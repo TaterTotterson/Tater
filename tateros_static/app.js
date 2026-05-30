@@ -122,6 +122,11 @@ const state = {
   runtimeBreakdownPollTimer: 0,
   runtimeBreakdownPayload: null,
   runtimeHistoryWindow: "24h",
+  dashboardRefreshInFlight: null,
+  dashboardLastRefreshError: "",
+  dashboardRefreshStatus: "",
+  hfLlmWarmupPollTimer: 0,
+  hfLlmWarmupLastSnapshot: null,
   runtimeSettingsSaveHandler: null,
   runtimeSettingsOpenHandler: null,
   runtimeSettingsCloseHandler: null,
@@ -468,8 +473,6 @@ function closePopupModal(modal) {
   syncPopupBodyScrollLock();
 }
 
-let redisRecoveryPromptInFlight = false;
-let redisRecoveryPromptLastAt = 0;
 let healthRefreshTimer = 0;
 let healthRefreshPromise = null;
 let webuiAuthPromise = null;
@@ -717,14 +720,7 @@ async function ensureWebuiAuth() {
   try {
     auth = await fetchWebuiAuthStatus();
   } catch (error) {
-    if (_isLikelyRedisFailureDetail(error?.message || "")) {
-      await ensureRedisSetup();
-      const redisError = new Error("Redis setup required.");
-      redisError.code = "REDIS_SETUP_REQUIRED";
-      throw redisError;
-    } else {
-      throw error;
-    }
+    throw error;
   }
 
   if (!auth.passwordSet || auth.authenticated) {
@@ -803,6 +799,8 @@ async function promptWebuiAuthRecovery(reason = "", { force = false } = {}) {
 function _setRedisStatus(status) {
   const next = status && typeof status === "object" ? status : {};
   state.redisStatus = {
+    mode: String(next.mode || (next.internal ? "internal" : "external") || "internal"),
+    internal: Boolean(next.internal || String(next.mode || "").toLowerCase() === "internal"),
     configured: Boolean(next.configured),
     connected: Boolean(next.connected),
     host: String(next.host || ""),
@@ -816,11 +814,25 @@ function _setRedisStatus(status) {
     error: String(next.error || ""),
     source: String(next.source || ""),
     config_path: String(next.config_path || ""),
+    data_path: String(next.data_path || ""),
+    data_dir: String(next.data_dir || ""),
+    socket_path: String(next.socket_path || ""),
+    redis_pid: Number(next.redis_pid || 0),
+    redis_managed: Boolean(next.redis_managed),
+    redis_server_source: String(next.redis_server_source || ""),
   };
   return state.redisStatus;
 }
 
 function _redisSetupMessage(status) {
+  if (status?.internal) {
+    if (status?.connected) {
+      const path = String(status?.data_path || "").trim();
+      return path ? `Internal Redis is connected. Data is stored at ${path}.` : "Internal Redis is connected.";
+    }
+    const reason = String(status?.error || "").trim();
+    return reason ? `Internal Redis could not start: ${reason}` : "Internal Redis is not running yet.";
+  }
   if (!status?.configured) {
     return "Redis is not configured yet. Enter the server details and save to continue.";
   }
@@ -860,7 +872,7 @@ async function ensureRedisSetup() {
     });
   }
   if (!status.connected) {
-    state.notice = _redisRecoveryNotice(status?.error || "");
+    state.notice = "";
   }
   return status;
 }
@@ -882,13 +894,6 @@ function _isLikelyRedisFailureDetail(detail) {
   );
 }
 
-function _redisRecoveryNotice(reason = "") {
-  const detail = String(reason || "").trim();
-  return detail
-    ? `Redis is unavailable. Reconnect it to continue. ${detail}`
-    : "Redis is unavailable. Reconnect it to continue.";
-}
-
 function _shouldTriggerRedisRecovery(path, statusCode, detail) {
   const status = Number(statusCode || 0);
   if (_isRedisSetupApiPath(path) && status >= 500) {
@@ -901,31 +906,9 @@ function _shouldTriggerRedisRecovery(path, statusCode, detail) {
 }
 
 async function promptRedisSetupRecovery(reason = "", { force = false } = {}) {
-  const now = Date.now();
-  if (!force) {
-    if (redisRecoveryPromptInFlight) {
-      return;
-    }
-    if (now - redisRecoveryPromptLastAt < REDIS_RECOVERY_PROMPT_COOLDOWN_MS) {
-      return;
-    }
-  }
-  redisRecoveryPromptInFlight = true;
-  redisRecoveryPromptLastAt = now;
-
-  try {
-    let status = state.redisStatus || {};
-    const fallbackError = String(reason || status?.error || "Redis is unavailable.").trim() || "Redis is unavailable.";
-    status = _setRedisStatus({
-      ...(status || {}),
-      connected: false,
-      error: fallbackError,
-    });
-    state.notice = _redisRecoveryNotice(fallbackError);
-    _scheduleHealthRefresh(180);
-  } finally {
-    redisRecoveryPromptInFlight = false;
-  }
+  void reason;
+  void force;
+  _scheduleHealthRefresh(180);
 }
 
 function ensureActionProgressModal() {
@@ -1119,9 +1102,15 @@ async function api(path, options = {}) {
 
   if (!response.ok) {
     let detail = "Request failed";
+    let detailPayload = null;
     try {
       const body = await response.json();
-      detail = body.detail || detail;
+      detailPayload = body.detail || detail;
+      if (detailPayload && typeof detailPayload === "object") {
+        detail = String(detailPayload.message || detailPayload.detail || detail);
+      } else {
+        detail = String(detailPayload || detail);
+      }
     } catch {
       detail = response.statusText || detail;
     }
@@ -1131,7 +1120,13 @@ async function api(path, options = {}) {
     if (!skipRedisRecovery && _shouldTriggerRedisRecovery(path, response.status, detail)) {
       void promptRedisSetupRecovery(detail);
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    error.detail = detailPayload;
+    if (detailPayload && typeof detailPayload === "object" && detailPayload.code) {
+      error.code = String(detailPayload.code || "");
+    }
+    throw error;
   }
 
   if (response.status === 204) {
@@ -1139,6 +1134,455 @@ async function api(path, options = {}) {
   }
 
   return response.json();
+}
+
+function formatBytes(value) {
+  const n = Math.max(0, Number(value) || 0);
+  if (n >= 1024 * 1024 * 1024) {
+    return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (n >= 1024) {
+    return `${(n / 1024).toFixed(1)} KB`;
+  }
+  return `${Math.round(n)} B`;
+}
+
+function formatByteRate(value) {
+  const n = Math.max(0, Number(value) || 0);
+  return n > 0 ? `${formatBytes(n)}/s` : "Idle";
+}
+
+function formatDurationShort(value) {
+  const total = Math.max(0, Math.round(Number(value) || 0));
+  if (total <= 0) {
+    return "Unknown";
+  }
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
+}
+
+function hfLlmWarmupPercent(snapshot) {
+  const direct = Number(snapshot?.progress);
+  if (Number.isFinite(direct) && direct > 0) {
+    return clampPercent(direct);
+  }
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  if (!items.length) {
+    return snapshot?.running ? 8 : 0;
+  }
+  const sum = items.reduce((total, item) => total + clampPercent(item?.progress), 0);
+  return clampPercent(sum / items.length);
+}
+
+function hfLlmWarmupStatusText(snapshot) {
+  const running = Boolean(snapshot?.running);
+  const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const active = items.find((item) => ["preparing", "downloading", "loading", "working", "cancelling"].includes(String(item?.status || "").toLowerCase()));
+  if (running && active) {
+    return String(active.message || active.status || "Working").trim();
+  }
+  if (running) {
+    return "Preparing local model download...";
+  }
+  if (errors.length) {
+    return errors[0];
+  }
+  if (items.some((item) => ["loaded", "downloaded"].includes(String(item?.status || "").toLowerCase()))) {
+    return snapshot?.load_models === false ? "Local model downloaded." : "Local model ready.";
+  }
+  return "No local model download is running.";
+}
+
+function hfLlmWarmupActiveItem(snapshot) {
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  return (
+    items.find((item) => Boolean(item?.active)) ||
+    items.find((item) => ["preparing", "downloading", "loading", "working", "cancelling"].includes(String(item?.status || "").toLowerCase())) ||
+    items[0] ||
+    null
+  );
+}
+
+function hfLlmProjectedByteStats(item) {
+  const total = Math.max(0, Number(item?.download_total_bytes || item?.current_total_bytes || 0));
+  let done = Math.max(0, Number(item?.download_bytes || item?.current_bytes || 0));
+  const speed = Math.max(0, Number(item?.download_speed_bytes_per_sec || item?.current_speed_bytes_per_sec || 0));
+  const status = String(item?.status || "").trim().toLowerCase();
+  const updatedTs = Math.max(0, Number(item?.updated_ts || 0));
+  const canProject =
+    total > 0 &&
+    done > 0 &&
+    speed > 0 &&
+    updatedTs > 0 &&
+    done < total &&
+    ["downloading", "working", "preparing"].includes(status);
+  if (canProject) {
+    const ageSeconds = Math.max(0, Date.now() / 1000 - updatedTs);
+    const projectionSeconds = Math.min(ageSeconds, 20);
+    done = Math.min(total, done + speed * projectionSeconds);
+  }
+  return {
+    done,
+    total,
+    speed,
+    eta: total > done && speed > 0 ? (total - done) / speed : 0,
+  };
+}
+
+function hfLlmWarmupAggregateStats(snapshot) {
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const active = hfLlmWarmupActiveItem(snapshot);
+  const running = Boolean(snapshot?.running);
+  const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
+  const loadedCount = items.filter((item) => ["loaded", "downloaded"].includes(String(item?.status || "").toLowerCase())).length;
+  const errorCount = items.filter((item) => String(item?.status || "").toLowerCase() === "error").length;
+  const cancelledCount = items.filter((item) => ["cancelled", "canceled"].includes(String(item?.status || "").toLowerCase())).length;
+  const activeCount = items.filter((item) =>
+    ["preparing", "downloading", "loading", "working", "cancelling"].includes(String(item?.status || "").toLowerCase())
+  ).length;
+  let bytesDone = 0;
+  let bytesTotal = 0;
+  let speed = 0;
+  let eta = 0;
+  items.forEach((item) => {
+    const byteStats = hfLlmProjectedByteStats(item);
+    if (byteStats.total > 0) {
+      bytesDone += byteStats.done;
+      bytesTotal += byteStats.total;
+    }
+    speed += byteStats.speed;
+  });
+  if (active) {
+    const activeByteStats = hfLlmProjectedByteStats(active);
+    eta = activeByteStats.eta || Number(active?.download_eta_seconds || active?.current_eta_seconds || active?.files_eta_seconds || 0);
+  }
+  return {
+    items,
+    active,
+    running,
+    errors,
+    loadedCount,
+    errorCount,
+    cancelledCount,
+    activeCount,
+    percent: hfLlmWarmupPercent(snapshot),
+    downloadPercent: bytesTotal > 0 ? clampPercent((bytesDone / bytesTotal) * 100) : 0,
+    bytesDone,
+    bytesTotal,
+    speed,
+    eta,
+  };
+}
+
+function renderHfDownloadSummary(snapshot = {}) {
+  const block = document.getElementById("hf-download-summary-block");
+  if (!block) {
+    return;
+  }
+  const stats = hfLlmWarmupAggregateStats(snapshot || {});
+  const titleEl = document.getElementById("hf-download-summary-title");
+  const detailEl = document.getElementById("hf-download-summary-detail");
+  const statEl = document.getElementById("hf-download-summary-stat");
+  const speedEl = document.getElementById("hf-download-summary-speed");
+  const etaEl = document.getElementById("hf-download-summary-eta");
+  const fillEl = document.getElementById("hf-download-summary-fill");
+  const count = stats.items.length;
+  const activeModel = String(stats.active?.model || "").trim();
+  const hasErrors = stats.errors.length || stats.errorCount > 0;
+  const tone = hasErrors ? "error" : stats.running ? "running" : stats.loadedCount > 0 ? "success" : stats.cancelledCount > 0 ? "cancelled" : "idle";
+  const byteStat = stats.bytesTotal > 0 ? `${formatBytes(stats.bytesDone)} / ${formatBytes(stats.bytesTotal)}` : "";
+  const fallbackStat = count
+    ? `${stats.loadedCount} ready • ${stats.errorCount} failed • ${stats.cancelledCount} cancelled`
+    : "No downloads yet";
+  block.classList.toggle("is-running", tone === "running");
+  block.classList.toggle("success", tone === "success");
+  block.classList.toggle("error", tone === "error");
+  block.classList.toggle("cancelled", tone === "cancelled");
+  if (titleEl) {
+    titleEl.textContent = stats.running
+      ? activeModel || "Local model download"
+      : hasErrors
+        ? "Download needs attention"
+        : stats.loadedCount > 0
+          ? "Downloads complete"
+          : stats.cancelledCount > 0
+            ? "Downloads cancelled"
+            : "Model downloads";
+  }
+  if (detailEl) {
+    detailEl.textContent = stats.running
+      ? hfLlmWarmupStatusText(snapshot)
+      : count
+        ? `${count} download${count === 1 ? "" : "s"} tracked`
+        : "Click to view local model download details.";
+  }
+  if (statEl) {
+    statEl.textContent = byteStat || fallbackStat;
+  }
+  if (speedEl) {
+    speedEl.textContent = formatByteRate(stats.speed);
+  }
+  if (etaEl) {
+    etaEl.textContent = stats.running && stats.eta > 0 ? `${formatDurationShort(stats.eta)} left` : stats.running ? "Calculating" : "Idle";
+  }
+  if (fillEl) {
+    const fillPercent = stats.running && stats.bytesTotal > 0 ? stats.downloadPercent : stats.percent;
+    fillEl.style.width = `${Math.max(stats.running ? 6 : 0, fillPercent)}%`;
+    fillEl.classList.toggle("success", tone === "success");
+    fillEl.classList.toggle("error", tone === "error");
+  }
+}
+
+function renderHfLlmWarmupItem(item) {
+  const providerLabel = String(item?.provider_label || "").trim();
+  const model = String(item?.model || "local model").trim();
+  const status = String(item?.status || "pending").trim().toLowerCase();
+  const tone = status === "error" ? "error" : ["loaded", "downloaded"].includes(status) ? "success" : status === "cancelled" || status === "canceled" ? "cancelled" : "running";
+  const message = String(item?.message || item?.error || status || "Pending").trim();
+  const key = String(item?.key || "").trim();
+  const canCancel = Boolean(item?.cancelable) && key;
+  const detailParts = [];
+  const byteStats = hfLlmProjectedByteStats(item);
+  const byteProgress = byteStats.total > 0 ? clampPercent((byteStats.done / byteStats.total) * 100) : 0;
+  const progress = ["loaded", "downloaded"].includes(status)
+    ? 100
+    : status === "downloading" && byteProgress > 0
+      ? byteProgress
+      : status === "downloading"
+        ? clampPercent(item?.download_progress || item?.current_progress || item?.progress)
+        : clampPercent(item?.progress);
+  const filesTotal = Number(item?.files_total || 0);
+  const filesCompleted = Number(item?.files_completed || 0);
+  if (filesTotal > 0) {
+    detailParts.push(`Files ${Math.max(0, Math.round(filesCompleted))}/${Math.max(0, Math.round(filesTotal))}`);
+  }
+  const currentTotalBytes = byteStats.total;
+  const currentBytes = byteStats.done;
+  if (currentTotalBytes > 0) {
+    detailParts.push(`${formatBytes(currentBytes)} / ${formatBytes(currentTotalBytes)}`);
+  }
+  const speed = byteStats.speed;
+  const eta = byteStats.eta || Number(item?.download_eta_seconds || item?.current_eta_seconds || 0);
+  if (speed > 0) {
+    detailParts.push(formatByteRate(speed));
+  }
+  if (eta > 0) {
+    detailParts.push(`${formatDurationShort(eta)} left`);
+  }
+  if (item?.device) {
+    detailParts.push(`Device ${String(item.device)}`);
+  }
+  const detail = detailParts.join(" • ");
+  return `
+    <div class="hf-llm-progress-item ${escapeHtml(tone)}">
+      <div class="hf-llm-progress-item-head">
+        <strong>${escapeHtml(providerLabel ? `${providerLabel}: ${model}` : model)}</strong>
+        <span>${escapeHtml(status || "pending")}</span>
+      </div>
+      <div class="action-progress-track" aria-hidden="true">
+        <div class="action-progress-fill ${tone === "success" ? "success" : tone === "error" ? "error" : ""}" style="width: ${Math.max(status === "downloading" ? 2 : 0, progress)}%"></div>
+      </div>
+      <div class="small">${escapeHtml(message)}</div>
+      ${detail ? `<div class="small muted">${escapeHtml(detail)}</div>` : ""}
+      ${canCancel ? `<div class="hf-llm-progress-item-actions"><button type="button" class="inline-btn" data-hf-download-cancel="${escapeHtml(key)}">Cancel</button></div>` : ""}
+    </div>
+  `;
+}
+
+function ensureHfLlmWarmupModal() {
+  let modal = document.getElementById("hf-llm-warmup-modal");
+  if (modal) {
+    return modal;
+  }
+
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="hf-llm-warmup-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card action-progress-dialog hf-llm-progress-dialog" role="dialog" aria-modal="true" aria-label="Local Model Download">
+          <div class="card-head">
+            <h3 class="card-title">Local Model Download</h3>
+            <button type="button" class="inline-btn" id="hf-llm-warmup-close">Close</button>
+          </div>
+          <div id="hf-llm-warmup-detail" class="small muted">Preparing...</div>
+          <div class="action-progress-track" aria-hidden="true">
+            <div id="hf-llm-warmup-fill" class="action-progress-fill"></div>
+          </div>
+          <div id="hf-llm-warmup-status" class="small action-progress-status">Starting...</div>
+          <div id="hf-llm-warmup-items" class="hf-llm-progress-items"></div>
+        </div>
+      </div>
+    `
+  );
+
+  modal = document.getElementById("hf-llm-warmup-modal");
+  const closeBtn = document.getElementById("hf-llm-warmup-close");
+  const closeModal = () => {
+    closePopupModal(modal);
+  };
+  closeBtn?.addEventListener("click", closeModal);
+  modal.addEventListener("click", (event) => {
+    const cancelButton = event.target instanceof Element ? event.target.closest("[data-hf-download-cancel]") : null;
+    if (cancelButton) {
+      event.preventDefault();
+      const key = String(cancelButton.getAttribute("data-hf-download-cancel") || "").trim();
+      if (key) {
+        void cancelHfLlmWarmupDownload(key);
+      }
+      return;
+    }
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active")) {
+      closeModal();
+    }
+  });
+  return modal;
+}
+
+function renderHfLlmWarmupModal(snapshot = {}) {
+  const modal = ensureHfLlmWarmupModal();
+  const running = Boolean(snapshot?.running);
+  const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const percent = hfLlmWarmupPercent(snapshot);
+  const tone = errors.length ? "error" : running ? "running" : percent >= 100 ? "success" : "running";
+  const detailEl = document.getElementById("hf-llm-warmup-detail");
+  const fillEl = document.getElementById("hf-llm-warmup-fill");
+  const statusEl = document.getElementById("hf-llm-warmup-status");
+  const itemsEl = document.getElementById("hf-llm-warmup-items");
+  const closeBtn = document.getElementById("hf-llm-warmup-close");
+
+  modal.dataset.running = running ? "true" : "false";
+  if (detailEl) {
+    const loadsModel = snapshot?.load_models !== false;
+    detailEl.textContent = running
+      ? "Download continues in the background across refreshes and tab changes."
+      : errors.length
+        ? loadsModel
+          ? "The download/load task stopped with an error."
+          : "The download stopped with an error."
+        : loadsModel
+          ? "Download/load finished."
+          : "Download finished.";
+  }
+  if (fillEl) {
+    fillEl.style.width = `${Math.max(running ? 6 : 0, percent)}%`;
+    fillEl.classList.toggle("success", tone === "success");
+    fillEl.classList.toggle("error", tone === "error");
+  }
+  if (statusEl) {
+    statusEl.textContent = hfLlmWarmupStatusText(snapshot);
+    statusEl.classList.toggle("success", tone === "success");
+    statusEl.classList.toggle("error", tone === "error");
+  }
+  if (itemsEl) {
+    itemsEl.innerHTML = items.length ? items.map((item) => renderHfLlmWarmupItem(item)).join("") : `<div class="small muted">Waiting for model download state...</div>`;
+  }
+  if (closeBtn) {
+    closeBtn.disabled = false;
+    closeBtn.textContent = "Close";
+  }
+  return modal;
+}
+
+async function cancelHfLlmWarmupDownload(key = "") {
+  const cleanKey = String(key || "").trim();
+  try {
+    const snapshot = await api("/api/settings/hf-llm/warmup/cancel", {
+      method: "POST",
+      body: JSON.stringify(cleanKey ? { key: cleanKey } : { cancel_all: true }),
+      _skipRedisRecovery: true,
+      _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+    });
+    state.hfLlmWarmupLastSnapshot = snapshot;
+    renderHfDownloadSummary(snapshot);
+    renderHfLlmWarmupModal(snapshot);
+    scheduleHfLlmWarmupPoll(650);
+  } catch (error) {
+    showToast(`Cancel failed: ${error.message}`, "error", 3200);
+  }
+}
+
+function updateHfLlmWarmupUi(snapshot = {}) {
+  state.hfLlmWarmupLastSnapshot = snapshot;
+  renderHfDownloadSummary(snapshot);
+  const modal = document.getElementById("hf-llm-warmup-modal");
+  if (modal?.classList.contains("active")) {
+    renderHfLlmWarmupModal(snapshot);
+  }
+}
+
+function scheduleHfLlmWarmupPoll(delayMs = 1000) {
+  if (state.hfLlmWarmupPollTimer) {
+    window.clearTimeout(state.hfLlmWarmupPollTimer);
+    state.hfLlmWarmupPollTimer = 0;
+  }
+  state.hfLlmWarmupPollTimer = window.setTimeout(async () => {
+    state.hfLlmWarmupPollTimer = 0;
+    try {
+      const snapshot = await api("/api/settings/hf-llm/warmup", { _skipRedisRecovery: true });
+      updateHfLlmWarmupUi(snapshot);
+      if (snapshot?.running) {
+        scheduleHfLlmWarmupPoll(500);
+      }
+    } catch (error) {
+      updateHfLlmWarmupUi({
+        running: false,
+        errors: [String(error?.message || "Failed to read local model download progress.")],
+        items: state.hfLlmWarmupLastSnapshot?.items || [],
+        progress: hfLlmWarmupPercent(state.hfLlmWarmupLastSnapshot || {}),
+      });
+    }
+  }, Math.max(250, Number(delayMs) || 1000));
+}
+
+function openHfLlmWarmupModal(snapshot = null) {
+  const initial = snapshot && typeof snapshot === "object" ? snapshot : state.hfLlmWarmupLastSnapshot || {};
+  updateHfLlmWarmupUi(initial);
+  const modal = renderHfLlmWarmupModal(initial);
+  openPopupModal(modal);
+  if (initial?.running || initial?.started || initial?.already_running) {
+    scheduleHfLlmWarmupPoll(450);
+  }
+}
+
+function maybeOpenHfLlmWarmupModal(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return;
+  }
+  updateHfLlmWarmupUi(snapshot);
+  if (snapshot.running || snapshot.started || snapshot.already_running) {
+    scheduleHfLlmWarmupPoll(450);
+  }
+}
+
+async function reconnectHfLlmWarmupModal() {
+  try {
+    const snapshot = await api("/api/settings/hf-llm/warmup", { _skipRedisRecovery: true });
+    maybeOpenHfLlmWarmupModal(snapshot);
+  } catch {
+    // Best effort: the settings page can still reconnect on its own.
+  }
 }
 
 function safeJsonParse(raw) {
@@ -2658,12 +3102,175 @@ function formatRuntimeSummary(health) {
   return `${verbasEnabled} verba enabled • ${portalsRunning} portals running • ${coresRunning} cores running • ${hydraJobsActive} hydra jobs • ${llmCallsActive} llm calls • ${visionCallsActive} vision calls`;
 }
 
+function runtimeMemoryPayload(source) {
+  return source?.loaded_models && typeof source.loaded_models === "object"
+    ? source.loaded_models
+    : source?.loadedModels && typeof source.loadedModels === "object"
+      ? source.loadedModels
+      : {};
+}
+
+function runtimeMemoryMeter(memoryPayload = {}) {
+  const system = memoryPayload?.system && typeof memoryPayload.system === "object" ? memoryPayload.system : {};
+  const vram = system?.vram && typeof system.vram === "object" ? system.vram : {};
+  const ram = system?.ram && typeof system.ram === "object" ? system.ram : {};
+  const vramTotal = Number(vram.total_bytes || 0);
+  const vramUsed = Number(vram.used_bytes || 0);
+  const ramTotal = Number(ram.total_bytes || 0);
+  const ramUsed = Number(ram.used_bytes || 0);
+  if (vramTotal > 0) {
+    return {
+      label: "VRAM",
+      used: Math.max(0, vramUsed),
+      total: Math.max(0, vramTotal),
+      percent: Math.max(0, Math.min(100, Number(vram.percent || (vramUsed / vramTotal) * 100) || 0)),
+    };
+  }
+  return {
+    label: system.unified_memory ? "Unified" : "RAM",
+    used: Math.max(0, ramUsed),
+    total: Math.max(0, ramTotal),
+    percent: ramTotal > 0 ? Math.max(0, Math.min(100, Number(ram.percent || (ramUsed / ramTotal) * 100) || 0)) : 0,
+  };
+}
+
+function _runtimePercentNumber(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" && !value.trim()) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, parsed));
+}
+
+function _runtimePercentText(value, fallback = "n/a") {
+  const percent = _runtimePercentNumber(value);
+  if (percent === null) {
+    return fallback;
+  }
+  return `${Math.round(percent)}%`;
+}
+
+function _runtimeBytesTitle(label, used, total, extra = "") {
+  const usedNum = Math.max(0, Number(used) || 0);
+  const totalNum = Math.max(0, Number(total) || 0);
+  const parts = [label];
+  if (totalNum > 0) {
+    parts.push(`${formatBytes(usedNum)} / ${formatBytes(totalNum)}`);
+  } else {
+    parts.push("unavailable");
+  }
+  if (extra) {
+    parts.push(extra);
+  }
+  return parts.join(" • ");
+}
+
+function _renderRuntimeSummaryResource({ label, value, percent = null, title = "", unavailable = false } = {}) {
+  const percentValue = _runtimePercentNumber(percent);
+  const fillPercent = percentValue === null ? 0 : percentValue;
+  return `
+    <span class="runtime-summary-resource${unavailable ? " unavailable" : ""}" title="${escapeHtml(title || `${label} ${value || ""}`)}">
+      <span class="runtime-summary-resource-label">${escapeHtml(label || "")}</span>
+      <span class="runtime-summary-resource-track" aria-hidden="true">
+        <span class="runtime-summary-resource-fill" style="width:${fillPercent.toFixed(1)}%"></span>
+      </span>
+      <span class="runtime-summary-resource-value">${escapeHtml(value || "n/a")}</span>
+    </span>
+  `;
+}
+
+function renderRuntimeSummaryBubble(health) {
+  const baseText = formatRuntimeSummary(health);
+  const memory = runtimeMemoryPayload(health);
+  const system = memory?.system && typeof memory.system === "object" ? memory.system : {};
+  const cpu = system?.cpu && typeof system.cpu === "object" ? system.cpu : {};
+  const ram = system?.ram && typeof system.ram === "object" ? system.ram : {};
+  const vram = system?.vram && typeof system.vram === "object" ? system.vram : {};
+  const loadedCount = Number(memory?.loaded_count || 0);
+  const totals = memory?.totals && typeof memory.totals === "object" ? memory.totals : {};
+  const estimatedLoaded = Number(totals.estimated_total_bytes || 0);
+  const loadedText = `${loadedCount} model${loadedCount === 1 ? "" : "s"} loaded${estimatedLoaded > 0 ? ` • est ${formatBytes(estimatedLoaded)}` : ""}`;
+  const ramTotal = Number(ram.total_bytes || 0);
+  const ramUsed = Number(ram.used_bytes || 0);
+  const ramPercent = ramTotal > 0 ? Number(ram.percent || (ramUsed / ramTotal) * 100) : null;
+  const vramTotal = Number(vram.total_bytes || 0);
+  const vramUsed = Number(vram.used_bytes || 0);
+  const vramPercent = vramTotal > 0 ? Number(vram.percent || (vramUsed / vramTotal) * 100) : null;
+  const gpuPercent = _runtimePercentNumber(vram.utilization_percent);
+  const gpuMemoryLabel = vram.unified ? "GPU Mem" : "VRAM";
+  const gpuTitleParts = [
+    vram.backend ? `Backend ${vram.backend}` : "",
+    gpuPercent === null ? "GPU load unavailable" : `GPU load ${_runtimePercentText(gpuPercent)}`,
+    vramTotal > 0 ? `${gpuMemoryLabel} ${formatBytes(vramUsed)} / ${formatBytes(vramTotal)}` : "",
+  ].filter(Boolean);
+  const resourceChips = [
+    _renderRuntimeSummaryResource({
+      label: "CPU",
+      value: _runtimePercentText(cpu.percent),
+      percent: cpu.percent,
+      title: [
+        `CPU ${_runtimePercentText(cpu.percent)}`,
+        Number(cpu.logical_count || 0) > 0 ? `${Number(cpu.logical_count || 0)} logical cores` : "",
+      ].filter(Boolean).join(" • "),
+      unavailable: !cpu.available,
+    }),
+    _renderRuntimeSummaryResource({
+      label: "GPU",
+      value: gpuPercent === null ? "n/a" : _runtimePercentText(gpuPercent),
+      percent: gpuPercent,
+      title: gpuTitleParts.join(" • ") || "GPU load unavailable",
+      unavailable: gpuPercent === null,
+    }),
+    _renderRuntimeSummaryResource({
+      label: system.unified_memory ? "Unified" : "RAM",
+      value: _runtimePercentText(ramPercent),
+      percent: ramPercent,
+      title: _runtimeBytesTitle(system.unified_memory ? "Unified memory" : "RAM", ramUsed, ramTotal),
+      unavailable: ramTotal <= 0,
+    }),
+    _renderRuntimeSummaryResource({
+      label: gpuMemoryLabel,
+      value: _runtimePercentText(vramPercent),
+      percent: vramPercent,
+      title: _runtimeBytesTitle(
+        vram.backend ? `${vram.unified ? "Unified GPU memory" : "VRAM"} (${vram.backend})` : gpuMemoryLabel,
+        vramUsed,
+        vramTotal
+      ),
+      unavailable: vramTotal <= 0,
+    }),
+  ];
+  return `
+    <span class="runtime-summary-main">${escapeHtml(baseText)}</span>
+    <span class="runtime-summary-metrics">
+      <span class="runtime-summary-models">${escapeHtml(loadedText)}</span>
+      <span class="runtime-summary-resources">${resourceChips.join("")}</span>
+    </span>
+  `;
+}
+
 function setRuntimeSummaryText(text, tone = "normal") {
   const summary = document.getElementById("runtime-summary");
   if (!summary) {
     return;
   }
   summary.textContent = String(text || "").trim();
+  summary.classList.toggle("degraded", tone === "degraded");
+  summary.classList.toggle("offline", tone === "offline");
+}
+
+function setRuntimeSummaryHealth(health, tone = "normal") {
+  const summary = document.getElementById("runtime-summary");
+  if (!summary) {
+    return;
+  }
+  summary.innerHTML = renderRuntimeSummaryBubble(health || {});
   summary.classList.toggle("degraded", tone === "degraded");
   summary.classList.toggle("offline", tone === "offline");
 }
@@ -2888,6 +3495,240 @@ function _runtimeFmtInt(value) {
   return _runtimeInt(value, 0).toLocaleString();
 }
 
+function _runtimePct(used, total) {
+  const usedNum = Math.max(0, Number(used) || 0);
+  const totalNum = Math.max(0, Number(total) || 0);
+  return totalNum > 0 ? Math.max(0, Math.min(100, (usedNum / totalNum) * 100)) : 0;
+}
+
+function _renderRuntimeMemoryMeter(label, used, total, detail = "") {
+  const percent = _runtimePct(used, total);
+  const value = total > 0 ? `${formatBytes(used)} / ${formatBytes(total)}` : "Unavailable";
+  return `
+    <div class="runtime-memory-meter">
+      <div class="runtime-memory-meter-head">
+        <span>${escapeHtml(label)}</span>
+        <span>${escapeHtml(value)}</span>
+      </div>
+      <div class="runtime-memory-meter-track" aria-hidden="true">
+        <span class="runtime-memory-meter-fill" style="width:${percent.toFixed(1)}%"></span>
+      </div>
+      ${detail ? `<div class="small muted">${escapeHtml(detail)}</div>` : ""}
+    </div>
+  `;
+}
+
+function _renderRuntimePercentMeter(label, percentRaw, detail = "") {
+  const percent = _runtimePercentNumber(percentRaw);
+  const unavailable = percent === null;
+  const value = unavailable ? "Unavailable" : `${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
+  return `
+    <div class="runtime-memory-meter${unavailable ? " runtime-memory-meter-unavailable" : ""}">
+      <div class="runtime-memory-meter-head">
+        <span>${escapeHtml(label)}</span>
+        <span>${escapeHtml(value)}</span>
+      </div>
+      <div class="runtime-memory-meter-track" aria-hidden="true">
+        <span class="runtime-memory-meter-fill" style="width:${(unavailable ? 0 : percent).toFixed(1)}%"></span>
+      </div>
+      ${detail ? `<div class="small muted">${escapeHtml(detail)}</div>` : ""}
+    </div>
+  `;
+}
+
+function _runtimeLoadedAtLabel(value) {
+  const epoch = Number(value || 0);
+  if (!Number.isFinite(epoch) || epoch <= 0) {
+    return "";
+  }
+  try {
+    return `Loaded ${new Date(epoch * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  } catch {
+    return "";
+  }
+}
+
+function _renderRuntimeLoadedModelsCard(memoryPayload) {
+  const payload = memoryPayload && typeof memoryPayload === "object" ? memoryPayload : {};
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  const system = payload.system && typeof payload.system === "object" ? payload.system : {};
+  const cpu = system.cpu && typeof system.cpu === "object" ? system.cpu : {};
+  const ram = system.ram && typeof system.ram === "object" ? system.ram : {};
+  const vram = system.vram && typeof system.vram === "object" ? system.vram : {};
+  const totals = payload.totals && typeof payload.totals === "object" ? payload.totals : {};
+  const loadedCount = Number(payload.loaded_count || models.length || 0);
+  const llmLoadedCount = Number(payload.local_llm_loaded_count || 0);
+  const managedLoadedCount = Number(payload.managed_loaded_count || 0);
+  const unloadableCount = Number(payload.unloadable_count || models.filter((row) => Boolean(row?.unloadable) && !Boolean(row?.managed)).length || 0);
+  const estimatedTotal = Number(totals.estimated_total_bytes || 0);
+  const estimatedVram = Number(totals.estimated_vram_bytes || 0);
+  const estimatedRam = Number(totals.estimated_ram_bytes || 0);
+  const estimatedUnified = Number(totals.estimated_unified_bytes || 0);
+  const summaryParts = [
+    `${loadedCount} loaded`,
+    llmLoadedCount > 0 ? `${llmLoadedCount} LLM` : "",
+    managedLoadedCount > 0 ? `${managedLoadedCount} managed voice` : "",
+    estimatedTotal > 0 ? `est ${formatBytes(estimatedTotal)}` : "",
+    estimatedVram > 0 ? `VRAM est ${formatBytes(estimatedVram)}` : "",
+    estimatedRam > 0 ? `RAM est ${formatBytes(estimatedRam)}` : "",
+    estimatedUnified > 0 ? `unified est ${formatBytes(estimatedUnified)}` : "",
+  ].filter(Boolean);
+  const cpuLoad = Array.isArray(cpu.load_average) ? cpu.load_average.map((item) => Number(item || 0)).filter((item) => Number.isFinite(item)) : [];
+  const cpuDetails = [
+    Number(cpu.logical_count || 0) > 0 ? `${Number(cpu.logical_count || 0)} logical cores` : "",
+    Number(cpu.physical_count || 0) > 0 ? `${Number(cpu.physical_count || 0)} physical cores` : "",
+    cpuLoad.length ? `load ${cpuLoad.map((item) => item.toFixed(2)).join(" / ")}` : "",
+  ].filter(Boolean).join(" • ");
+  const gpuUtilization = _runtimePercentNumber(vram.utilization_percent);
+  const gpuDevices = Array.isArray(vram.devices) ? vram.devices.filter((row) => row && typeof row === "object") : [];
+  const gpuDetailParts = [
+    vram.backend ? `Backend ${vram.backend}` : "",
+    Number(vram.total_bytes || 0) > 0 ? `${gpuDevices.length || 1} device${(gpuDevices.length || 1) === 1 ? "" : "s"}` : "",
+    vram.unified ? "shared/unified memory" : "",
+    gpuUtilization === null ? "GPU load unavailable from this runtime" : "",
+  ].filter(Boolean);
+  const gpuDevicesHtml = gpuDevices.length
+    ? `
+      <div class="runtime-breakdown-block">
+        <div class="runtime-breakdown-subtitle">GPU Devices</div>
+        <div class="runtime-breakdown-list runtime-breakdown-list-static runtime-breakdown-list-dense">
+          ${gpuDevices
+            .map((device) => {
+              const name = String(device?.name || `GPU ${device?.index ?? ""}`).trim() || "GPU";
+              const deviceUsed = Number(device?.used_bytes || 0);
+              const deviceTotal = Number(device?.total_bytes || 0);
+              const deviceUtil = _runtimePercentNumber(device?.utilization_percent);
+              const sharedUsed = Number(device?.shared_memory_used_bytes || 0);
+              const sharedTotal = Number(device?.shared_memory_total_bytes || 0);
+              const temp = Number(device?.temperature_c);
+              const power = Number(device?.power_draw_w);
+              const powerLimit = Number(device?.power_limit_w);
+              const meta = [
+                deviceUtil === null ? "GPU load n/a" : `GPU ${_runtimePercentText(deviceUtil)}`,
+                deviceTotal > 0 ? `${device?.unified ? "GPU memory" : "VRAM"} ${formatBytes(deviceUsed)} / ${formatBytes(deviceTotal)}` : "",
+                sharedTotal > 0 ? `Shared RAM ${formatBytes(sharedUsed)} / ${formatBytes(sharedTotal)}` : "",
+                Number.isFinite(temp) ? `${temp.toFixed(0)} C` : "",
+                Number.isFinite(power) ? `${power.toFixed(0)} W${Number.isFinite(powerLimit) && powerLimit > 0 ? ` / ${powerLimit.toFixed(0)} W` : ""}` : "",
+                device?.detail ? String(device.detail || "") : "",
+              ].filter(Boolean);
+              return `
+                <div class="runtime-breakdown-row runtime-breakdown-row-dense">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(name)}</div>
+                    <div class="small muted">${escapeHtml(meta.join(" • ") || "No GPU telemetry reported.")}</div>
+                  </div>
+                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(
+                    deviceUtil === null ? "n/a" : _runtimePercentText(deviceUtil)
+                  )}</span></div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      </div>
+    `
+    : "";
+  const rowsHtml = models.length
+    ? `
+        <div class="runtime-breakdown-list runtime-loaded-model-list">
+          ${models
+            .map((row) => {
+              const provider = String(row?.provider || "");
+              const providerLabel = String(row?.provider_label || provider || "Local");
+              const kindLabel = String(row?.kind_label || row?.category || "").trim();
+              const model = String(row?.model || "model");
+              const cacheKey = String(row?.cache_key || "");
+              const device = String(row?.device || "").trim();
+              const kind = String(row?.memory_kind || "ram").toUpperCase();
+              const estimated = Number(row?.estimated_bytes || 0);
+              const loadedAt = _runtimeLoadedAtLabel(row?.loaded_ts);
+              const managed = Boolean(row?.managed);
+              const unloadable = Boolean(row?.unloadable) && !managed;
+              const details = Array.isArray(row?.details) ? row.details.map((item) => String(item || "").trim()).filter(Boolean) : [];
+              const meta = [
+                kindLabel,
+                providerLabel,
+                device ? `Device ${device}` : "",
+                estimated > 0 ? `${kind} est ${formatBytes(estimated)}` : `${kind} estimate unavailable`,
+                loadedAt,
+              ].filter(Boolean);
+              const detailLine = [
+                ...details,
+                managed ? String(row?.managed_by || "Managed by settings").trim() || "Managed by settings" : "",
+              ].filter(Boolean);
+              return `
+                <div class="runtime-breakdown-row runtime-loaded-model-row">
+                  <div class="runtime-breakdown-main">
+                    <div class="runtime-breakdown-name">${escapeHtml(model)}</div>
+                    <div class="small muted">${escapeHtml(meta.join(" • "))}</div>
+                    ${detailLine.length ? `<div class="small muted">${escapeHtml(detailLine.join(" • "))}</div>` : ""}
+                    ${row?.warning ? `<div class="small muted">${escapeHtml(String(row.warning || ""))}</div>` : ""}
+                  </div>
+                  <div class="runtime-breakdown-status">
+                    ${
+                      unloadable
+                        ? `<button
+                            type="button"
+                            class="inline-btn danger runtime-loaded-model-unload"
+                            data-runtime-loaded-model-unload="one"
+                            data-provider="${escapeHtml(provider)}"
+                            data-model="${escapeHtml(model)}"
+                            data-cache-key="${escapeHtml(cacheKey)}"
+                          >Unload</button>`
+                        : `<span class="status-chip running">${escapeHtml(managed ? "Managed" : "Loaded")}</span>`
+                    }
+                  </div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+    : `<div class="small muted">No runtime models are loaded right now.</div>`;
+
+  return `
+    <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-model-memory">
+      <div class="runtime-breakdown-head runtime-model-memory-head">
+        <div>
+          <h4 class="runtime-breakdown-title">Loaded Runtime Models</h4>
+          <div class="small muted">${escapeHtml(summaryParts.join(" • ") || "No loaded runtime models")}</div>
+        </div>
+        ${
+          unloadableCount > 0
+            ? `<button type="button" class="inline-btn danger" data-runtime-loaded-model-unload="all">Unload Local LLMs</button>`
+            : ""
+        }
+      </div>
+      <div class="runtime-memory-meter-grid">
+        ${_renderRuntimePercentMeter("CPU Usage", cpu.percent, cpuDetails || "CPU telemetry from psutil.")}
+        ${_renderRuntimePercentMeter("GPU Usage", gpuUtilization, gpuDetailParts.join(" • ") || "GPU telemetry unavailable.")}
+        ${_renderRuntimeMemoryMeter("System RAM", Number(ram.used_bytes || 0), Number(ram.total_bytes || 0))}
+        ${_renderRuntimeMemoryMeter(
+          Number(vram.total_bytes || 0) > 0
+            ? `${vram.unified ? "Unified GPU Memory" : "System VRAM"}${vram.backend ? ` (${vram.backend})` : ""}`
+            : vram.unified
+              ? "Unified GPU Memory"
+              : "System VRAM",
+          Number(vram.used_bytes || 0),
+          Number(vram.total_bytes || 0),
+          Number(vram.total_bytes || 0) > 0
+            ? vram.unified
+              ? "Reported memory is shared with system RAM."
+              : ""
+            : vram.unified
+              ? "GPU memory is shared with system RAM; no separate limit reported."
+              : "No discrete GPU memory reported by this runtime."
+        )}
+      </div>
+      ${gpuDevicesHtml}
+      <div class="runtime-breakdown-block">
+        <div class="runtime-breakdown-subtitle">Loaded Model Entries</div>
+        ${rowsHtml}
+      </div>
+    </section>
+  `;
+}
+
 function _renderRuntimeContextWindowCard(estimate) {
   const payload = estimate && typeof estimate === "object" ? estimate : {};
   const error = String(payload?.error || "").trim();
@@ -3025,6 +3866,7 @@ function renderRuntimeBreakdown(payload) {
   const contextEstimate = payload?.chat_context_window && typeof payload.chat_context_window === "object"
     ? payload.chat_context_window
     : {};
+  const loadedModels = runtimeMemoryPayload(payload);
   const activeTurnCount = Array.isArray(hydraJobs?.active_turns) ? hydraJobs.active_turns.length : Number(hydraJobs.surface_running_turns ?? 0);
   const hydraSummary = `${Number(hydraJobs.total ?? 0)} total • Active turns ${activeTurnCount} • WebUI queue ${Number(
     hydraJobs.webui_jobs ?? 0
@@ -3037,6 +3879,7 @@ function renderRuntimeBreakdown(payload) {
   )} • Completed ${Number(visionCalls?.totals?.completed ?? 0)} • Failed ${Number(visionCalls?.totals?.failed ?? 0)}`;
   return `
     <div class="runtime-breakdown-grid">
+      ${_renderRuntimeLoadedModelsCard(loadedModels)}
       <section class="runtime-breakdown-card runtime-breakdown-card-wide runtime-card-hydra">
         <div class="runtime-breakdown-head">
           <h4 class="runtime-breakdown-title">Hydra Jobs</h4>
@@ -3073,13 +3916,13 @@ function ensureRuntimeBreakdownModal() {
     "beforeend",
     `
       <div id="runtime-breakdown-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Hydra Jobs, LLM Calls, and Vision Calls">
+        <div class="cerb-modal-dialog card runtime-breakdown-dialog" role="dialog" aria-modal="true" aria-label="Loaded Models, CPU and GPU Usage, Hydra Jobs, LLM Calls, and Vision Calls">
           <div class="card-head runtime-breakdown-modal-head">
             <span class="runtime-breakdown-modal-badge" aria-hidden="true">RT</span>
             <div>
               <div class="runtime-breakdown-kicker">Runtime Stats</div>
               <h3 class="card-title">Live Activity</h3>
-              <div class="small muted">Hydra turns, model calls, vision work, and context budget.</div>
+              <div class="small muted">Loaded runtime models, CPU/GPU usage, memory, Hydra turns, model calls, vision work, and context budget.</div>
             </div>
             <div class="inline-row runtime-breakdown-actions">
               <span id="runtime-breakdown-updated" class="small"></span>
@@ -3108,8 +3951,46 @@ function ensureRuntimeBreakdownModal() {
     await loadRuntimeBreakdown({ force: true });
   });
   const contentEl = document.getElementById("runtime-breakdown-content");
-  contentEl?.addEventListener("click", (event) => {
-    const button = event.target instanceof Element ? event.target.closest("[data-runtime-history-window]") : null;
+  contentEl?.addEventListener("click", async (event) => {
+    const targetEl = event.target instanceof Element ? event.target : null;
+    const unloadButton = targetEl?.closest("[data-runtime-loaded-model-unload]");
+    if (unloadButton) {
+      const mode = String(unloadButton.getAttribute("data-runtime-loaded-model-unload") || "").trim();
+      const statusEl = document.getElementById("runtime-breakdown-status");
+      unloadButton.setAttribute("disabled", "disabled");
+      if (statusEl) {
+        statusEl.textContent = mode === "all" ? "Unloading all local models..." : "Unloading local model...";
+      }
+      try {
+        const body = mode === "all"
+          ? { unload_all: true }
+          : {
+              provider: String(unloadButton.getAttribute("data-provider") || "").trim(),
+              model: String(unloadButton.getAttribute("data-model") || "").trim(),
+              cache_key: String(unloadButton.getAttribute("data-cache-key") || "").trim(),
+            };
+        const result = await api("/api/runtime/local-llm/unload", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const count = Number(result?.unloaded_count || 0);
+        if (statusEl) {
+          statusEl.textContent = count > 0 ? `Unloaded ${count} local model cache ${count === 1 ? "entry" : "entries"}.` : "No loaded model matched that request.";
+        }
+        showToast(count > 0 ? `Unloaded ${count} local model${count === 1 ? "" : "s"}.` : "No loaded model matched.");
+        await loadRuntimeBreakdown({ force: true, silent: true });
+        await refreshHealth();
+      } catch (error) {
+        unloadButton.removeAttribute("disabled");
+        if (statusEl) {
+          statusEl.textContent = `Unload failed: ${error?.message || "unknown error"}`;
+        }
+        showToast(`Unload failed: ${error?.message || "unknown error"}`, "error", 3600);
+      }
+      return;
+    }
+
+    const button = targetEl?.closest("[data-runtime-history-window]");
     if (!button) {
       return;
     }
@@ -3181,6 +4062,11 @@ async function loadRuntimeBreakdown({ force = false, silent = false } = {}) {
   try {
     const payload = await api("/api/runtime/breakdown");
     state.runtimeBreakdownPayload = payload;
+    try {
+      document.dispatchEvent(new CustomEvent("tater:runtime-breakdown-updated", { detail: { payload } }));
+    } catch {
+      // Runtime breakdown is a convenience cache for other panels; ignore event failures.
+    }
     if (contentEl) {
       contentEl.innerHTML = renderRuntimeBreakdown(payload);
     }
@@ -3217,7 +4103,7 @@ function bindRuntimeSummary() {
   summary.dataset.bound = "1";
   summary.setAttribute("role", "button");
   summary.setAttribute("tabindex", "0");
-  summary.title = "Open live Hydra jobs, LLM calls, and vision calls";
+  summary.title = "Open loaded models, CPU/GPU usage, memory, Hydra jobs, LLM calls, and vision calls";
   summary.classList.add("interactive");
   summary.addEventListener("click", () => {
     openRuntimeBreakdownModal();
@@ -3244,11 +4130,10 @@ async function refreshHealth() {
       }
       redisConnected = Boolean(health?.redis_status?.connected ?? health?.redis);
       if (!redisConnected) {
-        setRuntimeSummaryText("Redis setup required", "offline");
-        void promptRedisSetupRecovery(String(health?.redis_status?.error || state.redisStatus?.error || "Redis connection lost."));
+        setRuntimeSummaryText("Starting internal Redis", "offline");
         return health;
       }
-      setRuntimeSummaryText(formatRuntimeSummary(health), "normal");
+      setRuntimeSummaryHealth(health, "normal");
       return health;
     } catch {
       setRuntimeSummaryText("Backend offline", "offline");
@@ -12554,10 +13439,19 @@ function dashboardBriefRefreshLabel(payload) {
 
 function dashboardSnapshotLabel(payload) {
   const snapshot = payload?.snapshot && typeof payload.snapshot === "object" ? payload.snapshot : {};
+  const refresh = payload?.snapshot_refresh && typeof payload.snapshot_refresh === "object" ? payload.snapshot_refresh : {};
+  if (refresh.running) {
+    return "Refreshing live snapshot in the background.";
+  }
+  const lastError = String(refresh.last_error || "").trim();
+  if (lastError) {
+    return "Last live snapshot refresh failed. Tater will retry later.";
+  }
   const source = String(snapshot.source || "").trim().toLowerCase();
   const age = Number(snapshot.age_seconds || 0);
   if (source === "cache") {
-    return `${snapshot.stale ? "Stale cached snapshot" : "Cached snapshot"} • ${_runtimeAgeLabel(age)} old`;
+    const label = snapshot.stale ? "Showing cached snapshot; live refresh queued" : "Cached snapshot";
+    return `${label} • ${_runtimeAgeLabel(age)} old`;
   }
   if (source) {
     return "Live snapshot";
@@ -12786,17 +13680,21 @@ function scheduleDashboardRefresh() {
   if (seconds <= 0) {
     return;
   }
+  const snapshotRefresh = state.dashboardPayload?.snapshot_refresh && typeof state.dashboardPayload.snapshot_refresh === "object"
+    ? state.dashboardPayload.snapshot_refresh
+    : {};
+  const delaySeconds = snapshotRefresh.running ? Math.min(seconds, 15) : seconds;
   state.dashboardRefreshTimer = window.setTimeout(async () => {
     state.dashboardRefreshTimer = 0;
     if (state.view !== "dashboard") {
       return;
     }
     try {
-      await loadDashboardView({ silent: true });
+      await loadDashboardView({ silent: true, background: true });
     } catch {
       scheduleDashboardRefresh();
     }
-  }, seconds * 1000);
+  }, delaySeconds * 1000);
 }
 
 async function saveDashboardRefreshIntervals(statusEl, message = "Dashboard refresh settings saved.") {
@@ -12959,12 +13857,18 @@ function openDashboardSettingsModal() {
 function renderDashboardView(payload) {
   const generated = dashboardTimeLabel(payload?.generated_at);
   const briefRefreshLabel = dashboardBriefRefreshLabel(payload);
+  const snapshotLabel = dashboardSnapshotLabel(payload);
+  const refreshStatus = String(state.dashboardRefreshStatus || "").trim();
+  const refreshError = String(state.dashboardLastRefreshError || "").trim();
   return `${consumeNoticeHtml()}
     ${renderSettingsSectionIntro("Dashboard", "Live status, signals, and Tater-owned summaries.", "DASH")}
     <div class="dashboard-actions">
       <div>
         <div class="small muted">${generated ? `Updated ${escapeHtml(generated)}` : "Live dashboard"}</div>
+        ${snapshotLabel ? `<div class="small muted">${escapeHtml(snapshotLabel)}</div>` : ""}
         ${briefRefreshLabel ? `<div class="small muted">${escapeHtml(briefRefreshLabel)}</div>` : ""}
+        ${refreshStatus ? `<div id="dashboard-refresh-inline-status" class="small muted dashboard-refresh-status">${escapeHtml(refreshStatus)}</div>` : ""}
+        ${refreshError ? `<div id="dashboard-refresh-inline-status" class="small muted dashboard-refresh-error">${escapeHtml(refreshError)}</div>` : ""}
       </div>
       <div class="dashboard-action-buttons">
         <button type="button" id="dashboard-settings" class="inline-btn">Dashboard Controls</button>
@@ -12982,7 +13886,20 @@ async function refreshDashboardBriefs(briefId = "", options = {}) {
   const silent = Boolean(options?.silent);
   const previousPayload = state.dashboardPayload;
   if (!silent) {
-    root.innerHTML = renderNotice("Queueing dashboard brief refresh...");
+    state.dashboardRefreshStatus = "Queueing dashboard brief refresh...";
+    state.dashboardLastRefreshError = "";
+    if (previousPayload) {
+      const statusEl = document.getElementById("dashboard-refresh-inline-status");
+      if (statusEl) {
+        statusEl.className = "small muted dashboard-refresh-status";
+        statusEl.textContent = state.dashboardRefreshStatus;
+      } else {
+        root.innerHTML = renderDashboardView(previousPayload);
+        bindDashboardControls();
+      }
+    } else {
+      root.innerHTML = renderNotice("Queueing dashboard brief refresh...");
+    }
   }
   try {
     const payload = await api("/api/dashboard/briefs/refresh", {
@@ -12991,6 +13908,8 @@ async function refreshDashboardBriefs(briefId = "", options = {}) {
       _timeoutMs: 30000,
     });
     state.dashboardPayload = payload;
+    state.dashboardRefreshStatus = "";
+    state.dashboardLastRefreshError = "";
     syncDashboardRefreshSettingsFromPayload(payload);
     root.innerHTML = renderDashboardView(payload);
     bindDashboardControls();
@@ -13000,6 +13919,8 @@ async function refreshDashboardBriefs(briefId = "", options = {}) {
     }
     return payload;
   } catch (error) {
+    state.dashboardRefreshStatus = "";
+    state.dashboardLastRefreshError = `Brief refresh failed: ${error?.message || "unknown error"}`;
     if (!silent) {
       root.innerHTML = previousPayload ? renderDashboardView(previousPayload) : renderNotice(`Brief generation failed: ${error.message}`);
     }
@@ -13086,13 +14007,55 @@ async function openDashboardUpdateTarget(rawTarget) {
 async function loadDashboardView(options = {}) {
   const root = document.getElementById("view-root");
   const refreshSnapshot = Boolean(options?.refreshSnapshot);
+  const silent = Boolean(options?.silent);
+  const background = Boolean(options?.background || silent);
   const endpoint = refreshSnapshot ? "/api/dashboard?refresh_snapshot=true" : "/api/dashboard";
-  const payload = await api(endpoint, { _timeoutMs: refreshSnapshot ? 20000 : 12000 });
-  state.dashboardPayload = payload;
-  syncDashboardRefreshSettingsFromPayload(payload);
-  root.innerHTML = renderDashboardView(payload);
-  bindDashboardControls();
-  scheduleDashboardRefresh();
+  if (!root) {
+    return null;
+  }
+  if (state.dashboardRefreshInFlight && background) {
+    return state.dashboardRefreshInFlight;
+  }
+  if (background && state.dashboardPayload) {
+    state.dashboardRefreshStatus = refreshSnapshot ? "Refreshing live dashboard snapshot..." : "Updating dashboard in the background...";
+    state.dashboardLastRefreshError = "";
+    const statusEl = document.getElementById("dashboard-refresh-inline-status");
+    if (statusEl) {
+      statusEl.className = "small muted dashboard-refresh-status";
+      statusEl.textContent = state.dashboardRefreshStatus;
+    }
+  }
+  const previousPayload = state.dashboardPayload;
+  const request = (async () => {
+    try {
+      const payload = await api(endpoint, { _timeoutMs: refreshSnapshot ? 20000 : 12000 });
+      state.dashboardPayload = payload;
+      state.dashboardRefreshStatus = "";
+      state.dashboardLastRefreshError = "";
+      syncDashboardRefreshSettingsFromPayload(payload);
+      root.innerHTML = renderDashboardView(payload);
+      bindDashboardControls();
+      scheduleDashboardRefresh();
+      return payload;
+    } catch (error) {
+      state.dashboardRefreshStatus = "";
+      state.dashboardLastRefreshError = `Dashboard refresh failed: ${error?.message || "unknown error"}`;
+      if (previousPayload) {
+        root.innerHTML = renderDashboardView(previousPayload);
+        bindDashboardControls();
+      } else if (!silent) {
+        root.innerHTML = renderNotice(state.dashboardLastRefreshError);
+      }
+      scheduleDashboardRefresh();
+      throw error;
+    } finally {
+      if (state.dashboardRefreshInFlight === request) {
+        state.dashboardRefreshInFlight = null;
+      }
+    }
+  })();
+  state.dashboardRefreshInFlight = request;
+  return request;
 }
 
 async function loadChatView() {
@@ -13369,16 +14332,38 @@ async function loadChatView() {
       const completionTokens = Number(stats.completion_tokens || 0);
       const totalTokens = Number(stats.total_tokens || 0);
       const tpsTotal = Number(stats.tps_total || 0);
+      const tpsPrompt = Number(stats.tps_prompt || 0);
       const tpsComp = Number(stats.tps_comp || 0);
+      const speedBasis = String(stats.speed_basis || "").trim();
 
       if (!Number.isFinite(elapsed) || elapsed <= 0 || !Number.isFinite(totalTokens) || totalTokens <= 0) {
         return;
       }
 
-      const compPart = Number.isFinite(tpsComp) && tpsComp > 0 ? ` | completion: ${Math.round(tpsComp)} tok/s` : "";
-      speedStatsEl.textContent = `${model} - ${Math.round(tpsTotal)} tok/s${compPart} • ${Math.round(
+      const mainTps = Number.isFinite(tpsComp) && tpsComp > 0 ? tpsComp : tpsTotal;
+      if (!Number.isFinite(mainTps) || mainTps <= 0) {
+        return;
+      }
+      const localBasis = ["local_generate", "llama_cpp_timing", "mlx_lm_timing"].includes(speedBasis);
+      const mainLabel =
+        speedBasis === "llama_cpp_timing" || speedBasis === "mlx_lm_timing"
+          ? "decode"
+          : localBasis
+            ? "generated"
+            : speedBasis === "api_round_trip"
+              ? "API completion"
+              : "completion";
+      const detailParts = [];
+      if (Number.isFinite(tpsTotal) && tpsTotal > 0 && Math.abs(tpsTotal - mainTps) >= 1) {
+        detailParts.push(`total ${Math.round(tpsTotal)} tok/s`);
+      }
+      if (Number.isFinite(tpsPrompt) && tpsPrompt > 0) {
+        detailParts.push(`prompt ${Math.round(tpsPrompt)} tok/s`);
+      }
+      const detailText = detailParts.length ? ` | ${detailParts.join(" | ")}` : "";
+      speedStatsEl.textContent = `${model} - ${mainLabel}: ${Math.round(mainTps)} tok/s${detailText} • ${Math.round(
         totalTokens
-      )} tok in ${elapsed.toFixed(2)}s (prompt ${Math.round(promptTokens)}, completion ${Math.round(completionTokens)})`;
+      )} tok in ${elapsed.toFixed(2)}s (prompt ${Math.round(promptTokens)}, generated ${Math.round(completionTokens)})`;
       speedStatsEl.style.display = "block";
     } catch {
       speedStatsEl.textContent = "";
@@ -13993,33 +14978,43 @@ function renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus, { in
         <section class="core-inline-section">
           <div class="small core-inline-section-title">Redis Connection</div>
           <div class="form-grid two-col">
-            <label>Host
+            <label>Mode
+              <select id="set_redis_mode">
+                <option value="internal" ${redisStatus.internal || redisStatus.mode === "internal" ? "selected" : ""}>Internal</option>
+                <option value="external" ${!redisStatus.internal && redisStatus.mode === "external" ? "selected" : ""}>External</option>
+              </select>
+            </label>
+            <label data-redis-mode-field="internal">Internal Data File
+              <input id="set_redis_data_path" type="text" value="${escapeHtml(redisStatus.data_path || "")}" />
+            </label>
+            <label data-redis-mode-field="external">Host
               <input id="set_redis_host" type="text" value="${escapeHtml(redisStatus.host || "")}" />
             </label>
-            <label>Port
+            <label data-redis-mode-field="external">Port
               <input id="set_redis_port" type="number" min="1" max="65535" value="${escapeHtml(redisStatus.port || 6379)}" />
             </label>
             <label>DB
               <input id="set_redis_db" type="number" min="0" value="${escapeHtml(redisStatus.db || 0)}" />
             </label>
-            <label>Username (optional)
+            <label data-redis-mode-field="external">Username (optional)
               <input id="set_redis_username" type="text" value="${escapeHtml(redisStatus.username || "")}" />
             </label>
-            <label>Password (optional)
+            <label data-redis-mode-field="external">Password (optional)
               <input id="set_redis_password" type="password" autocomplete="new-password" />
             </label>
-            <label>CA Cert Path (optional)
+            <label data-redis-mode-field="external">CA Cert Path (optional)
               <input id="set_redis_ca_cert_path" type="text" value="${escapeHtml(redisStatus.ca_cert_path || "")}" />
             </label>
-            <label class="toggle-row">Use TLS
+            <label class="toggle-row" data-redis-mode-field="external">Use TLS
               <input id="set_redis_use_tls" type="checkbox" ${redisStatus.use_tls ? "checked" : ""} />
             </label>
-            <label class="toggle-row">Verify TLS Cert
+            <label class="toggle-row" data-redis-mode-field="external">Verify TLS Cert
               <input id="set_redis_verify_tls" type="checkbox" ${redisStatus.verify_tls ? "checked" : ""} />
             </label>
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-redis-refresh" class="inline-btn">Refresh</button>
               <button type="button" id="settings-redis-test" class="inline-btn">Test Connection</button>
+              <button type="button" id="settings-redis-migrate-internal" class="inline-btn">Migrate to Internal</button>
               <button type="button" id="settings-redis-save" class="action-btn">Save Redis</button>
             </div>
             <div id="settings-redis-status" class="small" style="grid-column: 1 / -1;">
@@ -14070,6 +15065,8 @@ function bindSettingsRedisSection({
   onConnected = null,
 } = {}) {
   let redisEncryptionState = normalizeRedisEncryptionStatusPayload(initialRedisEncryptionStatus);
+  const redisModeEl = document.getElementById("set_redis_mode");
+  const redisDataPathEl = document.getElementById("set_redis_data_path");
   const redisHostEl = document.getElementById("set_redis_host");
   const redisPortEl = document.getElementById("set_redis_port");
   const redisDbEl = document.getElementById("set_redis_db");
@@ -14081,6 +15078,7 @@ function bindSettingsRedisSection({
   const redisStatusLineEl = document.getElementById("settings-redis-status");
   const redisRefreshBtnEl = document.getElementById("settings-redis-refresh");
   const redisTestBtnEl = document.getElementById("settings-redis-test");
+  const redisMigrateInternalBtnEl = document.getElementById("settings-redis-migrate-internal");
   const redisSaveBtnEl = document.getElementById("settings-redis-save");
   const redisEncryptionStatusEl = document.getElementById("settings-redis-encryption-status");
   const redisEncryptionKeyPathEl = document.getElementById("set_redis_encryption_key_path");
@@ -14104,7 +15102,14 @@ function bindSettingsRedisSection({
   const setRedisBusy = (busy) => {
     const disabled = Boolean(busy);
     if (disabled) {
-      [redisRefreshBtnEl, redisTestBtnEl, redisSaveBtnEl, redisEncryptionEncryptBtnEl, redisEncryptionDecryptBtnEl]
+      [
+        redisRefreshBtnEl,
+        redisTestBtnEl,
+        redisMigrateInternalBtnEl,
+        redisSaveBtnEl,
+        redisEncryptionEncryptBtnEl,
+        redisEncryptionDecryptBtnEl,
+      ]
         .filter(Boolean)
         .forEach((button) => {
           button.disabled = true;
@@ -14116,10 +15121,57 @@ function bindSettingsRedisSection({
       .forEach((button) => {
         button.disabled = false;
       });
+    syncRedisMigrateInternalButton();
     applyRedisEncryptionStatus(redisEncryptionState);
   };
 
+  const syncRedisMigrateInternalButton = () => {
+    if (!redisMigrateInternalBtnEl) {
+      return;
+    }
+    const savedStatus = state.redisStatus || {};
+    const alreadyInternal = Boolean(savedStatus.internal || savedStatus.mode === "internal");
+    const canMigrate = Boolean(savedStatus.connected) && !alreadyInternal;
+    redisMigrateInternalBtnEl.disabled = !canMigrate;
+    redisMigrateInternalBtnEl.title = alreadyInternal
+      ? "Redis is already running internally."
+      : canMigrate
+        ? "Copy the connected external Redis DB into Tater's internal Redis store and switch over."
+        : "Connect external Redis before migrating.";
+  };
+
+  const currentRedisMode = () => {
+    const token = String(redisModeEl?.value || state.redisStatus?.mode || "internal").trim().toLowerCase();
+    return token === "external" ? "external" : "internal";
+  };
+
+  const syncRedisModeUi = () => {
+    const internal = currentRedisMode() === "internal";
+    document.querySelectorAll('[data-redis-mode-field="internal"]').forEach((wrapEl) => {
+      wrapEl.style.display = internal ? "" : "none";
+      wrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = !internal;
+      });
+    });
+    document.querySelectorAll('[data-redis-mode-field="external"]').forEach((wrapEl) => {
+      wrapEl.style.display = internal ? "none" : "";
+      wrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = internal;
+      });
+    });
+    syncRedisTlsUi();
+  };
+
   const syncRedisTlsUi = () => {
+    if (currentRedisMode() === "internal") {
+      if (redisVerifyTlsEl) {
+        redisVerifyTlsEl.disabled = true;
+      }
+      if (redisCaCertPathEl) {
+        redisCaCertPathEl.disabled = true;
+      }
+      return;
+    }
     const enabled = Boolean(redisUseTlsEl?.checked);
     if (redisVerifyTlsEl) {
       redisVerifyTlsEl.disabled = !enabled;
@@ -14137,6 +15189,7 @@ function bindSettingsRedisSection({
     const passwordRaw = maskedPassword ? "" : String(redisPasswordEl?.value || "");
     const keepExistingPassword = (maskedPassword || !passwordRaw) && Boolean(state.redisStatus?.password_set);
     return {
+      mode: currentRedisMode(),
       host: String(redisHostEl?.value || "").trim(),
       port: Number(redisPortEl?.value || 6379),
       db: Number(redisDbEl?.value || 0),
@@ -14145,6 +15198,7 @@ function bindSettingsRedisSection({
       use_tls: Boolean(redisUseTlsEl?.checked),
       verify_tls: Boolean(redisVerifyTlsEl?.checked),
       ca_cert_path: String(redisCaCertPathEl?.value || "").trim(),
+      data_path: String(redisDataPathEl?.value || "").trim(),
       keep_existing_password: keepExistingPassword,
       test_only: Boolean(testOnly),
     };
@@ -14152,6 +15206,12 @@ function bindSettingsRedisSection({
 
   const applyRedisConnectionStatus = (raw) => {
     const status = _setRedisStatus(raw);
+    if (redisModeEl) {
+      redisModeEl.value = status.internal || status.mode === "internal" ? "internal" : "external";
+    }
+    if (redisDataPathEl) {
+      redisDataPathEl.value = String(status.data_path || "");
+    }
     if (redisHostEl) {
       redisHostEl.value = String(status.host || "");
     }
@@ -14184,11 +15244,13 @@ function bindSettingsRedisSection({
       redisPasswordEl.placeholder = status.password_set ? "Leave blank to keep saved password" : "";
     }
     syncRedisTlsUi();
+    syncRedisModeUi();
     if (redisStatusLineEl) {
       redisStatusLineEl.textContent = _redisSetupMessage(status);
       redisStatusLineEl.classList.toggle("error", !status.connected);
       redisStatusLineEl.classList.toggle("success", Boolean(status.connected));
     }
+    syncRedisMigrateInternalButton();
     return status;
   };
 
@@ -14239,6 +15301,7 @@ function bindSettingsRedisSection({
 
   applyRedisConnectionStatus(initialRedisStatus);
   applyRedisEncryptionStatus(redisEncryptionState);
+  redisModeEl?.addEventListener("change", syncRedisModeUi);
   redisUseTlsEl?.addEventListener("change", syncRedisTlsUi);
   redisPasswordEl?.addEventListener("focus", () => {
     if (String(redisPasswordEl?.dataset?.masked || "") === "1") {
@@ -14311,6 +15374,61 @@ function bindSettingsRedisSection({
       setRedisBusy(false);
     }
   });
+  redisMigrateInternalBtnEl?.addEventListener("click", async () => {
+    const currentStatus = state.redisStatus || {};
+    if (currentStatus.internal || currentStatus.mode === "internal") {
+      setRedisStatusMessage("Redis is already using the internal store.");
+      return;
+    }
+    if (!currentStatus.connected) {
+      setRedisStatusMessage("Connect external Redis before migrating to internal.");
+      return;
+    }
+    const dataPath = String(redisDataPathEl?.value || currentStatus.data_path || "").trim();
+    const targetText = dataPath || "the default agent_lab/redis store";
+    if (!window.confirm(`Migrate the connected external Redis database into ${targetText} and switch Tater to internal Redis? The target internal DB will be replaced.`)) {
+      return;
+    }
+    setRedisBusy(true);
+    setRedisStatusMessage("Migrating external Redis to internal Redis...");
+    try {
+      const result = await runActionWithProgress(
+        {
+          title: "Migrating Redis",
+          detail: "Pausing active runtimes, copying Redis keys, and switching to the internal store",
+          workingText: "Migrating Redis data...",
+          successText: "Redis migration complete.",
+          errorPrefix: "Redis migration failed",
+        },
+        () =>
+          api("/api/redis/migrate/internal", {
+            method: "POST",
+            body: JSON.stringify({ data_path: dataPath, flush_internal: true }),
+            _skipRedisRecovery: true,
+          })
+      );
+      const nextStatus = applyRedisConnectionStatus(result?.redis_status || result);
+      if (includeEncryption) {
+        applyRedisEncryptionStatus(
+          result?.encryption_status || (await api("/api/redis/encryption/status", { _skipRedisRecovery: true }))
+        );
+      }
+      await refreshHealth();
+      const migration = result?.migration && typeof result.migration === "object" ? result.migration : {};
+      const restored = Number(migration.keys_restored || 0);
+      const replay = result?.bootstrap_replay && typeof result.bootstrap_replay === "object" ? result.bootstrap_replay : null;
+      if (replay && replay.ok === false) {
+        setRedisStatusMessage(`Migrated ${restored} Redis key(s) and switched to internal, but startup replay failed: ${replay.error || "unknown error"}`);
+      } else {
+        setRedisStatusMessage(`Migrated ${restored} Redis key(s) and switched to internal Redis.`);
+      }
+      await maybeReloadFullSettings(nextStatus);
+    } catch (error) {
+      setRedisStatusMessage(`Redis migration failed: ${error.message}`);
+    } finally {
+      setRedisBusy(false);
+    }
+  });
   redisEncryptionEncryptBtnEl?.addEventListener("click", async () => {
     setRedisBusy(true);
     setRedisStatusMessage("Encrypting live Redis values (auto-creating key if needed)...");
@@ -14369,49 +15487,6 @@ function bindSettingsRedisSection({
     } finally {
       setRedisBusy(false);
     }
-  });
-}
-
-function setRedisBootstrapMode(enabled) {
-  document.body?.classList.toggle("redis-bootstrap-mode", Boolean(enabled));
-}
-
-function renderRedisBootstrapView(root, redisStatus, redisEncryptionStatus) {
-  setRedisBootstrapMode(true);
-  document.body.dataset.view = "redis-bootstrap";
-  root.dataset.view = "redis-bootstrap";
-  root.innerHTML = `
-    <div class="redis-bootstrap-wrap">
-      <section class="card redis-bootstrap-card">
-        <div class="redis-bootstrap-brand">
-          <div class="brand-dot" aria-hidden="true"></div>
-          <div>
-            <div class="redis-bootstrap-kicker">TaterOS Startup</div>
-            <h1 class="redis-bootstrap-title">Connect Redis</h1>
-            <p class="redis-bootstrap-copy">
-              Tater couldn’t reach Redis during startup, so the normal WebUI is waiting. Update the Redis connection below and once it connects, Tater will reload normally.
-            </p>
-          </div>
-        </div>
-        <div id="settings-status" class="small redis-bootstrap-status"></div>
-        ${renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus, { includeEncryption: false })}
-      </section>
-    </div>
-  `;
-
-  const statusEl = document.getElementById("settings-status");
-  if (statusEl) {
-    statusEl.textContent = _redisRecoveryNotice(redisStatus?.error || "");
-    statusEl.classList.add("error");
-  }
-  bindSettingsRedisSection({
-    statusTargetEl: statusEl,
-    initialRedisStatus: redisStatus,
-    initialRedisEncryptionStatus: redisEncryptionStatus,
-    includeEncryption: false,
-    onConnected: async () => {
-      window.location.reload();
-    },
   });
 }
 
@@ -14730,7 +15805,6 @@ function bindSettingsPeopleActions() {
 
 async function loadSettingsView() {
   const root = document.getElementById("view-root");
-  setRedisBootstrapMode(false);
   const [redisStatusPayload, redisEncryptionPayload] = await Promise.all([
     api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: REDIS_STATUS_TIMEOUT_MS }),
     api("/api/redis/encryption/status", { _skipRedisRecovery: true, _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS }),
@@ -14755,7 +15829,129 @@ async function loadSettingsView() {
   const hydraDefaults =
     settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
   const peoplePayload = settings?.people && typeof settings.people === "object" ? settings.people : {};
+  const normalizeHydraBaseProvider = (value) => {
+    const token = String(value || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+    if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
+      return "hf_transformers";
+    }
+    if (["llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python"].includes(token)) {
+      return "llama_cpp";
+    }
+    if (["mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"].includes(token)) {
+      return "mlx_lm";
+    }
+    return "openai_compatible";
+  };
+  const isHydraLocalProvider = (value) => ["hf_transformers", "llama_cpp", "mlx_lm"].includes(normalizeHydraBaseProvider(value));
+  const hydraProviderOptions = [
+    { value: "openai_compatible", label: "OpenAI-Compatible API" },
+    { value: "hf_transformers", label: "Hugging Face Transformers" },
+    { value: "llama_cpp", label: "llama.cpp GGUF" },
+    { value: "mlx_lm", label: "MLX LM (Apple Silicon)" },
+  ];
+  const hydraOpenAiModelPlaceholder = "Model served by your API";
+  const hydraHfModelPlaceholder = "Qwen/Qwen2.5-0.5B-Instruct";
+  const hydraLlamaCppModelPlaceholder = "bartowski/Qwen2.5-1.5B-Instruct-GGUF::Qwen2.5-1.5B-Instruct-Q4_K_M.gguf";
+  const hydraMlxLmModelPlaceholder = "mlx-community/Llama-3.2-3B-Instruct-4bit";
+  const hydraModelPlaceholderForProvider = (value) => {
+    const provider = normalizeHydraBaseProvider(value);
+    if (provider === "hf_transformers") {
+      return hydraHfModelPlaceholder;
+    }
+    if (provider === "llama_cpp") {
+      return hydraLlamaCppModelPlaceholder;
+    }
+    if (provider === "mlx_lm") {
+      return hydraMlxLmModelPlaceholder;
+    }
+    return hydraOpenAiModelPlaceholder;
+  };
+  const hydraModelLabelForProvider = (value, remoteLabel = "Base Model") => {
+    const provider = normalizeHydraBaseProvider(value);
+    if (provider === "hf_transformers") {
+      return "Downloaded Transformers Model";
+    }
+    if (provider === "llama_cpp") {
+      return "Downloaded GGUF Model";
+    }
+    if (provider === "mlx_lm") {
+      return "Downloaded MLX Model";
+    }
+    return remoteLabel;
+  };
+  const renderHydraProviderOptions = (currentValue) => {
+    const selected = normalizeHydraBaseProvider(currentValue);
+    return hydraProviderOptions
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
+  const renderHydraLocalProviderOptions = (currentValue) => {
+    const selected = normalizeHydraBaseProvider(currentValue);
+    return hydraProviderOptions
+      .filter((option) => isHydraLocalProvider(option.value))
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
+  const renderHydraVisionProviderOptions = (currentValue) => {
+    const selected = normalizeHydraBaseProvider(currentValue);
+    return hydraProviderOptions
+      .filter((option) => ["hf_transformers", "llama_cpp"].includes(option.value))
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
+  const normalizeVisionMode = (value) => {
+    const token = String(value || "api").trim().toLowerCase().replaceAll("_", "-");
+    if (["auto", "base", "dedicated", "api"].includes(token)) {
+      return token;
+    }
+    if (token === "same-as-base" || token === "same-base") {
+      return "base";
+    }
+    return "api";
+  };
+  const renderVisionModeOptions = (currentValue) => {
+    const selected = normalizeVisionMode(currentValue);
+    const options = [
+      { value: "api", label: "OpenAI-Compatible API" },
+      { value: "auto", label: "Auto: Base if vision-capable" },
+      { value: "base", label: "Same as Base" },
+      { value: "dedicated", label: "Dedicated Local Vision" },
+    ];
+    return options
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
+  let localLlmModelsPayload =
+    settings?.local_llm_models && typeof settings.local_llm_models === "object"
+      ? settings.local_llm_models
+      : { models: [], by_provider: {} };
+  const localLlmModelsForProvider = (provider) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const grouped = localLlmModelsPayload?.by_provider && typeof localLlmModelsPayload.by_provider === "object"
+      ? localLlmModelsPayload.by_provider
+      : {};
+    const rows = Array.isArray(grouped[normalized])
+      ? grouped[normalized]
+      : Array.isArray(localLlmModelsPayload?.models)
+        ? localLlmModelsPayload.models.filter((row) => normalizeHydraBaseProvider(row?.provider || "") === normalized)
+        : [];
+    return rows
+      .map((row) => ({
+        provider: normalized,
+        model: String(row?.model || "").trim(),
+        repo_id: String(row?.repo_id || "").trim(),
+        filename: String(row?.filename || "").trim(),
+        model_path: String(row?.model_path || "").trim(),
+        downloaded_ts: Number(row?.downloaded_ts || 0),
+        max_context_tokens: Number(row?.max_context_tokens || 0),
+        context_source: String(row?.context_source || "").trim(),
+        supports_vision: Boolean(row?.supports_vision),
+        mmproj_filename: String(row?.mmproj_filename || "").trim(),
+      }))
+      .filter((row) => row.model);
+  };
   const normalizeHydraBaseRow = (row) => ({
+    provider: normalizeHydraBaseProvider(row?.provider || settings?.hydra_llm_provider || ""),
     host: String(row?.host || "").trim(),
     port: String(row?.port || "").trim(),
     model: String(row?.model || "").trim(),
@@ -14768,10 +15964,10 @@ async function loadSettingsView() {
   const normalizedHydraBaseSeen = new Set();
   const appendHydraBaseRow = (row) => {
     const normalized = normalizeHydraBaseRow(row);
-    if (!normalized.host || !normalized.model) {
+    if (!normalized.model || (!isHydraLocalProvider(normalized.provider) && !normalized.host)) {
       return;
     }
-    const signature = `${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}`;
+    const signature = `${normalized.provider}|${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}`;
     if (normalizedHydraBaseSeen.has(signature)) {
       return;
     }
@@ -14786,6 +15982,7 @@ async function loadSettingsView() {
       port: settings.hydra_llm_port || "",
       model: settings.hydra_llm_model || "",
       api_key: settings.hydra_llm_api_key || "",
+      provider: settings.hydra_llm_provider || "",
     });
   }
   if (!normalizedHydraBaseRows.length) {
@@ -14795,6 +15992,7 @@ async function loadSettingsView() {
         port: settings.hydra_llm_port || "",
         model: settings.hydra_llm_model || "",
         api_key: settings.hydra_llm_api_key || "",
+        provider: settings.hydra_llm_provider || "",
       })
     );
   }
@@ -14805,16 +16003,21 @@ async function loadSettingsView() {
         .map(
           (row, index) => `
             <div class="hydra-base-server-row" data-hydra-base-index="${index}">
-              <label>Host / IP
+              <label>Provider
+                <select data-hydra-base-field="provider">
+                  ${renderHydraProviderOptions(row.provider)}
+                </select>
+              </label>
+              <label data-hydra-provider-field="openai_compatible">Host / IP
                 <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
               </label>
-              <label>Port
+              <label data-hydra-provider-field="openai_compatible">Port
                 <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
               </label>
-              <label>Model
-                <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
+              <label><span data-hydra-model-label>Model</span>
+                <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(row.provider))}" />
               </label>
-              <label>API Key (optional)
+              <label data-hydra-provider-field="openai_compatible">API Key (optional)
                 <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
               </label>
               <div class="hydra-base-server-actions">
@@ -14825,8 +16028,111 @@ async function loadSettingsView() {
         )
         .join("")
     : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
+  const hydraRoleSpecs = [
+    { id: "chat", title: "Chat", note: "normal conversation replies" },
+    { id: "astraeus", title: "Astraeus", note: "planning" },
+    { id: "thanatos", title: "Thanatos", note: "execution" },
+    { id: "minos", title: "Minos", note: "judging" },
+    { id: "hermes", title: "Hermes", note: "final response" },
+  ];
+  const hydraRoleIds = hydraRoleSpecs.map((role) => role.id);
+  const renderHydraRoleRoute = (role) => {
+    const provider = normalizeHydraBaseProvider(settings[`hydra_llm_${role.id}_provider`] || "");
+    const model = String(settings[`hydra_llm_${role.id}_model`] || "").trim();
+    return `
+      <div class="hydra-route-row" data-hydra-route-scope="${escapeHtml(role.id)}">
+        <div class="hydra-role-title">${escapeHtml(role.title)} (${escapeHtml(role.note)})</div>
+        <label style="grid-column: 1 / -1;">Provider
+          <select id="set_hydra_llm_${escapeHtml(role.id)}_provider" data-hydra-route-provider="${escapeHtml(role.id)}">
+            ${renderHydraProviderOptions(provider)}
+          </select>
+        </label>
+        <label data-hydra-provider-field="openai_compatible">${escapeHtml(role.title)} Host / IP
+          <input id="set_hydra_llm_${escapeHtml(role.id)}_host" type="text" value="${escapeHtml(
+            settings[`hydra_llm_${role.id}_host`] || ""
+          )}" />
+        </label>
+        <label data-hydra-provider-field="openai_compatible">${escapeHtml(role.title)} Port
+          <input id="set_hydra_llm_${escapeHtml(role.id)}_port" type="number" min="1" max="65535" value="${escapeHtml(
+            settings[`hydra_llm_${role.id}_port`] || ""
+          )}" />
+        </label>
+        <label style="grid-column: 1 / -1;"><span id="hydra-${escapeHtml(role.id)}-model-label">${escapeHtml(hydraModelLabelForProvider(provider, `${role.title} Model`))}</span>
+          <input id="set_hydra_llm_${escapeHtml(role.id)}_model" type="text" value="${escapeHtml(model)}" placeholder="${escapeHtml(
+            hydraModelPlaceholderForProvider(provider)
+          )}" />
+          <select id="set_hydra_llm_${escapeHtml(role.id)}_model_select"></select>
+          <div id="hydra-${escapeHtml(role.id)}-local-model-status" class="small"></div>
+        </label>
+        <label data-hydra-provider-field="openai_compatible" style="grid-column: 1 / -1;">${escapeHtml(role.title)} API Key (optional)
+          <input id="set_hydra_llm_${escapeHtml(role.id)}_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
+            settings[`hydra_llm_${role.id}_api_key`] || ""
+          )}" />
+        </label>
+      </div>
+    `;
+  };
   const popupEffectStyle = normalizePopupEffectStyle(settings?.popup_effect_style || state.popupEffectStyle);
   applyPopupEffectStyle(popupEffectStyle);
+  maybeOpenHfLlmWarmupModal(settings?.hf_llm_warmup);
+  const normalizeHfIntegrationStatus = (value = {}) => ({
+    id: "huggingface",
+    installed: Boolean(value?.installed),
+    enabled: Boolean(value?.enabled),
+    has_token: Boolean(value?.has_token),
+    env_token: Boolean(value?.env_token),
+    ready: Boolean(value?.ready),
+    setup_needed: Boolean(value?.setup_needed),
+    message: String(value?.message || "").trim(),
+  });
+  let hfModelBrowserIntegration = normalizeHfIntegrationStatus(settings?.hf_browser_integration || {});
+  const hfIntegrationSetupTitle = (integration, hasError = false) => {
+    if (hasError) {
+      return "Hugging Face setup needed";
+    }
+    if (!integration.installed) {
+      return "Hugging Face integration is not installed";
+    }
+    if (!integration.enabled) {
+      return "Hugging Face integration is disabled";
+    }
+    if (!integration.has_token) {
+      return "Hugging Face token is not set";
+    }
+    return "Hugging Face integration is ready";
+  };
+  const hfIntegrationSetupMessage = (integration, hasError = false) => {
+    if (hasError) {
+      return "Open Integrations, install or enable Hugging Face, then save an access token for gated/private models and higher Hub rate limits.";
+    }
+    if (!integration.installed) {
+      return "Open Integrations, download Hugging Face from the Manager tab, enable it, then add an access token.";
+    }
+    if (!integration.enabled) {
+      return "Open Integrations and enable Hugging Face. Add a token there for gated/private models.";
+    }
+    if (!integration.has_token) {
+      return "Public browsing may still work, but gated/private models and higher Hub rate limits need a Hugging Face token in Integrations.";
+    }
+    return "The model browser can use your saved Hugging Face access token.";
+  };
+  const renderHfIntegrationNotice = (integrationValue = hfModelBrowserIntegration, options = {}) => {
+    const integration = normalizeHfIntegrationStatus(integrationValue);
+    const hasError = Boolean(options?.error);
+    const force = Boolean(options?.force);
+    if (!force && !hasError && !integration.setup_needed) {
+      return "";
+    }
+    const rawError = String(options?.rawError || "").trim();
+    return `
+      <div class="hf-integration-notice-copy">
+        <strong>${escapeHtml(hfIntegrationSetupTitle(integration, hasError))}</strong>
+        <span>${escapeHtml(hfIntegrationSetupMessage(integration, hasError))}</span>
+        ${rawError ? `<small>Hub said: ${escapeHtml(rawError)}</small>` : ""}
+      </div>
+      <button type="button" class="inline-btn" data-hf-integration-setup>Open Integrations</button>
+    `;
+  };
   const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
   const hydraPlatformOptionsHtml = hydraPlatforms
     .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(hydraPlatformLabel(platform))}</option>`)
@@ -14840,6 +16146,10 @@ async function loadSettingsView() {
         })
         .join("")
     : `<option value="" disabled>(No plugin ids available)</option>`;
+  const taterApiEndpoint = `${window.location.origin.replace(/\/$/, "")}/v1/chat/completions`;
+  const taterApiModelsEndpoint = `${window.location.origin.replace(/\/$/, "")}/v1/models`;
+  const taterApiMode = String(settings?.tater_api_mode || "direct").trim().toLowerCase() === "hydra" ? "hydra" : "direct";
+  const taterApiKeySet = Boolean(settings?.tater_api_key_set);
   const speechUi = settings?.speech_ui && typeof settings.speech_ui === "object" ? settings.speech_ui : {};
   const announcementSpeechUi =
     settings?.announcement_speech_ui && typeof settings.announcement_speech_ui === "object"
@@ -15223,25 +16533,165 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel active" data-models-panel="routing">
-              <div id="settings-hydra-base-fields" class="hydra-model-panel is-active">
+              <div class="settings-subtabs llm-vision-mini-tabs" style="grid-column: 1 / -1;">
+                <button type="button" class="settings-subtab-btn active" data-llm-vision-tab="settings">Settings</button>
+                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="huggingface">Hugging Face</button>
+                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="manage">Manage</button>
+              </div>
+              <div id="settings-hf-model-browser" class="hf-model-browser" hidden>
+                <div class="hf-model-browser-hero">
+                  <div class="hf-model-browser-spud" aria-hidden="true">
+                    <span class="hf-model-browser-spud-eye left"></span>
+                    <span class="hf-model-browser-spud-eye right"></span>
+                    <span class="hf-model-browser-spud-spark"></span>
+                  </div>
+                  <div class="hf-model-browser-title">
+                    <strong>Hugging Face Models</strong>
+                    <span>Trending repos, fresh drops, GGUF files, and MLX builds.</span>
+                  </div>
+                  <div id="hf-model-browser-form" class="hf-model-browser-controls">
+                      <select id="hf-model-browser-provider">
+                        <option value="hf_transformers">Transformers</option>
+                        <option value="llama_cpp">llama.cpp</option>
+                        <option value="mlx_lm">MLX</option>
+                      </select>
+                    <select id="hf-model-browser-task">
+                      <option value="text-generation">Text</option>
+                      <option value="image-text-to-text">Vision</option>
+                    </select>
+                    <div class="hf-model-browser-view-switch" role="group" aria-label="Model list">
+                      <button type="button" class="active" data-hf-model-view="trending">Trending</button>
+                      <button type="button" data-hf-model-view="new">New</button>
+                      <button type="button" data-hf-model-view="downloads">Most Downloaded</button>
+                    </div>
+                    <input id="hf-model-browser-query" type="search" placeholder="Search models" autocomplete="off" />
+                    <button type="button" class="inline-btn" data-hf-model-search>Search</button>
+                  </div>
+                </div>
+                <button type="button" id="hf-download-summary-block" class="hf-download-summary" aria-label="Open model download details">
+                  <span class="hf-download-summary-clock" aria-hidden="true"></span>
+                  <span class="hf-download-summary-main">
+                    <span id="hf-download-summary-title" class="hf-download-summary-title">Model downloads</span>
+                    <span id="hf-download-summary-detail" class="hf-download-summary-detail">No local model download is running.</span>
+                    <span class="action-progress-track" aria-hidden="true">
+                      <span id="hf-download-summary-fill" class="action-progress-fill"></span>
+                    </span>
+                  </span>
+                  <span class="hf-download-summary-stats">
+                    <span id="hf-download-summary-stat">No downloads yet</span>
+                    <span id="hf-download-summary-speed">Idle</span>
+                    <span id="hf-download-summary-eta">Idle</span>
+                  </span>
+                </button>
+                <div id="hf-model-browser-setup" class="hf-integration-notice" ${hfModelBrowserIntegration.setup_needed ? "" : "hidden"}>
+                  ${renderHfIntegrationNotice(hfModelBrowserIntegration)}
+                </div>
+                <div id="hf-model-browser-status" class="small hf-model-browser-status">Loading trending models...</div>
+                <div id="hf-model-browser-pagination" class="hf-model-browser-pagination" hidden></div>
+                <div class="hf-model-browser-layout">
+                  <div id="hf-model-browser-results" class="hf-model-browser-results"></div>
+                  <div id="hf-model-browser-detail" class="hf-model-browser-detail"></div>
+                </div>
+              </div>
+              <div id="settings-local-model-manager" class="hf-model-browser local-model-manager" hidden>
+                <div class="hf-model-browser-hero">
+                  <div class="hf-model-browser-spud" aria-hidden="true">
+                    <span class="hf-model-browser-spud-eye left"></span>
+                    <span class="hf-model-browser-spud-eye right"></span>
+                    <span class="hf-model-browser-spud-spark"></span>
+                  </div>
+                  <div class="hf-model-browser-title">
+                    <strong>Installed Local Models</strong>
+                    <span>Models downloaded into Tater's local LLM folders.</span>
+                  </div>
+                  <div class="hf-model-browser-controls">
+                    <button type="button" id="local-model-manager-refresh" class="inline-btn">Refresh</button>
+                  </div>
+                </div>
+                <div id="local-model-manager-status" class="small hf-model-browser-status"></div>
+                <div id="local-model-manager-list" class="local-model-manager-list"></div>
+              </div>
+              <div id="settings-hydra-base-fields" class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Base Model</div>
                 <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
-                <label>Base Host / IP
+                <label style="grid-column: 1 / -1;">Base Provider
+                  <select id="set_hydra_llm_provider">
+                    ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider)}
+                  </select>
+                </label>
+                <label id="hydra-base-host-wrap" data-hydra-provider-field="openai_compatible">Base Host / IP
                   <input id="set_hydra_llm_host" type="text" value="${escapeHtml(
                     hydraPrimaryBaseRow.host || ""
                   )}" />
                 </label>
-                <label>Base Port
+                <label id="hydra-base-port-wrap" data-hydra-provider-field="openai_compatible">Base Port
                   <input id="set_hydra_llm_port" type="number" min="1" max="65535" value="${escapeHtml(
                     hydraPrimaryBaseRow.port || ""
                   )}" />
                 </label>
-                <label style="grid-column: 1 / -1;">Base Model
+                <label id="hydra-base-model-wrap" style="grid-column: 1 / -1;"><span id="hydra-base-model-label">Base Model</span>
                   <input id="set_hydra_llm_model" type="text" value="${escapeHtml(
                     hydraPrimaryBaseRow.model || ""
-                  )}" />
+                  )}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(hydraPrimaryBaseRow.provider))}" />
+                  <select id="set_hydra_llm_model_select"></select>
+                  <div id="hydra-local-model-status" class="small"></div>
                 </label>
-                <label style="grid-column: 1 / -1;">API Key (optional)
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Context Length
+                  <div class="hydra-context-control" data-hydra-context-control="hf_transformers">
+                    <input id="set_hydra_hf_transformers_context_tokens_range" type="range" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_hf_transformers_context_tokens || "4096"
+                    )}" data-hydra-context-range="hf_transformers" />
+                    <input id="set_hydra_hf_transformers_context_tokens" type="number" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_hf_transformers_context_tokens || "4096"
+                    )}" data-hydra-context-number="hf_transformers" />
+                  </div>
+                  <div id="hydra-hf-context-hint" class="small hydra-context-hint"></div>
+                  <div id="hydra-hf-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="hf_transformers"></div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Context Length
+                  <div class="hydra-context-control" data-hydra-context-control="llama_cpp">
+                    <input id="set_hydra_llama_cpp_context_tokens_range" type="range" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_llama_cpp_context_tokens || "4096"
+                    )}" data-hydra-context-range="llama_cpp" />
+                    <input id="set_hydra_llama_cpp_context_tokens" type="number" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_llama_cpp_context_tokens || "4096"
+                    )}" data-hydra-context-number="llama_cpp" />
+                  </div>
+                  <div id="hydra-llama-context-hint" class="small hydra-context-hint"></div>
+                  <div id="hydra-llama-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="llama_cpp"></div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Multi-Token Prediction
+                  ${renderToggleRow(
+                    `<input id="set_hydra_llama_cpp_mtp_enabled" class="toggle-input" type="checkbox" ${
+                      settings.hydra_llama_cpp_mtp_enabled ? "checked" : ""
+                    } />`,
+                    "Enable MTP"
+                  )}
+                  <div class="small hydra-context-hint">Uses llama.cpp native draft-mtp when the installed binding exposes it.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">MTP Draft Tokens
+                  <div class="hydra-context-control hydra-mtp-control">
+                    <input id="set_hydra_llama_cpp_mtp_draft_tokens_range" type="range" min="1" max="16" step="1" value="${escapeHtml(
+                      settings.hydra_llama_cpp_mtp_draft_tokens || "3"
+                    )}" />
+                    <input id="set_hydra_llama_cpp_mtp_draft_tokens" type="number" min="1" max="16" step="1" value="${escapeHtml(
+                      settings.hydra_llama_cpp_mtp_draft_tokens || "3"
+                    )}" />
+                  </div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Context Length
+                  <div class="hydra-context-control" data-hydra-context-control="mlx_lm">
+                    <input id="set_hydra_mlx_lm_context_tokens_range" type="range" min="128" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_mlx_lm_context_tokens || "4096"
+                    )}" data-hydra-context-range="mlx_lm" />
+                    <input id="set_hydra_mlx_lm_context_tokens" type="number" min="128" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_mlx_lm_context_tokens || "4096"
+                    )}" data-hydra-context-number="mlx_lm" />
+                  </div>
+                  <div id="hydra-mlx-context-hint" class="small hydra-context-hint"></div>
+                  <div id="hydra-mlx-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="mlx_lm"></div>
+                </label>
+                <label id="hydra-base-api-key-wrap" data-hydra-provider-field="openai_compatible" style="grid-column: 1 / -1;">API Key (optional)
                   <input id="set_hydra_llm_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
                     hydraPrimaryBaseRow.api_key || ""
                   )}" />
@@ -15254,39 +16704,87 @@ async function loadSettingsView() {
                     <button type="button" id="settings-hydra-base-server-add" class="inline-btn">Add Server</button>
                   </div>
                 </div>
+                <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-hydra-base-save" class="inline-btn">Save Base</button>
+                  <button type="button" id="settings-hydra-base-save-load" class="inline-btn">Save & Load Base</button>
+                  <span class="small">Save updates the Base routing. Save & Load warms selected local Base models.</span>
+                </div>
               </div>
 
-              <div class="hydra-model-panel is-active">
+              <div class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Spudex LLM</div>
                 <div class="small hydra-model-panel-note">Optional override for Spudex direct chat and Hydra-triggered Spudex tasks. Blank uses the base model.</div>
-                <label>Spudex LLM Endpoint
+                <label style="grid-column: 1 / -1;">Spudex Provider
+                  <select id="set_spudex_llm_provider">
+                    ${renderHydraProviderOptions(settings.spudex_llm_provider || "openai_compatible")}
+                  </select>
+                </label>
+                <label data-hydra-provider-field="openai_compatible">Spudex LLM Endpoint
                   <input id="set_spudex_llm_host" type="text" value="${escapeHtml(
                     settings.spudex_llm_host || ""
                   )}" placeholder="Blank uses base endpoint" />
                 </label>
-                <label>Spudex LLM Model
+                <label style="grid-column: 1 / -1;"><span id="spudex-llm-model-label">Spudex LLM Model</span>
                   <input id="set_spudex_llm_model" type="text" value="${escapeHtml(
                     settings.spudex_llm_model || ""
-                  )}" placeholder="Blank uses base model" />
+                  )}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(settings.spudex_llm_provider || ""))}" />
+                  <select id="set_spudex_llm_model_select"></select>
+                  <div id="spudex-local-model-status" class="small"></div>
                 </label>
+                <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-spudex-llm-save" class="inline-btn">Save Spudex</button>
+                  <button type="button" id="settings-spudex-llm-save-load" class="inline-btn">Save & Load Spudex</button>
+                  <span class="small">Save only affects Spudex LLM settings.</span>
+                </div>
               </div>
 
-              <div class="hydra-model-panel is-active">
+              <div class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Vision Model</div>
                 <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
-                <label>Vision API Base URL
+                <label style="grid-column: 1 / -1;">Vision Mode
+                  <select id="set_vision_mode">
+                    ${renderVisionModeOptions(settings.vision_mode || "api")}
+                  </select>
+                </label>
+                <div id="vision-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                  Auto reuses the loaded Base model when it can process images, then falls back to the dedicated/API vision settings.
+                </div>
+                <label id="vision-llama-context-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Vision Context
+                  <div class="hydra-context-control">
+                    <input id="set_hydra_llama_cpp_vision_context_tokens_range" type="range" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_llama_cpp_vision_context_tokens || "4096"
+                    )}" />
+                    <input id="set_hydra_llama_cpp_vision_context_tokens" type="number" min="256" max="262144" step="256" value="${escapeHtml(
+                      settings.hydra_llama_cpp_vision_context_tokens || "4096"
+                    )}" />
+                  </div>
+                  <div id="vision-llama-context-hint" class="small hydra-context-hint">Used only for llama.cpp image calls. Text chat keeps its own context length.</div>
+                </label>
+                <label id="vision-provider-wrap" style="grid-column: 1 / -1;">Dedicated Vision Provider
+                  <select id="set_vision_provider">
+                    ${renderHydraVisionProviderOptions(settings.vision_provider || "hf_transformers")}
+                  </select>
+                </label>
+                <label id="vision-model-wrap" style="grid-column: 1 / -1;"><span id="vision-model-label">Vision Model</span>
+                  <input id="set_vision_model" type="text" value="${escapeHtml(
+                    settings.vision_model || "qwen2.5-vl-7b-instruct"
+                  )}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(settings.vision_provider || ""))}" />
+                  <select id="set_vision_model_select"></select>
+                  <div id="vision-local-model-status" class="small"></div>
+                </label>
+                <label id="vision-api-base-wrap">Vision API Base URL
                   <input id="set_vision_api_base" type="text" value="${escapeHtml(
                     settings.vision_api_base || "http://127.0.0.1:1234"
                   )}" />
                 </label>
-                <label>Vision Model
-                  <input id="set_vision_model" type="text" value="${escapeHtml(
-                    settings.vision_model || "qwen2.5-vl-7b-instruct"
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Vision API Key (optional)
+                <label id="vision-api-key-wrap" style="grid-column: 1 / -1;">Vision API Key (optional)
                   <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
                 </label>
+                <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-vision-model-save" class="inline-btn">Save Vision</button>
+                  <button type="button" id="settings-vision-model-save-load" class="inline-btn">Save & Load Vision</button>
+                  <span class="small">Dedicated local vision uses downloaded models from the Hugging Face tab.</span>
+                </div>
               </div>
               </div>
 
@@ -15558,7 +17056,7 @@ async function loadSettingsView() {
               </div>
               </div>
 
-              <div class="settings-subpanel active" data-models-panel="routing">
+              <div class="settings-subpanel active llm-vision-settings-block" data-models-panel="routing">
               <div class="hydra-model-mode" style="grid-column: 1 / -1;">
                 <div class="small hydra-model-mode-label">Beast Mode Routing</div>
                 ${renderToggleRow(
@@ -15573,116 +17071,12 @@ async function loadSettingsView() {
               }">
                 <div class="hydra-model-panel-title">Beast Head Models</div>
                 <div class="small hydra-model-panel-note">Used only in Beast Mode. AI Calls still uses Base model keys.</div>
-
-                <div class="hydra-role-title">Chat (normal conversation replies)</div>
-                <label>Chat Host / IP
-                  <input id="set_hydra_llm_chat_host" type="text" value="${escapeHtml(
-                    settings.hydra_llm_chat_host || ""
-                  )}" />
-                </label>
-                <label>Chat Port
-                  <input id="set_hydra_llm_chat_port" type="number" min="1" max="65535" value="${escapeHtml(
-                    settings.hydra_llm_chat_port || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Chat Model
-                  <input id="set_hydra_llm_chat_model" type="text" value="${escapeHtml(
-                    settings.hydra_llm_chat_model || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Chat API Key (optional)
-                  <input id="set_hydra_llm_chat_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
-                    settings.hydra_llm_chat_api_key || ""
-                  )}" />
-                </label>
-
-                <div class="hydra-role-title">Astraeus (planning)</div>
-                <label>Astraeus Host / IP
-                  <input id="set_hydra_llm_astraeus_host" type="text" value="${escapeHtml(
-                    settings.hydra_llm_astraeus_host || ""
-                  )}" />
-                </label>
-                <label>Astraeus Port
-                  <input id="set_hydra_llm_astraeus_port" type="number" min="1" max="65535" value="${escapeHtml(
-                    settings.hydra_llm_astraeus_port || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Astraeus Model
-                  <input id="set_hydra_llm_astraeus_model" type="text" value="${escapeHtml(
-                    settings.hydra_llm_astraeus_model || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Astraeus API Key (optional)
-                  <input id="set_hydra_llm_astraeus_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
-                    settings.hydra_llm_astraeus_api_key || ""
-                  )}" />
-                </label>
-
-                <div class="hydra-role-title">Thanatos (execution)</div>
-                <label>Thanatos Host / IP
-                  <input id="set_hydra_llm_thanatos_host" type="text" value="${escapeHtml(
-                    settings.hydra_llm_thanatos_host || ""
-                  )}" />
-                </label>
-                <label>Thanatos Port
-                  <input id="set_hydra_llm_thanatos_port" type="number" min="1" max="65535" value="${escapeHtml(
-                    settings.hydra_llm_thanatos_port || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Thanatos Model
-                  <input id="set_hydra_llm_thanatos_model" type="text" value="${escapeHtml(
-                    settings.hydra_llm_thanatos_model || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Thanatos API Key (optional)
-                  <input id="set_hydra_llm_thanatos_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
-                    settings.hydra_llm_thanatos_api_key || ""
-                  )}" />
-                </label>
-
-                <div class="hydra-role-title">Minos (judging)</div>
-                <label>Minos Host / IP
-                  <input id="set_hydra_llm_minos_host" type="text" value="${escapeHtml(
-                    settings.hydra_llm_minos_host || ""
-                  )}" />
-                </label>
-                <label>Minos Port
-                  <input id="set_hydra_llm_minos_port" type="number" min="1" max="65535" value="${escapeHtml(
-                    settings.hydra_llm_minos_port || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Minos Model
-                  <input id="set_hydra_llm_minos_model" type="text" value="${escapeHtml(
-                    settings.hydra_llm_minos_model || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Minos API Key (optional)
-                  <input id="set_hydra_llm_minos_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
-                    settings.hydra_llm_minos_api_key || ""
-                  )}" />
-                </label>
-
-                <div class="hydra-role-title">Hermes (final response)</div>
-                <label>Hermes Host / IP
-                  <input id="set_hydra_llm_hermes_host" type="text" value="${escapeHtml(
-                    settings.hydra_llm_hermes_host || ""
-                  )}" />
-                </label>
-                <label>Hermes Port
-                  <input id="set_hydra_llm_hermes_port" type="number" min="1" max="65535" value="${escapeHtml(
-                    settings.hydra_llm_hermes_port || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Hermes Model
-                  <input id="set_hydra_llm_hermes_model" type="text" value="${escapeHtml(
-                    settings.hydra_llm_hermes_model || ""
-                  )}" />
-                </label>
-                <label style="grid-column: 1 / -1;">Hermes API Key (optional)
-                  <input id="set_hydra_llm_hermes_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
-                    settings.hydra_llm_hermes_api_key || ""
-                  )}" />
-                </label>
+                ${hydraRoleSpecs.map((role) => renderHydraRoleRoute(role)).join("")}
+                <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-hydra-beast-save" class="inline-btn">Save Beast</button>
+                  <button type="button" id="settings-hydra-beast-save-load" class="inline-btn">Save & Load Beast</button>
+                  <span class="small">Save & Load warms the selected local Beast head models.</span>
+                </div>
               </div>
               </div>
 
@@ -15712,8 +17106,9 @@ async function loadSettingsView() {
               </div>
             </div>
             <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-hydra-model-save" class="action-btn">Save Models</button>
-              <span class="small">Saves shared LLM, vision, speech, wake word, Speaker ID, Emotion ID, STT, and TTS settings.</span>
+              <button type="button" id="settings-hydra-model-save" class="action-btn">Save All Models</button>
+              <button type="button" id="settings-hydra-model-save-load" class="inline-btn">Save & Load All Local LLMs</button>
+              <span class="small">Save All does not load local LLMs. Use Save & Load when you want selected local models warmed now.</span>
             </div>
           </div>
         </section>
@@ -16105,6 +17500,56 @@ async function loadSettingsView() {
             "ADV"
           )}
           <div class="form-grid">
+            <section class="core-inline-section tater-api-settings-card">
+              <div class="small core-inline-section-title">Tater OpenAI API</div>
+              <div class="tater-api-copy">
+                <strong>Local endpoint for other apps</strong>
+                <span>OpenAI-compatible chat calls can use Tater's selected Base model directly, or route through Hydra.</span>
+              </div>
+              <div class="form-grid two-col">
+                <label>Enable API
+                  ${renderToggleRow(
+                    `<input id="set_tater_api_enabled" class="toggle-input" type="checkbox" ${
+                      settings.tater_api_enabled ? "checked" : ""
+                    } />`
+                  )}
+                  <div class="small">When off, /v1 endpoints return disabled.</div>
+                </label>
+                <label>Default Mode
+                  <select id="set_tater_api_mode">
+                    <option value="direct" ${taterApiMode === "direct" ? "selected" : ""}>Direct Base LLM</option>
+                    <option value="hydra" ${taterApiMode === "hydra" ? "selected" : ""}>Hydra</option>
+                  </select>
+                  <div class="small">Clients can also choose tater/base or tater/hydra as the model.</div>
+                </label>
+                <label style="grid-column: 1 / -1;">API Key
+                  <div class="inline-row tater-api-key-row">
+                    <input id="set_tater_api_key" type="password" autocomplete="new-password" placeholder="${
+                      taterApiKeySet ? "Saved key is active; enter a new key to replace it." : "Required before clients can connect."
+                    }" />
+                    <button type="button" id="settings-tater-api-generate-key" class="inline-btn">Generate</button>
+                  </div>
+                  <div class="small" id="settings-tater-api-key-status">${
+                    taterApiKeySet ? "A key is saved. Tater will never show it back here." : "No key saved yet."
+                  }</div>
+                </label>
+                <label>Hydra Tool Use
+                  ${renderToggleRow(
+                    `<input id="set_tater_api_hydra_tools_enabled" class="toggle-input" type="checkbox" ${
+                      settings.tater_api_hydra_tools_enabled ? "checked" : ""
+                    } />`
+                  )}
+                  <div class="small">Only applies when the request runs in Hydra mode.</div>
+                </label>
+                <div class="tater-api-endpoints">
+                  <span>Chat</span>
+                  <code>${escapeHtml(taterApiEndpoint)}</code>
+                  <span>Models</span>
+                  <code>${escapeHtml(taterApiModelsEndpoint)}</code>
+                </div>
+              </div>
+            </section>
+
             <section class="core-inline-section">
               <div class="small core-inline-section-title">Admin Tool Gating</div>
               <div class="form-grid">
@@ -16369,22 +17814,623 @@ async function loadSettingsView() {
 
   const hydraBaseServersEl = document.getElementById("settings-hydra-base-servers");
   const hydraBaseServerAddEl = document.getElementById("settings-hydra-base-server-add");
+  const hydraBaseProviderEl = document.getElementById("set_hydra_llm_provider");
+  const hydraBaseModelEl = document.getElementById("set_hydra_llm_model");
+  const hydraBaseModelSelectEl = document.getElementById("set_hydra_llm_model_select");
+  const hydraBaseModelLabelEl = document.getElementById("hydra-base-model-label");
+  const hydraLocalModelStatusEl = document.getElementById("hydra-local-model-status");
+  const contextControlConfig = {
+    hf_transformers: {
+      min: 256,
+      fallbackMax: 262144,
+      fallbackValue: 4096,
+      numberEl: document.getElementById("set_hydra_hf_transformers_context_tokens"),
+      rangeEl: document.getElementById("set_hydra_hf_transformers_context_tokens_range"),
+      hintEl: document.getElementById("hydra-hf-context-hint"),
+      estimateEl: document.getElementById("hydra-hf-context-estimate"),
+    },
+    llama_cpp: {
+      min: 256,
+      fallbackMax: 262144,
+      fallbackValue: 4096,
+      numberEl: document.getElementById("set_hydra_llama_cpp_context_tokens"),
+      rangeEl: document.getElementById("set_hydra_llama_cpp_context_tokens_range"),
+      hintEl: document.getElementById("hydra-llama-context-hint"),
+      estimateEl: document.getElementById("hydra-llama-context-estimate"),
+    },
+    mlx_lm: {
+      min: 128,
+      fallbackMax: 262144,
+      fallbackValue: 4096,
+      numberEl: document.getElementById("set_hydra_mlx_lm_context_tokens"),
+      rangeEl: document.getElementById("set_hydra_mlx_lm_context_tokens_range"),
+      hintEl: document.getElementById("hydra-mlx-context-hint"),
+      estimateEl: document.getElementById("hydra-mlx-context-estimate"),
+    },
+  };
+  const contextTokenLabel = (value) => {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num) || num <= 0) {
+      return "unknown";
+    }
+    if (num >= 1024 && num % 1024 === 0) {
+      return `${Math.round(num / 1024)}k`;
+    }
+    return Math.round(num).toLocaleString();
+  };
+  let hydraContextEstimatePayload = state.runtimeBreakdownPayload?.chat_context_window && typeof state.runtimeBreakdownPayload.chat_context_window === "object"
+    ? state.runtimeBreakdownPayload.chat_context_window
+    : {};
+  let hydraContextEstimateError = "";
+  const selectedLocalLlmModelRow = (provider) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const selectedModel = String(hydraBaseModelSelectEl?.value || hydraBaseModelEl?.value || "").trim();
+    if (!selectedModel) {
+      return null;
+    }
+    return localLlmModelsForProvider(normalized).find((row) => row.model === selectedModel) || null;
+  };
+  const renderHydraContextEstimateForProvider = (provider, { loading = false } = {}) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const config = contextControlConfig[normalized];
+    const estimateEl = config?.estimateEl;
+    if (!estimateEl) {
+      return;
+    }
+    const selected = _runtimeInt(config.numberEl?.value || config.rangeEl?.value || config.fallbackValue, config.fallbackValue);
+    const selectedModelRow = selectedLocalLlmModelRow(normalized);
+    const modelMax = _runtimeInt(selectedModelRow?.max_context_tokens, 0);
+    const sliderMax = _runtimeInt(config.rangeEl?.max || config.numberEl?.max || config.fallbackMax, config.fallbackMax);
+    const cap = modelMax > 0 ? modelMax : sliderMax;
+    const estimate = hydraContextEstimatePayload && typeof hydraContextEstimatePayload === "object" ? hydraContextEstimatePayload : {};
+    const error = String(hydraContextEstimateError || estimate?.error || "").trim();
+    const promptTokens = _runtimeInt(estimate?.prompt_tokens);
+    const completionBudget = _runtimeInt(estimate?.completion_budget_tokens);
+    const minimumWindow = _runtimeInt(estimate?.minimum_context_window);
+    const recommendedWindow = _runtimeInt(estimate?.recommended_context_window);
+    const breakdown = estimate?.breakdown && typeof estimate.breakdown === "object" ? estimate.breakdown : {};
+    const capabilityReserve = _runtimeInt(estimate?.capability_context_reserve_tokens ?? breakdown?.capability_reserve_tokens);
+    const burstReserve = _runtimeInt(estimate?.burst_context_reserve_tokens ?? breakdown?.burst_reserve_tokens);
+    const reserveTotal = capabilityReserve + burstReserve;
+    const hasEstimate = promptTokens > 0 || minimumWindow > 0 || recommendedWindow > 0;
+
+    let tone = "idle";
+    let status = loading ? "Reading Stats" : "Waiting";
+    if (error) {
+      tone = "warn";
+      status = "No Estimate";
+    } else if (recommendedWindow > 0) {
+      if (selected < Math.max(1, minimumWindow)) {
+        tone = "danger";
+        status = "Too Low";
+      } else if (selected < recommendedWindow) {
+        tone = "warn";
+        status = "Tight";
+      } else {
+        tone = "good";
+        status = "Ready";
+      }
+    }
+    const needed = recommendedWindow > 0 ? recommendedWindow : Math.max(promptTokens + completionBudget + reserveTotal, 0);
+    const fitPct = selected > 0 && needed > 0 ? Math.max(4, Math.min(100, (needed / selected) * 100)) : 0;
+    const selectedCapPct = cap > 0 && selected > 0 ? Math.max(4, Math.min(100, (selected / cap) * 100)) : 0;
+    const recommendationText = recommendedWindow > 0
+      ? `Recommended: ${contextTokenLabel(recommendedWindow)} tokens`
+      : "Recommended: waiting for runtime stats";
+    const recommendationDetail = recommendedWindow > 0
+      ? selected < Math.max(1, minimumWindow)
+        ? `Set at least ${contextTokenLabel(minimumWindow)}; ${contextTokenLabel(recommendedWindow)} gives Tater room for tools, cores, and chat history.`
+        : selected < recommendedWindow
+          ? `Current ${contextTokenLabel(selected)} is tight. Raise toward ${contextTokenLabel(recommendedWindow)} when memory allows.`
+          : `Current ${contextTokenLabel(selected)} has room for the active prompt stack.`
+      : "Open the top stats bubble to refresh the runtime context estimate.";
+    const summary = error
+      ? error
+      : loading
+        ? "Reading the latest runtime context estimate..."
+        : recommendedWindow > 0
+          ? `Minimum ${contextTokenLabel(minimumWindow)} • Selected ${contextTokenLabel(selected)} • Slider cap ${contextTokenLabel(cap)}`
+          : "No cached runtime estimate yet.";
+    const detailParts = hasEstimate
+      ? [
+          `Prompt ${contextTokenLabel(promptTokens)}`,
+          completionBudget > 0 ? `Reply ${contextTokenLabel(completionBudget)}` : "",
+          minimumWindow > 0 ? `Minimum ${contextTokenLabel(minimumWindow)}` : "",
+          reserveTotal > 0 ? `Reserve ${contextTokenLabel(reserveTotal)}` : "",
+        ].filter(Boolean)
+      : [
+          modelMax > 0 ? `Model max ${contextTokenLabel(modelMax)}` : "Model max unknown",
+          `Slider cap ${contextTokenLabel(sliderMax)}`,
+        ];
+    estimateEl.className = `hydra-context-estimate ${tone}`;
+    estimateEl.innerHTML = `
+      <div class="hydra-context-estimate-head">
+        <span><i class="hydra-context-estimate-spud" aria-hidden="true"></i>Context fit</span>
+        <strong>${escapeHtml(status)}</strong>
+      </div>
+      <div class="hydra-context-estimate-meter" aria-hidden="true">
+        <span class="hydra-context-estimate-fill" style="width:${fitPct.toFixed(1)}%"></span>
+        <em style="left:${selectedCapPct.toFixed(1)}%"></em>
+      </div>
+      <div class="hydra-context-estimate-recommendation">
+        <strong>${escapeHtml(recommendationText)}</strong>
+        <span>${escapeHtml(recommendationDetail)}</span>
+      </div>
+      <div class="hydra-context-estimate-summary">${escapeHtml(summary)}</div>
+      <div class="hydra-context-estimate-meta">${detailParts.map((part) => `<span>${escapeHtml(part)}</span>`).join("")}</div>
+    `;
+  };
+  const renderHydraContextEstimateCards = (options = {}) => {
+    Object.keys(contextControlConfig).forEach((provider) => renderHydraContextEstimateForProvider(provider, options));
+  };
+  const syncHydraContextEstimateFromRuntimePayload = (payload = state.runtimeBreakdownPayload) => {
+    hydraContextEstimateError = "";
+    hydraContextEstimatePayload = payload?.chat_context_window && typeof payload.chat_context_window === "object"
+      ? payload.chat_context_window
+      : {};
+    renderHydraContextEstimateCards();
+  };
+  const refreshHydraContextEstimateCards = () => {
+    syncHydraContextEstimateFromRuntimePayload();
+  };
+  const syncHydraContextControl = (provider) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const config = contextControlConfig[normalized];
+    if (!config?.numberEl || !config?.rangeEl) {
+      return;
+    }
+    const row = selectedLocalLlmModelRow(normalized);
+    const detectedMax = Number(row?.max_context_tokens || 0);
+    const max = detectedMax > 0 ? Math.max(config.min, Math.floor(detectedMax)) : config.fallbackMax;
+    const currentRaw = Number(config.numberEl.value || config.rangeEl.value || config.fallbackValue);
+    const current = Math.max(config.min, Math.min(max, Number.isFinite(currentRaw) ? Math.round(currentRaw) : config.fallbackValue));
+    config.numberEl.min = String(config.min);
+    config.numberEl.max = String(max);
+    config.rangeEl.min = String(config.min);
+    config.rangeEl.max = String(max);
+    config.numberEl.value = String(current);
+    config.rangeEl.value = String(current);
+    if (config.hintEl) {
+      config.hintEl.textContent = detectedMax > 0
+        ? `Max ${contextTokenLabel(max)} tokens from ${row?.context_source === "gguf" ? "GGUF metadata" : "model config"}.`
+        : `Model max unknown; slider uses a safe ${contextTokenLabel(max)} token cap until metadata is available.`;
+    }
+    renderHydraContextEstimateForProvider(normalized);
+  };
+  const syncActiveHydraContextControl = () => {
+    syncHydraContextControl(hydraBaseProviderEl?.value || "");
+  };
+  Object.entries(contextControlConfig).forEach(([provider, config]) => {
+    config.rangeEl?.addEventListener("input", () => {
+      if (config.numberEl) {
+        config.numberEl.value = String(config.rangeEl.value || "");
+      }
+      renderHydraContextEstimateForProvider(provider);
+    });
+    config.numberEl?.addEventListener("input", () => {
+      if (config.rangeEl) {
+        const min = Number(config.rangeEl.min || config.min);
+        const max = Number(config.rangeEl.max || config.fallbackMax);
+        const raw = Number(config.numberEl.value || config.fallbackValue);
+        const value = Math.max(min, Math.min(max, Number.isFinite(raw) ? raw : config.fallbackValue));
+        config.rangeEl.value = String(Math.round(value));
+      }
+      renderHydraContextEstimateForProvider(provider);
+    });
+    config.numberEl?.addEventListener("blur", () => syncHydraContextControl(provider));
+  });
+  const llamaCppMtpDraftRangeEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens_range");
+  const llamaCppMtpDraftNumberEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens");
+  const syncLlamaCppMtpDraftControl = (sourceEl = null) => {
+    if (!llamaCppMtpDraftRangeEl || !llamaCppMtpDraftNumberEl) {
+      return;
+    }
+    const raw = Number(sourceEl?.value || llamaCppMtpDraftNumberEl.value || llamaCppMtpDraftRangeEl.value || 3);
+    const value = Math.max(1, Math.min(16, Number.isFinite(raw) ? Math.round(raw) : 3));
+    llamaCppMtpDraftRangeEl.value = String(value);
+    llamaCppMtpDraftNumberEl.value = String(value);
+  };
+  llamaCppMtpDraftRangeEl?.addEventListener("input", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftRangeEl));
+  llamaCppMtpDraftNumberEl?.addEventListener("input", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
+  llamaCppMtpDraftNumberEl?.addEventListener("blur", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
+  syncLlamaCppMtpDraftControl();
   const normalizeHydraBaseRowInput = (row) => ({
+    provider: normalizeHydraBaseProvider(row?.provider || ""),
     host: String(row?.host || "").trim(),
     port: String(row?.port || "").trim(),
     model: String(row?.model || "").trim(),
     api_key: String(row?.api_key || "").trim(),
   });
+  const syncHydraModelInputForProvider = (inputEl, labelEl, provider, remoteLabel = "Base Model") => {
+    if (labelEl) {
+      labelEl.textContent = hydraModelLabelForProvider(provider, remoteLabel);
+    }
+    if (inputEl) {
+      inputEl.placeholder = hydraModelPlaceholderForProvider(provider);
+    }
+  };
+  const populateHydraLocalModelSelectFor = ({
+    provider,
+    selectEl,
+    inputEl = null,
+    statusEl = null,
+    preferredModel = "",
+    syncContext = false,
+    visionOnly = false,
+  } = {}) => {
+    if (!selectEl) {
+      return;
+    }
+    const normalized = normalizeHydraBaseProvider(provider);
+    const rows = localLlmModelsForProvider(normalized).filter((row) => !visionOnly || Boolean(row.supports_vision));
+    const preferred = String(preferredModel || selectEl.value || inputEl?.value || "").trim();
+    if (!rows.length) {
+      selectEl.innerHTML = `<option value="">Download a model from the Hugging Face tab</option>`;
+      selectEl.value = "";
+      if (syncContext) {
+        syncHydraContextControl(normalized);
+      }
+      if (statusEl) {
+        statusEl.textContent = visionOnly ? "No downloaded vision-capable models for this provider yet." : "No downloaded models for this provider yet.";
+      }
+      return;
+    }
+    selectEl.innerHTML = [
+      `<option value="">Select a downloaded model</option>`,
+      ...rows.map((row) => {
+        const label = row.filename ? `${row.model}` : row.model;
+        return `<option value="${escapeHtml(row.model)}">${escapeHtml(label)}</option>`;
+      }),
+    ].join("");
+    const matched = rows.some((row) => row.model === preferred);
+    selectEl.value = matched ? preferred : "";
+    if (inputEl && matched) {
+      inputEl.value = preferred;
+    }
+    if (statusEl) {
+      statusEl.textContent = matched
+        ? `${rows.length} downloaded model${rows.length === 1 ? "" : "s"} available.`
+        : `${rows.length} downloaded model${rows.length === 1 ? "" : "s"} available. Choose one before saving.`;
+    }
+    if (syncContext) {
+      syncHydraContextControl(normalized);
+    }
+  };
+  const populateHydraLocalModelSelect = (provider, preferredModel = "") => {
+    populateHydraLocalModelSelectFor({
+      provider,
+      selectEl: hydraBaseModelSelectEl,
+      inputEl: hydraBaseModelEl,
+      statusEl: hydraLocalModelStatusEl,
+      preferredModel,
+      syncContext: true,
+    });
+  };
+  const syncHydraPrimaryModelControl = (provider) => {
+    const local = isHydraLocalProvider(provider);
+    if (hydraBaseModelEl) {
+      hydraBaseModelEl.style.display = local ? "none" : "";
+      hydraBaseModelEl.disabled = local;
+    }
+    if (hydraBaseModelSelectEl) {
+      hydraBaseModelSelectEl.style.display = local ? "" : "none";
+      hydraBaseModelSelectEl.disabled = !local;
+    }
+    if (hydraLocalModelStatusEl) {
+      hydraLocalModelStatusEl.style.display = local ? "" : "none";
+      if (!local) {
+        hydraLocalModelStatusEl.textContent = "";
+      }
+    }
+    if (local) {
+      populateHydraLocalModelSelect(provider);
+    }
+  };
+  const getHydraBaseModelValue = () => {
+    const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    if (isHydraLocalProvider(provider)) {
+      return String(hydraBaseModelSelectEl?.value || "").trim();
+    }
+    return String(hydraBaseModelEl?.value || "").trim();
+  };
+  const refreshLocalLlmModels = async ({ selectModel = "", provider = "" } = {}) => {
+    try {
+      localLlmModelsPayload = await api("/api/settings/local-llm/models", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+      const activeProvider = normalizeHydraBaseProvider(provider || hydraBaseProviderEl?.value || "");
+      if (isHydraLocalProvider(activeProvider)) {
+        populateHydraLocalModelSelect(activeProvider, selectModel || hydraBaseModelSelectEl?.value || hydraBaseModelEl?.value || "");
+      }
+      hydraRouteControls.forEach((control) => {
+        const routeProvider = normalizeHydraBaseProvider(control?.providerEl?.value || "");
+        if (isHydraLocalProvider(routeProvider)) {
+          populateHydraLocalModelSelectFor({
+            provider: routeProvider,
+            selectEl: control.modelSelectEl,
+            inputEl: control.modelInputEl,
+            statusEl: control.statusEl,
+            preferredModel: control.modelSelectEl?.value || control.modelInputEl?.value || "",
+            visionOnly: Boolean(control.visionOnly),
+          });
+        }
+      });
+      renderLocalModelManager();
+    } catch (error) {
+      if (hydraLocalModelStatusEl && isHydraLocalProvider(hydraBaseProviderEl?.value || "")) {
+        hydraLocalModelStatusEl.textContent = `Downloaded model list failed: ${error.message}`;
+      }
+      hydraRouteControls.forEach((control) => {
+        if (control?.statusEl && isHydraLocalProvider(control?.providerEl?.value || "")) {
+          control.statusEl.textContent = `Downloaded model list failed: ${error.message}`;
+        }
+      });
+      if (localModelManagerStatusEl) {
+        localModelManagerStatusEl.textContent = `Installed model list failed: ${error.message}`;
+        localModelManagerStatusEl.classList.add("error");
+        localModelManagerStatusEl.classList.remove("success");
+      }
+    }
+  };
+  const syncHydraProviderScopedFields = (rootEl, provider) => {
+    const local = isHydraLocalProvider(provider);
+    if (!rootEl) {
+      return;
+    }
+    const normalized = normalizeHydraBaseProvider(provider);
+    rootEl.querySelectorAll("[data-hydra-provider-field]").forEach((wrapEl) => {
+      const tokens = String(wrapEl.getAttribute("data-hydra-provider-field") || "")
+        .split(/[\s,]+/)
+        .map((token) => (String(token || "").trim() === "local" ? "local" : normalizeHydraBaseProvider(token)))
+        .filter(Boolean);
+      const show = tokens.includes("openai_compatible")
+        ? !local
+        : tokens.includes(normalized) || (tokens.includes("local") && local);
+      wrapEl.style.display = show ? "" : "none";
+      wrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = !show;
+      });
+    });
+  };
+  const syncHydraPrimaryProviderFields = () => {
+    const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    syncHydraProviderScopedFields(hydraBaseFieldsEl, provider);
+    syncHydraModelInputForProvider(hydraBaseModelEl, hydraBaseModelLabelEl, provider);
+    syncHydraPrimaryModelControl(provider);
+  };
+  const hydraRouteControls = [];
+  const syncHydraRouteControl = (control, preferredModel = "") => {
+    if (!control?.providerEl) {
+      return;
+    }
+    const provider = normalizeHydraBaseProvider(control.providerEl.value || "");
+    const local = isHydraLocalProvider(provider);
+    syncHydraProviderScopedFields(control.rootEl, provider);
+    syncHydraModelInputForProvider(control.modelInputEl, control.modelLabelEl, provider, control.remoteLabel || "Model");
+    if (control.modelInputEl) {
+      control.modelInputEl.style.display = local ? "none" : "";
+      control.modelInputEl.disabled = local;
+    }
+    if (control.modelSelectEl) {
+      control.modelSelectEl.style.display = local ? "" : "none";
+      control.modelSelectEl.disabled = !local;
+    }
+    if (control.statusEl) {
+      control.statusEl.style.display = local ? "" : "none";
+      if (!local) {
+        control.statusEl.textContent = "";
+      }
+    }
+    if (local) {
+      populateHydraLocalModelSelectFor({
+        provider,
+        selectEl: control.modelSelectEl,
+        inputEl: control.modelInputEl,
+        statusEl: control.statusEl,
+        preferredModel,
+        visionOnly: Boolean(control.visionOnly),
+      });
+    }
+  };
+  const registerHydraRouteControl = (control) => {
+    if (!control?.providerEl) {
+      return null;
+    }
+    hydraRouteControls.push(control);
+    control.providerEl.addEventListener("change", () => syncHydraRouteControl(control));
+    control.modelSelectEl?.addEventListener("change", () => {
+      if (control.modelInputEl) {
+        control.modelInputEl.value = String(control.modelSelectEl?.value || "");
+      }
+    });
+    syncHydraRouteControl(control, control.modelInputEl?.value || control.modelSelectEl?.value || "");
+    return control;
+  };
+  const getHydraRouteModelValue = (control) => {
+    if (!control?.providerEl) {
+      return "";
+    }
+    const provider = normalizeHydraBaseProvider(control.providerEl.value || "");
+    if (isHydraLocalProvider(provider)) {
+      return String(control.modelSelectEl?.value || "").trim();
+    }
+    return String(control.modelInputEl?.value || "").trim();
+  };
+  const spudexRouteControl = registerHydraRouteControl({
+    scope: "spudex",
+    rootEl: document.getElementById("set_spudex_llm_provider")?.closest(".hydra-model-panel"),
+    providerEl: document.getElementById("set_spudex_llm_provider"),
+    modelInputEl: document.getElementById("set_spudex_llm_model"),
+    modelSelectEl: document.getElementById("set_spudex_llm_model_select"),
+    modelLabelEl: document.getElementById("spudex-llm-model-label"),
+    statusEl: document.getElementById("spudex-local-model-status"),
+    remoteLabel: "Spudex LLM Model",
+  });
+  const visionModeEl = document.getElementById("set_vision_mode");
+  const visionProviderEl = document.getElementById("set_vision_provider");
+  const visionModelEl = document.getElementById("set_vision_model");
+  const visionModelSelectEl = document.getElementById("set_vision_model_select");
+  const visionLocalModelStatusEl = document.getElementById("vision-local-model-status");
+  const visionApiBaseWrapEl = document.getElementById("vision-api-base-wrap");
+  const visionApiKeyWrapEl = document.getElementById("vision-api-key-wrap");
+  const visionProviderWrapEl = document.getElementById("vision-provider-wrap");
+  const visionModelWrapEl = document.getElementById("vision-model-wrap");
+  const visionBaseNoteEl = document.getElementById("vision-base-note");
+  const visionLlamaContextWrapEl = document.getElementById("vision-llama-context-wrap");
+  const visionLlamaContextRangeEl = document.getElementById("set_hydra_llama_cpp_vision_context_tokens_range");
+  const visionLlamaContextNumberEl = document.getElementById("set_hydra_llama_cpp_vision_context_tokens");
+  const visionLlamaContextHintEl = document.getElementById("vision-llama-context-hint");
+  const visionRouteControl = registerHydraRouteControl({
+    scope: "vision",
+    rootEl: document.getElementById("set_vision_mode")?.closest(".hydra-model-panel"),
+    providerEl: visionProviderEl,
+    modelInputEl: visionModelEl,
+    modelSelectEl: visionModelSelectEl,
+    modelLabelEl: document.getElementById("vision-model-label"),
+    statusEl: visionLocalModelStatusEl,
+    remoteLabel: "Vision Model",
+    visionOnly: true,
+  });
+  const selectedVisionLlamaModelRow = () => {
+    const mode = normalizeVisionMode(visionModeEl?.value || "");
+    if (mode === "dedicated") {
+      const provider = normalizeHydraBaseProvider(visionProviderEl?.value || "");
+      const model = String(visionModelSelectEl?.value || visionModelEl?.value || "").trim();
+      return provider === "llama_cpp" && model
+        ? localLlmModelsForProvider("llama_cpp").find((row) => row.model === model) || null
+        : null;
+    }
+    const baseProvider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    return (mode === "auto" || mode === "base") && baseProvider === "llama_cpp" ? selectedLocalLlmModelRow("llama_cpp") : null;
+  };
+  const syncVisionLlamaContextControl = (sourceEl = null) => {
+    const mode = normalizeVisionMode(visionModeEl?.value || "");
+    const dedicatedLlama = mode === "dedicated" && normalizeHydraBaseProvider(visionProviderEl?.value || "") === "llama_cpp";
+    const baseLlama = (mode === "auto" || mode === "base") && normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "") === "llama_cpp";
+    const show = dedicatedLlama || baseLlama;
+    if (visionLlamaContextWrapEl) {
+      visionLlamaContextWrapEl.style.display = show ? "" : "none";
+      visionLlamaContextWrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = !show;
+      });
+    }
+    if (!visionLlamaContextRangeEl || !visionLlamaContextNumberEl) {
+      return;
+    }
+    const min = 256;
+    const fallback = 4096;
+    const fallbackMax = 262144;
+    const row = selectedVisionLlamaModelRow();
+    const detectedMax = Number(row?.max_context_tokens || 0);
+    const max = detectedMax > 0 ? Math.max(min, Math.floor(detectedMax)) : fallbackMax;
+    const raw = Number(sourceEl?.value || visionLlamaContextNumberEl.value || visionLlamaContextRangeEl.value || fallback);
+    const value = Math.max(min, Math.min(max, Number.isFinite(raw) ? Math.round(raw) : fallback));
+    visionLlamaContextNumberEl.min = String(min);
+    visionLlamaContextNumberEl.max = String(max);
+    visionLlamaContextRangeEl.min = String(min);
+    visionLlamaContextRangeEl.max = String(max);
+    visionLlamaContextNumberEl.value = String(value);
+    visionLlamaContextRangeEl.value = String(value);
+    if (visionLlamaContextHintEl) {
+      const source = dedicatedLlama ? "dedicated llama.cpp vision" : "same-as-base llama.cpp vision";
+      const cap = detectedMax > 0
+        ? `Max ${contextTokenLabel(max)} from ${row?.context_source === "gguf" ? "GGUF metadata" : "model config"}.`
+        : `Model max unknown; slider uses a safe ${contextTokenLabel(max)} cap.`;
+      visionLlamaContextHintEl.textContent = show
+        ? `${source}: ${contextTokenLabel(value)} tokens. ${cap} Text chat keeps its own context length.`
+        : "Used only for llama.cpp image calls. Text chat keeps its own context length.";
+    }
+  };
+  visionLlamaContextRangeEl?.addEventListener("input", () => syncVisionLlamaContextControl(visionLlamaContextRangeEl));
+  visionLlamaContextNumberEl?.addEventListener("input", () => syncVisionLlamaContextControl(visionLlamaContextNumberEl));
+  visionLlamaContextNumberEl?.addEventListener("blur", () => syncVisionLlamaContextControl(visionLlamaContextNumberEl));
+  const syncVisionModeFields = () => {
+    const mode = normalizeVisionMode(visionModeEl?.value || "");
+    const dedicated = mode === "dedicated";
+    const apiVisible = mode === "api" || mode === "auto";
+    [visionProviderWrapEl, visionModelWrapEl].forEach((el) => {
+      if (el) {
+        el.style.display = dedicated || apiVisible ? "" : "none";
+      }
+    });
+    if (visionProviderWrapEl) {
+      visionProviderWrapEl.style.display = dedicated ? "" : "none";
+    }
+    if (visionApiBaseWrapEl) {
+      visionApiBaseWrapEl.style.display = apiVisible ? "" : "none";
+    }
+    if (visionApiKeyWrapEl) {
+      visionApiKeyWrapEl.style.display = apiVisible ? "" : "none";
+    }
+    if (visionBaseNoteEl) {
+      visionBaseNoteEl.style.display = mode === "auto" || mode === "base" ? "" : "none";
+    }
+    if (dedicated) {
+      syncHydraRouteControl(visionRouteControl, visionModelEl?.value || visionModelSelectEl?.value || "");
+    } else {
+      if (visionModelEl) {
+        visionModelEl.style.display = "";
+        visionModelEl.disabled = mode === "base";
+      }
+      if (visionModelSelectEl) {
+        visionModelSelectEl.style.display = "none";
+        visionModelSelectEl.disabled = true;
+      }
+      if (visionLocalModelStatusEl) {
+        visionLocalModelStatusEl.style.display = "none";
+      }
+    }
+    syncVisionLlamaContextControl();
+  };
+  visionModeEl?.addEventListener("change", syncVisionModeFields);
+  visionProviderEl?.addEventListener("change", syncVisionModeFields);
+  visionModelSelectEl?.addEventListener("change", () => syncVisionLlamaContextControl());
+  visionModelEl?.addEventListener("input", () => syncVisionLlamaContextControl());
+  syncVisionModeFields();
+  const hydraRoleRouteControls = {};
+  hydraRoleIds.forEach((role) => {
+    hydraRoleRouteControls[role] = registerHydraRouteControl({
+      scope: role,
+      rootEl: document.querySelector(`[data-hydra-route-scope="${role}"]`),
+      providerEl: document.getElementById(`set_hydra_llm_${role}_provider`),
+      modelInputEl: document.getElementById(`set_hydra_llm_${role}_model`),
+      modelSelectEl: document.getElementById(`set_hydra_llm_${role}_model_select`),
+      modelLabelEl: document.getElementById(`hydra-${role}-model-label`),
+      statusEl: document.getElementById(`hydra-${role}-local-model-status`),
+      remoteLabel: `${role[0].toUpperCase()}${role.slice(1)} Model`,
+    });
+  });
+  const syncHydraAdditionalBaseRowProvider = (rowEl) => {
+    if (!rowEl) {
+      return;
+    }
+    const providerEl = rowEl.querySelector('[data-hydra-base-field="provider"]');
+    const provider = normalizeHydraBaseProvider(providerEl ? providerEl.value : "");
+    syncHydraProviderScopedFields(rowEl, provider);
+    syncHydraModelInputForProvider(
+      rowEl.querySelector('[data-hydra-base-field="model"]'),
+      rowEl.querySelector("[data-hydra-model-label]"),
+      provider
+    );
+  };
+  const syncHydraAdditionalBaseRowsProviders = () => {
+    if (!hydraBaseServersEl) {
+      return;
+    }
+    hydraBaseServersEl.querySelectorAll(".hydra-base-server-row").forEach((rowEl) => {
+      syncHydraAdditionalBaseRowProvider(rowEl);
+    });
+  };
   const readHydraAdditionalBaseRows = () => {
     if (!hydraBaseServersEl) {
       return [];
     }
     return Array.from(hydraBaseServersEl.querySelectorAll(".hydra-base-server-row")).map((rowEl) => {
+      const providerEl = rowEl.querySelector('[data-hydra-base-field="provider"]');
       const hostEl = rowEl.querySelector('[data-hydra-base-field="host"]');
       const portEl = rowEl.querySelector('[data-hydra-base-field="port"]');
       const modelEl = rowEl.querySelector('[data-hydra-base-field="model"]');
       const apiKeyEl = rowEl.querySelector('[data-hydra-base-field="api_key"]');
       return normalizeHydraBaseRowInput({
+        provider: providerEl ? providerEl.value : "",
         host: hostEl ? hostEl.value : "",
         port: portEl ? portEl.value : "",
         model: modelEl ? modelEl.value : "",
@@ -16405,16 +18451,21 @@ async function loadSettingsView() {
       .map(
         (row, index) => `
           <div class="hydra-base-server-row" data-hydra-base-index="${index}">
-            <label>Host / IP
+            <label>Provider
+              <select data-hydra-base-field="provider">
+                ${renderHydraProviderOptions(row.provider)}
+              </select>
+            </label>
+            <label data-hydra-provider-field="openai_compatible">Host / IP
               <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
             </label>
-            <label>Port
+            <label data-hydra-provider-field="openai_compatible">Port
               <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
             </label>
-            <label>Model
-              <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" />
+            <label><span data-hydra-model-label>Model</span>
+              <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(row.provider))}" />
             </label>
-            <label>API Key (optional)
+            <label data-hydra-provider-field="openai_compatible">API Key (optional)
               <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
             </label>
             <div class="hydra-base-server-actions">
@@ -16424,15 +18475,45 @@ async function loadSettingsView() {
         `
       )
       .join("");
+    syncHydraAdditionalBaseRowsProviders();
   };
   let hydraAdditionalBaseRowsState = Array.isArray(hydraAdditionalBaseRows)
     ? hydraAdditionalBaseRows.map((row) => normalizeHydraBaseRowInput(row))
     : [];
   renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
+  hydraBaseProviderEl?.addEventListener("change", () => {
+    syncHydraPrimaryProviderFields();
+    syncVisionModeFields();
+  });
+  hydraBaseModelSelectEl?.addEventListener("change", () => {
+    if (hydraBaseModelEl) {
+      hydraBaseModelEl.value = String(hydraBaseModelSelectEl.value || "").trim();
+    }
+    syncActiveHydraContextControl();
+    renderHydraContextEstimateCards();
+    syncVisionLlamaContextControl();
+  });
+  syncHydraPrimaryProviderFields();
+  if (state.hydraContextEstimateRuntimeListener) {
+    document.removeEventListener("tater:runtime-breakdown-updated", state.hydraContextEstimateRuntimeListener);
+  }
+  state.hydraContextEstimateRuntimeListener = (event) => {
+    syncHydraContextEstimateFromRuntimePayload(event?.detail?.payload || state.runtimeBreakdownPayload);
+  };
+  document.addEventListener("tater:runtime-breakdown-updated", state.hydraContextEstimateRuntimeListener);
+  renderHydraContextEstimateCards();
+  void refreshHydraContextEstimateCards();
   hydraBaseServerAddEl?.addEventListener("click", () => {
     hydraAdditionalBaseRowsState = readHydraAdditionalBaseRows();
-    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ host: "", port: "", model: "", api_key: "" }));
+    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ provider: "openai_compatible", host: "", port: "", model: "", api_key: "" }));
     renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
+  });
+  hydraBaseServersEl?.addEventListener("change", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.getAttribute("data-hydra-base-field") !== "provider") {
+      return;
+    }
+    syncHydraAdditionalBaseRowProvider(target.closest(".hydra-base-server-row"));
   });
   hydraBaseServersEl?.addEventListener("click", (event) => {
     const button = event.target instanceof Element ? event.target.closest("[data-hydra-base-remove]") : null;
@@ -16447,6 +18528,757 @@ async function loadSettingsView() {
     hydraAdditionalBaseRowsState.splice(removeIndex, 1);
     renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
   });
+
+  const llmVisionTabButtons = Array.from(root.querySelectorAll("[data-llm-vision-tab]"));
+  const hfModelBrowserEl = document.getElementById("settings-hf-model-browser");
+  const hfModelBrowserProviderEl = document.getElementById("hf-model-browser-provider");
+  const hfModelBrowserTaskEl = document.getElementById("hf-model-browser-task");
+  const hfModelBrowserQueryEl = document.getElementById("hf-model-browser-query");
+  const hfModelBrowserFormEl = document.getElementById("hf-model-browser-form");
+  const hfModelBrowserSetupEl = document.getElementById("hf-model-browser-setup");
+  const hfModelBrowserStatusEl = document.getElementById("hf-model-browser-status");
+  const hfModelBrowserPaginationEl = document.getElementById("hf-model-browser-pagination");
+  const hfModelBrowserResultsEl = document.getElementById("hf-model-browser-results");
+  const hfModelBrowserDetailEl = document.getElementById("hf-model-browser-detail");
+  const hfDownloadSummaryBlockEl = document.getElementById("hf-download-summary-block");
+  const localModelManagerEl = document.getElementById("settings-local-model-manager");
+  const localModelManagerStatusEl = document.getElementById("local-model-manager-status");
+  const localModelManagerListEl = document.getElementById("local-model-manager-list");
+  const localModelManagerRefreshEl = document.getElementById("local-model-manager-refresh");
+  const hfModelBrowserViewButtons = Array.from(root.querySelectorAll("[data-hf-model-view]"));
+  const hfModelBrowserState = {
+    provider: isHydraLocalProvider(hydraPrimaryBaseRow.provider) ? hydraPrimaryBaseRow.provider : "hf_transformers",
+    task: "text-generation",
+    view: "trending",
+    query: "",
+    loaded: false,
+    loadingSeq: 0,
+    pageIndex: 0,
+    pageCursors: [""],
+    nextCursor: "",
+    pageSize: 24,
+  };
+  const hfModelProviderLabel = (provider) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    if (normalized === "llama_cpp") {
+      return "llama.cpp";
+    }
+    if (normalized === "mlx_lm") {
+      return "MLX";
+    }
+    return "Transformers";
+  };
+  const normalizeHfModelTask = (value) => {
+    const token = String(value || "text-generation").trim().toLowerCase();
+    return token === "image-text-to-text" || token === "vision" ? "image-text-to-text" : "text-generation";
+  };
+  const hfModelTaskLabel = (task) => normalizeHfModelTask(task) === "image-text-to-text" ? "vision" : "text";
+  const normalizeHfModelView = (value) => {
+    const token = String(value || "trending").trim().toLowerCase().replace(/_/g, "-");
+    if (token === "new" || token === "recent" || token === "latest") {
+      return "new";
+    }
+    if (token === "downloads" || token === "downloaded" || token === "most-downloaded" || token === "popular") {
+      return "downloads";
+    }
+    return "trending";
+  };
+  const hfModelViewLabel = (value) => {
+    const view = normalizeHfModelView(value);
+    if (view === "new") {
+      return "new";
+    }
+    if (view === "downloads") {
+      return "most downloaded";
+    }
+    return "trending";
+  };
+  const hfModelDownloadsLabel = (value) => {
+    const n = Math.max(0, Number(value) || 0);
+    if (n >= 1000000) {
+      return `${(n / 1000000).toFixed(1)}M`;
+    }
+    if (n >= 1000) {
+      return `${(n / 1000).toFixed(1)}K`;
+    }
+    return String(Math.round(n));
+  };
+  const hfModelDateLabel = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) {
+      return "";
+    }
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) {
+      return raw.slice(0, 10);
+    }
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  };
+  const localModelContextLabel = (row) => {
+    const tokens = Number(row?.max_context_tokens || 0);
+    if (!Number.isFinite(tokens) || tokens <= 0) {
+      return "";
+    }
+    const label = tokens >= 1024 && tokens % 1024 === 0 ? `${Math.round(tokens / 1024)}k` : Math.round(tokens).toLocaleString();
+    const source = String(row?.context_source || "").trim();
+    return `${label} context${source ? ` (${source})` : ""}`;
+  };
+  const renderLocalModelManager = () => {
+    if (!localModelManagerListEl) {
+      return;
+    }
+    const rows = Array.isArray(localLlmModelsPayload?.models)
+      ? localLlmModelsPayload.models
+          .map((row) => ({
+            provider: normalizeHydraBaseProvider(row?.provider || ""),
+            provider_label: String(row?.provider_label || "").trim(),
+            model: String(row?.model || "").trim(),
+            repo_id: String(row?.repo_id || "").trim(),
+            filename: String(row?.filename || "").trim(),
+            model_path: String(row?.model_path || "").trim(),
+            model_root: String(row?.model_root || "").trim(),
+            downloaded_ts: Number(row?.downloaded_ts || 0),
+            max_context_tokens: Number(row?.max_context_tokens || 0),
+            context_source: String(row?.context_source || "").trim(),
+            supports_vision: Boolean(row?.supports_vision),
+            mmproj_filename: String(row?.mmproj_filename || "").trim(),
+            source: String(row?.source || "").trim(),
+          }))
+          .filter((row) => row.model && isHydraLocalProvider(row.provider))
+      : [];
+    if (localModelManagerStatusEl) {
+      localModelManagerStatusEl.textContent = rows.length
+        ? `${rows.length} installed local model${rows.length === 1 ? "" : "s"} found.`
+        : "No installed local models found.";
+      localModelManagerStatusEl.classList.remove("error", "success");
+    }
+    if (!rows.length) {
+      localModelManagerListEl.innerHTML = `<div class="hf-model-browser-empty">No local models installed yet. Download models from the Hugging Face tab.</div>`;
+      return;
+    }
+    localModelManagerListEl.innerHTML = rows
+      .map((row) => {
+        const providerLabel = row.provider_label || hfModelProviderLabel(row.provider);
+        const contextLabel = localModelContextLabel(row);
+        const downloaded = row.downloaded_ts > 0 ? hfModelDateLabel(new Date(row.downloaded_ts * 1000).toISOString()) : "";
+        const pathLabel = row.model_path || row.model_root || "";
+        return `
+          <article class="local-model-card">
+            <div class="local-model-card-main">
+              <div>
+                <strong>${escapeHtml(row.model)}</strong>
+                <span>${escapeHtml(providerLabel)}</span>
+              </div>
+              <span class="hf-model-provider-pill">${escapeHtml(hfModelProviderLabel(row.provider))}</span>
+            </div>
+            <div class="hf-model-card-meta">
+              ${contextLabel ? `<span>${escapeHtml(contextLabel)}</span>` : ""}
+              ${row.supports_vision ? `<span>Vision</span>` : ""}
+              ${row.mmproj_filename ? `<span>${escapeHtml(row.mmproj_filename)}</span>` : ""}
+              ${downloaded ? `<span>Downloaded ${escapeHtml(downloaded)}</span>` : ""}
+              ${row.source ? `<span>${escapeHtml(row.source)}</span>` : ""}
+              ${row.filename ? `<span>${escapeHtml(row.filename)}</span>` : ""}
+            </div>
+            ${pathLabel ? `<div class="local-model-path">${escapeHtml(pathLabel)}</div>` : ""}
+            <div class="local-model-actions">
+              <button type="button" class="inline-btn danger" data-local-model-delete data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Delete</button>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  };
+  const hfModelEffectiveId = (provider, repoId, filename = "") => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const repo = String(repoId || "").trim();
+    const file = String(filename || "").trim();
+    return normalized === "llama_cpp" && file ? `${repo}::${file}` : repo;
+  };
+  const setHfModelBrowserStatus = (message, tone = "") => {
+    if (!hfModelBrowserStatusEl) {
+      return;
+    }
+    hfModelBrowserStatusEl.textContent = message;
+    hfModelBrowserStatusEl.classList.toggle("error", tone === "error");
+    hfModelBrowserStatusEl.classList.toggle("success", tone === "success");
+  };
+  const resetHfModelBrowserPagination = () => {
+    hfModelBrowserState.pageIndex = 0;
+    hfModelBrowserState.pageCursors = [""];
+    hfModelBrowserState.nextCursor = "";
+  };
+  const renderHfModelBrowserPagination = ({ hidden = false } = {}) => {
+    if (!hfModelBrowserPaginationEl) {
+      return;
+    }
+    const pageNumber = Math.max(1, Number(hfModelBrowserState.pageIndex || 0) + 1);
+    const hasPrevious = pageNumber > 1;
+    const hasNext = Boolean(String(hfModelBrowserState.nextCursor || "").trim());
+    if (hidden || (!hasPrevious && !hasNext && !hfModelBrowserState.loaded)) {
+      hfModelBrowserPaginationEl.hidden = true;
+      hfModelBrowserPaginationEl.innerHTML = "";
+      return;
+    }
+    hfModelBrowserPaginationEl.hidden = false;
+    hfModelBrowserPaginationEl.innerHTML = `
+      <button type="button" class="inline-btn" data-hf-model-page="prev" ${hasPrevious ? "" : "disabled"}>Previous</button>
+      <span class="small">Page ${pageNumber} · ${hfModelBrowserState.pageSize} models per request</span>
+      <button type="button" class="inline-btn" data-hf-model-page="next" ${hasNext ? "" : "disabled"}>Next</button>
+    `;
+  };
+  const updateHfIntegrationNotice = (integrationValue = hfModelBrowserIntegration, options = {}) => {
+    hfModelBrowserIntegration = normalizeHfIntegrationStatus(integrationValue || hfModelBrowserIntegration);
+    if (!hfModelBrowserSetupEl) {
+      return;
+    }
+    const html = renderHfIntegrationNotice(hfModelBrowserIntegration, options);
+    hfModelBrowserSetupEl.hidden = !html;
+    hfModelBrowserSetupEl.innerHTML = html;
+    hfModelBrowserSetupEl.classList.toggle("error", Boolean(options?.error));
+  };
+  const isHfIntegrationSetupError = (error) => {
+    const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+    const message = String(error?.message || detail?.message || detail?.raw_error || "").toLowerCase();
+    return (
+      String(error?.code || detail?.code || "") === "huggingface_setup_required" ||
+      ["401", "403", "unauthorized", "forbidden", "gated", "private", "token", "rate limit", "too many requests"].some((token) =>
+        message.includes(token)
+      )
+    );
+  };
+  const renderHfIntegrationSetupCard = (error) => {
+    const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+    const integration = normalizeHfIntegrationStatus(detail?.integration || hfModelBrowserIntegration);
+    const rawError = String(detail?.raw_error || "").trim();
+    return `
+      <div class="hf-model-browser-empty hf-integration-setup-card">
+        <div class="hf-integration-notice error">
+          ${renderHfIntegrationNotice(integration, { error: true, force: true, rawError })}
+        </div>
+      </div>
+    `;
+  };
+  const openHfIntegrationSetup = async () => {
+    const targetTab = !hfModelBrowserIntegration.installed || !hfModelBrowserIntegration.enabled ? "manager" : "setup";
+    setPreferredSettingsTab("integrations");
+    setPreferredIntegrationTab(targetTab);
+    await loadSettingsView();
+    const targetButton = document.querySelector(`#settings-integrations-shell .settings-subtab-btn[data-integrations-tab='${targetTab}']`);
+    if (targetButton instanceof HTMLElement) {
+      targetButton.click();
+    }
+    const targetEl =
+      targetTab === "setup"
+        ? document.querySelector('[data-settings-integration="huggingface"]')
+        : document.querySelector('[data-kind="integrations"][data-id="huggingface"]');
+    (targetEl || document.getElementById("settings-integrations-shell"))?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+  const renderHfModelTags = (tags) => {
+    const list = Array.isArray(tags) ? tags.slice(0, 5) : [];
+    if (!list.length) {
+      return "";
+    }
+    return `<div class="hf-model-tags">${list.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
+  };
+  const renderHfModelCards = (models) => {
+    if (!hfModelBrowserResultsEl) {
+      return;
+    }
+    const rows = Array.isArray(models) ? models : [];
+    if (!rows.length) {
+      hfModelBrowserResultsEl.innerHTML = `<div class="hf-model-browser-empty">No models found.</div>`;
+      return;
+    }
+    hfModelBrowserResultsEl.innerHTML = rows
+      .map((model) => {
+        const id = String(model?.id || "").trim();
+        const provider = normalizeHydraBaseProvider(model?.provider || hfModelBrowserState.provider);
+        const downloads = hfModelDownloadsLabel(model?.downloads);
+        const likes = hfModelDownloadsLabel(model?.likes);
+        const modelSize = String(model?.model_size || "").trim();
+        const updated = hfModelDateLabel(model?.last_modified);
+        const license = String(model?.license || "").trim();
+        const library = String(model?.library_name || model?.pipeline_tag || "").trim();
+        const compatible = Boolean(model?.compatible);
+        const supportsVision = Boolean(model?.supports_vision) || normalizeHfModelTask(model?.task) === "image-text-to-text" || normalizeHfModelTask(hfModelBrowserState.task) === "image-text-to-text";
+        const isMlxProvider = provider === "mlx_lm";
+        const downloadLabel = isMlxProvider ? "Download Repo" : "Download";
+        return `
+          <article class="hf-model-card ${compatible ? "" : "is-uncertain"}" role="button" tabindex="0" aria-label="Show files for ${escapeHtml(id)}" data-hf-model-card data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">
+            <div class="hf-model-card-head">
+              <div>
+                <strong>${escapeHtml(id)}</strong>
+                <span>${escapeHtml(library || hfModelProviderLabel(provider))}</span>
+              </div>
+              <span class="hf-model-provider-pill">${escapeHtml(hfModelProviderLabel(provider))}</span>
+            </div>
+            <div class="hf-model-card-meta">
+              ${modelSize ? `<span class="hf-model-size-pill">${escapeHtml(modelSize)}</span>` : ""}
+              ${supportsVision ? `<span class="hf-model-vision-pill" title="Supports vision models">Vision</span>` : ""}
+              <span>${escapeHtml(downloads)} downloads</span>
+              <span>${escapeHtml(likes)} likes</span>
+              ${updated ? `<span>${escapeHtml(updated)}</span>` : ""}
+              ${license ? `<span>${escapeHtml(license)}</span>` : ""}
+            </div>
+            ${renderHfModelTags(model?.tags)}
+            <div class="hf-model-card-actions">
+              <button type="button" class="inline-btn" data-hf-model-action="download" data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">${escapeHtml(downloadLabel)}</button>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  };
+  const renderHfModelDetail = (payload) => {
+    if (!hfModelBrowserDetailEl) {
+      return;
+    }
+    const model = payload?.model || {};
+    const provider = normalizeHydraBaseProvider(payload?.provider || model.provider || hfModelBrowserState.provider);
+    const repoId = String(model?.id || "").trim();
+    const files = Array.isArray(payload?.files) ? payload.files : [];
+    const ggufs = files.filter((file) => Boolean(file?.is_gguf) && !Boolean(file?.is_mmproj));
+    const mmprojs = files.filter((file) => Boolean(file?.is_mmproj));
+    const preferred = String(payload?.preferred_gguf || "").trim();
+    const preferredMmproj = String(payload?.preferred_mmproj || "").trim();
+    const supportsVision = Boolean(payload?.supports_vision || model?.supports_vision || mmprojs.length);
+    const isGgufProvider = provider === "llama_cpp";
+    const isMlxProvider = provider === "mlx_lm";
+    const visibleFiles = (isGgufProvider ? ggufs : files).slice(0, 28);
+    const downloadLabel = isGgufProvider ? "Download Selected GGUF" : isMlxProvider ? "Download Repo" : "Download Model";
+    hfModelBrowserDetailEl.innerHTML = `
+      <div class="hf-model-detail-head">
+        <div>
+          <strong>${escapeHtml(repoId || "Model details")}</strong>
+          <span>${escapeHtml(hfModelProviderLabel(provider))}</span>
+        </div>
+      </div>
+      <div class="hf-model-detail-actions">
+        <button type="button" class="inline-btn" data-hf-detail-action="download" data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(repoId)}">${escapeHtml(downloadLabel)}</button>
+      </div>
+      ${
+        isGgufProvider && supportsVision
+          ? `<div class="small hf-model-detail-note">Vision projector ${preferredMmproj ? escapeHtml(preferredMmproj) : "will be auto-detected"} will be downloaded with the selected GGUF.</div>`
+          : ""
+      }
+      ${
+        isMlxProvider
+          ? `<div class="small hf-model-detail-note">MLX models download as a full repo. Sharded safetensors and tokenizer/config files are kept together for MLX-LM.</div>`
+          : ""
+      }
+      <div class="hf-model-file-list">
+        ${
+          visibleFiles.length
+            ? visibleFiles
+                .map((file, index) => {
+                  const path = String(file?.path || "").trim();
+                  const size = Number(file?.size || 0);
+                  const meta = `${file?.quant || (file?.is_safetensors ? "safetensors" : "")}${size ? ` ${formatBytes(size)}` : ""}`.trim();
+                  if (isGgufProvider) {
+                    const selected = path && (path === preferred || (!preferred && index === 0));
+                    return `
+                      <button type="button" class="hf-model-file-row selectable${selected ? " selected" : ""}" data-hf-file-choice="${escapeHtml(path)}" aria-pressed="${selected ? "true" : "false"}">
+                        <span>${escapeHtml(path)}</span>
+                        <small>${escapeHtml(meta || "GGUF")}</small>
+                      </button>
+                    `;
+                  }
+                  return `
+                    <div class="hf-model-file-row${isMlxProvider ? " readonly" : ""}" ${isMlxProvider ? 'aria-disabled="true"' : ""}>
+                      <span>${escapeHtml(path)}</span>
+                      <small>${escapeHtml(isMlxProvider ? meta || "repo file" : meta)}</small>
+                    </div>
+                  `;
+                })
+                .join("")
+            : `<div class="hf-model-browser-empty">No files listed for this repo.</div>`
+        }
+        ${
+          isGgufProvider && mmprojs.length
+            ? mmprojs.slice(0, 8).map((file) => {
+                const path = String(file?.path || "").trim();
+                const size = Number(file?.size || 0);
+                const selected = path && path === preferredMmproj;
+                const meta = `${file?.quant || "mmproj"}${size ? ` ${formatBytes(size)}` : ""}`.trim();
+                return `<div class="hf-model-file-row ${selected ? "selected" : ""}">
+                  <span>${escapeHtml(path)}</span>
+                  <small>${escapeHtml(meta)}</small>
+                </div>`;
+              }).join("")
+            : ""
+        }
+      </div>
+    `;
+  };
+  const loadHfModelBrowser = async () => {
+    if (!hfModelBrowserEl) {
+      return;
+    }
+    const seq = ++hfModelBrowserState.loadingSeq;
+    const provider = normalizeHydraBaseProvider(hfModelBrowserProviderEl?.value || hfModelBrowserState.provider);
+    const task = normalizeHfModelTask(hfModelBrowserTaskEl?.value || hfModelBrowserState.task);
+    const query = String(hfModelBrowserQueryEl?.value || "").trim();
+    const cursor = String(hfModelBrowserState.pageCursors[hfModelBrowserState.pageIndex] || "").trim();
+    hfModelBrowserState.provider = provider;
+    hfModelBrowserState.task = task;
+    hfModelBrowserState.query = query;
+    setHfModelBrowserStatus(`Loading ${hfModelViewLabel(hfModelBrowserState.view)} ${hfModelProviderLabel(provider)} ${hfModelTaskLabel(task)} models page ${hfModelBrowserState.pageIndex + 1}...`);
+    if (hfModelBrowserResultsEl) {
+      hfModelBrowserResultsEl.innerHTML = `<div class="hf-model-browser-empty">Loading models...</div>`;
+    }
+    renderHfModelBrowserPagination({ hidden: true });
+    try {
+      const params = new URLSearchParams({
+        provider,
+        task,
+        view: hfModelBrowserState.view,
+        query,
+        limit: String(hfModelBrowserState.pageSize),
+      });
+      if (cursor) {
+        params.set("cursor", cursor);
+      }
+      const payload = await api(`/api/settings/huggingface/models?${params.toString()}`, { _timeoutMs: 30000 });
+      if (seq !== hfModelBrowserState.loadingSeq) {
+        return;
+      }
+      hfModelBrowserState.loaded = true;
+      hfModelBrowserState.nextCursor = String(payload?.next_cursor || "").trim();
+      if (payload?.integration && typeof payload.integration === "object") {
+        updateHfIntegrationNotice(payload.integration);
+      }
+      renderHfModelCards(payload?.models || []);
+      renderHfModelBrowserPagination();
+      setHfModelBrowserStatus(`Page ${hfModelBrowserState.pageIndex + 1}: ${(payload?.models || []).length} models loaded.`, "success");
+    } catch (error) {
+      if (seq !== hfModelBrowserState.loadingSeq) {
+        return;
+      }
+      renderHfModelBrowserPagination({ hidden: true });
+      const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+      if (detail?.integration && typeof detail.integration === "object") {
+        updateHfIntegrationNotice(detail.integration, { error: isHfIntegrationSetupError(error), rawError: detail.raw_error || "" });
+      }
+      if (isHfIntegrationSetupError(error)) {
+        if (hfModelBrowserResultsEl) {
+          hfModelBrowserResultsEl.innerHTML = renderHfIntegrationSetupCard(error);
+        }
+        setHfModelBrowserStatus("Hugging Face setup needed before this model search can continue.", "error");
+        return;
+      }
+      renderHfModelCards([]);
+      setHfModelBrowserStatus(`Model search failed: ${error.message}`, "error");
+    }
+  };
+  const openHfModelDetail = async (provider, repoId) => {
+    if (!hfModelBrowserDetailEl) {
+      return;
+    }
+    hfModelBrowserDetailEl.innerHTML = `<div class="hf-model-browser-empty">Loading files...</div>`;
+    try {
+      const params = new URLSearchParams({ provider: normalizeHydraBaseProvider(provider), repo_id: String(repoId || "").trim() });
+      const payload = await api(`/api/settings/huggingface/model?${params.toString()}`, { _timeoutMs: 30000 });
+      if (payload?.integration && typeof payload.integration === "object") {
+        updateHfIntegrationNotice(payload.integration);
+      }
+      renderHfModelDetail(payload);
+    } catch (error) {
+      const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+      if (detail?.integration && typeof detail.integration === "object") {
+        updateHfIntegrationNotice(detail.integration, { error: isHfIntegrationSetupError(error), rawError: detail.raw_error || "" });
+      }
+      hfModelBrowserDetailEl.innerHTML = isHfIntegrationSetupError(error)
+        ? renderHfIntegrationSetupCard(error)
+        : `<div class="hf-model-browser-empty error">Files failed: ${escapeHtml(error.message)}</div>`;
+    }
+  };
+  const selectedHfDetailFilename = () => {
+    const selectedRow = hfModelBrowserDetailEl?.querySelector("[data-hf-file-choice].selected");
+    const selected = selectedRow instanceof HTMLElement ? String(selectedRow.dataset.hfFileChoice || "").trim() : "";
+    if (selected) {
+      return selected;
+    }
+    const firstRow = hfModelBrowserDetailEl?.querySelector("[data-hf-file-choice]");
+    return firstRow instanceof HTMLElement ? String(firstRow.dataset.hfFileChoice || "").trim() : "";
+  };
+  const downloadHfModel = async (provider, repoId, filename = "") => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const modelId = hfModelEffectiveId(normalized, repoId, filename);
+    if (!modelId) {
+      return;
+    }
+    const downloadKind = normalized === "mlx_lm" ? "repo download" : "download";
+    setHfModelBrowserStatus(`Starting ${downloadKind} for ${modelId}...`);
+    try {
+      const result = await api("/api/settings/huggingface/download", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: normalized,
+          repo_id: String(repoId || "").trim(),
+          model_id: modelId,
+          filename: String(filename || "").trim(),
+          task: hfModelBrowserState.task,
+        }),
+        _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+      });
+      maybeOpenHfLlmWarmupModal(result);
+      setHfModelBrowserStatus(`${normalized === "mlx_lm" ? "Repo download" : "Download"} started for ${modelId}.`, "success");
+      showToast("Local model download started.");
+      let refreshAttempts = 0;
+      const refreshAfterDownload = async () => {
+        refreshAttempts += 1;
+        await refreshLocalLlmModels({ provider: normalized });
+        try {
+          const snapshot = await api("/api/settings/hf-llm/warmup", { _skipRedisRecovery: true, _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+          if (snapshot?.running && refreshAttempts < 90) {
+            window.setTimeout(() => {
+              void refreshAfterDownload();
+            }, 4000);
+          } else {
+            await refreshLocalLlmModels({ provider: normalized });
+          }
+        } catch {
+          if (refreshAttempts < 6) {
+            window.setTimeout(() => {
+              void refreshAfterDownload();
+            }, 4000);
+          }
+        }
+      };
+      window.setTimeout(() => {
+        void refreshAfterDownload();
+      }, 2500);
+    } catch (error) {
+      setHfModelBrowserStatus(`Download failed: ${error.message}`, "error");
+      showToast(`Model download failed: ${error.message}`, "error", 3600);
+    }
+  };
+  const deleteLocalModel = async (provider, model) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const modelId = String(model || "").trim();
+    if (!modelId) {
+      return;
+    }
+    const ok = window.confirm(`Delete local model files for ${modelId}? This cannot be undone.`);
+    if (!ok) {
+      return;
+    }
+    if (localModelManagerStatusEl) {
+      localModelManagerStatusEl.textContent = `Deleting ${modelId}...`;
+      localModelManagerStatusEl.classList.remove("error", "success");
+    }
+    try {
+      const result = await api("/api/settings/local-llm/models/delete", {
+        method: "POST",
+        body: JSON.stringify({ provider: normalized, model: modelId }),
+        _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+      });
+      if (result?.local_llm_models && typeof result.local_llm_models === "object") {
+        localLlmModelsPayload = result.local_llm_models;
+      } else {
+        await refreshLocalLlmModels();
+      }
+      renderLocalModelManager();
+      syncHydraPrimaryProviderFields();
+      hydraRouteControls.forEach((control) => syncHydraRouteControl(control));
+      if (localModelManagerStatusEl) {
+        localModelManagerStatusEl.textContent = `${modelId} deleted.`;
+        localModelManagerStatusEl.classList.add("success");
+        localModelManagerStatusEl.classList.remove("error");
+      }
+      showToast("Local model deleted.");
+    } catch (error) {
+      if (localModelManagerStatusEl) {
+        localModelManagerStatusEl.textContent = `Delete failed: ${error.message}`;
+        localModelManagerStatusEl.classList.add("error");
+        localModelManagerStatusEl.classList.remove("success");
+      }
+      showToast(`Model delete failed: ${error.message}`, "error", 3600);
+    }
+  };
+  const activateLlmVisionTab = (tab) => {
+    const normalized = String(tab || "settings").trim() || "settings";
+    const browserActive = normalized === "huggingface";
+    const manageActive = normalized === "manage";
+    llmVisionTabButtons.forEach((button) => {
+      button.classList.toggle("active", String(button.dataset.llmVisionTab || "") === normalized);
+    });
+    root.querySelectorAll(".llm-vision-settings-block").forEach((block) => {
+      block.classList.toggle("llm-vision-hidden", browserActive || manageActive);
+    });
+    if (hfModelBrowserEl) {
+      hfModelBrowserEl.hidden = !browserActive;
+      hfModelBrowserEl.classList.toggle("active", browserActive);
+    }
+    if (localModelManagerEl) {
+      localModelManagerEl.hidden = !manageActive;
+      localModelManagerEl.classList.toggle("active", manageActive);
+    }
+    if (browserActive) {
+      renderHfDownloadSummary(state.hfLlmWarmupLastSnapshot || {});
+      scheduleHfLlmWarmupPoll(150);
+    }
+    if (manageActive) {
+      renderLocalModelManager();
+      void refreshLocalLlmModels();
+    }
+    if (browserActive && !hfModelBrowserState.loaded) {
+      if (hfModelBrowserProviderEl) {
+        hfModelBrowserProviderEl.value = isHydraLocalProvider(hydraBaseProviderEl?.value || "")
+          ? normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "")
+          : hfModelBrowserState.provider;
+      }
+      void loadHfModelBrowser();
+    }
+  };
+  llmVisionTabButtons.forEach((button) => {
+    button.addEventListener("click", () => activateLlmVisionTab(button.dataset.llmVisionTab || "settings"));
+  });
+  hfModelBrowserViewButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      hfModelBrowserState.view = normalizeHfModelView(button.dataset.hfModelView || "trending");
+      hfModelBrowserState.loaded = false;
+      resetHfModelBrowserPagination();
+      hfModelBrowserViewButtons.forEach((candidate) => {
+        candidate.classList.toggle("active", normalizeHfModelView(candidate.dataset.hfModelView || "") === hfModelBrowserState.view);
+      });
+      void loadHfModelBrowser();
+    });
+  });
+  hfModelBrowserProviderEl?.addEventListener("change", () => {
+    hfModelBrowserState.provider = normalizeHydraBaseProvider(hfModelBrowserProviderEl.value || "");
+    hfModelBrowserState.loaded = false;
+    resetHfModelBrowserPagination();
+    void loadHfModelBrowser();
+  });
+  hfModelBrowserTaskEl?.addEventListener("change", () => {
+    hfModelBrowserState.task = normalizeHfModelTask(hfModelBrowserTaskEl.value || "");
+    hfModelBrowserState.loaded = false;
+    resetHfModelBrowserPagination();
+    void loadHfModelBrowser();
+  });
+  hfDownloadSummaryBlockEl?.addEventListener("click", () => {
+    openHfLlmWarmupModal(state.hfLlmWarmupLastSnapshot || {});
+    scheduleHfLlmWarmupPoll(150);
+  });
+  hfModelBrowserEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hf-integration-setup]") : null;
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    void openHfIntegrationSetup();
+  });
+  hfModelBrowserPaginationEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hf-model-page]") : null;
+    if (!button || button.disabled) {
+      return;
+    }
+    const direction = String(button.getAttribute("data-hf-model-page") || "").trim();
+    if (direction === "prev") {
+      hfModelBrowserState.pageIndex = Math.max(0, Number(hfModelBrowserState.pageIndex || 0) - 1);
+      void loadHfModelBrowser();
+      return;
+    }
+    if (direction === "next" && hfModelBrowserState.nextCursor) {
+      const nextIndex = Number(hfModelBrowserState.pageIndex || 0) + 1;
+      hfModelBrowserState.pageCursors[nextIndex] = String(hfModelBrowserState.nextCursor || "");
+      hfModelBrowserState.pageIndex = nextIndex;
+      hfModelBrowserState.nextCursor = "";
+      void loadHfModelBrowser();
+    }
+  });
+  hfModelBrowserFormEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hf-model-search]") : null;
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    hfModelBrowserState.loaded = false;
+    resetHfModelBrowserPagination();
+    void loadHfModelBrowser();
+  });
+  hfModelBrowserQueryEl?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    hfModelBrowserState.loaded = false;
+    resetHfModelBrowserPagination();
+    void loadHfModelBrowser();
+  });
+  hfModelBrowserResultsEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hf-model-action]") : null;
+    if (button) {
+      event.stopPropagation();
+      const action = String(button.getAttribute("data-hf-model-action") || "").trim();
+      const provider = button.getAttribute("data-provider") || hfModelBrowserState.provider;
+      const repoId = button.getAttribute("data-repo-id") || "";
+      if (action === "download") {
+        void downloadHfModel(provider, repoId);
+      }
+      return;
+    }
+    const card = event.target instanceof Element ? event.target.closest("[data-hf-model-card]") : null;
+    if (!card) {
+      return;
+    }
+    const provider = card.getAttribute("data-provider") || hfModelBrowserState.provider;
+    const repoId = card.getAttribute("data-repo-id") || "";
+    void openHfModelDetail(provider, repoId);
+  });
+  hfModelBrowserResultsEl?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    const card = event.target instanceof Element ? event.target.closest("[data-hf-model-card]") : null;
+    if (!card || event.target !== card) {
+      return;
+    }
+    event.preventDefault();
+    const provider = card.getAttribute("data-provider") || hfModelBrowserState.provider;
+    const repoId = card.getAttribute("data-repo-id") || "";
+    void openHfModelDetail(provider, repoId);
+  });
+  hfModelBrowserDetailEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-hf-detail-action]") : null;
+    const fileChoice = event.target instanceof Element ? event.target.closest("[data-hf-file-choice]") : null;
+    if (fileChoice instanceof HTMLElement) {
+      hfModelBrowserDetailEl.querySelectorAll("[data-hf-file-choice]").forEach((row) => {
+        const selected = row === fileChoice;
+        row.classList.toggle("selected", selected);
+        row.setAttribute("aria-pressed", selected ? "true" : "false");
+      });
+      return;
+    }
+    if (!button) {
+      return;
+    }
+    const action = String(button.getAttribute("data-hf-detail-action") || "").trim();
+    const provider = button.getAttribute("data-provider") || hfModelBrowserState.provider;
+    const repoId = button.getAttribute("data-repo-id") || "";
+    const filename = normalizeHydraBaseProvider(provider) === "llama_cpp" ? selectedHfDetailFilename() : "";
+    if (action === "download") {
+      void downloadHfModel(provider, repoId, filename);
+    }
+  });
+  localModelManagerRefreshEl?.addEventListener("click", () => {
+    if (localModelManagerStatusEl) {
+      localModelManagerStatusEl.textContent = "Refreshing installed models...";
+      localModelManagerStatusEl.classList.remove("error", "success");
+    }
+    void refreshLocalLlmModels();
+  });
+  localModelManagerListEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-local-model-delete]") : null;
+    if (!button) {
+      return;
+    }
+    const provider = button.getAttribute("data-provider") || "";
+    const model = button.getAttribute("data-model") || "";
+    void deleteLocalModel(provider, model);
+  });
+  activateLlmVisionTab("settings");
 
   const speechSttBackendEl = document.getElementById("set_speech_stt_backend");
   const speechSttBackendStatusEl = document.getElementById("speech-stt-backend-status");
@@ -17812,109 +20644,288 @@ async function loadSettingsView() {
   nanoWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadNanoWakeWordTrainerModel);
   getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE")?.addEventListener("change", syncOpenWakeWordFrameworkFromModel);
 
-  document.getElementById("settings-hydra-model-save").addEventListener("click", async () => {
+  const localLoadTargetForModel = (provider, model) => {
+    const normalizedProvider = normalizeHydraBaseProvider(provider);
+    const modelId = String(model || "").trim();
+    if (!isHydraLocalProvider(normalizedProvider) || !modelId) {
+      return null;
+    }
+    return { provider: normalizedProvider, model: modelId };
+  };
+  const dedupeLocalLoadTargets = (targets) => {
+    const seen = new Set();
+    const rows = [];
+    (Array.isArray(targets) ? targets : []).forEach((target) => {
+      const normalizedProvider = normalizeHydraBaseProvider(target?.provider || "");
+      const modelId = String(target?.model || "").trim();
+      if (!isHydraLocalProvider(normalizedProvider) || !modelId) {
+        return;
+      }
+      const key = `${normalizedProvider}|${modelId}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      rows.push({ provider: normalizedProvider, model: modelId });
+    });
+    return rows;
+  };
+  const localLoadTargetsForRows = (rows) => dedupeLocalLoadTargets(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => localLoadTargetForModel(row?.provider, row?.model))
+      .filter(Boolean)
+  );
+  const readBaseModelSettingsPayload = () => {
+    const baseProvider = normalizeHydraBaseProvider(document.getElementById("set_hydra_llm_provider")?.value || "");
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
     const basePort = String(document.getElementById("set_hydra_llm_port")?.value || "").trim();
-    const baseModel = String(document.getElementById("set_hydra_llm_model")?.value || "").trim();
+    const baseModel = getHydraBaseModelValue();
     const baseApiKey = String(document.getElementById("set_hydra_llm_api_key")?.value || "").trim();
-    const visionApiBase = String(document.getElementById("set_vision_api_base")?.value || "").trim();
-    const visionModel = String(document.getElementById("set_vision_model")?.value || "").trim();
-    const visionApiKey = String(document.getElementById("set_vision_api_key")?.value || "").trim();
-    const spudexLlmHost = String(document.getElementById("set_spudex_llm_host")?.value || "").trim();
-    const spudexLlmModel = String(document.getElementById("set_spudex_llm_model")?.value || "").trim();
-    const speechSttBackend = String(document.getElementById("set_speech_stt_backend")?.value || "").trim();
-    const speechAcceleration = String(document.getElementById("set_speech_acceleration")?.value || "").trim();
-    const speechWyomingSttHost = String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim();
-    const speechWyomingSttPort = String(document.getElementById("set_speech_wyoming_stt_port")?.value || "").trim();
-    const speechTtsBackend = String(document.getElementById("set_speech_tts_backend")?.value || "").trim();
-    const speechTtsModel = getSpeechTtsModelValue();
-    const speechTtsVoice = getSpeechTtsVoiceValue();
-    const speechKokoroOutputGain = readTtsOutputGainValue(speechKokoroOutputGainEl);
-    const speechPocketTtsOutputGain = readTtsOutputGainValue(speechPocketTtsOutputGainEl);
-    const speechWyomingTtsHost = String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim();
-    const speechWyomingTtsPort = String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim();
-    const speechWyomingTtsVoice = String(speechWyomingTtsVoiceEl?.value || "").trim();
-    const speechOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue();
-    const speechOpenAiTtsApiKey = getOpenAiTtsApiKeyValue();
-    const speechAnnouncementTtsBackend = String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim();
-    const speechAnnouncementTtsModel = getAnnouncementTtsModelValue();
-    const speechAnnouncementTtsVoice = getAnnouncementTtsVoiceValue();
-    const speechAnnouncementWyomingTtsHost = String(announcementWyomingTtsHostEl?.value || "").trim();
-    const speechAnnouncementWyomingTtsPort = String(announcementWyomingTtsPortEl?.value || "").trim();
-    const speechAnnouncementWyomingTtsVoice = String(announcementWyomingTtsVoiceEl?.value || "").trim();
-    const speechAnnouncementOpenAiTtsBaseUrl = getOpenAiTtsBaseUrlValue("announcement");
-    const speechAnnouncementOpenAiTtsApiKey = getOpenAiTtsApiKeyValue("announcement");
+    const hfTransformersContextTokens = String(document.getElementById("set_hydra_hf_transformers_context_tokens")?.value || "").trim();
+    const llamaCppContextTokens = String(document.getElementById("set_hydra_llama_cpp_context_tokens")?.value || "").trim();
+    const llamaCppMtpEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
+    const llamaCppMtpDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
+    const mlxLmContextTokens = String(document.getElementById("set_hydra_mlx_lm_context_tokens")?.value || "").trim();
     const additionalBaseRows = readHydraAdditionalBaseRows();
-    const voiceModelSettings = collectVoiceModelSettings();
     const hydraBaseServersPayload = [
-      normalizeHydraBaseRowInput({ host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
+      normalizeHydraBaseRowInput({ provider: baseProvider, host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
     ];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
-    const payload = {
-      hydra_llm_host: baseHost,
-      hydra_llm_port: basePort,
-      hydra_llm_model: baseModel,
-      hydra_llm_api_key: baseApiKey,
-      hydra_base_servers: hydraBaseServersPayload,
-      hydra_beast_mode_enabled: Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked),
-      spudex_llm_host: spudexLlmHost,
-      spudex_llm_model: spudexLlmModel,
-      vision_api_base: visionApiBase,
-      vision_model: visionModel,
-      vision_api_key: visionApiKey,
-      speech_stt_backend: speechSttBackend,
-      speech_acceleration: speechAcceleration,
-      speech_wyoming_stt_host: speechWyomingSttHost,
-      speech_wyoming_stt_port: speechWyomingSttPort,
-      speech_tts_backend: speechTtsBackend,
-      speech_tts_model: speechTtsModel,
-      speech_tts_voice: speechTtsVoice,
-      speech_kokoro_output_gain: speechKokoroOutputGain,
-      speech_pocket_tts_output_gain: speechPocketTtsOutputGain,
-      speech_wyoming_tts_host: speechWyomingTtsHost,
-      speech_wyoming_tts_port: speechWyomingTtsPort,
-      speech_wyoming_tts_voice: speechWyomingTtsVoice,
-      speech_openai_tts_base_url: speechOpenAiTtsBaseUrl,
-      speech_openai_tts_api_key: speechOpenAiTtsApiKey,
-      speech_announcement_tts_backend: speechAnnouncementTtsBackend,
-      speech_announcement_tts_model: speechAnnouncementTtsModel,
-      speech_announcement_tts_voice: speechAnnouncementTtsVoice,
-      speech_announcement_wyoming_tts_host: speechAnnouncementWyomingTtsHost,
-      speech_announcement_wyoming_tts_port: speechAnnouncementWyomingTtsPort,
-      speech_announcement_wyoming_tts_voice: speechAnnouncementWyomingTtsVoice,
-      speech_announcement_openai_tts_base_url: speechAnnouncementOpenAiTtsBaseUrl,
-      speech_announcement_openai_tts_api_key: speechAnnouncementOpenAiTtsApiKey,
-      esphome_settings: voiceModelSettings,
+    return {
+      baseProvider,
+      baseModel,
+      rows: hydraBaseServersPayload,
+      loadTargets: localLoadTargetsForRows(hydraBaseServersPayload),
+      payload: {
+        hydra_llm_provider: baseProvider,
+        hydra_llm_host: baseHost,
+        hydra_llm_port: basePort,
+        hydra_llm_model: baseModel,
+        hydra_llm_api_key: baseApiKey,
+        hydra_hf_transformers_context_tokens: hfTransformersContextTokens,
+        hydra_llama_cpp_context_tokens: llamaCppContextTokens,
+        hydra_llama_cpp_mtp_enabled: llamaCppMtpEnabled,
+        hydra_llama_cpp_mtp_draft_tokens: llamaCppMtpDraftTokens,
+        hydra_mlx_lm_context_tokens: mlxLmContextTokens,
+        hydra_base_servers: hydraBaseServersPayload,
+      },
     };
-    const hydraRoleIds = ["chat", "astraeus", "thanatos", "minos", "hermes"];
+  };
+  const readSpudexModelSettingsPayload = () => {
+    const provider = normalizeHydraBaseProvider(document.getElementById("set_spudex_llm_provider")?.value || "");
+    const model = getHydraRouteModelValue(spudexRouteControl);
+    return {
+      loadTargets: dedupeLocalLoadTargets([localLoadTargetForModel(provider, model)]),
+      payload: {
+        spudex_llm_provider: provider,
+        spudex_llm_host: String(document.getElementById("set_spudex_llm_host")?.value || "").trim(),
+        spudex_llm_model: model,
+      },
+    };
+  };
+  const readVisionModelSettingsPayload = () => {
+    const mode = normalizeVisionMode(document.getElementById("set_vision_mode")?.value || "");
+    const provider = normalizeHydraBaseProvider(document.getElementById("set_vision_provider")?.value || "");
+    const model = mode === "dedicated"
+      ? getHydraRouteModelValue(visionRouteControl)
+      : String(document.getElementById("set_vision_model")?.value || "").trim();
+    const llamaCppVisionContextTokens = String(document.getElementById("set_hydra_llama_cpp_vision_context_tokens")?.value || "").trim();
+    const loadTargets = mode === "dedicated" ? dedupeLocalLoadTargets([localLoadTargetForModel(provider, model)]) : [];
+    return {
+      mode,
+      provider,
+      model,
+      loadTargets,
+      payload: {
+        vision_mode: mode,
+        vision_provider: provider,
+        vision_api_base: String(document.getElementById("set_vision_api_base")?.value || "").trim(),
+        vision_model: model,
+        vision_api_key: String(document.getElementById("set_vision_api_key")?.value || "").trim(),
+        hydra_llama_cpp_vision_context_tokens: llamaCppVisionContextTokens,
+      },
+    };
+  };
+  const readBeastModelSettingsPayload = () => {
+    const beastModeEnabled = Boolean(document.getElementById("set_hydra_beast_mode_enabled")?.checked);
+    const payload = { hydra_beast_mode_enabled: beastModeEnabled };
+    const loadTargets = [];
+    let missingRole = null;
     hydraRoleIds.forEach((role) => {
+      const control = hydraRoleRouteControls[role];
+      const providerEl = document.getElementById(`set_hydra_llm_${role}_provider`);
       const hostEl = document.getElementById(`set_hydra_llm_${role}_host`);
       const portEl = document.getElementById(`set_hydra_llm_${role}_port`);
-      const modelEl = document.getElementById(`set_hydra_llm_${role}_model`);
       const apiKeyEl = document.getElementById(`set_hydra_llm_${role}_api_key`);
+      const provider = normalizeHydraBaseProvider(providerEl ? providerEl.value : "");
+      const model = getHydraRouteModelValue(control);
+      if (beastModeEnabled && isHydraLocalProvider(provider) && !model && !missingRole) {
+        missingRole = hydraRoleSpecs.find((spec) => spec.id === role) || { title: role };
+      }
+      const loadTarget = localLoadTargetForModel(provider, model);
+      if (loadTarget) {
+        loadTargets.push(loadTarget);
+      }
+      payload[`hydra_llm_${role}_provider`] = provider;
       payload[`hydra_llm_${role}_host`] = hostEl ? String(hostEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
-      payload[`hydra_llm_${role}_model`] = modelEl ? String(modelEl.value || "").trim() : "";
+      payload[`hydra_llm_${role}_model`] = model;
       payload[`hydra_llm_${role}_api_key`] = apiKeyEl ? String(apiKeyEl.value || "").trim() : "";
     });
-    statusEl.textContent = "Saving shared model settings...";
+    return { beastModeEnabled, missingRole, loadTargets: dedupeLocalLoadTargets(loadTargets), payload };
+  };
+  const readSpeechModelSettingsPayload = () => ({
+    speech_stt_backend: String(document.getElementById("set_speech_stt_backend")?.value || "").trim(),
+    speech_acceleration: String(document.getElementById("set_speech_acceleration")?.value || "").trim(),
+    speech_wyoming_stt_host: String(document.getElementById("set_speech_wyoming_stt_host")?.value || "").trim(),
+    speech_wyoming_stt_port: String(document.getElementById("set_speech_wyoming_stt_port")?.value || "").trim(),
+    speech_tts_backend: String(document.getElementById("set_speech_tts_backend")?.value || "").trim(),
+    speech_tts_model: getSpeechTtsModelValue(),
+    speech_tts_voice: getSpeechTtsVoiceValue(),
+    speech_kokoro_output_gain: readTtsOutputGainValue(speechKokoroOutputGainEl),
+    speech_pocket_tts_output_gain: readTtsOutputGainValue(speechPocketTtsOutputGainEl),
+    speech_wyoming_tts_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
+    speech_wyoming_tts_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
+    speech_wyoming_tts_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
+    speech_openai_tts_base_url: getOpenAiTtsBaseUrlValue(),
+    speech_openai_tts_api_key: getOpenAiTtsApiKeyValue(),
+    speech_announcement_tts_backend: String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim(),
+    speech_announcement_tts_model: getAnnouncementTtsModelValue(),
+    speech_announcement_tts_voice: getAnnouncementTtsVoiceValue(),
+    speech_announcement_wyoming_tts_host: String(announcementWyomingTtsHostEl?.value || "").trim(),
+    speech_announcement_wyoming_tts_port: String(announcementWyomingTtsPortEl?.value || "").trim(),
+    speech_announcement_wyoming_tts_voice: String(announcementWyomingTtsVoiceEl?.value || "").trim(),
+    speech_announcement_openai_tts_base_url: getOpenAiTtsBaseUrlValue("announcement"),
+    speech_announcement_openai_tts_api_key: getOpenAiTtsApiKeyValue("announcement"),
+    esphome_settings: collectVoiceModelSettings(),
+  });
+  const saveModelSettings = async (scope = "all", { loadLocalModels = false } = {}) => {
+    const normalizedScope = String(scope || "all").trim() || "all";
+    const labelMap = {
+      all: "Model settings",
+      base: "Base model settings",
+      spudex: "Spudex LLM settings",
+      vision: "Vision model settings",
+      beast: "Beast routing settings",
+    };
+    const label = labelMap[normalizedScope] || "Model settings";
+    let payload = {};
+    let loadTargets = [];
+
+    const baseSettings = normalizedScope === "all" || normalizedScope === "base" ? readBaseModelSettingsPayload() : null;
+    if (baseSettings) {
+      if (isHydraLocalProvider(baseSettings.baseProvider) && !baseSettings.baseModel) {
+        statusEl.textContent = "Choose a downloaded local Base model before saving.";
+        showToast("Choose a downloaded local Base model first.", "error", 3000);
+        return;
+      }
+      payload = { ...payload, ...baseSettings.payload };
+      if (loadLocalModels) {
+        loadTargets = loadTargets.concat(baseSettings.loadTargets);
+      }
+    }
+
+    const spudexSettings = normalizedScope === "all" || normalizedScope === "spudex" ? readSpudexModelSettingsPayload() : null;
+    if (spudexSettings) {
+      payload = { ...payload, ...spudexSettings.payload };
+      if (loadLocalModels) {
+        loadTargets = loadTargets.concat(spudexSettings.loadTargets);
+      }
+    }
+
+    const visionSettings = normalizedScope === "all" || normalizedScope === "vision" ? readVisionModelSettingsPayload() : null;
+    if (visionSettings) {
+      if (visionSettings.mode === "dedicated" && isHydraLocalProvider(visionSettings.provider) && !visionSettings.model) {
+        statusEl.textContent = "Choose a downloaded local Vision model before saving.";
+        showToast("Choose a downloaded local Vision model first.", "error", 3000);
+        return;
+      }
+      payload = { ...payload, ...visionSettings.payload };
+      if (loadLocalModels) {
+        loadTargets = loadTargets.concat(visionSettings.loadTargets);
+      }
+    }
+
+    const beastSettings = normalizedScope === "all" || normalizedScope === "beast" ? readBeastModelSettingsPayload() : null;
+    if (beastSettings) {
+      if (beastSettings.missingRole) {
+        statusEl.textContent = `Choose a downloaded local model for ${beastSettings.missingRole.title} before saving.`;
+        showToast(`Choose a downloaded model for ${beastSettings.missingRole.title}.`, "error", 3000);
+        return;
+      }
+      payload = { ...payload, ...beastSettings.payload };
+      if (loadLocalModels) {
+        loadTargets = loadTargets.concat(beastSettings.loadTargets);
+      }
+    }
+
+    if (normalizedScope === "all") {
+      payload = { ...payload, ...readSpeechModelSettingsPayload() };
+    }
+
+    loadTargets = dedupeLocalLoadTargets(loadTargets);
+    payload.hydra_local_model_load_targets = loadLocalModels ? loadTargets : [];
+    statusEl.textContent = loadLocalModels
+      ? `Saving ${label.toLowerCase()}, unloading the previous local model for this section, and loading the selected one...`
+      : `Saving ${label.toLowerCase()}...`;
     try {
       const saveResult = await api("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
       const warmup = saveResult?.speech_warmup && typeof saveResult.speech_warmup === "object" ? saveResult.speech_warmup : null;
-      let message = "Shared model settings saved.";
-      if (warmup?.started) {
-        message = "Shared model settings saved. Warming selected voice models in the background.";
+      const hfWarmup = saveResult?.hf_llm_warmup && typeof saveResult.hf_llm_warmup === "object" ? saveResult.hf_llm_warmup : null;
+      let message = `${label} saved.`;
+      if (warmup?.started && hfWarmup?.started) {
+        message = `${label} saved. Warming voice models and swapping selected local LLMs in the background.`;
+      } else if (hfWarmup?.started) {
+        message = `${label} saved. Swapping selected local LLMs in the background.`;
+      } else if (hfWarmup?.already_running || (loadLocalModels && hfWarmup?.running)) {
+        message = `${label} saved. Local LLM download/load is already running.`;
+      } else if (warmup?.started) {
+        message = `${label} saved. Warming selected voice models in the background.`;
       } else if (warmup?.already_running || warmup?.running) {
-        message = "Shared model settings saved. Voice model warmup is already running.";
+        message = `${label} saved. Voice model warmup is already running.`;
+      } else if (loadLocalModels && !loadTargets.length) {
+        message = `${label} saved. No selected local LLMs to load.`;
       }
       statusEl.textContent = message;
+      maybeOpenHfLlmWarmupModal(hfWarmup);
       showToast(message);
     } catch (error) {
-      statusEl.textContent = `Model save failed: ${error.message}`;
+      statusEl.textContent = `${label} save failed: ${error.message}`;
+      showToast(`${label} save failed: ${error.message}`, "error", 3600);
     }
+  };
+  document.getElementById("settings-hydra-base-save")?.addEventListener("click", () => {
+    void saveModelSettings("base");
+  });
+  document.getElementById("settings-hydra-base-save-load")?.addEventListener("click", () => {
+    void saveModelSettings("base", { loadLocalModels: true });
+  });
+  document.getElementById("settings-spudex-llm-save")?.addEventListener("click", () => {
+    void saveModelSettings("spudex");
+  });
+  document.getElementById("settings-spudex-llm-save-load")?.addEventListener("click", () => {
+    void saveModelSettings("spudex", { loadLocalModels: true });
+  });
+  document.getElementById("settings-vision-model-save")?.addEventListener("click", () => {
+    void saveModelSettings("vision");
+  });
+  document.getElementById("settings-vision-model-save-load")?.addEventListener("click", () => {
+    void saveModelSettings("vision", { loadLocalModels: true });
+  });
+  document.getElementById("settings-hydra-beast-save")?.addEventListener("click", () => {
+    void saveModelSettings("beast");
+  });
+  document.getElementById("settings-hydra-beast-save-load")?.addEventListener("click", () => {
+    void saveModelSettings("beast", { loadLocalModels: true });
+  });
+  document.getElementById("settings-hydra-model-save")?.addEventListener("click", () => {
+    void saveModelSettings("all");
+  });
+  document.getElementById("settings-hydra-model-save-load")?.addEventListener("click", () => {
+    void saveModelSettings("all", { loadLocalModels: true });
   });
 
   const hydraSubtabButtons = Array.from(root.querySelectorAll(".settings-subtab-btn[data-hydra-tab]"));
@@ -18452,9 +21463,7 @@ async function loadSettingsView() {
       tater_last_name: document.getElementById("set_tater_last_name").value,
       tater_personality: document.getElementById("set_tater_personality").value,
       show_speed_stats: document.getElementById("set_show_speed_stats").checked,
-      vision_api_base: document.getElementById("set_vision_api_base").value,
-      vision_model: document.getElementById("set_vision_model").value,
-      vision_api_key: document.getElementById("set_vision_api_key").value,
+      ...readVisionModelSettingsPayload().payload,
       emoji_enable_on_reaction_add: document.getElementById("set_emoji_enable_on_reaction_add").checked,
       emoji_enable_auto_reaction_on_reply: document.getElementById("set_emoji_enable_auto_reaction_on_reply").checked,
       emoji_reaction_chain_chance_percent: Number(
@@ -18479,8 +21488,15 @@ async function loadSettingsView() {
       ).checked,
       popup_effect_style: normalizePopupEffectStyle(document.getElementById("set_popup_effect_style")?.value || "flame"),
       admin_only_plugins: adminOnlyPlugins,
+      tater_api_enabled: Boolean(document.getElementById("set_tater_api_enabled")?.checked),
+      tater_api_mode: document.getElementById("set_tater_api_mode")?.value || "direct",
+      tater_api_hydra_tools_enabled: Boolean(document.getElementById("set_tater_api_hydra_tools_enabled")?.checked),
       esphome_settings: esphomeSettingsValues,
     };
+    const taterApiKey = String(document.getElementById("set_tater_api_key")?.value || "").trim();
+    if (taterApiKey) {
+      payload.tater_api_key = taterApiKey;
+    }
     if (clearWebuiPasswordRequested) {
       payload.clear_webui_password = true;
     } else if (hasWebuiPasswordInput) {
@@ -18525,6 +21541,15 @@ async function loadSettingsView() {
       if (webuiPasswordConfirmEl) {
         webuiPasswordConfirmEl.value = "";
       }
+      const taterApiKeyEl = document.getElementById("set_tater_api_key");
+      const taterApiKeyStatusEl = document.getElementById("settings-tater-api-key-status");
+      if (taterApiKeyEl) {
+        taterApiKeyEl.value = "";
+        taterApiKeyEl.type = "password";
+      }
+      if (taterApiKeyStatusEl && payload.tater_api_key) {
+        taterApiKeyStatusEl.textContent = "A key is saved. Tater will never show it back here.";
+      }
       clearWebuiPasswordRequested = false;
       if (payload.clear_webui_password) {
         webuiPasswordIsSet = false;
@@ -18554,6 +21579,31 @@ async function loadSettingsView() {
       showToast(`Save failed: ${error.message}`, "error", 3600);
     }
   };
+
+  document.getElementById("settings-tater-api-generate-key")?.addEventListener("click", () => {
+    const keyEl = document.getElementById("set_tater_api_key");
+    const statusEl = document.getElementById("settings-tater-api-key-status");
+    const bytes = new Uint8Array(32);
+    if (window.crypto?.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+    } else {
+      bytes.forEach((_, index) => {
+        bytes[index] = Math.floor(Math.random() * 256);
+      });
+    }
+    const key = Array.from(bytes)
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    if (keyEl) {
+      keyEl.value = `tater-${key}`;
+      keyEl.type = "text";
+      keyEl.focus();
+      keyEl.select();
+    }
+    if (statusEl) {
+      statusEl.textContent = "Generated. Save settings to activate this key.";
+    }
+  });
 
   [
     "settings-save",
@@ -20320,7 +23370,6 @@ async function loadSpudexView({ silent = false, resetLogs = false, preserveInput
 }
 
 async function loadView(viewName) {
-  setRedisBootstrapMode(false);
   state.view = viewName;
   if (state.view !== "dashboard") {
     clearDashboardRefreshTimer();
@@ -20334,6 +23383,13 @@ async function loadView(viewName) {
 
   const root = document.getElementById("view-root");
   root.dataset.view = String(viewName || "").trim().toLowerCase();
+  if (viewName === "dashboard" && state.dashboardPayload) {
+    root.innerHTML = renderDashboardView(state.dashboardPayload);
+    bindDashboardControls();
+    scheduleDashboardRefresh();
+    void loadDashboardView({ silent: true, background: true }).catch(() => {});
+    return;
+  }
   root.innerHTML = renderNotice("Loading...");
 
   try {
@@ -20393,25 +23449,12 @@ async function init() {
   bindNav();
   bindRuntimeSummary();
   state.settingsTab = normalizeSettingsTab(state.settingsTab || "general");
-  try {
-    await ensureWebuiAuth();
-  } catch (error) {
-    if (error?.code === "REDIS_SETUP_REQUIRED" || _isLikelyRedisFailureDetail(error?.message || "")) {
-      const root = document.getElementById("view-root");
-      renderRedisBootstrapView(root, state.redisStatus || {}, normalizeRedisEncryptionStatusPayload({}));
-      return;
-    }
-    throw error;
-  }
-  const redisStatus = await ensureRedisSetup();
-  if (!redisStatus?.connected) {
-    const root = document.getElementById("view-root");
-    renderRedisBootstrapView(root, redisStatus, normalizeRedisEncryptionStatusPayload({}));
-    return;
-  }
+  await ensureRedisSetup();
+  await ensureWebuiAuth();
   await refreshBranding();
   await refreshHealth();
   await loadView(state.view);
+  await reconnectHfLlmWarmupModal();
   _scheduleHealthRefresh(HEALTH_POLL_CONNECTED_MS);
 }
 
@@ -20425,6 +23468,10 @@ window.addEventListener("beforeunload", () => {
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();
+  if (state.hfLlmWarmupPollTimer) {
+    window.clearTimeout(state.hfLlmWarmupPollTimer);
+    state.hfLlmWarmupPollTimer = 0;
+  }
 });
 
 init().catch((error) => {

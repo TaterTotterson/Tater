@@ -2,6 +2,7 @@ import base64
 import codecs
 import csv
 import fnmatch
+import hashlib
 import html as html_lib
 import io
 import json
@@ -27,7 +28,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from helpers import redis_blob_client, redis_client
+from helpers import (
+    HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+    describe_image_with_local_llm,
+    redis_blob_client,
+    redis_client,
+    resolve_hydra_base_servers,
+    _is_local_hydra_llm_provider,
+    _normalize_hydra_llm_provider,
+)
 from verba_loader import load_verbas_from_directory
 from verba_registry import reload_verbas
 from verba_result import action_failure, action_success
@@ -2617,20 +2626,15 @@ def _image_describe_resolve_explicit_image(
     return None, None, None, "", ""
 
 
-def _image_describe_call_vision_api(
+def _image_describe_call_openai_vision_api(
     *,
     image_bytes: bytes,
     filename: str,
     prompt: str,
+    api_base: str,
+    model: str,
+    api_key: str = "",
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    settings = get_vision_settings(
-        default_api_base=DEFAULT_VISION_API_BASE,
-        default_model=DEFAULT_VISION_MODEL,
-    )
-    api_base = _as_text(settings.get("api_base")).strip().rstrip("/")
-    model = _as_text(settings.get("model")).strip()
-    api_key = _as_text(settings.get("api_key")).strip()
-
     if not api_base or not model:
         return None, None, "Vision settings are incomplete. Configure API base and model in Settings."
 
@@ -2691,6 +2695,86 @@ def _image_describe_call_vision_api(
         return None, model, "Vision API returned an empty description."
 
     return description, model, None
+
+
+def _image_describe_call_local_vision(
+    *,
+    provider: str,
+    model: str,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        result = describe_image_with_local_llm(
+            provider=provider,
+            model=model,
+            image_bytes=image_bytes,
+            filename=filename,
+            prompt=prompt,
+            timeout=90.0,
+        )
+    except Exception as exc:
+        return None, model, f"Local vision request failed: {exc}"
+    return _as_text(result.get("description")).strip(), _as_text(result.get("model") or model).strip(), None
+
+
+def _image_describe_call_vision_api(
+    *,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    settings = get_vision_settings(
+        default_api_base=DEFAULT_VISION_API_BASE,
+        default_model=DEFAULT_VISION_MODEL,
+    )
+    mode = _as_text(settings.get("mode") or "api").strip().lower() or "api"
+    provider = _normalize_hydra_llm_provider(settings.get("provider") or HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE)
+    model = _as_text(settings.get("model")).strip()
+    api_base = _as_text(settings.get("api_base")).strip().rstrip("/")
+    api_key = _as_text(settings.get("api_key")).strip()
+
+    if mode == "dedicated" and _is_local_hydra_llm_provider(provider):
+        return _image_describe_call_local_vision(
+            provider=provider,
+            model=model,
+            image_bytes=image_bytes,
+            filename=filename,
+            prompt=prompt,
+        )
+
+    if mode in {"auto", "base"}:
+        try:
+            base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+        except Exception:
+            base_rows = []
+        base_row = dict(base_rows[0]) if base_rows and isinstance(base_rows[0], dict) else {}
+        base_provider = _normalize_hydra_llm_provider(base_row.get("provider"))
+        base_model = _as_text(base_row.get("model")).strip()
+        if _is_local_hydra_llm_provider(base_provider) and base_model:
+            description, used_model, local_error = _image_describe_call_local_vision(
+                provider=base_provider,
+                model=base_model,
+                image_bytes=image_bytes,
+                filename=filename,
+                prompt=prompt,
+            )
+            if description and not local_error:
+                return description, used_model, None
+            if mode == "base":
+                return None, base_model, local_error or "Base model is not vision-capable."
+        elif mode == "base":
+            return None, base_model or model, "Base model is not a local vision-capable provider."
+
+    return _image_describe_call_openai_vision_api(
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=prompt,
+        api_base=api_base,
+        model=model,
+        api_key=api_key,
+    )
 
 
 def image_describe(
@@ -2768,6 +2852,7 @@ def image_describe(
         )
 
     text = _as_text(description).strip()
+    image_sha = hashlib.sha256(bytes(image_bytes or b"")).hexdigest() if image_bytes else ""
     return action_success(
         facts={
             "tool": "image_describe",
@@ -2781,6 +2866,8 @@ def image_describe(
             "mimetype": mime or _as_text(mimetypes.guess_type(filename)[0]).strip() or "image/png",
             "model": model or "",
             "source": resolution_source or "unknown",
+            "size_bytes": len(image_bytes or b""),
+            "sha256": image_sha,
         },
         summary_for_user=text,
         say_hint="Return the image description directly and do not invent extra visual details.",

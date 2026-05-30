@@ -14,6 +14,7 @@ python-dotenv
 requests
 youtube-transcript-api
 redis
+redislite
 nest_asyncio
 websocket-client
 aioftp
@@ -42,8 +43,13 @@ onnxruntime
 torch
 torchinfo
 matplotlib
+psutil
 speechbrain==1.1.0
+huggingface-hub
 transformers
+accelerate
+llama-cpp-python>=0.3.23
+mlx-lm; platform_system == "Darwin" and platform_machine == "arm64"
 faster-whisper
 vosk
 pykokoro

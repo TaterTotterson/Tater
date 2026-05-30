@@ -36,7 +36,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 | App / Repo | Purpose |
 | --- | --- |
-| [HA Add-ons](https://github.com/TaterTotterson/hassio-addons-tater) | Home Assistant add-on repository for running Tater + Redis Stack directly inside HAOS/Supervised setups. |
+| [HA Add-ons](https://github.com/TaterTotterson/hassio-addons-tater) | Home Assistant add-on repository for running Tater directly inside HAOS/Supervised setups. |
 | [HomeKit Shortcuts](https://taterassistant.com/portals/homekit.html) | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
 | [Meshtastic Bridge](https://github.com/TaterTotterson/tater_meshtastic_bridge) | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
 | [microWakeWords](https://github.com/TaterTotterson/microWakeWords) | Tater VoicePE, Satellite1, ReSpeaker, and related ESPHome firmware plus microWakeWord model assets. |
@@ -61,46 +61,8 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 ### Prerequisites
 - Python 3.11
-- **[Redis-Stack](https://hub.docker.com/r/redis/redis-stack)**
-- A local LLM runtime (such as **Ollama**, **LocalAI**, **LM Studio**, or **Lemonade**)
-- Docker is optional, but it is the easiest way to run Redis Stack on machines that do not package it natively.
-
-### Install Redis Stack (Required)
-
-Redis is required for Tater memory, settings, Verbas, automations, and runtime state.
-
-#### Option 1: Docker
-
-```bash
-docker run -d --name tater_redis \
-  -p 6379:6379 \
-  redis/redis-stack-server:latest
-```
-
-#### Option 2: Ubuntu/Debian with APT
-
-```bash
-sudo apt-get install -y lsb-release curl gpg
-curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-sudo chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
-sudo apt-get update
-sudo apt-get install -y redis-stack-server
-sudo systemctl enable redis-stack-server
-sudo systemctl start redis-stack-server
-```
-
-Verify Redis is up:
-
-```bash
-redis-cli ping
-```
-
-Expected output:
-
-```text
-PONG
-```
+- A local OpenAI-compatible LLM runtime (such as **Ollama**, **LocalAI**, **LM Studio**, or **Lemonade**) or Tater's built-in **Hugging Face Transformers**, **llama.cpp GGUF**, or **MLX LM** providers
+- Docker is optional.
 
 ### Set Up Tater
 
@@ -152,6 +114,7 @@ The setup profile only prepares the runtime. Actual voice model choices are mana
 macOS Apple Silicon:
 - The macOS profile writes `PYTORCH_ENABLE_MPS_FALLBACK=1` so PyTorch can fall back to CPU for unsupported MPS operations.
 - It attempts to install `mlx-whisper` and the official PyTorch `kokoro` package.
+- It installs the Metal `llama-cpp-python` wheel on Apple Silicon when available; MLX LM remains the preferred Apple-native local LLM provider.
 - Select **Settings -> Models -> STT Backend -> MLX Whisper** for Apple-native Whisper STT.
 - MLX Whisper defaults to `mlx-community/whisper-base.en-mlx`; set `TATER_MLX_WHISPER_MODEL` to use another MLX Whisper model.
 - Kokoro automatically uses the PyTorch engine on Apple Metal/MPS when available. Set `TATER_KOKORO_ENGINE=onnx` to force the existing ONNX path or `TATER_KOKORO_ENGINE=torch` to force PyTorch.
@@ -163,7 +126,8 @@ brew install ffmpeg libolm pkg-config
 ```
 
 NVIDIA desktop/server:
-- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, and the GPU ONNX Runtime build.
+- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, a CUDA-enabled `llama-cpp-python`, and the GPU ONNX Runtime build.
+- `llama-cpp-python` defaults to the upstream CUDA 12.4 wheel index (`TATER_LLAMA_CPP_CUDA_WHEEL=cu124`) because that index carries current published CUDA wheels; set `TATER_LLAMA_CPP_CUDA_WHEEL=source` to compile locally with `CMAKE_ARGS="-DGGML_CUDA=on"` instead.
 - In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
 - Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
 - To override Faster Whisper compute type, use **Settings -> ESPHome -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
@@ -171,15 +135,17 @@ NVIDIA desktop/server:
 
 AMD ROCm / Strix Halo:
 - The `rocm` profile installs PyTorch from the ROCm wheel index, then installs Tater dependencies and the official PyTorch Kokoro package.
+- Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
 - Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
+- llama.cpp ROCm/hipBLAS is not installed automatically; build it locally with `TATER_LLAMA_CPP_CMAKE_ARGS="-DGGML_HIPBLAS=on"` if you want GGUF GPU offload on AMD.
 - Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
 - Strix Halo may require newer AMD ROCm wheels than the default PyTorch index. Override the PyTorch ROCm wheel source with `TATER_ROCM_PYTORCH_INDEX_URL` before running setup if needed.
 
 Jetson and Thor:
 - The `jetson` and `thor` profiles create a venv with `--system-site-packages` so NVIDIA JetPack-provided Python AI packages can be reused.
 - Setup intentionally avoids replacing JetPack PyTorch with generic pip wheels.
-- CUDA support depends on the JetPack / Thor runtime installed on the device.
+- Hugging Face Transformers can use JetPack CUDA when the system PyTorch install exposes CUDA. llama.cpp CUDA on Jetson/Thor usually requires a local source build and is not forced by setup.
 
 General voice notes:
 - Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
@@ -223,8 +189,6 @@ docker pull ghcr.io/tatertotterson/tater:latest
 
 ### 2. Run Container
 
-Redis settings are configured in the WebUI setup popup (not via `.env`).
-
 Recommended Docker networking:
 - Use `--network host` so Tater shares the host network directly.
 - This avoids managing a growing list of `-p` mappings for WebUI, voice, and other runtime surfaces.
@@ -236,7 +200,7 @@ Important for Docker persistence:
 - Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
 - Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
 - Add a path mapping for `/app/.runtime` (container) -> `/mnt/user/appdata/tater/runtime` (host example).
-- Without this mapping, Redis setup popup settings can be lost on container rebuilds/updates.
+- Without this mapping, local runtime settings can be lost on container rebuilds/updates.
 
 ---
 
@@ -256,11 +220,12 @@ docker run -d --name tater_webui \
 ### NVIDIA Docker
 
 The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
-The NVIDIA image uses CUDA 12.8 PyTorch wheels plus CUDA/cuDNN runtime packages for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, and SpeechBrain acceleration use the same TaterOS settings described in **Local Voice Acceleration Notes**.
+The NVIDIA image uses CUDA 12.8 PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and the upstream CUDA `llama-cpp-python` wheel for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, SpeechBrain acceleration, and llama.cpp GGUF offload use the same TaterOS settings described in **Local Voice Acceleration Notes**.
 
 Host requirements:
 - Install the NVIDIA driver.
 - Install NVIDIA Container Toolkit before starting the compose override.
+- The CUDA llama.cpp wheel needs `libcuda.so.1`, which is supplied by the host driver at container runtime. If diagnostics mention `libcuda.so.1`, the image built correctly but the container was not started with NVIDIA GPU access.
 
 Optional NVIDIA GPU build for Faster Whisper STT plus Kokoro TTS:
 
@@ -304,11 +269,7 @@ Once the WebUI is up, continue to **Post-Install Setup** below.
 
 Tater is available in the **Unraid Community Apps** store.
 
-You can install both:
-- **Tater**
-- **Redis Stack**
-
-directly from the Unraid App Store with a one-click template.
+You can install **Tater** directly from the Unraid App Store with a one-click template.
 
 Unraid note:
 - Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares, for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`.
@@ -330,17 +291,13 @@ Click the button below to add the repository to Home Assistant:
 https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
 )
 
-Once added, the following add-ons will appear in the Home Assistant Add-on Store:
-
-- **Redis Stack**: required for Tater memory, Verbas, and automations
-- **Tater AI Assistant**: the main Tater service
+Once added, the **Tater AI Assistant** add-on will appear in the Home Assistant Add-on Store.
 
 Install order:
 
-1. Install and start Redis Stack.
-2. Install Tater AI Assistant.
-3. Configure your LLM and Redis settings in the Tater add-on.
-4. Start Tater.
+1. Install Tater AI Assistant.
+2. Configure your LLM settings in the Tater add-on.
+3. Start Tater.
 
 Once the add-ons are running, continue to **Post-Install Setup** below.
 
@@ -350,25 +307,30 @@ Once the add-ons are running, continue to **Post-Install Setup** below.
 
 After Tater is running, open TaterOS and finish the first-run setup:
 
-1. Complete the **Redis Setup** popup if Tater shows it:
-   - Redis host
-   - Redis port
-   - optional auth (`username` / `password`)
-   - optional TLS settings
-2. Configure your model endpoint in **Settings**:
-   - `Hydra LLM Host`
-   - `Hydra LLM Port`
-   - `Hydra LLM Model`
-3. Optional:
+1. Configure your base model in **Settings -> Models -> LLM / Vision**:
+   - choose `OpenAI-Compatible API` for Ollama, LM Studio, LocalAI, Lemonade, vLLM, or a hosted compatible API
+   - choose `Hugging Face Transformers` to load a local model directly inside Tater
+   - choose `llama.cpp GGUF` to load a GGUF model through llama-cpp-python
+   - choose `MLX LM (Apple Silicon)` to load an MLX model directly on an Apple Silicon Mac
+   - set `Hydra LLM Model`; OpenAI-compatible providers also need host/port
+2. Optional:
    - add more Base servers for round-robin regular AI calls
    - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
 
-Redis connection settings are saved locally by TaterOS for future boots.
-Hydra model settings are stored in Redis and used at runtime.
-
-Docker note:
-- Redis setup popup config is stored at `/app/.runtime/redis_connection.json` inside the container.
-- If you want a custom config file location, set `TATER_REDIS_CONFIG_PATH` and mount that target path from the host.
+Hydra model settings are saved by TaterOS and used at runtime.
+Hugging Face Transformers model files are cached under `agent_lab/models/llm/huggingface` by default; override with `TATER_HF_TRANSFORMERS_MODEL_ROOT`.
+llama.cpp GGUF files are cached under `agent_lab/models/llm/llama-cpp` by default; override with `TATER_LLAMA_CPP_MODEL_ROOT`.
+MLX LM files are cached under `agent_lab/models/llm/mlx` by default; override with `TATER_MLX_LM_MODEL_ROOT`.
+For llama.cpp, set `Hydra LLM Model` to `owner/repo::filename.gguf`, `owner/repo/path/to/file.gguf`, a bare GGUF repo id such as `owner/repo` to auto-pick a preferred quant, or a local `.gguf` path.
+For MLX LM, set `Hydra LLM Model` to an MLX-compatible Hugging Face repo such as `mlx-community/Llama-3.2-3B-Instruct-4bit`, or a local MLX model folder.
+Download local Hugging Face Transformers, llama.cpp, or MLX LM models from the Hugging Face mini-tab first, then choose the downloaded model from the Settings mini-tab dropdown. The downloaded model registry is stored at `agent_lab/models/llm/downloaded_models.json` by default.
+The Hugging Face mini-tab can switch between text and vision model browsing. For llama.cpp vision GGUF repos, Tater detects `mmproj*.gguf` projector files and downloads the matching projector beside the selected GGUF when one is available.
+The Hugging Face browser and downloader use the token saved in Integration Manager -> Hugging Face for gated/private models and higher Hub rate limits; explicit env overrides like `TATER_HF_MODEL_BROWSER_TOKEN`, `TATER_HF_TRANSFORMERS_TOKEN`, or `TATER_MLX_LM_TOKEN` still take priority.
+llama.cpp tries GPU offload by default with `TATER_LLAMA_CPP_N_GPU_LAYERS=auto`; set it to `0` for CPU-only or to a specific layer count. GPU offload depends on installing llama-cpp-python with CUDA, Metal, or another supported acceleration build. On NVIDIA, rerun `sh setup_tater.sh nvidia` to replace a CPU-only llama.cpp install with the CUDA wheel/build path.
+MLX LM is intended for Apple Silicon Macs; use llama.cpp GGUF on Raspberry Pi, Linux, or non-Apple-Silicon devices.
+Thinking suppression is enabled by default for local providers where possible; set `TATER_HF_TRANSFORMERS_DISABLE_THINKING=false`, `TATER_LLAMA_CPP_DISABLE_THINKING=false`, or `TATER_MLX_LM_DISABLE_THINKING=false` if a model should keep its native reasoning tags.
+Local provider context length can be adjusted with a slider in Settings -> Models -> LLM / Vision. When Tater can read cached model metadata, the slider max follows the model's context limit. Transformers uses the value as the prompt truncation limit, llama.cpp uses it as `n_ctx`, and MLX LM uses it as `max_kv_size`.
+Vision can stay on an OpenAI-compatible API, automatically try the Base model first, use the Base model only, or load a dedicated local vision model. A loaded Base model is reused for local vision when its provider/model cache is already vision-capable; dedicated vision models are loaded and unloaded independently from Base.
 
 Access-log note:
 - `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request lines.

@@ -77,6 +77,8 @@ def verba_supports_platform(verba: Any, platform: str) -> bool:
     p = normalize_platform(platform)
     if not p:
         return False
+    if p == "openai_api":
+        p = "webui"
     supported = expand_verba_platforms(getattr(verba, "platforms", []) or [])
     return p in supported
 

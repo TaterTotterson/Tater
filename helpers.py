@@ -2,6 +2,14 @@ import os
 import asyncio
 import threading
 import inspect
+import logging
+import gc
+import io
+import queue
+import shutil
+import signal
+import subprocess
+import sys
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -12,7 +20,9 @@ import base64
 import uuid
 import time
 import websocket
-from typing import List, Dict, Any, Optional, Tuple
+import platform
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from urllib.parse import urlparse, urlunparse
 try:
     import httpx
@@ -28,12 +38,16 @@ from redis_runtime import (
     get_redis_connection_status,
     redis_blob_client,
     redis_client,
+    migrate_current_redis_to_internal,
     save_redis_connection_settings,
+    shutdown_internal_redis,
     test_redis_connection_settings,
 )
 
 load_dotenv()
 nest_asyncio.apply()
+
+logger = logging.getLogger("tateros.helpers")
 
 _INTERNAL_PORTAL_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _INTERNAL_PORTAL_AUTH_TARGETS = (
@@ -470,10 +484,32 @@ def run_async(coro):
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
+HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY = "tater:hydra:llm:hf_transformers_context_tokens"
+HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
+HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
+HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
+HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
+HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
+DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS = 4096
+DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
+DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
+DEFAULT_LLAMA_CPP_MTP_ENABLED = False
+DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS = 3
 HYDRA_LLM_SETUP_ERROR = (
-    "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
+    "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
+HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
+HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
+HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
+HYDRA_LLM_PROVIDER_CHOICES = {
+    HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+    HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+    HYDRA_LLM_PROVIDER_LLAMA_CPP,
+    HYDRA_LLM_PROVIDER_MLX_LM,
+}
 _HYDRA_BASE_RR_LOCK = threading.Lock()
 _HYDRA_BASE_RR_INDEX: Dict[str, int] = {}
 _ACTIVE_LLM_CALLS_LOCK = threading.RLock()
@@ -490,6 +526,21 @@ _VISION_CALL_HISTORY_MAX = 5000
 _VISION_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 _VISION_CALL_COUNTERS_REDIS_KEY = "tater:vision:runtime:counters"
 _VISION_CALL_HISTORY_REDIS_KEY = "tater:vision:runtime:history"
+_HF_LLM_MODEL_CACHE: Dict[Tuple[str, str, str, bool], Dict[str, Any]] = {}
+_HF_LLM_MODEL_CACHE_LOCK = threading.RLock()
+_HF_LLM_GENERATION_LOCKS: Dict[Tuple[str, str, str, bool], threading.RLock] = {}
+_LLAMA_CPP_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+_LLAMA_CPP_MODEL_CACHE_LOCK = threading.RLock()
+_LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_MLX_LM_MODEL_CACHE: Dict[Tuple[str, str, bool, bool], Dict[str, Any]] = {}
+_MLX_LM_MODEL_CACHE_LOCK = threading.RLock()
+_MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {}
+_LOCAL_VISION_GENERATION_LOCK = threading.RLock()
+HFProgressCallback = Callable[[Dict[str, Any]], None]
+
+
+class HfLlmDownloadCancelled(RuntimeError):
+    """Raised by progress callbacks to cooperatively stop local LLM downloads."""
 
 _LLM_ORIGIN_KIND_LABELS = {
     "hydra": "Hydra",
@@ -865,6 +916,119 @@ def _coerce_content_to_text(content) -> str:
     return "" if content is None else str(content)
 
 
+def _image_data_url(image_bytes: bytes, filename: str = "") -> str:
+    import mimetypes
+
+    mime = mimetypes.guess_type(str(filename or ""))[0] or "image/png"
+    encoded = base64.b64encode(bytes(image_bytes or b"")).decode("utf-8")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _image_url_value_from_block(block: Any) -> str:
+    if not isinstance(block, dict):
+        return ""
+    image_url = block.get("image_url")
+    if isinstance(image_url, dict):
+        return str(image_url.get("url") or "").strip()
+    if isinstance(image_url, str):
+        return image_url.strip()
+    for key in ("url", "src", "data_url", "image"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _pil_image_from_url_value(value: Any) -> Any:
+    url = str(value or "").strip()
+    if not url:
+        return None
+    try:
+        from PIL import Image  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("Local vision needs Pillow installed to decode image inputs.") from exc
+
+    raw: bytes
+    if url.startswith("data:"):
+        try:
+            _, encoded = url.split(",", 1)
+            raw = base64.b64decode(encoded)
+        except Exception as exc:
+            raise RuntimeError("Could not decode image data URL for local vision.") from exc
+    elif url.startswith(("http://", "https://")):
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            raw = bytes(response.content or b"")
+        except Exception as exc:
+            raise RuntimeError(f"Could not fetch image URL for local vision: {exc}") from exc
+    else:
+        path = os.path.abspath(os.path.expanduser(url[len("file://") :] if url.startswith("file://") else url))
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            raise RuntimeError(f"Could not read image file for local vision: {exc}") from exc
+
+    try:
+        image = Image.open(io.BytesIO(raw))
+        return image.convert("RGB")
+    except Exception as exc:
+        raise RuntimeError("Could not decode image bytes for local vision.") from exc
+
+
+def _extract_pil_images_from_messages(messages: List[Dict[str, Any]]) -> List[Any]:
+    images: List[Any] = []
+    for item in messages if isinstance(messages, list) else []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip().lower()
+            if block_type not in {"image", "image_url", "input_image"} and "image_url" not in block:
+                continue
+            image = _pil_image_from_url_value(_image_url_value_from_block(block))
+            if image is not None:
+                images.append(image)
+    return images
+
+
+def _messages_with_hf_image_blocks(messages: List[Dict[str, Any]], images: List[Any]) -> List[Dict[str, Any]]:
+    image_iter = iter(images)
+    out: List[Dict[str, Any]] = []
+    for item in messages if isinstance(messages, list) else []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip().lower() or "user"
+        content = item.get("content")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": [{"type": "text", "text": _coerce_content_to_text(content).strip()}]})
+            continue
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                text = _coerce_content_to_text(block).strip()
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                continue
+            block_type = str(block.get("type") or "").strip().lower()
+            if block_type in {"image", "image_url", "input_image"} or "image_url" in block:
+                try:
+                    blocks.append({"type": "image", "image": next(image_iter)})
+                except StopIteration:
+                    blocks.append({"type": "image"})
+                continue
+            text = _coerce_content_to_text(block.get("text") or block.get("content") or block.get("value")).strip()
+            if text:
+                blocks.append({"type": "text", "text": text})
+        out.append({"role": role, "content": blocks})
+    return out
+
+
 def _safe_redis_text_get(key: str, *, redis_conn: Any = None) -> str:
     client = redis_conn or redis_client
     try:
@@ -900,6 +1064,3429 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
 
 
+def _normalize_hydra_llm_provider(value: Any) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return HYDRA_LLM_PROVIDER_MLX_LM
+    return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
+
+
+def _is_local_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_MLX_LM,
+    }
+
+
+def _hf_llm_model_root() -> str:
+    raw = str(os.getenv("TATER_HF_TRANSFORMERS_MODEL_ROOT") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "huggingface"))
+
+
+def _llama_cpp_model_root() -> str:
+    raw = str(os.getenv("TATER_LLAMA_CPP_MODEL_ROOT") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "llama-cpp"))
+
+
+def _mlx_lm_model_root() -> str:
+    raw = str(os.getenv("TATER_MLX_LM_MODEL_ROOT") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "mlx"))
+
+
+def _hf_llm_device_pref() -> str:
+    token = str(os.getenv("TATER_HF_TRANSFORMERS_DEVICE") or "auto").strip().lower()
+    return token or "auto"
+
+
+def _hf_llm_dtype_pref() -> str:
+    token = str(os.getenv("TATER_HF_TRANSFORMERS_DTYPE") or "auto").strip().lower()
+    return token or "auto"
+
+
+def _hf_llm_trust_remote_code() -> bool:
+    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE"), default=False)
+
+
+def _local_llm_context_tokens(
+    redis_key: str,
+    env_keys: Tuple[str, ...],
+    default: Optional[int],
+    *,
+    minimum: int = 256,
+    maximum: int = 1_048_576,
+) -> Optional[int]:
+    raw = _safe_redis_text_get(redis_key)
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    if not raw:
+        return default
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return default
+    return max(int(minimum), min(int(maximum), int(value)))
+
+
+def _hf_llm_max_input_tokens() -> int:
+    value = _local_llm_context_tokens(
+        HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
+        ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
+        DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
+    )
+    return int(value or DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS)
+
+
+def _hf_llm_resolve_device(torch_module: Any, preference: str) -> str:
+    token = str(preference or "auto").strip().lower()
+    if token and token != "auto":
+        return token
+    try:
+        if bool(getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)()):
+            return "cuda"
+    except Exception:
+        pass
+    try:
+        mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if bool(getattr(mps_backend, "is_available", lambda: False)()):
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _hf_llm_torch_dtype(torch_module: Any, dtype_pref: str, device: str) -> Any:
+    token = str(dtype_pref or "auto").strip().lower()
+    if token in {"", "auto"}:
+        return "auto"
+    mapping = {
+        "float16": "float16",
+        "fp16": "float16",
+        "half": "float16",
+        "bfloat16": "bfloat16",
+        "bf16": "bfloat16",
+        "float32": "float32",
+        "fp32": "float32",
+    }
+    attr = mapping.get(token, token)
+    return getattr(torch_module, attr, "auto")
+
+
+def _hf_llm_device_map_pref(device: str) -> str:
+    raw = str(os.getenv("TATER_HF_TRANSFORMERS_DEVICE_MAP") or "").strip().lower()
+    if raw in {"none", "off", "false", "0", "disabled"}:
+        return ""
+    if raw:
+        return raw
+    if str(device or "").startswith("cuda"):
+        return "auto"
+    return ""
+
+
+def _hf_llm_cache_key(model_id: str) -> Tuple[str, str, str, bool]:
+    return (
+        str(model_id or "").strip(),
+        _hf_llm_device_pref(),
+        _hf_llm_dtype_pref(),
+        _hf_llm_trust_remote_code(),
+    )
+
+
+def _huggingface_integration_token() -> str:
+    try:
+        from tateros import integration_store as integration_store_module
+
+        env = integration_store_module.huggingface_environment(client=redis_client)
+    except Exception:
+        env = {}
+    if not isinstance(env, dict):
+        return ""
+    for key in (
+        "HF_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HUGGINGFACE_TOKEN",
+        "HF_HUB_TOKEN",
+        "HUGGINGFACE_API_TOKEN",
+    ):
+        token = _text(env.get(key)).strip()
+        if token:
+            return token
+    return ""
+
+
+def _hf_llm_hub_token() -> Optional[str]:
+    token = _text(os.getenv("TATER_HF_TRANSFORMERS_TOKEN")).strip()
+    if not token:
+        token = _huggingface_integration_token()
+    if not token:
+        token = _text(
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACE_HUB_TOKEN")
+            or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            or os.getenv("HUGGINGFACE_TOKEN")
+            or os.getenv("HF_HUB_TOKEN")
+            or os.getenv("HUGGINGFACE_API_TOKEN")
+        ).strip()
+    return token or None
+
+
+def _hf_llm_snapshot_max_workers() -> int:
+    try:
+        value = int(str(os.getenv("TATER_HF_TRANSFORMERS_DOWNLOAD_WORKERS") or "4").strip())
+    except Exception:
+        value = 4
+    return max(1, min(16, value))
+
+
+def _llama_cpp_n_ctx(*, vision: bool = False) -> int:
+    if vision:
+        value = _local_llm_context_tokens(
+            HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
+            ("TATER_LLAMA_CPP_VISION_N_CTX", "TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS"),
+            DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
+        )
+        return int(value or DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS)
+    value = _local_llm_context_tokens(
+        HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
+        ("TATER_LLAMA_CPP_N_CTX", "LLM_CONTEXT_SIZE"),
+        DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
+    )
+    return int(value or DEFAULT_LLAMA_CPP_CONTEXT_TOKENS)
+
+
+def _llama_cpp_n_batch(*, vision: bool = False) -> int:
+    if vision:
+        raw = str(os.getenv("TATER_LLAMA_CPP_VISION_N_BATCH") or "128").strip()
+        default = 128
+    else:
+        raw = str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or "512").strip()
+        default = 512
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(16 if vision else 32, min(8192, value))
+
+
+def _llama_cpp_n_threads() -> int:
+    raw = str(os.getenv("TATER_LLAMA_CPP_N_THREADS") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except Exception:
+            value = 0
+    else:
+        try:
+            value = max(1, int((os.cpu_count() or 4) * 0.75))
+        except Exception:
+            value = 4
+    return max(1, min(256, value))
+
+
+def _llama_cpp_n_gpu_layers() -> int:
+    raw = str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or "auto").strip().lower()
+    if raw in {"", "auto", "all", "gpu"}:
+        return -1
+    if raw in {"none", "off", "false", "cpu"}:
+        return 0
+    try:
+        return int(raw)
+    except Exception:
+        return -1
+
+
+def _llama_cpp_mtp_enabled() -> bool:
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_MTP_ENABLED_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_LLAMA_CPP_MTP_ENABLED)
+    return _boolish(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED"), default=DEFAULT_LLAMA_CPP_MTP_ENABLED)
+
+
+def _llama_cpp_mtp_draft_tokens() -> int:
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY)
+    if not raw:
+        raw = str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS") or DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS).strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS
+    return max(1, min(16, int(value)))
+
+
+def _llama_cpp_mtp_spec_type() -> str:
+    token = str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or "draft-mtp").strip().lower()
+    return token or "draft-mtp"
+
+
+def _llama_cpp_mtp_load_arg_support(Llama: Any) -> Dict[str, Any]:
+    try:
+        params = inspect.signature(Llama.__init__).parameters
+    except Exception:
+        params = {}
+    explicit = set(params.keys())
+    candidates = (
+        ("spec_type", "spec_draft_n_max"),
+        ("spec_type", "draft_n_max"),
+        ("speculative_type", "speculative_draft_n_max"),
+        ("speculative_type", "draft_n_max"),
+    )
+    for type_key, draft_key in candidates:
+        if type_key in explicit and draft_key in explicit:
+            return {"supported": True, "type_key": type_key, "draft_key": draft_key}
+    return {
+        "supported": False,
+        "type_key": "spec_type",
+        "draft_key": "spec_draft_n_max",
+        "has_var_kwargs": any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()),
+    }
+
+
+def _llama_cpp_mtp_load_kwargs(Llama: Any, *, enabled: bool, spec_type: str, draft_tokens: int) -> Tuple[Dict[str, Any], str]:
+    if not enabled:
+        return {}, ""
+    support = _llama_cpp_mtp_load_arg_support(Llama)
+    if support.get("supported"):
+        return {
+            str(support["type_key"]): str(spec_type or "draft-mtp"),
+            str(support["draft_key"]): int(draft_tokens),
+        }, ""
+    if _boolish(os.getenv("TATER_LLAMA_CPP_MTP_FORCE_KWARGS"), default=False):
+        return {
+            "spec_type": str(spec_type or "draft-mtp"),
+            "spec_draft_n_max": int(draft_tokens),
+        }, ""
+    return {}, (
+        "MTP is enabled in settings, but this llama-cpp-python build does not expose native "
+        "draft-mtp load arguments yet. Running llama.cpp without MTP."
+    )
+
+
+def _llama_cpp_warning_text(*parts: Any) -> str:
+    rows: List[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+    return "; ".join(rows)
+
+
+def _llama_cpp_context_load_error_message(
+    exc: BaseException,
+    *,
+    model_id: str,
+    n_ctx: Any,
+    n_gpu_layers: Any,
+    n_batch: Any,
+    vision: bool = False,
+    mmproj_path: str = "",
+) -> str:
+    raw = str(exc or "").strip() or exc.__class__.__name__
+    lowered = raw.lower()
+    if "llama_context" not in lowered and "context" not in lowered:
+        return raw
+
+    model_label = str(model_id or "").strip() or "the selected GGUF model"
+    message = (
+        f"{raw}. llama.cpp could not create a runtime context for {model_label}. "
+        f"Current load settings: n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}, n_batch={n_batch}. "
+        "This usually means the requested context length or GPU/RAM use is too high for the selected "
+        "model/quantization/build. "
+    )
+    if vision:
+        message = (
+            f"{message}Lower the llama.cpp Vision Context Length in Settings first "
+            "(try 4096 or 8192), then try the image request again."
+        )
+        message = (
+            f"{message} If this happens during boot or while other GPU models are loading, "
+            "lower TATER_LLAMA_CPP_VISION_N_BATCH first (try 128, 64, or 32)."
+        )
+        projector_note = (
+            f" Vision projector: {os.path.basename(str(mmproj_path or '').strip())}."
+            if str(mmproj_path or "").strip()
+            else " No matching mmproj vision projector was found for this GGUF."
+        )
+        message = (
+            f"{message}{projector_note} llama.cpp vision GGUF models need both the model GGUF "
+            "and a matching mmproj projector; otherwise use a dedicated vision model/provider."
+        )
+    else:
+        message = (
+            f"{message}Lower the llama.cpp Context Length in Settings first "
+            "(try 4096, 8192, or 16384), then save and load the model again."
+        )
+    return message
+
+
+def _safe_path_size_bytes(path: Any, *, file_limit: int = 20000) -> int:
+    raw = str(path or "").strip()
+    if not raw:
+        return 0
+    try:
+        target = os.path.abspath(os.path.expanduser(raw))
+    except Exception:
+        target = raw
+    try:
+        if os.path.isfile(target):
+            return max(0, int(os.path.getsize(target)))
+        if not os.path.isdir(target):
+            return 0
+        total = 0
+        count = 0
+        for root, _dirs, files in os.walk(target):
+            for filename in files:
+                count += 1
+                if count > int(file_limit):
+                    return total
+                try:
+                    total += max(0, int(os.path.getsize(os.path.join(root, filename))))
+                except Exception:
+                    continue
+        return total
+    except Exception:
+        return 0
+
+
+def _model_memory_footprint_bytes(model: Any) -> int:
+    if model is None:
+        return 0
+    try:
+        getter = getattr(model, "get_memory_footprint", None)
+        if callable(getter):
+            value = getter()
+            return max(0, int(value or 0))
+    except Exception:
+        pass
+    total = 0
+    for attr in ("parameters", "buffers"):
+        try:
+            getter = getattr(model, attr, None)
+            if not callable(getter):
+                continue
+            for item in getter():
+                try:
+                    total += int(item.nelement()) * int(item.element_size())
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return max(0, int(total))
+
+
+def runtime_object_memory_footprint_bytes(model: Any) -> int:
+    return _model_memory_footprint_bytes(model)
+
+
+def runtime_path_size_bytes(path: Any, *, file_limit: int = 20000) -> int:
+    return _safe_path_size_bytes(path, file_limit=file_limit)
+
+
+def _local_llm_cache_token(provider: str, cache_key: Tuple[Any, ...]) -> str:
+    try:
+        payload = json.dumps(list(cache_key), separators=(",", ":"), ensure_ascii=False)
+        encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+        return f"{_normalize_hydra_llm_provider(provider)}:{encoded}"
+    except Exception:
+        return ""
+
+
+def _decode_local_llm_cache_token(value: Any) -> Tuple[str, Tuple[Any, ...]]:
+    token = str(value or "").strip()
+    if not token or ":" not in token:
+        return "", tuple()
+    provider, encoded = token.split(":", 1)
+    provider_token = _normalize_hydra_llm_provider(provider)
+    try:
+        padding = "=" * ((4 - (len(encoded) % 4)) % 4)
+        raw = base64.urlsafe_b64decode(f"{encoded}{padding}".encode("ascii")).decode("utf-8", "replace")
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return provider_token, tuple(parsed)
+    except Exception:
+        pass
+    return provider_token, tuple()
+
+
+def _system_ram_snapshot() -> Dict[str, Any]:
+    try:
+        import psutil  # type: ignore
+
+        mem = psutil.virtual_memory()
+        total = max(0, int(getattr(mem, "total", 0) or 0))
+        available = max(0, int(getattr(mem, "available", 0) or 0))
+        used = max(0, int(getattr(mem, "used", 0) or max(0, total - available)))
+        return {
+            "available": True,
+            "total_bytes": total,
+            "available_bytes": available,
+            "used_bytes": used,
+            "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
+        }
+    except Exception:
+        pass
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        total = max(0, page_size * pages)
+        return {
+            "available": total > 0,
+            "total_bytes": total,
+            "available_bytes": 0,
+            "used_bytes": 0,
+            "percent": 0.0,
+        }
+    except Exception:
+        return {
+            "available": False,
+            "total_bytes": 0,
+            "available_bytes": 0,
+            "used_bytes": 0,
+            "percent": 0.0,
+        }
+
+
+def _system_cpu_snapshot() -> Dict[str, Any]:
+    try:
+        import psutil  # type: ignore
+
+        percent = float(psutil.cpu_percent(interval=None))
+        load_avg: List[float] = []
+        try:
+            load_avg = [round(float(item), 2) for item in os.getloadavg()]
+        except Exception:
+            load_avg = []
+        return {
+            "available": True,
+            "percent": round(max(0.0, min(100.0, percent)), 2),
+            "logical_count": int(psutil.cpu_count(logical=True) or 0),
+            "physical_count": int(psutil.cpu_count(logical=False) or 0),
+            "load_average": load_avg,
+        }
+    except Exception:
+        pass
+    try:
+        load_avg = [round(float(item), 2) for item in os.getloadavg()]
+    except Exception:
+        load_avg = []
+    return {
+        "available": False,
+        "percent": 0.0,
+        "logical_count": int(os.cpu_count() or 0),
+        "physical_count": 0,
+        "load_average": load_avg,
+    }
+
+
+def _system_gpu_float(value: Any) -> Optional[float]:
+    token = str(value or "").strip()
+    if not token or token.lower() in {"n/a", "[not supported]", "not supported", "none"}:
+        return None
+    token = token.replace("%", "").replace("MiB", "").replace("W", "").strip()
+    try:
+        parsed = float(token)
+    except Exception:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _system_gpu_mib_to_bytes(value: Any) -> int:
+    parsed = _system_gpu_float(value)
+    if parsed is None:
+        return 0
+    return max(0, int(parsed * 1024 * 1024))
+
+
+def _system_gpu_bytes(value: Any) -> int:
+    token = str(value or "").strip().replace(",", "")
+    if not token or token.lower() in {"n/a", "[not supported]", "not supported", "none"}:
+        return 0
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", token)
+    if not match:
+        return 0
+    try:
+        parsed = float(match.group(0))
+    except Exception:
+        return 0
+    if parsed <= 0:
+        return 0
+    lower = token.lower()
+    if "gib" in lower or re.search(r"\bgb\b", lower):
+        return max(0, int(parsed * 1024 * 1024 * 1024))
+    if "mib" in lower or re.search(r"\bmb\b", lower):
+        return max(0, int(parsed * 1024 * 1024))
+    if "kib" in lower or re.search(r"\bkb\b", lower):
+        return max(0, int(parsed * 1024))
+    return max(0, int(parsed))
+
+
+def _system_gpu_clamped_percent(value: Any) -> Optional[float]:
+    parsed = _system_gpu_float(value)
+    if parsed is None:
+        return None
+    return round(max(0.0, min(100.0, parsed)), 2)
+
+
+def _system_gpu_json_payload(text: Any) -> Optional[Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start : end + 1]
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _system_gpu_row_value(
+    row: Dict[str, Any],
+    options: List[Tuple[str, ...]],
+    *,
+    excluded_fragments: Tuple[str, ...] = tuple(),
+) -> Any:
+    normalized_items = [(re.sub(r"[^a-z0-9%]+", " ", str(key or "").lower()).strip(), value) for key, value in row.items()]
+    excluded = [re.sub(r"[^a-z0-9%]+", " ", str(fragment or "").lower()).strip() for fragment in excluded_fragments]
+    excluded = [fragment for fragment in excluded if fragment]
+    for fragments in options:
+        wanted = [re.sub(r"[^a-z0-9%]+", " ", str(fragment or "").lower()).strip() for fragment in fragments]
+        wanted = [fragment for fragment in wanted if fragment]
+        if not wanted:
+            continue
+        for key, value in normalized_items:
+            if any(fragment in key for fragment in excluded):
+                continue
+            if all(fragment in key for fragment in wanted):
+                return value
+    return None
+
+
+def _nvidia_smi_vram_snapshot() -> Optional[Dict[str, Any]]:
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    query = (
+        "index,name,utilization.gpu,memory.total,memory.used,memory.free,"
+        "temperature.gpu,power.draw,power.limit"
+    )
+    try:
+        proc = subprocess.run(
+            [exe, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=1.2,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+
+    devices: List[Dict[str, Any]] = []
+    total = 0
+    used = 0
+    free = 0
+    utilization_values: List[float] = []
+    for line in str(proc.stdout or "").splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 9:
+            continue
+        index_raw, name, util_raw, total_raw, used_raw, free_raw, temp_raw, power_raw, power_limit_raw = parts[:9]
+        device_total = _system_gpu_mib_to_bytes(total_raw)
+        device_used = _system_gpu_mib_to_bytes(used_raw)
+        device_free = _system_gpu_mib_to_bytes(free_raw)
+        utilization = _system_gpu_float(util_raw)
+        temperature = _system_gpu_float(temp_raw)
+        power_draw = _system_gpu_float(power_raw)
+        power_limit = _system_gpu_float(power_limit_raw)
+        if utilization is not None:
+            utilization_values.append(max(0.0, min(100.0, utilization)))
+        total += device_total
+        used += device_used
+        free += device_free
+        try:
+            index = int(float(index_raw))
+        except Exception:
+            index = len(devices)
+        devices.append(
+            {
+                "index": index,
+                "name": name or f"cuda:{index}",
+                "total_bytes": device_total,
+                "free_bytes": device_free,
+                "used_bytes": device_used,
+                "percent": round((device_used / device_total) * 100.0, 2) if device_total > 0 else 0.0,
+                "utilization_percent": round(max(0.0, min(100.0, utilization)), 2) if utilization is not None else None,
+                "temperature_c": round(temperature, 1) if temperature is not None else None,
+                "power_draw_w": round(power_draw, 1) if power_draw is not None else None,
+                "power_limit_w": round(power_limit, 1) if power_limit is not None else None,
+            }
+        )
+
+    if not devices:
+        return None
+    utilization_percent: Optional[float] = None
+    if utilization_values:
+        utilization_percent = round(sum(utilization_values) / len(utilization_values), 2)
+    return {
+        "available": total > 0,
+        "backend": "nvidia",
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
+        "utilization_percent": utilization_percent,
+        "devices": devices,
+    }
+
+
+def _rocm_smi_vram_snapshot() -> Optional[Dict[str, Any]]:
+    exe = shutil.which("rocm-smi") or shutil.which("rocm-smi.py")
+    if not exe:
+        return None
+    commands = [
+        [exe, "--showproductname", "--showuse", "--showmemuse", "--showmeminfo", "vram", "--showtemp", "--showpower", "--json"],
+        [exe, "--showuse", "--showmemuse", "--showmeminfo", "vram", "--showtemp", "--showpower", "--json"],
+        [exe, "--json"],
+    ]
+    payload: Optional[Any] = None
+    for command in commands:
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=1.8, check=False)
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        payload = _system_gpu_json_payload(proc.stdout)
+        if payload is not None:
+            break
+    if not isinstance(payload, dict):
+        return None
+
+    devices: List[Dict[str, Any]] = []
+    total = 0
+    used = 0
+    free = 0
+    utilization_values: List[float] = []
+    for key, raw_row in payload.items():
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        key_text = str(key or "")
+        if not key_text.lower().startswith(("card", "gpu")) and not any("vram" in str(k).lower() or "gpu use" in str(k).lower() for k in row.keys()):
+            continue
+        try:
+            index = int(float(re.sub(r"[^0-9.]+", "", key_text) or len(devices)))
+        except Exception:
+            index = len(devices)
+        name = str(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("card", "series"),
+                    ("card", "model"),
+                    ("product", "name"),
+                    ("gpu", "name"),
+                    ("device", "name"),
+                ],
+            )
+            or f"ROCm GPU {index}"
+        ).strip()
+        utilization = _system_gpu_clamped_percent(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("gpu", "use"),
+                    ("gpu", "busy"),
+                    ("activity",),
+                    ("use", "%"),
+                ],
+            )
+        )
+        device_total = _system_gpu_bytes(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("vram", "total", "memory"),
+                    ("vram", "total"),
+                    ("memory", "total", "vram"),
+                ],
+                excluded_fragments=("used", "free", "allocated", "%"),
+            )
+        )
+        device_used = _system_gpu_bytes(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("vram", "used", "memory"),
+                    ("vram", "used"),
+                    ("memory", "used", "vram"),
+                ],
+                excluded_fragments=("%",),
+            )
+        )
+        device_free = _system_gpu_bytes(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("vram", "free", "memory"),
+                    ("vram", "free"),
+                    ("memory", "free", "vram"),
+                ],
+            )
+        )
+        memory_percent = _system_gpu_clamped_percent(
+            _system_gpu_row_value(
+                row,
+                [
+                    ("vram%",),
+                    ("memory", "allocated", "vram"),
+                    ("memory", "use"),
+                ],
+            )
+        )
+        if device_used <= 0 and device_total > 0 and memory_percent is not None:
+            device_used = max(0, int(device_total * (memory_percent / 100.0)))
+        if device_free <= 0 and device_total > 0:
+            device_free = max(0, device_total - device_used)
+        temperature = _system_gpu_float(
+            _system_gpu_row_value(row, [("temperature", "edge"), ("temperature", "junction"), ("temperature",), ("temp",)])
+        )
+        power_draw = _system_gpu_float(
+            _system_gpu_row_value(row, [("average", "power"), ("power", "draw"), ("power", "w")])
+        )
+        if utilization is not None:
+            utilization_values.append(utilization)
+        total += device_total
+        used += device_used
+        free += device_free
+        devices.append(
+            {
+                "index": index,
+                "name": name or f"ROCm GPU {index}",
+                "total_bytes": device_total,
+                "free_bytes": device_free,
+                "used_bytes": device_used,
+                "percent": round((device_used / device_total) * 100.0, 2) if device_total > 0 else 0.0,
+                "utilization_percent": utilization,
+                "temperature_c": round(temperature, 1) if temperature is not None else None,
+                "power_draw_w": round(power_draw, 1) if power_draw is not None else None,
+            }
+        )
+
+    if not devices:
+        return None
+    utilization_percent: Optional[float] = None
+    if utilization_values:
+        utilization_percent = round(sum(utilization_values) / len(utilization_values), 2)
+    return {
+        "available": True,
+        "backend": "rocm",
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
+        "utilization_percent": utilization_percent,
+        "devices": devices,
+    }
+
+
+def _jetson_tegrastats_snapshot() -> Optional[Dict[str, Any]]:
+    exe = shutil.which("tegrastats")
+    if not exe:
+        return None
+    output = ""
+    commands = ([exe, "--interval", "200", "--count", "1"], [exe, "--interval", "200"])
+    for command in commands:
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=1.2, check=False)
+            output = str(proc.stdout or proc.stderr or "").strip()
+        except subprocess.TimeoutExpired as exc:
+            raw_output = exc.stdout or exc.stderr or ""
+            output = raw_output.decode("utf-8", "replace") if isinstance(raw_output, bytes) else str(raw_output or "")
+            output = output.strip()
+        except Exception:
+            output = ""
+        if output:
+            break
+    if not output:
+        return None
+    line = output.splitlines()[0]
+    util_match = re.search(r"\bGR3D_FREQ\s+(\d+(?:\.\d+)?)%", line)
+    utilization = _system_gpu_clamped_percent(util_match.group(1) if util_match else None)
+    ram_match = re.search(r"\bRAM\s+(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)MB\b", line, flags=re.IGNORECASE)
+    shared_used = _system_gpu_mib_to_bytes(ram_match.group(1)) if ram_match else 0
+    shared_total = _system_gpu_mib_to_bytes(ram_match.group(2)) if ram_match else 0
+    temp_match = re.search(r"\bGPU@(\d+(?:\.\d+)?)C\b", line)
+    temperature = _system_gpu_float(temp_match.group(1) if temp_match else None)
+    device = {
+        "index": 0,
+        "name": "Jetson GPU",
+        "total_bytes": 0,
+        "free_bytes": 0,
+        "used_bytes": 0,
+        "percent": 0.0,
+        "utilization_percent": utilization,
+        "temperature_c": round(temperature, 1) if temperature is not None else None,
+        "shared_memory_total_bytes": shared_total,
+        "shared_memory_used_bytes": shared_used,
+        "unified": True,
+    }
+    if utilization is None and shared_total <= 0:
+        return None
+    return {
+        "available": True,
+        "backend": "jetson",
+        "total_bytes": 0,
+        "free_bytes": 0,
+        "used_bytes": 0,
+        "percent": 0.0,
+        "utilization_percent": utilization,
+        "unified": True,
+        "devices": [device],
+    }
+
+
+def _apple_metal_vram_snapshot() -> Optional[Dict[str, Any]]:
+    if platform.system().lower() != "darwin":
+        return None
+    used_candidates: List[int] = []
+    total_candidates: List[int] = []
+    detail_parts: List[str] = []
+    try:
+        import torch  # type: ignore
+
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        mps_runtime = getattr(torch, "mps", None)
+        if mps_backend is not None and bool(getattr(mps_backend, "is_available", lambda: False)()):
+            detail_parts.append("MPS")
+            for attr in ("current_allocated_memory", "driver_allocated_memory"):
+                getter = getattr(mps_runtime, attr, None) if mps_runtime is not None else None
+                if callable(getter):
+                    with contextlib.suppress(Exception):
+                        used_candidates.append(max(0, int(getter() or 0)))
+            getter = getattr(mps_runtime, "recommended_max_memory", None) if mps_runtime is not None else None
+            if callable(getter):
+                with contextlib.suppress(Exception):
+                    total_candidates.append(max(0, int(getter() or 0)))
+    except Exception:
+        pass
+    try:
+        import mlx.core as mx  # type: ignore
+
+        detail_parts.append("MLX")
+        for attr in ("get_active_memory", "get_cache_memory"):
+            getter = getattr(mx, attr, None)
+            if callable(getter):
+                with contextlib.suppress(Exception):
+                    used_candidates.append(max(0, int(getter() or 0)))
+        getter = getattr(mx, "get_peak_memory", None)
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                total_candidates.append(max(0, int(getter() or 0)))
+    except Exception:
+        pass
+    if not detail_parts:
+        return None
+    used = max(used_candidates) if used_candidates else 0
+    total = max(total_candidates) if total_candidates else 0
+    free = max(0, total - used) if total > 0 else 0
+    return {
+        "available": True,
+        "backend": "metal",
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
+        "utilization_percent": None,
+        "unified": True,
+        "devices": [
+            {
+                "index": 0,
+                "name": "Apple Metal",
+                "total_bytes": total,
+                "free_bytes": free,
+                "used_bytes": used,
+                "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
+                "utilization_percent": None,
+                "unified": True,
+                "detail": " / ".join(dict.fromkeys(detail_parts)),
+            }
+        ],
+    }
+
+
+def _torch_cuda_vram_snapshot() -> Optional[Dict[str, Any]]:
+    try:
+        import torch  # type: ignore
+
+        cuda = getattr(torch, "cuda", None)
+        if cuda is None or not bool(cuda.is_available()):
+            return None
+        total = 0
+        free = 0
+        devices: List[Dict[str, Any]] = []
+        for index in range(int(cuda.device_count())):
+            props = cuda.get_device_properties(index)
+            device_total = max(0, int(getattr(props, "total_memory", 0) or 0))
+            device_free = 0
+            try:
+                free_pair = cuda.mem_get_info(index)
+                device_free = max(0, int(free_pair[0] or 0))
+                if free_pair and len(free_pair) > 1:
+                    device_total = max(device_total, int(free_pair[1] or 0))
+            except Exception:
+                pass
+            device_used = max(0, device_total - device_free) if device_free else 0
+            total += device_total
+            free += device_free
+            devices.append(
+                {
+                    "index": index,
+                    "name": str(getattr(props, "name", "") or f"cuda:{index}"),
+                    "total_bytes": device_total,
+                    "free_bytes": device_free,
+                    "used_bytes": device_used,
+                    "percent": round((device_used / device_total) * 100.0, 2) if device_total > 0 and device_used > 0 else 0.0,
+                    "utilization_percent": None,
+                }
+            )
+        used = max(0, total - free) if free else 0
+        backend = "cuda"
+        try:
+            if str(getattr(getattr(torch, "version", None), "hip", "") or "").strip():
+                backend = "rocm"
+        except Exception:
+            pass
+        return {
+            "available": total > 0,
+            "backend": backend,
+            "total_bytes": total,
+            "free_bytes": free,
+            "used_bytes": used,
+            "percent": round((used / total) * 100.0, 2) if total > 0 and used > 0 else 0.0,
+            "utilization_percent": None,
+            "devices": devices,
+        }
+    except Exception:
+        return None
+
+
+def _merge_gpu_usage_snapshot(memory_snapshot: Dict[str, Any], usage_snapshot: Dict[str, Any], *, backend: str) -> Dict[str, Any]:
+    merged = dict(memory_snapshot or {})
+    merged["backend"] = backend
+    usage_percent = _system_gpu_clamped_percent((usage_snapshot or {}).get("utilization_percent"))
+    if usage_percent is not None:
+        merged["utilization_percent"] = usage_percent
+    usage_devices = [row for row in list((usage_snapshot or {}).get("devices") or []) if isinstance(row, dict)]
+    memory_devices = [dict(row) for row in list(merged.get("devices") or []) if isinstance(row, dict)]
+    if usage_devices and memory_devices:
+        for index, row in enumerate(memory_devices):
+            usage_row = usage_devices[min(index, len(usage_devices) - 1)]
+            device_usage = _system_gpu_clamped_percent(usage_row.get("utilization_percent"))
+            if device_usage is not None:
+                row["utilization_percent"] = device_usage
+            for key in ("temperature_c", "power_draw_w", "power_limit_w", "shared_memory_total_bytes", "shared_memory_used_bytes", "unified"):
+                if usage_row.get(key) is not None:
+                    row[key] = usage_row.get(key)
+        merged["devices"] = memory_devices
+    return merged
+
+
+def _system_vram_snapshot() -> Dict[str, Any]:
+    nvidia_snapshot = _nvidia_smi_vram_snapshot()
+    if nvidia_snapshot:
+        return nvidia_snapshot
+
+    rocm_snapshot = _rocm_smi_vram_snapshot()
+    if rocm_snapshot:
+        return rocm_snapshot
+
+    jetson_snapshot = _jetson_tegrastats_snapshot()
+    if jetson_snapshot:
+        torch_snapshot = _torch_cuda_vram_snapshot()
+        if torch_snapshot and int(torch_snapshot.get("total_bytes") or 0) > 0:
+            return _merge_gpu_usage_snapshot(torch_snapshot, jetson_snapshot, backend="jetson-cuda")
+        return jetson_snapshot
+
+    apple_snapshot = _apple_metal_vram_snapshot()
+    if apple_snapshot:
+        return apple_snapshot
+
+    torch_snapshot = _torch_cuda_vram_snapshot()
+    if torch_snapshot:
+        return torch_snapshot
+
+    return {
+        "available": False,
+        "backend": "",
+        "total_bytes": 0,
+        "free_bytes": 0,
+        "used_bytes": 0,
+        "percent": 0.0,
+        "utilization_percent": None,
+        "devices": [],
+    }
+
+
+def _local_llm_memory_kind(provider: str, bundle: Dict[str, Any]) -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    device = str((bundle or {}).get("device") or "").strip().lower()
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        if str((bundle or {}).get("gpu_backend") or "").strip() and int((bundle or {}).get("n_gpu_layers") or 0) != 0:
+            return "vram"
+        return "ram"
+    if "cuda" in device or device == "gpu":
+        return "vram"
+    if "mps" in device or "metal" in device or "apple" in device:
+        return "unified"
+    return "ram"
+
+
+def _local_llm_provider_label(provider: str) -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+        return "Transformers"
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return "llama.cpp"
+    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        return "MLX LM"
+    return "Local LLM"
+
+
+def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundle: Dict[str, Any]) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model = str(cache_key[0] if cache_key else "").strip()
+    device = str((bundle or {}).get("device") or "").strip()
+    memory_bytes = max(0, int((bundle or {}).get("memory_estimate_bytes") or 0))
+    if memory_bytes <= 0:
+        if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+            memory_bytes = _model_memory_footprint_bytes((bundle or {}).get("model"))
+        else:
+            memory_bytes = _safe_path_size_bytes((bundle or {}).get("model_path"))
+    memory_kind = _local_llm_memory_kind(provider_token, bundle)
+    return {
+        "cache_key": _local_llm_cache_token(provider_token, cache_key),
+        "provider": provider_token,
+        "provider_label": _local_llm_provider_label(provider_token),
+        "model": model,
+        "device": device,
+        "memory_kind": memory_kind,
+        "estimated_bytes": memory_bytes,
+        "model_path": str((bundle or {}).get("model_path") or ""),
+        "model_root": str((bundle or {}).get("model_root") or ""),
+        "loaded_ts": float((bundle or {}).get("loaded_ts") or 0.0),
+        "gpu_backend": str((bundle or {}).get("gpu_backend") or ""),
+        "warning": str((bundle or {}).get("gpu_warning") or (bundle or {}).get("mtp_warning") or ""),
+        "supports_vision": bool((bundle or {}).get("supports_vision")),
+        "mmproj_path": str((bundle or {}).get("mmproj_path") or (bundle or {}).get("vision_projector_path") or ""),
+        "vision_chat_handler": str((bundle or {}).get("vision_chat_handler") or ""),
+    }
+
+
+def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    cache_specs = (
+        (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_MODEL_CACHE_LOCK),
+    )
+    for provider, cache, lock in cache_specs:
+        with lock:
+            items = list(cache.items())
+        for cache_key, bundle in items:
+            if not isinstance(bundle, dict):
+                continue
+            try:
+                rows.append(_local_llm_loaded_model_row(provider, tuple(cache_key), bundle))
+            except Exception:
+                logger.debug("[local-llm] failed to summarize loaded model provider=%s key=%s", provider, cache_key, exc_info=True)
+
+    rows.sort(key=lambda row: (str(row.get("provider_label") or ""), str(row.get("model") or "")))
+    totals = {
+        "estimated_ram_bytes": 0,
+        "estimated_vram_bytes": 0,
+        "estimated_unified_bytes": 0,
+        "estimated_total_bytes": 0,
+    }
+    by_provider: Dict[str, int] = {}
+    for row in rows:
+        provider = str(row.get("provider") or "").strip()
+        by_provider[provider] = by_provider.get(provider, 0) + 1
+        estimated = max(0, int(row.get("estimated_bytes") or 0))
+        totals["estimated_total_bytes"] += estimated
+        kind = str(row.get("memory_kind") or "ram").strip().lower()
+        if kind == "vram":
+            totals["estimated_vram_bytes"] += estimated
+        elif kind == "unified":
+            totals["estimated_unified_bytes"] += estimated
+        else:
+            totals["estimated_ram_bytes"] += estimated
+
+    system = {
+        "cpu": _system_cpu_snapshot(),
+        "ram": _system_ram_snapshot(),
+        "vram": _system_vram_snapshot(),
+        "unified_memory": bool(_mlx_lm_is_apple_silicon()),
+    }
+    payload = {
+        "loaded_count": len(rows),
+        "by_provider": by_provider,
+        "totals": totals,
+        "system": system,
+    }
+    if include_models:
+        payload["models"] = rows
+    return payload
+
+
+def _release_local_llm_runtime_memory() -> None:
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import torch  # type: ignore
+
+        cuda = getattr(torch, "cuda", None)
+        if cuda is not None and bool(cuda.is_available()):
+            try:
+                cuda.empty_cache()
+            except Exception:
+                pass
+        mps = getattr(torch, "mps", None)
+        if mps is not None and hasattr(mps, "empty_cache"):
+            try:
+                mps.empty_cache()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        import mlx.core as mx  # type: ignore
+
+        clear_cache = getattr(mx, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+    except Exception:
+        pass
+
+
+def unload_local_llm_models(
+    *,
+    provider: Any = "",
+    model: Any = "",
+    cache_key: Any = "",
+    all_models: bool = False,
+) -> Dict[str, Any]:
+    requested_provider = _normalize_hydra_llm_provider(provider) if str(provider or "").strip() else ""
+    requested_model = str(model or "").strip()
+    token_provider, decoded_key = _decode_local_llm_cache_token(cache_key)
+    if token_provider:
+        requested_provider = token_provider
+
+    removed: List[Dict[str, Any]] = []
+    removed_bundles: List[Dict[str, Any]] = []
+    cache_specs = (
+        (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_GENERATION_LOCKS, _HF_LLM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_GENERATION_LOCKS, _MLX_LM_MODEL_CACHE_LOCK),
+    )
+
+    for provider_token, cache, locks, lock in cache_specs:
+        if requested_provider and provider_token != requested_provider:
+            continue
+        with lock:
+            for raw_key, bundle in list(cache.items()):
+                key = tuple(raw_key)
+                key_model = str(key[0] if key else "").strip()
+                if not all_models:
+                    if decoded_key and key != decoded_key:
+                        continue
+                    if not decoded_key and requested_model and key_model != requested_model:
+                        continue
+                    if not decoded_key and not requested_model:
+                        continue
+                row = _local_llm_loaded_model_row(provider_token, key, bundle if isinstance(bundle, dict) else {})
+                removed.append(row)
+                if isinstance(bundle, dict):
+                    removed_bundles.append(bundle)
+                    bundle.clear()
+                cache.pop(raw_key, None)
+                locks.pop(raw_key, None)
+
+    removed_bundles.clear()
+    if removed:
+        _release_local_llm_runtime_memory()
+    return {
+        "ok": True,
+        "unloaded_count": len(removed),
+        "models": removed,
+        "loaded": get_local_llm_loaded_models_snapshot(include_models=True),
+    }
+
+
+def _llama_cpp_system_info(llama_cpp_module: Any = None) -> str:
+    try:
+        module = llama_cpp_module
+        if module is None:
+            import llama_cpp as imported_llama_cpp  # type: ignore
+
+            module = imported_llama_cpp
+        info_fn = getattr(module, "llama_print_system_info", None)
+        if not callable(info_fn):
+            return ""
+        info = info_fn()
+        if isinstance(info, bytes):
+            return info.decode("utf-8", "replace").strip()
+        return str(info or "").strip()
+    except Exception:
+        return ""
+
+
+def _llama_cpp_gpu_backend(system_info: str) -> str:
+    text = re.sub(r"\s+", " ", str(system_info or "").lower())
+    if not text:
+        return ""
+    checks = (
+        ("cuda", ("cuda", "cublas")),
+        ("metal", ("metal",)),
+        ("vulkan", ("vulkan",)),
+        ("rocm", ("hip", "hipblas", "rocblas")),
+        ("sycl", ("sycl",)),
+        ("opencl", ("opencl", "clblast")),
+    )
+    for label, names in checks:
+        for name in names:
+            if re.search(rf"\b{re.escape(name)}\s*:", text):
+                return label
+            if re.search(rf"\bggml[_-]{re.escape(name)}\s*:", text):
+                return label
+            if re.search(rf"\b{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text):
+                return label
+            if re.search(rf"\bggml[_-]{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text):
+                return label
+    return ""
+
+
+def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
+    diagnostics: Dict[str, Any] = {
+        "available": False,
+        "n_gpu_layers": _llama_cpp_n_gpu_layers(),
+        "n_ctx": _llama_cpp_n_ctx(),
+        "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
+        "mtp_enabled": _llama_cpp_mtp_enabled(),
+        "mtp_spec_type": _llama_cpp_mtp_spec_type(),
+        "mtp_draft_tokens": _llama_cpp_mtp_draft_tokens(),
+        "env": {
+            "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
+            "TATER_LLAMA_CPP_VISION_N_CTX": str(os.getenv("TATER_LLAMA_CPP_VISION_N_CTX") or ""),
+            "TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS") or ""),
+            "TATER_LLAMA_CPP_MTP_ENABLED": str(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED") or ""),
+            "TATER_LLAMA_CPP_MTP_DRAFT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS") or ""),
+            "TATER_LLAMA_CPP_MTP_SPEC_TYPE": str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or ""),
+            "CUDA_VISIBLE_DEVICES": str(os.getenv("CUDA_VISIBLE_DEVICES") or ""),
+            "NVIDIA_VISIBLE_DEVICES": str(os.getenv("NVIDIA_VISIBLE_DEVICES") or ""),
+        },
+        "ld_library_path": str(os.getenv("LD_LIBRARY_PATH") or ""),
+    }
+    try:
+        try:
+            from importlib import metadata
+
+            diagnostics["installed_version"] = metadata.version("llama-cpp-python")
+        except Exception:
+            pass
+        import llama_cpp as llama_cpp_module  # type: ignore
+        from llama_cpp import Llama  # type: ignore
+
+        system_info = _llama_cpp_system_info(llama_cpp_module)
+        gpu_backend = _llama_cpp_gpu_backend(system_info)
+        mtp_support = _llama_cpp_mtp_load_arg_support(Llama)
+        mtp_warning = ""
+        if diagnostics["mtp_enabled"] and not mtp_support.get("supported"):
+            mtp_warning = (
+                "MTP is enabled, but the installed llama-cpp-python high-level API does not expose "
+                "native draft-mtp load arguments yet."
+            )
+        diagnostics.update(
+            {
+                "available": True,
+                "module_path": str(getattr(llama_cpp_module, "__file__", "") or ""),
+                "version": str(getattr(llama_cpp_module, "__version__", "") or ""),
+                "system_info": system_info,
+                "gpu_backend": gpu_backend,
+                "gpu_enabled": bool(gpu_backend),
+                "mtp_supported": bool(mtp_support.get("supported")),
+                "mtp_load_args": {
+                    "type_key": str(mtp_support.get("type_key") or ""),
+                    "draft_key": str(mtp_support.get("draft_key") or ""),
+                },
+            }
+        )
+        if diagnostics["n_gpu_layers"] == 0:
+            diagnostics["warning"] = "TATER_LLAMA_CPP_N_GPU_LAYERS is set to CPU-only."
+        elif not gpu_backend:
+            diagnostics["warning"] = "llama-cpp-python is installed, but it does not report a GPU backend."
+        if mtp_warning:
+            diagnostics["mtp_warning"] = mtp_warning
+            diagnostics["warning"] = _llama_cpp_warning_text(diagnostics.get("warning"), mtp_warning)
+    except Exception as exc:
+        diagnostics["error"] = str(exc) or type(exc).__name__
+        if "libcuda.so.1" in str(exc):
+            diagnostics["warning"] = (
+                "The CUDA llama.cpp build is installed, but libcuda.so.1 is not visible. "
+                "Start the container with the NVIDIA runtime/GPU access so the host driver library is mounted."
+            )
+
+    try:
+        import torch  # type: ignore
+
+        diagnostics["torch_cuda_available"] = bool(getattr(torch, "cuda", None) and torch.cuda.is_available())
+        diagnostics["torch_cuda_device_count"] = int(torch.cuda.device_count()) if getattr(torch, "cuda", None) else 0
+    except Exception as exc:
+        diagnostics["torch_error"] = str(exc) or type(exc).__name__
+    return diagnostics
+
+
+def _llama_cpp_disable_thinking_enabled() -> bool:
+    return _boolish(os.getenv("TATER_LLAMA_CPP_DISABLE_THINKING"), default=True)
+
+
+def _llama_cpp_preferred_quants() -> List[str]:
+    raw = str(os.getenv("TATER_LLAMA_CPP_PREFERRED_QUANTS") or "Q4_K_M,Q5_K_M,Q4_K_S,Q5_0,Q4_0,Q8_0").strip()
+    return [item.strip().upper() for item in raw.split(",") if item.strip()]
+
+
+def _mlx_lm_is_apple_silicon() -> bool:
+    return platform.system().lower() == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+
+
+def _mlx_lm_trust_remote_code() -> bool:
+    return _boolish(os.getenv("TATER_MLX_LM_TRUST_REMOTE_CODE"), default=False)
+
+
+def _mlx_lm_lazy_load() -> bool:
+    return _boolish(os.getenv("TATER_MLX_LM_LAZY"), default=False)
+
+
+def _mlx_lm_disable_thinking_enabled() -> bool:
+    return _boolish(os.getenv("TATER_MLX_LM_DISABLE_THINKING"), default=True)
+
+
+def _mlx_lm_adapter_path() -> str:
+    return os.path.abspath(os.path.expanduser(str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip())) if str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip() else ""
+
+
+def _mlx_lm_revision() -> str:
+    return str(os.getenv("TATER_MLX_LM_REVISION") or "").strip()
+
+
+def _mlx_lm_hub_token() -> Optional[str]:
+    token = _text(os.getenv("TATER_MLX_LM_TOKEN") or os.getenv("TATER_HF_TRANSFORMERS_TOKEN")).strip()
+    if not token:
+        token = _huggingface_integration_token()
+    if not token:
+        token = _text(
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACE_HUB_TOKEN")
+            or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            or os.getenv("HUGGINGFACE_TOKEN")
+            or os.getenv("HF_HUB_TOKEN")
+            or os.getenv("HUGGINGFACE_API_TOKEN")
+        ).strip()
+    return token or None
+
+
+def _mlx_lm_max_kv_size() -> Optional[int]:
+    return _local_llm_context_tokens(
+        HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
+        ("TATER_MLX_LM_MAX_KV_SIZE",),
+        None,
+        minimum=128,
+    )
+
+
+def _emit_hf_llm_progress(progress_callback: Optional[HFProgressCallback], payload: Dict[str, Any]) -> None:
+    if not callable(progress_callback):
+        return
+    try:
+        progress_callback(dict(payload or {}))
+    except HfLlmDownloadCancelled:
+        raise
+    except Exception:
+        pass
+
+
+def _hf_cache_repo_dir(cache_dir: str, repo_id: str) -> Path:
+    repo_token = str(repo_id or "").strip().replace("/", "--")
+    return Path(str(cache_dir or "")).expanduser() / f"models--{repo_token}"
+
+
+def _hf_file_size_and_blob_ids(repo_id: str, filename: str) -> Tuple[int, List[str]]:
+    repo = str(repo_id or "").strip()
+    target = str(filename or "").strip()
+    if not repo or not target:
+        return 0, []
+    try:
+        from huggingface_hub import HfApi  # type: ignore
+    except Exception:
+        return 0, []
+    try:
+        api = HfApi(token=_hf_llm_hub_token())
+        try:
+            info = api.model_info(repo_id=repo, files_metadata=True)
+        except TypeError:
+            info = api.model_info(repo_id=repo)
+    except Exception:
+        return 0, []
+
+    for sibling in list(getattr(info, "siblings", []) or []):
+        path = str(getattr(sibling, "rfilename", "") or getattr(sibling, "path", "") or "").strip()
+        if path != target:
+            continue
+        size = 0
+        for value in (getattr(sibling, "size", None),):
+            try:
+                size = max(size, int(value or 0))
+            except Exception:
+                pass
+        blob_ids: List[str] = []
+        for value in (
+            getattr(sibling, "blob_id", None),
+            getattr(sibling, "oid", None),
+        ):
+            token = str(value or "").strip()
+            if token and token not in blob_ids:
+                blob_ids.append(token)
+        lfs = getattr(sibling, "lfs", None)
+        if isinstance(lfs, dict):
+            for key in ("size",):
+                try:
+                    size = max(size, int(lfs.get(key) or 0))
+                except Exception:
+                    pass
+            for key in ("sha256", "oid"):
+                token = str(lfs.get(key) or "").strip()
+                if token and token not in blob_ids:
+                    blob_ids.append(token)
+        return max(0, size), blob_ids
+    return 0, []
+
+
+def _download_stat_size(path: Path, *, total_bytes: int = 0) -> int:
+    try:
+        stat = path.stat()
+    except Exception:
+        return 0
+    logical_size = max(0, int(getattr(stat, "st_size", 0) or 0))
+    allocated_size = max(0, int(getattr(stat, "st_blocks", 0) or 0) * 512)
+    if total_bytes > 0 and logical_size >= int(total_bytes * 0.95) and 0 < allocated_size < int(logical_size * 0.8):
+        return allocated_size
+    return logical_size
+
+
+class _HFHubFileDownloadMonitor:
+    def __init__(
+        self,
+        *,
+        repo_id: str,
+        filename: str,
+        cache_dir: str,
+        total_bytes: int,
+        blob_ids: List[str],
+        description: str,
+        progress_callback: Optional[HFProgressCallback],
+    ):
+        self.repo_id = str(repo_id or "").strip()
+        self.filename = str(filename or "").strip()
+        self.cache_dir = str(cache_dir or "").strip()
+        self.total_bytes = max(0, int(total_bytes or 0))
+        self.blob_ids = [str(item or "").strip() for item in (blob_ids or []) if str(item or "").strip()]
+        self.description = str(description or self.filename or "Downloading model file").strip()
+        self.progress_callback = progress_callback
+        self.repo_dir = _hf_cache_repo_dir(self.cache_dir, self.repo_id)
+        self.started_at = time.time()
+        self.event_id = f"cache-monitor:{self.repo_id}:{self.filename}"
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.last_completed = 0
+        self.last_ts = self.started_at
+        self.last_rate = 0.0
+        self.last_increase_ts = self.started_at
+
+    def start(self) -> None:
+        if not callable(self.progress_callback) or self.total_bytes <= 0:
+            return
+        self.thread = threading.Thread(target=self._run, name="hf-download-progress-monitor", daemon=True)
+        self.thread.start()
+
+    def stop(self, *, completed: bool = False) -> None:
+        self.stop_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=1.5)
+        if completed and self.total_bytes > 0:
+            try:
+                self._emit(self.total_bytes, event="complete", rate=0.0)
+            except HfLlmDownloadCancelled:
+                pass
+
+    def _candidate_paths(self) -> List[Path]:
+        paths: List[Path] = []
+        blobs_dir = self.repo_dir / "blobs"
+        for blob_id in self.blob_ids:
+            for suffix in ("", ".incomplete"):
+                path = blobs_dir / f"{blob_id}{suffix}"
+                if path not in paths:
+                    paths.append(path)
+        snapshots_dir = self.repo_dir / "snapshots"
+        if self.filename and snapshots_dir.exists():
+            try:
+                target_suffix = "/" + self.filename.replace("\\", "/")
+                for path in snapshots_dir.rglob(Path(self.filename).name):
+                    try:
+                        if path.as_posix().endswith(target_suffix) and path not in paths:
+                            paths.append(path)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        return paths
+
+    def _generic_recent_size(self) -> int:
+        if not self.repo_dir.exists():
+            return 0
+        newest_size = 0
+        cutoff = self.started_at - 5.0
+        try:
+            for path in self.repo_dir.rglob("*"):
+                try:
+                    if not path.is_file():
+                        continue
+                    stat = path.stat()
+                    if float(getattr(stat, "st_mtime", 0.0) or 0.0) < cutoff:
+                        continue
+                    size = _download_stat_size(path, total_bytes=self.total_bytes)
+                    if self.total_bytes > 0:
+                        size = min(size, self.total_bytes)
+                    newest_size = max(newest_size, size)
+                except Exception:
+                    continue
+        except Exception:
+            return newest_size
+        return newest_size
+
+    def _completed_bytes(self) -> int:
+        sizes: List[int] = []
+        for path in self._candidate_paths():
+            size = _download_stat_size(path, total_bytes=self.total_bytes)
+            if size > 0:
+                sizes.append(size)
+        completed = max(sizes) if sizes else self._generic_recent_size()
+        if self.total_bytes > 0:
+            completed = min(completed, self.total_bytes)
+        return max(0, int(completed))
+
+    def _emit(self, completed: int, *, event: str = "update", rate: Optional[float] = None) -> None:
+        total = self.total_bytes
+        completed = max(0, min(int(completed), total if total > 0 else int(completed)))
+        rate_value = max(0.0, float(rate if rate is not None else self.last_rate))
+        eta_seconds = ((total - completed) / rate_value) if total > completed and rate_value > 0.0 else 0.0
+        progress = (completed / total * 100.0) if total > 0 else 0.0
+        _emit_hf_llm_progress(
+            self.progress_callback,
+            {
+                "event": event,
+                "stage": "download",
+                "id": self.event_id,
+                "source": "cache_monitor",
+                "description": self.description,
+                "unit": "B",
+                "completed": completed,
+                "total": total,
+                "rate": rate_value,
+                "elapsed": max(0.0, time.time() - self.started_at),
+                "eta_seconds": eta_seconds,
+                "progress": progress,
+            },
+        )
+
+    def _run(self) -> None:
+        interval = max(0.25, min(2.0, float(os.getenv("TATER_HF_DOWNLOAD_MONITOR_INTERVAL_SEC", "0.5") or 0.5)))
+        while not self.stop_event.wait(interval):
+            now = time.time()
+            completed = self._completed_bytes()
+            if completed > self.last_completed:
+                elapsed = max(0.001, now - self.last_ts)
+                raw_rate = float(completed - self.last_completed) / elapsed
+                self.last_rate = raw_rate if self.last_rate <= 0.0 else (self.last_rate * 0.65) + (raw_rate * 0.35)
+                self.last_completed = completed
+                self.last_increase_ts = now
+            elif now - self.last_increase_ts > 30.0:
+                self.last_rate = 0.0
+            self.last_ts = now
+            try:
+                self._emit(self.last_completed)
+            except HfLlmDownloadCancelled:
+                self.stop_event.set()
+                return
+
+
+def _terminate_process(proc: Any, *, timeout: float = 3.0, process_group: bool = False) -> None:
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+    if process_group and os.name != "nt":
+        try:
+            os.killpg(int(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    else:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=timeout)
+        return
+    except Exception:
+        pass
+    if process_group and os.name != "nt":
+        try:
+            os.killpg(int(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=1.0)
+    except Exception:
+        pass
+
+
+def _purge_hf_cached_file(cache_dir: str, repo_id: str, filename: str, blob_ids: List[str]) -> List[str]:
+    repo_dir = _hf_cache_repo_dir(cache_dir, repo_id)
+    removed: List[str] = []
+    candidates: List[Path] = []
+    blobs_dir = repo_dir / "blobs"
+    for blob_id in [str(item or "").strip() for item in (blob_ids or []) if str(item or "").strip()]:
+        candidates.append(blobs_dir / blob_id)
+        candidates.append(blobs_dir / f"{blob_id}.incomplete")
+        lock_dir = Path(str(cache_dir or "")).expanduser() / ".locks" / f"models--{str(repo_id or '').strip().replace('/', '--')}"
+        candidates.append(lock_dir / f"{blob_id}.lock")
+
+    target = str(filename or "").replace("\\", "/").strip()
+    snapshots_dir = repo_dir / "snapshots"
+    if target and snapshots_dir.exists():
+        try:
+            for snapshot_dir in snapshots_dir.iterdir():
+                candidates.append(snapshot_dir / target)
+        except Exception:
+            pass
+
+    if repo_dir.exists():
+        try:
+            for path in repo_dir.rglob("*.incomplete"):
+                candidates.append(path)
+        except Exception:
+            pass
+
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            token = str(path)
+            if token in seen:
+                continue
+            seen.add(token)
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                removed.append(token)
+        except Exception:
+            continue
+    return removed
+
+
+def _purge_hf_cached_snapshot(cache_dir: str, repo_id: str) -> List[str]:
+    root = Path(str(cache_dir or "")).expanduser()
+    repo_dir = _hf_cache_repo_dir(str(root), repo_id)
+    lock_dir = root / ".locks" / f"models--{str(repo_id or '').strip().replace('/', '--')}"
+    removed: List[str] = []
+
+    try:
+        root_resolved = root.resolve()
+    except Exception:
+        root_resolved = root
+
+    for path in (repo_dir, lock_dir):
+        try:
+            target = path.resolve()
+            if root_resolved not in [target, *target.parents]:
+                continue
+            if path.exists() or path.is_symlink():
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                removed.append(str(path))
+        except Exception:
+            continue
+    return removed
+
+
+def _read_worker_json_lines(stream: Any, out_queue: "queue.Queue[str]") -> None:
+    if stream is None:
+        return
+    try:
+        for line in stream:
+            if line:
+                out_queue.put(str(line))
+    except Exception:
+        return
+
+
+def _drain_snapshot_worker_lines(
+    line_queue: "queue.Queue[str]",
+    progress_callback: Optional[HFProgressCallback],
+) -> Tuple[str, str]:
+    result_path = ""
+    worker_error = ""
+    while True:
+        try:
+            raw_line = line_queue.get_nowait()
+        except queue.Empty:
+            break
+        raw_line = str(raw_line or "").strip()
+        if not raw_line:
+            continue
+        try:
+            payload = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_type = str(payload.get("type") or "").strip().lower()
+        if payload_type == "progress":
+            event = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+            _emit_hf_llm_progress(progress_callback, event)
+        elif payload_type == "result":
+            result_path = str(payload.get("path") or "").strip()
+        elif payload_type == "error":
+            worker_error = str(payload.get("error") or "").strip()
+    return result_path, worker_error
+
+
+def _snapshot_download_with_progress_worker(
+    *,
+    kwargs: Dict[str, Any],
+    progress_callback: Optional[HFProgressCallback],
+    description: str,
+) -> str:
+    repo_id = str((kwargs or {}).get("repo_id") or "").strip()
+    cache_dir = str((kwargs or {}).get("cache_dir") or "").strip()
+    if not callable(progress_callback) or not _boolish(os.getenv("TATER_HF_DOWNLOAD_WORKER"), default=True):
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        direct_kwargs = dict(kwargs or {})
+        tqdm_class = _make_hf_snapshot_tqdm_class(progress_callback)
+        if tqdm_class is not None:
+            direct_kwargs["tqdm_class"] = tqdm_class
+        try:
+            return str(snapshot_download(**direct_kwargs))
+        except TypeError as exc:
+            if "tqdm_class" not in direct_kwargs:
+                raise
+            logger.debug("huggingface_hub snapshot_download rejected tqdm_class; retrying without progress hook: %s", exc)
+            direct_kwargs.pop("tqdm_class", None)
+            return str(snapshot_download(**direct_kwargs))
+
+    worker_kwargs = dict(kwargs or {})
+    token_value = str(worker_kwargs.pop("token", "") or "").strip()
+    worker_payload = json.dumps({"kwargs": worker_kwargs}, separators=(",", ":"))
+    worker_code = r'''
+import json
+import os
+import sys
+import uuid
+
+from huggingface_hub import snapshot_download
+
+try:
+    from tqdm.auto import tqdm as base_tqdm
+except Exception:
+    base_tqdm = None
+
+
+def emit(payload):
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+if base_tqdm is not None:
+    class TaterSnapshotTqdm(base_tqdm):
+        def __init__(self, *args, **kwargs):
+            self._tater_progress_id = uuid.uuid4().hex
+            super().__init__(*args, **kwargs)
+            self._emit_tater_progress("start")
+
+        def _emit_tater_progress(self, event):
+            try:
+                fmt = getattr(self, "format_dict", {}) or {}
+            except Exception:
+                fmt = {}
+            try:
+                total = float(getattr(self, "total", None) or fmt.get("total") or 0.0)
+            except Exception:
+                total = 0.0
+            try:
+                completed = float(getattr(self, "n", None) or fmt.get("n") or 0.0)
+            except Exception:
+                completed = 0.0
+            try:
+                rate = float(fmt.get("rate") or 0.0)
+            except Exception:
+                rate = 0.0
+            try:
+                elapsed = float(fmt.get("elapsed") or 0.0)
+            except Exception:
+                elapsed = 0.0
+            eta_seconds = ((total - completed) / rate) if total > completed and rate > 0.0 else 0.0
+            progress = (completed / total * 100.0) if total > 0.0 else 0.0
+            emit({
+                "type": "progress",
+                "payload": {
+                    "event": event,
+                    "stage": "download",
+                    "id": self._tater_progress_id,
+                    "source": "worker_tqdm",
+                    "description": str(getattr(self, "desc", "") or fmt.get("prefix") or "").strip(),
+                    "unit": str(fmt.get("unit") or "").strip(),
+                    "completed": completed,
+                    "total": total,
+                    "rate": rate,
+                    "elapsed": elapsed,
+                    "eta_seconds": eta_seconds,
+                    "progress": progress,
+                },
+            })
+
+        def update(self, n=1):
+            result = super().update(n)
+            self._emit_tater_progress("update")
+            return result
+
+        def close(self):
+            self._emit_tater_progress("close")
+            return super().close()
+
+
+try:
+    config = json.loads(sys.argv[1])
+    kwargs = dict(config.get("kwargs") or {})
+    token = os.environ.get("HF_TOKEN") or None
+    if token and not kwargs.get("token"):
+        kwargs["token"] = token
+    if base_tqdm is not None:
+        kwargs["tqdm_class"] = TaterSnapshotTqdm
+    try:
+        path = snapshot_download(**kwargs)
+    except TypeError:
+        if "tqdm_class" not in kwargs:
+            raise
+        kwargs.pop("tqdm_class", None)
+        path = snapshot_download(**kwargs)
+    emit({"type": "result", "path": path})
+except Exception as exc:
+    emit({"type": "error", "error": str(exc) or type(exc).__name__})
+    raise
+'''
+    env = os.environ.copy()
+    if token_value:
+        env["HF_TOKEN"] = token_value
+    else:
+        env.pop("HF_TOKEN", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", worker_code, worker_payload],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+        env=env,
+        start_new_session=(os.name != "nt"),
+    )
+    line_queue: "queue.Queue[str]" = queue.Queue()
+    reader_thread = threading.Thread(
+        target=_read_worker_json_lines,
+        args=(proc.stdout, line_queue),
+        name="hf-snapshot-worker-reader",
+        daemon=True,
+    )
+    reader_thread.start()
+    heartbeat_id = f"snapshot-worker:{repo_id}"
+    result_path = ""
+    worker_error = ""
+    try:
+        while True:
+            next_path, next_error = _drain_snapshot_worker_lines(line_queue, progress_callback)
+            if next_path:
+                result_path = next_path
+            if next_error:
+                worker_error = next_error
+            return_code = proc.poll()
+            if return_code is not None:
+                break
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "heartbeat",
+                    "stage": "download",
+                    "id": heartbeat_id,
+                    "source": "worker",
+                    "description": description,
+                    "progress": 0.0,
+                },
+            )
+            time.sleep(0.25)
+
+        next_path, next_error = _drain_snapshot_worker_lines(line_queue, progress_callback)
+        if next_path:
+            result_path = next_path
+        if next_error:
+            worker_error = next_error
+
+        if return_code != 0:
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "error",
+                    "stage": "download",
+                    "id": heartbeat_id,
+                    "source": "worker",
+                    "description": description,
+                    "progress": 0.0,
+                },
+            )
+            raise RuntimeError(worker_error or f"Hugging Face snapshot download failed for {repo_id} with exit code {return_code}.")
+
+        if result_path:
+            return result_path
+
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        local_kwargs = dict(kwargs or {})
+        local_kwargs["local_files_only"] = True
+        return str(snapshot_download(**local_kwargs))
+    except HfLlmDownloadCancelled:
+        _terminate_process(proc, process_group=True)
+        removed = _purge_hf_cached_snapshot(cache_dir, repo_id)
+        logger.info("[hf-download] cancelled snapshot %s removed_paths=%s", repo_id, len(removed))
+        raise
+    finally:
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:
+            pass
+        if reader_thread.is_alive():
+            reader_thread.join(timeout=1.0)
+
+
+def _hf_hub_download_with_progress_worker(
+    *,
+    repo_id: str,
+    filename: str,
+    cache_dir: str,
+    token: Optional[str],
+    progress_callback: Optional[HFProgressCallback],
+    description: str,
+    total_bytes: int,
+    blob_ids: List[str],
+) -> str:
+    if not callable(progress_callback) or not _boolish(os.getenv("TATER_HF_DOWNLOAD_WORKER"), default=True):
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("Hugging Face downloads need huggingface_hub installed.") from exc
+        kwargs: Dict[str, Any] = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "cache_dir": cache_dir,
+        }
+        if token:
+            kwargs["token"] = token
+        tqdm_class = _make_hf_snapshot_tqdm_class(progress_callback)
+        if tqdm_class is not None:
+            kwargs["tqdm_class"] = tqdm_class
+        try:
+            return str(hf_hub_download(**kwargs))
+        except TypeError as exc:
+            if "tqdm_class" not in kwargs:
+                raise
+            logger.debug("huggingface_hub hf_hub_download rejected tqdm_class; retrying without progress hook: %s", exc)
+            kwargs.pop("tqdm_class", None)
+            return str(hf_hub_download(**kwargs))
+
+    monitor = _HFHubFileDownloadMonitor(
+        repo_id=repo_id,
+        filename=filename,
+        cache_dir=cache_dir,
+        total_bytes=total_bytes,
+        blob_ids=blob_ids,
+        description=description,
+        progress_callback=progress_callback,
+    )
+    monitor.start()
+    worker_code = (
+        "import json, os, sys\n"
+        "from huggingface_hub import hf_hub_download\n"
+        "token = os.environ.get('HF_TOKEN') or None\n"
+        "path = hf_hub_download(repo_id=sys.argv[1], filename=sys.argv[2], cache_dir=sys.argv[3], token=token)\n"
+        "print(json.dumps({'path': path}), flush=True)\n"
+    )
+    env = os.environ.copy()
+    if token:
+        env["HF_TOKEN"] = str(token)
+    else:
+        env.pop("HF_TOKEN", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", worker_code, repo_id, filename, cache_dir],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        start_new_session=(os.name != "nt"),
+    )
+    path = ""
+    heartbeat_id = f"worker:{repo_id}:{filename}"
+    try:
+        while True:
+            return_code = proc.poll()
+            if return_code is not None:
+                break
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "heartbeat",
+                    "stage": "download",
+                    "id": heartbeat_id,
+                    "source": "worker",
+                    "description": description,
+                    "progress": 0.0,
+                },
+            )
+            time.sleep(0.25)
+
+        if return_code != 0:
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "error",
+                    "stage": "download",
+                    "id": heartbeat_id,
+                    "source": "worker",
+                    "description": description,
+                    "progress": 0.0,
+                },
+            )
+            raise RuntimeError(f"Hugging Face download process failed for {repo_id}/{filename} with exit code {return_code}.")
+
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("Hugging Face downloads need huggingface_hub installed.") from exc
+        kwargs: Dict[str, Any] = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "cache_dir": cache_dir,
+            "local_files_only": True,
+        }
+        if token:
+            kwargs["token"] = token
+        path = str(hf_hub_download(**kwargs))
+        return path
+    except HfLlmDownloadCancelled:
+        _terminate_process(proc, process_group=True)
+        removed = _purge_hf_cached_file(cache_dir, repo_id, filename, blob_ids)
+        logger.info("[hf-download] cancelled %s/%s removed_files=%s", repo_id, filename, len(removed))
+        raise
+    finally:
+        monitor.stop(completed=bool(path and os.path.exists(str(path))))
+
+
+def _make_hf_snapshot_tqdm_class(progress_callback: Optional[HFProgressCallback]) -> Any:
+    if not callable(progress_callback):
+        return None
+    try:
+        from tqdm.auto import tqdm as base_tqdm  # type: ignore
+    except Exception:
+        return None
+
+    class TaterHFSnapshotTqdm(base_tqdm):
+        def __init__(self, *args, **kwargs):
+            self._tater_progress_id = uuid.uuid4().hex
+            super().__init__(*args, **kwargs)
+            self._emit_tater_progress("start")
+
+        def _emit_tater_progress(self, event: str) -> None:
+            try:
+                fmt = getattr(self, "format_dict", {}) or {}
+            except Exception:
+                fmt = {}
+            try:
+                total = float(getattr(self, "total", None) or fmt.get("total") or 0.0)
+            except Exception:
+                total = 0.0
+            try:
+                completed = float(getattr(self, "n", None) or fmt.get("n") or 0.0)
+            except Exception:
+                completed = 0.0
+            try:
+                rate = float(fmt.get("rate") or 0.0)
+            except Exception:
+                rate = 0.0
+            try:
+                elapsed = float(fmt.get("elapsed") or 0.0)
+            except Exception:
+                elapsed = 0.0
+            eta_seconds = ((total - completed) / rate) if total > completed and rate > 0.0 else 0.0
+            progress = (completed / total * 100.0) if total > 0.0 else 0.0
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": event,
+                    "stage": "download",
+                    "id": self._tater_progress_id,
+                    "source": "tqdm",
+                    "description": str(getattr(self, "desc", "") or fmt.get("prefix") or "").strip(),
+                    "unit": str(fmt.get("unit") or "").strip(),
+                    "completed": completed,
+                    "total": total,
+                    "rate": rate,
+                    "elapsed": elapsed,
+                    "eta_seconds": eta_seconds,
+                    "progress": progress,
+                },
+            )
+
+        def update(self, n=1):
+            result = super().update(n)
+            self._emit_tater_progress("update")
+            return result
+
+        def close(self):
+            self._emit_tater_progress("close")
+            return super().close()
+
+    return TaterHFSnapshotTqdm
+
+
+def _download_hf_llm_snapshot(
+    model_id: str,
+    *,
+    model_root: str,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> None:
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "start",
+            "stage": "download",
+            "description": "Resolving model repository",
+            "progress": 0.0,
+        },
+    )
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception:
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "skip",
+                "stage": "download",
+                "description": "huggingface_hub is unavailable; Transformers will download files while loading",
+                "progress": 0.0,
+            },
+        )
+        return
+
+    kwargs: Dict[str, Any] = {
+        "repo_id": str(model_id or "").strip(),
+        "cache_dir": model_root,
+        "max_workers": _hf_llm_snapshot_max_workers(),
+        "ignore_patterns": [
+            "*.gguf",
+            "*.onnx",
+            "*.tflite",
+            "*.h5",
+            "*.ot",
+            "*.msgpack",
+            "*.mlmodel",
+            "onnx/*",
+            "*/onnx/*",
+        ],
+    }
+    token = _hf_llm_hub_token()
+    if token:
+        kwargs["token"] = token
+    _ = snapshot_download
+    _snapshot_download_with_progress_worker(
+        kwargs=kwargs,
+        progress_callback=progress_callback,
+        description="Downloading model files",
+    )
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "complete",
+            "stage": "download",
+            "description": "Model files are cached",
+            "progress": 100.0,
+        },
+    )
+
+
+def _hf_model_config_supports_vision(config: Any) -> bool:
+    if config is None:
+        return False
+    for attr in ("vision_config", "image_token_id", "mm_vision_tower", "vision_tower"):
+        try:
+            if getattr(config, attr, None) is not None:
+                return True
+        except Exception:
+            pass
+    try:
+        model_type = str(getattr(config, "model_type", "") or "").lower()
+        architectures = " ".join(str(item or "") for item in getattr(config, "architectures", []) or []).lower()
+    except Exception:
+        model_type = ""
+        architectures = ""
+    return any(token in f"{model_type} {architectures}" for token in ("vision", "vl", "vla", "image", "multimodal"))
+
+
+def _hf_processor_supports_vision(processor: Any) -> bool:
+    if processor is None:
+        return False
+    for attr in ("image_processor", "image_processor_class", "vision_processor"):
+        try:
+            if getattr(processor, attr, None) is not None:
+                return True
+        except Exception:
+            pass
+    try:
+        name = str(type(processor).__name__).lower()
+        return any(token in name for token in ("image", "vision", "vl", "multimodal"))
+    except Exception:
+        return False
+
+
+def _parse_llama_cpp_model_ref(model_id: str) -> Dict[str, str]:
+    raw = str(model_id or "").strip()
+    if not raw:
+        raise RuntimeError("llama.cpp GGUF model id or path is required.")
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if raw.endswith(".gguf") and (os.path.exists(expanded) or raw.startswith(("/", "./", "../", "~"))):
+        return {"kind": "local", "path": expanded}
+    if raw.startswith("file://"):
+        path = os.path.abspath(os.path.expanduser(raw[len("file://") :]))
+        return {"kind": "local", "path": path}
+    if raw.startswith("hf://"):
+        raw = raw[len("hf://") :]
+    filename = ""
+    repo_id = raw
+    for sep in ("::", "#"):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            repo_id = left.strip()
+            filename = right.strip()
+            if filename.startswith("filename="):
+                filename = filename.split("=", 1)[1].strip()
+            break
+    if not filename and raw.lower().endswith(".gguf"):
+        parts = raw.split("/")
+        if len(parts) >= 3:
+            repo_id = "/".join(parts[:2])
+            filename = "/".join(parts[2:])
+    return {
+        "kind": "hf",
+        "repo_id": repo_id.strip(),
+        "filename": filename.strip(),
+    }
+
+
+def _llama_cpp_select_gguf_filename(repo_id: str) -> str:
+    preferred_filename = str(os.getenv("TATER_LLAMA_CPP_GGUF_FILENAME") or "").strip()
+    try:
+        from huggingface_hub import HfApi  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "llama.cpp GGUF auto-download needs huggingface_hub installed, or use repo_id::filename.gguf."
+        ) from exc
+
+    token = _hf_llm_hub_token()
+    try:
+        files = HfApi(token=token).list_repo_files(repo_id=str(repo_id or "").strip(), repo_type="model")
+    except Exception as exc:
+        raise RuntimeError(f"Could not list Hugging Face files for {repo_id}: {exc}") from exc
+    gguf_files = [
+        str(path or "")
+        for path in files
+        if str(path or "").lower().endswith(".gguf") and "mmproj" not in str(path or "").lower()
+    ]
+    if not gguf_files:
+        raise RuntimeError(f"No GGUF files found in Hugging Face repo {repo_id}.")
+    if preferred_filename:
+        for path in gguf_files:
+            if path == preferred_filename or path.endswith(f"/{preferred_filename}"):
+                return path
+        raise RuntimeError(f"Preferred GGUF file {preferred_filename} was not found in {repo_id}.")
+    if len(gguf_files) == 1:
+        return gguf_files[0]
+
+    def _score(path: str) -> Tuple[int, int, str]:
+        upper = os.path.basename(path).upper()
+        for index, quant in enumerate(_llama_cpp_preferred_quants()):
+            if quant and quant in upper:
+                return (index, len(path), path)
+        return (999, len(path), path)
+
+    return sorted(gguf_files, key=_score)[0]
+
+
+def _llama_cpp_mmproj_candidates(files: List[str]) -> List[str]:
+    rows = [
+        str(path or "").strip()
+        for path in files
+        if str(path or "").strip().lower().endswith(".gguf") and "mmproj" in str(path or "").strip().lower()
+    ]
+    return sorted(rows, key=lambda path: (len(path), path.lower()))
+
+
+def _local_gguf_quant_label(path: str) -> str:
+    name = os.path.basename(str(path or "")).upper()
+    for quant in ("Q2_K", "Q3_K_M", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16", "BF16"):
+        if quant in name:
+            return quant
+    return ""
+
+
+def _llama_cpp_select_mmproj_filename(repo_id: str, model_filename: str = "") -> str:
+    preferred_filename = str(os.getenv("TATER_LLAMA_CPP_MMPROJ_FILENAME") or "").strip()
+    try:
+        from huggingface_hub import HfApi  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("llama.cpp vision auto-download needs huggingface_hub installed.") from exc
+
+    token = _hf_llm_hub_token()
+    try:
+        files = HfApi(token=token).list_repo_files(repo_id=str(repo_id or "").strip(), repo_type="model")
+    except Exception as exc:
+        raise RuntimeError(f"Could not list Hugging Face files for {repo_id}: {exc}") from exc
+    mmproj_files = _llama_cpp_mmproj_candidates([str(item or "") for item in files])
+    if not mmproj_files:
+        return ""
+    if preferred_filename:
+        for path in mmproj_files:
+            if path == preferred_filename or path.endswith(f"/{preferred_filename}"):
+                return path
+        raise RuntimeError(f"Preferred mmproj file {preferred_filename} was not found in {repo_id}.")
+
+    model_base = os.path.basename(str(model_filename or "")).lower()
+    model_quant = _local_gguf_quant_label(model_base)
+
+    def _score(path: str) -> Tuple[int, int, str]:
+        lower = os.path.basename(path).lower()
+        quant = _local_gguf_quant_label(path)
+        score = 50
+        if model_quant and quant == model_quant:
+            score = 0
+        elif quant in {"F16", "BF16"}:
+            score = 5
+        elif "f16" in lower or "bf16" in lower:
+            score = 5
+        elif "q8_0" in lower:
+            score = 10
+        if model_base:
+            stem = re.sub(r"(?i)(?:^mmproj[-_]?|\.gguf$)", "", lower)
+            model_stem = re.sub(r"(?i)\.gguf$", "", model_base)
+            if stem and (stem in model_stem or model_stem in stem):
+                score -= 2
+        return (score, len(path), path)
+
+    return sorted(mmproj_files, key=_score)[0]
+
+
+def _download_llama_cpp_mmproj(
+    model_id: str,
+    *,
+    model_path: str = "",
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> str:
+    ref = _parse_llama_cpp_model_ref(model_id)
+    if ref.get("kind") == "local":
+        local_path = Path(str(ref.get("path") or model_path or "")).expanduser()
+        if not local_path.exists():
+            return ""
+        candidates = sorted(local_path.parent.glob("*mmproj*.gguf"), key=lambda path: (len(path.name), path.name.lower()))
+        return str(candidates[0]) if candidates else ""
+
+    repo_id = str(ref.get("repo_id") or "").strip()
+    filename = str(ref.get("filename") or "").strip()
+    if not repo_id or "/" not in repo_id:
+        return ""
+    try:
+        mmproj_filename = _llama_cpp_select_mmproj_filename(repo_id, filename)
+    except RuntimeError as exc:
+        logger.debug("[llama-cpp] no mmproj selected for %s: %s", model_id, exc)
+        return ""
+    if not mmproj_filename:
+        return ""
+
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("llama.cpp vision auto-download needs huggingface_hub installed.") from exc
+
+    model_root = _llama_cpp_model_root()
+    os.makedirs(model_root, exist_ok=True)
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "start",
+            "stage": "download",
+            "description": f"Downloading vision projector {mmproj_filename}",
+            "progress": 0.0,
+        },
+    )
+    kwargs: Dict[str, Any] = {
+        "repo_id": repo_id,
+        "filename": mmproj_filename,
+        "cache_dir": model_root,
+    }
+    token = _hf_llm_hub_token()
+    if token:
+        kwargs["token"] = token
+    expected_size, blob_ids = _hf_file_size_and_blob_ids(repo_id, mmproj_filename)
+    path = _hf_hub_download_with_progress_worker(
+        repo_id=repo_id,
+        filename=mmproj_filename,
+        cache_dir=model_root,
+        token=token,
+        progress_callback=progress_callback,
+        description=f"Downloading vision projector {mmproj_filename}",
+        total_bytes=expected_size,
+        blob_ids=blob_ids,
+    )
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "complete",
+            "stage": "download",
+            "description": "Vision projector is cached",
+            "progress": 100.0,
+        },
+    )
+    return str(path)
+
+
+def _llama_cpp_make_vision_chat_handler(model_id: str, mmproj_path: str) -> Tuple[Any, str, str]:
+    path = str(mmproj_path or "").strip()
+    if not path:
+        return None, "", ""
+    try:
+        import llama_cpp.llama_chat_format as chat_format_module  # type: ignore
+    except Exception as exc:
+        return None, "", f"llama-cpp-python vision chat handlers are unavailable: {exc}"
+
+    lowered = str(model_id or "").lower()
+    preferred: List[str] = []
+    if "qwen" in lowered and ("2.5" in lowered or "25" in lowered or "vl" in lowered):
+        preferred.extend(["Qwen25VLChatHandler", "Qwen2VLChatHandler"])
+    if "minicpm" in lowered:
+        preferred.append("MiniCPMv26ChatHandler")
+    if "moondream" in lowered:
+        preferred.append("MoondreamChatHandler")
+    if "nanollava" in lowered:
+        preferred.append("NanollavaChatHandler")
+    if "llava" in lowered and ("1.6" in lowered or "34b" in lowered):
+        preferred.append("Llava16ChatHandler")
+    if "llava" in lowered:
+        preferred.append("Llava15ChatHandler")
+    if "llama-3" in lowered and "vision" in lowered:
+        preferred.append("Llama3VisionAlphaChatHandler")
+    if "gemma" in lowered:
+        preferred.extend(["Gemma3ChatHandler", "GemmaVisionChatHandler", "Llava15ChatHandler"])
+
+    fallback = [
+        "Qwen25VLChatHandler",
+        "MiniCPMv26ChatHandler",
+        "Llava16ChatHandler",
+        "Llava15ChatHandler",
+        "MoondreamChatHandler",
+        "NanollavaChatHandler",
+        "Llama3VisionAlphaChatHandler",
+    ]
+    names: List[str] = []
+    for name in preferred + fallback:
+        if name not in names:
+            names.append(name)
+
+    errors: List[str] = []
+    for name in names:
+        cls = getattr(chat_format_module, name, None)
+        if cls is None:
+            continue
+        for args, kwargs in (
+            ((), {"clip_model_path": path}),
+            ((), {"mmproj_path": path}),
+            ((path,), {}),
+        ):
+            try:
+                return cls(*args, **kwargs), name, ""
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+    return None, "", "; ".join(errors[-3:]) or "No compatible llama-cpp-python vision chat handler was found."
+
+
+def _download_llama_cpp_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> str:
+    ref = _parse_llama_cpp_model_ref(model_id)
+    if ref.get("kind") == "local":
+        path = str(ref.get("path") or "").strip()
+        if not os.path.exists(path):
+            raise RuntimeError(f"llama.cpp GGUF file does not exist: {path}")
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "download",
+                "description": "Using local GGUF file",
+                "progress": 100.0,
+            },
+        )
+        return path
+
+    repo_id = str(ref.get("repo_id") or "").strip()
+    filename = str(ref.get("filename") or "").strip()
+    if not repo_id or "/" not in repo_id:
+        raise RuntimeError("llama.cpp provider needs a Hugging Face repo id, like owner/repo or owner/repo::model.gguf.")
+    if not filename:
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "download",
+                "description": "Selecting GGUF file",
+                "progress": 0.0,
+            },
+        )
+        filename = _llama_cpp_select_gguf_filename(repo_id)
+
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("llama.cpp GGUF auto-download needs huggingface_hub installed.") from exc
+
+    model_root = _llama_cpp_model_root()
+    os.makedirs(model_root, exist_ok=True)
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "start",
+            "stage": "download",
+            "description": f"Downloading {filename}",
+            "progress": 0.0,
+        },
+    )
+    kwargs: Dict[str, Any] = {
+        "repo_id": repo_id,
+        "filename": filename,
+        "cache_dir": model_root,
+    }
+    token = _hf_llm_hub_token()
+    if token:
+        kwargs["token"] = token
+    expected_size, blob_ids = _hf_file_size_and_blob_ids(repo_id, filename)
+    path = _hf_hub_download_with_progress_worker(
+        repo_id=repo_id,
+        filename=filename,
+        cache_dir=model_root,
+        token=token,
+        progress_callback=progress_callback,
+        description=f"Downloading {filename}",
+        total_bytes=expected_size,
+        blob_ids=blob_ids,
+    )
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "complete",
+            "stage": "download",
+            "description": "GGUF file is cached",
+            "progress": 100.0,
+        },
+    )
+    return str(path)
+
+
+def _download_mlx_lm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> str:
+    raw = str(model_id or "").strip()
+    if not raw:
+        raise RuntimeError("MLX LM model id or local path is required.")
+
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if os.path.exists(expanded) or raw.startswith(("/", "./", "../", "~")):
+        if not os.path.exists(expanded):
+            raise RuntimeError(f"MLX LM local model path does not exist: {expanded}")
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "download",
+                "description": "Using local MLX model files",
+                "progress": 100.0,
+            },
+        )
+        return expanded
+    if raw.startswith("file://"):
+        path = os.path.abspath(os.path.expanduser(raw[len("file://") :]))
+        if not os.path.exists(path):
+            raise RuntimeError(f"MLX LM local model path does not exist: {path}")
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "download",
+                "description": "Using local MLX model files",
+                "progress": 100.0,
+            },
+        )
+        return path
+    if raw.startswith("hf://"):
+        raw = raw[len("hf://") :]
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("MLX LM auto-download needs huggingface_hub installed.") from exc
+
+    model_root = _mlx_lm_model_root()
+    os.makedirs(model_root, exist_ok=True)
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "start",
+            "stage": "download",
+            "description": "Downloading MLX model files",
+            "progress": 0.0,
+        },
+    )
+    kwargs: Dict[str, Any] = {
+        "repo_id": raw,
+        "cache_dir": model_root,
+        "allow_patterns": [
+            "*.json",
+            "*.safetensors",
+            "*.py",
+            "tokenizer.model",
+            "*.tiktoken",
+            "tiktoken.model",
+            "*.txt",
+            "*.jsonl",
+            "*.jinja",
+        ],
+    }
+    revision = _mlx_lm_revision()
+    if revision:
+        kwargs["revision"] = revision
+    token = _mlx_lm_hub_token()
+    if token:
+        kwargs["token"] = token
+    _ = snapshot_download
+    path = _snapshot_download_with_progress_worker(
+        kwargs=kwargs,
+        progress_callback=progress_callback,
+        description="Downloading MLX model files",
+    )
+    _emit_hf_llm_progress(
+        progress_callback,
+        {
+            "event": "complete",
+            "stage": "download",
+            "description": "MLX model files are cached",
+            "progress": 100.0,
+        },
+    )
+    return str(path)
+
+
+def _load_hf_llm_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("Hugging Face Transformers model id is required.")
+
+    cache_key = _hf_llm_cache_key(model_token)
+    with _HF_LLM_MODEL_CACHE_LOCK:
+        cached = _HF_LLM_MODEL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "Model is already loaded",
+                    "progress": 100.0,
+                },
+            )
+            return cached
+
+        try:
+            import torch  # type: ignore
+            import transformers as transformers_module  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "Hugging Face Transformers LLM backend needs torch and transformers installed."
+            ) from exc
+
+        AutoProcessor = getattr(transformers_module, "AutoProcessor", None)
+        AutoTokenizer = getattr(transformers_module, "AutoTokenizer", None)
+        if AutoTokenizer is None:
+            raise RuntimeError("Hugging Face Transformers LLM backend could not find AutoTokenizer.")
+
+        model_class_names = (
+            "AutoModelForImageTextToText",
+            "AutoModelForVision2Seq",
+            "AutoModelForCausalLM",
+            "AutoModelForSeq2SeqLM",
+        )
+        model_classes = [
+            (name, getattr(transformers_module, name, None))
+            for name in model_class_names
+            if getattr(transformers_module, name, None) is not None
+        ]
+        if not model_classes:
+            raise RuntimeError("Hugging Face Transformers LLM backend could not find a supported AutoModel class.")
+
+        model_root = _hf_llm_model_root()
+        os.makedirs(model_root, exist_ok=True)
+        device = _hf_llm_resolve_device(torch, cache_key[1])
+        torch_dtype = _hf_llm_torch_dtype(torch, cache_key[2], device)
+        trust_remote_code = bool(cache_key[3])
+        device_map = _hf_llm_device_map_pref(device)
+        hub_token = _hf_llm_hub_token()
+
+        _download_hf_llm_snapshot(
+            model_token,
+            model_root=model_root,
+            progress_callback=progress_callback,
+        )
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Loading tokenizer and model into memory",
+                "progress": 0.0,
+            },
+        )
+
+        load_kwargs: Dict[str, Any] = {
+            "cache_dir": model_root,
+            "trust_remote_code": trust_remote_code,
+        }
+        if hub_token:
+            load_kwargs["token"] = hub_token
+        if torch_dtype != "auto" or device != "cpu":
+            load_kwargs["torch_dtype"] = torch_dtype
+        else:
+            load_kwargs["torch_dtype"] = "auto"
+        if device_map:
+            load_kwargs["device_map"] = device_map
+
+        pretrained_kwargs: Dict[str, Any] = {
+            "cache_dir": model_root,
+            "trust_remote_code": trust_remote_code,
+        }
+        if hub_token:
+            pretrained_kwargs["token"] = hub_token
+
+        processor = None
+        tokenizer = None
+        tokenizer_error: Optional[Exception] = None
+        processor_error: Optional[Exception] = None
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_token, **pretrained_kwargs)
+        except Exception as exc:
+            tokenizer_error = exc
+        if AutoProcessor is not None:
+            try:
+                processor = AutoProcessor.from_pretrained(model_token, **pretrained_kwargs)
+            except Exception as exc:
+                processor_error = exc
+                processor = None
+        if tokenizer is None and processor is not None:
+            tokenizer = getattr(processor, "tokenizer", None)
+        if tokenizer is None:
+            detail_exc = tokenizer_error or processor_error
+            detail = str(detail_exc) if detail_exc is not None else "unknown tokenizer error"
+            raise RuntimeError(f"Could not load tokenizer or processor for {model_token}: {detail}") from detail_exc
+
+        model = None
+        loaded_device_map = device_map
+        load_errors: List[str] = []
+        for class_name, model_class in model_classes:
+            try:
+                model = model_class.from_pretrained(model_token, **load_kwargs)
+                loaded_device_map = device_map
+                break
+            except TypeError as exc:
+                if "torch_dtype" not in str(exc):
+                    load_errors.append(f"{class_name}: {str(exc)}")
+                    continue
+                retry_kwargs = dict(load_kwargs)
+                retry_kwargs["dtype"] = retry_kwargs.pop("torch_dtype")
+                try:
+                    model = model_class.from_pretrained(model_token, **retry_kwargs)
+                    loaded_device_map = device_map
+                    break
+                except Exception as retry_exc:
+                    load_errors.append(f"{class_name}: {str(retry_exc)}")
+            except Exception as exc:
+                message = str(exc)
+                if not device_map or ("accelerate" not in message.lower() and "device_map" not in message.lower()):
+                    load_errors.append(f"{class_name}: {message}")
+                    continue
+                retry_kwargs = dict(load_kwargs)
+                retry_kwargs.pop("device_map", None)
+                try:
+                    model = model_class.from_pretrained(model_token, **retry_kwargs)
+                    loaded_device_map = ""
+                    break
+                except Exception as retry_exc:
+                    load_errors.append(f"{class_name}: {str(retry_exc)}")
+        if model is None:
+            detail = "; ".join(error for error in load_errors if error) or "no compatible model class loaded"
+            raise RuntimeError(f"Could not load Hugging Face model {model_token}. {detail}")
+        device_map = loaded_device_map
+        if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token", None) is not None:
+            try:
+                tokenizer.pad_token = tokenizer.eos_token
+            except Exception:
+                pass
+        if not device_map:
+            try:
+                model.to(device)
+            except Exception:
+                device = "cpu"
+        else:
+            try:
+                first_param = next(model.parameters())
+                device = str(getattr(first_param, "device", None) or device)
+            except Exception:
+                device = str(getattr(model, "device", None) or device)
+        try:
+            model.eval()
+        except Exception:
+            pass
+
+        generation_lock = _HF_LLM_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _HF_LLM_GENERATION_LOCKS[cache_key] = generation_lock
+
+        bundle = {
+            "model": model,
+            "tokenizer": tokenizer,
+            "processor": processor,
+            "device": device,
+            "torch": torch,
+            "lock": generation_lock,
+            "model_root": model_root,
+            "memory_estimate_bytes": _model_memory_footprint_bytes(model),
+            "loaded_ts": time.time(),
+            "supports_vision": bool(_hf_processor_supports_vision(processor) or _hf_model_config_supports_vision(getattr(model, "config", None))),
+        }
+        _HF_LLM_MODEL_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "Model loaded",
+                "progress": 100.0,
+                "device": device,
+            },
+        )
+        return bundle
+
+
+def preload_hf_transformers_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    bundle = _load_hf_llm_bundle(model_id, progress_callback=progress_callback)
+    return {
+        "ok": True,
+        "model": str(model_id or "").strip(),
+        "device": str(bundle.get("device") or ""),
+        "model_root": str(bundle.get("model_root") or _hf_llm_model_root()),
+        "supports_vision": bool(bundle.get("supports_vision")),
+    }
+
+
+def download_hf_transformers_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("Hugging Face Transformers model id is required.")
+    model_root = _hf_llm_model_root()
+    os.makedirs(model_root, exist_ok=True)
+    _download_hf_llm_snapshot(model_token, model_root=model_root, progress_callback=progress_callback)
+    return {
+        "ok": True,
+        "model": model_token,
+        "model_root": model_root,
+    }
+
+
+def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, ...]:
+    return (
+        str(model_id or "").strip(),
+        str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip(),
+        _llama_cpp_n_ctx(vision=vision),
+        _llama_cpp_n_gpu_layers(),
+        _llama_cpp_n_batch(vision=vision),
+        _llama_cpp_mtp_enabled(),
+        _llama_cpp_mtp_draft_tokens(),
+        _llama_cpp_mtp_spec_type(),
+        bool(vision),
+    )
+
+
+def _load_llama_cpp_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+    vision: bool = False,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("llama.cpp GGUF model id or path is required.")
+
+    cache_key = _llama_cpp_cache_key(model_token, vision=vision)
+    with _LLAMA_CPP_MODEL_CACHE_LOCK:
+        cached = _LLAMA_CPP_MODEL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "GGUF model is already loaded",
+                    "progress": 100.0,
+                    "device": str(cached.get("device") or ""),
+                    "warning": _llama_cpp_warning_text(cached.get("gpu_warning"), cached.get("mtp_warning"), cached.get("vision_warning")),
+                },
+            )
+            return cached
+
+        try:
+            import llama_cpp as llama_cpp_module  # type: ignore
+            from llama_cpp import Llama  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("llama.cpp provider needs llama-cpp-python installed.") from exc
+
+        system_info = _llama_cpp_system_info(llama_cpp_module)
+        gpu_backend = _llama_cpp_gpu_backend(system_info)
+        gpu_requested = cache_key[3] != 0
+        mtp_requested = bool(cache_key[5])
+        mtp_draft_tokens = int(cache_key[6])
+        mtp_spec_type = str(cache_key[7] or "draft-mtp")
+        vision_requested = bool(cache_key[8])
+        gpu_warning = ""
+        if gpu_requested and system_info and not gpu_backend:
+            gpu_warning = (
+                "llama.cpp GPU offload was requested, but the installed llama-cpp-python build "
+                "does not report a GPU backend. Reinstall the NVIDIA profile or rebuild "
+                "llama-cpp-python with CUDA support."
+            )
+            logger.warning("[llama-cpp] %s system_info=%s", gpu_warning, system_info)
+
+        model_path = _download_llama_cpp_model(model_token, progress_callback=progress_callback)
+        mmproj_path = ""
+        if vision_requested:
+            mmproj_path = _download_llama_cpp_mmproj(
+                model_token,
+                model_path=model_path,
+                progress_callback=progress_callback,
+            )
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Loading GGUF model into llama.cpp",
+                "progress": 0.0,
+            },
+        )
+
+        load_kwargs: Dict[str, Any] = {
+            "model_path": model_path,
+            "n_ctx": cache_key[2],
+            "n_gpu_layers": cache_key[3],
+            "n_batch": cache_key[4],
+            "n_threads": _llama_cpp_n_threads(),
+            "verbose": _boolish(os.getenv("TATER_LLAMA_CPP_VERBOSE"), default=False),
+        }
+        chat_format = cache_key[1]
+        if chat_format:
+            load_kwargs["chat_format"] = chat_format
+        if _boolish(os.getenv("TATER_LLAMA_CPP_USE_MLOCK"), default=False):
+            load_kwargs["use_mlock"] = True
+        if _boolish(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN"), default=False):
+            load_kwargs["flash_attn"] = True
+
+        vision_warning = ""
+        chat_handler_name = ""
+        if vision_requested and mmproj_path:
+            chat_handler, chat_handler_name, vision_warning = _llama_cpp_make_vision_chat_handler(
+                model_token,
+                mmproj_path,
+            )
+            if chat_handler is not None:
+                load_kwargs["chat_handler"] = chat_handler
+            elif vision_warning:
+                logger.warning("[llama-cpp] %s", vision_warning)
+
+        mtp_kwargs, mtp_warning = _llama_cpp_mtp_load_kwargs(
+            Llama,
+            enabled=mtp_requested,
+            spec_type=mtp_spec_type,
+            draft_tokens=mtp_draft_tokens,
+        )
+        if mtp_kwargs:
+            load_kwargs.update(mtp_kwargs)
+        elif mtp_warning:
+            logger.warning("[llama-cpp] %s", mtp_warning)
+
+        try:
+            model = Llama(**load_kwargs)
+        except TypeError as exc:
+            if not mtp_kwargs or not any(token in str(exc) for token in mtp_kwargs.keys()):
+                raise
+            for key in mtp_kwargs:
+                load_kwargs.pop(key, None)
+            mtp_warning = _llama_cpp_warning_text(
+                mtp_warning,
+                f"llama-cpp-python rejected MTP load arguments ({exc}); running without MTP.",
+            )
+            logger.warning("[llama-cpp] %s", mtp_warning)
+            try:
+                model = Llama(**load_kwargs)
+            except Exception as retry_exc:
+                raise RuntimeError(
+                    _llama_cpp_context_load_error_message(
+                        retry_exc,
+                        model_id=model_token,
+                        n_ctx=cache_key[2],
+                        n_gpu_layers=cache_key[3],
+                        n_batch=cache_key[4],
+                        vision=vision_requested,
+                        mmproj_path=mmproj_path,
+                    )
+                ) from retry_exc
+        except Exception as exc:
+            raise RuntimeError(
+                _llama_cpp_context_load_error_message(
+                    exc,
+                    model_id=model_token,
+                    n_ctx=cache_key[2],
+                    n_gpu_layers=cache_key[3],
+                    n_batch=cache_key[4],
+                    vision=vision_requested,
+                    mmproj_path=mmproj_path,
+                )
+            ) from exc
+        device = gpu_backend if gpu_requested and gpu_backend else ("gpu" if gpu_requested and not system_info else "cpu")
+        generation_lock = _LLAMA_CPP_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _LLAMA_CPP_GENERATION_LOCKS[cache_key] = generation_lock
+        bundle = {
+            "model": model,
+            "model_path": model_path,
+            "mmproj_path": mmproj_path,
+            "model_root": _llama_cpp_model_root(),
+            "lock": generation_lock,
+            "n_gpu_layers": cache_key[3],
+            "device": device,
+            "gpu_backend": gpu_backend,
+            "gpu_warning": gpu_warning,
+            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
+            "loaded_ts": time.time(),
+            "mtp_requested": mtp_requested,
+            "mtp_enabled": bool(mtp_requested and mtp_kwargs and not mtp_warning),
+            "mtp_spec_type": mtp_spec_type,
+            "mtp_draft_tokens": mtp_draft_tokens,
+            "mtp_warning": mtp_warning,
+            "vision_requested": bool(vision_requested),
+            "supports_vision": bool(vision_requested and mmproj_path and chat_handler_name),
+            "vision_projector_path": mmproj_path,
+            "vision_chat_handler": chat_handler_name,
+            "vision_warning": vision_warning,
+            "llama_cpp_system_info": system_info,
+        }
+        _LLAMA_CPP_MODEL_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "GGUF model loaded",
+                "progress": 100.0,
+                "device": device,
+                "warning": _llama_cpp_warning_text(gpu_warning, mtp_warning),
+            },
+        )
+        return bundle
+
+
+def preload_llama_cpp_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+    vision: bool = False,
+) -> Dict[str, Any]:
+    bundle = _load_llama_cpp_bundle(model_id, progress_callback=progress_callback, vision=vision)
+    return {
+        "ok": True,
+        "model": str(model_id or "").strip(),
+        "device": str(bundle.get("device") or ("gpu" if int(bundle.get("n_gpu_layers") or 0) != 0 else "cpu")),
+        "model_root": str(bundle.get("model_root") or _llama_cpp_model_root()),
+        "model_path": str(bundle.get("model_path") or ""),
+        "gpu_backend": str(bundle.get("gpu_backend") or ""),
+        "mtp_requested": bool(bundle.get("mtp_requested")),
+        "mtp_enabled": bool(bundle.get("mtp_enabled")),
+        "mtp_spec_type": str(bundle.get("mtp_spec_type") or ""),
+        "mtp_draft_tokens": int(bundle.get("mtp_draft_tokens") or 0),
+        "mmproj_path": str(bundle.get("mmproj_path") or ""),
+        "supports_vision": bool(bundle.get("supports_vision")),
+        "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
+        "warning": _llama_cpp_warning_text(bundle.get("gpu_warning"), bundle.get("mtp_warning"), bundle.get("vision_warning")),
+    }
+
+
+def download_llama_cpp_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("llama.cpp GGUF model id or path is required.")
+    model_path = _download_llama_cpp_model(model_token, progress_callback=progress_callback)
+    mmproj_path = _download_llama_cpp_mmproj(
+        model_token,
+        model_path=model_path,
+        progress_callback=progress_callback,
+    )
+    return {
+        "ok": True,
+        "model": model_token,
+        "model_root": _llama_cpp_model_root(),
+        "model_path": model_path,
+        "mmproj_path": mmproj_path,
+        "supports_vision": bool(mmproj_path),
+    }
+
+
+def _mlx_lm_cache_key(model_id: str) -> Tuple[str, str, bool, bool]:
+    return (
+        str(model_id or "").strip(),
+        _mlx_lm_adapter_path(),
+        _mlx_lm_trust_remote_code(),
+        _mlx_lm_lazy_load(),
+    )
+
+
+def _load_mlx_lm_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("MLX LM model id or local path is required.")
+    if not _mlx_lm_is_apple_silicon():
+        raise RuntimeError("MLX LM provider runs on Apple Silicon Macs only. Use llama.cpp GGUF on this device.")
+
+    cache_key = _mlx_lm_cache_key(model_token)
+    with _MLX_LM_MODEL_CACHE_LOCK:
+        cached = _MLX_LM_MODEL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "MLX model is already loaded",
+                    "progress": 100.0,
+                    "device": "apple_silicon",
+                },
+            )
+            return cached
+
+        try:
+            from mlx_lm import generate as mlx_generate  # type: ignore
+            from mlx_lm import load as mlx_load  # type: ignore
+            from mlx_lm import stream_generate as mlx_stream_generate  # type: ignore
+            from mlx_lm.sample_utils import make_logits_processors, make_sampler  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("MLX LM provider needs mlx-lm installed on an Apple Silicon Mac.") from exc
+
+        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Loading MLX model into memory",
+                "progress": 0.0,
+            },
+        )
+
+        tokenizer_config: Dict[str, Any] = {}
+        if cache_key[2]:
+            tokenizer_config["trust_remote_code"] = True
+        load_kwargs: Dict[str, Any] = {
+            "tokenizer_config": tokenizer_config,
+            "lazy": cache_key[3],
+            "return_config": True,
+        }
+        adapter_path = cache_key[1]
+        if adapter_path:
+            load_kwargs["adapter_path"] = adapter_path
+
+        try:
+            loaded = mlx_load(model_path, **load_kwargs)
+        except TypeError:
+            retry_kwargs = dict(load_kwargs)
+            retry_kwargs.pop("return_config", None)
+            loaded = mlx_load(model_path, **retry_kwargs)
+        if not isinstance(loaded, tuple) or len(loaded) < 2:
+            raise RuntimeError(f"Could not load MLX model {model_token}.")
+        model = loaded[0]
+        tokenizer = loaded[1]
+        config = loaded[2] if len(loaded) >= 3 and isinstance(loaded[2], dict) else {}
+
+        generation_lock = _MLX_LM_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _MLX_LM_GENERATION_LOCKS[cache_key] = generation_lock
+
+        bundle = {
+            "model": model,
+            "tokenizer": tokenizer,
+            "config": config,
+            "lock": generation_lock,
+            "model_path": model_path,
+            "model_root": _mlx_lm_model_root(),
+            "device": "apple_silicon",
+            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
+            "loaded_ts": time.time(),
+            "generate": mlx_generate,
+            "stream_generate": mlx_stream_generate,
+            "make_sampler": make_sampler,
+            "make_logits_processors": make_logits_processors,
+        }
+        _MLX_LM_MODEL_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "MLX model loaded",
+                "progress": 100.0,
+                "device": "apple_silicon",
+            },
+        )
+        return bundle
+
+
+def preload_mlx_lm_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
+    return {
+        "ok": True,
+        "model": str(model_id or "").strip(),
+        "device": str(bundle.get("device") or "apple_silicon"),
+        "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
+        "model_path": str(bundle.get("model_path") or ""),
+    }
+
+
+def download_mlx_lm_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("MLX LM model id or local path is required.")
+    model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+    return {
+        "ok": True,
+        "model": model_token,
+        "model_root": _mlx_lm_model_root(),
+        "model_path": model_path,
+    }
+
+
 def _resolve_hydra_llm_defaults(*, redis_conn: Any = None) -> tuple[str, str]:
     host = _safe_redis_text_get(HYDRA_LLM_HOST_KEY, redis_conn=redis_conn)
     port = _safe_redis_text_get(HYDRA_LLM_PORT_KEY, redis_conn=redis_conn)
@@ -912,12 +4499,31 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
     if not isinstance(row, dict):
         return None
 
+    provider = _normalize_hydra_llm_provider(row.get("provider"))
     raw_host = str(row.get("host") or "").strip()
     raw_port = str(row.get("port") or "").strip()
     raw_model = str(row.get("model") or "").strip()
     raw_api_key = str(row.get("api_key") or "").strip()
     if not raw_host and not raw_port and not raw_model:
         return None
+
+    if _is_local_hydra_llm_provider(provider):
+        if not raw_model:
+            return None
+        return {
+            "provider": provider,
+            "host": "",
+            "port": "",
+            "model": raw_model,
+            "api_key": "",
+            "endpoint": (
+                "hf://transformers"
+                if provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+                else "llama-cpp://local"
+                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP
+                else "mlx-lm://local"
+            ),
+        }
 
     endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
     if not endpoint or not raw_model:
@@ -933,6 +4539,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
     canonical_port = str(parsed.port) if parsed.port is not None else ""
 
     return {
+        "provider": provider,
         "host": canonical_host,
         "port": canonical_port,
         "model": raw_model,
@@ -944,7 +4551,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
 def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
     client = redis_conn or redis_client
     rows: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str, str]] = set()
+    seen: set[Tuple[str, str, str, str]] = set()
 
     raw_payload = _safe_redis_text_get(HYDRA_LLM_BASE_SERVERS_KEY, redis_conn=client)
     parsed_payload: Any = []
@@ -959,7 +4566,12 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
             normalized = _normalize_hydra_base_server_row(item)
             if not normalized:
                 continue
-            signature = (normalized["endpoint"], normalized["model"], normalized.get("api_key", ""))
+            signature = (
+                normalized.get("provider", HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE),
+                normalized["endpoint"],
+                normalized["model"],
+                normalized.get("api_key", ""),
+            )
             if signature in seen:
                 continue
             seen.add(signature)
@@ -971,11 +4583,17 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
     legacy_host = _safe_redis_text_get(HYDRA_LLM_HOST_KEY, redis_conn=client)
     legacy_port = _safe_redis_text_get(HYDRA_LLM_PORT_KEY, redis_conn=client)
     legacy_model = _safe_redis_text_get(HYDRA_LLM_MODEL_KEY, redis_conn=client)
+    legacy_provider = _safe_redis_text_get(HYDRA_LLM_PROVIDER_KEY, redis_conn=client)
     legacy_row = _normalize_hydra_base_server_row(
-        {"host": legacy_host, "port": legacy_port, "model": legacy_model}
+        {"provider": legacy_provider, "host": legacy_host, "port": legacy_port, "model": legacy_model}
     )
     if legacy_row:
-        signature = (legacy_row["endpoint"], legacy_row["model"], legacy_row.get("api_key", ""))
+        signature = (
+            legacy_row.get("provider", HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE),
+            legacy_row["endpoint"],
+            legacy_row["model"],
+            legacy_row.get("api_key", ""),
+        )
         if signature not in seen:
             rows.append(legacy_row)
     return rows
@@ -1620,10 +5238,36 @@ def build_llm_host_from_env(default_host="127.0.0.1", default_port="11434") -> s
     Legacy helper name kept for compatibility.
     Returns Hydra Base LLM endpoint from Redis settings.
     """
+    try:
+        rows = resolve_hydra_base_servers(include_legacy=True)
+    except Exception:
+        rows = []
+    primary = rows[0] if rows and isinstance(rows[0], dict) else {}
+    endpoint = str(primary.get("endpoint") or "").strip() if isinstance(primary, dict) else ""
+    if endpoint:
+        return endpoint
     endpoint, _ = _resolve_hydra_llm_defaults()
     return endpoint
 
-def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> "LLMClientWrapper":
+def _make_llm_client_for_provider(
+    *,
+    provider: str,
+    host: str,
+    model: str,
+    api_key: str = "",
+    **kwargs,
+) -> Any:
+    selected_provider = _normalize_hydra_llm_provider(provider)
+    if selected_provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+        return TransformersLLMClientWrapper(model=model, **kwargs)
+    if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return LlamaCppLLMClientWrapper(model=model, **kwargs)
+    if selected_provider == HYDRA_LLM_PROVIDER_MLX_LM:
+        return MlxLmLLMClientWrapper(model=model, **kwargs)
+    return LLMClientWrapper(host=host, model=model, api_key=api_key, **kwargs)
+
+
+def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> Any:
     """
     Construct an LLMClientWrapper using explicit host/model overrides,
     with Hydra Base LLM settings fallback from Redis.
@@ -1631,37 +5275,64 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     """
     redis_conn = kwargs.pop("redis_conn", None)
     api_key_arg_provided = "api_key" in kwargs
+    provider_arg_provided = "provider" in kwargs
     explicit_api_key = str(kwargs.pop("api_key", "") or "").strip()
+    explicit_provider = _normalize_hydra_llm_provider(kwargs.pop("provider", "")) if provider_arg_provided else ""
     explicit_host = str(host or "").strip()
     explicit_model = str(model or "").strip()
 
     base_servers = resolve_hydra_base_servers(redis_conn=redis_conn, include_legacy=True)
+    default_provider = (
+        str(base_servers[0].get("provider") or HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE).strip()
+        if base_servers
+        else ""
+    )
     default_host = str(base_servers[0]["endpoint"]).strip() if base_servers else ""
     default_model = str(base_servers[0]["model"]).strip() if base_servers else ""
     default_api_key = str(base_servers[0].get("api_key") or "").strip() if base_servers else ""
     if not default_host or not default_model:
         fallback_host, fallback_model = _resolve_hydra_llm_defaults(redis_conn=redis_conn)
+        if not default_provider:
+            default_provider = _safe_redis_text_get(HYDRA_LLM_PROVIDER_KEY, redis_conn=redis_conn)
         if not default_host:
             default_host = fallback_host
         if not default_model:
             default_model = fallback_model
 
+    default_provider = _normalize_hydra_llm_provider(default_provider)
+    resolved_provider = explicit_provider or (
+        HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE if explicit_host else default_provider
+    )
     resolved_host = explicit_host or default_host
     resolved_model = explicit_model or default_model
-    if not resolved_host or not resolved_model:
+    if _is_local_hydra_llm_provider(resolved_provider):
+        if not resolved_model:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+    elif not resolved_host or not resolved_model:
         raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
 
     if not explicit_host and not explicit_model and len(base_servers) > 1:
-        clients: List[LLMClientWrapper] = []
+        clients: List[Any] = []
         signature_parts: List[str] = []
         for row in base_servers:
+            row_provider = _normalize_hydra_llm_provider(row.get("provider"))
             endpoint = str(row.get("endpoint") or "").strip()
             row_model = str(row.get("model") or "").strip()
             row_api_key = str(row.get("api_key") or "").strip()
-            if not endpoint or not row_model:
+            if not row_model:
                 continue
-            clients.append(LLMClientWrapper(host=endpoint, model=row_model, api_key=row_api_key, **kwargs))
-            signature_parts.append(f"{endpoint}|{row_model}|{row_api_key}")
+            if not _is_local_hydra_llm_provider(row_provider) and not endpoint:
+                continue
+            clients.append(
+                _make_llm_client_for_provider(
+                    provider=row_provider,
+                    host=endpoint,
+                    model=row_model,
+                    api_key=row_api_key,
+                    **kwargs,
+                )
+            )
+            signature_parts.append(f"{row_provider}|{endpoint}|{row_model}|{row_api_key}")
         if len(clients) > 1:
             pool_key = "||".join(signature_parts)
             return RoundRobinLLMClientWrapper(clients=clients, pool_key=pool_key)
@@ -1672,7 +5343,237 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     if not resolved_api_key and not api_key_arg_provided and not explicit_host and not explicit_model:
         resolved_api_key = default_api_key
 
-    return LLMClientWrapper(host=resolved_host, model=resolved_model, api_key=resolved_api_key, **kwargs)
+    return _make_llm_client_for_provider(
+        provider=resolved_provider,
+        host=resolved_host,
+        model=resolved_model,
+        api_key=resolved_api_key,
+        **kwargs,
+    )
+
+def primary_hydra_llm_client_kwargs(*, redis_conn: Any = None) -> Dict[str, Any]:
+    """Return explicit kwargs for the first configured Hydra Base LLM row."""
+    out: Dict[str, Any] = {"redis_conn": redis_conn}
+    try:
+        rows = resolve_hydra_base_servers(redis_conn=redis_conn, include_legacy=True)
+    except Exception:
+        rows = []
+    primary = rows[0] if rows and isinstance(rows[0], dict) else {}
+    provider = _normalize_hydra_llm_provider(primary.get("provider") if isinstance(primary, dict) else "")
+    model = str(primary.get("model") or "").strip() if isinstance(primary, dict) else ""
+    if not model:
+        return out
+    out["provider"] = provider
+    out["model"] = model
+    if not _is_local_hydra_llm_provider(provider):
+        out["host"] = str(primary.get("endpoint") or "").strip()
+        api_key = str(primary.get("api_key") or "").strip()
+        if api_key:
+            out["api_key"] = api_key
+    return out
+
+def get_primary_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> Any:
+    """Construct an LLM client pinned to the first configured Hydra Base LLM row."""
+    redis_conn = kwargs.pop("redis_conn", None)
+    has_explicit_provider = "provider" in kwargs
+    has_explicit_api_key = "api_key" in kwargs
+    host_hint = str(host or "").strip().lower()
+    if host_hint and not has_explicit_provider:
+        if host_hint.startswith("hf://"):
+            kwargs["provider"] = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+            has_explicit_provider = True
+        elif host_hint.startswith("llama-cpp://"):
+            kwargs["provider"] = HYDRA_LLM_PROVIDER_LLAMA_CPP
+            has_explicit_provider = True
+        elif host_hint.startswith("mlx-lm://"):
+            kwargs["provider"] = HYDRA_LLM_PROVIDER_MLX_LM
+            has_explicit_provider = True
+    if host or model or has_explicit_provider or has_explicit_api_key:
+        return get_llm_client_from_env(host=host, model=model, redis_conn=redis_conn, **kwargs)
+    client_kwargs = primary_hydra_llm_client_kwargs(redis_conn=redis_conn)
+    client_kwargs.update(kwargs)
+    return get_llm_client_from_env(**client_kwargs)
+
+def _perf_nonnegative_float(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except Exception:
+        return float(default)
+    if result < 0.0:
+        return 0.0
+    return result
+
+
+def _perf_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        result = int(float(value))
+    except Exception:
+        return int(default)
+    if result < 0:
+        return 0
+    return result
+
+
+def _build_llm_perf_stats(
+    *,
+    model: str,
+    elapsed: Any,
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    total_tokens: Any,
+    calls: Any,
+    prompt_elapsed: Any = 0.0,
+    completion_elapsed: Any = 0.0,
+    speed_basis: str = "wall_time",
+) -> Dict[str, Any]:
+    elapsed_sec = _perf_nonnegative_float(elapsed)
+    prompt_elapsed_sec = _perf_nonnegative_float(prompt_elapsed)
+    completion_elapsed_sec = _perf_nonnegative_float(completion_elapsed)
+    prompt_count = _perf_nonnegative_int(prompt_tokens)
+    completion_count = _perf_nonnegative_int(completion_tokens)
+    total_count = _perf_nonnegative_int(total_tokens)
+    if total_count <= 0:
+        total_count = max(0, prompt_count + completion_count)
+
+    total_basis_sec = elapsed_sec
+    completion_basis_sec = completion_elapsed_sec if completion_elapsed_sec > 0.0 else elapsed_sec
+    prompt_basis_sec = prompt_elapsed_sec
+    tps_total = (float(total_count) / total_basis_sec) if total_basis_sec > 0.0 and total_count > 0 else 0.0
+    tps_comp = (
+        float(completion_count) / completion_basis_sec
+        if completion_basis_sec > 0.0 and completion_count > 0
+        else 0.0
+    )
+    tps_prompt = (
+        float(prompt_count) / prompt_basis_sec
+        if prompt_basis_sec > 0.0 and prompt_count > 0
+        else 0.0
+    )
+
+    return {
+        "model": str(model or "LLM"),
+        "elapsed": round(elapsed_sec, 6),
+        "prompt_elapsed": round(prompt_elapsed_sec, 6),
+        "completion_elapsed": round(completion_elapsed_sec, 6),
+        "prompt_tokens": prompt_count,
+        "completion_tokens": completion_count,
+        "total_tokens": total_count,
+        "tps_total": round(tps_total, 4),
+        "tps_prompt": round(tps_prompt, 4),
+        "tps_comp": round(tps_comp, 4),
+        "calls": _perf_nonnegative_int(calls),
+        "speed_basis": str(speed_basis or "wall_time"),
+    }
+
+
+def _timing_mapping(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    out: Dict[str, Any] = {}
+    for name in (
+        "prompt_ms",
+        "predicted_ms",
+        "completion_ms",
+        "generation_ms",
+        "prompt_per_second",
+        "predicted_per_second",
+        "completion_per_second",
+        "generation_per_second",
+        "prompt_tps",
+        "generation_tps",
+    ):
+        try:
+            attr = getattr(value, name)
+        except Exception:
+            continue
+        if attr is not None:
+            out[name] = attr
+    return out
+
+
+def _seconds_from_timing_ms(timings: Dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = timings.get(key)
+        seconds = _perf_nonnegative_float(value)
+        if seconds > 0.0:
+            return seconds / 1000.0
+    return 0.0
+
+
+def _seconds_from_tps(tokens: int, timings: Dict[str, Any], *keys: str) -> float:
+    if tokens <= 0:
+        return 0.0
+    for key in keys:
+        tps = _perf_nonnegative_float(timings.get(key))
+        if tps > 0.0:
+            return float(tokens) / tps
+    return 0.0
+
+
+def _llama_cpp_response_timing(
+    response: Any,
+    *,
+    fallback_elapsed: float,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> Dict[str, Any]:
+    timings: Dict[str, Any] = {}
+    if isinstance(response, dict):
+        for key in ("timings", "timing", "performance", "perf"):
+            candidate = _timing_mapping(response.get(key))
+            if candidate:
+                timings.update(candidate)
+                break
+    prompt_elapsed = _seconds_from_timing_ms(timings, "prompt_ms", "prompt_eval_ms", "prefill_ms")
+    completion_elapsed = _seconds_from_timing_ms(
+        timings,
+        "predicted_ms",
+        "completion_ms",
+        "generation_ms",
+        "decode_ms",
+    )
+    if prompt_elapsed <= 0.0:
+        prompt_elapsed = _seconds_from_tps(prompt_tokens, timings, "prompt_per_second", "prompt_tps")
+    if completion_elapsed <= 0.0:
+        completion_elapsed = _seconds_from_tps(
+            completion_tokens,
+            timings,
+            "predicted_per_second",
+            "completion_per_second",
+            "generation_per_second",
+            "generation_tps",
+        )
+    source = "llama_cpp_timing" if prompt_elapsed > 0.0 or completion_elapsed > 0.0 else "local_generate"
+    if completion_elapsed <= 0.0:
+        completion_elapsed = _perf_nonnegative_float(fallback_elapsed)
+    return {
+        "prompt_elapsed": prompt_elapsed,
+        "completion_elapsed": completion_elapsed,
+        "speed_basis": source,
+    }
+
+
+def _llama_cpp_count_text_tokens(model: Any, text: Any) -> int:
+    content = _coerce_content_to_text(text)
+    if not content:
+        return 0
+    tokenizer = getattr(model, "tokenize", None)
+    if not callable(tokenizer):
+        return 0
+    raw = content.encode("utf-8", "ignore")
+    for args, kwargs in (
+        ((raw,), {"add_bos": False}),
+        ((raw,), {}),
+        ((content,), {"add_bos": False}),
+        ((content,), {}),
+    ):
+        try:
+            tokens = tokenizer(*args, **kwargs)
+            return int(len(tokens or []))
+        except Exception:
+            continue
+    return 0
+
 
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
@@ -1702,10 +5603,13 @@ class LLMClientWrapper:
         # Per-instance perf aggregation for one chat turn.
         self._llm_calls = 0
         self._llm_elapsed_sec = 0.0
+        self._llm_prompt_elapsed_sec = 0.0
+        self._llm_completion_elapsed_sec = 0.0
         self._llm_prompt_tokens = 0
         self._llm_completion_tokens = 0
         self._llm_total_tokens = 0
         self._llm_model_last = str(resolved_model or "").strip() or "LLM"
+        self._llm_speed_basis = "api_round_trip"
 
     async def aclose(self):
         client = getattr(self, "client", None)
@@ -1739,27 +5643,23 @@ class LLMClientWrapper:
         await self.aclose()
 
     def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
-        elapsed = max(0.0, float(self._llm_elapsed_sec))
-        prompt_tokens = max(0, int(self._llm_prompt_tokens))
-        completion_tokens = max(0, int(self._llm_completion_tokens))
-        total_tokens = max(0, int(self._llm_total_tokens))
-        tps_total = (float(total_tokens) / elapsed) if elapsed > 0.0 and total_tokens > 0 else 0.0
-        tps_comp = (float(completion_tokens) / elapsed) if elapsed > 0.0 and completion_tokens > 0 else 0.0
-
-        out: Dict[str, Any] = {
-            "model": str(self._llm_model_last or self.model or "LLM"),
-            "elapsed": round(elapsed, 6),
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "tps_total": round(tps_total, 4),
-            "tps_comp": round(tps_comp, 4),
-            "calls": max(0, int(self._llm_calls)),
-        }
+        out = _build_llm_perf_stats(
+            model=str(self._llm_model_last or self.model or "LLM"),
+            elapsed=self._llm_elapsed_sec,
+            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
+            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
+            prompt_tokens=self._llm_prompt_tokens,
+            completion_tokens=self._llm_completion_tokens,
+            total_tokens=self._llm_total_tokens,
+            calls=self._llm_calls,
+            speed_basis=getattr(self, "_llm_speed_basis", "api_round_trip"),
+        )
 
         if reset:
             self._llm_calls = 0
             self._llm_elapsed_sec = 0.0
+            self._llm_prompt_elapsed_sec = 0.0
+            self._llm_completion_elapsed_sec = 0.0
             self._llm_prompt_tokens = 0
             self._llm_completion_tokens = 0
             self._llm_total_tokens = 0
@@ -1882,8 +5782,1460 @@ class LLMClientWrapper:
             )
 
 
+class TransformersLLMClientWrapper:
+    def __init__(self, model=None, **kwargs):
+        _ = kwargs
+        resolved_model = str(model or "").strip()
+        if not resolved_model:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+
+        self.host = "hf://transformers"
+        self.model = resolved_model
+        self.provider = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+
+        self._llm_calls = 0
+        self._llm_elapsed_sec = 0.0
+        self._llm_prompt_elapsed_sec = 0.0
+        self._llm_completion_elapsed_sec = 0.0
+        self._llm_prompt_tokens = 0
+        self._llm_completion_tokens = 0
+        self._llm_total_tokens = 0
+        self._llm_model_last = resolved_model
+        self._llm_speed_basis = "local_generate"
+
+    async def aclose(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        out = _build_llm_perf_stats(
+            model=str(self._llm_model_last or self.model or "HF Transformers"),
+            elapsed=self._llm_elapsed_sec,
+            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
+            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
+            prompt_tokens=self._llm_prompt_tokens,
+            completion_tokens=self._llm_completion_tokens,
+            total_tokens=self._llm_total_tokens,
+            calls=self._llm_calls,
+            speed_basis=getattr(self, "_llm_speed_basis", "local_generate"),
+        )
+
+        if reset:
+            self._llm_calls = 0
+            self._llm_elapsed_sec = 0.0
+            self._llm_prompt_elapsed_sec = 0.0
+            self._llm_completion_elapsed_sec = 0.0
+            self._llm_prompt_tokens = 0
+            self._llm_completion_tokens = 0
+            self._llm_total_tokens = 0
+        return out
+
+    def _format_messages_without_template(self, messages: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for item in (messages if isinstance(messages, list) else []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip().lower()
+            content = _coerce_content_to_text(item.get("content")).strip()
+            if not content:
+                continue
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"User: {content}")
+        parts.append("Assistant:")
+        return "\n\n".join(parts).strip()
+
+    def _messages_with_text_blocks(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for item in (messages if isinstance(messages, list) else []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip().lower() or "user"
+            content = item.get("content")
+            if isinstance(content, list):
+                normalized.append({"role": role, "content": content})
+                continue
+            text = _coerce_content_to_text(content).strip()
+            normalized.append({"role": role, "content": [{"type": "text", "text": text}]})
+        return normalized
+
+    def _model_input_device(self, bundle: Dict[str, Any]) -> str:
+        model = bundle.get("model")
+        device = str(bundle.get("device") or "cpu")
+        try:
+            first_param = next(model.parameters())
+            return str(getattr(first_param, "device", None) or device)
+        except Exception:
+            return device
+
+    def _move_encoded_to_device(self, encoded: Any, device: str) -> Any:
+        if hasattr(encoded, "to"):
+            try:
+                return encoded.to(device)
+            except Exception:
+                pass
+        if isinstance(encoded, dict):
+            return {key: value.to(device) if hasattr(value, "to") else value for key, value in encoded.items()}
+        return encoded
+
+    def _chat_template_inputs(
+        self,
+        formatter: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        tokenize: bool,
+        return_dict: bool = False,
+    ) -> Any:
+        base_kwargs: Dict[str, Any] = {
+            "add_generation_prompt": True,
+            "tokenize": bool(tokenize),
+        }
+        if tokenize:
+            base_kwargs.update({"return_tensors": "pt"})
+        if return_dict:
+            base_kwargs["return_dict"] = True
+        variants = [messages]
+        block_messages = self._messages_with_text_blocks(messages)
+        if block_messages != messages:
+            variants.append(block_messages)
+        last_exc: Optional[Exception] = None
+        for variant in variants:
+            for extra in ({"enable_thinking": False}, {}):
+                try:
+                    return formatter.apply_chat_template(variant, **base_kwargs, **extra)
+                except TypeError as exc:
+                    last_exc = exc
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+                    break
+        if last_exc is not None:
+            raise last_exc
+        return formatter.apply_chat_template(messages, **base_kwargs)
+
+    def _encode_messages(self, bundle: Dict[str, Any], messages: List[Dict[str, Any]]) -> Tuple[Any, int]:
+        tokenizer = bundle["tokenizer"]
+        processor = bundle.get("processor")
+        formatter = processor if processor is not None and hasattr(processor, "apply_chat_template") else tokenizer
+        input_builder = processor if processor is not None and callable(processor) else tokenizer
+        torch = bundle["torch"]
+        device = self._model_input_device(bundle)
+        max_input_tokens = _hf_llm_max_input_tokens()
+        images = _extract_pil_images_from_messages(messages)
+
+        if images and processor is not None:
+            prompt_text = ""
+            vision_messages = _messages_with_hf_image_blocks(messages, images)
+            try:
+                prompt_text = self._chat_template_inputs(
+                    formatter,
+                    vision_messages,
+                    tokenize=False,
+                    return_dict=False,
+                )
+            except Exception:
+                prompt_text = self._format_messages_without_template(messages)
+            prompt_text = _coerce_content_to_text(prompt_text).strip()
+            if not prompt_text:
+                prompt_text = self._format_messages_without_template(messages)
+            processor_variants = (
+                {"text": [prompt_text], "images": images, "return_tensors": "pt"},
+                {"text": prompt_text, "images": images[0] if len(images) == 1 else images, "return_tensors": "pt"},
+                {"text": [prompt_text], "images": images[0] if len(images) == 1 else images, "return_tensors": "pt"},
+            )
+            last_exc: Optional[Exception] = None
+            for call_kwargs in processor_variants:
+                try:
+                    encoded = processor(**call_kwargs)
+                    encoded = self._move_encoded_to_device(encoded, device)
+                    encoded_fields = dict(encoded)
+                    input_ids = encoded_fields.get("input_ids")
+                    attention_mask = encoded_fields.get("attention_mask")
+                    if input_ids is not None and hasattr(input_ids, "dim") and input_ids.dim() == 1:
+                        input_ids = input_ids.unsqueeze(0)
+                        encoded_fields["input_ids"] = input_ids
+                    if attention_mask is not None and hasattr(attention_mask, "dim") and attention_mask.dim() == 1:
+                        attention_mask = attention_mask.unsqueeze(0)
+                        encoded_fields["attention_mask"] = attention_mask
+                    input_len = int(getattr(input_ids, "shape", [0])[-1] or 0) if input_ids is not None else 0
+                    return encoded_fields, input_len
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            raise RuntimeError(f"Could not encode image input for Hugging Face vision model: {last_exc}")
+
+        input_ids = None
+        attention_mask = None
+        encoded_fields: Dict[str, Any] = {}
+        try:
+            input_ids = self._chat_template_inputs(formatter, messages, tokenize=True, return_dict=True)
+        except Exception:
+            input_ids = None
+
+        if input_ids is None:
+            try:
+                input_ids = self._chat_template_inputs(formatter, messages, tokenize=True, return_dict=False)
+            except Exception:
+                input_ids = None
+
+        if input_ids is None and formatter is not tokenizer:
+            try:
+                input_ids = self._chat_template_inputs(tokenizer, messages, tokenize=True, return_dict=False)
+            except Exception:
+                input_ids = None
+
+        if input_ids is None:
+            try:
+                prompt_text = self._chat_template_inputs(formatter, messages, tokenize=False, return_dict=False)
+                input_ids = input_builder(text=prompt_text, return_tensors="pt")
+            except Exception:
+                input_ids = None
+
+        if input_ids is None and formatter is not tokenizer:
+            try:
+                prompt_text = self._chat_template_inputs(tokenizer, messages, tokenize=False, return_dict=False)
+                input_ids = tokenizer(prompt_text, return_tensors="pt")
+            except Exception:
+                input_ids = None
+
+        if input_ids is not None:
+            try:
+                if hasattr(input_ids, "to") and not isinstance(input_ids, dict):
+                    input_ids = input_ids.to(device)
+                elif isinstance(input_ids, dict):
+                    input_ids = self._move_encoded_to_device(input_ids, device)
+            except Exception:
+                pass
+
+        if input_ids is not None:
+            try:
+                input_ids = dict(input_ids)
+            except Exception:
+                pass
+
+        if input_ids is not None:
+            try:
+                if isinstance(input_ids, dict):
+                    encoded_fields = dict(input_ids)
+                    attention_mask = encoded_fields.get("attention_mask")
+                    input_ids = encoded_fields.get("input_ids")
+            except Exception:
+                pass
+            try:
+                if input_ids is not None and hasattr(input_ids, "dim") and input_ids.dim() == 1:
+                    input_ids = input_ids.unsqueeze(0)
+                    if attention_mask is not None and hasattr(attention_mask, "dim") and attention_mask.dim() == 1:
+                        attention_mask = attention_mask.unsqueeze(0)
+                if input_ids is not None and max_input_tokens > 0 and int(input_ids.shape[-1]) > max_input_tokens:
+                    input_ids = input_ids[:, -max_input_tokens:]
+                    if attention_mask is not None:
+                        attention_mask = attention_mask[:, -max_input_tokens:]
+                if input_ids is not None:
+                    if attention_mask is None:
+                        attention_mask = torch.ones_like(input_ids)
+                    input_ids = input_ids.to(device)
+                    attention_mask = attention_mask.to(device)
+                    encoded_fields["input_ids"] = input_ids
+                    encoded_fields["attention_mask"] = attention_mask
+                    encoded_fields = self._move_encoded_to_device(encoded_fields, device)
+                    return encoded_fields, int(input_ids.shape[-1])
+            except Exception:
+                pass
+
+        prompt = self._format_messages_without_template(messages)
+        try:
+            encoded = input_builder(
+                text=prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_input_tokens,
+            )
+        except Exception:
+            encoded = tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_input_tokens,
+            )
+        encoded = self._move_encoded_to_device(encoded, device)
+        input_len = int(encoded["input_ids"].shape[-1])
+        return encoded, input_len
+
+    def _decode_completion(self, bundle: Dict[str, Any], completion_ids: Any) -> str:
+        processor = bundle.get("processor")
+        tokenizer = bundle.get("tokenizer")
+        decoder = processor if processor is not None and hasattr(processor, "decode") else tokenizer
+        try:
+            raw = decoder.decode(completion_ids, skip_special_tokens=False)
+        except Exception:
+            raw = tokenizer.decode(completion_ids, skip_special_tokens=True)
+        parser = getattr(processor, "parse_response", None) if processor is not None else None
+        if callable(parser):
+            try:
+                parsed = parser(raw)
+                if isinstance(parsed, str):
+                    return parsed
+                if isinstance(parsed, dict):
+                    for key in ("response", "text", "content"):
+                        value = parsed.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value
+                if parsed is not None:
+                    return _coerce_content_to_text(parsed)
+            except Exception:
+                pass
+        try:
+            return tokenizer.decode(completion_ids, skip_special_tokens=True)
+        except Exception:
+            return _coerce_content_to_text(raw)
+
+    def _build_generation_kwargs(self, tokenizer: Any, timeout: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        generation_kwargs: Dict[str, Any] = {}
+        max_new_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        try:
+            generation_kwargs["max_new_tokens"] = max(1, int(max_new_tokens))
+        except Exception:
+            generation_kwargs["max_new_tokens"] = self.max_tokens
+
+        temperature = kwargs.pop("temperature", self.temperature)
+        try:
+            temperature_value = float(temperature)
+        except Exception:
+            temperature_value = self.temperature
+        if temperature_value > 0:
+            generation_kwargs["temperature"] = temperature_value
+            generation_kwargs["do_sample"] = bool(kwargs.pop("do_sample", True))
+        else:
+            generation_kwargs["do_sample"] = bool(kwargs.pop("do_sample", False))
+
+        for key in ("top_p", "top_k", "repetition_penalty", "num_beams", "min_new_tokens"):
+            if key in kwargs and kwargs.get(key) is not None:
+                generation_kwargs[key] = kwargs.pop(key)
+
+        try:
+            timeout_value = float(timeout) if timeout is not None else 0.0
+        except Exception:
+            timeout_value = 0.0
+        if timeout_value > 0:
+            generation_kwargs["max_time"] = timeout_value
+
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if eos_token_id is not None:
+            generation_kwargs["eos_token_id"] = eos_token_id
+        if pad_token_id is not None:
+            generation_kwargs["pad_token_id"] = pad_token_id
+        elif eos_token_id is not None:
+            generation_kwargs["pad_token_id"] = eos_token_id
+
+        return generation_kwargs
+
+    def _apply_stop_sequences(self, text: str, stop: Any) -> str:
+        if not stop:
+            return text
+        stops = stop if isinstance(stop, list) else [stop]
+        cut_at: Optional[int] = None
+        for item in stops:
+            token = str(item or "")
+            if not token:
+                continue
+            idx = text.find(token)
+            if idx >= 0:
+                cut_at = idx if cut_at is None else min(cut_at, idx)
+        if cut_at is None:
+            return text
+        return text[:cut_at]
+
+    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
+        stop = kwargs.pop("stop", None)
+        bundle = _load_hf_llm_bundle(self.model)
+        model = bundle["model"]
+        tokenizer = bundle["tokenizer"]
+        torch = bundle["torch"]
+        generation_lock = bundle["lock"]
+
+        encoded, prompt_tokens = self._encode_messages(bundle, messages)
+        generation_kwargs = self._build_generation_kwargs(tokenizer, timeout, kwargs)
+
+        with generation_lock:
+            generation_started = time.perf_counter()
+            with torch.inference_mode():
+                output_ids = model.generate(**encoded, **generation_kwargs)
+        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+
+        input_ids = encoded["input_ids"]
+        is_encoder_decoder = bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
+        completion_ids = output_ids[0] if is_encoder_decoder else output_ids[0][int(input_ids.shape[-1]):]
+        content = self._decode_completion(bundle, completion_ids)
+        content = self._apply_stop_sequences(_coerce_content_to_text(content).strip(), stop).strip()
+        completion_tokens = int(getattr(completion_ids, "shape", [0])[-1] or 0)
+        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
+
+        return {
+            "model": self.model,
+            "message": {"role": "assistant", "content": content},
+            "_usage": {
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": int(completion_tokens),
+                "total_tokens": int(total_tokens),
+            },
+            "_timing": {
+                "completion_elapsed": generation_elapsed,
+                "speed_basis": "local_generate",
+            },
+        }
+
+    async def chat(self, messages, **kwargs):
+        timeout = kwargs.pop("timeout", None)
+        timeout_ms = kwargs.pop("timeout_ms", None)
+        if timeout is None and timeout_ms is not None:
+            try:
+                timeout = float(timeout_ms) / 1000.0
+            except Exception:
+                timeout = None
+
+        stream = kwargs.pop("stream", False)
+        if stream:
+            raise RuntimeError("Hugging Face Transformers LLM backend does not support streaming yet.")
+
+        activity_hint = kwargs.pop("activity", "")
+        model = kwargs.pop("model", self.model)
+        if model and str(model).strip() != self.model:
+            self.model = str(model).strip()
+
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self.max_tokens
+        elif kwargs.get("max_tokens") is None:
+            kwargs.pop("max_tokens", None)
+        if "temperature" not in kwargs:
+            kwargs["temperature"] = self.temperature
+
+        try:
+            if _vision_payload_has_image_url(messages):
+                messages = messages if isinstance(messages, list) else []
+            else:
+                messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
+        except Exception:
+            messages = messages if isinstance(messages, list) else []
+
+        call_id = _register_active_llm_call(
+            host=self.host,
+            model=str(self.model or "").strip(),
+            stream=False,
+            message_count=(len(messages) if isinstance(messages, list) else 0),
+            messages=(messages if isinstance(messages, list) else []),
+            activity_hint=str(activity_hint or ""),
+        )
+        call_error: Optional[Exception] = None
+        final_model = str(self.model or "").strip()
+        started_at = asyncio.get_running_loop().time()
+
+        try:
+            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
+            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
+            timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
+            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+            total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
+            completion_elapsed = _perf_nonnegative_float((timing or {}).get("completion_elapsed"), elapsed)
+
+            self._llm_calls += 1
+            self._llm_elapsed_sec += elapsed
+            self._llm_prompt_elapsed_sec += _perf_nonnegative_float((timing or {}).get("prompt_elapsed"))
+            self._llm_completion_elapsed_sec += completion_elapsed
+            self._llm_prompt_tokens += max(0, prompt_tokens)
+            self._llm_completion_tokens += max(0, completion_tokens)
+            self._llm_total_tokens += max(0, total_tokens)
+            self._llm_model_last = str((result or {}).get("model") or self.model)
+            self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
+            final_model = self._llm_model_last
+            return result
+        except Exception as exc:
+            call_error = exc
+            raise
+        finally:
+            _finish_active_llm_call(
+                call_id,
+                error=call_error,
+                response_model=final_model,
+            )
+
+
+def _strip_local_thinking_blocks(text: Any) -> str:
+    content = _coerce_content_to_text(text)
+    if not content:
+        return ""
+    content = re.sub(r"(?is)<think>.*?</think>", "", content).strip()
+    content = re.sub(r"(?is)^<think>.*", "", content).strip()
+    content = re.sub(r"(?is)<\|channel\>thought\s*.*?<channel\|>", "", content).strip()
+    content = re.sub(r"(?is)^<\|channel\>thought\s*.*", "", content).strip()
+    return content
+
+
+def _append_no_think_to_content(content: Any) -> Any:
+    if isinstance(content, list):
+        out: List[Any] = []
+        appended = False
+        for item in content:
+            if isinstance(item, dict):
+                row = dict(item)
+                if not appended and str(row.get("type") or "").strip().lower() == "text":
+                    text = _coerce_content_to_text(row.get("text") or row.get("content") or row.get("value")).rstrip()
+                    if "/no_think" not in text.lower():
+                        text = f"{text}\n/no_think".strip()
+                    row["text"] = text
+                    appended = True
+                out.append(row)
+            else:
+                text = _coerce_content_to_text(item).rstrip()
+                if not appended:
+                    if "/no_think" not in text.lower():
+                        text = f"{text}\n/no_think".strip()
+                    appended = True
+                out.append(text)
+        if not appended:
+            out.append({"type": "text", "text": "/no_think"})
+        return out
+
+    text = _coerce_content_to_text(content).rstrip()
+    if "/no_think" not in text.lower():
+        text = f"{text}\n/no_think".strip()
+    return text
+
+
+def _llama_cpp_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not _llama_cpp_disable_thinking_enabled():
+        return list(messages if isinstance(messages, list) else [])
+    out = [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
+    control = (
+        "Answer directly and concisely. Do not include chain-of-thought, hidden reasoning, "
+        "scratchpad text, or <think> blocks."
+    )
+    if out and out[0].get("role") == "system":
+        out[0]["content"] = f"{_coerce_content_to_text(out[0].get('content')).strip()}\n\n{control}".strip()
+    else:
+        out.insert(0, {"role": "system", "content": control})
+    for index in range(len(out) - 1, -1, -1):
+        if out[index].get("role") != "user":
+            continue
+        out[index]["content"] = _append_no_think_to_content(out[index].get("content"))
+        break
+    return out
+
+
+class LlamaCppLLMClientWrapper:
+    def __init__(self, model=None, **kwargs):
+        vision = kwargs.pop("vision", False)
+        _ = kwargs
+        resolved_model = str(model or "").strip()
+        if not resolved_model:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+
+        self.host = "llama-cpp://local"
+        self.model = resolved_model
+        self.provider = HYDRA_LLM_PROVIDER_LLAMA_CPP
+        self.vision = _boolish(vision, default=False)
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+
+        self._llm_calls = 0
+        self._llm_elapsed_sec = 0.0
+        self._llm_prompt_elapsed_sec = 0.0
+        self._llm_completion_elapsed_sec = 0.0
+        self._llm_prompt_tokens = 0
+        self._llm_completion_tokens = 0
+        self._llm_total_tokens = 0
+        self._llm_model_last = resolved_model
+        self._llm_speed_basis = "local_generate"
+
+    async def aclose(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        out = _build_llm_perf_stats(
+            model=str(self._llm_model_last or self.model or "llama.cpp"),
+            elapsed=self._llm_elapsed_sec,
+            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
+            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
+            prompt_tokens=self._llm_prompt_tokens,
+            completion_tokens=self._llm_completion_tokens,
+            total_tokens=self._llm_total_tokens,
+            calls=self._llm_calls,
+            speed_basis=getattr(self, "_llm_speed_basis", "local_generate"),
+        )
+        if reset:
+            self._llm_calls = 0
+            self._llm_elapsed_sec = 0.0
+            self._llm_prompt_elapsed_sec = 0.0
+            self._llm_completion_elapsed_sec = 0.0
+            self._llm_prompt_tokens = 0
+            self._llm_completion_tokens = 0
+            self._llm_total_tokens = 0
+        return out
+
+    def _build_chat_kwargs(self, timeout: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        chat_kwargs: Dict[str, Any] = {}
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
+        if isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs = dict(chat_template_kwargs)
+        else:
+            chat_template_kwargs = {}
+        if _llama_cpp_disable_thinking_enabled():
+            chat_template_kwargs.setdefault("enable_thinking", False)
+        if chat_template_kwargs:
+            chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
+        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        try:
+            chat_kwargs["max_tokens"] = max(1, int(max_tokens))
+        except Exception:
+            chat_kwargs["max_tokens"] = self.max_tokens
+        temperature = kwargs.pop("temperature", self.temperature)
+        try:
+            chat_kwargs["temperature"] = float(temperature)
+        except Exception:
+            chat_kwargs["temperature"] = self.temperature
+        for key in (
+            "top_p",
+            "top_k",
+            "min_p",
+            "typical_p",
+            "repeat_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            "seed",
+        ):
+            if key in kwargs and kwargs.get(key) is not None:
+                chat_kwargs[key] = kwargs.pop(key)
+        try:
+            timeout_value = float(timeout) if timeout is not None else 0.0
+        except Exception:
+            timeout_value = 0.0
+        if timeout_value > 0 and "max_tokens" not in chat_kwargs:
+            chat_kwargs["max_tokens"] = self.max_tokens
+        chat_kwargs["stream"] = False
+        return chat_kwargs
+
+    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
+        vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
+        bundle = _load_llama_cpp_bundle(self.model, vision=vision_requested)
+        model = bundle["model"]
+        generation_lock = bundle["lock"]
+        chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
+        local_messages = _llama_cpp_disable_thinking_messages(messages)
+
+        with generation_lock:
+            generation_started = time.perf_counter()
+            try:
+                response = model.create_chat_completion(messages=local_messages, **chat_kwargs)
+            except TypeError as exc:
+                if "chat_template_kwargs" not in chat_kwargs or "chat_template_kwargs" not in str(exc):
+                    raise
+                retry_kwargs = dict(chat_kwargs)
+                retry_kwargs.pop("chat_template_kwargs", None)
+                response = model.create_chat_completion(messages=local_messages, **retry_kwargs)
+        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+
+        choices = response.get("choices") if isinstance(response, dict) else []
+        first_choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+        content = ""
+        if isinstance(message, dict):
+            content = _coerce_content_to_text(message.get("content"))
+        if not content and isinstance(first_choice, dict):
+            content = _coerce_content_to_text(first_choice.get("text"))
+        content = _strip_local_thinking_blocks(content).strip()
+        usage = response.get("usage", {}) if isinstance(response, dict) else {}
+        prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+        completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+        if completion_tokens <= 0:
+            completion_tokens = _llama_cpp_count_text_tokens(model, content)
+        total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
+        timing = _llama_cpp_response_timing(
+            response,
+            fallback_elapsed=generation_elapsed,
+            prompt_tokens=max(0, prompt_tokens),
+            completion_tokens=max(0, completion_tokens),
+        )
+        return {
+            "model": self.model,
+            "message": {"role": "assistant", "content": content},
+            "_usage": {
+                "prompt_tokens": max(0, prompt_tokens),
+                "completion_tokens": max(0, completion_tokens),
+                "total_tokens": max(0, total_tokens),
+            },
+            "_timing": timing,
+        }
+
+    async def chat(self, messages, **kwargs):
+        timeout = kwargs.pop("timeout", None)
+        timeout_ms = kwargs.pop("timeout_ms", None)
+        if timeout is None and timeout_ms is not None:
+            try:
+                timeout = float(timeout_ms) / 1000.0
+            except Exception:
+                timeout = None
+        stream = kwargs.pop("stream", False)
+        if stream:
+            raise RuntimeError("llama.cpp provider does not support streaming yet.")
+        activity_hint = kwargs.pop("activity", "")
+        model = kwargs.pop("model", self.model)
+        if model and str(model).strip() != self.model:
+            self.model = str(model).strip()
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self.max_tokens
+        elif kwargs.get("max_tokens") is None:
+            kwargs.pop("max_tokens", None)
+        if "temperature" not in kwargs:
+            kwargs["temperature"] = self.temperature
+        try:
+            if _vision_payload_has_image_url(messages):
+                messages = messages if isinstance(messages, list) else []
+            else:
+                messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
+        except Exception:
+            messages = messages if isinstance(messages, list) else []
+
+        call_id = _register_active_llm_call(
+            host=self.host,
+            model=str(self.model or "").strip(),
+            stream=False,
+            message_count=(len(messages) if isinstance(messages, list) else 0),
+            messages=(messages if isinstance(messages, list) else []),
+            activity_hint=str(activity_hint or ""),
+        )
+        call_error: Optional[Exception] = None
+        final_model = str(self.model or "").strip()
+        started_at = asyncio.get_running_loop().time()
+        try:
+            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
+            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
+            timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
+            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+            total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
+            completion_elapsed = _perf_nonnegative_float((timing or {}).get("completion_elapsed"), elapsed)
+            self._llm_calls += 1
+            self._llm_elapsed_sec += elapsed
+            self._llm_prompt_elapsed_sec += _perf_nonnegative_float((timing or {}).get("prompt_elapsed"))
+            self._llm_completion_elapsed_sec += completion_elapsed
+            self._llm_prompt_tokens += max(0, prompt_tokens)
+            self._llm_completion_tokens += max(0, completion_tokens)
+            self._llm_total_tokens += max(0, total_tokens)
+            self._llm_model_last = str((result or {}).get("model") or self.model)
+            self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
+            final_model = self._llm_model_last
+            return result
+        except Exception as exc:
+            call_error = exc
+            raise
+        finally:
+            _finish_active_llm_call(
+                call_id,
+                error=call_error,
+                response_model=final_model,
+            )
+
+
+def _mlx_lm_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not _mlx_lm_disable_thinking_enabled():
+        return list(messages if isinstance(messages, list) else [])
+    out = [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
+    control = (
+        "Answer directly and concisely. Do not include chain-of-thought, hidden reasoning, "
+        "scratchpad text, or <think> blocks."
+    )
+    if out and out[0].get("role") == "system":
+        out[0]["content"] = f"{_coerce_content_to_text(out[0].get('content')).strip()}\n\n{control}".strip()
+    else:
+        out.insert(0, {"role": "system", "content": control})
+    for index in range(len(out) - 1, -1, -1):
+        if out[index].get("role") != "user":
+            continue
+        text = _coerce_content_to_text(out[index].get("content")).rstrip()
+        if "/no_think" not in text.lower():
+            text = f"{text}\n/no_think".strip()
+        out[index]["content"] = text
+        break
+    return out
+
+
+def _apply_local_stop_sequences(text: Any, stop: Any) -> str:
+    content = _coerce_content_to_text(text)
+    if not content or not stop:
+        return content
+    stops = stop if isinstance(stop, list) else [stop]
+    cut_at: Optional[int] = None
+    for item in stops:
+        token = str(item or "")
+        if not token:
+            continue
+        idx = content.find(token)
+        if idx >= 0:
+            cut_at = idx if cut_at is None else min(cut_at, idx)
+    return content if cut_at is None else content[:cut_at]
+
+
+class MlxLmLLMClientWrapper:
+    def __init__(self, model=None, **kwargs):
+        _ = kwargs
+        resolved_model = str(model or "").strip()
+        if not resolved_model:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+
+        self.host = "mlx-lm://local"
+        self.model = resolved_model
+        self.provider = HYDRA_LLM_PROVIDER_MLX_LM
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+
+        self._llm_calls = 0
+        self._llm_elapsed_sec = 0.0
+        self._llm_prompt_elapsed_sec = 0.0
+        self._llm_completion_elapsed_sec = 0.0
+        self._llm_prompt_tokens = 0
+        self._llm_completion_tokens = 0
+        self._llm_total_tokens = 0
+        self._llm_model_last = resolved_model
+        self._llm_speed_basis = "local_generate"
+
+    async def aclose(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        out = _build_llm_perf_stats(
+            model=str(self._llm_model_last or self.model or "MLX LM"),
+            elapsed=self._llm_elapsed_sec,
+            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
+            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
+            prompt_tokens=self._llm_prompt_tokens,
+            completion_tokens=self._llm_completion_tokens,
+            total_tokens=self._llm_total_tokens,
+            calls=self._llm_calls,
+            speed_basis=getattr(self, "_llm_speed_basis", "local_generate"),
+        )
+        if reset:
+            self._llm_calls = 0
+            self._llm_elapsed_sec = 0.0
+            self._llm_prompt_elapsed_sec = 0.0
+            self._llm_completion_elapsed_sec = 0.0
+            self._llm_prompt_tokens = 0
+            self._llm_completion_tokens = 0
+            self._llm_total_tokens = 0
+        return out
+
+    def _format_messages_without_template(self, messages: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for item in (messages if isinstance(messages, list) else []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip().lower()
+            content = _coerce_content_to_text(item.get("content")).strip()
+            if not content:
+                continue
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"User: {content}")
+        parts.append("Assistant:")
+        return "\n\n".join(parts).strip()
+
+    def _chat_template_prompt(self, tokenizer: Any, messages: List[Dict[str, Any]]) -> str:
+        local_messages = _mlx_lm_disable_thinking_messages(messages)
+        template = getattr(tokenizer, "apply_chat_template", None)
+        if callable(template):
+            last_exc: Optional[Exception] = None
+            for extra in ({"enable_thinking": False}, {}):
+                try:
+                    prompt = template(local_messages, tokenize=False, add_generation_prompt=True, **extra)
+                    return _coerce_content_to_text(prompt)
+                except TypeError as exc:
+                    last_exc = exc
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+                    break
+            if last_exc is not None:
+                logger.debug("MLX LM chat template failed; using plain prompt: %s", last_exc)
+        return self._format_messages_without_template(local_messages)
+
+    def _estimate_tokens(self, tokenizer: Any, text: str) -> int:
+        try:
+            encoded = tokenizer.encode(text)
+            return int(len(encoded))
+        except Exception:
+            return 0
+
+    def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        generation_kwargs: Dict[str, Any] = {}
+        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        try:
+            generation_kwargs["max_tokens"] = max(1, int(max_tokens))
+        except Exception:
+            generation_kwargs["max_tokens"] = self.max_tokens
+
+        temperature = kwargs.pop("temperature", self.temperature)
+        try:
+            temp_value = max(0.0, float(temperature))
+        except Exception:
+            temp_value = self.temperature
+        try:
+            top_p = float(kwargs.pop("top_p", 1.0))
+        except Exception:
+            top_p = 1.0
+        try:
+            min_p = float(kwargs.pop("min_p", 0.0))
+        except Exception:
+            min_p = 0.0
+        try:
+            top_k = int(kwargs.pop("top_k", 0))
+        except Exception:
+            top_k = 0
+        try:
+            min_tokens_to_keep = int(kwargs.pop("min_tokens_to_keep", 1))
+        except Exception:
+            min_tokens_to_keep = 1
+
+        make_sampler = bundle.get("make_sampler")
+        if callable(make_sampler):
+            generation_kwargs["sampler"] = make_sampler(
+                temp=temp_value,
+                top_p=top_p,
+                min_p=min_p,
+                top_k=top_k,
+                min_tokens_to_keep=max(1, min_tokens_to_keep),
+            )
+
+        make_logits_processors = bundle.get("make_logits_processors")
+        if callable(make_logits_processors):
+            processors = make_logits_processors(
+                repetition_penalty=kwargs.pop("repeat_penalty", kwargs.pop("repetition_penalty", None)),
+                presence_penalty=kwargs.pop("presence_penalty", None),
+                frequency_penalty=kwargs.pop("frequency_penalty", None),
+            )
+            if processors:
+                generation_kwargs["logits_processors"] = processors
+
+        max_kv_size = kwargs.pop("max_kv_size", _mlx_lm_max_kv_size())
+        if max_kv_size is not None:
+            try:
+                generation_kwargs["max_kv_size"] = max(128, int(max_kv_size))
+            except Exception:
+                pass
+        for key in ("prefill_step_size", "kv_bits", "kv_group_size", "quantized_kv_start"):
+            if key in kwargs and kwargs.get(key) is not None:
+                generation_kwargs[key] = kwargs.pop(key)
+        return generation_kwargs
+
+    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
+        _ = timeout
+        stop = kwargs.pop("stop", None)
+        seed = kwargs.pop("seed", None)
+        bundle = _load_mlx_lm_bundle(self.model)
+        model = bundle["model"]
+        tokenizer = bundle["tokenizer"]
+        generation_lock = bundle["lock"]
+        prompt = self._chat_template_prompt(tokenizer, messages)
+        generation_kwargs = self._build_generation_kwargs(bundle, kwargs)
+
+        if seed is not None:
+            try:
+                import mlx.core as mx  # type: ignore
+
+                mx.random.seed(int(seed))
+            except Exception:
+                pass
+
+        content = ""
+        prompt_tokens = self._estimate_tokens(tokenizer, prompt)
+        completion_tokens = 0
+        prompt_tps = 0.0
+        generation_tps = 0.0
+        stream_generate = bundle.get("stream_generate")
+        with generation_lock:
+            generation_started = time.perf_counter()
+            if callable(stream_generate):
+                for response in stream_generate(model, tokenizer, prompt, **generation_kwargs):
+                    text_part = _coerce_content_to_text(getattr(response, "text", ""))
+                    content += text_part
+                    prompt_tokens = int(getattr(response, "prompt_tokens", prompt_tokens) or prompt_tokens)
+                    completion_tokens = int(getattr(response, "generation_tokens", completion_tokens) or completion_tokens)
+                    prompt_tps = (
+                        _perf_nonnegative_float(getattr(response, "prompt_tps", 0.0))
+                        or _perf_nonnegative_float(getattr(response, "prompt_tokens_per_second", 0.0))
+                        or prompt_tps
+                    )
+                    generation_tps = (
+                        _perf_nonnegative_float(getattr(response, "generation_tps", 0.0))
+                        or _perf_nonnegative_float(getattr(response, "tokens_per_second", 0.0))
+                        or _perf_nonnegative_float(getattr(response, "generation_tokens_per_second", 0.0))
+                        or generation_tps
+                    )
+                    if stop and _apply_local_stop_sequences(content, stop) != content:
+                        break
+            else:
+                generated = bundle["generate"](model, tokenizer, prompt=prompt, verbose=False, **generation_kwargs)
+                content = _coerce_content_to_text(generated)
+                completion_tokens = self._estimate_tokens(tokenizer, content)
+        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+
+        content = _strip_local_thinking_blocks(_apply_local_stop_sequences(content, stop)).strip()
+        if completion_tokens <= 0:
+            completion_tokens = self._estimate_tokens(tokenizer, content)
+        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
+        prompt_elapsed = float(prompt_tokens) / prompt_tps if prompt_tps > 0.0 and prompt_tokens > 0 else 0.0
+        completion_elapsed = (
+            float(completion_tokens) / generation_tps
+            if generation_tps > 0.0 and completion_tokens > 0
+            else generation_elapsed
+        )
+        speed_basis = "mlx_lm_timing" if prompt_tps > 0.0 or generation_tps > 0.0 else "local_generate"
+        return {
+            "model": self.model,
+            "message": {"role": "assistant", "content": content},
+            "_usage": {
+                "prompt_tokens": max(0, int(prompt_tokens)),
+                "completion_tokens": max(0, int(completion_tokens)),
+                "total_tokens": max(0, int(total_tokens)),
+            },
+            "_timing": {
+                "prompt_elapsed": prompt_elapsed,
+                "completion_elapsed": completion_elapsed,
+                "speed_basis": speed_basis,
+            },
+        }
+
+    async def chat(self, messages, **kwargs):
+        timeout = kwargs.pop("timeout", None)
+        timeout_ms = kwargs.pop("timeout_ms", None)
+        if timeout is None and timeout_ms is not None:
+            try:
+                timeout = float(timeout_ms) / 1000.0
+            except Exception:
+                timeout = None
+        stream = kwargs.pop("stream", False)
+        if stream:
+            raise RuntimeError("MLX LM provider does not support streaming yet.")
+        activity_hint = kwargs.pop("activity", "")
+        model = kwargs.pop("model", self.model)
+        if model and str(model).strip() != self.model:
+            self.model = str(model).strip()
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self.max_tokens
+        elif kwargs.get("max_tokens") is None:
+            kwargs.pop("max_tokens", None)
+        if "temperature" not in kwargs:
+            kwargs["temperature"] = self.temperature
+        try:
+            messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
+        except Exception:
+            messages = messages if isinstance(messages, list) else []
+
+        call_id = _register_active_llm_call(
+            host=self.host,
+            model=str(self.model or "").strip(),
+            stream=False,
+            message_count=(len(messages) if isinstance(messages, list) else 0),
+            messages=(messages if isinstance(messages, list) else []),
+            activity_hint=str(activity_hint or ""),
+        )
+        call_error: Optional[Exception] = None
+        final_model = str(self.model or "").strip()
+        started_at = asyncio.get_running_loop().time()
+        try:
+            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
+            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
+            timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
+            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+            total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
+            completion_elapsed = _perf_nonnegative_float((timing or {}).get("completion_elapsed"), elapsed)
+            self._llm_calls += 1
+            self._llm_elapsed_sec += elapsed
+            self._llm_prompt_elapsed_sec += _perf_nonnegative_float((timing or {}).get("prompt_elapsed"))
+            self._llm_completion_elapsed_sec += completion_elapsed
+            self._llm_prompt_tokens += max(0, prompt_tokens)
+            self._llm_completion_tokens += max(0, completion_tokens)
+            self._llm_total_tokens += max(0, total_tokens)
+            self._llm_model_last = str((result or {}).get("model") or self.model)
+            self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
+            final_model = self._llm_model_last
+            return result
+        except Exception as exc:
+            call_error = exc
+            raise
+        finally:
+            _finish_active_llm_call(
+                call_id,
+                error=call_error,
+                response_model=final_model,
+            )
+
+
+def _local_vision_messages(image_bytes: bytes, filename: str, prompt: str) -> List[Dict[str, Any]]:
+    image_bytes, filename = _local_vision_prepare_image_bytes(image_bytes, filename)
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": str(prompt or "").strip() or "Describe this image."},
+                {"type": "image_url", "image_url": {"url": _image_data_url(image_bytes, filename)}},
+            ],
+        }
+    ]
+
+
+def _local_vision_prepare_image_bytes(image_bytes: bytes, filename: str) -> Tuple[bytes, str]:
+    name = str(filename or "image.png").strip() or "image.png"
+    lower_name = name.lower()
+    if not lower_name.endswith(".gif"):
+        return bytes(image_bytes or b""), name
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return bytes(image_bytes or b""), name
+    try:
+        image = Image.open(io.BytesIO(bytes(image_bytes or b"")))
+        image.seek(0)
+        frame = image.convert("RGBA")
+        background = Image.new("RGBA", frame.size, (255, 255, 255, 255))
+        background.alpha_composite(frame)
+        out = io.BytesIO()
+        background.convert("RGB").save(out, format="PNG")
+        stem = Path(name).stem or "image"
+        return out.getvalue(), f"{stem}.png"
+    except Exception as exc:
+        logger.debug("[local-vision] failed to normalize GIF %s to PNG: %s", name, exc)
+        return bytes(image_bytes or b""), name
+
+
+_LLAMA_CPP_VISION_WORKER_ARG = "--tater-llama-cpp-vision-worker"
+_LLAMA_CPP_VISION_WORKER_ENV = "TATER_LLAMA_CPP_VISION_WORKER"
+_LLAMA_CPP_VISION_WORKER_RESULT_PREFIX = "TATER_LLAMA_CPP_VISION_RESULT:"
+
+
+def _llama_cpp_vision_worker_enabled() -> bool:
+    if str(os.getenv(_LLAMA_CPP_VISION_WORKER_ENV) or "").strip() == "1":
+        return False
+    return _boolish(os.getenv("TATER_LLAMA_CPP_VISION_SUBPROCESS"), default=True)
+
+
+def _llama_cpp_vision_unload_matching_cache_enabled() -> bool:
+    return _boolish(os.getenv("TATER_LLAMA_CPP_VISION_UNLOAD_MATCHING_CACHE"), default=False)
+
+
+def _local_vision_serialize_enabled() -> bool:
+    return _boolish(os.getenv("TATER_LOCAL_VISION_SERIALIZE"), default=True)
+
+
+def _local_vision_lock_timeout_seconds() -> float:
+    raw = str(os.getenv("TATER_LOCAL_VISION_LOCK_TIMEOUT_SECONDS") or "300").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 300.0
+    return max(5.0, min(3600.0, value))
+
+
+def _llama_cpp_vision_worker_retry_count() -> int:
+    raw = str(os.getenv("TATER_LLAMA_CPP_VISION_WORKER_RETRIES") or "1").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 1
+    return max(0, min(3, value))
+
+
+def _llama_cpp_vision_worker_retry_delay_seconds() -> float:
+    raw = str(os.getenv("TATER_LLAMA_CPP_VISION_WORKER_RETRY_DELAY_SECONDS") or "2").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 2.0
+    return max(0.25, min(30.0, value))
+
+
+def _llama_cpp_vision_worker_retryable_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        token in text
+        for token in (
+            "exit signal 6",
+            "exit signal 11",
+            "ggml_assert(buffer)",
+            "ggml_assert",
+            "cuda error",
+            "cuda out of memory",
+            "out of memory",
+            "failed to create llama_context",
+            "could not create a runtime context",
+            "failed to allocate",
+            "allocation",
+            "worker timed out",
+        )
+    )
+
+
+def _llama_cpp_vision_worker_batch_retry_values() -> List[int]:
+    current = _llama_cpp_n_batch(vision=True)
+    values: List[int] = [current]
+    for candidate in (128, 64, 32, 16):
+        if candidate < current and candidate not in values:
+            values.append(candidate)
+    return values
+
+
+def _tail_text(value: Any, limit: int = 5000) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text.strip()
+    return text[-limit:].strip()
+
+
+def _subprocess_returncode_label(code: Any) -> str:
+    try:
+        value = int(code)
+    except Exception:
+        return str(code or "unknown")
+    if value < 0:
+        return f"signal {-value}"
+    return str(value)
+
+
+def _describe_image_with_llama_cpp_direct(
+    *,
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    timeout: float,
+) -> Dict[str, Any]:
+    bundle = _load_llama_cpp_bundle(model_token, vision=True)
+    if not bool(bundle.get("supports_vision")):
+        detail = str(bundle.get("vision_warning") or "").strip()
+        if not detail and not str(bundle.get("mmproj_path") or "").strip():
+            detail = "No matching mmproj vision projector was found for this GGUF."
+        raise RuntimeError(detail or f"{model_token} is not loaded as a llama.cpp vision model.")
+    client = LlamaCppLLMClientWrapper(model=model_token, vision=True)
+    return client._chat_sync(messages, timeout=timeout, max_tokens=768, temperature=0.2)
+
+
+def _describe_image_with_llama_cpp_subprocess(
+    *,
+    model_token: str,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+    timeout: float,
+) -> Dict[str, Any]:
+    if _llama_cpp_vision_unload_matching_cache_enabled():
+        try:
+            unload_local_llm_models(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP, model=model_token)
+        except Exception as exc:
+            logger.warning("[llama-cpp-vision] failed unloading matching in-process cache before worker: %s", exc)
+
+    payload = {
+        "model": str(model_token or "").strip(),
+        "image_b64": base64.b64encode(bytes(image_bytes or b"")).decode("ascii"),
+        "filename": str(filename or "image.png"),
+        "prompt": str(prompt or ""),
+        "timeout": float(timeout or 90.0),
+    }
+    env = dict(os.environ)
+    env[_LLAMA_CPP_VISION_WORKER_ENV] = "1"
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    command = [sys.executable, os.path.abspath(__file__), _LLAMA_CPP_VISION_WORKER_ARG]
+    worker_timeout = max(45.0, float(timeout or 90.0) + 60.0)
+
+    def _run_once(run_env: Dict[str, str]) -> Dict[str, Any]:
+        try:
+            completed = subprocess.run(
+                command,
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                timeout=worker_timeout,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                env=run_env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            combined = "\n".join([_tail_text(exc.stdout), _tail_text(exc.stderr)]).strip()
+            detail = f" Logs: {combined}" if combined else ""
+            raise RuntimeError(f"llama.cpp vision worker timed out after {int(worker_timeout)} seconds.{detail}") from exc
+
+        combined_output = "\n".join([str(completed.stdout or ""), str(completed.stderr or "")])
+        matches = re.findall(rf"{re.escape(_LLAMA_CPP_VISION_WORKER_RESULT_PREFIX)}([A-Za-z0-9+/=]+)", combined_output)
+        if not matches:
+            detail = _tail_text(combined_output)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "llama.cpp vision worker crashed "
+                    f"(exit {_subprocess_returncode_label(completed.returncode)}). Tater stayed online."
+                    f"{' Logs: ' + detail if detail else ''}"
+                )
+            raise RuntimeError(f"llama.cpp vision worker finished without a result.{' Logs: ' + detail if detail else ''}")
+
+        try:
+            worker_payload = json.loads(base64.b64decode(matches[-1]).decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError("llama.cpp vision worker returned an unreadable result.") from exc
+        if completed.returncode != 0 and not bool(worker_payload.get("ok")):
+            detail = str(worker_payload.get("error") or "").strip() or _tail_text(combined_output)
+            raise RuntimeError(
+                "llama.cpp vision worker failed "
+                f"(exit {_subprocess_returncode_label(completed.returncode)}).{f' {detail}' if detail else ''}"
+            )
+        if not bool(worker_payload.get("ok")):
+            raise RuntimeError(str(worker_payload.get("error") or "llama.cpp vision worker failed."))
+        result = worker_payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("llama.cpp vision worker returned an invalid result.")
+        return result
+
+    retry_count = _llama_cpp_vision_worker_retry_count()
+    attempts = max(1, retry_count + 1)
+    batch_values = _llama_cpp_vision_worker_batch_retry_values()
+    last_exc: Optional[RuntimeError] = None
+    total_profiles = max(1, len(batch_values) * attempts)
+    profile_index = 0
+    for batch_value in batch_values:
+        run_env = dict(env)
+        run_env["TATER_LLAMA_CPP_VISION_N_BATCH"] = str(batch_value)
+        for attempt in range(attempts):
+            profile_index += 1
+            try:
+                return _run_once(run_env)
+            except RuntimeError as exc:
+                last_exc = exc
+                if not _llama_cpp_vision_worker_retryable_error(exc):
+                    raise
+                if profile_index >= total_profiles:
+                    raise
+                delay = _llama_cpp_vision_worker_retry_delay_seconds() * float(attempt + 1)
+                logger.warning(
+                    "[llama-cpp-vision] worker failed with n_batch=%s; retrying in %.1fs (%s/%s): %s",
+                    batch_value,
+                    delay,
+                    profile_index + 1,
+                    total_profiles,
+                    _tail_text(exc, 700),
+                )
+                time.sleep(delay)
+    raise last_exc or RuntimeError("llama.cpp vision worker failed.")
+
+
+def describe_image_with_local_llm(
+    *,
+    provider: str,
+    model: str,
+    image_bytes: bytes,
+    filename: str = "image.png",
+    prompt: str = "",
+    timeout: float = 90.0,
+) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    if not _is_local_hydra_llm_provider(provider_token) or not model_token:
+        raise RuntimeError("Choose a local vision provider and model.")
+    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        raise RuntimeError("MLX LM is text-only in Tater right now. Use Transformers or llama.cpp for local vision.")
+
+    messages = _local_vision_messages(image_bytes, filename, prompt)
+    call_id = register_active_vision_call(
+        api_base={
+            HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "hf://transformers",
+            HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp://local",
+        }.get(provider_token, "local://vision"),
+        model=model_token,
+        source="local_vision",
+    )
+    call_error: Optional[Exception] = None
+    response_model = model_token
+    lock_acquired = False
+    try:
+        if _local_vision_serialize_enabled():
+            lock_timeout = _local_vision_lock_timeout_seconds()
+            lock_acquired = _LOCAL_VISION_GENERATION_LOCK.acquire(timeout=lock_timeout)
+            if not lock_acquired:
+                raise RuntimeError(
+                    f"Local vision is busy and did not become available within {int(lock_timeout)} seconds."
+                )
+
+        if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+            bundle = _load_hf_llm_bundle(model_token)
+            if not bool(bundle.get("supports_vision")):
+                raise RuntimeError(f"{model_token} does not look like a Hugging Face vision-capable model.")
+            client = TransformersLLMClientWrapper(model=model_token)
+            result = client._chat_sync(messages, timeout=timeout, max_tokens=768, temperature=0.2)
+        elif provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+            if _llama_cpp_vision_worker_enabled():
+                result = _describe_image_with_llama_cpp_subprocess(
+                    model_token=model_token,
+                    image_bytes=image_bytes,
+                    filename=filename,
+                    prompt=prompt,
+                    timeout=timeout,
+                )
+            else:
+                result = _describe_image_with_llama_cpp_direct(
+                    model_token=model_token,
+                    messages=messages,
+                    timeout=timeout,
+                )
+        else:
+            raise RuntimeError("OpenAI-compatible vision should use the API vision path.")
+
+        content = _coerce_content_to_text(((result or {}).get("message") or {}).get("content")).strip()
+        response_model = str((result or {}).get("model") or model_token)
+        if not content:
+            raise RuntimeError("Local vision model returned an empty description.")
+        return {
+            "ok": True,
+            "description": content,
+            "model": response_model,
+            "provider": provider_token,
+            "provider_label": _local_llm_provider_label(provider_token),
+        }
+    except Exception as exc:
+        call_error = exc
+        raise
+    finally:
+        if lock_acquired:
+            try:
+                _LOCAL_VISION_GENERATION_LOCK.release()
+            except RuntimeError:
+                pass
+        finish_active_vision_call(call_id, error=call_error, response_model=response_model)
+
+
 class RoundRobinLLMClientWrapper:
-    def __init__(self, *, clients: List[LLMClientWrapper], pool_key: str = ""):
+    def __init__(self, *, clients: List[Any], pool_key: str = ""):
         self._clients = [client for client in (clients or []) if client is not None]
         if not self._clients:
             raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
@@ -1924,11 +7276,14 @@ class RoundRobinLLMClientWrapper:
 
     def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
         elapsed_total = 0.0
+        prompt_elapsed_total = 0.0
+        completion_elapsed_total = 0.0
         prompt_tokens_total = 0
         completion_tokens_total = 0
         total_tokens_total = 0
         calls_total = 0
         model_names: List[str] = []
+        speed_bases: List[str] = []
 
         for client in self._clients:
             getter = getattr(client, "get_perf_stats", None)
@@ -1938,6 +7293,8 @@ class RoundRobinLLMClientWrapper:
             if not isinstance(stats, dict):
                 continue
             elapsed_total += max(0.0, float(stats.get("elapsed") or 0.0))
+            prompt_elapsed_total += max(0.0, float(stats.get("prompt_elapsed") or 0.0))
+            completion_elapsed_total += max(0.0, float(stats.get("completion_elapsed") or 0.0))
             prompt_tokens_total += max(0, int(stats.get("prompt_tokens") or 0))
             completion_tokens_total += max(0, int(stats.get("completion_tokens") or 0))
             total_tokens_total += max(0, int(stats.get("total_tokens") or 0))
@@ -1945,6 +7302,9 @@ class RoundRobinLLMClientWrapper:
             model_name = str(stats.get("model") or "").strip()
             if model_name and model_name not in model_names:
                 model_names.append(model_name)
+            speed_basis = str(stats.get("speed_basis") or "").strip()
+            if speed_basis and speed_basis not in speed_bases:
+                speed_bases.append(speed_basis)
 
         if total_tokens_total <= 0:
             total_tokens_total = max(0, prompt_tokens_total + completion_tokens_total)
@@ -1955,8 +7315,13 @@ class RoundRobinLLMClientWrapper:
             else 0.0
         )
         tps_comp = (
-            float(completion_tokens_total) / float(elapsed_total)
-            if elapsed_total > 0.0 and completion_tokens_total > 0
+            float(completion_tokens_total) / float(completion_elapsed_total or elapsed_total)
+            if (completion_elapsed_total > 0.0 or elapsed_total > 0.0) and completion_tokens_total > 0
+            else 0.0
+        )
+        tps_prompt = (
+            float(prompt_tokens_total) / float(prompt_elapsed_total)
+            if prompt_elapsed_total > 0.0 and prompt_tokens_total > 0
             else 0.0
         )
 
@@ -1971,12 +7336,16 @@ class RoundRobinLLMClientWrapper:
         return {
             "model": model_label,
             "elapsed": round(elapsed_total, 6),
+            "prompt_elapsed": round(prompt_elapsed_total, 6),
+            "completion_elapsed": round(completion_elapsed_total, 6),
             "prompt_tokens": prompt_tokens_total,
             "completion_tokens": completion_tokens_total,
             "total_tokens": total_tokens_total,
             "tps_total": round(tps_total, 4),
+            "tps_prompt": round(tps_prompt, 4),
             "tps_comp": round(tps_comp, 4),
             "calls": calls_total,
+            "speed_basis": speed_bases[0] if len(speed_bases) == 1 else ("mixed" if speed_bases else "wall_time"),
         }
 
 # ---------------------------------------------------------
@@ -2353,3 +7722,33 @@ def run_comfy_prompt(base_http: str, base_ws: str, prompt: dict):
             ws.close()
         except Exception:
             pass
+
+
+def _llama_cpp_vision_worker_main() -> int:
+    try:
+        raw_payload = sys.stdin.read()
+        payload = json.loads(raw_payload or "{}")
+        model_token = str(payload.get("model") or "").strip()
+        image_b64 = str(payload.get("image_b64") or "")
+        image_bytes = base64.b64decode(image_b64, validate=True)
+        filename = str(payload.get("filename") or "image.png")
+        prompt = str(payload.get("prompt") or "")
+        timeout = float(payload.get("timeout") or 90.0)
+        messages = _local_vision_messages(image_bytes, filename, prompt)
+        result = _describe_image_with_llama_cpp_direct(
+            model_token=model_token,
+            messages=messages,
+            timeout=timeout,
+        )
+        output = {"ok": True, "result": result}
+        return_code = 0
+    except Exception as exc:
+        output = {"ok": False, "error": str(exc) or exc.__class__.__name__}
+        return_code = 1
+    encoded = base64.b64encode(json.dumps(output, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    print(f"{_LLAMA_CPP_VISION_WORKER_RESULT_PREFIX}{encoded}", flush=True)
+    return return_code
+
+
+if __name__ == "__main__" and _LLAMA_CPP_VISION_WORKER_ARG in sys.argv[1:]:
+    raise SystemExit(_llama_cpp_vision_worker_main())
