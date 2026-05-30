@@ -532,6 +532,8 @@ _HF_LLM_GENERATION_LOCKS: Dict[Tuple[str, str, str, bool], threading.RLock] = {}
 _LLAMA_CPP_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _LLAMA_CPP_MODEL_CACHE_LOCK = threading.RLock()
 _LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_LLAMA_CPP_VISION_FAILURE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
+_LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK = threading.RLock()
 _MLX_LM_MODEL_CACHE: Dict[Tuple[str, str, bool, bool], Dict[str, Any]] = {}
 _MLX_LM_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {}
@@ -6983,8 +6985,102 @@ def _llama_cpp_vision_worker_retry_delay_seconds() -> float:
     return max(0.25, min(30.0, value))
 
 
+def _llama_cpp_vision_failure_cooldown_seconds() -> float:
+    raw = str(os.getenv("TATER_LLAMA_CPP_VISION_FAILURE_COOLDOWN_SECONDS") or "300").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 300.0
+    return max(0.0, min(3600.0, value))
+
+
+def _llama_cpp_vision_failure_key(model_token: Any) -> str:
+    return str(model_token or "").strip() or "llama-cpp-vision"
+
+
+def _llama_cpp_vision_projector_native_crash_text(text: Any) -> bool:
+    lowered = str(text or "").lower()
+    if "ggml_assert(buffer)" not in lowered and "ggml_assert" not in lowered:
+        return False
+    return any(token in lowered for token in ("libmtmd", "clip_model_loader", "projector:", "mmproj", "clip_init"))
+
+
+def _llama_cpp_vision_error_summary(text: Any, limit: int = 1400) -> str:
+    wanted = (
+        "ggml_assert",
+        "projector:",
+        "clip_ctx:",
+        "clip_model_loader",
+        "load_hparams:",
+        "load_tensors:",
+        "cuda",
+        "out of memory",
+        "failed",
+        "error",
+    )
+    rows: List[str] = []
+    seen: set[str] = set()
+    for line in str(text or "").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        lowered = clean.lower()
+        if not any(token in lowered for token in wanted):
+            continue
+        if clean in seen:
+            continue
+        seen.add(clean)
+        rows.append(clean)
+        if len(rows) >= 14:
+            break
+    summary = "\n".join(rows).strip() or _tail_text(text, limit)
+    return _tail_text(summary, limit)
+
+
+def _llama_cpp_vision_raise_if_failure_cooling(model_token: Any) -> None:
+    cooldown = _llama_cpp_vision_failure_cooldown_seconds()
+    if cooldown <= 0:
+        return
+    key = _llama_cpp_vision_failure_key(model_token)
+    now = time.time()
+    with _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK:
+        row = _LLAMA_CPP_VISION_FAILURE_COOLDOWNS.get(key)
+        until = float((row or {}).get("until") or 0.0)
+        if until <= now:
+            _LLAMA_CPP_VISION_FAILURE_COOLDOWNS.pop(key, None)
+            return
+        remaining = max(1, int(round(until - now)))
+        reason = str((row or {}).get("reason") or "previous llama.cpp vision projector crash").strip()
+    raise RuntimeError(
+        f"llama.cpp vision is paused for {remaining}s after a native projector crash. "
+        f"Last failure: {reason}"
+    )
+
+
+def _llama_cpp_vision_record_failure(model_token: Any, exc: BaseException) -> None:
+    text = str(exc or "")
+    if not _llama_cpp_vision_projector_native_crash_text(text):
+        return
+    cooldown = _llama_cpp_vision_failure_cooldown_seconds()
+    if cooldown <= 0:
+        return
+    key = _llama_cpp_vision_failure_key(model_token)
+    summary = _llama_cpp_vision_error_summary(text, 900)
+    until = time.time() + cooldown
+    with _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK:
+        _LLAMA_CPP_VISION_FAILURE_COOLDOWNS[key] = {"until": until, "reason": summary}
+
+
+def _llama_cpp_vision_clear_failure(model_token: Any) -> None:
+    key = _llama_cpp_vision_failure_key(model_token)
+    with _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK:
+        _LLAMA_CPP_VISION_FAILURE_COOLDOWNS.pop(key, None)
+
+
 def _llama_cpp_vision_worker_retryable_error(exc: BaseException) -> bool:
     text = str(exc or "").lower()
+    if _llama_cpp_vision_projector_native_crash_text(text):
+        return False
     return any(
         token in text
         for token in (
@@ -7054,6 +7150,8 @@ def _describe_image_with_llama_cpp_subprocess(
     prompt: str,
     timeout: float,
 ) -> Dict[str, Any]:
+    _llama_cpp_vision_raise_if_failure_cooling(model_token)
+
     if _llama_cpp_vision_unload_matching_cache_enabled():
         try:
             unload_local_llm_models(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP, model=model_token)
@@ -7094,6 +7192,15 @@ def _describe_image_with_llama_cpp_subprocess(
         if not matches:
             detail = _tail_text(combined_output)
             if completed.returncode != 0:
+                if _llama_cpp_vision_projector_native_crash_text(detail):
+                    summary = _llama_cpp_vision_error_summary(detail)
+                    raise RuntimeError(
+                        "llama.cpp vision worker crashed while loading the vision projector. "
+                        "The selected GGUF/mmproj pair or llama-cpp-python build appears incompatible "
+                        "with the current GPU path, or the projector could not allocate GPU buffers. "
+                        "Changing n_batch will not fix this projector-load failure. "
+                        f"Details: {summary}"
+                    )
                 raise RuntimeError(
                     "llama.cpp vision worker crashed "
                     f"(exit {_subprocess_returncode_label(completed.returncode)}). Tater stayed online."
@@ -7124,30 +7231,36 @@ def _describe_image_with_llama_cpp_subprocess(
     last_exc: Optional[RuntimeError] = None
     total_profiles = max(1, len(batch_values) * attempts)
     profile_index = 0
-    for batch_value in batch_values:
-        run_env = dict(env)
-        run_env["TATER_LLAMA_CPP_VISION_N_BATCH"] = str(batch_value)
-        for attempt in range(attempts):
-            profile_index += 1
-            try:
-                return _run_once(run_env)
-            except RuntimeError as exc:
-                last_exc = exc
-                if not _llama_cpp_vision_worker_retryable_error(exc):
-                    raise
-                if profile_index >= total_profiles:
-                    raise
-                delay = _llama_cpp_vision_worker_retry_delay_seconds() * float(attempt + 1)
-                logger.warning(
-                    "[llama-cpp-vision] worker failed with n_batch=%s; retrying in %.1fs (%s/%s): %s",
-                    batch_value,
-                    delay,
-                    profile_index + 1,
-                    total_profiles,
-                    _tail_text(exc, 700),
-                )
-                time.sleep(delay)
-    raise last_exc or RuntimeError("llama.cpp vision worker failed.")
+    try:
+        for batch_value in batch_values:
+            run_env = dict(env)
+            run_env["TATER_LLAMA_CPP_VISION_N_BATCH"] = str(batch_value)
+            for attempt in range(attempts):
+                profile_index += 1
+                try:
+                    result = _run_once(run_env)
+                    _llama_cpp_vision_clear_failure(model_token)
+                    return result
+                except RuntimeError as exc:
+                    last_exc = exc
+                    if not _llama_cpp_vision_worker_retryable_error(exc):
+                        raise
+                    if profile_index >= total_profiles:
+                        raise
+                    delay = _llama_cpp_vision_worker_retry_delay_seconds() * float(attempt + 1)
+                    logger.warning(
+                        "[llama-cpp-vision] worker failed with n_batch=%s; retrying in %.1fs (%s/%s): %s",
+                        batch_value,
+                        delay,
+                        profile_index + 1,
+                        total_profiles,
+                        _tail_text(exc, 700),
+                    )
+                    time.sleep(delay)
+        raise last_exc or RuntimeError("llama.cpp vision worker failed.")
+    except RuntimeError as exc:
+        _llama_cpp_vision_record_failure(model_token, exc)
+        raise
 
 
 def describe_image_with_local_llm(
