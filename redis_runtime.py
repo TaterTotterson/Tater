@@ -1,7 +1,11 @@
+import atexit
 import hashlib
 import json
 import os
+import shutil
+import socket
 import ssl
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -22,7 +26,11 @@ _BLOB_CLIENT: Optional[redis.Redis] = None
 _CONFIG_CACHE: Optional[Dict[str, Any]] = None
 _CONFIG_SOURCE = "unknown"
 _CONFIG_ERROR = ""
+_CONFIG_FALLBACK_REASON = ""
 _RUNTIME_DIR = (Path(__file__).resolve().parent / ".runtime").resolve()
+_INTERNAL_REDIS_PROCESS: Optional[subprocess.Popen] = None
+_INTERNAL_REDIS_INFO: Dict[str, Any] = {}
+_INTERNAL_REDIS_ATEXIT_REGISTERED = False
 _REDIS_ENCRYPTION_KEY_PATH = (_RUNTIME_DIR / "redis_encryption.key").resolve()
 _REDIS_LIVE_ENCRYPTION_STATE_PATH = (_RUNTIME_DIR / "redis_live_encryption.json").resolve()
 _REDIS_ENCRYPTED_SNAPSHOT_PATH = (_RUNTIME_DIR / "redis_snapshot.enc").resolve()  # legacy artifact path
@@ -31,6 +39,8 @@ _LIVE_ENCRYPTION_STATE_CACHE: Optional[Dict[str, Any]] = None
 
 _REDIS_ENCRYPTION_PREFIX_TEXT = "enc:v1:"
 _REDIS_ENCRYPTION_PREFIX_BYTES = _REDIS_ENCRYPTION_PREFIX_TEXT.encode("ascii")
+_REDIS_MODE_INTERNAL = "internal"
+_REDIS_MODE_EXTERNAL = "external"
 
 # Counter keys must remain plaintext for atomic INCR/INCRBY operations.
 _NUMERIC_PLAINTEXT_KEY_PREFIXES = (
@@ -465,6 +475,73 @@ def _config_path() -> Path:
     return (Path(__file__).resolve().parent / ".runtime" / "redis_connection.json").resolve()
 
 
+def _agent_lab_dir() -> Path:
+    raw = str(os.getenv("TATER_AGENT_ROOT", "") or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (Path(__file__).resolve().parent / path).resolve()
+        return path.resolve()
+    return (Path(__file__).resolve().parent / "agent_lab").resolve()
+
+
+def _default_internal_redis_data_path() -> Path:
+    return (_agent_lab_dir() / "redis" / "dump.rdb").resolve()
+
+
+def _normalize_redis_mode(value: Any, *, default: str = _REDIS_MODE_INTERNAL) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"", "auto", "embedded", "embed", "builtin", "built_in", "local", "redislite", "python"}:
+        token = str(default or _REDIS_MODE_INTERNAL).strip().lower()
+    if token in {"internal", "embedded", "builtin", "built_in", "local", "redislite", "python"}:
+        return _REDIS_MODE_INTERNAL
+    if token in {"external", "remote", "server", "tcp", "standalone"}:
+        return _REDIS_MODE_EXTERNAL
+    return _REDIS_MODE_INTERNAL if str(default or "").strip().lower() == _REDIS_MODE_INTERNAL else _REDIS_MODE_EXTERNAL
+
+
+def _resolve_internal_redis_data_path(value: Any = None) -> Path:
+    raw = str(os.getenv("TATER_REDIS_DATA_PATH", "") or value or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            parts = path.parts
+            if parts and parts[0] == "agent_lab":
+                path = (Path(__file__).resolve().parent / path).resolve()
+            else:
+                path = (_agent_lab_dir() / path).resolve()
+        elif str(path).startswith("/agent_lab/"):
+            path = (_agent_lab_dir() / str(path)[len("/agent_lab/") :]).resolve()
+        elif str(path) == "/agent_lab":
+            path = _default_internal_redis_data_path()
+    else:
+        path = _default_internal_redis_data_path()
+    if path.name in {"", ".", ".."} or str(raw).endswith(("/", "\\")):
+        path = path / "dump.rdb"
+    return path.resolve()
+
+
+def _internal_redis_paths(config: Dict[str, Any]) -> Dict[str, Path]:
+    data_path = _resolve_internal_redis_data_path(config.get("data_path"))
+    data_dir = data_path.parent
+    socket_raw = str(os.getenv("TATER_REDIS_SOCKET_PATH", "") or "").strip()
+    if socket_raw:
+        socket_path = Path(socket_raw).expanduser()
+        if not socket_path.is_absolute():
+            socket_path = (data_dir / socket_path).resolve()
+    else:
+        socket_path = (data_dir / "redis.sock").resolve()
+    return {
+        "data_path": data_path,
+        "data_dir": data_dir.resolve(),
+        "config_path": (data_dir / "redis.conf").resolve(),
+        "log_path": (data_dir / "redis.log").resolve(),
+        "pid_path": (data_dir / "redis.pid").resolve(),
+        "port_path": (data_dir / "redis.port").resolve(),
+        "socket_path": socket_path.resolve(),
+    }
+
+
 def _to_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -497,7 +574,9 @@ def _to_int(
 
 
 def _empty_config() -> Dict[str, Any]:
+    mode = _normalize_redis_mode(os.getenv("TATER_REDIS_MODE"), default=_REDIS_MODE_INTERNAL)
     return {
+        "mode": mode,
         "host": "",
         "port": 6379,
         "db": 0,
@@ -506,6 +585,7 @@ def _empty_config() -> Dict[str, Any]:
         "use_tls": False,
         "verify_tls": True,
         "ca_cert_path": "",
+        "data_path": str(_resolve_internal_redis_data_path()),
     }
 
 
@@ -514,7 +594,18 @@ def _normalize_config(raw: Dict[str, Any], *, allow_empty_host: bool = False) ->
         raise ValueError("Redis config payload must be an object.")
 
     host = str(raw.get("host") or "").strip()
-    if not allow_empty_host and not host:
+    env_mode = str(os.getenv("TATER_REDIS_MODE", "") or "").strip()
+    if env_mode:
+        mode = _normalize_redis_mode(env_mode, default=_REDIS_MODE_INTERNAL)
+    elif raw.get("mode") is not None:
+        mode = _normalize_redis_mode(raw.get("mode"), default=_REDIS_MODE_INTERNAL)
+    else:
+        # Legacy config files did not have a mode. If they have a host, keep
+        # them external; otherwise new installs default to internal Redis.
+        mode = _REDIS_MODE_EXTERNAL if host else _REDIS_MODE_INTERNAL
+
+    host = str(raw.get("host") or "").strip()
+    if mode == _REDIS_MODE_EXTERNAL and not allow_empty_host and not host:
         raise ValueError("Redis host is required.")
 
     use_tls = _to_bool(raw.get("use_tls"), default=False)
@@ -524,6 +615,7 @@ def _normalize_config(raw: Dict[str, Any], *, allow_empty_host: bool = False) ->
         ca_cert_path = str(Path(ca_cert_path).expanduser())
 
     return {
+        "mode": mode,
         "host": host,
         "port": _to_int(raw.get("port"), default=6379, min_value=1, max_value=65535),
         "db": _to_int(raw.get("db"), default=0, min_value=0),
@@ -532,11 +624,15 @@ def _normalize_config(raw: Dict[str, Any], *, allow_empty_host: bool = False) ->
         "use_tls": bool(use_tls),
         "verify_tls": bool(verify_tls),
         "ca_cert_path": ca_cert_path,
+        "data_path": str(_resolve_internal_redis_data_path(raw.get("data_path"))),
     }
 
 
 def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
     return {
+        "mode": mode,
+        "internal": mode == _REDIS_MODE_INTERNAL,
         "host": str(config.get("host") or ""),
         "port": int(config.get("port") or 6379),
         "db": int(config.get("db") or 0),
@@ -544,8 +640,57 @@ def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "use_tls": bool(config.get("use_tls")),
         "verify_tls": bool(config.get("verify_tls")),
         "ca_cert_path": str(config.get("ca_cert_path") or ""),
-        "password_set": bool(str(config.get("password") or "")),
+        "password_set": bool(mode == _REDIS_MODE_EXTERNAL and str(config.get("password") or "")),
+        "data_path": str(_resolve_internal_redis_data_path(config.get("data_path"))),
     }
+
+
+def _internal_config_from(config: Dict[str, Any]) -> Dict[str, Any]:
+    return _normalize_config(
+        {
+            "mode": _REDIS_MODE_INTERNAL,
+            "host": "",
+            "port": 6379,
+            "db": int((config or {}).get("db") or 0),
+            "username": "",
+            "password": "",
+            "use_tls": False,
+            "verify_tls": True,
+            "ca_cert_path": "",
+            "data_path": str(_resolve_internal_redis_data_path((config or {}).get("data_path"))),
+        },
+        allow_empty_host=True,
+    )
+
+
+def _write_config_file(config: Dict[str, Any]) -> None:
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except Exception:
+        pass
+    tmp_path.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def _switch_to_internal_config_locked(reason: Any = "") -> Dict[str, Any]:
+    global _CONFIG_CACHE, _CONFIG_SOURCE, _CONFIG_ERROR, _CONFIG_FALLBACK_REASON
+    previous = _CONFIG_CACHE if isinstance(_CONFIG_CACHE, dict) else _load_config_locked()
+    config = _internal_config_from(previous)
+    _write_config_file(config)
+    _CONFIG_CACHE = dict(config)
+    _CONFIG_SOURCE = "internal_fallback"
+    _CONFIG_ERROR = ""
+    _CONFIG_FALLBACK_REASON = str(reason or "").strip()
+    _reset_clients_locked()
+    _stop_internal_redis_locked()
+    return dict(config)
 
 
 def _load_config_locked() -> Dict[str, Any]:
@@ -587,6 +732,392 @@ def _reset_clients_locked() -> None:
     _close_client(_BLOB_CLIENT)
     _TEXT_CLIENT = None
     _BLOB_CLIENT = None
+
+
+def _quote_redis_conf_value(value: Any) -> str:
+    return json.dumps(str(value))
+
+
+def _tail_text(path: Path, *, max_bytes: int = 4000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        data = path.read_bytes()
+        if len(data) > max_bytes:
+            data = data[-max_bytes:]
+        return data.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _find_internal_redis_server_executable() -> Tuple[str, str]:
+    raw = str(os.getenv("TATER_REDIS_SERVER_BIN", "") or os.getenv("TATER_INTERNAL_REDIS_SERVER_BIN", "") or "").strip()
+    if raw:
+        return str(Path(raw).expanduser()), "env"
+
+    try:
+        import redislite  # type: ignore
+
+        path = str(getattr(redislite, "__redis_executable__", "") or "").strip()
+        if path:
+            return path, "redislite"
+    except Exception:
+        pass
+
+    try:
+        import redis_server  # type: ignore
+
+        path = str(getattr(redis_server, "REDIS_SERVER_PATH", "") or "").strip()
+        if path:
+            return path, "redis_server"
+    except Exception:
+        pass
+
+    path = shutil.which("redis-server") or ""
+    if path:
+        return path, "path"
+    return "", ""
+
+
+def _internal_redis_use_unix_socket() -> bool:
+    token = str(os.getenv("TATER_REDIS_USE_UNIX_SOCKET", "false") or "").strip().lower()
+    return token in {"1", "true", "yes", "on", "enabled"}
+
+
+def _read_internal_redis_port(path: Path) -> int:
+    try:
+        return _to_int(path.read_text(encoding="utf-8").strip(), default=0, min_value=0, max_value=65535)
+    except Exception:
+        return 0
+
+
+def _write_internal_redis_port(path: Path, port: int) -> None:
+    try:
+        path.write_text(f"{int(port)}\n", encoding="utf-8")
+        _safe_chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def _allocate_loopback_port() -> int:
+    raw = str(os.getenv("TATER_REDIS_PORT", "") or os.getenv("TATER_INTERNAL_REDIS_PORT", "") or "").strip()
+    if raw:
+        return _to_int(raw, default=6379, min_value=1, max_value=65535)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _internal_redis_existing_ping(
+    *,
+    socket_path: Optional[Path] = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    db: int = 0,
+    timeout_seconds: float = 0.25,
+) -> Tuple[bool, str]:
+    kwargs: Dict[str, Any] = {
+        "db": int(db),
+        "decode_responses": True,
+        "socket_timeout": float(timeout_seconds),
+        "socket_connect_timeout": float(timeout_seconds),
+        "health_check_interval": 30,
+    }
+    if socket_path is not None:
+        if not socket_path.exists():
+            return False, "socket not found"
+        kwargs["unix_socket_path"] = str(socket_path)
+    else:
+        if int(port or 0) <= 0:
+            return False, "port not set"
+        kwargs["host"] = str(host or "127.0.0.1")
+        kwargs["port"] = int(port)
+    client = None
+    try:
+        client = redis.Redis(**kwargs)
+        client.ping()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        _close_client(client)
+
+
+def _internal_redis_state_key(config: Dict[str, Any]) -> str:
+    paths = _internal_redis_paths(config)
+    return json.dumps(
+        {
+            "data_path": str(paths["data_path"]),
+            "socket_path": str(paths["socket_path"]),
+            "use_unix_socket": _internal_redis_use_unix_socket(),
+        },
+        sort_keys=True,
+    )
+
+
+def _internal_redis_config_text(paths: Dict[str, Path], *, port: int, use_unix_socket: bool) -> str:
+    data_path = paths["data_path"]
+    lines = [
+        "# Generated by Tater. Do not edit while Tater is running.",
+        "daemonize no",
+        "supervised no",
+        "protected-mode yes",
+        "bind 127.0.0.1",
+        f"port {0 if use_unix_socket else int(port)}",
+    ]
+    if use_unix_socket:
+        lines.extend(
+            [
+                f"unixsocket {_quote_redis_conf_value(paths['socket_path'])}",
+                "unixsocketperm 700",
+            ]
+        )
+    lines.extend(
+        [
+            f"dir {_quote_redis_conf_value(paths['data_dir'])}",
+            f"dbfilename {_quote_redis_conf_value(data_path.name)}",
+            f"pidfile {_quote_redis_conf_value(paths['pid_path'])}",
+            f"logfile {_quote_redis_conf_value(paths['log_path'])}",
+            "databases 16",
+            "appendonly yes",
+            "appendfsync everysec",
+            "save 900 1",
+            "save 300 10",
+            "save 60 10000",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _register_internal_redis_shutdown_locked() -> None:
+    global _INTERNAL_REDIS_ATEXIT_REGISTERED
+    if _INTERNAL_REDIS_ATEXIT_REGISTERED:
+        return
+    atexit.register(shutdown_internal_redis)
+    _INTERNAL_REDIS_ATEXIT_REGISTERED = True
+
+
+def _stop_internal_redis_locked() -> None:
+    global _INTERNAL_REDIS_PROCESS, _INTERNAL_REDIS_INFO
+    proc = _INTERNAL_REDIS_PROCESS
+    info = dict(_INTERNAL_REDIS_INFO or {})
+    _INTERNAL_REDIS_PROCESS = None
+    _INTERNAL_REDIS_INFO = {}
+    if proc is None or proc.poll() is not None:
+        return
+
+    use_unix_socket = bool(info.get("use_unix_socket"))
+    client = None
+    try:
+        if use_unix_socket:
+            socket_path = str(info.get("socket_path") or "")
+            if not socket_path:
+                client = None
+            else:
+                client = redis.Redis(
+                    unix_socket_path=socket_path,
+                    decode_responses=True,
+                    socket_timeout=1.0,
+                    socket_connect_timeout=1.0,
+                )
+        else:
+            port = int(info.get("port") or 0)
+            if port > 0:
+                client = redis.Redis(
+                    host=str(info.get("host") or "127.0.0.1"),
+                    port=port,
+                    decode_responses=True,
+                    socket_timeout=1.0,
+                    socket_connect_timeout=1.0,
+                )
+        if client is not None:
+            try:
+                client.execute_command("SHUTDOWN", "SAVE")
+            except redis.exceptions.ConnectionError:
+                pass
+    except Exception:
+        pass
+    finally:
+        _close_client(client)
+
+    try:
+        proc.wait(timeout=5.0)
+    except Exception:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def shutdown_internal_redis() -> None:
+    with _LOCK:
+        _reset_clients_locked()
+        _stop_internal_redis_locked()
+
+
+def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, Any]:
+    global _INTERNAL_REDIS_PROCESS, _INTERNAL_REDIS_INFO
+    paths = _internal_redis_paths(config)
+    state_key = _internal_redis_state_key(config)
+    db = int(config.get("db") or 0)
+    use_unix_socket = _internal_redis_use_unix_socket()
+    host = "127.0.0.1"
+
+    if _INTERNAL_REDIS_INFO.get("state_key") == state_key:
+        proc = _INTERNAL_REDIS_PROCESS
+        process_running = proc is None or proc.poll() is None
+        if bool(_INTERNAL_REDIS_INFO.get("use_unix_socket")):
+            ping_ok, _ping_error = _internal_redis_existing_ping(socket_path=paths["socket_path"], db=db)
+        else:
+            ping_ok, _ping_error = _internal_redis_existing_ping(
+                host=str(_INTERNAL_REDIS_INFO.get("host") or host),
+                port=int(_INTERNAL_REDIS_INFO.get("port") or 0),
+                db=db,
+            )
+        if process_running and ping_ok:
+            return dict(_INTERNAL_REDIS_INFO)
+
+    if _INTERNAL_REDIS_PROCESS is not None:
+        _stop_internal_redis_locked()
+
+    paths["data_dir"].mkdir(parents=True, exist_ok=True)
+    existing_port = _read_internal_redis_port(paths["port_path"])
+    if use_unix_socket:
+        ping_ok, _ping_error = _internal_redis_existing_ping(socket_path=paths["socket_path"], db=db)
+    else:
+        ping_ok, _ping_error = _internal_redis_existing_ping(host=host, port=existing_port, db=db)
+    if ping_ok:
+        info = {
+            "mode": _REDIS_MODE_INTERNAL,
+            "managed": False,
+            "pid": 0,
+            "state_key": state_key,
+            "data_path": str(paths["data_path"]),
+            "data_dir": str(paths["data_dir"]),
+            "host": host,
+            "port": int(existing_port),
+            "use_unix_socket": bool(use_unix_socket),
+            "socket_path": str(paths["socket_path"]),
+            "config_path": str(paths["config_path"]),
+            "log_path": str(paths["log_path"]),
+            "server_path": "",
+            "server_source": "existing",
+        }
+        _INTERNAL_REDIS_INFO = dict(info)
+        return dict(info)
+
+    for cleanup_path in (paths["socket_path"], paths["pid_path"], paths["port_path"]):
+        try:
+            if cleanup_path.exists() or cleanup_path.is_symlink():
+                cleanup_path.unlink()
+        except Exception:
+            pass
+
+    server_path, server_source = _find_internal_redis_server_executable()
+    if not server_path:
+        raise RedisNotConfiguredError(
+            "Internal Redis requires the `redislite` package, the `redis-server` Python package, "
+            "or a redis-server binary on PATH."
+        )
+
+    port = 0 if use_unix_socket else _allocate_loopback_port()
+    paths["config_path"].write_text(
+        _internal_redis_config_text(paths, port=port, use_unix_socket=use_unix_socket),
+        encoding="utf-8",
+    )
+    _safe_chmod(paths["config_path"], 0o600)
+    _register_internal_redis_shutdown_locked()
+
+    try:
+        proc = subprocess.Popen(
+            [server_path, str(paths["config_path"])],
+            cwd=str(paths["data_dir"]),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+        )
+    except Exception as exc:
+        raise RedisNotConfiguredError(f"Failed to start internal Redis server: {exc}") from exc
+
+    try:
+        timeout = float(os.getenv("TATER_REDIS_START_TIMEOUT_SECONDS", "8") or "8")
+    except Exception:
+        timeout = 8.0
+    timeout = max(1.0, timeout)
+    deadline = time.time() + timeout
+    last_error = ""
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            detail = _tail_text(paths["log_path"])
+            message = detail or f"redis-server exited with code {proc.returncode}"
+            raise RedisNotConfiguredError(f"Internal Redis exited during startup: {message}")
+        if use_unix_socket:
+            ping_ok, ping_error = _internal_redis_existing_ping(
+                socket_path=paths["socket_path"],
+                db=db,
+                timeout_seconds=0.35,
+            )
+        else:
+            ping_ok, ping_error = _internal_redis_existing_ping(
+                host=host,
+                port=port,
+                db=db,
+                timeout_seconds=0.35,
+            )
+        if ping_ok:
+            if not use_unix_socket:
+                _write_internal_redis_port(paths["port_path"], port)
+            info = {
+                "mode": _REDIS_MODE_INTERNAL,
+                "managed": True,
+                "pid": int(proc.pid or 0),
+                "state_key": state_key,
+                "data_path": str(paths["data_path"]),
+                "data_dir": str(paths["data_dir"]),
+                "host": host,
+                "port": int(port),
+                "use_unix_socket": bool(use_unix_socket),
+                "socket_path": str(paths["socket_path"]),
+                "config_path": str(paths["config_path"]),
+                "log_path": str(paths["log_path"]),
+                "server_path": str(server_path),
+                "server_source": str(server_source),
+            }
+            _INTERNAL_REDIS_PROCESS = proc
+            _INTERNAL_REDIS_INFO = dict(info)
+            return dict(info)
+        last_error = ping_error
+        time.sleep(0.08)
+
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    detail = _tail_text(paths["log_path"]) or last_error or "startup timed out"
+    raise RedisNotConfiguredError(f"Internal Redis did not become ready: {detail}")
+
+
+def _internal_client_kwargs(config: Dict[str, Any], *, decode_responses: bool) -> Dict[str, Any]:
+    info = _ensure_internal_redis_server_locked(config)
+    kwargs: Dict[str, Any] = {
+        "db": int(config.get("db") or 0),
+        "decode_responses": bool(decode_responses),
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 5.0,
+        "health_check_interval": 30,
+    }
+    if bool(info.get("use_unix_socket")):
+        kwargs["unix_socket_path"] = str(info.get("socket_path") or "")
+    else:
+        kwargs["host"] = str(info.get("host") or "127.0.0.1")
+        kwargs["port"] = int(info.get("port") or 0)
+    return kwargs
 
 
 def _client_kwargs(config: Dict[str, Any], *, decode_responses: bool) -> Dict[str, Any]:
@@ -631,33 +1162,218 @@ def reload_redis_connection_config() -> Dict[str, Any]:
     with _LOCK:
         _CONFIG_CACHE = None
         _reset_clients_locked()
+        _stop_internal_redis_locked()
         config = _load_config_locked()
     return _public_config(config)
 
 
 def save_redis_connection_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     config = _normalize_config(payload, allow_empty_host=False)
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        os.chmod(tmp_path, 0o600)
-    except Exception:
-        pass
-    tmp_path.replace(path)
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+    _write_config_file(config)
 
-    global _CONFIG_CACHE, _CONFIG_SOURCE, _CONFIG_ERROR
+    global _CONFIG_CACHE, _CONFIG_SOURCE, _CONFIG_ERROR, _CONFIG_FALLBACK_REASON
     with _LOCK:
         _CONFIG_CACHE = dict(config)
         _CONFIG_SOURCE = "file"
         _CONFIG_ERROR = ""
+        _CONFIG_FALLBACK_REASON = ""
         _reset_clients_locked()
+        _stop_internal_redis_locked()
     return _public_config(config)
+
+
+def _redis_type_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore").strip().lower()
+    return str(value or "").strip().lower()
+
+
+def _copy_redis_key_by_type(source: redis.Redis, target: redis.Redis, key: bytes, key_type: str) -> None:
+    target.delete(key)
+    if key_type == "string":
+        value = source.get(key)
+        if value is not None:
+            target.set(key, value)
+        return
+
+    if key_type == "hash":
+        mapping = source.hgetall(key) or {}
+        if mapping:
+            target.hset(key, mapping=mapping)
+        return
+
+    if key_type == "list":
+        values = source.lrange(key, 0, -1) or []
+        if values:
+            target.rpush(key, *values)
+        return
+
+    if key_type == "set":
+        values = source.smembers(key) or set()
+        if values:
+            target.sadd(key, *values)
+        return
+
+    if key_type == "zset":
+        rows = source.zrange(key, 0, -1, withscores=True) or []
+        if rows:
+            target.zadd(key, {member: float(score) for member, score in rows})
+        return
+
+    if key_type == "stream":
+        last_id = "-"
+        while True:
+            raw_rows = source.xrange(key, min=last_id, max="+", count=500) or []
+            rows = raw_rows
+            if last_id != "-":
+                rows = rows[1:]
+            if not rows:
+                break
+            for entry_id, fields in rows:
+                target.xadd(key, fields or {}, id=entry_id)
+                last_id = entry_id
+            if len(raw_rows) < 500:
+                break
+        return
+
+    raise RedisError(f"Unsupported Redis key type for migration: {key_type or 'unknown'}")
+
+
+def _copy_redis_key(source: redis.Redis, target: redis.Redis, key: bytes) -> str:
+    key_type = _redis_type_text(source.type(key))
+    if not key_type or key_type == "none":
+        return "missing"
+
+    ttl_ms = int(source.pttl(key))
+    if ttl_ms == -2:
+        return "missing"
+    restore_ttl = max(0, ttl_ms)
+
+    try:
+        payload = source.dump(key)
+        if payload is None:
+            return "missing"
+        target.restore(key, restore_ttl, payload, replace=True)
+        return "dump_restore"
+    except Exception:
+        _copy_redis_key_by_type(source, target, key, key_type)
+        if ttl_ms >= 0:
+            target.pexpire(key, ttl_ms)
+        return key_type
+
+
+def migrate_current_redis_to_internal(
+    *,
+    data_path: Any = "",
+    flush_internal: bool = True,
+) -> Dict[str, Any]:
+    with _LOCK:
+        source_config = _load_config_locked()
+        source_mode = _normalize_redis_mode(source_config.get("mode"), default=_REDIS_MODE_INTERNAL)
+        if source_mode == _REDIS_MODE_INTERNAL:
+            return {
+                "already_internal": True,
+                "switched": False,
+                "keys_scanned": 0,
+                "keys_restored": 0,
+                "keys_failed": 0,
+                "target": _public_config(source_config),
+            }
+        if not str(source_config.get("host") or "").strip():
+            raise RedisNotConfiguredError("External Redis is not configured.")
+
+        target_config = dict(source_config)
+        target_config.update(
+            {
+                "mode": _REDIS_MODE_INTERNAL,
+                "host": "",
+                "port": 6379,
+                "username": "",
+                "password": "",
+                "use_tls": False,
+                "verify_tls": True,
+                "ca_cert_path": "",
+                "data_path": str(_resolve_internal_redis_data_path(data_path or source_config.get("data_path"))),
+            }
+        )
+        source_kwargs = _client_kwargs(source_config, decode_responses=False)
+        target_kwargs = _internal_client_kwargs(target_config, decode_responses=False)
+
+    source = redis.Redis(**source_kwargs)
+    target = redis.Redis(**target_kwargs)
+    keys_scanned = 0
+    keys_restored = 0
+    keys_failed = 0
+    failed: List[Dict[str, str]] = []
+    copied_by_method: Dict[str, int] = {}
+    migration_ok = False
+
+    try:
+        source.ping()
+        target.ping()
+        same_server = False
+        try:
+            source_run_id = str((source.info("server") or {}).get("run_id") or "")
+            target_run_id = str((target.info("server") or {}).get("run_id") or "")
+            same_server = bool(source_run_id and source_run_id == target_run_id)
+        except Exception:
+            same_server = False
+
+        if same_server:
+            try:
+                keys_scanned = int(source.dbsize() or 0)
+            except Exception:
+                keys_scanned = 0
+            keys_restored = keys_scanned
+            copied_by_method["same_server"] = keys_restored
+        else:
+            if bool(flush_internal):
+                target.flushdb()
+
+            for raw_key in source.scan_iter(match=b"*", count=500):
+                if raw_key is None:
+                    continue
+                key = bytes(raw_key)
+                keys_scanned += 1
+                try:
+                    method = _copy_redis_key(source, target, key)
+                    if method == "missing":
+                        continue
+                    keys_restored += 1
+                    copied_by_method[method] = int(copied_by_method.get(method) or 0) + 1
+                except Exception as exc:
+                    keys_failed += 1
+                    if len(failed) < 25:
+                        failed.append({"key": key.decode("utf-8", errors="replace"), "error": str(exc)})
+
+            if keys_failed:
+                raise RedisError(f"Failed to migrate {keys_failed} Redis key(s). First failures: {failed}")
+
+        try:
+            target.save()
+        except Exception:
+            pass
+        migration_ok = True
+    finally:
+        _close_client(source)
+        _close_client(target)
+        if not migration_ok:
+            with _LOCK:
+                _stop_internal_redis_locked()
+
+    saved_public = save_redis_connection_settings(target_config)
+    status = get_redis_connection_status()
+    return {
+        "already_internal": False,
+        "switched": True,
+        "keys_scanned": int(keys_scanned),
+        "keys_restored": int(keys_restored),
+        "keys_failed": int(keys_failed),
+        "failed": failed,
+        "copied_by_method": copied_by_method,
+        "target": saved_public,
+        "redis_status": status,
+    }
 
 
 def test_redis_connection_settings(
@@ -670,11 +1386,15 @@ def test_redis_connection_settings(
     except Exception as exc:
         return False, str(exc)
 
-    kwargs = _client_kwargs(config, decode_responses=True)
-    kwargs["socket_timeout"] = float(timeout_seconds)
-    kwargs["socket_connect_timeout"] = float(timeout_seconds)
     client = None
     try:
+        if _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL) == _REDIS_MODE_INTERNAL:
+            with _LOCK:
+                kwargs = _internal_client_kwargs(config, decode_responses=True)
+        else:
+            kwargs = _client_kwargs(config, decode_responses=True)
+        kwargs["socket_timeout"] = float(timeout_seconds)
+        kwargs["socket_connect_timeout"] = float(timeout_seconds)
         client = redis.Redis(**kwargs)
         client.ping()
         return True, ""
@@ -689,42 +1409,129 @@ def get_redis_connection_status() -> Dict[str, Any]:
         config = _load_config_locked()
         source = str(_CONFIG_SOURCE or "unknown")
         load_error = str(_CONFIG_ERROR or "")
-    configured = bool(str(config.get("host") or "").strip())
+        fallback_reason = str(_CONFIG_FALLBACK_REASON or "")
+    mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
+    configured = mode == _REDIS_MODE_INTERNAL or bool(str(config.get("host") or "").strip())
     connected = False
     error = ""
     if configured:
         try:
             get_redis_client(decode_responses=True).ping()
+            with _LOCK:
+                config = _load_config_locked()
+                source = str(_CONFIG_SOURCE or source)
+                fallback_reason = str(_CONFIG_FALLBACK_REASON or fallback_reason)
+            mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
+            configured = mode == _REDIS_MODE_INTERNAL or bool(str(config.get("host") or "").strip())
             connected = True
         except Exception as exc:
-            connected = False
-            error = str(exc)
+            if mode == _REDIS_MODE_EXTERNAL:
+                fallback_error = str(exc)
+                try:
+                    with _LOCK:
+                        config = _switch_to_internal_config_locked(fallback_error)
+                        source = str(_CONFIG_SOURCE or "internal_fallback")
+                        fallback_reason = str(_CONFIG_FALLBACK_REASON or "")
+                    get_redis_client(decode_responses=True).ping()
+                    mode = _REDIS_MODE_INTERNAL
+                    configured = True
+                    connected = True
+                    error = ""
+                except Exception as fallback_exc:
+                    connected = False
+                    error = str(fallback_exc)
+            else:
+                connected = False
+                error = str(exc)
     else:
-        error = load_error or "Redis connection is not configured."
+        try:
+            with _LOCK:
+                config = _switch_to_internal_config_locked(load_error or "Redis connection is not configured.")
+                source = str(_CONFIG_SOURCE or "internal_fallback")
+                fallback_reason = str(_CONFIG_FALLBACK_REASON or "")
+            get_redis_client(decode_responses=True).ping()
+            mode = _REDIS_MODE_INTERNAL
+            configured = True
+            connected = True
+            error = ""
+        except Exception as fallback_exc:
+            error = str(fallback_exc)
 
-    return {
+    public = _public_config(config)
+    status = {
         "configured": configured,
         "connected": connected,
         "source": source,
         "error": error,
+        "fallback_reason": fallback_reason,
         "config_path": str(_config_path()),
-        **_public_config(config),
+        **public,
     }
+    if mode == _REDIS_MODE_INTERNAL:
+        paths = _internal_redis_paths(config)
+        info = dict(_INTERNAL_REDIS_INFO or {})
+        status.update(
+            {
+                "data_path": str(paths["data_path"]),
+                "data_dir": str(paths["data_dir"]),
+                "internal_host": str(info.get("host") or "127.0.0.1"),
+                "internal_port": int(info.get("port") or _read_internal_redis_port(paths["port_path"])),
+                "internal_use_unix_socket": bool(info.get("use_unix_socket") or _internal_redis_use_unix_socket()),
+                "socket_path": str(info.get("socket_path") or paths["socket_path"]),
+                "redis_config_path": str(info.get("config_path") or paths["config_path"]),
+                "redis_log_path": str(info.get("log_path") or paths["log_path"]),
+                "redis_pid": int(info.get("pid") or 0),
+                "redis_managed": bool(info.get("managed")),
+                "redis_server_path": str(info.get("server_path") or ""),
+                "redis_server_source": str(info.get("server_source") or ""),
+            }
+        )
+    return status
 
 
 def get_redis_client(*, decode_responses: bool = True) -> redis.Redis:
     global _TEXT_CLIENT, _BLOB_CLIENT
     with _LOCK:
         config = _load_config_locked()
+        mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
         host = str(config.get("host") or "").strip()
-        if not host:
-            raise RedisNotConfiguredError("Redis is not configured. Open TaterOS WebUI and complete Redis setup.")
+        if mode == _REDIS_MODE_EXTERNAL and not host:
+            config = _switch_to_internal_config_locked("External Redis host is empty.")
+            mode = _REDIS_MODE_INTERNAL
         if decode_responses:
             if _TEXT_CLIENT is None:
-                _TEXT_CLIENT = redis.Redis(**_client_kwargs(config, decode_responses=True))
+                kwargs = (
+                    _internal_client_kwargs(config, decode_responses=True)
+                    if mode == _REDIS_MODE_INTERNAL
+                    else _client_kwargs(config, decode_responses=True)
+                )
+                candidate = redis.Redis(**kwargs)
+                if mode == _REDIS_MODE_EXTERNAL:
+                    try:
+                        candidate.ping()
+                    except Exception as exc:
+                        _close_client(candidate)
+                        config = _switch_to_internal_config_locked(exc)
+                        mode = _REDIS_MODE_INTERNAL
+                        candidate = redis.Redis(**_internal_client_kwargs(config, decode_responses=True))
+                _TEXT_CLIENT = candidate
             return _TEXT_CLIENT
         if _BLOB_CLIENT is None:
-            _BLOB_CLIENT = redis.Redis(**_client_kwargs(config, decode_responses=False))
+            kwargs = (
+                _internal_client_kwargs(config, decode_responses=False)
+                if mode == _REDIS_MODE_INTERNAL
+                else _client_kwargs(config, decode_responses=False)
+            )
+            candidate = redis.Redis(**kwargs)
+            if mode == _REDIS_MODE_EXTERNAL:
+                try:
+                    candidate.ping()
+                except Exception as exc:
+                    _close_client(candidate)
+                    config = _switch_to_internal_config_locked(exc)
+                    mode = _REDIS_MODE_INTERNAL
+                    candidate = redis.Redis(**_internal_client_kwargs(config, decode_responses=False))
+            _BLOB_CLIENT = candidate
         return _BLOB_CLIENT
 
 

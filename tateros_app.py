@@ -10,16 +10,19 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import dotenv
 
@@ -60,22 +63,53 @@ from hydra import (
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from notify import notifier_destination_catalog
 from helpers import (
+    DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
+    DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
+    DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
+    DEFAULT_LLAMA_CPP_MTP_ENABLED,
+    DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
+    HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
     HYDRA_LLM_BASE_SERVERS_KEY,
+    HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+    HYDRA_LLM_PROVIDER_KEY,
+    HYDRA_LLM_PROVIDER_LLAMA_CPP,
+    HYDRA_LLM_PROVIDER_MLX_LM,
+    HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+    HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
+    HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
+    HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
+    HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
+    HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
+    HfLlmDownloadCancelled,
     decrypt_current_redis_snapshot,
+    download_hf_transformers_llm_model,
+    download_llama_cpp_llm_model,
+    download_mlx_lm_llm_model,
     encrypt_current_redis_snapshot,
     ensure_redis_encryption_key,
+    get_llama_cpp_runtime_diagnostics,
+    get_local_llm_loaded_models_snapshot,
     get_redis_connection_config,
     get_redis_encryption_status,
     get_redis_connection_status,
     get_llm_call_runtime_summary,
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
+    get_primary_llm_client_from_env,
+    preload_hf_transformers_llm_model,
+    preload_llama_cpp_llm_model,
+    preload_mlx_lm_llm_model,
+    migrate_current_redis_to_internal,
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
     resolve_hydra_base_servers,
+    runtime_object_memory_footprint_bytes,
+    runtime_path_size_bytes,
     save_redis_connection_settings,
     set_main_loop,
+    shutdown_internal_redis,
     test_redis_connection_settings,
+    unload_local_llm_models,
 )
 from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, shutdown_runtime_executors
 from verba_settings import (
@@ -177,6 +211,10 @@ WEBUI_ATTACH_INDEX_MAX = int(os.getenv("WEBUI_ATTACH_INDEX_MAX", "500"))
 FILE_BLOB_KEY_PREFIX = "webui:file:"
 FILE_INDEX_KEY = "webui:file_index"
 LAST_LLM_STATS_KEY = "webui:last_llm_stats"
+TATER_API_SETTINGS_KEY = "tater:openai_api:settings"
+TATER_API_MODE_DIRECT = "direct"
+TATER_API_MODE_HYDRA = "hydra"
+TATER_API_MODE_CHOICES = {TATER_API_MODE_DIRECT, TATER_API_MODE_HYDRA}
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
@@ -218,6 +256,14 @@ dashboard_brief_refresh_state: Dict[str, Any] = {
     "last_reason": "",
     "last_ids": [],
 }
+dashboard_snapshot_refresh_lock = threading.RLock()
+dashboard_snapshot_refresh_state: Dict[str, Any] = {
+    "running": False,
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "last_error": "",
+    "last_reason": "",
+}
 dashboard_brief_scheduler_task: Optional[asyncio.Task] = None
 speech_model_warmup_lock = threading.RLock()
 speech_model_warmup_state: Dict[str, Any] = {
@@ -228,6 +274,22 @@ speech_model_warmup_state: Dict[str, Any] = {
     "items": [],
     "errors": [],
 }
+hf_llm_warmup_lock = threading.RLock()
+hf_llm_warmup_state: Dict[str, Any] = {
+    "running": False,
+    "started_ts": 0.0,
+    "finished_ts": 0.0,
+    "reason": "",
+    "items": [],
+    "errors": [],
+    "unload_before": [],
+    "unload_result": {},
+    "progress": 0.0,
+    "active_key": "",
+    "cancel_requested": False,
+    "cancelled": False,
+}
+hf_llm_warmup_cancel_keys: set[str] = set()
 
 
 def _trim(value: Any) -> str:
@@ -437,6 +499,62 @@ def _read_positive_int(key: str, default: int) -> int:
     return max(1, _read_non_negative_int(key, default))
 
 
+def _read_local_llm_context_setting(
+    redis_key: str,
+    env_keys: Tuple[str, ...],
+    default: Optional[int],
+    *,
+    minimum: int = 256,
+    maximum: int = 1_048_576,
+) -> str:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    if not raw:
+        return "" if default is None else str(int(default))
+    try:
+        value = int(raw)
+    except Exception:
+        return "" if default is None else str(int(default))
+    return str(max(int(minimum), min(int(maximum), int(value))))
+
+
+def _read_bool_setting(redis_key: str, env_keys: Tuple[str, ...], default: bool) -> bool:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    if not raw:
+        return bool(default)
+    return _as_bool_flag(raw, default=default)
+
+
+def _read_bounded_int_setting(
+    redis_key: str,
+    env_keys: Tuple[str, ...],
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int = 16,
+) -> str:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    try:
+        value = int(float(raw)) if raw else int(default)
+    except Exception:
+        value = int(default)
+    return str(max(int(minimum), min(int(maximum), int(value))))
+
+
 def _setting_fields(required: Dict[str, Any], current: Dict[str, str]) -> List[Dict[str, Any]]:
     fields: List[Dict[str, Any]] = []
     for setting_key, setting_meta in (required or {}).items():
@@ -590,6 +708,2066 @@ def _speech_model_warmup_snapshot() -> Dict[str, Any]:
             "items": list(speech_model_warmup_state.get("items") or []),
             "errors": list(speech_model_warmup_state.get("errors") or []),
         }
+
+
+def _hf_llm_warmup_snapshot() -> Dict[str, Any]:
+    with hf_llm_warmup_lock:
+        running = bool(hf_llm_warmup_state.get("running"))
+        active_key = str(hf_llm_warmup_state.get("active_key") or "").strip()
+        cancel_requested = bool(hf_llm_warmup_state.get("cancel_requested"))
+        cancel_keys = set(hf_llm_warmup_cancel_keys)
+        items: List[Dict[str, Any]] = []
+        for raw_item in list(hf_llm_warmup_state.get("items") or []):
+            item = dict(raw_item) if isinstance(raw_item, dict) else {}
+            key = str(item.get("key") or _hf_llm_warmup_item_key(item.get("provider", ""), item.get("model", ""))).strip()
+            status = str(item.get("status") or "").strip().lower()
+            item["key"] = key
+            item_cancel_requested = cancel_requested or key in cancel_keys
+            item["cancel_requested"] = bool(item_cancel_requested)
+            item["active"] = bool(running and key and key == active_key)
+            item["cancelable"] = bool(
+                running
+                and status not in {"loaded", "downloaded", "error", "cancelled", "canceled"}
+                and not item_cancel_requested
+                and key
+            )
+            items.append(item)
+        if items:
+            progress_values = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    progress_values.append(float(item.get("progress") or 0.0))
+                except Exception:
+                    progress_values.append(0.0)
+            progress = sum(progress_values) / max(1, len(progress_values))
+        else:
+            try:
+                progress = float(hf_llm_warmup_state.get("progress") or 0.0)
+            except Exception:
+                progress = 0.0
+        return {
+            "running": running,
+            "started_ts": float(hf_llm_warmup_state.get("started_ts") or 0.0),
+            "finished_ts": float(hf_llm_warmup_state.get("finished_ts") or 0.0),
+            "reason": str(hf_llm_warmup_state.get("reason") or ""),
+            "items": items,
+            "errors": list(hf_llm_warmup_state.get("errors") or []),
+            "unload_before": list(hf_llm_warmup_state.get("unload_before") or []),
+            "unload_result": dict(hf_llm_warmup_state.get("unload_result") or {}),
+            "progress": max(0.0, min(100.0, progress)),
+            "active_key": active_key,
+            "cancel_requested": cancel_requested,
+            "cancelled": bool(hf_llm_warmup_state.get("cancelled")),
+            "load_models": bool(hf_llm_warmup_state.get("load_models", True)),
+        }
+
+
+def _hf_llm_warmup_on_save_enabled() -> bool:
+    token = os.getenv("TATER_LOCAL_LLM_WARMUP_ON_SAVE")
+    if token is None:
+        token = os.getenv("TATER_HF_TRANSFORMERS_WARMUP_ON_SAVE")
+    if token is None:
+        return False
+    token = str(token or "true").strip().lower()
+    return token in {"1", "true", "yes", "on", "enabled"}
+
+
+def _local_llm_warmup_on_startup_enabled() -> bool:
+    token = os.getenv("TATER_LOCAL_LLM_WARMUP_ON_STARTUP")
+    if token is None:
+        return True
+    return str(token or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _local_llm_warmup_startup_wait_seconds() -> float:
+    raw = str(os.getenv("TATER_LOCAL_LLM_WARMUP_STARTUP_WAIT_SECONDS") or "75").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 75.0
+    return max(0.0, min(1800.0, value))
+
+
+def _hf_llm_warmup_item_key(provider: str, model: str) -> str:
+    return f"{_normalize_hydra_llm_provider(provider)}:{str(model or '').strip()}"
+
+
+def _hf_llm_warmup_base_item(provider: str, model: str) -> Dict[str, str]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    return {
+        "key": _hf_llm_warmup_item_key(provider_token, model_token),
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "model": model_token,
+    }
+
+
+def _hf_llm_warmup_target(value: Any) -> Dict[str, str]:
+    if isinstance(value, dict):
+        provider = _normalize_hydra_llm_provider(value.get("provider"))
+        model = str(value.get("model") or "").strip()
+    else:
+        provider = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+        model = str(value or "").strip()
+    if not model or not _is_local_hydra_llm_provider(provider):
+        return {}
+    return _hf_llm_warmup_base_item(provider, model)
+
+
+def _dedupe_hf_llm_warmup_targets(values: List[Any]) -> List[Dict[str, str]]:
+    targets: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values or []:
+        target = _hf_llm_warmup_target(value)
+        if not target:
+            continue
+        key = str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    return targets
+
+
+def _hf_llm_warmup_models(base_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    models: List[Dict[str, str]] = []
+    for row in base_rows or []:
+        if not isinstance(row, dict):
+            continue
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        if not _is_local_hydra_llm_provider(provider):
+            continue
+        model = str(row.get("model") or "").strip()
+        if not model:
+            continue
+        models.append(_hf_llm_warmup_base_item(provider, model))
+    return _dedupe_hf_llm_warmup_targets(models)
+
+
+def _hf_llm_warmup_update_item(provider: str, model: str, updates: Dict[str, Any]) -> None:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    if not model_token:
+        return
+    target_key = _hf_llm_warmup_item_key(provider_token, model_token)
+    with hf_llm_warmup_lock:
+        items = list(hf_llm_warmup_state.get("items") or [])
+        if not items:
+            items = [dict(_hf_llm_warmup_base_item(provider_token, model_token), status="pending", progress=0.0)]
+        found = False
+        next_items: List[Dict[str, Any]] = []
+        for item in items:
+            row = dict(item) if isinstance(item, dict) else {}
+            row_model = str(row.get("model") or "").strip()
+            row_provider = _normalize_hydra_llm_provider(row.get("provider") or provider_token)
+            row_key = str(row.get("key") or _hf_llm_warmup_item_key(row_provider, row_model)).strip()
+            if row_key == target_key or (row_model == model_token and not row.get("provider")):
+                row.update(_hf_llm_warmup_base_item(provider_token, model_token))
+                row.update(updates or {})
+                found = True
+            next_items.append(row)
+        if not found:
+            next_items.append({**_hf_llm_warmup_base_item(provider_token, model_token), **dict(updates or {})})
+        hf_llm_warmup_state["items"] = next_items
+
+
+def _hf_llm_warmup_item_snapshot(provider: str, model: str) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    if not model_token:
+        return {}
+    target_key = _hf_llm_warmup_item_key(provider_token, model_token)
+    with hf_llm_warmup_lock:
+        for item in list(hf_llm_warmup_state.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            row_model = str(item.get("model") or "").strip()
+            row_provider = _normalize_hydra_llm_provider(item.get("provider") or provider_token)
+            row_key = str(item.get("key") or _hf_llm_warmup_item_key(row_provider, row_model)).strip()
+            if row_key == target_key or (row_model == model_token and not item.get("provider")):
+                return dict(item)
+    return {}
+
+
+def _hf_llm_warmup_cancel_requested(provider: str, model: str) -> bool:
+    key = _hf_llm_warmup_item_key(provider, model)
+    with hf_llm_warmup_lock:
+        return bool(hf_llm_warmup_state.get("cancel_requested")) or key in hf_llm_warmup_cancel_keys
+
+
+def _hf_llm_warmup_download_bar_updates(
+    provider: str,
+    model: str,
+    *,
+    event_id: str,
+    event_name: str,
+    description: str,
+    unit: str,
+    source: str,
+    completed: float,
+    total: float,
+    rate: float,
+    eta_seconds: float,
+    event_progress: float,
+) -> Dict[str, Any]:
+    if not event_id or total <= 0:
+        return {}
+
+    now = time.time()
+    snapshot = _hf_llm_warmup_item_snapshot(provider, model)
+    raw_bars = snapshot.get("download_progress_bars") if isinstance(snapshot, dict) else {}
+    bars: Dict[str, Dict[str, Any]] = {}
+    if isinstance(raw_bars, dict):
+        for key, value in raw_bars.items():
+            if isinstance(value, dict):
+                bars[str(key)] = dict(value)
+
+    unit_token = str(unit or "").strip().lower()
+    bars[event_id] = {
+        "event": str(event_name or "").strip().lower(),
+        "source": str(source or "").strip().lower(),
+        "description": str(description or "").strip(),
+        "unit": unit_token,
+        "completed": max(0.0, float(completed)),
+        "total": max(0.0, float(total)),
+        "rate": max(0.0, float(rate)),
+        "eta_seconds": max(0.0, float(eta_seconds)),
+        "progress": max(0.0, min(100.0, float(event_progress))),
+        "updated_ts": now,
+    }
+
+    byte_units = {"b", "byte", "bytes"}
+    byte_bars = [bar for bar in bars.values() if str(bar.get("unit") or "").lower() in byte_units and float(bar.get("total") or 0.0) > 0.0]
+    monitor_byte_bars = [bar for bar in byte_bars if str(bar.get("source") or "").lower() == "cache_monitor"]
+    if monitor_byte_bars:
+        byte_bars = monitor_byte_bars
+    if byte_bars:
+        bytes_done = sum(min(float(bar.get("completed") or 0.0), float(bar.get("total") or 0.0)) for bar in byte_bars)
+        bytes_total = sum(float(bar.get("total") or 0.0) for bar in byte_bars)
+        active_byte_bars = [
+            bar
+            for bar in byte_bars
+            if str(bar.get("event") or "") != "close"
+            and float(bar.get("completed") or 0.0) < float(bar.get("total") or 0.0)
+            and now - float(bar.get("updated_ts") or 0.0) < 15.0
+        ]
+        speed = sum(float(bar.get("rate") or 0.0) for bar in active_byte_bars)
+        if speed <= 0.0:
+            speed = max(float(bar.get("rate") or 0.0) for bar in byte_bars)
+        progress = (bytes_done / bytes_total * 100.0) if bytes_total > 0.0 else 0.0
+        eta = ((bytes_total - bytes_done) / speed) if bytes_total > bytes_done and speed > 0.0 else 0.0
+        scaled_progress = 4.0 + (max(0.0, min(100.0, progress)) * 0.72)
+        return {
+            "download_progress_bars": bars,
+            "download_bytes": int(max(0.0, bytes_done)),
+            "download_total_bytes": int(max(0.0, bytes_total)),
+            "download_speed_bytes_per_sec": int(max(0.0, speed)),
+            "download_eta_seconds": max(0.0, eta),
+            "download_progress": max(0.0, min(100.0, progress)),
+            "current_bytes": int(max(0.0, bytes_done)),
+            "current_total_bytes": int(max(0.0, bytes_total)),
+            "current_progress": max(0.0, min(100.0, progress)),
+            "current_speed_bytes_per_sec": int(max(0.0, speed)),
+            "current_eta_seconds": max(0.0, eta),
+            "progress": max(4.0, min(78.0, scaled_progress)),
+        }
+
+    file_bars = [bar for bar in bars.values() if str(bar.get("unit") or "").lower() not in byte_units and float(bar.get("total") or 0.0) > 0.0]
+    if file_bars:
+        files_done = sum(min(float(bar.get("completed") or 0.0), float(bar.get("total") or 0.0)) for bar in file_bars)
+        files_total = sum(float(bar.get("total") or 0.0) for bar in file_bars)
+        file_progress = (files_done / files_total * 100.0) if files_total > 0.0 else 0.0
+        file_rate = sum(float(bar.get("rate") or 0.0) for bar in file_bars if str(bar.get("event") or "") != "close")
+        file_eta = ((files_total - files_done) / file_rate) if files_total > files_done and file_rate > 0.0 else 0.0
+        return {
+            "download_progress_bars": bars,
+            "files_completed": int(max(0.0, files_done)),
+            "files_total": int(max(0.0, files_total)),
+            "files_progress": max(0.0, min(100.0, file_progress)),
+            "files_rate_per_sec": max(0.0, file_rate),
+            "files_eta_seconds": max(0.0, file_eta),
+        }
+
+    return {"download_progress_bars": bars}
+
+
+def _hf_llm_warmup_progress_callback(provider: str, model: str):
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+
+    def _callback(event: Dict[str, Any]) -> None:
+        if _hf_llm_warmup_cancel_requested(provider_token, model_token):
+            raise HfLlmDownloadCancelled("Local model download cancelled.")
+        if not isinstance(event, dict):
+            return
+        stage = str(event.get("stage") or "").strip().lower()
+        event_name = str(event.get("event") or "").strip().lower()
+        event_id = str(event.get("id") or "").strip()
+        desc = str(event.get("description") or "").strip()
+        unit = str(event.get("unit") or "").strip()
+        source = str(event.get("source") or "").strip()
+        try:
+            event_progress = float(event.get("progress") or 0.0)
+        except Exception:
+            event_progress = 0.0
+        try:
+            completed = float(event.get("completed") or 0.0)
+        except Exception:
+            completed = 0.0
+        try:
+            total = float(event.get("total") or 0.0)
+        except Exception:
+            total = 0.0
+        try:
+            rate = float(event.get("rate") or 0.0)
+        except Exception:
+            rate = 0.0
+        try:
+            eta_seconds = float(event.get("eta_seconds") or 0.0)
+        except Exception:
+            eta_seconds = 0.0
+
+        updates: Dict[str, Any] = {
+            "updated_ts": time.time(),
+        }
+        if stage == "download":
+            base_progress = 4.0
+            scaled_progress = base_progress + (max(0.0, min(100.0, event_progress)) * 0.72)
+            updates.update(
+                {
+                    "status": "downloading",
+                    "stage": "download",
+                    "message": desc or "Downloading model files",
+                    "progress": max(4.0, min(78.0, scaled_progress)),
+                }
+            )
+            if total > 0:
+                aggregate_updates = _hf_llm_warmup_download_bar_updates(
+                    provider_token,
+                    model_token,
+                    event_id=event_id,
+                    event_name=event_name,
+                    description=desc,
+                    unit=unit,
+                    source=source,
+                    completed=completed,
+                    total=total,
+                    rate=rate,
+                    eta_seconds=eta_seconds,
+                    event_progress=event_progress,
+                )
+                if aggregate_updates:
+                    updates.update(aggregate_updates)
+                elif unit.lower() in {"b", "byte", "bytes"}:
+                    updates.update(
+                        {
+                            "current_bytes": int(max(0.0, completed)),
+                            "current_total_bytes": int(max(0.0, total)),
+                            "current_progress": max(0.0, min(100.0, event_progress)),
+                            "current_speed_bytes_per_sec": int(max(0.0, rate)),
+                            "current_eta_seconds": max(0.0, eta_seconds),
+                        }
+                    )
+                else:
+                    updates.update(
+                        {
+                            "files_completed": int(max(0.0, completed)),
+                            "files_total": int(max(0.0, total)),
+                            "files_progress": max(0.0, min(100.0, event_progress)),
+                            "files_rate_per_sec": max(0.0, rate),
+                            "files_eta_seconds": max(0.0, eta_seconds),
+                        }
+                    )
+        elif stage == "load":
+            progress = 82.0 + (max(0.0, min(100.0, event_progress)) * 0.16)
+            updates.update(
+                {
+                    "status": "loading" if str(event.get("event") or "") != "complete" else "loaded",
+                    "stage": "load",
+                    "message": desc or "Loading model",
+                    "progress": max(80.0, min(98.0, progress)),
+                }
+            )
+            if event.get("device"):
+                updates["device"] = str(event.get("device") or "")
+        else:
+            updates.update(
+                {
+                    "status": "working",
+                    "message": desc or "Preparing model",
+                    "progress": max(2.0, min(98.0, event_progress)),
+                }
+            )
+        _hf_llm_warmup_update_item(provider_token, model_token, updates)
+
+    return _callback
+
+
+def _unload_local_llm_warmup_targets(targets: List[Any]) -> Dict[str, Any]:
+    clean_targets = _dedupe_hf_llm_warmup_targets(targets or [])
+    removed: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for target in clean_targets:
+        provider = _normalize_hydra_llm_provider(target.get("provider"))
+        model = str(target.get("model") or "").strip()
+        if not model or not _is_local_hydra_llm_provider(provider):
+            continue
+        try:
+            result = unload_local_llm_models(provider=provider, model=model)
+            removed.extend([dict(item) for item in result.get("models", []) if isinstance(item, dict)])
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            errors.append(f"{_hydra_llm_provider_label(provider)} {model}: {message}")
+            logger.warning("[local-llm-warmup] unload previous model failed provider=%s model=%s: %s", provider, model, message)
+    return {
+        "ok": not errors,
+        "requested": clean_targets,
+        "unloaded_count": len(removed),
+        "models": removed,
+        "errors": errors,
+    }
+
+
+def _run_hf_llm_warmup(
+    models: List[Any],
+    *,
+    reason: str,
+    load_models: bool = True,
+    unload_before: Optional[List[Any]] = None,
+) -> None:
+    items = [dict(target, status="pending", progress=0.0) for target in _dedupe_hf_llm_warmup_targets(models or [])]
+    unload_targets = _dedupe_hf_llm_warmup_targets(unload_before or [])
+    with hf_llm_warmup_lock:
+        cancel_requested = bool(hf_llm_warmup_state.get("cancel_requested"))
+        hf_llm_warmup_state.update(
+            {
+                "running": True,
+                "started_ts": time.time(),
+                "finished_ts": 0.0,
+                "reason": reason,
+                "items": list(items),
+                "errors": [],
+                "unload_before": list(unload_targets),
+                "unload_result": {},
+                "progress": 0.0,
+                "active_key": "",
+                "cancel_requested": cancel_requested,
+                "cancelled": False,
+                "load_models": bool(load_models),
+            }
+        )
+
+    logger.info(
+        "[local-llm-warmup] starting reason=%s load_models=%s models=%s",
+        reason,
+        bool(load_models),
+        [f"{item.get('provider')}:{item.get('model')}" for item in items],
+    )
+    item_states: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    if load_models and unload_targets:
+        with hf_llm_warmup_lock:
+            hf_llm_warmup_state["active_key"] = "__unload_previous__"
+            hf_llm_warmup_state["progress"] = 1.0
+        unload_result = _unload_local_llm_warmup_targets(unload_targets)
+        with hf_llm_warmup_lock:
+            hf_llm_warmup_state["active_key"] = ""
+            hf_llm_warmup_state["unload_result"] = dict(unload_result)
+        if unload_result.get("errors"):
+            errors.extend(str(error) for error in unload_result.get("errors") or [] if str(error or "").strip())
+        logger.info(
+            "[local-llm-warmup] unloaded previous models count=%s errors=%s",
+            int(unload_result.get("unloaded_count") or 0),
+            len(unload_result.get("errors") or []),
+        )
+    for item in items:
+        row = dict(item)
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        provider_label = _hydra_llm_provider_label(provider)
+        model = str(row.get("model") or "").strip()
+        key = _hf_llm_warmup_item_key(provider, model)
+        row["key"] = key
+        if _hf_llm_warmup_cancel_requested(provider, model):
+            row["started_ts"] = time.time()
+            row["finished_ts"] = time.time()
+            row["status"] = "cancelled"
+            row["progress"] = 0.0
+            row["provider"] = provider
+            row["provider_label"] = provider_label
+            row["message"] = "Cancelled before download started."
+            item_states.append(row)
+            with hf_llm_warmup_lock:
+                hf_llm_warmup_state["items"] = list(item_states) + [
+                    dict(pending, status="pending", progress=0.0) for pending in items[len(item_states) :]
+                ]
+            continue
+        row["started_ts"] = time.time()
+        row["status"] = "preparing"
+        row["progress"] = 2.0
+        with hf_llm_warmup_lock:
+            hf_llm_warmup_state["active_key"] = key
+            hf_llm_warmup_state["items"] = list(item_states) + [
+                row,
+                *[dict(pending, status="pending", progress=0.0) for pending in items[len(item_states) + 1 :]],
+            ]
+        try:
+            if _hf_llm_warmup_cancel_requested(provider, model):
+                raise HfLlmDownloadCancelled("Local model download cancelled.")
+            if load_models:
+                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+                    loaded = preload_llama_cpp_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+                elif provider == HYDRA_LLM_PROVIDER_MLX_LM:
+                    loaded = preload_mlx_lm_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+                else:
+                    loaded = preload_hf_transformers_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+            else:
+                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+                    loaded = download_llama_cpp_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+                elif provider == HYDRA_LLM_PROVIDER_MLX_LM:
+                    loaded = download_mlx_lm_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+                else:
+                    loaded = download_hf_transformers_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+            row.update(_hf_llm_warmup_item_snapshot(provider, model))
+            row["status"] = "loaded" if load_models else "downloaded"
+            row["provider"] = provider
+            row["provider_label"] = provider_label
+            row["device"] = str(loaded.get("device") or "")
+            row["model_root"] = str(loaded.get("model_root") or "")
+            if loaded.get("model_path"):
+                row["model_path"] = str(loaded.get("model_path") or "")
+            if loaded.get("mmproj_path"):
+                row["mmproj_path"] = str(loaded.get("mmproj_path") or "")
+                row["mmproj_filename"] = Path(str(loaded.get("mmproj_path") or "")).name
+            if "supports_vision" in loaded:
+                row["supports_vision"] = bool(loaded.get("supports_vision"))
+            provider_warning = str(loaded.get("warning") or "").strip()
+            if provider_warning:
+                row["warning"] = provider_warning
+                row["message"] = provider_warning
+            else:
+                row["message"] = (
+                    f"Loaded on {row['device'] or 'device'}"
+                    if load_models
+                    else "Downloaded into Tater. Select it from Settings to use it."
+                )
+            row["progress"] = 100.0
+            _record_downloaded_local_llm_model(
+                provider=provider,
+                model=model,
+                model_root=str(row.get("model_root") or ""),
+                model_path=str(row.get("model_path") or ""),
+                source=str(reason or "local-warmup"),
+                supports_vision=bool(row.get("supports_vision")),
+                mmproj_path=str(row.get("mmproj_path") or ""),
+            )
+            logger.info(
+                "[local-llm-warmup] %s %s model %s%s",
+                "loaded" if load_models else "downloaded",
+                provider_label,
+                model,
+                f" on {row['device'] or 'unknown device'}" if load_models else "",
+            )
+        except HfLlmDownloadCancelled:
+            row.update(_hf_llm_warmup_item_snapshot(provider, model))
+            row["status"] = "cancelled"
+            row["provider"] = provider
+            row["provider_label"] = provider_label
+            row["message"] = "Download cancelled."
+            row["progress"] = max(0.0, min(100.0, float(row.get("progress") or 0.0)))
+            logger.info("[local-llm-warmup] %s model %s cancelled", provider_label, model)
+        except Exception as exc:
+            row.update(_hf_llm_warmup_item_snapshot(provider, model))
+            message = str(exc) or type(exc).__name__
+            row["status"] = "error"
+            row["provider"] = provider
+            row["provider_label"] = provider_label
+            row["error"] = message
+            row["message"] = message
+            errors.append(f"{provider_label} {model}: {message}")
+            logger.warning("[local-llm-warmup] %s model %s failed: %s", provider_label, model, message)
+        row["finished_ts"] = time.time()
+        item_states.append(row)
+        with hf_llm_warmup_lock:
+            if str(hf_llm_warmup_state.get("active_key") or "") == key:
+                hf_llm_warmup_state["active_key"] = ""
+            hf_llm_warmup_state["items"] = list(item_states) + [
+                dict(pending, status="pending", progress=0.0) for pending in items[len(item_states) :]
+            ]
+            hf_llm_warmup_state["errors"] = list(errors)
+
+    with hf_llm_warmup_lock:
+        cancelled = any(str(item.get("status") or "").lower() in {"cancelled", "canceled"} for item in item_states)
+        hf_llm_warmup_state.update(
+            {
+                "running": False,
+                "finished_ts": time.time(),
+                "items": item_states,
+                "errors": errors,
+                "progress": 100.0 if not errors else _hf_llm_warmup_snapshot().get("progress", 0.0),
+                "active_key": "",
+                "cancelled": cancelled,
+                "load_models": bool(load_models),
+            }
+        )
+    logger.info("[local-llm-warmup] finished errors=%s", len(errors))
+
+
+def _start_hf_llm_warmup(
+    models: List[Any],
+    *,
+    reason: str = "settings-save",
+    load_models: bool = True,
+    unload_before: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    clean_items = _dedupe_hf_llm_warmup_targets(models or [])
+    clean_unload_items = _dedupe_hf_llm_warmup_targets(unload_before or [])
+    if not clean_items:
+        snapshot = _hf_llm_warmup_snapshot()
+        snapshot["started"] = False
+        snapshot["already_running"] = False
+        return snapshot
+
+    with hf_llm_warmup_lock:
+        if bool(hf_llm_warmup_state.get("running")):
+            snapshot = _hf_llm_warmup_snapshot()
+            snapshot["started"] = False
+            snapshot["already_running"] = True
+            return snapshot
+        hf_llm_warmup_cancel_keys.clear()
+        hf_llm_warmup_state.update(
+            {
+                "running": True,
+                "started_ts": time.time(),
+                "finished_ts": 0.0,
+                "reason": reason,
+                "items": [dict(item, status="pending") for item in clean_items],
+                "errors": [],
+                "unload_before": list(clean_unload_items),
+                "unload_result": {},
+                "progress": 0.0,
+                "active_key": "",
+                "cancel_requested": False,
+                "cancelled": False,
+                "load_models": bool(load_models),
+            }
+        )
+
+    thread = threading.Thread(
+        target=_run_hf_llm_warmup,
+        kwargs={
+            "models": clean_items,
+            "reason": reason,
+            "load_models": bool(load_models),
+            "unload_before": clean_unload_items,
+        },
+        daemon=True,
+        name="hf-llm-warmup",
+    )
+    thread.start()
+    snapshot = _hf_llm_warmup_snapshot()
+    snapshot["started"] = True
+    snapshot["already_running"] = False
+    return snapshot
+
+
+def _start_local_llm_warmup_for_startup(*, reason: str) -> Dict[str, Any]:
+    if not _local_llm_warmup_on_startup_enabled():
+        snapshot = _hf_llm_warmup_snapshot()
+        snapshot["started"] = False
+        snapshot["skipped"] = True
+        snapshot["skip_reason"] = "TATER_LOCAL_LLM_WARMUP_ON_STARTUP=false"
+        logger.info("[local-llm-warmup] startup warmup skipped (TATER_LOCAL_LLM_WARMUP_ON_STARTUP=false)")
+        return snapshot
+
+    try:
+        rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception as exc:
+        snapshot = _hf_llm_warmup_snapshot()
+        snapshot["started"] = False
+        snapshot["error"] = str(exc) or type(exc).__name__
+        logger.warning("[local-llm-warmup] startup failed to read base models: %s", exc)
+        return snapshot
+
+    models = _hf_llm_warmup_models(rows)
+    if not models:
+        snapshot = _hf_llm_warmup_snapshot()
+        snapshot["started"] = False
+        snapshot["skipped"] = True
+        snapshot["skip_reason"] = "no local base models configured"
+        logger.info("[local-llm-warmup] startup warmup skipped (no local base models configured)")
+        return snapshot
+
+    snapshot = _start_hf_llm_warmup(models, reason=reason, load_models=True)
+    wait_seconds = _local_llm_warmup_startup_wait_seconds()
+    if wait_seconds <= 0:
+        snapshot["waited_seconds"] = 0.0
+        snapshot["startup_wait_timeout"] = False
+        return snapshot
+
+    started_wait = time.time()
+    deadline = started_wait + wait_seconds
+    while time.time() < deadline:
+        current = _hf_llm_warmup_snapshot()
+        if not bool(current.get("running")):
+            snapshot = current
+            break
+        time.sleep(0.25)
+    else:
+        snapshot = _hf_llm_warmup_snapshot()
+
+    snapshot["waited_seconds"] = round(max(0.0, time.time() - started_wait), 2)
+    snapshot["startup_wait_timeout"] = bool(snapshot.get("running"))
+    if snapshot["startup_wait_timeout"]:
+        logger.info(
+            "[local-llm-warmup] startup wait timed out after %.1fs; continuing boot while warmup finishes",
+            wait_seconds,
+        )
+    else:
+        logger.info("[local-llm-warmup] startup warmup ready after %.1fs", snapshot["waited_seconds"])
+    return snapshot
+
+
+def _hf_browser_token() -> Optional[str]:
+    for key in ("TATER_HF_MODEL_BROWSER_TOKEN", "TATER_MLX_LM_TOKEN", "TATER_HF_TRANSFORMERS_TOKEN"):
+        token = str(os.getenv(key) or "").strip()
+        if token:
+            return token
+    try:
+        env = integration_store_module.huggingface_environment(client=redis_client)
+    except Exception:
+        env = {}
+    if isinstance(env, dict):
+        for key in (
+            "HF_TOKEN",
+            "HUGGINGFACE_HUB_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "HF_HUB_TOKEN",
+            "HUGGINGFACE_API_TOKEN",
+        ):
+            token = str(env.get(key) or "").strip()
+            if token:
+                return token
+    for key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HF_HUB_TOKEN"):
+        token = str(os.getenv(key) or "").strip()
+        if token:
+            return token
+    return None
+
+
+def _hf_browser_integration_status() -> Dict[str, Any]:
+    env_override = False
+    for key in (
+        "TATER_HF_MODEL_BROWSER_TOKEN",
+        "TATER_MLX_LM_TOKEN",
+        "TATER_HF_TRANSFORMERS_TOKEN",
+        "HF_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HUGGINGFACE_TOKEN",
+        "HF_HUB_TOKEN",
+        "HUGGINGFACE_API_TOKEN",
+    ):
+        if str(os.getenv(key) or "").strip():
+            env_override = True
+            break
+    try:
+        installed = bool(integration_store_module.is_integration_installed("huggingface"))
+    except Exception:
+        installed = False
+    try:
+        enabled = bool(integration_store_module.get_integration_enabled("huggingface"))
+    except Exception:
+        enabled = False
+    token = _hf_browser_token()
+    has_token = bool(str(token or "").strip())
+    if not installed:
+        message = "Hugging Face integration is not installed yet."
+    elif not enabled:
+        message = "Hugging Face integration is installed but not enabled."
+    elif not has_token:
+        message = "Hugging Face integration is enabled, but no access token is saved."
+    else:
+        message = "Hugging Face integration is ready."
+    return {
+        "id": "huggingface",
+        "installed": installed,
+        "enabled": enabled,
+        "has_token": has_token,
+        "env_token": env_override,
+        "ready": bool(installed and enabled and has_token),
+        "setup_needed": bool((not installed) or (not enabled) or (not has_token)),
+        "message": message,
+    }
+
+
+def _hf_browser_error_detail(exc: Exception, fallback: str) -> Dict[str, Any]:
+    raw_message = str(exc).strip() or fallback
+    lowered = raw_message.lower()
+    auth_or_setup_error = any(
+        token in lowered
+        for token in (
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "gated",
+            "private",
+            "token",
+            "rate limit",
+            "too many requests",
+        )
+    )
+    integration = _hf_browser_integration_status()
+    if auth_or_setup_error or integration.get("setup_needed"):
+        return {
+            "code": "huggingface_setup_required",
+            "message": (
+                "Hugging Face setup is needed for this request. Open Integrations, install/enable Hugging Face, "
+                "and save an access token for gated/private models and higher Hub rate limits."
+            ),
+            "raw_error": raw_message,
+            "integration": integration,
+        }
+    return {
+        "code": "huggingface_browser_error",
+        "message": raw_message,
+        "integration": integration,
+    }
+
+
+def _hf_browser_cursor_encode(url: str) -> str:
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return ""
+    return base64.urlsafe_b64encode(clean_url.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _hf_browser_cursor_decode(cursor: str) -> str:
+    token = str(cursor or "").strip()
+    if not token:
+        return ""
+    try:
+        padded = token + ("=" * (-len(token) % 4))
+        url = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", "replace").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid Hugging Face page cursor.") from exc
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != "huggingface.co" or parsed.path != "/api/models":
+        raise HTTPException(status_code=400, detail="Invalid Hugging Face page cursor.")
+    return url
+
+
+def _hf_browser_next_url_from_link_header(link_header: Any) -> str:
+    raw = str(link_header or "").strip()
+    if not raw:
+        return ""
+    for part in raw.split(","):
+        section = part.strip()
+        if 'rel="next"' not in section and "rel=next" not in section:
+            continue
+        match = re.search(r"<([^>]+)>", section)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith("/api/models"):
+                return f"https://huggingface.co{url}"
+            return url
+    return ""
+
+
+def _hf_browser_models_api_url(
+    *,
+    provider: str,
+    search: str,
+    sort: str,
+    limit: int,
+    task: str = "text-generation",
+) -> str:
+    library = _hf_browser_provider_library(provider)
+    app_filter = _hf_browser_provider_app_filter(provider)
+    params: Dict[str, Any] = {
+        "sort": sort,
+        "direction": "-1",
+        "limit": str(max(1, min(100, int(limit or 24)))),
+        "full": "true",
+        "cardData": "true",
+        "pipeline_tag": _normalize_hf_browser_task(task),
+    }
+    if library:
+        params["library"] = library
+    if app_filter:
+        params["apps"] = app_filter
+    if search:
+        params["search"] = search
+    return f"https://huggingface.co/api/models?{urlencode(params)}"
+
+
+def _hf_browser_fetch_models_page(url: str) -> Tuple[List[Any], str]:
+    request_url = str(url or "").strip()
+    if not request_url:
+        raise RuntimeError("Hugging Face models URL is missing.")
+    token = _hf_browser_token()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Tater-HuggingFace-Model-Browser",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(request_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw_body = response.read()
+            link_header = response.headers.get("Link", "")
+    except urllib.error.HTTPError as exc:
+        try:
+            body_text = exc.read().decode("utf-8", "replace")
+        except Exception:
+            body_text = ""
+        message = body_text.strip() or str(exc)
+        raise RuntimeError(message) from exc
+    except Exception as exc:
+        raise RuntimeError(str(exc) or "Failed to fetch Hugging Face models.") from exc
+    try:
+        payload = json.loads(raw_body.decode("utf-8", "replace"))
+    except Exception as exc:
+        raise RuntimeError("Hugging Face returned invalid model data.") from exc
+    rows = payload if isinstance(payload, list) else []
+    next_url = _hf_browser_next_url_from_link_header(link_header)
+    return rows, next_url
+
+
+def _hf_hub_call_compat(fn: Callable[..., Any], **kwargs: Any) -> Any:
+    call_kwargs = dict(kwargs)
+    removed: set[str] = set()
+    fallback_order = ("direction", "pipeline_tag", "task", "library", "tags", "filter", "cardData", "full", "fetch_config")
+    for _ in range(16):
+        try:
+            return fn(**call_kwargs)
+        except TypeError as exc:
+            message = str(exc)
+            match = re.search(r"unexpected keyword argument ['\"]([^'\"]+)['\"]", message)
+            if match:
+                key = str(match.group(1) or "").strip()
+                if key in call_kwargs:
+                    call_kwargs.pop(key, None)
+                    removed.add(key)
+                    continue
+            fallback_key = next((key for key in fallback_order if key in call_kwargs and key not in removed), "")
+            if fallback_key:
+                call_kwargs.pop(fallback_key, None)
+                removed.add(fallback_key)
+                continue
+            raise
+    return fn(**call_kwargs)
+
+
+def _hf_browser_object_value(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _hf_browser_datetime(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return value.isoformat()
+    except Exception:
+        return str(value or "").strip()
+
+
+def _hf_browser_size(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except Exception:
+        return 0
+
+
+def _hf_browser_card_license(card_data: Any) -> str:
+    if not card_data:
+        return ""
+    if isinstance(card_data, dict):
+        value = card_data.get("license") or card_data.get("licenses") or ""
+    else:
+        value = getattr(card_data, "license", "") or getattr(card_data, "licenses", "")
+    if isinstance(value, list):
+        return ", ".join(str(item or "").strip() for item in value if str(item or "").strip())
+    return str(value or "").strip()
+
+
+def _hf_browser_param_size_label(value: Any) -> str:
+    try:
+        count = int(float(value))
+    except Exception:
+        return ""
+    if count <= 0:
+        return ""
+    if count >= 1_000_000_000:
+        number = count / 1_000_000_000.0
+        suffix = "B"
+    elif count >= 1_000_000:
+        number = count / 1_000_000.0
+        suffix = "M"
+    else:
+        return ""
+    text = f"{number:.1f}".rstrip("0").rstrip(".")
+    return f"{text}{suffix}"
+
+
+def _hf_browser_safetensors_param_count(safetensors: Any) -> int:
+    if not safetensors:
+        return 0
+    total = _hf_browser_object_value(safetensors, "total", 0)
+    try:
+        parsed_total = int(float(total or 0))
+    except Exception:
+        parsed_total = 0
+    if parsed_total > 0:
+        return parsed_total
+    parameters = _hf_browser_object_value(safetensors, "parameters", {}) or {}
+    if isinstance(parameters, dict):
+        total_params = 0
+        for value in parameters.values():
+            try:
+                total_params += int(float(value or 0))
+            except Exception:
+                continue
+        return total_params
+    return 0
+
+
+def _hf_browser_model_size_label(model_id: str, tags: List[str], files: List[str], model: Any, card_data: Any) -> str:
+    structured = _hf_browser_param_size_label(
+        _hf_browser_safetensors_param_count(_hf_browser_object_value(model, "safetensors", None))
+    )
+    if structured:
+        return structured
+
+    parts = [model_id, *tags[:40]]
+    for filename in files[:20]:
+        if filename.lower().endswith((".gguf", ".safetensors", "config.json")):
+            parts.append(filename)
+    if isinstance(card_data, dict):
+        for key in ("base_model", "model_name", "model_name_or_path"):
+            value = card_data.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                parts.extend(str(item or "") for item in value[:5])
+
+    haystack = " ".join(str(part or "") for part in parts if str(part or "").strip())
+    mixture = re.search(r"(?<![A-Za-z0-9])(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*([bBmM])(?=$|[^A-Za-z0-9])", haystack)
+    if mixture:
+        left = mixture.group(1)
+        right = mixture.group(2).rstrip("0").rstrip(".")
+        return f"{left}x{right}{mixture.group(3).upper()}"
+
+    matches = list(re.finditer(r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*([bBmM])(?=$|[^A-Za-z0-9])", haystack))
+    for match in matches:
+        prefix = haystack[max(0, match.start() - 3) : match.start()].lower()
+        suffix = haystack[match.end() : match.end() + 4].lower()
+        if prefix.endswith(("q", "v")) or suffix.startswith(("it/", "it-", "bit")):
+            continue
+        number = match.group(1).rstrip("0").rstrip(".")
+        return f"{number}{match.group(2).upper()}"
+    return ""
+
+
+def _hf_browser_provider_search(provider: str, query: str, task: str = "text-generation") -> str:
+    q = str(query or "").strip()
+    lowered = q.lower()
+    task_token = _normalize_hf_browser_task(task)
+    if task_token == "image-text-to-text" and not any(token in lowered for token in ("vision", "vl", "image")):
+        q = f"{q} vision".strip()
+    return q
+
+
+def _hf_browser_provider_app_filter(provider: str) -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return "llama.cpp"
+    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        return "mlx-lm"
+    return ""
+
+
+def _hf_browser_provider_library(provider: str) -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if provider_token in {HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM}:
+        return ""
+    return "transformers"
+
+
+def _hf_browser_text_generation_tokens() -> Tuple[str, ...]:
+    return ("text-generation",)
+
+
+def _hf_browser_vision_tokens() -> Tuple[str, ...]:
+    return ("image-text-to-text", "image-to-text", "visual-question-answering")
+
+
+def _normalize_hf_browser_task(value: Any) -> str:
+    token = str(value or "text-generation").strip().lower().replace("_", "-")
+    if token in {"vision", "image", "image-text", "image-text-to-text", "vl", "vllm"}:
+        return "image-text-to-text"
+    return "text-generation"
+
+
+def _hf_browser_model_has_any_task(model: Any, tokens: set[str]) -> bool:
+    pipeline_tag = str(_hf_browser_object_value(model, "pipeline_tag") or "").strip().lower()
+    if pipeline_tag in tokens:
+        return True
+    tags = [
+        str(item or "").strip().lower()
+        for item in (_hf_browser_object_value(model, "tags", []) or [])
+        if str(item or "").strip()
+    ]
+    if any(tag in tokens for tag in tags):
+        return True
+    card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
+    card_pipeline = ""
+    card_tags: List[str] = []
+    if isinstance(card_data, dict):
+        card_pipeline = str(card_data.get("pipeline_tag") or "").strip().lower()
+        raw_tags = card_data.get("tags") or []
+        if isinstance(raw_tags, list):
+            card_tags = [str(item or "").strip().lower() for item in raw_tags if str(item or "").strip()]
+    else:
+        card_pipeline = str(getattr(card_data, "pipeline_tag", "") or "").strip().lower()
+        raw_tags = getattr(card_data, "tags", []) or []
+        if isinstance(raw_tags, list):
+            card_tags = [str(item or "").strip().lower() for item in raw_tags if str(item or "").strip()]
+    return card_pipeline in tokens or any(tag in tokens for tag in card_tags)
+
+
+def _hf_browser_is_text_generation_model(model: Any) -> bool:
+    return _hf_browser_model_has_any_task(model, set(_hf_browser_text_generation_tokens()))
+
+
+def _hf_browser_is_vision_model(model: Any) -> bool:
+    if _hf_browser_model_has_any_task(model, set(_hf_browser_vision_tokens())):
+        return True
+    model_id = str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or "").strip().lower()
+    tags = " ".join(
+        str(item or "").strip().lower()
+        for item in (_hf_browser_object_value(model, "tags", []) or [])
+        if str(item or "").strip()
+    )
+    siblings = _hf_browser_object_value(model, "siblings", []) or []
+    files = " ".join(
+        str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip().lower()
+        for item in siblings
+        if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+    )
+    return any(token in f"{model_id} {tags} {files}" for token in ("vision", "-vl", "_vl", "vl-", "mmproj", "multimodal"))
+
+
+def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    library = str(_hf_browser_object_value(model, "library_name") or "").strip().lower()
+    tags = " ".join(
+        str(item or "").strip().lower()
+        for item in (_hf_browser_object_value(model, "tags", []) or [])
+        if str(item or "").strip()
+    )
+    siblings = _hf_browser_object_value(model, "siblings", []) or []
+    files = " ".join(
+        str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip().lower()
+        for item in siblings
+        if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+    )
+    model_id = str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or "").strip().lower()
+    provider_haystack = f"{model_id} {library} {tags} {files}"
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return (
+            "llama.cpp" in provider_haystack
+            or "llama-cpp" in provider_haystack
+            or "llamacpp" in provider_haystack
+            or library == "gguf"
+            or "gguf" in tags
+            or ".gguf" in files
+            or "gguf" in model_id
+        )
+    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        return (
+            "mlx-lm" in provider_haystack
+            or "mlx_lm" in provider_haystack
+            or library == "mlx"
+            or "mlx" in tags
+            or "mlx" in files
+            or "mlx" in model_id
+        )
+    return library in {"", "transformers"} and ".gguf" not in files
+
+
+def _hf_browser_file_quant(path: str) -> str:
+    name = os.path.basename(str(path or "")).upper()
+    for quant in ("Q2_K", "Q3_K_M", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16", "BF16"):
+        if quant in name:
+            return quant
+    return ""
+
+
+def _hf_browser_preferred_gguf(files: List[Dict[str, Any]]) -> str:
+    ggufs = [row for row in files if bool(row.get("is_gguf")) and "mmproj" not in str(row.get("path") or "").lower()]
+    if not ggufs:
+        return ""
+    preferred = ("Q4_K_M", "Q5_K_M", "Q4_K_S", "Q5_0", "Q4_0", "Q8_0")
+
+    def _score(row: Dict[str, Any]) -> Tuple[int, int, str]:
+        path = str(row.get("path") or "")
+        upper = os.path.basename(path).upper()
+        for index, quant in enumerate(preferred):
+            if quant in upper:
+                return (index, len(path), path)
+        return (999, len(path), path)
+
+    return str(sorted(ggufs, key=_score)[0].get("path") or "")
+
+
+def _hf_browser_preferred_mmproj(files: List[Dict[str, Any]], preferred_gguf: str = "") -> str:
+    mmprojs = [row for row in files if bool(row.get("is_mmproj"))]
+    if not mmprojs:
+        return ""
+    main_quant = _hf_browser_file_quant(preferred_gguf)
+
+    def _score(row: Dict[str, Any]) -> Tuple[int, int, str]:
+        path = str(row.get("path") or "")
+        quant = _hf_browser_file_quant(path)
+        score = 50
+        if main_quant and quant == main_quant:
+            score = 0
+        elif quant in {"F16", "BF16"}:
+            score = 5
+        elif quant == "Q8_0":
+            score = 10
+        return (score, len(path), path)
+
+    return str(sorted(mmprojs, key=_score)[0].get("path") or "")
+
+
+def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
+    model_id = str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or "").strip()
+    tags = [
+        str(item or "").strip()
+        for item in (_hf_browser_object_value(model, "tags", []) or [])
+        if str(item or "").strip()
+    ]
+    siblings = _hf_browser_object_value(model, "siblings", []) or []
+    files = [
+        str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+        for item in siblings
+        if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+    ]
+    provider_token = _normalize_hydra_llm_provider(provider)
+    lower_id = model_id.lower()
+    lower_tags = " ".join(tags).lower()
+    lower_files = " ".join(files).lower()
+    lower_library = str(_hf_browser_object_value(model, "library_name") or "").strip().lower()
+    provider_haystack = f"{lower_id} {lower_library} {lower_tags} {lower_files}"
+    supports_vision = _hf_browser_is_vision_model(model) or "mmproj" in lower_files
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        compatible = (
+            "llama.cpp" in provider_haystack
+            or "llama-cpp" in provider_haystack
+            or "llamacpp" in provider_haystack
+            or "gguf" in lower_id
+            or "gguf" in lower_tags
+            or ".gguf" in lower_files
+        )
+    elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        compatible = "mlx-lm" in provider_haystack or "mlx_lm" in provider_haystack or "mlx" in provider_haystack
+    else:
+        compatible = ".gguf" not in lower_files
+    card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
+    model_size_label = _hf_browser_model_size_label(model_id, tags, files, model, card_data)
+    return {
+        "id": model_id,
+        "author": str(_hf_browser_object_value(model, "author") or "").strip(),
+        "model_size": model_size_label,
+        "downloads": _hf_browser_size(_hf_browser_object_value(model, "downloads", 0)),
+        "likes": _hf_browser_size(_hf_browser_object_value(model, "likes", 0)),
+        "last_modified": _hf_browser_datetime(
+            _hf_browser_object_value(model, "lastModified")
+            or _hf_browser_object_value(model, "last_modified")
+        ),
+        "pipeline_tag": str(_hf_browser_object_value(model, "pipeline_tag") or "").strip(),
+        "library_name": str(_hf_browser_object_value(model, "library_name") or "").strip(),
+        "tags": tags[:30],
+        "license": _hf_browser_card_license(card_data),
+        "private": bool(_hf_browser_object_value(model, "private", False)),
+        "gated": str(_hf_browser_object_value(model, "gated", "") or "").strip(),
+        "compatible": compatible,
+        "supports_vision": supports_vision,
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+    }
+
+
+def _hf_browser_file_rows(info: Any, fallback_files: List[str]) -> List[Dict[str, Any]]:
+    siblings = _hf_browser_object_value(info, "siblings", []) or []
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in siblings:
+        path = str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+        if not path:
+            continue
+        seen.add(path)
+        lower = path.lower()
+        size = _hf_browser_size(_hf_browser_object_value(item, "size", 0))
+        rows.append(
+            {
+                "path": path,
+                "size": size,
+                "is_gguf": lower.endswith(".gguf"),
+                "is_mmproj": lower.endswith(".gguf") and "mmproj" in lower,
+                "is_safetensors": lower.endswith(".safetensors"),
+                "is_config": os.path.basename(lower) in {"config.json", "tokenizer.json", "tokenizer.model"},
+                "quant": _hf_browser_file_quant(path),
+            }
+        )
+    for path in fallback_files:
+        path = str(path or "").strip()
+        if not path or path in seen:
+            continue
+        lower = path.lower()
+        rows.append(
+            {
+                "path": path,
+                "size": 0,
+                "is_gguf": lower.endswith(".gguf"),
+                "is_mmproj": lower.endswith(".gguf") and "mmproj" in lower,
+                "is_safetensors": lower.endswith(".safetensors"),
+                "is_config": os.path.basename(lower) in {"config.json", "tokenizer.json", "tokenizer.model"},
+                "quant": _hf_browser_file_quant(path),
+            }
+        )
+    return sorted(rows, key=lambda row: (not bool(row.get("is_gguf")), bool(row.get("is_mmproj")), str(row.get("path") or "").lower()))
+
+
+def _hf_browser_effective_model_id(provider: str, repo_id: str, filename: str = "") -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    repo = str(repo_id or "").strip()
+    file_token = str(filename or "").strip()
+    if not repo:
+        return ""
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and file_token:
+        return f"{repo}::{file_token}"
+    return repo
+
+
+def _local_llm_model_registry_path() -> Path:
+    raw = str(os.getenv("TATER_LOCAL_LLM_MODEL_REGISTRY") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path(__file__).resolve().parent / "agent_lab" / "models" / "llm" / "downloaded_models.json"
+
+
+def _local_llm_model_root(provider: str) -> Path:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    env_key = {
+        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "TATER_HF_TRANSFORMERS_MODEL_ROOT",
+        HYDRA_LLM_PROVIDER_LLAMA_CPP: "TATER_LLAMA_CPP_MODEL_ROOT",
+        HYDRA_LLM_PROVIDER_MLX_LM: "TATER_MLX_LM_MODEL_ROOT",
+    }.get(provider_token, "")
+    raw = str(os.getenv(env_key) or "").strip() if env_key else ""
+    if raw:
+        return Path(raw).expanduser().resolve()
+    folder = {
+        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "huggingface",
+        HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp",
+        HYDRA_LLM_PROVIDER_MLX_LM: "mlx",
+    }.get(provider_token, "huggingface")
+    return Path(__file__).resolve().parent / "agent_lab" / "models" / "llm" / folder
+
+
+def _local_llm_context_value(value: Any, *, maximum: int = 1_048_576) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return 0
+    if parsed < 128 or parsed > 10_000_000:
+        return 0
+    return max(128, min(int(maximum), int(parsed)))
+
+
+def _local_llm_context_from_json(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    direct_keys = (
+        "max_position_embeddings",
+        "model_max_length",
+        "max_seq_len",
+        "max_sequence_length",
+        "seq_length",
+        "sequence_length",
+        "n_positions",
+        "n_ctx",
+        "context_length",
+        "sliding_window",
+    )
+    candidates: List[int] = []
+    for key in direct_keys:
+        value = _local_llm_context_value(payload.get(key))
+        if value:
+            candidates.append(value)
+
+    rope_scaling = payload.get("rope_scaling") if isinstance(payload.get("rope_scaling"), dict) else {}
+    original = _local_llm_context_value(
+        rope_scaling.get("original_max_position_embeddings")
+        or rope_scaling.get("original_max_position")
+        or payload.get("original_max_position_embeddings")
+    )
+    try:
+        factor = float(rope_scaling.get("factor") or 0)
+    except Exception:
+        factor = 0.0
+    if original and factor > 1.0:
+        candidates.append(_local_llm_context_value(int(original * factor)))
+
+    for nested_key in ("text_config", "llm_config", "language_config", "model_config"):
+        nested = _local_llm_context_from_json(payload.get(nested_key))
+        if nested:
+            candidates.append(nested)
+    return max(candidates) if candidates else 0
+
+
+def _local_llm_context_from_json_files(path: Path) -> int:
+    folder = path if path.is_dir() else path.parent
+    if not folder.exists():
+        return 0
+    candidates: List[int] = []
+    for filename in ("config.json", "tokenizer_config.json", "generation_config.json", "params.json"):
+        candidate = folder / filename
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            parsed = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        value = _local_llm_context_from_json(parsed)
+        if value:
+            candidates.append(value)
+    return max(candidates) if candidates else 0
+
+
+def _local_llm_json_files_support_vision(path: Path) -> bool:
+    folder = path if path.is_dir() else path.parent
+    if not folder.exists():
+        return False
+    for filename in ("config.json", "preprocessor_config.json", "processor_config.json", "image_processor_config.json"):
+        candidate = folder / filename
+        if candidate.exists() and candidate.is_file():
+            try:
+                parsed = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                parsed = {}
+            text = json.dumps(parsed).lower() if isinstance(parsed, dict) else ""
+            if filename != "config.json" or any(token in text for token in ("vision", "image", "multimodal", "vl")):
+                return True
+    return False
+
+
+def _local_llm_mmproj_for_gguf(path: Path) -> Path:
+    if not path.exists() or not path.is_file():
+        return Path()
+    candidates = sorted(path.parent.glob("*mmproj*.gguf"), key=lambda item: (len(item.name), item.name.lower()))
+    return candidates[0] if candidates else Path()
+
+
+def _gguf_read_u32(handle) -> int:
+    data = handle.read(4)
+    if len(data) != 4:
+        raise EOFError("short gguf u32")
+    return int.from_bytes(data, "little", signed=False)
+
+
+def _gguf_read_u64(handle) -> int:
+    data = handle.read(8)
+    if len(data) != 8:
+        raise EOFError("short gguf u64")
+    return int.from_bytes(data, "little", signed=False)
+
+
+def _gguf_read_string(handle) -> str:
+    length = _gguf_read_u64(handle)
+    if length > 1_000_000:
+        raise ValueError("gguf string too large")
+    return handle.read(int(length)).decode("utf-8", errors="ignore")
+
+
+def _gguf_skip_value(handle, value_type: int) -> None:
+    scalar_sizes = {
+        0: 1,
+        1: 1,
+        2: 2,
+        3: 2,
+        4: 4,
+        5: 4,
+        6: 4,
+        7: 1,
+        10: 8,
+        11: 8,
+        12: 8,
+    }
+    if value_type in scalar_sizes:
+        handle.seek(scalar_sizes[value_type], os.SEEK_CUR)
+    elif value_type == 8:
+        length = _gguf_read_u64(handle)
+        handle.seek(int(length), os.SEEK_CUR)
+    elif value_type == 9:
+        item_type = _gguf_read_u32(handle)
+        count = _gguf_read_u64(handle)
+        if count > 1_000_000:
+            raise ValueError("gguf array too large")
+        for _ in range(int(count)):
+            _gguf_skip_value(handle, item_type)
+    else:
+        raise ValueError(f"unknown gguf metadata type {value_type}")
+
+
+def _gguf_read_context_value(handle, value_type: int) -> int:
+    if value_type in {0, 2, 4, 10}:
+        sizes = {0: 1, 2: 2, 4: 4, 10: 8}
+        return int.from_bytes(handle.read(sizes[value_type]), "little", signed=False)
+    if value_type in {1, 3, 5, 11}:
+        sizes = {1: 1, 3: 2, 5: 4, 11: 8}
+        return int.from_bytes(handle.read(sizes[value_type]), "little", signed=True)
+    if value_type == 8:
+        return _local_llm_context_value(_gguf_read_string(handle))
+    _gguf_skip_value(handle, value_type)
+    return 0
+
+
+def _local_llm_context_from_gguf(path: Path) -> int:
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".gguf":
+        return 0
+    try:
+        with path.open("rb") as handle:
+            if handle.read(4) != b"GGUF":
+                return 0
+            _version = _gguf_read_u32(handle)
+            _tensor_count = _gguf_read_u64(handle)
+            metadata_count = min(_gguf_read_u64(handle), 10000)
+            for _ in range(int(metadata_count)):
+                key = _gguf_read_string(handle)
+                value_type = _gguf_read_u32(handle)
+                if key.endswith(".context_length") or key in {"context_length", "general.context_length"}:
+                    return _local_llm_context_value(_gguf_read_context_value(handle))
+                _gguf_skip_value(handle, value_type)
+    except Exception:
+        return 0
+    return 0
+
+
+def _local_llm_repo_snapshot_path(model_root: str, repo_id: str) -> Path:
+    root = Path(str(model_root or "")).expanduser()
+    repo = str(repo_id or "").strip()
+    if not root.exists() or "/" not in repo:
+        return Path()
+    repo_dir = root / f"models--{repo.replace('/', '--')}"
+    snapshots_dir = repo_dir / "snapshots"
+    if not snapshots_dir.exists():
+        return Path()
+    snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+    if not snapshots:
+        return Path()
+    return max(snapshots, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
+
+
+def _local_llm_detect_max_context(provider: str, model_path: str = "", model_root: str = "", repo_id: str = "") -> tuple[int, str]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    path = Path(str(model_path or "")).expanduser() if str(model_path or "").strip() else Path()
+    if not path.exists():
+        path = _local_llm_repo_snapshot_path(model_root, repo_id)
+    if not path.exists():
+        return 0, ""
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        gguf_value = _local_llm_context_from_gguf(path)
+        if gguf_value:
+            return gguf_value, "gguf"
+    json_value = _local_llm_context_from_json_files(path)
+    if json_value:
+        return json_value, "config"
+    return 0, ""
+
+
+def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    root = _local_llm_model_root(provider_token)
+    if not root.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for repo_dir in root.glob("models--*--*"):
+        if not repo_dir.is_dir():
+            continue
+        repo_bits = repo_dir.name.split("--")
+        if len(repo_bits) < 3:
+            continue
+        repo_id = f"{repo_bits[1]}/{'/'.join(repo_bits[2:])}"
+        snapshots_dir = repo_dir / "snapshots"
+        if not snapshots_dir.exists():
+            continue
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+        if not snapshots:
+            continue
+        latest_snapshot = max(snapshots, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
+        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+            gguf_files = sorted(
+                path for path in latest_snapshot.rglob("*.gguf") if "mmproj" not in path.name.lower()
+            )
+            for gguf in gguf_files:
+                try:
+                    rel = gguf.relative_to(latest_snapshot).as_posix()
+                except Exception:
+                    rel = gguf.name
+                model_id = f"{repo_id}::{rel}"
+                mmproj_path = _local_llm_mmproj_for_gguf(gguf)
+                try:
+                    mmproj_rel = mmproj_path.relative_to(latest_snapshot).as_posix() if mmproj_path else ""
+                except Exception:
+                    mmproj_rel = mmproj_path.name if mmproj_path else ""
+                max_context, context_source = _local_llm_detect_max_context(
+                    provider_token,
+                    model_path=str(gguf),
+                    model_root=str(root),
+                    repo_id=repo_id,
+                )
+                rows.append(
+                    {
+                        "provider": provider_token,
+                        "provider_label": _hydra_llm_provider_label(provider_token),
+                        "model": model_id,
+                        "repo_id": repo_id,
+                        "filename": rel,
+                        "model_path": str(gguf),
+                        "model_root": str(root),
+                        "status": "ready",
+                        "source": "cache-scan",
+                        "downloaded_ts": float(gguf.stat().st_mtime if gguf.exists() else time.time()),
+                        "max_context_tokens": max_context,
+                        "context_source": context_source,
+                        "supports_vision": bool(mmproj_path),
+                        "mmproj_filename": mmproj_rel,
+                        "mmproj_path": str(mmproj_path) if mmproj_path else "",
+                    }
+                )
+        else:
+            max_context, context_source = _local_llm_detect_max_context(
+                provider_token,
+                model_path=str(latest_snapshot),
+                model_root=str(root),
+                repo_id=repo_id,
+            )
+            rows.append(
+                {
+                    "provider": provider_token,
+                    "provider_label": _hydra_llm_provider_label(provider_token),
+                    "model": repo_id,
+                    "repo_id": repo_id,
+                    "filename": "",
+                    "model_path": str(latest_snapshot),
+                    "model_root": str(root),
+                    "status": "ready",
+                    "source": "cache-scan",
+                    "downloaded_ts": float(latest_snapshot.stat().st_mtime if latest_snapshot.exists() else time.time()),
+                    "max_context_tokens": max_context,
+                    "context_source": context_source,
+                    "supports_vision": bool(_local_llm_json_files_support_vision(latest_snapshot)),
+                }
+            )
+    return rows
+
+
+def _read_local_llm_model_registry() -> List[Dict[str, Any]]:
+    path = _local_llm_model_registry_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except Exception:
+        return []
+    rows = payload.get("models") if isinstance(payload, dict) else payload
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _write_local_llm_model_registry(rows: List[Dict[str, Any]]) -> None:
+    path = _local_llm_model_registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"models": rows, "updated_ts": time.time()}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _normalize_hydra_llm_provider(row.get("provider"))
+    model = str(row.get("model") or row.get("model_id") or "").strip()
+    repo_id = str(row.get("repo_id") or "").strip()
+    filename = str(row.get("filename") or "").strip()
+    if not model and repo_id:
+        model = _hf_browser_effective_model_id(provider, repo_id, filename)
+    max_context = _local_llm_context_value(row.get("max_context_tokens"))
+    context_source = str(row.get("context_source") or "").strip()
+    if not max_context:
+        max_context, context_source = _local_llm_detect_max_context(
+            provider,
+            model_path=str(row.get("model_path") or "").strip(),
+            model_root=str(row.get("model_root") or "").strip(),
+            repo_id=repo_id or (model.split("::", 1)[0] if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP else model),
+        )
+    supports_vision = bool(row.get("supports_vision"))
+    mmproj_filename = str(row.get("mmproj_filename") or "").strip()
+    mmproj_path = str(row.get("mmproj_path") or "").strip()
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        path_obj = Path(str(row.get("model_path") or "")).expanduser()
+        if path_obj.exists():
+            detected_mmproj = _local_llm_mmproj_for_gguf(path_obj)
+            if detected_mmproj:
+                supports_vision = True
+                mmproj_path = str(detected_mmproj)
+                if not mmproj_filename:
+                    mmproj_filename = detected_mmproj.name
+    elif not supports_vision:
+        path_obj = Path(str(row.get("model_path") or "")).expanduser()
+        supports_vision = bool(path_obj.exists() and _local_llm_json_files_support_vision(path_obj))
+    return {
+        "provider": provider,
+        "provider_label": _hydra_llm_provider_label(provider),
+        "model": model,
+        "repo_id": repo_id,
+        "filename": filename,
+        "model_path": str(row.get("model_path") or "").strip(),
+        "model_root": str(row.get("model_root") or "").strip(),
+        "status": str(row.get("status") or "ready").strip() or "ready",
+        "source": str(row.get("source") or "").strip(),
+        "downloaded_ts": float(row.get("downloaded_ts") or row.get("updated_ts") or 0.0),
+        "max_context_tokens": int(max_context or 0),
+        "context_source": context_source,
+        "supports_vision": supports_vision,
+        "mmproj_filename": mmproj_filename,
+        "mmproj_path": mmproj_path,
+    }
+
+
+def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
+    provider_filter = _normalize_hydra_llm_provider(provider) if str(provider or "").strip() else ""
+    rows = [_normalize_local_llm_model_row(row) for row in _read_local_llm_model_registry()]
+    rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_HF_TRANSFORMERS))
+    rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_LLAMA_CPP))
+    rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_MLX_LM))
+    deduped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        provider_token = _normalize_hydra_llm_provider(row.get("provider"))
+        model = str(row.get("model") or "").strip()
+        if not model or not _is_local_hydra_llm_provider(provider_token):
+            continue
+        if provider_filter and provider_token != provider_filter:
+            continue
+        key = (provider_token, model)
+        current = deduped.get(key)
+        if not current or float(row.get("downloaded_ts") or 0.0) >= float(current.get("downloaded_ts") or 0.0):
+            row["provider"] = provider_token
+            row["provider_label"] = _hydra_llm_provider_label(provider_token)
+            deduped[key] = row
+    models = sorted(
+        deduped.values(),
+        key=lambda row: (
+            str(row.get("provider_label") or ""),
+            -float(row.get("downloaded_ts") or 0.0),
+            str(row.get("model") or "").lower(),
+        ),
+    )
+    by_provider: Dict[str, List[Dict[str, Any]]] = {}
+    for row in models:
+        by_provider.setdefault(str(row.get("provider") or ""), []).append(row)
+    return {"models": models, "by_provider": by_provider, "updated_ts": time.time()}
+
+
+def _record_downloaded_local_llm_model(
+    *,
+    provider: str,
+    model: str,
+    model_root: str = "",
+    model_path: str = "",
+    source: str = "",
+    supports_vision: bool = False,
+    mmproj_path: str = "",
+) -> None:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    if not model_token or not _is_local_hydra_llm_provider(provider_token):
+        return
+    rows = [_normalize_local_llm_model_row(row) for row in _read_local_llm_model_registry()]
+    next_row = {
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "model": model_token,
+        "repo_id": model_token.split("::", 1)[0] if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP else model_token,
+        "filename": model_token.split("::", 1)[1] if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and "::" in model_token else "",
+        "model_path": str(model_path or "").strip(),
+        "model_root": str(model_root or "").strip(),
+        "status": "ready",
+        "source": str(source or "huggingface-browser").strip(),
+        "downloaded_ts": time.time(),
+        "supports_vision": bool(supports_vision),
+        "mmproj_path": str(mmproj_path or "").strip(),
+    }
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and str(mmproj_path or "").strip():
+        next_row["mmproj_filename"] = Path(str(mmproj_path or "")).name
+    max_context, context_source = _local_llm_detect_max_context(
+        provider_token,
+        model_path=next_row["model_path"],
+        model_root=next_row["model_root"],
+        repo_id=next_row["repo_id"],
+    )
+    if max_context:
+        next_row["max_context_tokens"] = max_context
+        next_row["context_source"] = context_source
+    replaced = False
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if _normalize_hydra_llm_provider(row.get("provider")) == provider_token and str(row.get("model") or "").strip() == model_token:
+            merged_row = dict(next_row)
+            if not bool(merged_row.get("supports_vision")) and bool(row.get("supports_vision")):
+                merged_row["supports_vision"] = True
+            if not str(merged_row.get("mmproj_path") or "").strip() and str(row.get("mmproj_path") or "").strip():
+                merged_row["mmproj_path"] = str(row.get("mmproj_path") or "").strip()
+            if not str(merged_row.get("mmproj_filename") or "").strip() and str(row.get("mmproj_filename") or "").strip():
+                merged_row["mmproj_filename"] = str(row.get("mmproj_filename") or "").strip()
+            out.append(merged_row)
+            replaced = True
+        else:
+            out.append(row)
+    if not replaced:
+        out.append(next_row)
+    try:
+        _write_local_llm_model_registry(out)
+    except Exception as exc:
+        logger.warning("[local-llm-models] failed recording downloaded model %s:%s: %s", provider_token, model_token, exc)
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _local_llm_repo_cache_dir(provider: str, repo_id: str) -> Path:
+    root = _local_llm_model_root(provider)
+    repo = str(repo_id or "").strip()
+    if "/" not in repo:
+        return Path()
+    return root / f"models--{repo.replace('/', '--')}"
+
+
+def _prune_empty_local_model_dirs(start: Path, stop: Path) -> None:
+    try:
+        current = start.resolve()
+        stop_path = stop.resolve()
+    except Exception:
+        return
+    while current != stop_path and _path_within(current, stop_path):
+        try:
+            current.rmdir()
+        except Exception:
+            break
+        current = current.parent
+
+
+def _delete_local_model_path(path: Path, root: Path, deleted_paths: List[str]) -> None:
+    if not str(path or "").strip() or (not path.exists() and not path.is_symlink()):
+        return
+    if not _path_within(path, root):
+        raise HTTPException(status_code=400, detail="Refusing to delete a model path outside Tater's local model folder.")
+
+    blob_target: Optional[Path] = None
+    try:
+        if path.is_symlink():
+            resolved = path.resolve()
+            if resolved.exists() and _path_within(resolved, root):
+                blob_target = resolved
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        deleted_paths.append(str(path))
+        if blob_target is not None and blob_target.exists() and _path_within(blob_target, root):
+            try:
+                blob_target.unlink()
+                deleted_paths.append(str(blob_target))
+            except IsADirectoryError:
+                pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not delete local model file: {exc}") from exc
+
+
+def _local_llm_model_usage(provider: str, model: str) -> List[str]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    usage: List[str] = []
+    if not model_token:
+        return usage
+
+    try:
+        base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        base_rows = []
+    for idx, row in enumerate(base_rows or []):
+        if (
+            _normalize_hydra_llm_provider((row or {}).get("provider")) == provider_token
+            and str((row or {}).get("model") or "").strip() == model_token
+        ):
+            usage.append("Base Model" if idx == 0 else f"Additional Base Server {idx}")
+
+    try:
+        from spudex.settings import get_spudex_settings
+
+        spudex_settings = get_spudex_settings(redis_client)
+        if (
+            _normalize_hydra_llm_provider(spudex_settings.get("llm_provider")) == provider_token
+            and str(spudex_settings.get("llm_model") or "").strip() == model_token
+        ):
+            usage.append("Spudex LLM")
+    except Exception:
+        pass
+
+    try:
+        vision_settings = get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="qwen2.5-vl-7b-instruct",
+        )
+        if (
+            str(vision_settings.get("mode") or "").strip().lower() == "dedicated"
+            and _normalize_hydra_llm_provider(vision_settings.get("provider")) == provider_token
+            and str(vision_settings.get("model") or "").strip() == model_token
+        ):
+            usage.append("Vision Model")
+    except Exception:
+        pass
+
+    for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        try:
+            role_provider = _normalize_hydra_llm_provider(redis_client.get(_hydra_role_llm_key(role, "provider")))
+            role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
+        except Exception:
+            continue
+        if role_provider == provider_token and role_model == model_token:
+            usage.append(f"Beast {role.title()}")
+    return usage
+
+
+def _delete_local_llm_model(provider: str, model: str) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    if not model_token or not _is_local_hydra_llm_provider(provider_token):
+        raise HTTPException(status_code=400, detail="Choose an installed local model to delete.")
+
+    key = _hf_llm_warmup_item_key(provider_token, model_token)
+    with hf_llm_warmup_lock:
+        if bool(hf_llm_warmup_state.get("running")):
+            for raw_item in list(hf_llm_warmup_state.get("items") or []):
+                item = dict(raw_item) if isinstance(raw_item, dict) else {}
+                item_key = str(
+                    item.get("key") or _hf_llm_warmup_item_key(item.get("provider", ""), item.get("model", ""))
+                ).strip()
+                status = str(item.get("status") or "").strip().lower()
+                if item_key == key and status not in {"loaded", "downloaded", "error", "cancelled", "canceled"}:
+                    raise HTTPException(status_code=409, detail="This model is downloading right now. Cancel or wait for it to finish before deleting.")
+
+    usage = _local_llm_model_usage(provider_token, model_token)
+    if usage:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This model is selected in {', '.join(usage)}. Change that setting before deleting it.",
+        )
+
+    payload = _local_llm_models_payload(provider=provider_token)
+    row = next(
+        (
+            dict(item)
+            for item in payload.get("models", [])
+            if isinstance(item, dict) and str(item.get("model") or "").strip() == model_token
+        ),
+        {},
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Local model is not installed.")
+
+    root = Path(str(row.get("model_root") or _local_llm_model_root(provider_token))).expanduser().resolve()
+    repo_id = str(row.get("repo_id") or "").strip()
+    filename = str(row.get("filename") or "").strip()
+    if not repo_id and provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and "::" in model_token:
+        repo_id, filename = model_token.split("::", 1)
+    elif not repo_id:
+        repo_id = model_token
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and not filename and "::" in model_token:
+        filename = model_token.split("::", 1)[1]
+
+    deleted_paths: List[str] = []
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and filename:
+        raw_model_path = str(row.get("model_path") or "").strip()
+        model_path = Path(raw_model_path).expanduser() if raw_model_path else Path()
+        if raw_model_path:
+            _delete_local_model_path(model_path, root, deleted_paths)
+            _prune_empty_local_model_dirs(model_path.parent, root)
+        repo_dir = _local_llm_repo_cache_dir(provider_token, repo_id)
+        if repo_dir.exists() and _path_within(repo_dir, root) and not list(repo_dir.rglob("*.gguf")):
+            _delete_local_model_path(repo_dir, root, deleted_paths)
+    else:
+        repo_dir = _local_llm_repo_cache_dir(provider_token, repo_id)
+        if repo_dir.exists() and _path_within(repo_dir, root):
+            _delete_local_model_path(repo_dir, root, deleted_paths)
+        else:
+            raw_model_path = str(row.get("model_path") or "").strip()
+            model_path = Path(raw_model_path).expanduser() if raw_model_path else Path()
+            if raw_model_path:
+                if model_path.is_dir():
+                    candidate = model_path
+                    while candidate.parent != candidate and candidate.name != f"models--{repo_id.replace('/', '--')}":
+                        candidate = candidate.parent
+                    if candidate.name == f"models--{repo_id.replace('/', '--')}":
+                        model_path = candidate
+                _delete_local_model_path(model_path, root, deleted_paths)
+
+    rows = [_normalize_local_llm_model_row(item) for item in _read_local_llm_model_registry()]
+    rows = [
+        item
+        for item in rows
+        if not (
+            _normalize_hydra_llm_provider(item.get("provider")) == provider_token
+            and str(item.get("model") or "").strip() == model_token
+        )
+    ]
+    _write_local_llm_model_registry(rows)
+
+    return {
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "model": model_token,
+        "deleted_paths": deleted_paths,
+    }
 
 
 def _speech_model_warmup_on_startup_enabled() -> bool:
@@ -788,6 +2966,44 @@ def _start_speech_model_warmup(settings: Dict[str, Any], *, reason: str = "setti
     return snapshot
 
 
+def _speech_model_warmup_startup_wait_seconds() -> float:
+    raw = str(os.getenv("TATER_SPEECH_WARMUP_STARTUP_WAIT_SECONDS") or "120").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 120.0
+    return max(0.0, min(1800.0, value))
+
+
+def _wait_for_speech_model_warmup(*, timeout: Optional[float] = None) -> Dict[str, Any]:
+    wait_seconds = _speech_model_warmup_startup_wait_seconds() if timeout is None else float(timeout)
+    if wait_seconds <= 0:
+        snapshot = _speech_model_warmup_snapshot()
+        snapshot["waited_seconds"] = 0.0
+        snapshot["startup_wait_timeout"] = bool(snapshot.get("running"))
+        return snapshot
+
+    started_wait = time.time()
+    deadline = started_wait + wait_seconds
+    while time.time() < deadline:
+        snapshot = _speech_model_warmup_snapshot()
+        if not bool(snapshot.get("running")):
+            snapshot["waited_seconds"] = round(max(0.0, time.time() - started_wait), 2)
+            snapshot["startup_wait_timeout"] = False
+            return snapshot
+        time.sleep(0.25)
+
+    snapshot = _speech_model_warmup_snapshot()
+    snapshot["waited_seconds"] = round(max(0.0, time.time() - started_wait), 2)
+    snapshot["startup_wait_timeout"] = bool(snapshot.get("running"))
+    if snapshot["startup_wait_timeout"]:
+        logger.info(
+            "[speech-warmup] startup wait timed out after %.1fs; continuing boot while warmup finishes",
+            wait_seconds,
+        )
+    return snapshot
+
+
 def _reload_local_tts_model_caches(*, reason: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "ok": True,
@@ -850,6 +3066,36 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
 
 
+def _normalize_hydra_llm_provider(value: Any) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return HYDRA_LLM_PROVIDER_MLX_LM
+    return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
+
+
+def _is_local_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_MLX_LM,
+    }
+
+
+def _hydra_llm_provider_label(provider: Any) -> str:
+    token = _normalize_hydra_llm_provider(provider)
+    if token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+        return "Hugging Face Transformers"
+    if token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return "llama.cpp GGUF"
+    if token == HYDRA_LLM_PROVIDER_MLX_LM:
+        return "MLX LM"
+    return "OpenAI-Compatible API"
+
+
 def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
     if rows is None:
         return []
@@ -857,18 +3103,36 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         raise HTTPException(status_code=400, detail="hydra_base_servers must be a list")
 
     normalized: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str, str]] = set()
+    seen: set[Tuple[str, str, str, str]] = set()
 
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
             raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}] must be an object")
 
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
         host = str(row.get("host") or "").strip()
         port = str(row.get("port") or "").strip()
         model = str(row.get("model") or "").strip()
         api_key = str(row.get("api_key") or "").strip()
 
         if not host and not port and not model:
+            continue
+        if _is_local_hydra_llm_provider(provider):
+            if not model:
+                raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}].model is required")
+            signature = (provider, "", model, "")
+            if signature in seen:
+                continue
+            seen.add(signature)
+            normalized.append(
+                {
+                    "provider": provider,
+                    "host": "",
+                    "port": "",
+                    "model": model,
+                    "api_key": "",
+                }
+            )
             continue
         if not host:
             raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}].host is required")
@@ -887,12 +3151,13 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         host_with_scheme = host.startswith(("http://", "https://"))
         canonical_host = f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname
         canonical_port = str(parsed.port) if parsed.port is not None else ""
-        signature = (endpoint, model, api_key)
+        signature = (provider, endpoint, model, api_key)
         if signature in seen:
             continue
         seen.add(signature)
         normalized.append(
             {
+                "provider": provider,
                 "host": canonical_host,
                 "port": canonical_port,
                 "model": model,
@@ -909,12 +3174,16 @@ def _set_hydra_legacy_base_keys(base_rows: List[Dict[str, str]]) -> None:
         redis_client.delete(HYDRA_LLM_HOST_KEY)
         redis_client.delete(HYDRA_LLM_PORT_KEY)
         redis_client.delete(HYDRA_LLM_MODEL_KEY)
+        redis_client.delete(HYDRA_LLM_PROVIDER_KEY)
         return
 
     first = rows[0]
+    first_provider = _normalize_hydra_llm_provider(first.get("provider"))
     first_host = str(first.get("host") or "").strip()
     first_port = str(first.get("port") or "").strip()
     first_model = str(first.get("model") or "").strip()
+
+    redis_client.set(HYDRA_LLM_PROVIDER_KEY, first_provider)
 
     if first_host:
         redis_client.set(HYDRA_LLM_HOST_KEY, first_host)
@@ -1249,12 +3518,16 @@ def _save_last_llm_stats(stats: Any) -> None:
     mapping = {
         "model": str(stats.get("model") or "LLM"),
         "elapsed": str(float(stats.get("elapsed") or 0.0)),
+        "prompt_elapsed": str(float(stats.get("prompt_elapsed") or 0.0)),
+        "completion_elapsed": str(float(stats.get("completion_elapsed") or 0.0)),
         "prompt_tokens": str(int(stats.get("prompt_tokens") or 0)),
         "completion_tokens": str(int(stats.get("completion_tokens") or 0)),
         "total_tokens": str(int(stats.get("total_tokens") or 0)),
         "tps_total": str(float(stats.get("tps_total") or 0.0)),
+        "tps_prompt": str(float(stats.get("tps_prompt") or 0.0)),
         "tps_comp": str(float(stats.get("tps_comp") or 0.0)),
         "calls": str(int(stats.get("calls") or 0)),
+        "speed_basis": str(stats.get("speed_basis") or "wall_time"),
         "updated_at": str(float(stats.get("updated_at") or time.time())),
     }
     redis_client.hset(LAST_LLM_STATS_KEY, mapping=mapping)
@@ -1280,12 +3553,16 @@ def _load_last_llm_stats() -> Dict[str, Any]:
     stats = {
         "model": str(raw.get("model") or "LLM"),
         "elapsed": max(0.0, _as_float(raw.get("elapsed"))),
+        "prompt_elapsed": max(0.0, _as_float(raw.get("prompt_elapsed"))),
+        "completion_elapsed": max(0.0, _as_float(raw.get("completion_elapsed"))),
         "prompt_tokens": max(0, _as_int(raw.get("prompt_tokens"))),
         "completion_tokens": max(0, _as_int(raw.get("completion_tokens"))),
         "total_tokens": max(0, _as_int(raw.get("total_tokens"))),
         "tps_total": max(0.0, _as_float(raw.get("tps_total"))),
+        "tps_prompt": max(0.0, _as_float(raw.get("tps_prompt"))),
         "tps_comp": max(0.0, _as_float(raw.get("tps_comp"))),
         "calls": max(0, _as_int(raw.get("calls"))),
+        "speed_basis": str(raw.get("speed_basis") or "wall_time"),
         "updated_at": max(0.0, _as_float(raw.get("updated_at"))),
     }
     return stats
@@ -1622,6 +3899,376 @@ def _webui_auth_profile_payload(
         "username": str(chat_settings.get("username") or "User"),
         "user_avatar": _read_user_avatar_data_url(chat_settings),
     }
+
+
+def _normalize_tater_api_mode(value: Any, default: str = TATER_API_MODE_DIRECT) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"hydra", "agent", "tools"}:
+        return TATER_API_MODE_HYDRA
+    if token in {"direct", "base", "llm", "chat"}:
+        return TATER_API_MODE_DIRECT
+    fallback = str(default or TATER_API_MODE_DIRECT).strip().lower()
+    return fallback if fallback in TATER_API_MODE_CHOICES else TATER_API_MODE_DIRECT
+
+
+def _load_tater_api_settings(*, include_secret: bool = False) -> Dict[str, Any]:
+    raw = redis_client.hgetall(TATER_API_SETTINGS_KEY) or {}
+    enabled_raw = raw.get("enabled")
+    if enabled_raw is None:
+        enabled_raw = os.getenv("TATER_OPENAI_API_ENABLED")
+    key_value = str(raw.get("api_key") or os.getenv("TATER_OPENAI_API_KEY") or "").strip()
+    mode = _normalize_tater_api_mode(raw.get("mode") or os.getenv("TATER_OPENAI_API_MODE"))
+    hydra_tools_enabled = _as_bool_flag(
+        raw.get("hydra_tools_enabled") or os.getenv("TATER_OPENAI_API_HYDRA_TOOLS_ENABLED"),
+        default=False,
+    )
+    settings: Dict[str, Any] = {
+        "enabled": _as_bool_flag(enabled_raw, default=False),
+        "mode": mode,
+        "hydra_tools_enabled": bool(hydra_tools_enabled),
+        "api_key_set": bool(key_value),
+    }
+    if include_secret:
+        settings["api_key"] = key_value
+    return settings
+
+
+def _save_tater_api_settings_from_updates(updates: Dict[str, Any]) -> None:
+    keys = {
+        "tater_api_enabled",
+        "tater_api_key",
+        "clear_tater_api_key",
+        "tater_api_mode",
+        "tater_api_hydra_tools_enabled",
+    }
+    if not any(key in updates for key in keys):
+        return
+
+    mapping: Dict[str, str] = {}
+    if "tater_api_enabled" in updates:
+        mapping["enabled"] = "true" if _as_bool_flag(updates.get("tater_api_enabled"), default=False) else "false"
+    if "tater_api_mode" in updates:
+        mapping["mode"] = _normalize_tater_api_mode(updates.get("tater_api_mode"))
+    if "tater_api_hydra_tools_enabled" in updates:
+        mapping["hydra_tools_enabled"] = (
+            "true" if _as_bool_flag(updates.get("tater_api_hydra_tools_enabled"), default=False) else "false"
+        )
+    if bool(updates.get("clear_tater_api_key")):
+        redis_client.hdel(TATER_API_SETTINGS_KEY, "api_key")
+    elif "tater_api_key" in updates:
+        key_value = str(updates.get("tater_api_key") or "").strip()
+        if key_value:
+            mapping["api_key"] = key_value
+
+    if mapping:
+        redis_client.hset(TATER_API_SETTINGS_KEY, mapping=mapping)
+
+
+def _extract_tater_api_token(request: Request) -> str:
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    api_key = str(request.headers.get("x-api-key") or "").strip()
+    if api_key:
+        return api_key
+    return str(request.query_params.get("api_key") or "").strip()
+
+
+def _require_tater_api_request(request: Request) -> Dict[str, Any]:
+    settings = _load_tater_api_settings(include_secret=True)
+    if not bool(settings.get("enabled")):
+        raise HTTPException(status_code=404, detail="Tater OpenAI-compatible API is disabled.")
+    expected = str(settings.get("api_key") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=403, detail="Tater OpenAI-compatible API key is not configured.")
+    supplied = _extract_tater_api_token(request)
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Invalid Tater API key.")
+    return settings
+
+
+def _openai_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_type in {"text", "input_text"}:
+                    parts.append(str(item.get("text") or ""))
+                elif "text" in item and not item_type:
+                    parts.append(str(item.get("text") or ""))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part).strip()
+    return str(content)
+
+
+def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, str]]:
+    if not isinstance(messages, list):
+        return []
+    normalized: List[Dict[str, str]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        role = str(raw_message.get("role") or "user").strip().lower()
+        if role not in {"system", "user", "assistant", "tool"}:
+            role = "user"
+        content = _openai_content_to_text(raw_message.get("content")).strip()
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _openai_user_text_and_history(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]]]:
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages must include at least one text message.")
+    last_user_idx = -1
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get("role") == "user":
+            last_user_idx = idx
+            break
+    if last_user_idx < 0:
+        last_user_idx = len(messages) - 1
+    user_text = str(messages[last_user_idx].get("content") or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="The latest user message is empty.")
+    max_llm = _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM)
+    history = [dict(item) for item in messages[:last_user_idx]]
+    if max_llm > 0:
+        history = history[-max_llm:]
+    return user_text, history
+
+
+def _tater_api_primary_model_id() -> str:
+    try:
+        rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        rows = []
+    row = rows[0] if rows else {}
+    provider = _normalize_hydra_llm_provider(row.get("provider") if isinstance(row, dict) else "")
+    model = str((row or {}).get("model") or "").strip() if isinstance(row, dict) else ""
+    if model and provider and provider != HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE:
+        return f"{provider}::{model}"
+    return model or "tater/base"
+
+
+def _tater_api_mode_for_model(model: Any, default_mode: str) -> str:
+    token = str(model or "").strip().lower()
+    if token in {"tater/hydra", "tater-hydra", "hydra", "agent"}:
+        return TATER_API_MODE_HYDRA
+    if token in {"tater/base", "tater/direct", "tater-direct", "base", "direct"}:
+        return TATER_API_MODE_DIRECT
+    return _normalize_tater_api_mode(default_mode)
+
+
+def _openai_usage_from_perf(perf: Any) -> Dict[str, int]:
+    def _safe_token_count(value: Any) -> int:
+        try:
+            return max(0, int(float(value or 0)))
+        except Exception:
+            return 0
+
+    if not isinstance(perf, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    prompt_tokens = _safe_token_count(perf.get("prompt_tokens"))
+    completion_tokens = _safe_token_count(perf.get("completion_tokens"))
+    total_tokens = _safe_token_count(perf.get("total_tokens"))
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _openai_chat_completion_response(
+    *,
+    content: str,
+    model: str,
+    usage: Optional[Dict[str, int]] = None,
+    completion_id: str = "",
+) -> Dict[str, Any]:
+    return {
+        "id": completion_id or f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": str(model or _tater_api_primary_model_id()),
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": str(content or "")},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+async def _run_tater_api_direct_completion(
+    payload: Any,
+    messages: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    generation_kwargs: Dict[str, Any] = {"activity": "external_api"}
+    if payload.max_tokens is not None:
+        try:
+            generation_kwargs["max_tokens"] = max(1, int(payload.max_tokens))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_tokens must be a positive integer.")
+    if payload.temperature is not None:
+        generation_kwargs["temperature"] = payload.temperature
+    if payload.top_p is not None:
+        generation_kwargs["top_p"] = payload.top_p
+    if payload.stop is not None:
+        generation_kwargs["stop"] = payload.stop
+
+    perf: Dict[str, Any] = {}
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        result = await llm_client.chat(messages, stream=False, **generation_kwargs)
+        try:
+            perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
+            if isinstance(perf, dict):
+                perf["updated_at"] = time.time()
+                _save_last_llm_stats(perf)
+        except Exception:
+            logger.exception("[tater-api] failed saving LLM speed stats")
+
+    response_message = result.get("message") if isinstance(result, dict) else {}
+    content = ""
+    if isinstance(response_message, dict):
+        content = str(response_message.get("content") or "")
+    model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
+    return _openai_chat_completion_response(
+        content=content,
+        model=model,
+        usage=_openai_usage_from_perf(perf),
+    )
+
+
+async def _run_tater_api_hydra_completion(
+    payload: Any,
+    messages: List[Dict[str, str]],
+    *,
+    tools_enabled: bool,
+    request: Request,
+) -> Dict[str, Any]:
+    user_text, history_messages = _openai_user_text_and_history(messages)
+    session_id = str(request.headers.get("x-tater-session") or payload.user or "default").strip() or "default"
+    origin = {
+        "platform": "openai_api",
+        "user": str(payload.user or "api").strip() or "api",
+        "user_id": str(payload.user or "api").strip() or "api",
+        "session_id": session_id,
+    }
+
+    verba_registry_module.ensure_verbas_loaded()
+    registry = dict(verba_registry_module.get_verba_registry() or {}) if tools_enabled else {}
+
+    perf: Dict[str, Any] = {}
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        result = await run_hydra_turn(
+            llm_client=llm_client,
+            platform="openai_api",
+            history_messages=history_messages,
+            registry=registry,
+            enabled_predicate=(get_verba_enabled if tools_enabled else None),
+            context={"raw_message": user_text, "openai_api": True, "tools_enabled": bool(tools_enabled)},
+            user_text=user_text,
+            scope=f"session:{session_id}",
+            origin=origin,
+            redis_client=redis_client,
+            platform_preamble="External OpenAI-compatible API request.",
+        )
+        try:
+            perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
+            if isinstance(perf, dict):
+                perf["updated_at"] = time.time()
+                _save_last_llm_stats(perf)
+        except Exception:
+            logger.exception("[tater-api] failed saving Hydra LLM speed stats")
+
+    content = ""
+    if isinstance(result, dict):
+        text = result.get("text")
+        if isinstance(text, str):
+            content = text
+        if not content.strip():
+            artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+            content_parts: List[str] = []
+            for item in artifacts:
+                if isinstance(item, str):
+                    content_parts.append(item)
+                elif isinstance(item, dict):
+                    summary = item.get("summary") or item.get("text") or item.get("message")
+                    if summary:
+                        content_parts.append(str(summary))
+            content = "\n".join(part for part in content_parts if part).strip()
+
+    return _openai_chat_completion_response(
+        content=content,
+        model="tater/hydra",
+        usage=_openai_usage_from_perf(perf),
+    )
+
+
+async def _run_tater_api_chat_completion(
+    payload: Any,
+    *,
+    settings: Dict[str, Any],
+    request: Request,
+) -> Dict[str, Any]:
+    messages = _normalize_openai_chat_messages(payload.messages)
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages must include at least one text message.")
+    mode = _tater_api_mode_for_model(payload.model, str(settings.get("mode") or TATER_API_MODE_DIRECT))
+    if mode == TATER_API_MODE_HYDRA:
+        return await _run_tater_api_hydra_completion(
+            payload,
+            messages,
+            tools_enabled=bool(settings.get("hydra_tools_enabled")),
+            request=request,
+        )
+    return await _run_tater_api_direct_completion(payload, messages)
+
+
+async def _stream_openai_chat_completion(completion: Dict[str, Any]):
+    completion_id = str(completion.get("id") or f"chatcmpl-{uuid.uuid4().hex}")
+    created = int(completion.get("created") or time.time())
+    model = str(completion.get("model") or "tater/base")
+    choices = completion.get("choices") if isinstance(completion.get("choices"), list) else []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+    content = str((message or {}).get("content") or "")
+    first = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+    }
+    yield f"data: {json.dumps(first, separators=(',', ':'))}\n\n"
+    if content:
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+    final = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final, separators=(',', ':'))}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _save_chat_message(role: str, username: str, content: Any) -> None:
@@ -2556,11 +5203,9 @@ def _stop_builtin_esphome() -> None:
 
 
 def _redis_reachable_for_startup() -> tuple[bool, str]:
-    timeout = _read_positive_float_env("HTMLUI_STARTUP_REDIS_PROBE_TIMEOUT_SECONDS", 0.45)
     try:
-        config = get_redis_connection_config(include_secret=True)
-        ok, error = test_redis_connection_settings(config, timeout_seconds=timeout)
-        return bool(ok), str(error or "")
+        status = get_redis_connection_status()
+        return bool(status.get("connected")), str(status.get("error") or "")
     except Exception as exc:
         return False, str(exc)
 
@@ -2690,6 +5335,7 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         "ran_autostart": False,
         "error": "",
         "restore_summary": {},
+        "local_llm_warmup": {},
         "speech_warmup": {},
     }
 
@@ -2708,19 +5354,21 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
             logger.info("[runtime-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
 
         _run_async_sync(ensure_integration_runtime_started(redis_client), timeout=15.0)
-        if bool(bootstrap_state.get("autostart_enabled")):
-            _autostart_enabled_surfaces()
-            result["ran_autostart"] = True
-        else:
-            logger.info("[runtime-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+        result["local_llm_warmup"] = _start_local_llm_warmup_for_startup(reason="runtime-bootstrap")
         _start_builtin_esphome()
         if _speech_model_warmup_on_startup_enabled():
             result["speech_warmup"] = _start_speech_model_warmup(
                 get_shared_speech_settings(),
                 reason="runtime-bootstrap",
             )
+            result["speech_warmup"] = _wait_for_speech_model_warmup()
         else:
             logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
+        if bool(bootstrap_state.get("autostart_enabled")):
+            _autostart_enabled_surfaces()
+            result["ran_autostart"] = True
+        else:
+            logger.info("[runtime-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
         _start_dashboard_brief_scheduler()
     except Exception as exc:
         err = str(exc)
@@ -3096,6 +5744,17 @@ class ChatRequest(BaseModel):
     attachments: List[ChatAttachmentRequest] = Field(default_factory=list)
 
 
+class OpenAIChatCompletionRequest(BaseModel):
+    model: Optional[str] = None
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    stop: Optional[Any] = None
+    stream: Optional[bool] = None
+    user: Optional[str] = None
+
+
 class ShopItemRequest(BaseModel):
     id: str = Field(min_length=1)
 
@@ -3173,6 +5832,33 @@ class NanoWakeWordTrainerDownloadRequest(BaseModel):
     artifact_url: Optional[str] = None
 
 
+class HfModelDownloadRequest(BaseModel):
+    provider: Optional[str] = None
+    repo_id: Optional[str] = None
+    model_id: Optional[str] = None
+    filename: Optional[str] = None
+    task: Optional[str] = None
+
+
+class LocalLlmModelDeleteRequest(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class HfLlmWarmupCancelRequest(BaseModel):
+    key: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    cancel_all: Optional[bool] = None
+
+
+class LocalLlmUnloadRequest(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    cache_key: Optional[str] = None
+    unload_all: Optional[bool] = None
+
+
 class AppSettingsRequest(BaseModel):
     username: Optional[str] = None
     user_avatar: Optional[str] = None
@@ -3203,6 +5889,8 @@ class AppSettingsRequest(BaseModel):
     unifi_protect_base_url: Optional[str] = None
     unifi_protect_api_key: Optional[str] = None
     vision_api_base: Optional[str] = None
+    vision_mode: Optional[str] = None
+    vision_provider: Optional[str] = None
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
     speech_stt_backend: Optional[str] = None
@@ -3239,26 +5927,40 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_port: Optional[str] = None
     hydra_llm_model: Optional[str] = None
     hydra_llm_api_key: Optional[str] = None
+    hydra_llm_provider: Optional[str] = None
+    hydra_hf_transformers_context_tokens: Optional[Any] = None
+    hydra_llama_cpp_context_tokens: Optional[Any] = None
+    hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
+    hydra_llama_cpp_mtp_enabled: Optional[bool] = None
+    hydra_llama_cpp_mtp_draft_tokens: Optional[Any] = None
+    hydra_mlx_lm_context_tokens: Optional[Any] = None
+    spudex_llm_provider: Optional[str] = None
     spudex_llm_host: Optional[str] = None
     spudex_llm_model: Optional[str] = None
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
+    hydra_local_model_load_targets: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
+    hydra_llm_chat_provider: Optional[str] = None
     hydra_llm_chat_host: Optional[str] = None
     hydra_llm_chat_port: Optional[str] = None
     hydra_llm_chat_model: Optional[str] = None
     hydra_llm_chat_api_key: Optional[str] = None
+    hydra_llm_astraeus_provider: Optional[str] = None
     hydra_llm_astraeus_host: Optional[str] = None
     hydra_llm_astraeus_port: Optional[str] = None
     hydra_llm_astraeus_model: Optional[str] = None
     hydra_llm_astraeus_api_key: Optional[str] = None
+    hydra_llm_thanatos_provider: Optional[str] = None
     hydra_llm_thanatos_host: Optional[str] = None
     hydra_llm_thanatos_port: Optional[str] = None
     hydra_llm_thanatos_model: Optional[str] = None
     hydra_llm_thanatos_api_key: Optional[str] = None
+    hydra_llm_minos_provider: Optional[str] = None
     hydra_llm_minos_host: Optional[str] = None
     hydra_llm_minos_port: Optional[str] = None
     hydra_llm_minos_model: Optional[str] = None
     hydra_llm_minos_api_key: Optional[str] = None
+    hydra_llm_hermes_provider: Optional[str] = None
     hydra_llm_hermes_host: Optional[str] = None
     hydra_llm_hermes_port: Optional[str] = None
     hydra_llm_hermes_model: Optional[str] = None
@@ -3268,6 +5970,11 @@ class AppSettingsRequest(BaseModel):
     hydra_auto_continue_incomplete_final_enabled: Optional[bool] = None
     popup_effect_style: Optional[str] = None
     admin_only_plugins: Optional[List[str]] = None
+    tater_api_enabled: Optional[bool] = None
+    tater_api_key: Optional[str] = None
+    clear_tater_api_key: Optional[bool] = None
+    tater_api_mode: Optional[str] = None
+    tater_api_hydra_tools_enabled: Optional[bool] = None
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
@@ -3325,6 +6032,7 @@ class OpenAiCompatibleTtsModelsRequest(BaseModel):
 
 
 class RedisSetupRequest(BaseModel):
+    mode: Optional[str] = "internal"
     host: Optional[str] = ""
     port: Optional[int] = 6379
     db: Optional[int] = 0
@@ -3333,8 +6041,14 @@ class RedisSetupRequest(BaseModel):
     use_tls: Optional[bool] = False
     verify_tls: Optional[bool] = True
     ca_cert_path: Optional[str] = ""
+    data_path: Optional[str] = ""
     keep_existing_password: Optional[bool] = False
     test_only: Optional[bool] = False
+
+
+class RedisMigrateInternalRequest(BaseModel):
+    data_path: Optional[str] = ""
+    flush_internal: Optional[bool] = True
 
 
 class HydraDataClearRequest(BaseModel):
@@ -3360,9 +6074,6 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.on_event("startup")
 async def _startup_event() -> None:
-    set_main_loop(asyncio.get_running_loop())
-    bind_integration_runtime_loop()
-    verba_registry_module.ensure_verbas_loaded()
     restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
         "1",
         "true",
@@ -3382,32 +6093,43 @@ async def _startup_event() -> None:
     bootstrap_state["restore_error"] = ""
     bootstrap_state["restore_summary"] = {}
 
+    redis_ready, redis_error = _redis_reachable_for_startup()
+    if not redis_ready:
+        bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
+        bootstrap_state["restore_in_progress"] = False
+        bootstrap_state["restore_complete"] = True
+        logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
+        logger.info("TaterOS backend started")
+        return
+
+    set_main_loop(asyncio.get_running_loop())
+    bind_integration_runtime_loop()
+    verba_registry_module.ensure_verbas_loaded()
+
     try:
-        redis_ready, redis_error = _redis_reachable_for_startup()
-        if not redis_ready:
-            bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
-            logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
+        logger.info("[startup] runtime executor settings applied: %s", configure_runtime_executors())
+        if restore_enabled:
+            bootstrap_state["restore_in_progress"] = True
+            summary = _restore_enabled_surfaces()
+            bootstrap_state["restore_summary"] = summary
+            logger.info("[startup-restore] summary: %s", summary)
         else:
-            logger.info("[startup] runtime executor settings applied: %s", configure_runtime_executors())
-            if restore_enabled:
-                bootstrap_state["restore_in_progress"] = True
-                summary = _restore_enabled_surfaces()
-                bootstrap_state["restore_summary"] = summary
-                logger.info("[startup-restore] summary: %s", summary)
-            else:
-                logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
-            start_integration_runtime(redis_client)
-            if autostart_enabled:
-                _autostart_enabled_surfaces()
-            else:
-                logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
-            await esphome_home_module.startup()
-            if _speech_model_warmup_on_startup_enabled():
-                warmup = _start_speech_model_warmup(get_shared_speech_settings(), reason="startup")
-                logger.info("[speech-warmup] startup scheduled: %s", warmup)
-            else:
-                logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
-            _start_dashboard_brief_scheduler()
+            logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
+        start_integration_runtime(redis_client)
+        local_warmup = _start_local_llm_warmup_for_startup(reason="startup")
+        logger.info("[local-llm-warmup] startup scheduled: %s", local_warmup)
+        await esphome_home_module.startup()
+        if _speech_model_warmup_on_startup_enabled():
+            warmup = _start_speech_model_warmup(get_shared_speech_settings(), reason="startup")
+            warmup = _wait_for_speech_model_warmup()
+            logger.info("[speech-warmup] startup scheduled: %s", warmup)
+        else:
+            logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
+        if autostart_enabled:
+            _autostart_enabled_surfaces()
+        else:
+            logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
+        _start_dashboard_brief_scheduler()
     except RedisError as exc:
         bootstrap_state["restore_error"] = str(exc)
         logger.warning("Redis unavailable during startup autostart: %s", exc)
@@ -3425,6 +6147,7 @@ async def _shutdown_event() -> None:
     portal_runtime.stop_all()
     await stop_integration_runtime()
     shutdown_runtime_executors(wait=False, cancel_futures=True)
+    shutdown_internal_redis()
     logger.info("TaterOS backend stopped")
 
 
@@ -3802,11 +6525,391 @@ def _estimate_webui_chat_context_window(*, force_refresh: bool = False) -> Dict[
     return dict(runtime_context_estimate_cache.get("payload") or {})
 
 
+def _runtime_model_memory_kind_from_device(device: Any, fallback: str = "ram") -> str:
+    token = str(device or "").strip().lower()
+    if any(part in token for part in ("cuda", "gpu", "nvidia", "rocm", "hip")):
+        return "vram"
+    if any(part in token for part in ("mps", "metal", "apple", "unified")):
+        return "unified"
+    return str(fallback or "ram").strip().lower() or "ram"
+
+
+def _runtime_path_bytes(*paths: Any) -> int:
+    total = 0
+    seen: set[str] = set()
+    for path in paths:
+        raw = str(path or "").strip()
+        if not raw:
+            continue
+        try:
+            token = str(Path(raw).expanduser().resolve())
+        except Exception:
+            token = raw
+        if token in seen:
+            continue
+        seen.add(token)
+        try:
+            total += max(0, int(runtime_path_size_bytes(raw) or 0))
+        except Exception:
+            continue
+    return max(0, int(total))
+
+
+def _runtime_model_estimated_bytes(model_obj: Any = None, *paths: Any) -> int:
+    try:
+        memory = max(0, int(runtime_object_memory_footprint_bytes(model_obj) or 0))
+        if memory > 0:
+            return memory
+    except Exception:
+        pass
+    return _runtime_path_bytes(*paths)
+
+
+def _runtime_managed_model_row(
+    *,
+    category: str,
+    kind_label: str,
+    provider: str,
+    provider_label: str,
+    model: str,
+    device: str = "",
+    model_path: str = "",
+    model_root: str = "",
+    estimated_bytes: int = 0,
+    memory_kind: str = "",
+    warning: str = "",
+    details: Optional[List[str]] = None,
+    loaded_ts: float = 0.0,
+) -> Dict[str, Any]:
+    return {
+        "cache_key": "",
+        "category": str(category or "managed").strip() or "managed",
+        "kind_label": str(kind_label or "Managed").strip() or "Managed",
+        "provider": str(provider or category or "managed").strip(),
+        "provider_label": str(provider_label or provider or "Managed").strip(),
+        "model": str(model or "model").strip() or "model",
+        "device": str(device or "").strip(),
+        "memory_kind": str(memory_kind or _runtime_model_memory_kind_from_device(device)).strip().lower() or "ram",
+        "estimated_bytes": max(0, int(estimated_bytes or 0)),
+        "model_path": str(model_path or "").strip(),
+        "model_root": str(model_root or "").strip(),
+        "loaded_ts": float(loaded_ts or 0.0),
+        "warning": str(warning or "").strip(),
+        "managed": True,
+        "unloadable": False,
+        "managed_by": "Settings enable/disable",
+        "details": [str(item).strip() for item in (details or []) if str(item or "").strip()],
+    }
+
+
+def _runtime_kokoro_model_label(key: Tuple[Any, ...]) -> Tuple[str, str, str, str]:
+    parts = [str(item or "").strip() for item in key]
+    if parts and parts[0] == "torch":
+        repo = parts[1] if len(parts) > 1 else "Kokoro"
+        lang = parts[2] if len(parts) > 2 else ""
+        device = parts[3] if len(parts) > 3 else ""
+        label = repo
+        if lang:
+            label = f"{label} ({lang})"
+        return label, device, "torch", repo
+    variant = parts[1] if len(parts) > 1 else "v1.0"
+    quality = parts[2] if len(parts) > 2 else "q8"
+    provider = parts[3] if len(parts) > 3 else ""
+    return f"Kokoro {variant}:{quality}", provider, provider or "onnx", ""
+
+
+def _runtime_tts_cache_rows(module: Any, *, scope_label: str, provider_prefix: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    with contextlib.suppress(Exception):
+        lock = getattr(module, "_kokoro_pipeline_lock", None)
+        cache = getattr(module, "_kokoro_pipeline_cache", {})
+        with lock:
+            kokoro_items = list(cache.items())
+        for key, pipeline in kokoro_items:
+            key_tuple = tuple(key if isinstance(key, tuple) else (key,))
+            model_label, device, engine_label, repo_id = _runtime_kokoro_model_label(key_tuple)
+            root_name = "kokoro_torch" if str(engine_label).lower() == "torch" else "kokoro"
+            model_root = ""
+            with contextlib.suppress(Exception):
+                model_root = str(module._tts_backend_model_root(root_name))
+            estimated = _runtime_model_estimated_bytes(pipeline, model_root)
+            detail_parts = [f"Engine {engine_label}"]
+            if repo_id:
+                detail_parts.append(repo_id)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="tts",
+                    kind_label="TTS",
+                    provider=f"{provider_prefix}_kokoro",
+                    provider_label=f"{scope_label} • Kokoro",
+                    model=model_label,
+                    device=device,
+                    model_root=model_root,
+                    estimated_bytes=estimated,
+                    memory_kind=_runtime_model_memory_kind_from_device(device),
+                    details=detail_parts,
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        lock = getattr(module, "_pocket_tts_model_lock", None)
+        cache = getattr(module, "_pocket_tts_model_cache", {})
+        with lock:
+            pocket_items = list(cache.items())
+        model_root = ""
+        with contextlib.suppress(Exception):
+            model_root = str(module._tts_backend_model_root("pocket_tts"))
+        for token, model_obj in pocket_items:
+            model_token = str(token or "").strip() or str(getattr(module, "DEFAULT_POCKET_TTS_MODEL", "") or "PocketTTS")
+            estimated = _runtime_model_estimated_bytes(model_obj, model_root)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="tts",
+                    kind_label="TTS",
+                    provider=f"{provider_prefix}_pocket_tts",
+                    provider_label=f"{scope_label} • PocketTTS",
+                    model=model_token,
+                    model_root=model_root,
+                    estimated_bytes=estimated,
+                    memory_kind="ram",
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        lock = getattr(module, "_piper_voice_lock", None)
+        cache = getattr(module, "_piper_voice_cache", {})
+        with lock:
+            piper_items = list(cache.items())
+        for model_path, voice_obj in piper_items:
+            path = str(model_path or "").strip()
+            config_path = f"{path}.json" if path and not path.endswith(".json") else ""
+            model_label = Path(path).name.replace(".onnx", "") if path else "Piper"
+            model_root = str(Path(path).parent) if path else ""
+            estimated = _runtime_model_estimated_bytes(voice_obj, path, config_path)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="tts",
+                    kind_label="TTS",
+                    provider=f"{provider_prefix}_piper",
+                    provider_label=f"{scope_label} • Piper",
+                    model=model_label,
+                    model_path=path,
+                    model_root=model_root,
+                    estimated_bytes=estimated,
+                    memory_kind="ram",
+                )
+            )
+    return rows
+
+
+def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        from esphome import voice_pipeline
+    except Exception:
+        return rows
+
+    with contextlib.suppress(Exception):
+        with voice_pipeline._faster_whisper_model_lock:
+            faster_whisper_items = list(voice_pipeline._faster_whisper_model_cache.items())
+        for key, model_obj in faster_whisper_items:
+            key_tuple = tuple(key if isinstance(key, tuple) else (key,))
+            model_source = str(key_tuple[0] if len(key_tuple) > 0 else "").strip()
+            device = str(key_tuple[1] if len(key_tuple) > 1 else "").strip()
+            compute_type = str(key_tuple[2] if len(key_tuple) > 2 else "").strip()
+            model_path = model_source if model_source and os.path.exists(os.path.expanduser(model_source)) else ""
+            estimated = _runtime_model_estimated_bytes(model_obj, model_path)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_faster_whisper",
+                    provider_label="STT • Faster Whisper",
+                    model=model_source or str(getattr(voice_pipeline, "DEFAULT_FASTER_WHISPER_MODEL", "") or "Faster Whisper"),
+                    device=device,
+                    model_path=model_path,
+                    model_root=str(getattr(voice_pipeline, "_stt_backend_model_root")("faster_whisper")),
+                    estimated_bytes=estimated,
+                    memory_kind=_runtime_model_memory_kind_from_device(device),
+                    details=[f"Compute {compute_type}"] if compute_type else [],
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        with voice_pipeline._vosk_model_lock:
+            vosk_items = list(voice_pipeline._vosk_model_cache.items())
+        for model_path, model_obj in vosk_items:
+            path = str(model_path or "").strip()
+            estimated = _runtime_model_estimated_bytes(model_obj, path)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_vosk",
+                    provider_label="STT • Vosk",
+                    model=Path(path).name if path else "Vosk",
+                    model_path=path,
+                    model_root=str(getattr(voice_pipeline, "_stt_backend_model_root")("vosk")),
+                    estimated_bytes=estimated,
+                    memory_kind="ram",
+                )
+            )
+
+    rows.extend(_runtime_tts_cache_rows(voice_pipeline, scope_label="Voice TTS", provider_prefix="voice_tts"))
+    return rows
+
+
+def _runtime_announcement_tts_model_rows() -> List[Dict[str, Any]]:
+    try:
+        import speech_tts as speech_tts_module
+    except Exception:
+        return []
+    return _runtime_tts_cache_rows(speech_tts_module, scope_label="Announcement TTS", provider_prefix="announcement_tts")
+
+
+def _runtime_speechbrain_engine_row(module: Any, *, category: str, kind_label: str, provider: str, provider_label: str) -> List[Dict[str, Any]]:
+    try:
+        lock = getattr(module, "_ENGINE_LOCK")
+        with lock:
+            engine = getattr(module, "_ENGINE", None)
+            engine_source = str(getattr(module, "_ENGINE_SOURCE", "") or "").strip()
+            engine_device = str(getattr(module, "_ENGINE_DEVICE", "") or "").strip()
+            requested_device = str(getattr(module, "_ENGINE_REQUESTED_DEVICE", "") or "").strip()
+    except Exception:
+        return []
+    if engine is None:
+        return []
+
+    availability: Dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        availability = module.runtime_availability()
+    model_source = str(availability.get("model_source") or engine_source or provider_label).strip()
+    model_dir = str(availability.get("model_dir") or "").strip()
+    device = str(availability.get("device") or engine_device or requested_device or "").strip()
+    detail = str(availability.get("detail") or "").strip()
+    acceleration = str(availability.get("acceleration") or "").strip()
+    estimated = _runtime_model_estimated_bytes(engine, model_dir)
+    details = [f"Acceleration {acceleration}"] if acceleration else []
+    return [
+        _runtime_managed_model_row(
+            category=category,
+            kind_label=kind_label,
+            provider=provider,
+            provider_label=provider_label,
+            model=model_source,
+            device=device,
+            model_path=model_dir,
+            model_root=model_dir,
+            estimated_bytes=estimated,
+            memory_kind=_runtime_model_memory_kind_from_device(device),
+            warning=detail,
+            details=details,
+        )
+    ]
+
+
+def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    rows.extend(_runtime_voice_pipeline_model_rows())
+    rows.extend(_runtime_announcement_tts_model_rows())
+    try:
+        from esphome import speaker_id as speaker_id_module
+
+        rows.extend(
+            _runtime_speechbrain_engine_row(
+                speaker_id_module,
+                category="speaker_id",
+                kind_label="SpeakerID",
+                provider="speaker_id_speechbrain",
+                provider_label="SpeakerID • SpeechBrain",
+            )
+        )
+    except Exception:
+        pass
+    try:
+        from esphome import emotion_id as emotion_id_module
+
+        rows.extend(
+            _runtime_speechbrain_engine_row(
+                emotion_id_module,
+                category="emotion_id",
+                kind_label="EmotionID",
+                provider="emotion_id_speechbrain",
+                provider_label="EmotionID • SpeechBrain",
+            )
+        )
+    except Exception:
+        pass
+    rows.sort(key=lambda row: (str(row.get("kind_label") or ""), str(row.get("provider_label") or ""), str(row.get("model") or "")))
+    return rows
+
+
+def _runtime_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str, Any]:
+    llm_payload = get_local_llm_loaded_models_snapshot(include_models=True)
+    llm_rows = [dict(row) for row in list(llm_payload.get("models") or []) if isinstance(row, dict)]
+    for row in llm_rows:
+        row.setdefault("category", "llm")
+        row.setdefault("kind_label", "LLM")
+        row.setdefault("managed", False)
+        row.setdefault("unloadable", True)
+        row.setdefault("managed_by", "")
+
+    managed_rows = _runtime_managed_voice_model_rows()
+    rows = [*llm_rows, *managed_rows]
+    rows.sort(key=lambda row: (str(row.get("kind_label") or ""), str(row.get("provider_label") or ""), str(row.get("model") or "")))
+
+    totals = {
+        "estimated_ram_bytes": 0,
+        "estimated_vram_bytes": 0,
+        "estimated_unified_bytes": 0,
+        "estimated_total_bytes": 0,
+    }
+    by_provider: Dict[str, int] = {}
+    by_category: Dict[str, int] = {}
+    unloadable_count = 0
+    managed_count = 0
+    for row in rows:
+        provider = str(row.get("provider") or "").strip()
+        category = str(row.get("category") or "managed").strip() or "managed"
+        if provider:
+            by_provider[provider] = by_provider.get(provider, 0) + 1
+        by_category[category] = by_category.get(category, 0) + 1
+        if bool(row.get("unloadable", False)):
+            unloadable_count += 1
+        if bool(row.get("managed", False)):
+            managed_count += 1
+        estimated = max(0, int(row.get("estimated_bytes") or 0))
+        totals["estimated_total_bytes"] += estimated
+        kind = str(row.get("memory_kind") or "ram").strip().lower()
+        if kind == "vram":
+            totals["estimated_vram_bytes"] += estimated
+        elif kind == "unified":
+            totals["estimated_unified_bytes"] += estimated
+        else:
+            totals["estimated_ram_bytes"] += estimated
+
+    payload = {
+        "loaded_count": len(rows),
+        "local_llm_loaded_count": len(llm_rows),
+        "managed_loaded_count": managed_count,
+        "unloadable_count": unloadable_count,
+        "by_provider": by_provider,
+        "by_category": by_category,
+        "totals": totals,
+        "system": dict(llm_payload.get("system") or {}),
+    }
+    if include_models:
+        payload["models"] = rows
+    return payload
+
+
 def _runtime_breakdown_payload() -> Dict[str, Any]:
     hydra_jobs = _chat_job_counts_with_breakdown(include_history=True)
     llm_calls = get_llm_call_runtime_summary(include_history=True)
     vision_calls = get_vision_call_runtime_summary(include_history=True)
     context_estimate = _estimate_webui_chat_context_window()
+    loaded_models = _runtime_loaded_models_snapshot(include_models=True)
     return {
         "hydra_jobs": hydra_jobs,
         "chat_jobs": hydra_jobs,  # Backward-compatible key for older clients.
@@ -3814,6 +6917,7 @@ def _runtime_breakdown_payload() -> Dict[str, Any]:
         "voice_calls": vision_calls,  # Alias while voice runtime shares the vision-call tracker.
         "vision_calls": vision_calls,
         "chat_context_window": context_estimate,
+        "loaded_models": loaded_models,
     }
 
 
@@ -4653,6 +7757,68 @@ def _dashboard_save_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return _dashboard_snapshot_meta(cached_at=cached_at, source="live")
 
 
+def _dashboard_snapshot_refresh_snapshot() -> Dict[str, Any]:
+    with dashboard_snapshot_refresh_lock:
+        state = dict(dashboard_snapshot_refresh_state)
+    started_at = float(state.get("started_at") or 0.0)
+    finished_at = float(state.get("finished_at") or 0.0)
+    now = time.time()
+    state["age_seconds"] = max(0.0, now - started_at) if bool(state.get("running")) and started_at else 0.0
+    state["last_finished_age_seconds"] = max(0.0, now - finished_at) if finished_at else 0.0
+    return state
+
+
+def _dashboard_mark_snapshot_refresh_started(*, reason: str, force: bool = False) -> bool:
+    now = time.time()
+    with dashboard_snapshot_refresh_lock:
+        if bool(dashboard_snapshot_refresh_state.get("running")) and not force:
+            return False
+        dashboard_snapshot_refresh_state.update(
+            {
+                "running": True,
+                "started_at": now,
+                "last_reason": str(reason or "dashboard").strip() or "dashboard",
+                "last_error": "",
+            }
+        )
+    return True
+
+
+def _dashboard_mark_snapshot_refresh_finished(*, error: str = "") -> None:
+    with dashboard_snapshot_refresh_lock:
+        dashboard_snapshot_refresh_state.update(
+            {
+                "running": False,
+                "finished_at": time.time(),
+                "last_error": str(error or "").strip(),
+            }
+        )
+
+
+def _dashboard_schedule_snapshot_refresh(*, reason: str = "dashboard", force: bool = False) -> bool:
+    if not _dashboard_mark_snapshot_refresh_started(reason=reason, force=force):
+        return False
+
+    async def runner() -> None:
+        error = ""
+        try:
+            snapshot = await run_dashboard(_dashboard_build_snapshot)
+            await run_dashboard(_dashboard_save_snapshot, snapshot)
+        except Exception as exc:
+            error = str(exc)
+            logger.info("[dashboard] queued snapshot refresh failed reason=%s: %s", reason, exc)
+        finally:
+            _dashboard_mark_snapshot_refresh_finished(error=error)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _dashboard_mark_snapshot_refresh_finished(error="dashboard event loop unavailable")
+        return False
+    loop.create_task(runner())
+    return True
+
+
 def _dashboard_time_greeting(now: Optional[datetime] = None) -> Dict[str, Any]:
     local_now = now or datetime.now()
     hour = int(local_now.hour)
@@ -5429,7 +8595,7 @@ async def _dashboard_generate_briefs(
     generated: Dict[str, str] = {}
     error_text = ""
     try:
-        async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        async with get_primary_llm_client_from_env(redis_conn=redis_client) as llm_client:
             for context in selected_contexts:
                 row_id = str(context.get("id") or "").strip()
                 if row_id != "awareness":
@@ -5967,7 +9133,7 @@ async def _dashboard_payload(
 ) -> Dict[str, Any]:
     snapshot_meta: Dict[str, Any]
     rebuilt_snapshot = False
-    if refresh_briefs or refresh_snapshot:
+    if refresh_snapshot:
         snapshot = await run_dashboard(_dashboard_build_snapshot)
         rebuilt_snapshot = True
         snapshot_meta = _dashboard_snapshot_meta(source="live")
@@ -5975,6 +9141,12 @@ async def _dashboard_payload(
         cached_snapshot, snapshot_meta = await run_dashboard(_dashboard_load_snapshot_cache)
         if isinstance(cached_snapshot, dict) and not bool(snapshot_meta.get("stale")):
             snapshot = cached_snapshot
+        elif isinstance(cached_snapshot, dict):
+            snapshot = cached_snapshot
+            _dashboard_schedule_snapshot_refresh(
+                reason="brief-refresh-stale" if refresh_briefs else "dashboard-stale",
+                force=False,
+            )
         else:
             snapshot = await run_dashboard(_dashboard_build_snapshot)
             rebuilt_snapshot = True
@@ -6018,6 +9190,7 @@ async def _dashboard_payload(
         "ok": True,
         "generated_at": float(snapshot_meta.get("cached_at") or time.time()),
         "snapshot": snapshot_meta,
+        "snapshot_refresh": _dashboard_snapshot_refresh_snapshot(),
         "brief_ttl_seconds": brief_ttl_seconds,
         "brief_refresh": _dashboard_brief_refresh_snapshot(stale_ids),
         "cards": snapshot.get("cards") or [],
@@ -6036,6 +9209,7 @@ def _redis_setup_payload(payload: RedisSetupRequest) -> Dict[str, Any]:
         existing = get_redis_connection_config(include_secret=True)
         password = str(existing.get("password") or "")
     return {
+        "mode": str(payload.mode or "").strip() or "internal",
         "host": str(payload.host or "").strip(),
         "port": int(payload.port if payload.port is not None else 6379),
         "db": int(payload.db if payload.db is not None else 0),
@@ -6044,6 +9218,7 @@ def _redis_setup_payload(payload: RedisSetupRequest) -> Dict[str, Any]:
         "use_tls": bool(payload.use_tls),
         "verify_tls": bool(payload.verify_tls),
         "ca_cert_path": str(payload.ca_cert_path or "").strip(),
+        "data_path": str(payload.data_path or "").strip(),
     }
 
 
@@ -6064,9 +9239,12 @@ def redis_configure(payload: RedisSetupRequest) -> Dict[str, Any]:
         status = get_redis_connection_status()
         status.update(
             {
-                "configured": bool(str(config_payload.get("host") or "").strip()),
+                "configured": str(config_payload.get("mode") or "").strip().lower() != "external"
+                or bool(str(config_payload.get("host") or "").strip()),
                 "connected": True,
                 "error": "",
+                "mode": str(config_payload.get("mode") or "internal"),
+                "internal": str(config_payload.get("mode") or "").strip().lower() != "external",
                 "host": str(config_payload.get("host") or ""),
                 "port": int(config_payload.get("port") or 6379),
                 "db": int(config_payload.get("db") or 0),
@@ -6075,6 +9253,7 @@ def redis_configure(payload: RedisSetupRequest) -> Dict[str, Any]:
                 "verify_tls": bool(config_payload.get("verify_tls")),
                 "ca_cert_path": str(config_payload.get("ca_cert_path") or ""),
                 "password_set": bool(str(config_payload.get("password") or "")),
+                "data_path": str(config_payload.get("data_path") or status.get("data_path") or ""),
             }
         )
         return {
@@ -6088,6 +9267,33 @@ def redis_configure(payload: RedisSetupRequest) -> Dict[str, Any]:
     return {
         **status,
         "saved": True,
+        "bootstrap_replay": bootstrap_replay,
+    }
+
+
+@app.post("/api/redis/migrate/internal")
+def redis_migrate_internal(payload: RedisMigrateInternalRequest) -> Dict[str, Any]:
+    try:
+        migration_payload = _run_redis_maintenance_with_runtime_pause(
+            action="redis-migrate-internal",
+            operation=lambda: migrate_current_redis_to_internal(
+                data_path=str(payload.data_path or "").strip(),
+                flush_internal=bool(payload.flush_internal),
+            ),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=f"Redis migration blocked: {exc}")
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail=f"Redis migration failed: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Redis migration failed: {exc}")
+
+    bootstrap_replay = _replay_startup_after_redis_configure()
+    status = get_redis_connection_status()
+    return {
+        **status,
+        "migrated": bool(migration_payload.get("switched")) or bool(status.get("internal")),
+        "migration": migration_payload,
         "bootstrap_replay": bootstrap_replay,
     }
 
@@ -6169,6 +9375,7 @@ def health() -> Dict[str, Any]:
     hydra_job_counts = _chat_job_counts_with_breakdown()
     llm_call_counts = get_llm_call_runtime_summary(include_history=False)
     vision_call_counts = get_vision_call_runtime_summary()
+    loaded_models = _runtime_loaded_models_snapshot(include_models=False)
 
     return {
         "ok": redis_ok,
@@ -6183,6 +9390,7 @@ def health() -> Dict[str, Any]:
         "llm_calls_active": int(llm_call_counts.get("active_total") or 0),
         "voice_calls_active": int(vision_call_counts.get("active_total") or 0),  # Alias for UI voice wording.
         "vision_calls_active": int(vision_call_counts.get("active_total") or 0),
+        "loaded_models": loaded_models,
         "bootstrap": {
             "restore_enabled": bool(bootstrap_state.get("restore_enabled")),
             "autostart_enabled": bool(bootstrap_state.get("autostart_enabled")),
@@ -6403,11 +9611,14 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
     async def _run() -> None:
         try:
             overrides = spudex_llm_overrides(redis_client)
-            async with get_llm_client_from_env(
-                host=overrides.get("host"),
-                model=overrides.get("model"),
-                redis_conn=redis_client,
-            ) as llm_client:
+            llm_kwargs: Dict[str, Any] = {
+                "host": overrides.get("host"),
+                "model": overrides.get("model"),
+                "redis_conn": redis_client,
+            }
+            if overrides.get("provider") and overrides.get("model"):
+                llm_kwargs["provider"] = overrides.get("provider")
+            async with get_llm_client_from_env(**llm_kwargs) as llm_client:
                 result = await run_spudex_chat_turn(
                     session_id=str(session.get("id") or ""),
                     message=message,
@@ -6512,6 +9723,20 @@ def runtime_breakdown() -> Dict[str, Any]:
     return {"ok": True, **payload}
 
 
+@app.post("/api/runtime/local-llm/unload")
+def unload_runtime_local_llm(payload: LocalLlmUnloadRequest) -> Dict[str, Any]:
+    try:
+        return unload_local_llm_models(
+            provider=payload.provider,
+            model=payload.model,
+            cache_key=payload.cache_key,
+            all_models=bool(payload.unload_all),
+        )
+    except Exception as exc:
+        logger.exception("[local-llm] unload failed")
+        raise HTTPException(status_code=500, detail=str(exc) or "Failed to unload local model.") from exc
+
+
 @app.get("/api/chat/history")
 def chat_history(limit: int = 0) -> Dict[str, Any]:
     max_display = _read_positive_int("tater:max_display", DEFAULT_MAX_DISPLAY)
@@ -6578,6 +9803,51 @@ def chat_file(file_id: str, mimetype: str = "application/octet-stream") -> Respo
         raise HTTPException(status_code=404, detail="Attachment not found or expired.")
     media_type = str(mimetype or "application/octet-stream").strip() or "application/octet-stream"
     return Response(content=blob, media_type=media_type)
+
+
+@app.get("/v1/models")
+def tater_openai_models(request: Request) -> Dict[str, Any]:
+    _require_tater_api_request(request)
+    created = int(time.time())
+    models: List[Dict[str, Any]] = [
+        {"id": "tater/base", "object": "model", "created": created, "owned_by": "tater"},
+        {"id": "tater/direct", "object": "model", "created": created, "owned_by": "tater"},
+        {"id": "tater/hydra", "object": "model", "created": created, "owned_by": "tater"},
+    ]
+    seen = {str(item.get("id")) for item in models}
+    try:
+        base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        base_rows = []
+    for row in base_rows or []:
+        if not isinstance(row, dict):
+            continue
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        model = str(row.get("model") or "").strip()
+        if not model:
+            continue
+        model_id = f"{provider}::{model}" if provider != HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE else model
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"id": model_id, "object": "model", "created": created, "owned_by": "tater"})
+    return {"object": "list", "data": models}
+
+
+@app.post("/v1/chat/completions")
+async def tater_openai_chat_completions(
+    payload: OpenAIChatCompletionRequest,
+    request: Request,
+) -> Any:
+    settings = _require_tater_api_request(request)
+    completion = await _run_tater_api_chat_completion(payload, settings=settings, request=request)
+    if bool(payload.stream):
+        return StreamingResponse(
+            _stream_openai_chat_completion(completion),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return completion
 
 
 @app.post("/api/chat/send")
@@ -8444,6 +11714,7 @@ def get_settings() -> Dict[str, Any]:
     hydra_base_servers_raw = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
     hydra_base_servers: List[Dict[str, str]] = [
         {
+            "provider": _normalize_hydra_llm_provider(row.get("provider")),
             "host": str(row.get("host") or "").strip(),
             "port": str(row.get("port") or "").strip(),
             "model": str(row.get("model") or "").strip(),
@@ -8453,6 +11724,9 @@ def get_settings() -> Dict[str, Any]:
         if isinstance(row, dict)
     ]
     first_hydra_base = hydra_base_servers[0] if hydra_base_servers else {}
+    hydra_llm_provider = _normalize_hydra_llm_provider(
+        first_hydra_base.get("provider") or redis_client.get(HYDRA_LLM_PROVIDER_KEY)
+    )
     hydra_llm_host = str(first_hydra_base.get("host") or redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
     hydra_llm_port = str(first_hydra_base.get("port") or redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
     hydra_llm_model = str(first_hydra_base.get("model") or redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
@@ -8467,20 +11741,29 @@ def get_settings() -> Dict[str, Any]:
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        role_provider = _normalize_hydra_llm_provider(redis_client.get(_hydra_role_llm_key(role, "provider")))
         role_host = str(redis_client.get(_hydra_role_llm_key(role, "host")) or "").strip()
         role_port = str(redis_client.get(_hydra_role_llm_key(role, "port")) or "").strip()
         role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
         role_api_key = str(redis_client.get(_hydra_role_llm_key(role, "api_key")) or "").strip()
+        hydra_role_model_values[f"hydra_llm_{role}_provider"] = role_provider
         hydra_role_model_values[f"hydra_llm_{role}_host"] = role_host
         hydra_role_model_values[f"hydra_llm_{role}_port"] = role_port
         hydra_role_model_values[f"hydra_llm_{role}_model"] = role_model
         hydra_role_model_values[f"hydra_llm_{role}_api_key"] = role_api_key
 
     hydra_defaults = {
+        "hydra_llm_provider": HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
         "hydra_llm_host": "",
         "hydra_llm_port": "",
         "hydra_llm_model": "",
         "hydra_llm_api_key": "",
+        "hydra_hf_transformers_context_tokens": str(DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS),
+        "hydra_llama_cpp_context_tokens": str(DEFAULT_LLAMA_CPP_CONTEXT_TOKENS),
+        "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
+        "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
+        "hydra_llama_cpp_mtp_draft_tokens": str(DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS),
+        "hydra_mlx_lm_context_tokens": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
@@ -8494,6 +11777,7 @@ def get_settings() -> Dict[str, Any]:
         "catalog": integration_shop_snapshot.get("catalog") or [],
         "updates_available": integration_shop_snapshot.get("updates_available") or 0,
     }
+    tater_api_settings = _load_tater_api_settings(include_secret=False)
 
     return {
         "username": chat_settings.get("username", "User"),
@@ -8533,7 +11817,10 @@ def get_settings() -> Dict[str, Any]:
         "integrations": get_integration_catalog(),
         "integration_shop": integration_shop_payload,
         "integration_runtime": integration_runtime_status(redis_client),
+        "hf_browser_integration": _hf_browser_integration_status(),
         "people": people_module.panel_payload(redis_client),
+        "vision_mode": str(vision_settings.get("mode") or "api"),
+        "vision_provider": _normalize_hydra_llm_provider(vision_settings.get("provider") or HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE),
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
@@ -8560,6 +11847,8 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_openai_tts_base_url": str(speech_settings.get("announcement_openai_tts_base_url") or ""),
         "speech_announcement_openai_tts_api_key": str(speech_settings.get("announcement_openai_tts_api_key") or ""),
         "speech_model_warmup": _speech_model_warmup_snapshot(),
+        "hf_llm_warmup": _hf_llm_warmup_snapshot(),
+        "local_llm_models": _local_llm_models_payload(),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
         "esphome_ui": esphome_ui,
@@ -8571,10 +11860,45 @@ def get_settings() -> Dict[str, Any]:
         "emoji_reaction_chain_cooldown_seconds": int(emoji_settings.get("reaction_chain_cooldown_seconds", 30)),
         "emoji_reply_reaction_cooldown_seconds": int(emoji_settings.get("reply_reaction_cooldown_seconds", 120)),
         "emoji_min_message_length": int(emoji_settings.get("min_message_length", 4)),
+        "hydra_llm_provider": hydra_llm_provider,
         "hydra_llm_host": hydra_llm_host,
         "hydra_llm_port": hydra_llm_port,
         "hydra_llm_model": hydra_llm_model,
         "hydra_llm_api_key": hydra_llm_api_key,
+        "hydra_hf_transformers_context_tokens": _read_local_llm_context_setting(
+            HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
+            ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
+            DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
+        ),
+        "hydra_llama_cpp_context_tokens": _read_local_llm_context_setting(
+            HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
+            ("TATER_LLAMA_CPP_N_CTX", "LLM_CONTEXT_SIZE"),
+            DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
+        ),
+        "hydra_llama_cpp_vision_context_tokens": _read_local_llm_context_setting(
+            HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
+            ("TATER_LLAMA_CPP_VISION_N_CTX", "TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS"),
+            DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
+        ),
+        "hydra_llama_cpp_mtp_enabled": _read_bool_setting(
+            HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
+            ("TATER_LLAMA_CPP_MTP_ENABLED",),
+            DEFAULT_LLAMA_CPP_MTP_ENABLED,
+        ),
+        "hydra_llama_cpp_mtp_draft_tokens": _read_bounded_int_setting(
+            HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
+            ("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS",),
+            DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
+            minimum=1,
+            maximum=16,
+        ),
+        "hydra_mlx_lm_context_tokens": _read_local_llm_context_setting(
+            HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
+            ("TATER_MLX_LM_MAX_KV_SIZE",),
+            None,
+            minimum=128,
+        ),
+        "spudex_llm_provider": _normalize_hydra_llm_provider(spudex_settings.get("llm_provider") or ""),
         "spudex_llm_host": str(spudex_settings.get("llm_host") or ""),
         "spudex_llm_model": str(spudex_settings.get("llm_model") or ""),
         "hydra_base_servers": hydra_base_servers,
@@ -8593,6 +11917,10 @@ def get_settings() -> Dict[str, Any]:
         "admin_plugin_options": admin_plugin_options,
         "admin_only_plugins": admin_only_plugins,
         "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
+        "tater_api_enabled": bool(tater_api_settings.get("enabled")),
+        "tater_api_key_set": bool(tater_api_settings.get("api_key_set")),
+        "tater_api_mode": _normalize_tater_api_mode(tater_api_settings.get("mode")),
+        "tater_api_hydra_tools_enabled": bool(tater_api_settings.get("hydra_tools_enabled")),
         "webui_password_set": _webui_password_is_set(),
     }
 
@@ -9353,6 +12681,218 @@ def get_speech_model_warmup() -> Dict[str, Any]:
     return _speech_model_warmup_snapshot()
 
 
+@app.get("/api/settings/hf-llm/warmup")
+def get_hf_llm_warmup() -> Dict[str, Any]:
+    return _hf_llm_warmup_snapshot()
+
+
+@app.post("/api/settings/hf-llm/warmup/cancel")
+def cancel_hf_llm_warmup(request: HfLlmWarmupCancelRequest) -> Dict[str, Any]:
+    key = str(request.key or "").strip()
+    if not key and request.provider and request.model:
+        key = _hf_llm_warmup_item_key(str(request.provider or ""), str(request.model or ""))
+    cancel_all = bool(request.cancel_all) or not key
+    now = time.time()
+    with hf_llm_warmup_lock:
+        if not bool(hf_llm_warmup_state.get("running")):
+            snapshot = _hf_llm_warmup_snapshot()
+            snapshot["cancel_requested"] = False
+            return snapshot
+
+        items = []
+        for raw_item in list(hf_llm_warmup_state.get("items") or []):
+            item = dict(raw_item) if isinstance(raw_item, dict) else {}
+            item_key = str(
+                item.get("key") or _hf_llm_warmup_item_key(item.get("provider", ""), item.get("model", ""))
+            ).strip()
+            status = str(item.get("status") or "").strip().lower()
+            if cancel_all or item_key == key:
+                if item_key:
+                    hf_llm_warmup_cancel_keys.add(item_key)
+                if status not in {"loaded", "error", "cancelled", "canceled"}:
+                    item["status"] = "cancelling"
+                    item["message"] = "Cancel requested."
+                    item["cancel_requested"] = True
+                    item["updated_ts"] = now
+            items.append(item)
+
+        if cancel_all:
+            hf_llm_warmup_state["cancel_requested"] = True
+        hf_llm_warmup_state["items"] = items
+
+    snapshot = _hf_llm_warmup_snapshot()
+    snapshot["cancel_requested"] = True
+    return snapshot
+
+
+@app.get("/api/settings/local-llm/models")
+def get_local_llm_models(provider: str = "") -> Dict[str, Any]:
+    return _local_llm_models_payload(provider=provider)
+
+
+@app.post("/api/settings/local-llm/models/delete")
+def delete_local_llm_model(request: LocalLlmModelDeleteRequest) -> Dict[str, Any]:
+    result = _delete_local_llm_model(str(request.provider or ""), str(request.model or ""))
+    return {
+        "ok": True,
+        "deleted": result,
+        "local_llm_models": _local_llm_models_payload(),
+    }
+
+
+@app.get("/api/settings/llama-cpp/diagnostics")
+def get_llama_cpp_diagnostics() -> Dict[str, Any]:
+    return get_llama_cpp_runtime_diagnostics()
+
+
+@app.get("/api/settings/huggingface/models")
+def get_huggingface_models(
+    provider: str = "hf_transformers",
+    view: str = "trending",
+    query: str = "",
+    task: str = "text-generation",
+    limit: int = 24,
+    cursor: str = "",
+) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if not _is_local_hydra_llm_provider(provider_token):
+        provider_token = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    view_token = str(view or "trending").strip().lower().replace("_", "-")
+    task_token = _normalize_hf_browser_task(task)
+    if view_token in {"new", "recent", "latest"}:
+        sort = "lastModified"
+        response_view = "new"
+    elif view_token in {"downloads", "downloaded", "most-downloaded", "popular"}:
+        sort = "downloads"
+        response_view = "downloads"
+    else:
+        sort = "trendingScore"
+        response_view = "trending"
+    clean_limit = max(4, min(48, int(limit or 24)))
+    search = _hf_browser_provider_search(provider_token, query, task_token)
+    integration_status = _hf_browser_integration_status()
+    page_url = _hf_browser_cursor_decode(cursor) if str(cursor or "").strip() else _hf_browser_models_api_url(
+        provider=provider_token,
+        search=search,
+        sort=sort,
+        limit=clean_limit,
+        task=task_token,
+    )
+    try:
+        raw_models, next_url = _hf_browser_fetch_models_page(page_url)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_hf_browser_error_detail(exc, "Failed to search Hugging Face models."),
+        ) from exc
+
+    try:
+        filtered_models = [
+            model
+            for model in raw_models[:clean_limit]
+            if (
+                (_hf_browser_is_vision_model(model) if task_token == "image-text-to-text" else _hf_browser_is_text_generation_model(model))
+                and _hf_browser_provider_matches(model, provider_token)
+            )
+        ]
+        models = [_hf_browser_model_summary(model, provider=provider_token) for model in filtered_models]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_hf_browser_error_detail(exc, "Failed to read Hugging Face model results."),
+        ) from exc
+    next_cursor = _hf_browser_cursor_encode(next_url)
+    return {
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "view": response_view,
+        "query": search,
+        "task": task_token,
+        "library": _hf_browser_provider_library(provider_token),
+        "app_filter": _hf_browser_provider_app_filter(provider_token),
+        "integration": integration_status,
+        "limit": clean_limit,
+        "has_next": bool(next_cursor),
+        "next_cursor": next_cursor,
+        "models": models,
+    }
+
+
+@app.get("/api/settings/huggingface/model")
+def get_huggingface_model_detail(
+    repo_id: str,
+    provider: str = "hf_transformers",
+) -> Dict[str, Any]:
+    repo = str(repo_id or "").strip()
+    if not repo or "/" not in repo:
+        raise HTTPException(status_code=400, detail="repo_id must look like owner/repo")
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if not _is_local_hydra_llm_provider(provider_token):
+        provider_token = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    integration_status = _hf_browser_integration_status()
+    try:
+        from huggingface_hub import HfApi  # type: ignore
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Hugging Face model browser needs huggingface_hub installed.") from exc
+
+    api = HfApi(token=_hf_browser_token())
+    try:
+        try:
+            info = api.model_info(repo_id=repo, files_metadata=True)
+        except TypeError:
+            info = api.model_info(repo_id=repo)
+        try:
+            fallback_files = list(api.list_repo_files(repo_id=repo, repo_type="model"))
+        except Exception:
+            fallback_files = []
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_hf_browser_error_detail(exc, "Failed to fetch Hugging Face model details."),
+        ) from exc
+
+    files = _hf_browser_file_rows(info, fallback_files)
+    summary = _hf_browser_model_summary(info, provider=provider_token)
+    preferred_gguf = _hf_browser_preferred_gguf(files)
+    preferred_mmproj = _hf_browser_preferred_mmproj(files, preferred_gguf)
+    effective_model_id = _hf_browser_effective_model_id(provider_token, repo, preferred_gguf)
+    return {
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "model": summary,
+        "files": files,
+        "preferred_gguf": preferred_gguf,
+        "preferred_mmproj": preferred_mmproj,
+        "supports_vision": bool(summary.get("supports_vision") or preferred_mmproj),
+        "effective_model_id": effective_model_id,
+        "integration": integration_status,
+    }
+
+
+@app.post("/api/settings/huggingface/download")
+def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(request.provider)
+    if not _is_local_hydra_llm_provider(provider_token):
+        raise HTTPException(status_code=400, detail="Choose a local provider before downloading.")
+    repo = str(request.repo_id or "").strip()
+    model_id = str(request.model_id or "").strip()
+    filename = str(request.filename or "").strip()
+    task_token = _normalize_hf_browser_task(request.task)
+    effective_model_id = model_id or _hf_browser_effective_model_id(provider_token, repo, filename)
+    if not effective_model_id:
+        raise HTTPException(status_code=400, detail="Model id is required.")
+    result = _start_hf_llm_warmup(
+        [{"provider": provider_token, "model": effective_model_id}],
+        reason="huggingface-browser",
+        load_models=False,
+    )
+    result["provider"] = provider_token
+    result["provider_label"] = _hydra_llm_provider_label(provider_token)
+    result["model_id"] = effective_model_id
+    result["task"] = task_token
+    return result
+
+
 @app.get("/api/settings/integrations")
 def get_settings_integrations() -> Dict[str, Any]:
     return {"integrations": get_integration_catalog()}
@@ -9451,6 +12991,7 @@ def test_aladdin_settings(payload: AladdinTestRequest) -> Dict[str, Any]:
 def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str, Any]:
     updates = payload.model_dump(exclude_none=True)
     speech_warmup_result: Dict[str, Any] = {}
+    hf_llm_warmup_result: Dict[str, Any] = {}
     tts_reload_result: Dict[str, Any] = {}
 
     def _bounded_int(
@@ -9469,6 +13010,244 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         if max_value is not None and parsed > int(max_value):
             parsed = int(max_value)
         return int(parsed)
+
+    def _save_local_llm_context_setting(
+        payload_key: str,
+        redis_key: str,
+        *,
+        min_value: int = 256,
+        max_value: int = 1_048_576,
+    ) -> None:
+        if payload_key not in updates:
+            return
+        raw = str(updates.get(payload_key) or "").strip()
+        if not raw:
+            redis_client.delete(redis_key)
+            return
+        try:
+            parsed = int(float(raw))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"{payload_key} must be a whole number of tokens.") from exc
+        if parsed < min_value or parsed > max_value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{payload_key} must be between {min_value} and {max_value} tokens.",
+            )
+        redis_client.set(redis_key, str(int(parsed)))
+
+    def _save_bool_setting(payload_key: str, redis_key: str, *, default: bool = False) -> None:
+        if payload_key not in updates:
+            return
+        redis_client.set(redis_key, "true" if _as_bool_flag(updates.get(payload_key), default=default) else "false")
+
+    def _save_bounded_int_setting(
+        payload_key: str,
+        redis_key: str,
+        *,
+        default: int,
+        min_value: int = 1,
+        max_value: int = 16,
+    ) -> None:
+        if payload_key not in updates:
+            return
+        raw = str(updates.get(payload_key) or "").strip()
+        if not raw:
+            redis_client.set(redis_key, str(int(default)))
+            return
+        try:
+            parsed = int(float(raw))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"{payload_key} must be a whole number.") from exc
+        if parsed < min_value or parsed > max_value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{payload_key} must be between {min_value} and {max_value}.",
+            )
+        redis_client.set(redis_key, str(int(parsed)))
+
+    _save_tater_api_settings_from_updates(updates)
+
+    local_model_keys_cache: Optional[set[Tuple[str, str]]] = None
+
+    def _downloaded_local_model_keys() -> set[Tuple[str, str]]:
+        nonlocal local_model_keys_cache
+        if local_model_keys_cache is None:
+            local_model_keys_cache = {
+                (_normalize_hydra_llm_provider(row.get("provider")), str(row.get("model") or "").strip())
+                for row in _local_llm_models_payload().get("models", [])
+                if isinstance(row, dict)
+            }
+        return local_model_keys_cache
+
+    def _require_downloaded_local_model(provider: Any, model: Any, label: str) -> None:
+        provider_token = _normalize_hydra_llm_provider(provider)
+        model_token = str(model or "").strip()
+        if (
+            _is_local_hydra_llm_provider(provider_token)
+            and model_token
+            and (provider_token, model_token) not in _downloaded_local_model_keys()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} {_hydra_llm_provider_label(provider_token)} model must be downloaded from the Hugging Face tab before saving.",
+            )
+
+    explicit_local_model_load_targets = "hydra_local_model_load_targets" in updates
+
+    def _normalize_local_model_load_targets(value: Any) -> List[Dict[str, str]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise HTTPException(status_code=400, detail="hydra_local_model_load_targets must be a list.")
+        targets: List[Dict[str, str]] = []
+        seen: set[Tuple[str, str]] = set()
+        for raw_target in value:
+            if not isinstance(raw_target, dict):
+                continue
+            provider_token = _normalize_hydra_llm_provider(raw_target.get("provider"))
+            model_token = str(raw_target.get("model") or "").strip()
+            if not _is_local_hydra_llm_provider(provider_token) or not model_token:
+                continue
+            _require_downloaded_local_model(provider_token, model_token, "Load target")
+            key = (provider_token, model_token)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append({"provider": provider_token, "model": model_token})
+        return targets
+
+    local_model_load_targets = (
+        _normalize_local_model_load_targets(updates.get("hydra_local_model_load_targets"))
+        if explicit_local_model_load_targets
+        else []
+    )
+    base_settings_keys = {
+        "hydra_llm_host",
+        "hydra_llm_port",
+        "hydra_llm_model",
+        "hydra_llm_api_key",
+        "hydra_llm_provider",
+        "hydra_base_servers",
+        "hydra_hf_transformers_context_tokens",
+        "hydra_llama_cpp_context_tokens",
+        "hydra_llama_cpp_mtp_enabled",
+        "hydra_llama_cpp_mtp_draft_tokens",
+        "hydra_mlx_lm_context_tokens",
+    }
+    spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
+    vision_model_keys = {
+        "vision_mode",
+        "vision_provider",
+        "vision_model",
+        "vision_api_base",
+        "vision_api_key",
+        "hydra_llama_cpp_vision_context_tokens",
+    }
+
+    def _single_local_model_target(provider: Any, model: Any) -> List[Dict[str, str]]:
+        provider_token = _normalize_hydra_llm_provider(provider)
+        model_token = str(model or "").strip()
+        if not model_token or not _is_local_hydra_llm_provider(provider_token):
+            return []
+        return [_hf_llm_warmup_base_item(provider_token, model_token)]
+
+    def _current_spudex_local_targets() -> List[Dict[str, str]]:
+        try:
+            from spudex.settings import get_spudex_settings
+
+            current = get_spudex_settings(redis_client)
+        except Exception:
+            current = {}
+        return _single_local_model_target(current.get("llm_provider"), current.get("llm_model"))
+
+    def _current_beast_local_targets() -> List[Dict[str, str]]:
+        targets: List[Dict[str, str]] = []
+        for role_id in HYDRA_BEAST_CONFIG_ROLE_IDS:
+            role_provider = _normalize_hydra_llm_provider(redis_client.get(_hydra_role_llm_key(role_id, "provider")))
+            role_model = str(redis_client.get(_hydra_role_llm_key(role_id, "model")) or "").strip()
+            targets.extend(_single_local_model_target(role_provider, role_model))
+        return _dedupe_hf_llm_warmup_targets(targets)
+
+    def _current_vision_local_targets() -> List[Dict[str, str]]:
+        try:
+            current = get_shared_vision_settings(
+                default_api_base="http://127.0.0.1:1234",
+                default_model="qwen2.5-vl-7b-instruct",
+            )
+        except Exception:
+            current = {}
+        mode = str(current.get("mode") or "api").strip().lower()
+        if mode != "dedicated":
+            return []
+        return _single_local_model_target(current.get("provider"), current.get("model"))
+
+    current_scope_local_targets = {
+        "base": _hf_llm_warmup_models(resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)),
+        "spudex": _current_spudex_local_targets(),
+        "vision": _current_vision_local_targets(),
+        "beast": _current_beast_local_targets(),
+    }
+    touched_local_model_scopes: set[str] = set()
+    if any(key in updates for key in base_settings_keys):
+        touched_local_model_scopes.add("base")
+    if any(key in updates for key in spudex_model_keys):
+        touched_local_model_scopes.add("spudex")
+    if any(key in updates for key in vision_model_keys):
+        touched_local_model_scopes.add("vision")
+    if "hydra_beast_mode_enabled" in updates or any(
+        f"hydra_llm_{role_id}_{field}" in updates
+        for role_id in HYDRA_BEAST_CONFIG_ROLE_IDS
+        for field in ("provider", "host", "port", "model", "api_key")
+    ):
+        touched_local_model_scopes.add("beast")
+
+    protected_local_model_keys = {
+        str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
+        for scope, targets in current_scope_local_targets.items()
+        if scope not in touched_local_model_scopes
+        for target in targets
+    }
+    local_model_unload_targets = _dedupe_hf_llm_warmup_targets(
+        [
+            target
+            for scope in sorted(touched_local_model_scopes)
+            for target in current_scope_local_targets.get(scope, [])
+            if str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
+            not in protected_local_model_keys
+        ]
+        if explicit_local_model_load_targets and local_model_load_targets
+        else []
+    )
+
+    _save_local_llm_context_setting(
+        "hydra_hf_transformers_context_tokens",
+        HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
+    )
+    _save_local_llm_context_setting(
+        "hydra_llama_cpp_context_tokens",
+        HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
+    )
+    _save_local_llm_context_setting(
+        "hydra_llama_cpp_vision_context_tokens",
+        HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
+    )
+    _save_bool_setting(
+        "hydra_llama_cpp_mtp_enabled",
+        HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
+        default=DEFAULT_LLAMA_CPP_MTP_ENABLED,
+    )
+    _save_bounded_int_setting(
+        "hydra_llama_cpp_mtp_draft_tokens",
+        HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
+        default=DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
+        min_value=1,
+        max_value=16,
+    )
+    _save_local_llm_context_setting(
+        "hydra_mlx_lm_context_tokens",
+        HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
+        min_value=128,
+    )
 
     username = updates.get("username")
     if isinstance(username, str):
@@ -9619,15 +13398,29 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             api_key=updates.get("unifi_protect_api_key", current_protect.get("api_key")),
         )
 
-    if "vision_api_base" in updates or "vision_model" in updates or "vision_api_key" in updates:
+    vision_update_keys = {"vision_api_base", "vision_model", "vision_api_key", "vision_mode", "vision_provider"}
+    if any(key in updates for key in vision_update_keys):
         current_vision = get_shared_vision_settings(
             default_api_base="http://127.0.0.1:1234",
             default_model="qwen2.5-vl-7b-instruct",
         )
+        vision_mode = str(updates.get("vision_mode", current_vision.get("mode") or "api") or "api").strip().lower()
+        if vision_mode not in {"api", "auto", "base", "dedicated"}:
+            raise HTTPException(status_code=400, detail="vision_mode must be api, auto, base, or dedicated.")
+        vision_provider = _normalize_hydra_llm_provider(
+            updates.get("vision_provider", current_vision.get("provider") or HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE)
+        )
+        vision_model = str(updates.get("vision_model", current_vision.get("model") or "")).strip()
+        if vision_mode == "dedicated" and vision_provider == HYDRA_LLM_PROVIDER_MLX_LM:
+            raise HTTPException(status_code=400, detail="Dedicated local vision currently supports Transformers and llama.cpp GGUF models.")
+        if vision_mode == "dedicated" and _is_local_hydra_llm_provider(vision_provider):
+            _require_downloaded_local_model(vision_provider, vision_model, "Vision")
         save_shared_vision_settings(
             api_base=str(updates.get("vision_api_base", current_vision.get("api_base") or "")).strip(),
-            model=str(updates.get("vision_model", current_vision.get("model") or "")).strip(),
+            model=vision_model,
             api_key=str(updates.get("vision_api_key", current_vision.get("api_key") or "")).strip(),
+            mode=vision_mode,
+            provider=vision_provider,
         )
 
     speech_keys = {
@@ -9746,16 +13539,25 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         if any(key in updates for key in speech_warmup_keys):
             speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
 
-    spudex_model_keys = {"spudex_llm_host", "spudex_llm_model"}
+    spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
     if any(key in updates for key in spudex_model_keys):
         from spudex.settings import get_spudex_settings, save_spudex_settings
 
         current_spudex = get_spudex_settings(redis_client)
+        spudex_provider = _normalize_hydra_llm_provider(
+            updates.get("spudex_llm_provider", current_spudex.get("llm_provider") or "")
+        )
+        spudex_host = str(updates.get("spudex_llm_host", current_spudex.get("llm_host") or "") or "").strip()
+        spudex_model = str(updates.get("spudex_llm_model", current_spudex.get("llm_model") or "") or "").strip()
+        if _is_local_hydra_llm_provider(spudex_provider):
+            _require_downloaded_local_model(spudex_provider, spudex_model, "Spudex")
+            spudex_host = ""
         save_spudex_settings(
             {
                 **current_spudex,
-                "llm_host": str(updates.get("spudex_llm_host", current_spudex.get("llm_host") or "") or "").strip(),
-                "llm_model": str(updates.get("spudex_llm_model", current_spudex.get("llm_model") or "") or "").strip(),
+                "llm_provider": spudex_provider,
+                "llm_host": spudex_host,
+                "llm_model": spudex_model,
             },
             redis_client,
         )
@@ -9862,12 +13664,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             }
         )
 
+    current_llm_provider = _normalize_hydra_llm_provider(redis_client.get(HYDRA_LLM_PROVIDER_KEY))
     current_llm_host = str(redis_client.get(HYDRA_LLM_HOST_KEY) or "").strip()
     current_llm_port = str(redis_client.get(HYDRA_LLM_PORT_KEY) or "").strip()
     current_llm_model = str(redis_client.get(HYDRA_LLM_MODEL_KEY) or "").strip()
     current_base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    if current_base_rows:
+        current_llm_provider = _normalize_hydra_llm_provider(current_base_rows[0].get("provider"))
     current_llm_api_key = str((current_base_rows[0] if current_base_rows else {}).get("api_key") or "").strip()
 
+    if "hydra_llm_provider" in updates:
+        current_llm_provider = _normalize_hydra_llm_provider(updates.get("hydra_llm_provider"))
     if "hydra_llm_host" in updates:
         current_llm_host = str(updates.get("hydra_llm_host") or "").strip()
     if "hydra_llm_port" in updates:
@@ -9890,12 +13697,23 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llm_port",
         "hydra_llm_model",
         "hydra_llm_api_key",
+        "hydra_llm_provider",
         "hydra_base_servers",
     }
     if any(key in updates for key in base_settings_keys):
         normalized_base_rows: List[Dict[str, str]] = []
         if "hydra_base_servers" in updates:
             normalized_base_rows = _normalize_hydra_base_server_rows(updates.get("hydra_base_servers"))
+        elif _is_local_hydra_llm_provider(current_llm_provider) and current_llm_model:
+            normalized_base_rows = [
+                {
+                    "provider": current_llm_provider,
+                    "host": "",
+                    "port": "",
+                    "model": current_llm_model,
+                    "api_key": "",
+                }
+            ]
         elif current_llm_host and current_llm_model:
             endpoint = _build_hydra_llm_endpoint(current_llm_host, current_llm_port)
             if endpoint:
@@ -9905,6 +13723,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     host_with_scheme = current_llm_host.startswith(("http://", "https://"))
                     normalized_base_rows = [
                         {
+                            "provider": current_llm_provider,
                             "host": f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname,
                             "port": str(parsed.port) if parsed.port is not None else "",
                             "model": current_llm_model,
@@ -9912,11 +13731,19 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                         }
                     ]
 
+        for row in normalized_base_rows:
+            row_provider = _normalize_hydra_llm_provider(row.get("provider"))
+            row_model = str(row.get("model") or "").strip()
+            _require_downloaded_local_model(row_provider, row_model, "Base")
+
         if normalized_base_rows:
             redis_client.set(HYDRA_LLM_BASE_SERVERS_KEY, json.dumps(normalized_base_rows))
         else:
             redis_client.delete(HYDRA_LLM_BASE_SERVERS_KEY)
         _set_hydra_legacy_base_keys(normalized_base_rows)
+        hf_models = _hf_llm_warmup_models(normalized_base_rows)
+        if hf_models and not explicit_local_model_load_targets and _hf_llm_warmup_on_save_enabled():
+            hf_llm_warmup_result = _start_hf_llm_warmup(hf_models, reason="settings-save")
 
     # Remove deprecated legacy key if it exists.
     redis_client.delete("tater:hydra:llm_url")
@@ -9933,29 +13760,58 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
-        for field in ("host", "port", "model", "api_key"):
-            payload_key = f"hydra_llm_{role}_{field}"
-            if payload_key not in updates:
-                continue
-            raw_value = str(updates.get(payload_key) or "").strip()
+        role_payload_keys = {f"hydra_llm_{role}_{field}" for field in ("provider", "host", "port", "model", "api_key")}
+        if not any(key in updates for key in role_payload_keys):
+            continue
+
+        provider_payload_key = f"hydra_llm_{role}_provider"
+        raw_provider = updates.get(provider_payload_key, redis_client.get(_hydra_role_llm_key(role, "provider")) or "")
+        role_provider = _normalize_hydra_llm_provider(raw_provider)
+        role_host = str(updates.get(f"hydra_llm_{role}_host", redis_client.get(_hydra_role_llm_key(role, "host")) or "") or "").strip()
+        role_port = str(updates.get(f"hydra_llm_{role}_port", redis_client.get(_hydra_role_llm_key(role, "port")) or "") or "").strip()
+        role_model = str(updates.get(f"hydra_llm_{role}_model", redis_client.get(_hydra_role_llm_key(role, "model")) or "") or "").strip()
+        role_api_key = str(updates.get(f"hydra_llm_{role}_api_key", redis_client.get(_hydra_role_llm_key(role, "api_key")) or "") or "").strip()
+
+        if _is_local_hydra_llm_provider(role_provider):
+            _require_downloaded_local_model(role_provider, role_model, role.title())
+            role_host = ""
+            role_port = ""
+            role_api_key = ""
+        elif role_port:
+            if not role_port.isdigit():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"hydra_llm_{role}_port must be an integer between 1 and 65535",
+                )
+            port_int = int(role_port)
+            if port_int < 1 or port_int > 65535:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"hydra_llm_{role}_port must be an integer between 1 and 65535",
+                )
+            role_port = str(port_int)
+
+        role_values = {
+            "provider": role_provider,
+            "host": role_host,
+            "port": role_port,
+            "model": role_model,
+            "api_key": role_api_key,
+        }
+        for field, raw_value in role_values.items():
             redis_key = _hydra_role_llm_key(role, field)
-            if field == "port" and raw_value:
-                if not raw_value.isdigit():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{payload_key} must be an integer between 1 and 65535",
-                    )
-                port_int = int(raw_value)
-                if port_int < 1 or port_int > 65535:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{payload_key} must be an integer between 1 and 65535",
-                    )
-                raw_value = str(port_int)
             if raw_value:
                 redis_client.set(redis_key, raw_value)
             else:
                 redis_client.delete(redis_key)
+
+    if explicit_local_model_load_targets and local_model_load_targets:
+        hf_llm_warmup_result = _start_hf_llm_warmup(
+            local_model_load_targets,
+            reason="settings-save-load",
+            load_models=True,
+            unload_before=local_model_unload_targets,
+        )
 
     hydra_mappings = {
         "hydra_max_ledger_items": (HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),
@@ -10002,4 +13858,5 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "esphome": esphome_result,
         "tts_reload": tts_reload_result,
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
+        "hf_llm_warmup": hf_llm_warmup_result or _hf_llm_warmup_snapshot(),
     }

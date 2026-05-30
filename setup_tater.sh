@@ -9,6 +9,7 @@ RUNTIME_DIR=".runtime"
 PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
 PROFILE_ENV="${RUNTIME_DIR}/tater_profile.env"
 REQUIREMENTS_FILE="requirements.txt"
+LLAMA_CPP_PYTHON_SPEC="${TATER_LLAMA_CPP_PYTHON_SPEC:-llama-cpp-python>=0.3.23}"
 
 RED=""
 GREEN=""
@@ -201,6 +202,36 @@ filtered_requirements() {
   ' "${REQUIREMENTS_FILE}" > "${output_file}"
 }
 
+filtered_nvidia_requirements() {
+  output_file="$1"
+  awk '
+    /^[[:space:]]*($|#)/ { print; next }
+    {
+      line = $0
+      lower = tolower(line)
+      if (lower ~ /^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python)([[:space:]]|[=<>!~]|$)/) {
+        next
+      }
+      print line
+    }
+  ' "${REQUIREMENTS_FILE}" > "${output_file}"
+}
+
+filtered_without_llama_cpp_requirements() {
+  output_file="$1"
+  awk '
+    /^[[:space:]]*($|#)/ { print; next }
+    {
+      line = $0
+      lower = tolower(line)
+      if (lower ~ /^[[:space:]]*llama-cpp-python([[:space:]]|[=<>!~]|$)/) {
+        next
+      }
+      print line
+    }
+  ' "${REQUIREMENTS_FILE}" > "${output_file}"
+}
+
 install_base() {
   venv_python="$1"
   info "Upgrading pip tooling"
@@ -213,14 +244,47 @@ install_cpu() {
   "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
 }
 
+check_llama_cpp_backend() {
+  venv_python="$1"
+  backend="$2"
+  "${venv_python}" -c 'import re, sys, llama_cpp; backend = sys.argv[1].strip().lower(); names = {"cuda": ("cuda", "cublas"), "metal": ("metal",), "rocm": ("hip", "hipblas", "rocblas"), "vulkan": ("vulkan",), "sycl": ("sycl",), "opencl": ("opencl", "clblast")}.get(backend, (backend,)); info = llama_cpp.llama_print_system_info(); info = info.decode("utf-8", "replace") if isinstance(info, bytes) else str(info or ""); text = re.sub(r"\s+", " ", info.lower()); print("llama_cpp_system_info=" + " ".join(info.split())); ok = any(re.search(rf"\b{re.escape(name)}\s*:", text) or re.search(rf"\bggml[_-]{re.escape(name)}\s*:", text) or re.search(rf"\b{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text) or re.search(rf"\bggml[_-]{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text) for name in names); sys.exit(0 if ok else 1)' "${backend}"
+}
+
+install_llama_cpp_metal() {
+  venv_python="$1"
+  pyver="$(python_version "${venv_python}")"
+  case "${pyver}" in
+    3.10|3.11|3.12)
+      info "Installing Metal llama-cpp-python wheel"
+      if "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/metal" --extra-index-url https://pypi.org/simple "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_backend "${venv_python}" metal; then
+        return
+      fi
+      warn "Metal llama-cpp-python wheel install failed or did not report Metal; falling back to local Metal build."
+      ;;
+    *)
+      warn "Metal llama-cpp-python wheels support Python 3.10-3.12; Python ${pyver} will build from source."
+      ;;
+  esac
+  if CMAKE_ARGS="${TATER_LLAMA_CPP_CMAKE_ARGS:--DGGML_METAL=on}" FORCE_CMAKE=1 "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_backend "${venv_python}" metal; then
+    return
+  fi
+  warn "Metal llama-cpp-python install failed. Installing the default llama-cpp-python fallback."
+  "${venv_python}" -m pip install --upgrade "${LLAMA_CPP_PYTHON_SPEC}" || warn "Default llama-cpp-python fallback failed."
+}
+
 install_macos() {
   venv_python="$1"
+  tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-macos.XXXXXX")"
+  trap 'rm -f "${tmp_req}"' EXIT
+  filtered_without_llama_cpp_requirements "${tmp_req}"
+  is_apple_silicon="0"
   if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ]; then
     warn "macOS profile selected on a non-macOS host."
   else
     arch="$(uname -m 2>/dev/null || printf unknown)"
     if [ "${arch}" = "arm64" ]; then
       ok "Detected Apple Silicon (${arch})"
+      is_apple_silicon="1"
     else
       warn "Detected macOS ${arch}. This profile is tuned for Apple Silicon but may still run CPU-first."
     fi
@@ -231,39 +295,100 @@ install_macos() {
     fi
   fi
   info "Installing Tater dependencies for macOS"
-  "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
+  "${venv_python}" -m pip install -r "${tmp_req}"
+  if [ "${is_apple_silicon}" = "1" ]; then
+    install_llama_cpp_metal "${venv_python}"
+  else
+    "${venv_python}" -m pip install --upgrade "${LLAMA_CPP_PYTHON_SPEC}" || warn "llama-cpp-python failed to install."
+  fi
   info "Installing Apple-native speech extras"
   if ! "${venv_python}" -m pip install mlx-whisper kokoro; then
     warn "Apple-native speech extras failed to install. Tater will still run with Faster Whisper/Kokoro CPU fallbacks."
   fi
+  rm -f "${tmp_req}"
+  trap - EXIT
+}
+
+check_llama_cpp_cuda() {
+  venv_python="$1"
+  check_llama_cpp_backend "${venv_python}" cuda
+}
+
+install_llama_cpp_cuda() {
+  venv_python="$1"
+  cuda_wheel="${TATER_LLAMA_CPP_CUDA_WHEEL:-cu124}"
+  cuda_wheel="$(printf '%s' "${cuda_wheel}" | tr '[:upper:]' '[:lower:]')"
+  case "${cuda_wheel}" in
+    ""|auto)
+      cuda_wheel="cu124"
+      ;;
+    source|build|compile)
+      cuda_wheel=""
+      ;;
+  esac
+
+  pyver="$(python_version "${venv_python}")"
+  if [ "${cuda_wheel}" ]; then
+    case "${pyver}" in
+      3.10|3.11|3.12)
+        info "Installing CUDA llama-cpp-python wheel (${cuda_wheel})"
+        if "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/${cuda_wheel}" --extra-index-url https://pypi.org/simple "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_cuda "${venv_python}"; then
+          return
+        fi
+        warn "CUDA llama-cpp-python wheel install failed or did not report CUDA; falling back to local CUDA build."
+        ;;
+      *)
+        warn "CUDA llama-cpp-python wheels support Python 3.10-3.12; Python ${pyver} will build from source."
+        ;;
+    esac
+  fi
+
+  cmake_args="${TATER_LLAMA_CPP_CMAKE_ARGS:--DGGML_CUDA=on}"
+  info "Building llama-cpp-python with CUDA (${cmake_args})"
+  warn "This requires the CUDA toolkit/compiler on the host. Set TATER_LLAMA_CPP_CUDA_WHEEL=cu124 to force the prebuilt wheel path."
+  CMAKE_ARGS="${cmake_args}" FORCE_CMAKE=1 "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir "${LLAMA_CPP_PYTHON_SPEC}"
+  check_llama_cpp_cuda "${venv_python}"
 }
 
 install_nvidia() {
   venv_python="$1"
+  tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-nvidia.XXXXXX")"
+  trap 'rm -f "${tmp_req}"' EXIT
+  filtered_nvidia_requirements "${tmp_req}"
+
   info "Installing NVIDIA PyTorch CUDA wheels"
   "${venv_python}" -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
   info "Installing CUDA runtime Python packages"
   "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
+  "${venv_python}" -m pip install -r "${tmp_req}"
+  install_llama_cpp_cuda "${venv_python}"
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
   "${venv_python}" -m pip install onnxruntime-gpu
+  rm -f "${tmp_req}"
+  trap - EXIT
 }
 
 install_rocm() {
   venv_python="$1"
+  tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-rocm.XXXXXX")"
+  trap 'rm -f "${tmp_req}"' EXIT
+  filtered_requirements "${tmp_req}"
+
   rocm_index="${TATER_ROCM_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/rocm6.4}"
   warn "AMD ROCm support is Linux-only and depends on the ROCm runtime installed for your GPU/APU."
   warn "Strix Halo systems may need newer AMD ROCm wheels; override with TATER_ROCM_PYTORCH_INDEX_URL if needed."
   info "Installing AMD ROCm PyTorch wheels from ${rocm_index}"
   "${venv_python}" -m pip install --index-url "${rocm_index}" torch torchaudio
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
+  "${venv_python}" -m pip install -r "${tmp_req}"
   info "Installing PyTorch Kokoro runtime"
   if ! "${venv_python}" -m pip install kokoro; then
     warn "Kokoro PyTorch failed to install. Tater will still run with CPU/ONNX TTS fallbacks."
   fi
+  rm -f "${tmp_req}"
+  trap - EXIT
 }
 
 install_jetson_like() {
@@ -289,6 +414,7 @@ write_profile_env() {
   speech_acceleration="cpu"
   compute_type="auto"
   torch_mps_fallback=""
+  nvidia_site_packages=""
   case "${profile}" in
     cpu)
       speech_acceleration="cpu"
@@ -304,6 +430,9 @@ write_profile_env() {
       speech_acceleration="rocm"
       ;;
   esac
+  if [ "${profile}" = "nvidia" ] && [ -x "${VENV_DIR}/bin/python" ]; then
+    nvidia_site_packages="$("${VENV_DIR}/bin/python" -c 'import site; paths = site.getsitepackages(); print(paths[0] if paths else "")' 2>/dev/null || true)"
+  fi
 
   {
     say "# Generated by setup_tater.sh"
@@ -313,6 +442,12 @@ write_profile_env() {
     say "export TATER_KOKORO_ENGINE=\"\${TATER_KOKORO_ENGINE:-auto}\""
     if [ "${torch_mps_fallback}" ]; then
       say "export PYTORCH_ENABLE_MPS_FALLBACK=\"\${PYTORCH_ENABLE_MPS_FALLBACK:-${torch_mps_fallback}}\""
+    fi
+    if [ "${profile}" = "nvidia" ]; then
+      say "export TATER_LLAMA_CPP_N_GPU_LAYERS=\"\${TATER_LLAMA_CPP_N_GPU_LAYERS:-auto}\""
+      if [ "${nvidia_site_packages}" ]; then
+        say "export LD_LIBRARY_PATH=\"${nvidia_site_packages}/nvidia/cublas/lib:${nvidia_site_packages}/nvidia/cuda_runtime/lib:${nvidia_site_packages}/nvidia/cuda_nvrtc/lib:${nvidia_site_packages}/nvidia/cudnn/lib:${nvidia_site_packages}/nvidia/curand/lib:${nvidia_site_packages}/nvidia/cusolver/lib:${nvidia_site_packages}/nvidia/cusparse/lib:${nvidia_site_packages}/nvidia/nvjitlink/lib:\${LD_LIBRARY_PATH:-}\""
+      fi
     fi
   } > "${PROFILE_ENV}"
 
@@ -326,7 +461,7 @@ verify_install() {
   "${venv_python}" - <<'PY'
 import importlib.util
 
-required = ["fastapi", "uvicorn", "redis", "aioesphomeapi"]
+required = ["fastapi", "uvicorn", "redis", "redislite", "aioesphomeapi"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing required packages: " + ", ".join(missing))
@@ -356,6 +491,15 @@ try:
     print("onnxruntime providers=" + ",".join(ort.get_available_providers()))
 except Exception as exc:
     print(f"onnxruntime unavailable: {exc}")
+
+try:
+    import llama_cpp
+    info = llama_cpp.llama_print_system_info()
+    if isinstance(info, bytes):
+        info = info.decode("utf-8", "replace")
+    print("llama_cpp_system_info=" + " ".join(str(info).split()))
+except Exception as exc:
+    print(f"llama_cpp unavailable: {exc}")
 
 for name in ("mlx_whisper", "kokoro"):
     try:

@@ -3,9 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.nvidia
+      args:
+        LLAMA_CPP_CUDA_WHEEL: ${TATER_LLAMA_CPP_CUDA_WHEEL:-cu124}
+    gpus: all
     environment:
       TATER_SPEECH_ACCELERATION: ${TATER_SPEECH_ACCELERATION:-auto}
       TATER_FASTER_WHISPER_COMPUTE_TYPE: ${TATER_FASTER_WHISPER_COMPUTE_TYPE:-auto}
+      TATER_LLAMA_CPP_N_GPU_LAYERS: ${TATER_LLAMA_CPP_N_GPU_LAYERS:-auto}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     deploy:

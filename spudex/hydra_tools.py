@@ -520,11 +520,14 @@ async def run_spudex_hydra_tool(
         if overrides.get("host") or overrides.get("model"):
             from helpers import get_llm_client_from_env
 
-            async with get_llm_client_from_env(
-                host=overrides.get("host"),
-                model=overrides.get("model"),
-                redis_conn=redis_client,
-            ) as spudex_llm_client:
+            llm_kwargs: Dict[str, Any] = {
+                "host": overrides.get("host"),
+                "model": overrides.get("model"),
+                "redis_conn": redis_client,
+            }
+            if overrides.get("provider") and overrides.get("model"):
+                llm_kwargs["provider"] = overrides.get("provider")
+            async with get_llm_client_from_env(**llm_kwargs) as spudex_llm_client:
                 return await _run_spudex_task(args=payload, platform=platform, llm_client=spudex_llm_client, redis_client=redis_client)
         return await _run_spudex_task(args=payload, platform=platform, llm_client=llm_client, redis_client=redis_client)
     return None

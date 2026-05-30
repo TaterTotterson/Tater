@@ -26,6 +26,7 @@ DEFAULT_SPUDEX_SETTINGS: Dict[str, Any] = {
     "allow_installs": False,
     "sandbox_mode": "agent_lab",
     "default_cwd": "workspace",
+    "llm_provider": "",
     "llm_host": "",
     "llm_model": "",
 }
@@ -166,6 +167,7 @@ def spudex_enabled_for_platform(platform: str, redis_client: Any = None) -> bool
 def spudex_llm_overrides(redis_client: Any = None) -> Dict[str, str]:
     settings = get_spudex_settings(redis_client)
     return {
+        "provider": str(settings.get("llm_provider") or "").strip(),
         "host": str(settings.get("llm_host") or "").strip(),
         "model": str(settings.get("llm_model") or "").strip(),
     }

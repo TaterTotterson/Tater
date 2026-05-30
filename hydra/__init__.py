@@ -125,6 +125,11 @@ DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED = True
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
+HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
+HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
+HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
+HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
 CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
 HYDRA_BEAST_ROLE_IDS = (
@@ -372,6 +377,25 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     return urlunparse((parsed.scheme or "http", netloc, "", "", "", "")).rstrip("/")
 
 
+def _normalize_hydra_llm_provider(value: Any) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
+        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP
+    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
+        return HYDRA_LLM_PROVIDER_MLX_LM
+    return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
+
+
+def _is_local_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_MLX_LM,
+    }
+
+
 class _HydraLLMClientPool:
     def __init__(self, *, role_clients: Dict[str, Any], owned_clients: List[Any], beast_mode_enabled: bool) -> None:
         self.role_clients = dict(role_clients or {})
@@ -423,13 +447,41 @@ async def _build_hydra_llm_client_pool(
     base_client_host = str(getattr(base_llm_client, "host", "") or "").rstrip("/")
     base_client_model = str(getattr(base_llm_client, "model", "") or "").strip()
     base_client_api_key = str(getattr(base_llm_client, "api_key", "") or "").strip()
-    shared_clients: Dict[tuple[str, str, str], Any] = {}
+    base_client_provider = _normalize_hydra_llm_provider(getattr(base_llm_client, "provider", ""))
+    shared_clients: Dict[tuple[str, str, str, str], Any] = {}
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
+        raw_provider = _safe_get_text(_hydra_role_llm_key(role, "provider"))
+        role_provider = _normalize_hydra_llm_provider(raw_provider)
         raw_host = _safe_get_text(_hydra_role_llm_key(role, "host"))
         raw_port = _safe_get_text(_hydra_role_llm_key(role, "port"))
         raw_model = _safe_get_text(_hydra_role_llm_key(role, "model"))
         raw_api_key = _safe_get_text(_hydra_role_llm_key(role, "api_key"))
+        if _is_local_hydra_llm_provider(role_provider):
+            if not raw_model:
+                missing_or_invalid_roles.append(role)
+                continue
+            if base_client_provider == role_provider and raw_model == base_client_model:
+                role_clients[role] = base_llm_client
+                continue
+
+            signature = (role_provider, "", str(raw_model).strip(), "")
+            existing = shared_clients.get(signature)
+            if existing is not None:
+                role_clients[role] = existing
+                continue
+
+            try:
+                client = get_llm_client_from_env(provider=role_provider, host="", model=raw_model)
+            except Exception:
+                missing_or_invalid_roles.append(role)
+                continue
+
+            shared_clients[signature] = client
+            owned_clients.append(client)
+            role_clients[role] = client
+            continue
+
         endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
         if not endpoint or not raw_model:
             missing_or_invalid_roles.append(role)
@@ -446,14 +498,14 @@ async def _build_hydra_llm_client_pool(
             role_clients[role] = base_llm_client
             continue
 
-        signature = (endpoint_key, str(raw_model).strip(), raw_api_key)
+        signature = (role_provider, endpoint_key, str(raw_model).strip(), raw_api_key)
         existing = shared_clients.get(signature)
         if existing is not None:
             role_clients[role] = existing
             continue
 
         try:
-            client = get_llm_client_from_env(host=endpoint, model=raw_model, api_key=raw_api_key)
+            client = get_llm_client_from_env(provider=role_provider, host=endpoint, model=raw_model, api_key=raw_api_key)
         except Exception:
             missing_or_invalid_roles.append(role)
             continue
@@ -464,7 +516,7 @@ async def _build_hydra_llm_client_pool(
 
     if missing_or_invalid_roles:
         raise RuntimeError(
-            "Hydra LLM is not configured. Open Settings > Hydra and set Hydra LLM Host/IP, Port, and Model."
+            "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
         )
 
     return _HydraLLMClientPool(
@@ -2424,6 +2476,10 @@ def _normalize_plan_step_candidate(
         step["tool_hint"] = tool_hint
     return step
 
+
+def _plan_step_has_valid_tool_hint(step: Any) -> bool:
+    return isinstance(step, dict) and bool(str(step.get("tool_hint") or "").strip())
+
 def _sync_agent_state_with_plan_queue(
     *,
     agent_state: Optional[Dict[str, Any]],
@@ -2436,6 +2492,13 @@ def _sync_agent_state_with_plan_queue(
     merged["plan"] = lines
     merged["next_step"] = lines[0] if lines else ""
     return _normalize_agent_state(merged, fallback_goal=fallback_goal)
+
+
+def _plan_step_can_complete_with_answer(step: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(step, dict):
+        return True
+    tool_hint = str(step.get("tool_hint") or "").strip()
+    return not tool_hint
 
 
 def _generic_chat_fallback_text(text: str) -> str:
@@ -2584,6 +2647,8 @@ async def _run_astraeus_plan(
         )
         if not isinstance(step, dict):
             continue
+        if not _plan_step_has_valid_tool_hint(step):
+            continue
         dedupe_key = (step.get("intent", ""), step.get("nl", ""))
         if dedupe_key in seen:
             continue
@@ -2690,6 +2755,8 @@ async def _review_execution_plan_for_completeness(
             available_tool_ids=available_tool_ids,
         )
         if not isinstance(step, dict):
+            continue
+        if not _plan_step_has_valid_tool_hint(step):
             continue
         dedupe_key = (step.get("intent", ""), step.get("nl", ""))
         if dedupe_key in seen:
@@ -3046,7 +3113,18 @@ async def _run_chat_fallback_reply(
                 fallback=220,
             ),
         )
-    except Exception:
+    except Exception as exc:
+        provider = str(getattr(llm_client, "provider", "") or "").strip().lower()
+        host = str(getattr(llm_client, "host", "") or "").strip().lower()
+        if provider in {"hf_transformers", "llama_cpp", "mlx_lm"} or host.startswith(("hf://", "llama-cpp://", "mlx-lm://")):
+            detail = _short_text(str(exc) or type(exc).__name__, limit=420)
+            if not detail:
+                detail = type(exc).__name__
+            return (
+                "Local model failed to load or run: "
+                f"{detail}. Check the model ID/path, install/update the local model dependencies, "
+                "and restart Tater after changing dependencies."
+            )
         return ""
     return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
 
@@ -5307,6 +5385,37 @@ async def _run_hydra_turn_impl(
                 tool_result_payload=tool_result_for_checker,
             )
             if structured_plan_queue:
+                if _plan_step_can_complete_with_answer(current_plan_step):
+                    completed_tool_steps.append(
+                        {
+                            "request": str(round_request_text or turn_request_text or "").strip(),
+                            "summary": final_text_candidate or draft_response,
+                        }
+                    )
+                    structured_plan_queue = structured_plan_queue[1:]
+                    _clear_step_failure_state(current_step_id)
+                    agent_state = _sync_agent_state_with_plan_queue(
+                        agent_state=agent_state,
+                        plan_queue=structured_plan_queue,
+                        fallback_goal=astraeus_goal or turn_request_text or user_text,
+                    )
+                    _save_persistent_agent_state(
+                        redis_client=r,
+                        platform=platform,
+                        scope=scope,
+                        state=agent_state,
+                    )
+                    if not structured_plan_queue:
+                        checker_reason = _checker_decision_text(checker_decision, "reason") or "complete"
+                        return _finish(
+                            text=final_text_candidate,
+                            status="done",
+                            checker_action_value="FINAL_ANSWER",
+                            checker_reason_value=checker_reason,
+                        )
+                    checker_reason = "continue_plan_step"
+                    critic_continue_count += 1
+                    continue
                 checker_reason = "step_not_executed"
                 return _finish(
                     text=final_text_candidate or _failed_step_message(checker_decision, draft_response, tool_result_for_checker),
