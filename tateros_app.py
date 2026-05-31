@@ -1605,14 +1605,16 @@ def _hf_browser_models_api_url(
 ) -> str:
     library = _hf_browser_provider_library(provider)
     app_filter = _hf_browser_provider_app_filter(provider)
+    pipeline_tag = _hf_browser_provider_pipeline_filter(provider, task)
     params: Dict[str, Any] = {
         "sort": sort,
         "direction": "-1",
         "limit": str(max(1, min(100, int(limit or 24)))),
         "full": "true",
         "cardData": "true",
-        "pipeline_tag": _normalize_hf_browser_task(task),
     }
+    if pipeline_tag:
+        params["pipeline_tag"] = pipeline_tag
     if library:
         params["library"] = library
     if app_filter:
@@ -1818,8 +1820,16 @@ def _hf_browser_provider_library(provider: str) -> str:
     return "transformers"
 
 
+def _hf_browser_provider_pipeline_filter(provider: str, task: str = "text-generation") -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    task_token = _normalize_hf_browser_task(task)
+    if task_token == "text-generation" and provider_token in {HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM}:
+        return ""
+    return task_token
+
+
 def _hf_browser_text_generation_tokens() -> Tuple[str, ...]:
-    return ("text-generation",)
+    return ("text-generation", "text2text-generation", "conversational", "image-text-to-text")
 
 
 def _hf_browser_vision_tokens() -> Tuple[str, ...]:
