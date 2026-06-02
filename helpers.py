@@ -2463,7 +2463,7 @@ def _llama_cpp_gpu_backend(system_info: str) -> str:
         return ""
     checks = (
         ("cuda", ("cuda", "cublas")),
-        ("metal", ("metal",)),
+        ("metal", ("metal", "mtl")),
         ("vulkan", ("vulkan",)),
         ("rocm", ("hip", "hipblas", "rocblas")),
         ("sycl", ("sycl",)),
