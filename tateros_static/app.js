@@ -1016,6 +1016,35 @@ function finishActionProgress(tone = "success", statusText = "Completed.") {
   setActionProgress(100, statusText, tone);
 }
 
+function normalizeLocalLlmProviderToken(value) {
+  const token = String(value || "").trim().toLowerCase().replace(/[\s.-]+/g, "_");
+  if (["llama", "llamacpp", "llama_cpp", "gguf", "llama_cpp_python"].includes(token)) {
+    return "llama_cpp";
+  }
+  if (["mlx", "mlx_lm", "apple_mlx", "apple_silicon", "mlxlm"].includes(token)) {
+    return "mlx_lm";
+  }
+  if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
+    return "hf_transformers";
+  }
+  return token || "hf_transformers";
+}
+
+function isLocalLlmProviderToken(value) {
+  return ["hf_transformers", "llama_cpp", "mlx_lm"].includes(normalizeLocalLlmProviderToken(value));
+}
+
+function localLlmProviderLabel(value) {
+  const provider = normalizeLocalLlmProviderToken(value);
+  if (provider === "llama_cpp") {
+    return "llama.cpp";
+  }
+  if (provider === "mlx_lm") {
+    return "MLX";
+  }
+  return "Transformers";
+}
+
 function closeActionProgressModal() {
   const modal = document.getElementById("action-progress-modal");
   if (!modal) {
@@ -1058,7 +1087,7 @@ async function runActionWithProgress(meta, actionFn) {
   }
 }
 
-function llamaCppChatTemplateCapabilityBadges(capabilities = {}) {
+function localLlmChatTemplateCapabilityBadges(capabilities = {}) {
   const items = [
     ["enable_thinking", "enable_thinking"],
     ["reasoning_budget", "reasoning budget"],
@@ -1073,7 +1102,7 @@ function llamaCppChatTemplateCapabilityBadges(capabilities = {}) {
     .join("");
 }
 
-function ensureLlamaCppChatTemplateModal() {
+function ensureLocalLlmChatTemplateModal() {
   let modal = document.getElementById("llama-chat-template-modal");
   if (modal) {
     return modal;
@@ -1082,7 +1111,7 @@ function ensureLlamaCppChatTemplateModal() {
     "beforeend",
     `
       <div id="llama-chat-template-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card llama-chat-template-dialog" role="dialog" aria-modal="true" aria-label="llama.cpp Chat Template">
+        <div class="cerb-modal-dialog card llama-chat-template-dialog" role="dialog" aria-modal="true" aria-label="Local Model Chat Template">
           <div class="card-head runtime-breakdown-modal-head">
             <span class="runtime-breakdown-modal-badge" aria-hidden="true">CT</span>
             <div>
@@ -1122,13 +1151,15 @@ function ensureLlamaCppChatTemplateModal() {
   return modal;
 }
 
-async function openLlamaCppChatTemplateModal(model, options = {}) {
+async function openLocalLlmChatTemplateModal(provider, model, options = {}) {
+  const providerToken = normalizeLocalLlmProviderToken(provider);
   const modelId = String(model || "").trim();
-  if (!modelId) {
-    showToast("Select a llama.cpp model first.", "error", 2600);
+  if (!isLocalLlmProviderToken(providerToken) || !modelId) {
+    showToast("Select a local model first.", "error", 2600);
     return null;
   }
-  const modal = ensureLlamaCppChatTemplateModal();
+  const providerLabel = localLlmProviderLabel(providerToken);
+  const modal = ensureLocalLlmChatTemplateModal();
   const titleEl = document.getElementById("llama-chat-template-title");
   const modelEl = document.getElementById("llama-chat-template-model");
   const summaryEl = document.getElementById("llama-chat-template-summary");
@@ -1167,14 +1198,14 @@ async function openLlamaCppChatTemplateModal(model, options = {}) {
       titleEl.textContent = latestPayload.override_active ? "Chat Template Override" : "Chat Template";
     }
     if (modelEl) {
-      modelEl.textContent = modelId;
+      modelEl.textContent = `${providerLabel} • ${modelId}`;
     }
     if (editorEl) {
       editorEl.value = effective;
     }
     const templateNames = Array.isArray(latestPayload.template_names) ? latestPayload.template_names : [];
     const source = String(latestPayload.source || "none").trim();
-    const sourceLabel = source === "override" ? "Override active" : source === "gguf" || source === "embedded" ? "Using embedded GGUF template" : "No embedded template found";
+    const sourceLabel = source === "override" ? "Override active" : source === "gguf" || source === "embedded" ? "Using embedded model template" : "No embedded template found";
     const embeddedChars = Number(latestPayload.embedded_template_chars || 0);
     const overrideChars = Number(latestPayload.override_template_chars || 0);
     const maxChars = Number(latestPayload.max_chars || 0);
@@ -1185,7 +1216,7 @@ async function openLlamaCppChatTemplateModal(model, options = {}) {
           <span>${escapeHtml(templateNames.length ? templateNames.join(", ") : "default template")}</span>
         </div>
         <div class="llama-chat-template-badges">
-          ${llamaCppChatTemplateCapabilityBadges(latestPayload.capabilities || {})}
+          ${localLlmChatTemplateCapabilityBadges(latestPayload.capabilities || {})}
         </div>
         <div class="llama-chat-template-meta">
           <span>Embedded ${embeddedChars.toLocaleString()} chars</span>
@@ -1204,7 +1235,7 @@ async function openLlamaCppChatTemplateModal(model, options = {}) {
     setBusy(true);
     setStatus("Loading chat template...");
     try {
-      const payload = await api(`/api/settings/llama-cpp/chat-template?model=${encodeURIComponent(modelId)}`, {
+      const payload = await api(`/api/settings/local-llm/chat-template?provider=${encodeURIComponent(providerToken)}&model=${encodeURIComponent(modelId)}`, {
         _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
       });
       renderPayload(payload);
@@ -1221,9 +1252,10 @@ async function openLlamaCppChatTemplateModal(model, options = {}) {
     setBusy(true);
     setStatus(reset ? "Resetting override..." : "Saving override...");
     try {
-      const payload = await api("/api/settings/llama-cpp/chat-template", {
+      const payload = await api("/api/settings/local-llm/chat-template", {
         method: "POST",
         body: JSON.stringify({
+          provider: providerToken,
           model: modelId,
           template: reset ? "" : String(editorEl?.value || ""),
           reset,
@@ -16857,7 +16889,7 @@ async function loadSettingsView() {
                   <select id="set_hydra_llm_model_select"></select>
                   <div id="hydra-local-model-status" class="small"></div>
                 </label>
-                <div id="settings-llama-chat-template-tools" class="hydra-chat-template-tools" data-hydra-provider-field="llama_cpp">
+                <div id="settings-llama-chat-template-tools" class="hydra-chat-template-tools" data-hydra-provider-field="local">
                   <button type="button" id="settings-llama-chat-template-edit" class="inline-btn">Edit Chat Template</button>
                   <span id="settings-llama-chat-template-status" class="small">Per-model template override.</span>
                 </div>
@@ -18362,16 +18394,18 @@ async function loadSettingsView() {
   };
   const syncLlamaChatTemplateTools = () => {
     const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
-    const model = provider === "llama_cpp" ? getHydraBaseModelValue() : "";
+    const local = isHydraLocalProvider(provider);
+    const model = local ? getHydraBaseModelValue() : "";
     if (llamaChatTemplateEditEl) {
       llamaChatTemplateEditEl.disabled = !model;
     }
     if (llamaChatTemplateStatusEl) {
-      llamaChatTemplateStatusEl.textContent = provider !== "llama_cpp"
+      const providerLabel = provider === "llama_cpp" ? "GGUF" : provider === "mlx_lm" ? "MLX" : "Transformers";
+      llamaChatTemplateStatusEl.textContent = !local
         ? ""
         : model
-          ? "Per-model template override."
-          : "Select a downloaded GGUF model first.";
+          ? `Per-model ${providerLabel} template override.`
+          : `Select a downloaded ${providerLabel} model first.`;
     }
   };
   const refreshLocalLlmModels = async ({ selectModel = "", provider = "" } = {}) => {
@@ -18737,10 +18771,11 @@ async function loadSettingsView() {
     syncLlamaChatTemplateTools();
   });
   llamaChatTemplateEditEl?.addEventListener("click", () => {
+    const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
     const model = getHydraBaseModelValue();
-    void openLlamaCppChatTemplateModal(model, {
+    void openLocalLlmChatTemplateModal(provider, model, {
       onSaved: () => {
-        void refreshLocalLlmModels({ provider: "llama_cpp", selectModel: model });
+        void refreshLocalLlmModels({ provider, selectModel: model });
         syncLlamaChatTemplateTools();
       },
     });
@@ -18933,7 +18968,7 @@ async function loadSettingsView() {
             </div>
             ${pathLabel ? `<div class="local-model-path">${escapeHtml(pathLabel)}</div>` : ""}
             <div class="local-model-actions">
-              ${row.provider === "llama_cpp" ? `<button type="button" class="inline-btn" data-local-model-template data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Chat Template</button>` : ""}
+              <button type="button" class="inline-btn" data-local-model-template data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Chat Template</button>
               <button type="button" class="inline-btn danger" data-local-model-delete data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Delete</button>
             </div>
           </article>
@@ -19527,10 +19562,10 @@ async function loadSettingsView() {
     if (templateButton) {
       const provider = normalizeHydraBaseProvider(templateButton.getAttribute("data-provider") || "");
       const model = templateButton.getAttribute("data-model") || "";
-      if (provider === "llama_cpp") {
-        void openLlamaCppChatTemplateModal(model, {
+      if (isHydraLocalProvider(provider)) {
+        void openLocalLlmChatTemplateModal(provider, model, {
           onSaved: () => {
-            void refreshLocalLlmModels({ provider: "llama_cpp", selectModel: model });
+            void refreshLocalLlmModels({ provider, selectModel: model });
             syncLlamaChatTemplateTools();
           },
         });

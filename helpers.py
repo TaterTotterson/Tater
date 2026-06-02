@@ -493,8 +493,10 @@ HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
 HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
+HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:hf_transformers_chat_template_overrides"
 HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
 HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
+HYDRA_MLX_LM_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:mlx_lm_chat_template_overrides"
 DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
@@ -2591,6 +2593,15 @@ def _llama_cpp_chat_template_field(model_id: Any) -> str:
     return hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _local_llm_chat_template_store_key(provider: Any) -> str:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
+        return HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY
+    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        return HYDRA_MLX_LM_CHAT_TEMPLATE_OVERRIDES_KEY
+    return HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY
+
+
 def _llama_cpp_chat_template_capabilities(template: Any) -> Dict[str, bool]:
     text = str(template or "")
     lower = text.lower()
@@ -2606,13 +2617,14 @@ def _llama_cpp_chat_template_capabilities(template: Any) -> Dict[str, bool]:
     }
 
 
-def get_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+def get_local_llm_chat_template_override(provider: Any, model_id: Any) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model_id or "").strip()
     field = _llama_cpp_chat_template_field(model_token)
     if not field:
         return {}
     try:
-        raw = redis_client.hget(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field)
+        raw = redis_client.hget(_local_llm_chat_template_store_key(provider_token), field)
     except Exception:
         raw = None
     if not raw:
@@ -2625,6 +2637,7 @@ def get_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
     if not template:
         return {}
     return {
+        "provider": provider_token,
         "model": model_token,
         "template": template,
         "updated_ts": float((payload or {}).get("updated_ts") or 0.0) if isinstance(payload, dict) else 0.0,
@@ -2632,36 +2645,55 @@ def get_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
     }
 
 
-def set_llama_cpp_chat_template_override(model_id: Any, template: Any) -> Dict[str, Any]:
+def get_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+    return get_local_llm_chat_template_override(HYDRA_LLM_PROVIDER_LLAMA_CPP, model_id)
+
+
+def set_local_llm_chat_template_override(provider: Any, model_id: Any, template: Any) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model_id or "").strip()
     if not model_token:
-        raise ValueError("llama.cpp model id is required.")
+        raise ValueError("Local model id is required.")
     normalized = _normalize_llama_cpp_chat_template(template)
     if not normalized.strip():
-        raise ValueError("Chat template cannot be blank. Reset the override to use the GGUF template.")
+        raise ValueError("Chat template cannot be blank. Reset the override to use the embedded template.")
     field = _llama_cpp_chat_template_field(model_token)
     payload = {
+        "provider": provider_token,
         "model": model_token,
         "template": normalized,
         "updated_ts": time.time(),
     }
-    redis_client.hset(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field, json.dumps(payload, sort_keys=True))
+    redis_client.hset(_local_llm_chat_template_store_key(provider_token), field, json.dumps(payload, sort_keys=True))
     return {**payload, "source": "override"}
 
 
-def clear_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+def set_llama_cpp_chat_template_override(model_id: Any, template: Any) -> Dict[str, Any]:
+    return set_local_llm_chat_template_override(HYDRA_LLM_PROVIDER_LLAMA_CPP, model_id, template)
+
+
+def clear_local_llm_chat_template_override(provider: Any, model_id: Any) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model_id or "").strip()
     field = _llama_cpp_chat_template_field(model_token)
     if field:
         try:
-            redis_client.hdel(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field)
+            redis_client.hdel(_local_llm_chat_template_store_key(provider_token), field)
         except Exception:
             pass
-    return {"model": model_token, "template": "", "source": "gguf"}
+    return {"provider": provider_token, "model": model_token, "template": "", "source": "embedded"}
+
+
+def clear_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+    return clear_local_llm_chat_template_override(HYDRA_LLM_PROVIDER_LLAMA_CPP, model_id)
+
+
+def _local_llm_chat_template_override_text(provider: Any, model_id: Any) -> str:
+    return str(get_local_llm_chat_template_override(provider, model_id).get("template") or "")
 
 
 def _llama_cpp_chat_template_override_text(model_id: Any) -> str:
-    return str(get_llama_cpp_chat_template_override(model_id).get("template") or "")
+    return _local_llm_chat_template_override_text(HYDRA_LLM_PROVIDER_LLAMA_CPP, model_id)
 
 
 def _llama_cpp_chat_template_cache_token(model_id: Any) -> str:
@@ -2716,6 +2748,19 @@ def _emit_hf_llm_progress(progress_callback: Optional[HFProgressCallback], paylo
 def _hf_cache_repo_dir(cache_dir: str, repo_id: str) -> Path:
     repo_token = str(repo_id or "").strip().replace("/", "--")
     return Path(str(cache_dir or "")).expanduser() / f"models--{repo_token}"
+
+
+def _latest_hf_snapshot_path(cache_dir: str, repo_id: str) -> str:
+    repo_dir = _hf_cache_repo_dir(cache_dir, repo_id)
+    snapshots_dir = repo_dir / "snapshots"
+    try:
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+    except Exception:
+        snapshots = []
+    if not snapshots:
+        return ""
+    latest = max(snapshots, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
+    return str(latest)
 
 
 def _hf_file_size_and_blob_ids(repo_id: str, filename: str) -> Tuple[int, List[str]]:
@@ -3713,37 +3758,137 @@ def read_llama_cpp_gguf_chat_templates(path: Any) -> Dict[str, str]:
     return templates
 
 
+def _chat_template_entries_from_value(value: Any, name: str = "chat_template") -> Dict[str, str]:
+    templates: Dict[str, str] = {}
+    if isinstance(value, str):
+        if value.strip():
+            templates[name] = value
+        return templates
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            item_name = f"{name}.{index + 1}"
+            if isinstance(item, dict):
+                raw_name = str(item.get("name") or item.get("template_name") or "").strip()
+                item_template = item.get("template") or item.get("chat_template")
+                templates.update(_chat_template_entries_from_value(item_template, raw_name or item_name))
+            else:
+                templates.update(_chat_template_entries_from_value(item, item_name))
+        return templates
+    if isinstance(value, dict):
+        direct = value.get("chat_template") if "chat_template" in value else value.get("template")
+        if direct is not None:
+            templates.update(_chat_template_entries_from_value(direct, name))
+        for key, item in value.items():
+            key_text = str(key or "").strip()
+            if not key_text or key_text in {"chat_template", "template"}:
+                continue
+            if isinstance(item, str) and ("template" in key_text.lower() or key_text.lower() in {"default", "tool_use"}):
+                templates.update(_chat_template_entries_from_value(item, f"{name}.{key_text}"))
+            elif isinstance(item, (dict, list)) and ("template" in key_text.lower() or key_text.lower() in {"default", "tool_use", "templates"}):
+                templates.update(_chat_template_entries_from_value(item, f"{name}.{key_text}"))
+        return templates
+    return templates
+
+
+def read_local_llm_repo_chat_templates(path: Any) -> Dict[str, str]:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return {}
+    root = Path(raw_path).expanduser()
+    if root.is_file():
+        root = root.parent
+    if not root.is_dir():
+        return {}
+    files = (
+        "tokenizer_config.json",
+        "chat_template.json",
+        "processor_config.json",
+        "preprocessor_config.json",
+        "config.json",
+    )
+    templates: Dict[str, str] = {}
+    for filename in files:
+        candidate = root / filename
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_size > 2_000_000:
+                continue
+            payload = json.loads(candidate.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        file_templates = _chat_template_entries_from_value(payload, filename)
+        for key, template in file_templates.items():
+            clean = str(template or "")
+            if clean.strip():
+                templates[key] = clean
+    return templates
+
+
 def get_llama_cpp_chat_template_info(model_id: Any, *, model_path: Any = "") -> Dict[str, Any]:
+    return get_local_llm_chat_template_info(
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        model_id,
+        model_path=model_path,
+    )
+
+
+def get_local_llm_chat_template_info(provider: Any, model_id: Any, *, model_path: Any = "") -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model_id or "").strip()
     path = str(model_path or "").strip()
     if not path:
-        try:
-            ref = _parse_llama_cpp_model_ref(model_token)
-            if ref.get("kind") == "local":
-                path = str(ref.get("path") or "").strip()
-        except Exception:
-            path = ""
-    templates = read_llama_cpp_gguf_chat_templates(path) if path else {}
-    embedded_template = str(templates.get("chat_template.default") or "")
+        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+            try:
+                ref = _parse_llama_cpp_model_ref(model_token)
+                if ref.get("kind") == "local":
+                    path = str(ref.get("path") or "").strip()
+            except Exception:
+                path = ""
+        else:
+            expanded = Path(model_token).expanduser()
+            if expanded.exists():
+                path = str(expanded)
+    templates = (
+        read_llama_cpp_gguf_chat_templates(path)
+        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and path
+        else read_local_llm_repo_chat_templates(path)
+        if path
+        else {}
+    )
+    embedded_template = str(
+        templates.get("chat_template.default")
+        or templates.get("tokenizer_config.json")
+        or templates.get("chat_template.json")
+        or ""
+    )
     if not embedded_template and templates:
         embedded_template = str(next(iter(templates.values())) or "")
-    override = get_llama_cpp_chat_template_override(model_token)
+    override = get_local_llm_chat_template_override(provider_token, model_token)
     override_template = str(override.get("template") or "")
     effective_template = override_template or embedded_template
-    chat_format = str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip()
-    source = "override" if override_template else ("gguf" if embedded_template else ("chat_format" if chat_format else "fallback"))
+    chat_format = str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip() if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP else ""
+    embedded_source = "gguf" if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP else "embedded"
+    source = "override" if override_template else (embedded_source if embedded_template else ("chat_format" if chat_format else "fallback"))
     capabilities = _llama_cpp_chat_template_capabilities(effective_template)
     return {
+        "provider": provider_token,
         "model": model_token,
         "model_path": path,
         "chat_format": chat_format,
         "source": source,
         "has_override": bool(override_template),
+        "override_active": bool(override_template),
         "override_template": override_template,
+        "override_template_chars": len(override_template),
         "embedded_template": embedded_template,
+        "embedded_template_chars": len(embedded_template),
         "effective_template": effective_template,
+        "effective_template_chars": len(effective_template),
+        "max_chars": _llama_cpp_chat_template_max_chars(),
         "template_names": sorted(templates.keys()),
         "updated_ts": float(override.get("updated_ts") or 0.0),
+        "capabilities": capabilities,
         **capabilities,
         "no_thinking_supported": bool(
             capabilities.get("enable_thinking")
@@ -3751,6 +3896,68 @@ def get_llama_cpp_chat_template_info(model_id: Any, *, model_path: Any = "") -> 
             or capabilities.get("no_think_marker")
         ),
     }
+
+
+def _set_chat_template_on_target(target: Any, template: str) -> bool:
+    if target is None or not str(template or "").strip():
+        return False
+    if isinstance(target, dict):
+        target["chat_template"] = template
+        return True
+    applied = False
+    try:
+        setattr(target, "chat_template", template)
+        applied = True
+    except Exception:
+        pass
+    for attr in ("tokenizer", "_tokenizer"):
+        try:
+            nested = getattr(target, attr, None)
+        except Exception:
+            nested = None
+        if nested is not None and nested is not target:
+            applied = _set_chat_template_on_target(nested, template) or applied
+    return applied
+
+
+def _install_local_llm_chat_template_override(
+    provider: Any,
+    model_id: Any,
+    *,
+    tokenizer: Any = None,
+    processor: Any = None,
+    config: Any = None,
+    model: Any = None,
+) -> Tuple[bool, str, str]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    template = _local_llm_chat_template_override_text(provider_token, model_id)
+    if not template:
+        return False, "", ""
+    targets: List[Tuple[str, Any]] = [
+        ("tokenizer", tokenizer),
+        ("processor", processor),
+        ("config", config),
+    ]
+    try:
+        model_config = getattr(model, "config", None)
+    except Exception:
+        model_config = None
+    if model_config is not None:
+        targets.append(("model.config", model_config))
+    applied_names: List[str] = []
+    seen: set[int] = set()
+    for name, target in targets:
+        if target is None:
+            continue
+        ident = id(target)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if _set_chat_template_on_target(target, template):
+            applied_names.append(name)
+    if not applied_names:
+        return True, "", "Chat template override is saved, but no runtime tokenizer/processor target accepted it."
+    return True, ",".join(applied_names), ""
 
 
 def _parse_llama_cpp_model_ref(model_id: str) -> Dict[str, str]:
@@ -4265,6 +4472,7 @@ def _load_hf_llm_bundle(
             model_root=model_root,
             progress_callback=progress_callback,
         )
+        model_path = _latest_hf_snapshot_path(model_root, model_token)
         _emit_hf_llm_progress(
             progress_callback,
             {
@@ -4373,6 +4581,15 @@ def _load_hf_llm_bundle(
             model.eval()
         except Exception:
             pass
+        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
+            HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+            model_token,
+            tokenizer=tokenizer,
+            processor=processor,
+            model=model,
+        )
+        if chat_template_warning:
+            logger.warning("[transformers] %s", chat_template_warning)
 
         generation_lock = _HF_LLM_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
@@ -4386,9 +4603,13 @@ def _load_hf_llm_bundle(
             "device": device,
             "torch": torch,
             "lock": generation_lock,
+            "model_path": str(model_path or ""),
             "model_root": model_root,
             "memory_estimate_bytes": _model_memory_footprint_bytes(model),
             "loaded_ts": time.time(),
+            "chat_template_override": bool(chat_template_override),
+            "chat_template_handler": chat_template_handler,
+            "chat_template_warning": chat_template_warning,
             "supports_vision": bool(_hf_processor_supports_vision(processor) or _hf_model_config_supports_vision(getattr(model, "config", None))),
         }
         _HF_LLM_MODEL_CACHE[cache_key] = bundle
@@ -4416,6 +4637,8 @@ def preload_hf_transformers_llm_model(
         "model": str(model_id or "").strip(),
         "device": str(bundle.get("device") or ""),
         "model_root": str(bundle.get("model_root") or _hf_llm_model_root()),
+        "model_path": str(bundle.get("model_path") or ""),
+        "warning": str(bundle.get("chat_template_warning") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
     }
 
@@ -4435,6 +4658,7 @@ def download_hf_transformers_llm_model(
         "ok": True,
         "model": model_token,
         "model_root": model_root,
+        "model_path": _latest_hf_snapshot_path(model_root, model_token),
     }
 
 
@@ -4719,7 +4943,12 @@ def preload_llama_cpp_llm_model(
         "mmproj_path": str(bundle.get("mmproj_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
-        "warning": _llama_cpp_warning_text(bundle.get("gpu_warning"), bundle.get("mtp_warning"), bundle.get("vision_warning")),
+        "warning": _llama_cpp_warning_text(
+            bundle.get("gpu_warning"),
+            bundle.get("mtp_warning"),
+            bundle.get("vision_warning"),
+            bundle.get("chat_template_warning"),
+        ),
     }
 
 
@@ -4835,6 +5064,15 @@ def _load_mlx_lm_bundle(
         model = loaded[0]
         tokenizer = loaded[1]
         config = loaded[2] if len(loaded) >= 3 and isinstance(loaded[2], dict) else {}
+        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
+            HYDRA_LLM_PROVIDER_MLX_LM,
+            model_token,
+            tokenizer=tokenizer,
+            config=config,
+            model=model,
+        )
+        if chat_template_warning:
+            logger.warning("[mlx-lm] %s", chat_template_warning)
 
         generation_lock = _MLX_LM_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
@@ -4851,6 +5089,9 @@ def _load_mlx_lm_bundle(
             "device": "apple_silicon",
             "memory_estimate_bytes": _safe_path_size_bytes(model_path),
             "loaded_ts": time.time(),
+            "chat_template_override": bool(chat_template_override),
+            "chat_template_handler": chat_template_handler,
+            "chat_template_warning": chat_template_warning,
             "generate": mlx_generate,
             "stream_generate": mlx_stream_generate,
             "make_sampler": make_sampler,
@@ -4885,6 +5126,7 @@ def preload_mlx_lm_llm_model(
             "model_path": str(bundle.get("model_path") or ""),
             "supports_vision": True,
             "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
+            "warning": str(bundle.get("chat_template_warning") or ""),
             "runtime": "mlx-vlm",
         }
     bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
@@ -4895,6 +5137,7 @@ def preload_mlx_lm_llm_model(
         "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
         "model_path": str(bundle.get("model_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
+        "warning": str(bundle.get("chat_template_warning") or ""),
         "runtime": "mlx-lm",
     }
 
@@ -5149,6 +5392,15 @@ def _load_mlx_vlm_bundle(
                     config = mlx_vlm_load_config(model_path)
             except Exception:
                 config = None
+        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
+            HYDRA_LLM_PROVIDER_MLX_LM,
+            model_token,
+            processor=processor,
+            config=config,
+            model=model_obj,
+        )
+        if chat_template_warning:
+            logger.warning("[mlx-vlm] %s", chat_template_warning)
 
         generation_lock = _MLX_VLM_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
@@ -5165,6 +5417,9 @@ def _load_mlx_vlm_bundle(
             "device": "apple_silicon",
             "memory_estimate_bytes": _safe_path_size_bytes(model_path),
             "loaded_ts": time.time(),
+            "chat_template_override": bool(chat_template_override),
+            "chat_template_handler": chat_template_handler,
+            "chat_template_warning": chat_template_warning,
             "generate": mlx_vlm_generate,
             "apply_chat_template": mlx_vlm_apply_chat_template,
             "supports_vision": True,

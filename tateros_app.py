@@ -90,6 +90,7 @@ from helpers import (
     ensure_redis_encryption_key,
     get_llama_cpp_runtime_diagnostics,
     get_llama_cpp_chat_template_info,
+    get_local_llm_chat_template_info,
     get_local_llm_loaded_models_snapshot,
     get_redis_connection_config,
     get_redis_encryption_status,
@@ -112,6 +113,8 @@ from helpers import (
     test_redis_connection_settings,
     set_llama_cpp_chat_template_override,
     clear_llama_cpp_chat_template_override,
+    set_local_llm_chat_template_override,
+    clear_local_llm_chat_template_override,
     unload_local_llm_models,
 )
 from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, shutdown_runtime_executors
@@ -2525,27 +2528,34 @@ def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     return {"models": models, "by_provider": by_provider, "updated_ts": time.time()}
 
 
-def _llama_cpp_chat_template_model_info(model: str) -> Dict[str, Any]:
+def _local_llm_chat_template_model_info(provider: str, model: str) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if not _is_local_hydra_llm_provider(provider_token):
+        raise HTTPException(status_code=400, detail="Local LLM provider is required.")
     model_token = str(model or "").strip()
     if not model_token:
-        raise HTTPException(status_code=400, detail="llama.cpp model is required.")
-    payload = _local_llm_models_payload(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP)
+        raise HTTPException(status_code=400, detail="Local model is required.")
+    payload = _local_llm_models_payload(provider=provider_token)
     row = next(
         (
             dict(item)
             for item in payload.get("models", [])
-            if _normalize_hydra_llm_provider(item.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            if _normalize_hydra_llm_provider(item.get("provider")) == provider_token
             and str(item.get("model") or "").strip() == model_token
         ),
         {},
     )
     model_path = str(row.get("model_path") or "").strip()
-    info = get_llama_cpp_chat_template_info(model_token, model_path=model_path)
+    info = get_local_llm_chat_template_info(provider_token, model_token, model_path=model_path)
     info["installed"] = bool(row)
-    info["provider"] = HYDRA_LLM_PROVIDER_LLAMA_CPP
-    info["provider_label"] = _hydra_llm_provider_label(HYDRA_LLM_PROVIDER_LLAMA_CPP)
+    info["provider"] = provider_token
+    info["provider_label"] = _hydra_llm_provider_label(provider_token)
     info["model_path"] = model_path or str(info.get("model_path") or "")
     return info
+
+
+def _llama_cpp_chat_template_model_info(model: str) -> Dict[str, Any]:
+    return _local_llm_chat_template_model_info(HYDRA_LLM_PROVIDER_LLAMA_CPP, model)
 
 
 def _record_downloaded_local_llm_model(
@@ -5994,6 +6004,7 @@ class LocalLlmModelDeleteRequest(BaseModel):
 
 
 class LlamaCppChatTemplateRequest(BaseModel):
+    provider: Optional[str] = None
     model: Optional[str] = None
     template: Optional[str] = None
     reset: Optional[bool] = None
@@ -13098,6 +13109,33 @@ def save_llama_cpp_chat_template(request: LlamaCppChatTemplateRequest) -> Dict[s
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     unload_result = unload_local_llm_models(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP, model=model)
     info = _llama_cpp_chat_template_model_info(model)
+    info["ok"] = True
+    info["unload"] = unload_result
+    return info
+
+
+@app.get("/api/settings/local-llm/chat-template")
+def get_local_llm_chat_template(provider: str = "", model: str = "") -> Dict[str, Any]:
+    return _local_llm_chat_template_model_info(provider, model)
+
+
+@app.post("/api/settings/local-llm/chat-template")
+def save_local_llm_chat_template(request: LlamaCppChatTemplateRequest) -> Dict[str, Any]:
+    provider = _normalize_hydra_llm_provider(request.provider)
+    if not _is_local_hydra_llm_provider(provider):
+        raise HTTPException(status_code=400, detail="Local LLM provider is required.")
+    model = str(request.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Local model is required.")
+    try:
+        if request.reset:
+            clear_local_llm_chat_template_override(provider, model)
+        else:
+            set_local_llm_chat_template_override(provider, model, request.template or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    unload_result = unload_local_llm_models(provider=provider, model=model)
+    info = _local_llm_chat_template_model_info(provider, model)
     info["ok"] = True
     info["unload"] = unload_result
     return info
