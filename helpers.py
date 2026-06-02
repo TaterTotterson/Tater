@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -532,11 +533,15 @@ _HF_LLM_GENERATION_LOCKS: Dict[Tuple[str, str, str, bool], threading.RLock] = {}
 _LLAMA_CPP_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _LLAMA_CPP_MODEL_CACHE_LOCK = threading.RLock()
 _LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = False
 _LLAMA_CPP_VISION_FAILURE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK = threading.RLock()
 _MLX_LM_MODEL_CACHE: Dict[Tuple[str, str, bool, bool], Dict[str, Any]] = {}
 _MLX_LM_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {}
+_MLX_VLM_MODEL_CACHE: Dict[Tuple[str, bool, bool], Dict[str, Any]] = {}
+_MLX_VLM_MODEL_CACHE_LOCK = threading.RLock()
+_MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -1436,6 +1441,43 @@ def _llama_cpp_context_load_error_message(
     return message
 
 
+def _llama_cpp_patch_partial_model_destructor() -> None:
+    global _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED
+    if _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED:
+        return
+    try:
+        import llama_cpp._internals as internals  # type: ignore
+    except Exception:
+        return
+    model_cls = getattr(internals, "LlamaModel", None)
+    if model_cls is None:
+        return
+    if bool(getattr(model_cls, "_tater_partial_model_del_patch", False)):
+        _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = True
+        return
+    original_del = getattr(model_cls, "__del__", None)
+    if not callable(original_del):
+        return
+
+    def _tater_safe_llama_model_del(self):
+        try:
+            if not hasattr(self, "sampler"):
+                return None
+            return original_del(self)
+        except AttributeError as exc:
+            if "sampler" in str(exc):
+                return None
+            raise
+
+    try:
+        setattr(model_cls, "_tater_original_del", original_del)
+        setattr(model_cls, "__del__", _tater_safe_llama_model_del)
+        setattr(model_cls, "_tater_partial_model_del_patch", True)
+        _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = True
+    except Exception:
+        return
+
+
 def _safe_path_size_bytes(path: Any, *, file_limit: int = 20000) -> int:
     raw = str(path or "").strip()
     if not raw:
@@ -2209,6 +2251,7 @@ def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_MODEL_CACHE_LOCK),
     )
     for provider, cache, lock in cache_specs:
         with lock:
@@ -2310,6 +2353,7 @@ def unload_local_llm_models(
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_GENERATION_LOCKS, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_GENERATION_LOCKS, _MLX_LM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_GENERATION_LOCKS, _MLX_VLM_MODEL_CACHE_LOCK),
     )
 
     for provider_token, cache, locks, lock in cache_specs:
@@ -4143,6 +4187,7 @@ def _load_llama_cpp_bundle(
             from llama_cpp import Llama  # type: ignore
         except Exception as exc:
             raise RuntimeError("llama.cpp provider needs llama-cpp-python installed.") from exc
+        _llama_cpp_patch_partial_model_destructor()
 
         system_info = _llama_cpp_system_info(llama_cpp_module)
         gpu_backend = _llama_cpp_gpu_backend(system_info)
@@ -4357,6 +4402,16 @@ def _mlx_lm_cache_key(model_id: str) -> Tuple[str, str, bool, bool]:
     )
 
 
+def _mlx_lm_loaded_bundle_for_model(model_id: str) -> Optional[Dict[str, Any]]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        return None
+    cache_key = _mlx_lm_cache_key(model_token)
+    with _MLX_LM_MODEL_CACHE_LOCK:
+        cached = _MLX_LM_MODEL_CACHE.get(cache_key)
+        return cached if isinstance(cached, dict) else None
+
+
 def _load_mlx_lm_bundle(
     model_id: str,
     *,
@@ -4466,6 +4521,18 @@ def preload_mlx_lm_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
+    if _mlx_vlm_should_handle_model(model_id, progress_callback=progress_callback):
+        bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
+        return {
+            "ok": True,
+            "model": str(model_id or "").strip(),
+            "device": str(bundle.get("device") or "apple_silicon"),
+            "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
+            "model_path": str(bundle.get("model_path") or ""),
+            "supports_vision": True,
+            "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
+            "runtime": "mlx-vlm",
+        }
     bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
     return {
         "ok": True,
@@ -4473,6 +4540,8 @@ def preload_mlx_lm_llm_model(
         "device": str(bundle.get("device") or "apple_silicon"),
         "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
         "model_path": str(bundle.get("model_path") or ""),
+        "supports_vision": bool(bundle.get("supports_vision")),
+        "runtime": "mlx-lm",
     }
 
 
@@ -4485,12 +4554,341 @@ def download_mlx_lm_llm_model(
     if not model_token:
         raise RuntimeError("MLX LM model id or local path is required.")
     model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+    supports_vision = _mlx_vlm_model_id_looks_vision_capable(model_token) or _mlx_vlm_model_path_looks_vision_capable(model_path)
     return {
         "ok": True,
         "model": model_token,
         "model_root": _mlx_lm_model_root(),
         "model_path": model_path,
+        "supports_vision": bool(supports_vision),
+        "vision_chat_handler": "mlx-vlm" if supports_vision else "",
     }
+
+
+def _mlx_vlm_cache_key(model_id: str) -> Tuple[str, bool, bool]:
+    return (
+        str(model_id or "").strip(),
+        _mlx_lm_trust_remote_code(),
+        _mlx_lm_lazy_load(),
+    )
+
+
+def _mlx_vlm_loaded_bundle_for_model(model_id: str) -> Optional[Dict[str, Any]]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        return None
+    cache_key = _mlx_vlm_cache_key(model_token)
+    with _MLX_VLM_MODEL_CACHE_LOCK:
+        cached = _MLX_VLM_MODEL_CACHE.get(cache_key)
+        return cached if isinstance(cached, dict) else None
+
+
+def _mlx_vlm_model_id_looks_vision_capable(model_id: Any) -> bool:
+    lowered = str(model_id or "").strip().lower()
+    if not lowered:
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", "-", lowered)
+    tokens = (
+        "vlm",
+        "vision",
+        "visual",
+        "multimodal",
+        "multi-modal",
+        "llava",
+        "paligemma",
+        "pixtral",
+        "idefics",
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2-5-vl",
+        "qwen3-vl",
+        "gemma-3n",
+        "gemma3n",
+    )
+    return any(token in normalized for token in tokens)
+
+
+def _mlx_vlm_json_looks_vision_capable(value: Any, *, depth: int = 0) -> bool:
+    if depth > 5:
+        return False
+    vision_keys = {
+        "vision_config",
+        "image_token_id",
+        "mm_vision_tower",
+        "vision_tower",
+        "image_processor",
+        "image_processor_class",
+        "vision_processor",
+        "vision_feature_select_strategy",
+        "image_seq_length",
+    }
+    vision_tokens = ("vision", "vl", "vla", "image", "multimodal", "multi-modal", "llava", "pixtral", "paligemma")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").strip().lower()
+            if key_text in vision_keys and item not in (None, "", [], {}):
+                return True
+            if key_text in {"model_type", "processor_class", "feature_extractor_type"}:
+                item_text = str(item or "").strip().lower()
+                if any(token in item_text for token in vision_tokens):
+                    return True
+            if key_text == "architectures" and isinstance(item, list):
+                joined = " ".join(str(part or "") for part in item).lower()
+                if any(token in joined for token in vision_tokens):
+                    return True
+            if isinstance(item, (dict, list)) and _mlx_vlm_json_looks_vision_capable(item, depth=depth + 1):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_mlx_vlm_json_looks_vision_capable(item, depth=depth + 1) for item in value[:80])
+    return False
+
+
+def _mlx_vlm_model_path_looks_vision_capable(model_path: Any) -> bool:
+    raw_path = str(model_path or "").strip()
+    if not raw_path:
+        return False
+    path = Path(raw_path).expanduser()
+    if path.is_file():
+        path = path.parent
+    if not path.is_dir():
+        return False
+
+    vision_marker_files = {
+        "preprocessor_config.json",
+        "image_processor_config.json",
+        "processor_config.json",
+    }
+    try:
+        names = {item.name for item in path.iterdir() if item.is_file()}
+    except Exception:
+        names = set()
+    if names.intersection(vision_marker_files):
+        return True
+
+    for filename in ("config.json", "preprocessor_config.json", "processor_config.json", "chat_template.json", "tokenizer_config.json"):
+        candidate = path / filename
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_size > 2_000_000:
+                continue
+            text = candidate.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        try:
+            parsed = json.loads(text)
+            if _mlx_vlm_json_looks_vision_capable(parsed):
+                return True
+        except Exception:
+            lowered = text.lower()
+            if any(token in lowered for token in ("<image", "image_token", "vision", "pixel_values")):
+                return True
+    return False
+
+
+def _mlx_vlm_should_handle_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> bool:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        return False
+    if _mlx_vlm_loaded_bundle_for_model(model_token):
+        return True
+    if _mlx_lm_loaded_bundle_for_model(model_token):
+        return False
+    if _mlx_vlm_model_id_looks_vision_capable(model_token):
+        return True
+    try:
+        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+    except Exception:
+        return False
+    return _mlx_vlm_model_path_looks_vision_capable(model_path)
+
+
+def _load_mlx_vlm_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("MLX VLM model id or local path is required.")
+    if not _mlx_lm_is_apple_silicon():
+        raise RuntimeError("MLX vision runs on Apple Silicon Macs only. Use Transformers or llama.cpp on this device.")
+
+    cache_key = _mlx_vlm_cache_key(model_token)
+    with _MLX_VLM_MODEL_CACHE_LOCK:
+        cached = _MLX_VLM_MODEL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "MLX vision model is already loaded",
+                    "progress": 100.0,
+                    "device": "apple_silicon",
+                },
+            )
+            return cached
+
+        try:
+            from mlx_vlm import generate as mlx_vlm_generate  # type: ignore
+            from mlx_vlm import load as mlx_vlm_load  # type: ignore
+            from mlx_vlm.prompt_utils import apply_chat_template as mlx_vlm_apply_chat_template  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "MLX vision needs mlx-vlm installed on an Apple Silicon Mac. "
+                "Install/update requirements, then load a vision-capable MLX model."
+            ) from exc
+
+        try:
+            from mlx_vlm.utils import load_config as mlx_vlm_load_config  # type: ignore
+        except Exception:
+            mlx_vlm_load_config = None
+
+        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Loading MLX vision model into memory",
+                "progress": 0.0,
+            },
+        )
+
+        load_kwargs: Dict[str, Any] = {}
+        if cache_key[1]:
+            load_kwargs["trust_remote_code"] = True
+        if cache_key[2]:
+            load_kwargs["lazy"] = True
+        try:
+            loaded = mlx_vlm_load(model_path, **load_kwargs)
+        except TypeError:
+            retry_kwargs = dict(load_kwargs)
+            retry_kwargs.pop("lazy", None)
+            try:
+                loaded = mlx_vlm_load(model_path, **retry_kwargs)
+            except TypeError:
+                retry_kwargs.pop("trust_remote_code", None)
+                loaded = mlx_vlm_load(model_path, **retry_kwargs)
+        if not isinstance(loaded, tuple) or len(loaded) < 2:
+            raise RuntimeError(f"Could not load MLX vision model {model_token}.")
+        model_obj = loaded[0]
+        processor = loaded[1]
+
+        config = getattr(model_obj, "config", None)
+        if config is None and callable(mlx_vlm_load_config):
+            try:
+                config_kwargs: Dict[str, Any] = {}
+                if cache_key[1]:
+                    config_kwargs["trust_remote_code"] = True
+                try:
+                    config = mlx_vlm_load_config(model_path, **config_kwargs)
+                except TypeError:
+                    config = mlx_vlm_load_config(model_path)
+            except Exception:
+                config = None
+
+        generation_lock = _MLX_VLM_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _MLX_VLM_GENERATION_LOCKS[cache_key] = generation_lock
+
+        bundle = {
+            "model": model_obj,
+            "processor": processor,
+            "config": config,
+            "lock": generation_lock,
+            "model_path": model_path,
+            "model_root": _mlx_lm_model_root(),
+            "device": "apple_silicon",
+            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
+            "loaded_ts": time.time(),
+            "generate": mlx_vlm_generate,
+            "apply_chat_template": mlx_vlm_apply_chat_template,
+            "supports_vision": True,
+            "vision_chat_handler": "mlx-vlm",
+        }
+        _MLX_VLM_MODEL_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "MLX vision model loaded",
+                "progress": 100.0,
+                "device": "apple_silicon",
+            },
+        )
+        return bundle
+
+
+def _mlx_vlm_processor_tokenizer(bundle: Dict[str, Any]) -> Any:
+    processor = bundle.get("processor")
+    for attr in ("tokenizer", "_tokenizer"):
+        try:
+            tokenizer = getattr(processor, attr, None)
+            if tokenizer is not None:
+                return tokenizer
+        except Exception:
+            pass
+    return processor
+
+
+def _mlx_vlm_generate_with_fallback(
+    generate: Any,
+    model_obj: Any,
+    processor: Any,
+    formatted_prompt: str,
+    images: Optional[List[str]],
+    generation_kwargs: Dict[str, Any],
+    *,
+    allow_no_images: bool = False,
+) -> Any:
+    if not callable(generate):
+        raise RuntimeError("MLX vision runtime is missing generate helper.")
+    image_values: List[Tuple[str, Any]] = []
+    if images is not None:
+        image_list = list(images)
+        image_values.append(("positional", image_list))
+        image_values.append(("named", image_list))
+        if len(image_list) == 1:
+            image_values.append(("named", image_list[0]))
+    if allow_no_images:
+        image_values.append(("none", None))
+
+    kw_variants: List[Dict[str, Any]] = [dict(generation_kwargs)]
+    no_temperature = dict(generation_kwargs)
+    no_temperature.pop("temperature", None)
+    if no_temperature not in kw_variants:
+        kw_variants.append(no_temperature)
+    no_max_tokens = dict(no_temperature)
+    no_max_tokens.pop("max_tokens", None)
+    if no_max_tokens not in kw_variants:
+        kw_variants.append(no_max_tokens)
+
+    last_exc: Optional[TypeError] = None
+    for kwargs_variant in kw_variants:
+        for mode, image_value in image_values:
+            try:
+                if mode == "positional":
+                    return generate(model_obj, processor, formatted_prompt, image_value, **kwargs_variant)
+                if mode == "named":
+                    return generate(model_obj, processor, formatted_prompt, image=image_value, **kwargs_variant)
+                return generate(model_obj, processor, formatted_prompt, **kwargs_variant)
+            except TypeError as exc:
+                last_exc = exc
+                continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("MLX vision generation failed.")
 
 
 def _resolve_hydra_llm_defaults(*, redis_conn: Any = None) -> tuple[str, str]:
@@ -6635,6 +7033,41 @@ class MlxLmLLMClientWrapper:
         except Exception:
             return 0
 
+    def _vlm_prompt_text(self, messages: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for item in (messages if isinstance(messages, list) else []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip().lower()
+            content = _coerce_content_to_text(item.get("content")).strip()
+            if not content:
+                continue
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"User: {content}")
+        return "\n\n".join(parts).strip() or "Hello."
+
+    def _vlm_chat_template_prompt(self, bundle: Dict[str, Any], messages: List[Dict[str, Any]]) -> str:
+        local_messages = _mlx_lm_disable_thinking_messages(messages)
+        prompt_text = self._vlm_prompt_text(local_messages)
+        apply_chat_template = bundle.get("apply_chat_template")
+        processor = bundle.get("processor")
+        config = bundle.get("config") or getattr(bundle.get("model"), "config", None)
+        if callable(apply_chat_template):
+            for extra in ({"num_images": 0}, {}):
+                try:
+                    prompt = apply_chat_template(processor, config, prompt_text, **extra)
+                    return _coerce_content_to_text(prompt)
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    logger.debug("MLX VLM chat template failed; using plain prompt: %s", exc)
+                    break
+        return prompt_text
+
     def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
@@ -6696,8 +7129,75 @@ class MlxLmLLMClientWrapper:
                 generation_kwargs[key] = kwargs.pop(key)
         return generation_kwargs
 
+    def _build_vlm_generation_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        generation_kwargs: Dict[str, Any] = {"verbose": False}
+        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        try:
+            generation_kwargs["max_tokens"] = max(1, int(max_tokens))
+        except Exception:
+            generation_kwargs["max_tokens"] = self.max_tokens
+        temperature = kwargs.pop("temperature", self.temperature)
+        try:
+            generation_kwargs["temperature"] = max(0.0, float(temperature))
+        except Exception:
+            generation_kwargs["temperature"] = self.temperature
+        return generation_kwargs
+
+    def _chat_sync_vlm(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
+        _ = timeout
+        stop = kwargs.pop("stop", None)
+        seed = kwargs.pop("seed", None)
+        bundle = _load_mlx_vlm_bundle(self.model)
+        model_obj = bundle["model"]
+        processor = bundle["processor"]
+        generation_lock = bundle["lock"]
+        prompt = self._vlm_chat_template_prompt(bundle, messages)
+        generation_kwargs = self._build_vlm_generation_kwargs(kwargs)
+
+        if seed is not None:
+            try:
+                import mlx.core as mx  # type: ignore
+
+                mx.random.seed(int(seed))
+            except Exception:
+                pass
+
+        tokenizer = _mlx_vlm_processor_tokenizer(bundle)
+        prompt_tokens = self._estimate_tokens(tokenizer, prompt)
+        generation_started = time.perf_counter()
+        with generation_lock:
+            output = _mlx_vlm_generate_with_fallback(
+                bundle.get("generate"),
+                model_obj,
+                processor,
+                prompt,
+                [],
+                generation_kwargs,
+                allow_no_images=True,
+            )
+        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+        content = _strip_local_thinking_blocks(_apply_local_stop_sequences(_mlx_vlm_result_text(output), stop)).strip()
+        completion_tokens = self._estimate_tokens(tokenizer, content)
+        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
+        return {
+            "model": self.model,
+            "message": {"role": "assistant", "content": content},
+            "_usage": {
+                "prompt_tokens": max(0, int(prompt_tokens)),
+                "completion_tokens": max(0, int(completion_tokens)),
+                "total_tokens": max(0, int(total_tokens)),
+            },
+            "_timing": {
+                "prompt_elapsed": 0.0,
+                "completion_elapsed": generation_elapsed,
+                "speed_basis": "mlx_vlm_generate",
+            },
+        }
+
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         _ = timeout
+        if _mlx_vlm_should_handle_model(self.model):
+            return self._chat_sync_vlm(messages, timeout=timeout, **kwargs)
         stop = kwargs.pop("stop", None)
         seed = kwargs.pop("seed", None)
         bundle = _load_mlx_lm_bundle(self.model)
@@ -7203,6 +7703,86 @@ def _describe_image_with_llama_cpp_subprocess(
         raise
 
 
+def _mlx_vlm_result_text(output: Any) -> str:
+    for attr in ("text", "content", "response"):
+        value = getattr(output, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    text = _coerce_content_to_text(output).strip()
+    if text:
+        return text
+    if isinstance(output, (list, tuple)):
+        for item in output:
+            text = _mlx_vlm_result_text(item)
+            if text:
+                return text
+    return str(output or "").strip()
+
+
+def _describe_image_with_mlx_vlm(
+    *,
+    model_token: str,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+    timeout: float,
+) -> Dict[str, Any]:
+    _ = timeout
+    prepared_bytes, prepared_name = _local_vision_prepare_image_bytes(image_bytes, filename)
+    suffix = Path(str(prepared_name or "image.png")).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
+        suffix = ".png"
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="tater-mlx-vlm-", suffix=suffix, delete=False) as handle:
+            handle.write(bytes(prepared_bytes or b""))
+            temp_path = str(handle.name)
+
+        bundle = _load_mlx_vlm_bundle(model_token)
+        model_obj = bundle["model"]
+        processor = bundle["processor"]
+        config = bundle.get("config") or getattr(model_obj, "config", None)
+        apply_chat_template = bundle.get("apply_chat_template")
+        generate = bundle.get("generate")
+        generation_lock = bundle["lock"]
+        if not callable(apply_chat_template) or not callable(generate):
+            raise RuntimeError("MLX vision runtime is missing generate/template helpers.")
+
+        prompt_text = str(prompt or "").strip() or "Describe this image."
+        try:
+            formatted_prompt = apply_chat_template(processor, config, prompt_text, num_images=1)
+        except TypeError:
+            formatted_prompt = apply_chat_template(processor, config, prompt_text)
+
+        generation_kwargs: Dict[str, Any] = {
+            "max_tokens": 768,
+            "temperature": 0.2,
+            "verbose": False,
+        }
+        with generation_lock:
+            output = _mlx_vlm_generate_with_fallback(
+                generate,
+                model_obj,
+                processor,
+                formatted_prompt,
+                [temp_path],
+                generation_kwargs,
+                allow_no_images=False,
+            )
+
+        content = _strip_local_thinking_blocks(_mlx_vlm_result_text(output)).strip()
+        return {
+            "model": model_token,
+            "message": {"role": "assistant", "content": content},
+        }
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+
 def describe_image_with_local_llm(
     *,
     provider: str,
@@ -7216,14 +7796,13 @@ def describe_image_with_local_llm(
     model_token = str(model or "").strip()
     if not _is_local_hydra_llm_provider(provider_token) or not model_token:
         raise RuntimeError("Choose a local vision provider and model.")
-    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        raise RuntimeError("MLX LM is text-only in Tater right now. Use Transformers or llama.cpp for local vision.")
 
     messages = _local_vision_messages(image_bytes, filename, prompt)
     call_id = register_active_vision_call(
         api_base={
             HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "hf://transformers",
             HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp://local",
+            HYDRA_LLM_PROVIDER_MLX_LM: "mlx-vlm://local",
         }.get(provider_token, "local://vision"),
         model=model_token,
         source="local_vision",
@@ -7261,6 +7840,14 @@ def describe_image_with_local_llm(
                     messages=messages,
                     timeout=timeout,
                 )
+        elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+            result = _describe_image_with_mlx_vlm(
+                model_token=model_token,
+                image_bytes=image_bytes,
+                filename=filename,
+                prompt=prompt,
+                timeout=timeout,
+            )
         else:
             raise RuntimeError("OpenAI-compatible vision should use the API vision path.")
 
@@ -7800,8 +8387,17 @@ def _llama_cpp_vision_worker_main() -> int:
         return_code = 1
     encoded = base64.b64encode(json.dumps(output, separators=(",", ":")).encode("utf-8")).decode("ascii")
     print(f"{_LLAMA_CPP_VISION_WORKER_RESULT_PREFIX}{encoded}", flush=True)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    # macOS Metal can abort during llama.cpp/ggml finalizers after the worker has already
+    # produced its result. Exit directly so setup users do not get a Python crash dialog.
+    os._exit(return_code)
     return return_code
 
 
 if __name__ == "__main__" and _LLAMA_CPP_VISION_WORKER_ARG in sys.argv[1:]:
-    raise SystemExit(_llama_cpp_vision_worker_main())
+    _llama_cpp_vision_worker_main()
+    os._exit(1)

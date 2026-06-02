@@ -6,6 +6,7 @@ import hmac
 import importlib
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -1604,7 +1605,7 @@ def _hf_browser_models_api_url(
     task: str = "text-generation",
 ) -> str:
     library = _hf_browser_provider_library(provider)
-    app_filter = _hf_browser_provider_app_filter(provider)
+    app_filter = _hf_browser_provider_app_filter(provider, task)
     pipeline_tag = _hf_browser_provider_pipeline_filter(provider, task)
     params: Dict[str, Any] = {
         "sort": sort,
@@ -1804,11 +1805,14 @@ def _hf_browser_provider_search(provider: str, query: str, task: str = "text-gen
     return q
 
 
-def _hf_browser_provider_app_filter(provider: str) -> str:
+def _hf_browser_provider_app_filter(provider: str, task: str = "text-generation") -> str:
     provider_token = _normalize_hydra_llm_provider(provider)
+    task_token = _normalize_hf_browser_task(task)
     if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         return "llama.cpp"
     if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
+        if task_token == "image-text-to-text":
+            return ""
         return "mlx-lm"
     return ""
 
@@ -1922,6 +1926,8 @@ def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
         return (
             "mlx-lm" in provider_haystack
             or "mlx_lm" in provider_haystack
+            or "mlx-vlm" in provider_haystack
+            or "mlx_vlm" in provider_haystack
             or library == "mlx"
             or "mlx" in tags
             or "mlx" in files
@@ -2006,7 +2012,13 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
             or ".gguf" in lower_files
         )
     elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        compatible = "mlx-lm" in provider_haystack or "mlx_lm" in provider_haystack or "mlx" in provider_haystack
+        compatible = (
+            "mlx-lm" in provider_haystack
+            or "mlx_lm" in provider_haystack
+            or "mlx-vlm" in provider_haystack
+            or "mlx_vlm" in provider_haystack
+            or "mlx" in provider_haystack
+        )
     else:
         compatible = ".gguf" not in lower_files
     card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
@@ -3465,16 +3477,52 @@ def _enforce_user_assistant_alternation(loop_messages: List[Dict[str, Any]]) -> 
     return merged
 
 
+def _compact_chat_history_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    if not isinstance(row, dict):
+        return row, False
+    content = row.get("content")
+    if not isinstance(content, dict):
+        return row, False
+    content_type = str(content.get("type") or "").strip().lower()
+    mimetype_value = str(content.get("mimetype") or content.get("mime_type") or "").strip().lower()
+    if content_type not in {"image", "audio", "video", "file"} and not mimetype_value.startswith(("image/", "audio/", "video/")):
+        return row, False
+    has_inline_payload = any(
+        isinstance(content.get(key), (bytes, bytearray)) or (isinstance(content.get(key), str) and content.get(key).strip())
+        for key in ("data", "bytes", "data_b64")
+    )
+    has_materializable_ref = any(str(content.get(key) or "").strip() for key in ("blob_key", "path", "file_path", "artifact_path"))
+    if not has_inline_payload and not has_materializable_ref:
+        return row, False
+    normalized = _normalize_plugin_response_item(content)
+    if not isinstance(normalized, dict) or normalized == content:
+        return row, False
+    compacted = dict(row)
+    compacted["content"] = normalized
+    return compacted, True
+
+
 def _load_chat_history_tail(count: int) -> List[Dict[str, Any]]:
     if count <= 0:
         return []
+    try:
+        list_len = int(redis_client.llen(CHAT_HISTORY_KEY) or 0)
+    except Exception:
+        list_len = 0
+    start_index = max(0, list_len - int(count))
     raw = redis_client.lrange(CHAT_HISTORY_KEY, -count, -1)
     out: List[Dict[str, Any]] = []
-    for line in raw:
+    for offset, line in enumerate(raw):
         try:
             parsed = json.loads(line)
             if isinstance(parsed, dict):
-                out.append(parsed)
+                compacted, changed = _compact_chat_history_row(parsed)
+                out.append(compacted)
+                if changed and list_len > 0:
+                    try:
+                        redis_client.lset(CHAT_HISTORY_KEY, start_index + offset, json.dumps(compacted))
+                    except Exception:
+                        pass
         except Exception:
             continue
     return out
@@ -3483,11 +3531,17 @@ def _load_chat_history_tail(count: int) -> List[Dict[str, Any]]:
 def _load_chat_history() -> List[Dict[str, Any]]:
     raw = redis_client.lrange(CHAT_HISTORY_KEY, 0, -1)
     out: List[Dict[str, Any]] = []
-    for line in raw:
+    for idx, line in enumerate(raw):
         try:
             parsed = json.loads(line)
             if isinstance(parsed, dict):
-                out.append(parsed)
+                compacted, changed = _compact_chat_history_row(parsed)
+                out.append(compacted)
+                if changed:
+                    try:
+                        redis_client.lset(CHAT_HISTORY_KEY, idx, json.dumps(compacted))
+                    except Exception:
+                        pass
         except Exception:
             continue
     return out
@@ -4297,8 +4351,20 @@ def _normalize_plugin_response_item(item: Any) -> Any:
     if not isinstance(item, dict):
         return item
 
-    media_type = str(item.get("type") or "").strip().lower()
-    if media_type not in {"image", "audio", "video", "file"}:
+    raw_type = str(item.get("type") or "").strip().lower()
+    name = str(item.get("name") or item.get("filename") or "attachment").strip() or "attachment"
+    mimetype_value = str(item.get("mimetype") or item.get("mime_type") or "").strip().lower()
+    if not mimetype_value:
+        mimetype_value = str(mimetypes.guess_type(name)[0] or "").strip().lower() or "application/octet-stream"
+
+    inferred_type = _media_type_from_mimetype(mimetype_value)
+    if raw_type in {"image", "audio", "video"}:
+        media_type = raw_type
+    elif raw_type == "file":
+        media_type = inferred_type if inferred_type != "file" else "file"
+    elif inferred_type in {"image", "audio", "video"}:
+        media_type = inferred_type
+    else:
         return item
 
     raw = None
@@ -4306,15 +4372,62 @@ def _normalize_plugin_response_item(item: Any) -> Any:
         raw = bytes(item.get("data"))
     elif isinstance(item.get("bytes"), (bytes, bytearray)):
         raw = bytes(item.get("bytes"))
+    elif isinstance(item.get("data_b64"), str):
+        try:
+            raw = _decode_attachment_data(item.get("data_b64"))
+        except Exception:
+            raw = None
+    elif isinstance(item.get("data"), str):
+        try:
+            raw = _decode_attachment_data(item.get("data"))
+        except Exception:
+            raw = None
 
     if raw is None:
-        return item
+        blob_key = str(item.get("blob_key") or "").strip()
+        if blob_key:
+            try:
+                blob = redis_blob_client.get(blob_key)
+                if isinstance(blob, (bytes, bytearray)):
+                    raw = bytes(blob)
+            except Exception:
+                raw = None
+
+    if raw is None:
+        path_value = str(item.get("path") or item.get("file_path") or item.get("artifact_path") or "").strip()
+        if path_value:
+            try:
+                path = Path(path_value).expanduser()
+                if path.is_file():
+                    raw = path.read_bytes()
+                    if name == "attachment":
+                        name = path.name or name
+                    if mimetype_value == "application/octet-stream":
+                        mimetype_value = str(mimetypes.guess_type(name)[0] or mimetype_value).strip().lower()
+                        inferred_type = _media_type_from_mimetype(mimetype_value)
+                        if raw_type in {"", "file"} and inferred_type != "file":
+                            media_type = inferred_type
+            except Exception:
+                raw = None
 
     safe = dict(item)
     safe.pop("data", None)
     safe.pop("bytes", None)
-    safe["data_b64"] = base64.b64encode(raw).decode("utf-8")
-    safe["size"] = len(raw)
+    safe.pop("data_b64", None)
+    safe["type"] = media_type
+    safe["name"] = name
+    safe["mimetype"] = mimetype_value
+    if raw is not None:
+        file_id = str(uuid.uuid4())
+        _store_file_blob_in_redis(file_id, raw)
+        safe["id"] = file_id
+        safe["size"] = len(raw)
+        safe.pop("blob_key", None)
+        safe.pop("path", None)
+        safe.pop("file_path", None)
+        safe.pop("artifact_path", None)
+    elif str(safe.get("file_id") or "").strip() and not str(safe.get("id") or "").strip():
+        safe["id"] = str(safe.get("file_id") or "").strip()
     return safe
 
 
@@ -12998,7 +13111,7 @@ def get_huggingface_models(
         "query": search,
         "task": task_token,
         "library": _hf_browser_provider_library(provider_token),
-        "app_filter": _hf_browser_provider_app_filter(provider_token),
+        "app_filter": _hf_browser_provider_app_filter(provider_token, task_token),
         "integration": integration_status,
         "limit": clean_limit,
         "has_next": bool(next_cursor),
@@ -13600,8 +13713,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             updates.get("vision_provider", current_vision.get("provider") or HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE)
         )
         vision_model = str(updates.get("vision_model", current_vision.get("model") or "")).strip()
-        if vision_mode == "dedicated" and vision_provider == HYDRA_LLM_PROVIDER_MLX_LM:
-            raise HTTPException(status_code=400, detail="Dedicated local vision currently supports Transformers and llama.cpp GGUF models.")
         if vision_mode == "dedicated" and _is_local_hydra_llm_provider(vision_provider):
             _require_downloaded_local_model(vision_provider, vision_model, "Vision")
         save_shared_vision_settings(
