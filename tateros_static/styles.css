@@ -2439,6 +2439,19 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   justify-content: flex-end;
 }
 
+.hydra-chat-template-tools {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hydra-chat-template-tools .small {
+  color: #a99f95;
+}
+
 .local-model-path {
   overflow-wrap: anywhere;
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -2731,6 +2744,110 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   background: rgba(0, 0, 0, 0.16);
   color: #a99f95;
   font-size: 0.68rem;
+}
+
+.llama-chat-template-dialog {
+  width: min(980px, 96vw);
+  border-color: rgba(240, 131, 69, 0.18);
+  background:
+    linear-gradient(180deg, rgba(28, 29, 30, 0.98), rgba(18, 19, 20, 0.985)),
+    radial-gradient(circle at top left, rgba(240, 131, 69, 0.1), transparent 42%);
+}
+
+.llama-chat-template-body {
+  display: grid;
+  gap: 12px;
+}
+
+.llama-chat-template-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 151, 83, 0.14);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.llama-chat-template-summary-row {
+  display: grid;
+  gap: 3px;
+}
+
+.llama-chat-template-summary-row strong {
+  color: #f5e9dc;
+  font-size: 0.88rem;
+  line-height: 1.25;
+}
+
+.llama-chat-template-summary-row span {
+  overflow-wrap: anywhere;
+  color: #a99f95;
+  font-size: 0.74rem;
+}
+
+.llama-chat-template-badges,
+.llama-chat-template-meta,
+.llama-chat-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.llama-template-badge,
+.llama-chat-template-meta span {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #a99f95;
+  font-size: 0.7rem;
+  font-weight: 750;
+  line-height: 1.2;
+  padding: 4px 8px;
+}
+
+.llama-template-badge.active {
+  border-color: rgba(103, 204, 138, 0.28);
+  background: rgba(78, 188, 132, 0.12);
+  color: #a9edc4;
+}
+
+.llama-chat-template-editor {
+  width: 100%;
+  min-height: 360px;
+  max-height: min(56vh, 640px);
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(4, 5, 7, 0.5);
+  color: #efe6dc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding: 11px;
+}
+
+.llama-chat-template-editor:focus {
+  border-color: rgba(255, 151, 83, 0.42);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 151, 83, 0.12);
+}
+
+.llama-chat-template-actions {
+  justify-content: flex-end;
+}
+
+.llama-chat-template-status {
+  min-height: 1.2em;
+  color: #a99f95;
+}
+
+.llama-chat-template-status.success {
+  color: #a9edc4;
+}
+
+.llama-chat-template-status.error {
+  color: #ffb2a8;
 }
 
 .hf-model-browser-empty {
