@@ -491,6 +491,11 @@ HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
 HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
 HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY = "tater:hydra:llm:hf_transformers_context_tokens"
+HYDRA_HF_TRANSFORMERS_DEVICE_KEY = "tater:hydra:llm:hf_transformers_device"
+HYDRA_HF_TRANSFORMERS_DTYPE_KEY = "tater:hydra:llm:hf_transformers_dtype"
+HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY = "tater:hydra:llm:hf_transformers_device_map"
+HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY = "tater:hydra:llm:hf_transformers_attn_implementation"
+HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY = "tater:hydra:llm:hf_transformers_trust_remote_code"
 HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
@@ -502,8 +507,19 @@ HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY = "tater:hydra:llm:llama_cpp_offload_kqv"
 HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:hf_transformers_chat_template_overrides"
 HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
 HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
+HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY = "tater:hydra:llm:mlx_lm_trust_remote_code"
+HYDRA_MLX_LM_LAZY_LOAD_KEY = "tater:hydra:llm:mlx_lm_lazy_load"
+HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY = "tater:hydra:llm:mlx_engine_prefill_step_size"
+HYDRA_MLX_ENGINE_KV_BITS_KEY = "tater:hydra:llm:mlx_engine_kv_bits"
+HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY = "tater:hydra:llm:mlx_engine_kv_group_size"
+HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY = "tater:hydra:llm:mlx_engine_quantized_kv_start"
 HYDRA_MLX_LM_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:mlx_lm_chat_template_overrides"
 DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS = 4096
+DEFAULT_HF_TRANSFORMERS_DEVICE = "auto"
+DEFAULT_HF_TRANSFORMERS_DTYPE = "auto"
+DEFAULT_HF_TRANSFORMERS_DEVICE_MAP = "default"
+DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION = ""
+DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE = False
 DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_MTP_ENABLED = False
@@ -512,6 +528,8 @@ DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
+DEFAULT_MLX_LM_TRUST_REMOTE_CODE = False
+DEFAULT_MLX_LM_LAZY_LOAD = False
 HYDRA_LLM_SETUP_ERROR = (
     "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
@@ -534,6 +552,10 @@ _LLM_CALL_HISTORY_MAX = 5000
 _LLM_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 _LLM_CALL_COUNTERS_REDIS_KEY = "tater:llm:runtime:counters"
 _LLM_CALL_HISTORY_REDIS_KEY = "tater:llm:runtime:history"
+_LLM_DEBUG_EVENTS_LOCK = threading.RLock()
+_LLM_DEBUG_EVENTS: List[Dict[str, Any]] = []
+_LLM_DEBUG_EVENTS_MAX = 1200
+_LLM_DEBUG_EVENT_SEQ = 0
 _ACTIVE_VISION_CALLS_LOCK = threading.RLock()
 _ACTIVE_VISION_CALLS: Dict[str, Dict[str, Any]] = {}
 _VISION_CALL_HISTORY: List[Dict[str, Any]] = []
@@ -559,7 +581,6 @@ _MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
 _MLX_ENGINE_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _MLX_ENGINE_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
-_MLX_ENGINE_FALLBACK_WARNED: set[str] = set()
 _MLX_RUNTIME_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tater-mlx-runtime")
 _MLX_RUNTIME_LOCAL = threading.local()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
@@ -1064,6 +1085,13 @@ def _safe_redis_text_get(key: str, *, redis_conn: Any = None) -> str:
         return ""
 
 
+def _setting_text(redis_key: str, env_key: str, default: str = "") -> str:
+    raw = _safe_redis_text_get(redis_key)
+    if not raw and env_key:
+        raw = str(os.getenv(env_key) or "").strip()
+    return raw if raw else str(default or "")
+
+
 def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
     raw_host = str(host or "").strip()
     raw_port = str(port or "").strip()
@@ -1132,17 +1160,40 @@ def _mlx_lm_model_root() -> str:
 
 
 def _hf_llm_device_pref() -> str:
-    token = str(os.getenv("TATER_HF_TRANSFORMERS_DEVICE") or "auto").strip().lower()
-    return token or "auto"
+    token = _setting_text(
+        HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
+        "TATER_HF_TRANSFORMERS_DEVICE",
+        DEFAULT_HF_TRANSFORMERS_DEVICE,
+    ).strip().lower()
+    if token in {"", "default"}:
+        return DEFAULT_HF_TRANSFORMERS_DEVICE
+    if token in {"auto", "cuda", "mps", "cpu"}:
+        return token
+    return token or DEFAULT_HF_TRANSFORMERS_DEVICE
 
 
 def _hf_llm_dtype_pref() -> str:
-    token = str(os.getenv("TATER_HF_TRANSFORMERS_DTYPE") or "auto").strip().lower()
-    return token or "auto"
+    token = _setting_text(
+        HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
+        "TATER_HF_TRANSFORMERS_DTYPE",
+        DEFAULT_HF_TRANSFORMERS_DTYPE,
+    ).strip().lower()
+    if token in {"", "default"}:
+        return DEFAULT_HF_TRANSFORMERS_DTYPE
+    aliases = {
+        "fp16": "float16",
+        "half": "float16",
+        "bf16": "bfloat16",
+        "fp32": "float32",
+    }
+    return aliases.get(token, token or DEFAULT_HF_TRANSFORMERS_DTYPE)
 
 
 def _hf_llm_trust_remote_code() -> bool:
-    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE"), default=False)
+    raw = _safe_redis_text_get(HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE)
+    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE"), default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE)
 
 
 def _local_llm_context_tokens(
@@ -1213,7 +1264,13 @@ def _hf_llm_torch_dtype(torch_module: Any, dtype_pref: str, device: str) -> Any:
 
 
 def _hf_llm_device_map_pref(device: str) -> str:
-    raw = str(os.getenv("TATER_HF_TRANSFORMERS_DEVICE_MAP") or "").strip().lower()
+    raw = _setting_text(
+        HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
+        "TATER_HF_TRANSFORMERS_DEVICE_MAP",
+        DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
+    ).strip().lower()
+    if raw in {"", "default"}:
+        raw = ""
     if raw in {"none", "off", "false", "0", "disabled"}:
         return ""
     if raw:
@@ -1223,12 +1280,26 @@ def _hf_llm_device_map_pref(device: str) -> str:
     return ""
 
 
-def _hf_llm_cache_key(model_id: str) -> Tuple[str, str, str, bool]:
+def _hf_llm_attn_implementation() -> str:
+    token = _setting_text(
+        HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
+        "TATER_HF_TRANSFORMERS_ATTN_IMPLEMENTATION",
+        DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
+    ).strip().lower()
+    if token in {"", "auto", "default", "none", "off", "false", "0"}:
+        return ""
+    allowed = {"sdpa", "flash_attention_2", "eager"}
+    return token if token in allowed else ""
+
+
+def _hf_llm_cache_key(model_id: str) -> Tuple[Any, ...]:
     return (
         str(model_id or "").strip(),
         _hf_llm_device_pref(),
         _hf_llm_dtype_pref(),
         _hf_llm_trust_remote_code(),
+        _hf_llm_device_map_pref(_hf_llm_device_pref()),
+        _hf_llm_attn_implementation(),
     )
 
 
@@ -2602,11 +2673,17 @@ def _mlx_lm_is_apple_silicon() -> bool:
 
 
 def _mlx_lm_trust_remote_code() -> bool:
-    return _boolish(os.getenv("TATER_MLX_LM_TRUST_REMOTE_CODE"), default=False)
+    raw = _safe_redis_text_get(HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE)
+    return _boolish(os.getenv("TATER_MLX_LM_TRUST_REMOTE_CODE"), default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE)
 
 
 def _mlx_lm_lazy_load() -> bool:
-    return _boolish(os.getenv("TATER_MLX_LM_LAZY"), default=False)
+    raw = _safe_redis_text_get(HYDRA_MLX_LM_LAZY_LOAD_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_MLX_LM_LAZY_LOAD)
+    return _boolish(os.getenv("TATER_MLX_LM_LAZY"), default=DEFAULT_MLX_LM_LAZY_LOAD)
 
 
 def _mlx_lm_disable_thinking_enabled() -> bool:
@@ -2818,10 +2895,6 @@ async def _run_mlx_runtime_async(func: Callable[..., Any], *args: Any, **kwargs:
     return await loop.run_in_executor(_MLX_RUNTIME_EXECUTOR, call)
 
 
-def _mlx_engine_enabled() -> bool:
-    return _boolish(os.getenv("TATER_MLX_ENGINE_ENABLED"), default=True)
-
-
 def _mlx_engine_checkout_path() -> str:
     raw = str(os.getenv("TATER_MLX_ENGINE_PATH") or "").strip()
     if raw:
@@ -2838,13 +2911,37 @@ def _mlx_engine_max_seq_nums() -> int:
 
 
 def _mlx_engine_prefill_step_size() -> Optional[int]:
-    raw = str(os.getenv("TATER_MLX_ENGINE_PREFILL_STEP_SIZE") or "").strip()
+    return _mlx_engine_optional_int_setting(
+        HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
+        "TATER_MLX_ENGINE_PREFILL_STEP_SIZE",
+        minimum=1,
+        maximum=32768,
+    )
+
+
+def _mlx_engine_optional_int_setting(
+    redis_key: str,
+    env_name: str,
+    *,
+    minimum: int = 0,
+    maximum: int = 1_048_576,
+    allow_zero: bool = False,
+    allowed: Optional[Tuple[int, ...]] = None,
+) -> Optional[int]:
+    raw = _safe_redis_text_get(redis_key)
+    if not raw:
+        raw = str(os.getenv(env_name) or "").strip()
     if not raw:
         return None
     try:
-        return max(1, int(float(raw)))
+        value = int(float(raw))
     except Exception:
         return None
+    if value < 0 or (value == 0 and not allow_zero):
+        return None
+    if allowed is not None and value not in set(int(item) for item in allowed):
+        return None
+    return max(int(minimum), min(int(maximum), int(value)))
 
 
 def _mlx_engine_optional_int_env(name: str) -> Optional[int]:
@@ -2879,8 +2976,7 @@ def _mlx_engine_import_helpers() -> Dict[str, Any]:
         from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
     except Exception as exc:
         hint = (
-            "Install/update the MLX engine dependencies with setup_tater.sh, "
-            "or set TATER_MLX_ENGINE_ENABLED=0 to use mlx-lm/mlx-vlm directly."
+            "Install/update the MLX engine dependencies with setup_tater.sh so the MLX provider can run."
         )
         if checkout and not os.path.isdir(os.path.join(checkout, "mlx_engine")):
             hint = f"MLX engine checkout was not found at {checkout}. {hint}"
@@ -2910,21 +3006,31 @@ def _mlx_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _mlx_lm_max_kv_size() or 0,
         _mlx_engine_max_seq_nums(),
         _mlx_engine_prefill_step_size() or 0,
-        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_KV_BITS") or 0,
-        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_KV_GROUP_SIZE") or 0,
-        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_QUANTIZED_KV_START") or 0,
+        _mlx_engine_optional_int_setting(
+            HYDRA_MLX_ENGINE_KV_BITS_KEY,
+            "TATER_MLX_ENGINE_KV_BITS",
+            minimum=2,
+            maximum=8,
+            allowed=(2, 3, 4, 6, 8),
+        )
+        or 0,
+        _mlx_engine_optional_int_setting(
+            HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
+            "TATER_MLX_ENGINE_KV_GROUP_SIZE",
+            minimum=32,
+            maximum=128,
+            allowed=(32, 64, 128),
+        )
+        or 0,
+        _mlx_engine_optional_int_setting(
+            HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
+            "TATER_MLX_ENGINE_QUANTIZED_KV_START",
+            minimum=0,
+            maximum=1_048_576,
+            allow_zero=True,
+        )
+        or 0,
     )
-
-
-def _mlx_engine_log_fallback(scope: str, exc: Exception) -> None:
-    reason = str(exc) or type(exc).__name__
-    key = f"{scope}:{type(exc).__name__}:{reason[:180]}"
-    with _MLX_ENGINE_MODEL_CACHE_LOCK:
-        if key in _MLX_ENGINE_FALLBACK_WARNED:
-            return
-        _MLX_ENGINE_FALLBACK_WARNED.add(key)
-    logger.warning("[mlx-engine] %s path unavailable; falling back to built-in MLX runtime: %s", scope, reason)
-
 
 def _load_mlx_engine_bundle(
     model_id: str,
@@ -2934,8 +3040,6 @@ def _load_mlx_engine_bundle(
     model_token = str(model_id or "").strip()
     if not model_token:
         raise RuntimeError("MLX model id or local path is required.")
-    if not _mlx_engine_enabled():
-        raise RuntimeError("MLX engine is disabled by TATER_MLX_ENGINE_ENABLED.")
     if not _mlx_lm_is_apple_silicon():
         raise RuntimeError("MLX engine runs on Apple Silicon Macs only.")
     if _mlx_lm_adapter_path():
@@ -2959,6 +3063,7 @@ def _load_mlx_engine_bundle(
 
         helpers = _mlx_engine_import_helpers()
         model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+        config = _mlx_engine_config_json(model_path)
         _emit_hf_llm_progress(
             progress_callback,
             {
@@ -2979,17 +3084,42 @@ def _load_mlx_engine_bundle(
         prefill_step_size = _mlx_engine_prefill_step_size()
         if prefill_step_size is not None:
             load_kwargs["prefill_step_size"] = prefill_step_size
-        for env_name, arg_name in (
-            ("TATER_MLX_ENGINE_KV_BITS", "kv_bits"),
-            ("TATER_MLX_ENGINE_KV_GROUP_SIZE", "kv_group_size"),
-            ("TATER_MLX_ENGINE_QUANTIZED_KV_START", "quantized_kv_start"),
+        if "vision_config" not in config:
+            for redis_key, env_name, arg_name, minimum, maximum, allow_zero, allowed in (
+                (HYDRA_MLX_ENGINE_KV_BITS_KEY, "TATER_MLX_ENGINE_KV_BITS", "kv_bits", 2, 8, False, (2, 3, 4, 6, 8)),
+                (HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY, "TATER_MLX_ENGINE_KV_GROUP_SIZE", "kv_group_size", 32, 128, False, (32, 64, 128)),
+                (
+                    HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
+                    "TATER_MLX_ENGINE_QUANTIZED_KV_START",
+                    "quantized_kv_start",
+                    0,
+                    1_048_576,
+                    True,
+                    None,
+                ),
+            ):
+                value = _mlx_engine_optional_int_setting(
+                    redis_key,
+                    env_name,
+                    minimum=minimum,
+                    maximum=maximum,
+                    allow_zero=allow_zero,
+                    allowed=allowed,
+                )
+                if value is not None:
+                    load_kwargs[arg_name] = value
+        elif any(
+            _mlx_engine_optional_int_setting(redis_key, env_name, minimum=minimum, maximum=maximum, allow_zero=allow_zero, allowed=allowed)
+            is not None
+            for redis_key, env_name, minimum, maximum, allow_zero, allowed in (
+                (HYDRA_MLX_ENGINE_KV_BITS_KEY, "TATER_MLX_ENGINE_KV_BITS", 2, 8, False, (2, 3, 4, 6, 8)),
+                (HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY, "TATER_MLX_ENGINE_KV_GROUP_SIZE", 32, 128, False, (32, 64, 128)),
+                (HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY, "TATER_MLX_ENGINE_QUANTIZED_KV_START", 0, 1_048_576, True, None),
+            )
         ):
-            value = _mlx_engine_optional_int_env(env_name)
-            if value is not None:
-                load_kwargs[arg_name] = value
+            logger.info("[mlx-engine] KV cache quantization settings are ignored for vision-capable model %s.", model_token)
 
         model_kit = helpers["load_model"](model_path, **load_kwargs)
-        config = _mlx_engine_config_json(model_path)
         trust_kwargs: Dict[str, Any] = {}
         if _mlx_lm_trust_remote_code():
             trust_kwargs["trust_remote_code"] = True
@@ -3044,6 +3174,12 @@ def _load_mlx_engine_bundle(
             "chat_template_override": bool(chat_template_override),
             "chat_template_handler": chat_template_handler,
             "chat_template_warning": chat_template_warning,
+            "trust_remote_code": _mlx_lm_trust_remote_code(),
+            "max_kv_size": max_kv_size,
+            "prefill_step_size": prefill_step_size,
+            "kv_bits": load_kwargs.get("kv_bits"),
+            "kv_group_size": load_kwargs.get("kv_group_size"),
+            "quantized_kv_start": load_kwargs.get("quantized_kv_start"),
             "supports_vision": bool("vision_config" in config),
             "vision_chat_handler": "mlx-engine" if "vision_config" in config else "",
             "create_generator": helpers["create_generator"],
@@ -4904,6 +5040,7 @@ def _load_hf_llm_bundle(
         torch_dtype = _hf_llm_torch_dtype(torch, cache_key[2], device)
         trust_remote_code = bool(cache_key[3])
         device_map = _hf_llm_device_map_pref(device)
+        attn_implementation = _hf_llm_attn_implementation()
         hub_token = _hf_llm_hub_token()
 
         _download_hf_llm_snapshot(
@@ -4934,6 +5071,8 @@ def _load_hf_llm_bundle(
             load_kwargs["torch_dtype"] = "auto"
         if device_map:
             load_kwargs["device_map"] = device_map
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
 
         pretrained_kwargs: Dict[str, Any] = {
             "cache_dir": model_root,
@@ -4972,8 +5111,19 @@ def _load_hf_llm_bundle(
                 loaded_device_map = device_map
                 break
             except TypeError as exc:
-                if "torch_dtype" not in str(exc):
-                    load_errors.append(f"{class_name}: {str(exc)}")
+                message = str(exc)
+                if "attn_implementation" in message and "attn_implementation" in load_kwargs:
+                    retry_kwargs = dict(load_kwargs)
+                    retry_kwargs.pop("attn_implementation", None)
+                    try:
+                        model = model_class.from_pretrained(model_token, **retry_kwargs)
+                        loaded_device_map = device_map
+                        break
+                    except Exception as retry_exc:
+                        load_errors.append(f"{class_name}: {str(retry_exc)}")
+                        continue
+                if "torch_dtype" not in message:
+                    load_errors.append(f"{class_name}: {message}")
                     continue
                 retry_kwargs = dict(load_kwargs)
                 retry_kwargs["dtype"] = retry_kwargs.pop("torch_dtype")
@@ -5049,6 +5199,10 @@ def _load_hf_llm_bundle(
             "chat_template_override": bool(chat_template_override),
             "chat_template_handler": chat_template_handler,
             "chat_template_warning": chat_template_warning,
+            "torch_dtype": str(torch_dtype),
+            "device_map": str(device_map or ""),
+            "attn_implementation": str(attn_implementation or ""),
+            "trust_remote_code": trust_remote_code,
             "supports_vision": bool(_hf_processor_supports_vision(processor) or _hf_model_config_supports_vision(getattr(model, "config", None))),
         }
         _HF_LLM_MODEL_CACHE[cache_key] = bundle
@@ -5551,6 +5705,8 @@ def _load_mlx_lm_bundle(
             "chat_template_override": bool(chat_template_override),
             "chat_template_handler": chat_template_handler,
             "chat_template_warning": chat_template_warning,
+            "trust_remote_code": bool(cache_key[2]),
+            "lazy_load": bool(cache_key[3]),
             "supports_vision": False,
             "vision_chat_handler": "",
             "generate": mlx_generate,
@@ -5577,24 +5733,7 @@ def _preload_mlx_lm_llm_model_sync(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
-    if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
-        try:
-            bundle = _load_mlx_engine_bundle(model_id, progress_callback=progress_callback)
-            return {
-                "ok": True,
-                "model": str(model_id or "").strip(),
-                "device": str(bundle.get("device") or "apple_silicon"),
-                "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
-                "model_path": str(bundle.get("model_path") or ""),
-                "supports_vision": bool(bundle.get("supports_vision")),
-                "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
-                "warning": str(bundle.get("chat_template_warning") or ""),
-                "runtime": "mlx-engine",
-            }
-        except Exception as exc:
-            _mlx_engine_log_fallback("preload", exc)
-
-    bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
+    bundle = _load_mlx_engine_bundle(model_id, progress_callback=progress_callback)
     return {
         "ok": True,
         "model": str(model_id or "").strip(),
@@ -5604,7 +5743,7 @@ def _preload_mlx_lm_llm_model_sync(
         "supports_vision": bool(bundle.get("supports_vision")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
         "warning": str(bundle.get("chat_template_warning") or ""),
-        "runtime": "mlx-lm",
+        "runtime": "mlx-engine",
     }
 
 
@@ -6152,6 +6291,181 @@ def _infer_llm_call_activity(*, origin: Dict[str, str], messages: List[Dict[str,
     return _llm_activity_from_origin(origin)
 
 
+def _llm_debug_text(value: Any, *, limit: int = 900) -> str:
+    text = _coerce_content_to_text(value).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text).strip()
+    max_len = max(80, int(limit or 900))
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _llm_debug_row_for_call(call_id: Any) -> Dict[str, Any]:
+    token = str(call_id or "").strip()
+    if not token:
+        return {}
+    with _ACTIVE_LLM_CALLS_LOCK:
+        row = _ACTIVE_LLM_CALLS.get(token)
+        return dict(row) if isinstance(row, dict) else {}
+
+
+def _append_llm_debug_event(
+    *,
+    phase: str,
+    message: str,
+    call_id: Any = "",
+    level: str = "info",
+    provider: str = "",
+    host: str = "",
+    model: str = "",
+    activity: str = "",
+    kind: str = "",
+    source: str = "",
+    detail: Any = None,
+    output: Any = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    duration_ms: float = 0.0,
+) -> None:
+    global _LLM_DEBUG_EVENT_SEQ
+    call_row = _llm_debug_row_for_call(call_id)
+    if call_row:
+        host = host or str(call_row.get("host") or "")
+        model = model or str(call_row.get("model") or "")
+        activity = activity or str(call_row.get("activity") or "")
+        kind = kind or str(call_row.get("kind") or "")
+        source = source or str(call_row.get("source") or "")
+
+    phase_token = str(phase or "event").strip().lower().replace(" ", "_") or "event"
+    level_token = str(level or "info").strip().lower() or "info"
+    if level_token not in {"debug", "info", "success", "warning", "error"}:
+        level_token = "info"
+
+    event = {
+        "id": 0,
+        "ts": time.time(),
+        "level": level_token,
+        "phase": phase_token,
+        "message": _llm_debug_text(message, limit=360),
+        "call_id": str(call_id or "").strip(),
+        "provider": str(provider or "").strip(),
+        "host": str(host or "").strip(),
+        "model": str(model or "").strip(),
+        "activity": str(activity or "").strip(),
+        "kind": str(kind or "").strip(),
+        "source": str(source or "").strip(),
+        "source_label": (
+            f"{_llm_origin_kind_label(kind)} - {source}"
+            if str(kind or "").strip() or str(source or "").strip()
+            else ""
+        ),
+        "detail": _llm_debug_text(detail, limit=900),
+        "output": _llm_debug_text(output, limit=1200),
+        "prompt_tokens": max(0, int(prompt_tokens or 0)),
+        "completion_tokens": max(0, int(completion_tokens or 0)),
+        "total_tokens": max(0, int(total_tokens or 0)),
+        "duration_ms": round(max(0.0, float(duration_ms or 0.0)), 2),
+    }
+
+    with _LLM_DEBUG_EVENTS_LOCK:
+        _LLM_DEBUG_EVENT_SEQ += 1
+        event["id"] = int(_LLM_DEBUG_EVENT_SEQ)
+        _LLM_DEBUG_EVENTS.append(event)
+        overflow = len(_LLM_DEBUG_EVENTS) - int(_LLM_DEBUG_EVENTS_MAX)
+        if overflow > 0:
+            del _LLM_DEBUG_EVENTS[:overflow]
+
+
+def _append_llm_debug_result(
+    *,
+    call_id: Any,
+    provider: str = "",
+    host: str = "",
+    model: str = "",
+    result: Any = None,
+    usage: Any = None,
+    timing: Any = None,
+    elapsed: float = 0.0,
+) -> None:
+    response_text = ""
+    if isinstance(result, dict):
+        message = result.get("message")
+        if isinstance(message, dict):
+            response_text = _coerce_content_to_text(message.get("content"))
+    prompt_tokens = _llm_runtime_as_int((usage or {}).get("prompt_tokens"), 0, minimum=0) if isinstance(usage, dict) else 0
+    completion_tokens = _llm_runtime_as_int((usage or {}).get("completion_tokens"), 0, minimum=0) if isinstance(usage, dict) else 0
+    total_tokens = (
+        _llm_runtime_as_int((usage or {}).get("total_tokens"), prompt_tokens + completion_tokens, minimum=0)
+        if isinstance(usage, dict)
+        else 0
+    )
+    timing_map = timing if isinstance(timing, dict) else {}
+    duration_ms = max(0.0, float(elapsed or 0.0)) * 1000.0
+    prompt_elapsed = _perf_nonnegative_float(timing_map.get("prompt_elapsed"))
+    completion_elapsed = _perf_nonnegative_float(timing_map.get("completion_elapsed"))
+    speed_basis = str(timing_map.get("speed_basis") or "").strip()
+    detail_parts: List[str] = []
+    if prompt_tokens:
+        detail_parts.append(f"prompt_tokens={prompt_tokens}")
+    if completion_tokens:
+        detail_parts.append(f"completion_tokens={completion_tokens}")
+    if total_tokens:
+        detail_parts.append(f"total_tokens={total_tokens}")
+    if prompt_elapsed:
+        detail_parts.append(f"prompt_ms={round(prompt_elapsed * 1000.0, 1)}")
+    if completion_elapsed:
+        detail_parts.append(f"generation_ms={round(completion_elapsed * 1000.0, 1)}")
+    if speed_basis:
+        detail_parts.append(f"timing={speed_basis}")
+    _append_llm_debug_event(
+        phase="output",
+        level="success",
+        message="Model output ready",
+        call_id=call_id,
+        provider=provider,
+        host=host,
+        model=model,
+        detail=" • ".join(detail_parts),
+        output=response_text,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        duration_ms=duration_ms,
+    )
+
+
+def get_llm_debug_runtime_snapshot(*, since_id: int = 0, limit: int = 200) -> Dict[str, Any]:
+    try:
+        since = max(0, int(since_id or 0))
+    except Exception:
+        since = 0
+    try:
+        max_items = max(20, min(int(limit or 200), 500))
+    except Exception:
+        max_items = 200
+
+    with _LLM_DEBUG_EVENTS_LOCK:
+        current_seq = int(_LLM_DEBUG_EVENT_SEQ)
+        if since > 0:
+            rows = [dict(row) for row in _LLM_DEBUG_EVENTS if int(row.get("id") or 0) > since]
+        else:
+            rows = [dict(row) for row in _LLM_DEBUG_EVENTS[-max_items:]]
+    if len(rows) > max_items:
+        rows = rows[-max_items:]
+
+    return {
+        "ok": True,
+        "generated_at": time.time(),
+        "next_id": current_seq,
+        "events": rows,
+        "active_calls": get_active_llm_calls_snapshot(limit=50),
+        "summary": get_llm_call_runtime_summary(include_history=False),
+    }
+
+
 def _register_active_llm_call(
     *,
     host: str,
@@ -6186,6 +6500,18 @@ def _register_active_llm_call(
         _ACTIVE_LLM_CALLS[call_id] = row
         _LLM_CALL_COUNTERS["started"] = int(_LLM_CALL_COUNTERS.get("started") or 0) + 1
     _persist_llm_runtime_counter_delta(started=1)
+    _append_llm_debug_event(
+        phase="start",
+        level="info",
+        message="LLM call started",
+        call_id=call_id,
+        host=row["host"],
+        model=row["model"],
+        activity=row["activity"],
+        kind=row["kind"],
+        source=row["source"],
+        detail=f"messages={row['message_count']} stream={str(bool(row['stream'])).lower()}",
+    )
     return call_id
 
 
@@ -6242,6 +6568,19 @@ def _finish_active_llm_call(
     else:
         _persist_llm_runtime_counter_delta(failed=1)
     _persist_llm_runtime_history_row(history_row)
+    _append_llm_debug_event(
+        phase="finish",
+        level=("success" if ok else "error"),
+        message=("LLM call completed" if ok else "LLM call failed"),
+        call_id=call_token,
+        host=history_row["host"],
+        model=history_row["model"],
+        activity=history_row["activity"],
+        kind=history_row["kind"],
+        source=history_row["source"],
+        detail=(history_row["error"] if not ok else f"duration_ms={round(duration_ms, 2)}"),
+        duration_ms=duration_ms,
+    )
 
 
 def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
@@ -7065,6 +7404,16 @@ class LLMClientWrapper:
         final_model = str(model or "").strip()
 
         try:
+            _append_llm_debug_event(
+                phase="prompt",
+                level="info",
+                message="Prompt submitted",
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+                host=str(self.host or "").strip(),
+                model=str(model or "").strip(),
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+            )
             started_at = asyncio.get_running_loop().time()
             response = await self.client.chat.completions.create(
                 model=model,
@@ -7111,19 +7460,49 @@ class LLMClientWrapper:
 
             # Defensive: choices can be empty in edge cases / errors
             if not getattr(response, "choices", None):
-                return {
+                result = {
                     "model": getattr(response, "model", model),
                     "message": {"role": "assistant", "content": ""},
                 }
+                _append_llm_debug_result(
+                    call_id=call_id,
+                    provider=HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+                    host=str(self.host or "").strip(),
+                    model=final_model,
+                    result=result,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                    timing={"speed_basis": "api_round_trip"},
+                    elapsed=elapsed,
+                )
+                return result
 
             choice = response.choices[0].message or {}
             raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
             content_text = _strip_local_thinking_blocks(raw_content).strip()
 
-            return {
+            result = {
                 "model": getattr(response, "model", model),
                 "message": {"role": getattr(choice, "role", "assistant"), "content": content_text},
             }
+            _append_llm_debug_result(
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+                host=str(self.host or "").strip(),
+                model=final_model,
+                result=result,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                timing={"speed_basis": "api_round_trip"},
+                elapsed=elapsed,
+            )
+            return result
         except Exception as exc:
             call_error = exc
             raise
@@ -7595,6 +7974,16 @@ class TransformersLLMClientWrapper:
         started_at = asyncio.get_running_loop().time()
 
         try:
+            _append_llm_debug_event(
+                phase="prompt",
+                level="info",
+                message="Local prompt submitted",
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+                host=self.host,
+                model=str(self.model or "").strip(),
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+            )
             result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
@@ -7614,6 +8003,20 @@ class TransformersLLMClientWrapper:
             self._llm_model_last = str((result or {}).get("model") or self.model)
             self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
             final_model = self._llm_model_last
+            _append_llm_debug_result(
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
+                host=self.host,
+                model=final_model,
+                result=result,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                timing=timing,
+                elapsed=elapsed,
+            )
             return result
         except Exception as exc:
             call_error = exc
@@ -7877,6 +8280,16 @@ class LlamaCppLLMClientWrapper:
         final_model = str(self.model or "").strip()
         started_at = asyncio.get_running_loop().time()
         try:
+            _append_llm_debug_event(
+                phase="prompt",
+                level="info",
+                message="Local prompt submitted",
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                host=self.host,
+                model=str(self.model or "").strip(),
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+            )
             result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
@@ -7895,6 +8308,20 @@ class LlamaCppLLMClientWrapper:
             self._llm_model_last = str((result or {}).get("model") or self.model)
             self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
             final_model = self._llm_model_last
+            _append_llm_debug_result(
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                host=self.host,
+                model=final_model,
+                result=result,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                timing=timing,
+                elapsed=elapsed,
+            )
             return result
         except Exception as exc:
             call_error = exc
@@ -8155,87 +8582,8 @@ class MlxLmLLMClientWrapper:
         seed = kwargs.pop("seed", None)
         if seed is not None and "seed" not in kwargs:
             kwargs["seed"] = seed
-        if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
-            try:
-                engine_bundle = _load_mlx_engine_bundle(self.model)
-                return self._chat_sync_mlx_engine(engine_bundle, messages, stop=stop, **dict(kwargs))
-            except Exception as exc:
-                _mlx_engine_log_fallback("text", exc)
-        if seed is not None:
-            kwargs.pop("seed", None)
-        bundle = _load_mlx_lm_bundle(self.model)
-        model = bundle["model"]
-        tokenizer = bundle["tokenizer"]
-        generation_lock = bundle["lock"]
-        prompt = self._chat_template_prompt(tokenizer, messages)
-        generation_kwargs = self._build_generation_kwargs(bundle, kwargs)
-
-        if seed is not None:
-            try:
-                import mlx.core as mx  # type: ignore
-
-                mx.random.seed(int(seed))
-            except Exception:
-                pass
-
-        content = ""
-        prompt_tokens = self._estimate_tokens(tokenizer, prompt)
-        completion_tokens = 0
-        prompt_tps = 0.0
-        generation_tps = 0.0
-        stream_generate = bundle.get("stream_generate")
-        with generation_lock:
-            generation_started = time.perf_counter()
-            if callable(stream_generate):
-                for response in stream_generate(model, tokenizer, prompt, **generation_kwargs):
-                    text_part = _coerce_content_to_text(getattr(response, "text", ""))
-                    content += text_part
-                    prompt_tokens = int(getattr(response, "prompt_tokens", prompt_tokens) or prompt_tokens)
-                    completion_tokens = int(getattr(response, "generation_tokens", completion_tokens) or completion_tokens)
-                    prompt_tps = (
-                        _perf_nonnegative_float(getattr(response, "prompt_tps", 0.0))
-                        or _perf_nonnegative_float(getattr(response, "prompt_tokens_per_second", 0.0))
-                        or prompt_tps
-                    )
-                    generation_tps = (
-                        _perf_nonnegative_float(getattr(response, "generation_tps", 0.0))
-                        or _perf_nonnegative_float(getattr(response, "tokens_per_second", 0.0))
-                        or _perf_nonnegative_float(getattr(response, "generation_tokens_per_second", 0.0))
-                        or generation_tps
-                    )
-                    if stop and _apply_local_stop_sequences(content, stop) != content:
-                        break
-            else:
-                generated = bundle["generate"](model, tokenizer, prompt=prompt, verbose=False, **generation_kwargs)
-                content = _coerce_content_to_text(generated)
-                completion_tokens = self._estimate_tokens(tokenizer, content)
-        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-
-        content = _strip_local_thinking_blocks(_apply_local_stop_sequences(content, stop)).strip()
-        if completion_tokens <= 0:
-            completion_tokens = self._estimate_tokens(tokenizer, content)
-        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
-        prompt_elapsed = float(prompt_tokens) / prompt_tps if prompt_tps > 0.0 and prompt_tokens > 0 else 0.0
-        completion_elapsed = (
-            float(completion_tokens) / generation_tps
-            if generation_tps > 0.0 and completion_tokens > 0
-            else generation_elapsed
-        )
-        speed_basis = "mlx_lm_timing" if prompt_tps > 0.0 or generation_tps > 0.0 else "local_generate"
-        return {
-            "model": self.model,
-            "message": {"role": "assistant", "content": content},
-            "_usage": {
-                "prompt_tokens": max(0, int(prompt_tokens)),
-                "completion_tokens": max(0, int(completion_tokens)),
-                "total_tokens": max(0, int(total_tokens)),
-            },
-            "_timing": {
-                "prompt_elapsed": prompt_elapsed,
-                "completion_elapsed": completion_elapsed,
-                "speed_basis": speed_basis,
-            },
-        }
+        engine_bundle = _load_mlx_engine_bundle(self.model)
+        return self._chat_sync_mlx_engine(engine_bundle, messages, stop=stop, **dict(kwargs))
 
     async def chat(self, messages, **kwargs):
         timeout = kwargs.pop("timeout", None)
@@ -8275,6 +8623,16 @@ class MlxLmLLMClientWrapper:
         final_model = str(self.model or "").strip()
         started_at = asyncio.get_running_loop().time()
         try:
+            _append_llm_debug_event(
+                phase="prompt",
+                level="info",
+                message="Local prompt submitted",
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_MLX_LM,
+                host=self.host,
+                model=str(self.model or "").strip(),
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+            )
             result = await _run_mlx_runtime_async(self._chat_sync, messages, timeout=timeout, **kwargs)
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
@@ -8293,6 +8651,20 @@ class MlxLmLLMClientWrapper:
             self._llm_model_last = str((result or {}).get("model") or self.model)
             self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
             final_model = self._llm_model_last
+            _append_llm_debug_result(
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_MLX_LM,
+                host=self.host,
+                model=final_model,
+                result=result,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                timing=timing,
+                elapsed=elapsed,
+            )
             return result
         except Exception as exc:
             call_error = exc
@@ -8897,18 +9269,7 @@ def describe_image_with_local_llm(
                 )
         elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
             def _describe_mlx_local() -> Dict[str, Any]:
-                if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
-                    try:
-                        return _describe_image_with_mlx_engine(
-                            model_token=model_token,
-                            image_bytes=image_bytes,
-                            filename=filename,
-                            prompt=prompt,
-                            timeout=timeout,
-                        )
-                    except Exception as exc:
-                        _mlx_engine_log_fallback("vision", exc)
-                return _describe_image_with_mlx_vlm(
+                return _describe_image_with_mlx_engine(
                     model_token=model_token,
                     image_bytes=image_bytes,
                     filename=filename,

@@ -2291,6 +2291,154 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   min-width: 0;
 }
 
+.llm-debug-console-shell {
+  min-width: 0;
+}
+
+.llm-debug-hero {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.llm-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.llm-debug-actions .inline-btn.active {
+  border-color: rgba(214, 90, 31, 0.52);
+  background: rgba(214, 90, 31, 0.16);
+  color: var(--accent-soft);
+}
+
+.llm-debug-active {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.llm-debug-active-empty,
+.llm-debug-empty {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.llm-debug-active-call {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 151, 83, 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(31, 32, 34, 0.98), rgba(20, 21, 23, 0.97)),
+    linear-gradient(135deg, rgba(214, 90, 31, 0.1), rgba(92, 155, 220, 0.06));
+}
+
+.llm-debug-active-call strong {
+  color: #f9efe7;
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.llm-debug-active-call span,
+.llm-debug-active-call small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #b8afa5;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.llm-debug-events {
+  max-height: min(58vh, 620px);
+  min-height: 360px;
+  overflow: auto;
+  border: 1px solid rgba(240, 131, 69, 0.2);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(10, 11, 13, 0.96), rgba(8, 9, 11, 0.98)),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0, rgba(255, 255, 255, 0.018) 1px, transparent 1px, transparent 24px);
+  box-shadow: var(--shadow-soft);
+  padding: 10px;
+  color: #e5e9e4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.llm-debug-line {
+  display: grid;
+  grid-template-columns: 88px 92px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.llm-debug-time {
+  color: #8f9aa5;
+  white-space: nowrap;
+}
+
+.llm-debug-phase {
+  color: #f0a678;
+  font-weight: 900;
+  text-transform: lowercase;
+}
+
+.llm-debug-line.success .llm-debug-phase,
+.llm-debug-line.phase-output .llm-debug-phase {
+  color: #8ddfb1;
+}
+
+.llm-debug-line.warning .llm-debug-phase {
+  color: #ffd08a;
+}
+
+.llm-debug-line.error .llm-debug-phase {
+  color: #ff9b8e;
+}
+
+.llm-debug-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.llm-debug-body strong {
+  color: #f5efe7;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.llm-debug-body small {
+  color: #aeb8c2;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.llm-debug-body pre {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #ccd5dc;
+  font: inherit;
+}
+
+.llm-debug-body .llm-debug-output {
+  padding: 8px;
+  border-left: 2px solid rgba(141, 223, 177, 0.55);
+  border-radius: 6px;
+  background: rgba(141, 223, 177, 0.07);
+  color: #e7f4ec;
+}
+
 .hf-model-card,
 .local-model-card,
 .hf-model-browser-detail {
@@ -2885,6 +3033,18 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   .hf-model-browser-layout,
   .hf-model-browser-controls {
     grid-template-columns: 1fr;
+  }
+
+  .llm-debug-actions {
+    justify-content: flex-start;
+  }
+
+  .llm-debug-line {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .llm-debug-body {
+    grid-column: 1 / -1;
   }
 
   .hf-download-summary {

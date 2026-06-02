@@ -127,6 +127,12 @@ const state = {
   dashboardRefreshStatus: "",
   hfLlmWarmupPollTimer: 0,
   hfLlmWarmupLastSnapshot: null,
+  llmDebugPollTimer: 0,
+  llmDebugInFlight: false,
+  llmDebugNextId: 0,
+  llmDebugEvents: [],
+  llmDebugLastSnapshot: null,
+  llmDebugAutoScroll: String(safeStorageGet("tater_llm_debug_auto_scroll", "true")).trim().toLowerCase() !== "false",
   runtimeSettingsSaveHandler: null,
   runtimeSettingsOpenHandler: null,
   runtimeSettingsCloseHandler: null,
@@ -177,6 +183,14 @@ const state = {
 };
 
 safeStorageSet("tater_tateros_session_id", state.sessionId);
+
+function clearLlmDebugPollTimer() {
+  if (state.llmDebugPollTimer) {
+    window.clearTimeout(state.llmDebugPollTimer);
+    state.llmDebugPollTimer = 0;
+  }
+  state.llmDebugInFlight = false;
+}
 
 const APP_BASE_PATH = (() => {
   const rawPath = String(window.location.pathname || "/").trim();
@@ -8446,6 +8460,9 @@ function bindModelSettingsTabs(root = document) {
     if (load && ["speakerid", "emotionid"].includes(normalized)) {
       void ensureEspHomeRuntimeLoaded({ force: true, panel: normalized });
     }
+    if (normalized !== "routing") {
+      clearLlmDebugPollTimer();
+    }
   };
   buttons.forEach((button) => {
     if (button.dataset.modelsTabBound === "1") {
@@ -16138,6 +16155,16 @@ async function loadSettingsView() {
       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
       .join("");
   };
+  const renderChoiceOptions = (options, currentValue) => {
+    const selected = String(currentValue ?? "").trim().toLowerCase();
+    return (Array.isArray(options) ? options : [])
+      .map((option) => {
+        const value = String(option?.value ?? "").trim();
+        const label = String(option?.label ?? value).trim();
+        return `<option value="${escapeHtml(value)}"${value.toLowerCase() === selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+  };
   const renderHydraLocalProviderOptions = (currentValue) => {
     const selected = normalizeHydraBaseProvider(currentValue);
     return hydraProviderOptions
@@ -16790,6 +16817,7 @@ async function loadSettingsView() {
                 <button type="button" class="settings-subtab-btn active" data-llm-vision-tab="settings">Settings</button>
                 <button type="button" class="settings-subtab-btn" data-llm-vision-tab="huggingface">Hugging Face</button>
                 <button type="button" class="settings-subtab-btn" data-llm-vision-tab="manage">Manage</button>
+                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="debug">Debug</button>
               </div>
               <div id="settings-hf-model-browser" class="hf-model-browser" hidden>
                 <div class="hf-model-browser-hero">
@@ -16864,6 +16892,27 @@ async function loadSettingsView() {
                 <div id="local-model-manager-status" class="small hf-model-browser-status"></div>
                 <div id="local-model-manager-list" class="local-model-manager-list"></div>
               </div>
+              <div id="settings-llm-debug-console" class="hf-model-browser llm-debug-console-shell" hidden>
+                <div class="hf-model-browser-hero llm-debug-hero">
+                  <div class="hf-model-browser-spud" aria-hidden="true">
+                    <span class="hf-model-browser-spud-eye left"></span>
+                    <span class="hf-model-browser-spud-eye right"></span>
+                    <span class="hf-model-browser-spud-spark"></span>
+                  </div>
+                  <div class="hf-model-browser-title">
+                    <strong>Live LLM Console</strong>
+                    <span>Runtime events, active calls, prompt timing, output previews, and backend errors.</span>
+                  </div>
+                  <div class="llm-debug-actions">
+                    <button type="button" id="llm-debug-refresh" class="inline-btn">Refresh</button>
+                    <button type="button" id="llm-debug-autoscroll" class="inline-btn">Auto-scroll On</button>
+                    <button type="button" id="llm-debug-clear" class="inline-btn danger">Clear View</button>
+                  </div>
+                </div>
+                <div id="llm-debug-status" class="small hf-model-browser-status">Open Debug to start the live console.</div>
+                <div id="llm-debug-active" class="llm-debug-active"></div>
+                <div id="llm-debug-events" class="llm-debug-events" role="log" aria-live="polite"></div>
+              </div>
               <div id="settings-hydra-base-fields" class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Base Model</div>
                 <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
@@ -16904,6 +16953,71 @@ async function loadSettingsView() {
                   </div>
                   <div id="hydra-hf-context-hint" class="small hydra-context-hint"></div>
                   <div id="hydra-hf-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="hf_transformers"></div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Device
+                  <select id="set_hydra_hf_transformers_device">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "auto", label: "Auto" },
+                        { value: "cuda", label: "CUDA" },
+                        { value: "mps", label: "Apple MPS" },
+                        { value: "cpu", label: "CPU" },
+                      ],
+                      settings.hydra_hf_transformers_device || "auto"
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Auto chooses CUDA, then Apple MPS, then CPU.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Precision
+                  <select id="set_hydra_hf_transformers_dtype">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "auto", label: "Auto" },
+                        { value: "float16", label: "Float16" },
+                        { value: "bfloat16", label: "BFloat16" },
+                        { value: "float32", label: "Float32" },
+                      ],
+                      settings.hydra_hf_transformers_dtype || "auto"
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Auto lets Transformers choose the model dtype.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Device Map
+                  <select id="set_hydra_hf_transformers_device_map">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "default", label: "Default" },
+                        { value: "disabled", label: "Disabled" },
+                        { value: "auto", label: "Auto" },
+                        { value: "balanced", label: "Balanced" },
+                      ],
+                      settings.hydra_hf_transformers_device_map || "default"
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Default uses automatic mapping on CUDA and direct device load elsewhere.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Attention
+                  <select id="set_hydra_hf_transformers_attn_implementation">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "auto", label: "Auto" },
+                        { value: "sdpa", label: "SDPA" },
+                        { value: "flash_attention_2", label: "Flash Attention 2" },
+                        { value: "eager", label: "Eager" },
+                      ],
+                      settings.hydra_hf_transformers_attn_implementation || "auto"
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Uses Transformers attention implementation support when available.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Trust Remote Code
+                  ${renderToggleRow(
+                    `<input id="set_hydra_hf_transformers_trust_remote_code" class="toggle-input" type="checkbox" ${
+                      settings.hydra_hf_transformers_trust_remote_code ? "checked" : ""
+                    } />`,
+                    "Enable"
+                  )}
+                  <div class="small hydra-context-hint">Allows custom model code from the selected repository.</div>
                 </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Context Length
                   <div class="hydra-context-control" data-hydra-context-control="llama_cpp">
@@ -16987,6 +17101,66 @@ async function loadSettingsView() {
                   </div>
                   <div id="hydra-mlx-context-hint" class="small hydra-context-hint"></div>
                   <div id="hydra-mlx-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="mlx_lm"></div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Lazy Load
+                  ${renderToggleRow(
+                    `<input id="set_hydra_mlx_lm_lazy_load" class="toggle-input" type="checkbox" ${
+                      settings.hydra_mlx_lm_lazy_load ? "checked" : ""
+                    } />`,
+                    "Enable"
+                  )}
+                  <div class="small hydra-context-hint">Defers some MLX weight materialization during model load.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Trust Remote Code
+                  ${renderToggleRow(
+                    `<input id="set_hydra_mlx_lm_trust_remote_code" class="toggle-input" type="checkbox" ${
+                      settings.hydra_mlx_lm_trust_remote_code ? "checked" : ""
+                    } />`,
+                    "Enable"
+                  )}
+                  <div class="small hydra-context-hint">Allows custom tokenizer/config code from the selected repository.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Prefill Step Size
+                  <input id="set_hydra_mlx_engine_prefill_step_size" type="number" min="1" max="32768" step="1" placeholder="Auto" value="${escapeHtml(
+                    settings.hydra_mlx_engine_prefill_step_size || ""
+                  )}" />
+                  <div class="small hydra-context-hint">Blank lets the MLX runtime choose the prompt prefill chunk size.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Quantized KV Bits
+                  <select id="set_hydra_mlx_engine_kv_bits">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "", label: "Auto" },
+                        { value: "2", label: "2-bit" },
+                        { value: "3", label: "3-bit" },
+                        { value: "4", label: "4-bit" },
+                        { value: "6", label: "6-bit" },
+                        { value: "8", label: "8-bit" },
+                      ],
+                      settings.hydra_mlx_engine_kv_bits || ""
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Optional KV cache quantization for lower memory use.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">KV Group Size
+                  <select id="set_hydra_mlx_engine_kv_group_size">
+                    ${renderChoiceOptions(
+                      [
+                        { value: "", label: "Auto" },
+                        { value: "32", label: "32" },
+                        { value: "64", label: "64" },
+                        { value: "128", label: "128" },
+                      ],
+                      settings.hydra_mlx_engine_kv_group_size || ""
+                    )}
+                  </select>
+                  <div class="small hydra-context-hint">Blank uses the MLX runtime default.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Quantized KV Start
+                  <input id="set_hydra_mlx_engine_quantized_kv_start" type="number" min="0" max="1048576" step="1" placeholder="Auto" value="${escapeHtml(
+                    settings.hydra_mlx_engine_quantized_kv_start || ""
+                  )}" />
+                  <div class="small hydra-context-hint">Token index where quantized KV begins. Blank uses the runtime default.</div>
                 </label>
                 <label id="hydra-base-api-key-wrap" data-hydra-provider-field="openai_compatible" style="grid-column: 1 / -1;">API Key (optional)
                   <input id="set_hydra_llm_api_key" type="password" autocomplete="new-password" value="${escapeHtml(
@@ -17958,6 +18132,8 @@ async function loadSettingsView() {
       if (["speakerid", "emotionid"].includes(activeModelsPanel)) {
         void ensureEspHomeRuntimeLoaded({ force: true, panel: activeModelsPanel });
       }
+    } else {
+      clearLlmDebugPollTimer();
     }
   };
 
@@ -18908,6 +19084,13 @@ async function loadSettingsView() {
   const localModelManagerStatusEl = document.getElementById("local-model-manager-status");
   const localModelManagerListEl = document.getElementById("local-model-manager-list");
   const localModelManagerRefreshEl = document.getElementById("local-model-manager-refresh");
+  const llmDebugConsoleEl = document.getElementById("settings-llm-debug-console");
+  const llmDebugStatusEl = document.getElementById("llm-debug-status");
+  const llmDebugActiveEl = document.getElementById("llm-debug-active");
+  const llmDebugEventsEl = document.getElementById("llm-debug-events");
+  const llmDebugRefreshEl = document.getElementById("llm-debug-refresh");
+  const llmDebugAutoscrollEl = document.getElementById("llm-debug-autoscroll");
+  const llmDebugClearEl = document.getElementById("llm-debug-clear");
   const hfModelBrowserViewButtons = Array.from(root.querySelectorAll("[data-hf-model-view]"));
   const hfModelBrowserState = {
     provider: isHydraLocalProvider(hydraPrimaryBaseRow.provider) ? hydraPrimaryBaseRow.provider : "hf_transformers",
@@ -19460,15 +19643,210 @@ async function loadSettingsView() {
       showToast(`Model delete failed: ${error.message}`, "error", 3600);
     }
   };
+  const llmDebugTimeLabel = (value) => {
+    const seconds = Number(value || 0);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return "--:--";
+    }
+    try {
+      return new Date(seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    } catch {
+      return "--:--";
+    }
+  };
+  const llmDebugDurationLabel = (value) => {
+    const ms = Number(value || 0);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      return "";
+    }
+    if (ms >= 1000) {
+      return `${(ms / 1000).toFixed(ms >= 10000 ? 1 : 2)}s`;
+    }
+    return `${Math.round(ms)}ms`;
+  };
+  const llmDebugTokenLabel = (event) => {
+    const promptTokens = Math.max(0, Number(event?.prompt_tokens || 0));
+    const completionTokens = Math.max(0, Number(event?.completion_tokens || 0));
+    const totalTokens = Math.max(0, Number(event?.total_tokens || 0));
+    const parts = [];
+    if (promptTokens > 0) {
+      parts.push(`in ${Math.round(promptTokens).toLocaleString()}`);
+    }
+    if (completionTokens > 0) {
+      parts.push(`out ${Math.round(completionTokens).toLocaleString()}`);
+    }
+    if (!parts.length && totalTokens > 0) {
+      parts.push(`${Math.round(totalTokens).toLocaleString()} tok`);
+    }
+    return parts.join(" / ");
+  };
+  const normalizeLlmDebugEvent = (row) => ({
+    id: Math.max(0, Number(row?.id || 0)),
+    ts: Number(row?.ts || row?.timestamp || 0),
+    level: String(row?.level || "info").trim().toLowerCase() || "info",
+    phase: String(row?.phase || "event").trim().toLowerCase() || "event",
+    message: String(row?.message || "").trim(),
+    detail: String(row?.detail || "").trim(),
+    output: String(row?.output || "").trim(),
+    provider: String(row?.provider || "").trim(),
+    host: String(row?.host || "").trim(),
+    model: String(row?.model || "").trim(),
+    activity: String(row?.activity || "").trim(),
+    source_label: String(row?.source_label || "").trim(),
+    source: String(row?.source || "").trim(),
+    kind: String(row?.kind || "").trim(),
+    call_id: String(row?.call_id || "").trim(),
+    prompt_tokens: Math.max(0, Number(row?.prompt_tokens || 0)),
+    completion_tokens: Math.max(0, Number(row?.completion_tokens || 0)),
+    total_tokens: Math.max(0, Number(row?.total_tokens || 0)),
+    duration_ms: Math.max(0, Number(row?.duration_ms || 0)),
+  });
+  const renderLlmDebugActiveCalls = (rows = []) => {
+    if (!llmDebugActiveEl) {
+      return;
+    }
+    const calls = Array.isArray(rows) ? rows : [];
+    if (!calls.length) {
+      llmDebugActiveEl.innerHTML = `<div class="llm-debug-active-empty">No active LLM calls.</div>`;
+      return;
+    }
+    llmDebugActiveEl.innerHTML = calls
+      .map((call) => {
+        const model = String(call?.model || "model").trim();
+        const source = String(call?.source_label || call?.source || "unknown").trim();
+        const activity = String(call?.activity || "llm").trim();
+        const age = Math.max(0, Number(call?.age_seconds || 0));
+        const host = String(call?.host || "").trim();
+        const messages = Math.max(0, Number(call?.message_count || 0));
+        return `
+          <div class="llm-debug-active-call">
+            <strong>${escapeHtml(activity)}</strong>
+            <span>${escapeHtml(model)}</span>
+            <small>${escapeHtml(source)}${host ? ` · ${escapeHtml(host)}` : ""} · ${messages} messages · ${Math.round(age)}s</small>
+          </div>
+        `;
+      })
+      .join("");
+  };
+  const renderLlmDebugEvents = () => {
+    if (!llmDebugEventsEl) {
+      return;
+    }
+    const rows = Array.isArray(state.llmDebugEvents) ? state.llmDebugEvents.slice(-220) : [];
+    if (!rows.length) {
+      llmDebugEventsEl.innerHTML = `<div class="llm-debug-empty">No LLM debug events yet.</div>`;
+      return;
+    }
+    const shouldScroll =
+      state.llmDebugAutoScroll &&
+      Math.abs(llmDebugEventsEl.scrollHeight - llmDebugEventsEl.clientHeight - llmDebugEventsEl.scrollTop) < 72;
+    llmDebugEventsEl.innerHTML = rows
+      .map((event) => {
+        const phase = event.phase || event.level || "event";
+        const meta = [
+          event.provider,
+          event.source_label || event.source,
+          event.activity,
+          event.model,
+          llmDebugTokenLabel(event),
+          llmDebugDurationLabel(event.duration_ms),
+        ].filter(Boolean);
+        return `
+          <article class="llm-debug-line ${escapeHtml(event.level)} phase-${escapeHtml(phase)}">
+            <span class="llm-debug-time">${escapeHtml(llmDebugTimeLabel(event.ts))}</span>
+            <span class="llm-debug-phase">${escapeHtml(phase.replace(/_/g, " "))}</span>
+            <div class="llm-debug-body">
+              <strong>${escapeHtml(event.message || phase)}</strong>
+              ${meta.length ? `<small>${escapeHtml(meta.join(" · "))}</small>` : ""}
+              ${event.detail ? `<pre>${escapeHtml(event.detail)}</pre>` : ""}
+              ${event.output ? `<pre class="llm-debug-output">${escapeHtml(event.output)}</pre>` : ""}
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+    if (shouldScroll) {
+      llmDebugEventsEl.scrollTop = llmDebugEventsEl.scrollHeight;
+    }
+  };
+  const setLlmDebugStatus = (message, tone = "") => {
+    if (!llmDebugStatusEl) {
+      return;
+    }
+    llmDebugStatusEl.textContent = String(message || "");
+    llmDebugStatusEl.classList.toggle("error", tone === "error");
+    llmDebugStatusEl.classList.toggle("success", tone === "success");
+  };
+  const renderLlmDebugSnapshot = (payload = {}, { reset = false } = {}) => {
+    state.llmDebugLastSnapshot = payload && typeof payload === "object" ? payload : {};
+    const events = Array.isArray(payload?.events) ? payload.events.map((row) => normalizeLlmDebugEvent(row)).filter((row) => row.id > 0) : [];
+    if (reset) {
+      state.llmDebugEvents = events;
+    } else if (events.length) {
+      const merged = new Map((Array.isArray(state.llmDebugEvents) ? state.llmDebugEvents : []).map((row) => [Number(row.id), row]));
+      events.forEach((event) => merged.set(Number(event.id), event));
+      state.llmDebugEvents = Array.from(merged.values()).sort((a, b) => Number(a.id) - Number(b.id)).slice(-260);
+    }
+    state.llmDebugNextId = Math.max(Number(state.llmDebugNextId || 0), Number(payload?.next_id || 0));
+    renderLlmDebugActiveCalls(Array.isArray(payload?.active_calls) ? payload.active_calls : []);
+    renderLlmDebugEvents();
+    const activeTotal = Number(payload?.summary?.active_total ?? (payload?.active_calls || []).length ?? 0);
+    const eventCount = Array.isArray(state.llmDebugEvents) ? state.llmDebugEvents.length : 0;
+    setLlmDebugStatus(`${Math.max(0, activeTotal)} active LLM call${activeTotal === 1 ? "" : "s"} · ${eventCount} visible event${eventCount === 1 ? "" : "s"}`, "success");
+  };
+  const updateLlmDebugAutoscrollButton = () => {
+    if (llmDebugAutoscrollEl) {
+      llmDebugAutoscrollEl.textContent = state.llmDebugAutoScroll ? "Auto-scroll On" : "Auto-scroll Off";
+      llmDebugAutoscrollEl.classList.toggle("active", Boolean(state.llmDebugAutoScroll));
+    }
+  };
+  const refreshLlmDebugConsole = async ({ reset = false } = {}) => {
+    if (
+      !llmDebugConsoleEl ||
+      !document.body.contains(llmDebugConsoleEl) ||
+      document.body.dataset.view !== "settings" ||
+      state.llmDebugInFlight
+    ) {
+      return;
+    }
+    state.llmDebugInFlight = true;
+    try {
+      const sinceId = reset ? 0 : Math.max(0, Number(state.llmDebugNextId || 0));
+      const params = new URLSearchParams({ since_id: String(sinceId), limit: "220" });
+      const payload = await api(`/api/runtime/llm/debug?${params.toString()}`, { _skipRedisRecovery: true, _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+      renderLlmDebugSnapshot(payload, { reset });
+    } catch (error) {
+      setLlmDebugStatus(`Debug refresh failed: ${error.message}`, "error");
+    } finally {
+      state.llmDebugInFlight = false;
+    }
+  };
+  const scheduleLlmDebugPoll = (delayMs = 1200) => {
+    clearLlmDebugPollTimer();
+    if (
+      !llmDebugConsoleEl ||
+      !document.body.contains(llmDebugConsoleEl) ||
+      document.body.dataset.view !== "settings" ||
+      llmDebugConsoleEl.hidden
+    ) {
+      return;
+    }
+    state.llmDebugPollTimer = window.setTimeout(async () => {
+      state.llmDebugPollTimer = 0;
+      await refreshLlmDebugConsole();
+      scheduleLlmDebugPoll(1200);
+    }, Math.max(250, Number(delayMs || 1200)));
+  };
   const activateLlmVisionTab = (tab) => {
     const normalized = String(tab || "settings").trim() || "settings";
     const browserActive = normalized === "huggingface";
     const manageActive = normalized === "manage";
+    const debugActive = normalized === "debug";
     llmVisionTabButtons.forEach((button) => {
       button.classList.toggle("active", String(button.dataset.llmVisionTab || "") === normalized);
     });
     root.querySelectorAll(".llm-vision-settings-block").forEach((block) => {
-      block.classList.toggle("llm-vision-hidden", browserActive || manageActive);
+      block.classList.toggle("llm-vision-hidden", browserActive || manageActive || debugActive);
     });
     if (hfModelBrowserEl) {
       hfModelBrowserEl.hidden = !browserActive;
@@ -19478,6 +19856,13 @@ async function loadSettingsView() {
       localModelManagerEl.hidden = !manageActive;
       localModelManagerEl.classList.toggle("active", manageActive);
     }
+    if (llmDebugConsoleEl) {
+      llmDebugConsoleEl.hidden = !debugActive;
+      llmDebugConsoleEl.classList.toggle("active", debugActive);
+    }
+    if (!debugActive) {
+      clearLlmDebugPollTimer();
+    }
     if (browserActive) {
       renderHfDownloadSummary(state.hfLlmWarmupLastSnapshot || {});
       scheduleHfLlmWarmupPoll(150);
@@ -19485,6 +19870,12 @@ async function loadSettingsView() {
     if (manageActive) {
       renderLocalModelManager();
       void refreshLocalLlmModels();
+    }
+    if (debugActive) {
+      updateLlmDebugAutoscrollButton();
+      renderLlmDebugSnapshot(state.llmDebugLastSnapshot || {}, { reset: false });
+      void refreshLlmDebugConsole({ reset: state.llmDebugNextId <= 0 });
+      scheduleLlmDebugPoll(800);
     }
     if (browserActive && !hfModelBrowserState.loaded) {
       if (hfModelBrowserProviderEl) {
@@ -19497,6 +19888,23 @@ async function loadSettingsView() {
   };
   llmVisionTabButtons.forEach((button) => {
     button.addEventListener("click", () => activateLlmVisionTab(button.dataset.llmVisionTab || "settings"));
+  });
+  llmDebugRefreshEl?.addEventListener("click", () => {
+    void refreshLlmDebugConsole({ reset: true });
+    scheduleLlmDebugPoll(1000);
+  });
+  llmDebugAutoscrollEl?.addEventListener("click", () => {
+    state.llmDebugAutoScroll = !state.llmDebugAutoScroll;
+    safeStorageSet("tater_llm_debug_auto_scroll", state.llmDebugAutoScroll ? "true" : "false");
+    updateLlmDebugAutoscrollButton();
+    if (state.llmDebugAutoScroll && llmDebugEventsEl) {
+      llmDebugEventsEl.scrollTop = llmDebugEventsEl.scrollHeight;
+    }
+  });
+  llmDebugClearEl?.addEventListener("click", () => {
+    state.llmDebugEvents = [];
+    renderLlmDebugEvents();
+    setLlmDebugStatus("Debug view cleared. New events will continue to appear.");
   });
   hfModelBrowserViewButtons.forEach((button) => {
     button.addEventListener("click", () => {
@@ -21060,6 +21468,11 @@ async function loadSettingsView() {
     const baseModel = getHydraBaseModelValue();
     const baseApiKey = String(document.getElementById("set_hydra_llm_api_key")?.value || "").trim();
     const hfTransformersContextTokens = String(document.getElementById("set_hydra_hf_transformers_context_tokens")?.value || "").trim();
+    const hfTransformersDevice = String(document.getElementById("set_hydra_hf_transformers_device")?.value || "auto").trim();
+    const hfTransformersDtype = String(document.getElementById("set_hydra_hf_transformers_dtype")?.value || "auto").trim();
+    const hfTransformersDeviceMap = String(document.getElementById("set_hydra_hf_transformers_device_map")?.value || "default").trim();
+    const hfTransformersAttnImplementation = String(document.getElementById("set_hydra_hf_transformers_attn_implementation")?.value || "auto").trim();
+    const hfTransformersTrustRemoteCode = Boolean(document.getElementById("set_hydra_hf_transformers_trust_remote_code")?.checked);
     const llamaCppContextTokens = String(document.getElementById("set_hydra_llama_cpp_context_tokens")?.value || "").trim();
     const llamaCppMtpEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
     const llamaCppMtpDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
@@ -21068,6 +21481,12 @@ async function loadSettingsView() {
     const llamaCppFlashAttn = Boolean(document.getElementById("set_hydra_llama_cpp_flash_attn")?.checked);
     const llamaCppOffloadKqv = Boolean(document.getElementById("set_hydra_llama_cpp_offload_kqv")?.checked);
     const mlxLmContextTokens = String(document.getElementById("set_hydra_mlx_lm_context_tokens")?.value || "").trim();
+    const mlxLmTrustRemoteCode = Boolean(document.getElementById("set_hydra_mlx_lm_trust_remote_code")?.checked);
+    const mlxLmLazyLoad = Boolean(document.getElementById("set_hydra_mlx_lm_lazy_load")?.checked);
+    const mlxEnginePrefillStepSize = String(document.getElementById("set_hydra_mlx_engine_prefill_step_size")?.value || "").trim();
+    const mlxEngineKvBits = String(document.getElementById("set_hydra_mlx_engine_kv_bits")?.value || "").trim();
+    const mlxEngineKvGroupSize = String(document.getElementById("set_hydra_mlx_engine_kv_group_size")?.value || "").trim();
+    const mlxEngineQuantizedKvStart = String(document.getElementById("set_hydra_mlx_engine_quantized_kv_start")?.value || "").trim();
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [
       normalizeHydraBaseRowInput({ provider: baseProvider, host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
@@ -21085,6 +21504,11 @@ async function loadSettingsView() {
         hydra_llm_model: baseModel,
         hydra_llm_api_key: baseApiKey,
         hydra_hf_transformers_context_tokens: hfTransformersContextTokens,
+        hydra_hf_transformers_device: hfTransformersDevice,
+        hydra_hf_transformers_dtype: hfTransformersDtype,
+        hydra_hf_transformers_device_map: hfTransformersDeviceMap,
+        hydra_hf_transformers_attn_implementation: hfTransformersAttnImplementation,
+        hydra_hf_transformers_trust_remote_code: hfTransformersTrustRemoteCode,
         hydra_llama_cpp_context_tokens: llamaCppContextTokens,
         hydra_llama_cpp_mtp_enabled: llamaCppMtpEnabled,
         hydra_llama_cpp_mtp_draft_tokens: llamaCppMtpDraftTokens,
@@ -21093,6 +21517,12 @@ async function loadSettingsView() {
         hydra_llama_cpp_flash_attn: llamaCppFlashAttn,
         hydra_llama_cpp_offload_kqv: llamaCppOffloadKqv,
         hydra_mlx_lm_context_tokens: mlxLmContextTokens,
+        hydra_mlx_lm_trust_remote_code: mlxLmTrustRemoteCode,
+        hydra_mlx_lm_lazy_load: mlxLmLazyLoad,
+        hydra_mlx_engine_prefill_step_size: mlxEnginePrefillStepSize,
+        hydra_mlx_engine_kv_bits: mlxEngineKvBits,
+        hydra_mlx_engine_kv_group_size: mlxEngineKvGroupSize,
+        hydra_mlx_engine_quantized_kv_start: mlxEngineQuantizedKvStart,
         hydra_base_servers: hydraBaseServersPayload,
       },
     };
@@ -23757,6 +24187,9 @@ async function loadView(viewName) {
   if (state.view !== "spudex") {
     clearSpudexPollTimer();
   }
+  if (state.view !== "settings") {
+    clearLlmDebugPollTimer();
+  }
   document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
   updateHeader();
@@ -23845,6 +24278,7 @@ window.addEventListener("beforeunload", () => {
   }
   clearDashboardRefreshTimer();
   clearSpudexPollTimer();
+  clearLlmDebugPollTimer();
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();
