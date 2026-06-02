@@ -320,22 +320,26 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
 
 Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
-Hugging Face Transformers model files are cached under `agent_lab/models/llm/huggingface` by default; override with `TATER_HF_TRANSFORMERS_MODEL_ROOT`.
-llama.cpp GGUF files are cached under `agent_lab/models/llm/llama-cpp` by default; override with `TATER_LLAMA_CPP_MODEL_ROOT`.
-MLX LM files are cached under `agent_lab/models/llm/mlx` by default; override with `TATER_MLX_LM_MODEL_ROOT`.
-For llama.cpp, the model value can be `owner/repo::filename.gguf`, `owner/repo/path/to/file.gguf`, a bare GGUF repo id such as `owner/repo` to auto-pick a preferred quant, or a local `.gguf` path.
-For MLX LM, the model value can be an MLX-compatible Hugging Face repo such as `mlx-community/Llama-3.2-3B-Instruct-4bit`, or a local MLX model folder.
-Download local Hugging Face Transformers, llama.cpp, or MLX LM models from the Hugging Face mini-tab first, then choose the downloaded model from the Settings mini-tab dropdown. The downloaded model registry is stored at `agent_lab/models/llm/downloaded_models.json` by default.
-The Hugging Face mini-tab can switch between text and vision model browsing. For llama.cpp vision GGUF repos, Tater detects `mmproj*.gguf` projector files and downloads the matching projector beside the selected GGUF when one is available.
-The Hugging Face browser and downloader use the token saved in Integration Manager -> Hugging Face for gated/private models and higher Hub rate limits; explicit env overrides like `TATER_HF_MODEL_BROWSER_TOKEN`, `TATER_HF_TRANSFORMERS_TOKEN`, or `TATER_MLX_LM_TOKEN` still take priority.
-llama.cpp tries GPU offload by default with `TATER_LLAMA_CPP_N_GPU_LAYERS=auto`; set it to `0` for CPU-only or to a specific layer count. GPU offload depends on installing llama-cpp-python with CUDA, Metal, or another supported acceleration build. On NVIDIA, rerun `sh setup_tater.sh nvidia` to replace a CPU-only llama.cpp install with the CUDA wheel/build path.
-MLX LM is intended for Apple Silicon Macs; use llama.cpp GGUF on Raspberry Pi, Linux, or non-Apple-Silicon devices.
-Thinking suppression is enabled by default for local providers where possible; set `TATER_HF_TRANSFORMERS_DISABLE_THINKING=false`, `TATER_LLAMA_CPP_DISABLE_THINKING=false`, or `TATER_MLX_LM_DISABLE_THINKING=false` if a model should keep its native reasoning tags.
-Local provider context length can be adjusted with a slider in Settings -> Models -> LLM / Vision. When Tater can read cached model metadata, the slider max follows the model's context limit. Transformers uses the value as the prompt truncation limit, llama.cpp uses it as `n_ctx`, and MLX LM uses it as `max_kv_size`.
-Vision can stay on an OpenAI-compatible API, automatically try the Base model first, use the Base model only, or load a dedicated local vision model. A loaded Base model is reused for local vision when its provider/model cache is already vision-capable; dedicated vision models are loaded and unloaded independently from Base.
 
-Access-log note:
-- `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request lines.
+### Local Models
 
+- Download local Hugging Face Transformers, llama.cpp GGUF, or MLX models from the Hugging Face mini-tab first, then select them from Settings.
+- Model caches live under `agent_lab/models/llm/` by default:
+  - `huggingface` for Transformers
+  - `llama-cpp` for GGUF models and matching `mmproj*.gguf` vision projectors
+  - `mlx` for MLX text and vision models
+- The Hugging Face browser uses the token saved in **Integration Manager -> Hugging Face** for private/gated models and better Hub rate limits.
+- llama.cpp uses GPU offload by default when the installed build supports it. Set `TATER_LLAMA_CPP_N_GPU_LAYERS=0` for CPU-only.
+- MLX is intended for Apple Silicon Macs. Use llama.cpp GGUF on Linux, Raspberry Pi, NVIDIA, AMD/ROCm, Jetson, or other non-Apple-Silicon devices.
 
-https://github.com/user-attachments/assets/9138f485-ccd6-46e0-9295-f5617c079fea
+### Vision
+
+- Vision can use an OpenAI-compatible API, the loaded Base model, or a dedicated local vision model.
+- If Base is already loaded and vision-capable, Tater reuses it instead of loading the same model twice.
+- Dedicated vision models are managed separately from Base.
+
+### Advanced Notes
+
+- Local context length is configured in **Settings -> Models -> LLM / Vision**.
+- Thinking suppression is enabled by default for local providers when supported.
+- `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request log spam.
