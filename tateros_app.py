@@ -2429,7 +2429,10 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
                     "downloaded_ts": float(latest_snapshot.stat().st_mtime if latest_snapshot.exists() else time.time()),
                     "max_context_tokens": max_context,
                     "context_source": context_source,
-                    "supports_vision": bool(_local_llm_json_files_support_vision(latest_snapshot)),
+                    "supports_vision": bool(
+                        provider_token != HYDRA_LLM_PROVIDER_MLX_LM
+                        and _local_llm_json_files_support_vision(latest_snapshot)
+                    ),
                 }
             )
     return rows
@@ -2471,7 +2474,9 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     supports_vision = bool(row.get("supports_vision"))
     mmproj_filename = str(row.get("mmproj_filename") or "").strip()
     mmproj_path = str(row.get("mmproj_path") or "").strip()
-    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+    if provider == HYDRA_LLM_PROVIDER_MLX_LM:
+        supports_vision = False
+    elif provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         path_obj = Path(str(row.get("model_path") or "")).expanduser()
         if path_obj.exists():
             detected_mmproj = _local_llm_mmproj_for_gguf(path_obj)

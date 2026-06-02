@@ -554,8 +554,6 @@ _MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {
 _MLX_VLM_MODEL_CACHE: Dict[Tuple[str, bool, bool], Dict[str, Any]] = {}
 _MLX_VLM_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
-_MLX_VLM_TEXT_FALLBACKS: Dict[str, str] = {}
-_MLX_VLM_TEXT_FALLBACK_LOCK = threading.RLock()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -2597,10 +2595,6 @@ def _mlx_lm_lazy_load() -> bool:
 
 def _mlx_lm_disable_thinking_enabled() -> bool:
     return _boolish(os.getenv("TATER_MLX_LM_DISABLE_THINKING"), default=True)
-
-
-def _mlx_vlm_text_chat_enabled() -> bool:
-    return _boolish(os.getenv("TATER_MLX_VLM_TEXT_CHAT"), default=False)
 
 
 def _local_no_thinking_template_variants(enabled: bool = True) -> Tuple[Dict[str, Any], ...]:
@@ -5164,10 +5158,6 @@ def _load_mlx_lm_bundle(
         if chat_template_warning:
             logger.warning("[mlx-lm] %s", chat_template_warning)
 
-        supports_vision = (
-            _mlx_vlm_model_id_looks_vision_capable(model_token)
-            or _mlx_vlm_model_path_looks_vision_capable(model_path)
-        )
         generation_lock = _MLX_LM_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
             generation_lock = threading.RLock()
@@ -5186,8 +5176,8 @@ def _load_mlx_lm_bundle(
             "chat_template_override": bool(chat_template_override),
             "chat_template_handler": chat_template_handler,
             "chat_template_warning": chat_template_warning,
-            "supports_vision": bool(supports_vision),
-            "vision_chat_handler": "mlx-vlm" if supports_vision else "",
+            "supports_vision": False,
+            "vision_chat_handler": "",
             "generate": mlx_generate,
             "stream_generate": mlx_stream_generate,
             "make_sampler": make_sampler,
@@ -5212,45 +5202,7 @@ def preload_mlx_lm_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
-    try:
-        bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
-    except Exception as lm_exc:
-        reason = ""
-        if _mlx_vlm_text_chat_enabled() and _mlx_vlm_should_handle_model(
-            model_id,
-            progress_callback=progress_callback,
-        ):
-            try:
-                bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
-                return {
-                    "ok": True,
-                    "model": str(model_id or "").strip(),
-                    "device": str(bundle.get("device") or "apple_silicon"),
-                    "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
-                    "model_path": str(bundle.get("model_path") or ""),
-                    "supports_vision": True,
-                    "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
-                    "warning": _llama_cpp_warning_text(
-                        "MLX VLM text chat is experimental and enabled by TATER_MLX_VLM_TEXT_CHAT.",
-                        bundle.get("chat_template_warning"),
-                    ),
-                    "runtime": "mlx-vlm",
-                }
-            except Exception as vlm_exc:
-                reason = str(vlm_exc or "").strip() or vlm_exc.__class__.__name__
-        if reason:
-            logger.warning("[mlx-vlm] experimental text chat load failed for %s: %s", model_id, reason)
-        detail = str(lm_exc or "").strip() or lm_exc.__class__.__name__
-        if len(detail) > 700:
-            detail = detail[:700].rstrip() + "..."
-        if _mlx_vlm_model_id_looks_vision_capable(model_id):
-            raise RuntimeError(
-                "MLX text chat uses mlx-lm, and this vision-capable repo could not be loaded as a text model. "
-                "Use a dedicated MLX-LM text model for chat, or use this repo only from the Vision model setting/image tool. "
-                f"Original mlx-lm error: {detail}"
-            ) from lm_exc
-        raise
-
+    bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
     return {
         "ok": True,
         "model": str(model_id or "").strip(),
@@ -5273,14 +5225,13 @@ def download_mlx_lm_llm_model(
     if not model_token:
         raise RuntimeError("MLX LM model id or local path is required.")
     model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-    supports_vision = _mlx_vlm_model_id_looks_vision_capable(model_token) or _mlx_vlm_model_path_looks_vision_capable(model_path)
     return {
         "ok": True,
         "model": model_token,
         "model_root": _mlx_lm_model_root(),
         "model_path": model_path,
-        "supports_vision": bool(supports_vision),
-        "vision_chat_handler": "mlx-vlm" if supports_vision else "",
+        "supports_vision": False,
+        "vision_chat_handler": "",
     }
 
 
@@ -5290,165 +5241,6 @@ def _mlx_vlm_cache_key(model_id: str) -> Tuple[str, bool, bool]:
         _mlx_lm_trust_remote_code(),
         _mlx_lm_lazy_load(),
     )
-
-
-def _mlx_vlm_loaded_bundle_for_model(model_id: str) -> Optional[Dict[str, Any]]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        return None
-    cache_key = _mlx_vlm_cache_key(model_token)
-    with _MLX_VLM_MODEL_CACHE_LOCK:
-        cached = _MLX_VLM_MODEL_CACHE.get(cache_key)
-        return cached if isinstance(cached, dict) else None
-
-
-def _mlx_vlm_text_fallback_reason(model_id: Any) -> str:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        return ""
-    with _MLX_VLM_TEXT_FALLBACK_LOCK:
-        return str(_MLX_VLM_TEXT_FALLBACKS.get(model_token) or "")
-
-
-def _mark_mlx_vlm_text_fallback(model_id: Any, exc: BaseException) -> str:
-    model_token = str(model_id or "").strip()
-    reason = str(exc or "").strip() or exc.__class__.__name__
-    if len(reason) > 1200:
-        reason = reason[:1200].rstrip() + "..."
-    if not model_token:
-        return reason
-    with _MLX_VLM_TEXT_FALLBACK_LOCK:
-        _MLX_VLM_TEXT_FALLBACKS[model_token] = reason
-    return reason
-
-
-def _mlx_vlm_model_id_looks_vision_capable(model_id: Any) -> bool:
-    lowered = str(model_id or "").strip().lower()
-    if not lowered:
-        return False
-    normalized = re.sub(r"[^a-z0-9]+", "-", lowered)
-    tokens = (
-        "vlm",
-        "vision",
-        "visual",
-        "multimodal",
-        "multi-modal",
-        "llava",
-        "paligemma",
-        "pixtral",
-        "idefics",
-        "qwen-vl",
-        "qwen2-vl",
-        "qwen2-5-vl",
-        "qwen3-vl",
-        "gemma-3n",
-        "gemma3n",
-    )
-    return any(token in normalized for token in tokens)
-
-
-def _mlx_vlm_json_looks_vision_capable(value: Any, *, depth: int = 0) -> bool:
-    if depth > 5:
-        return False
-    vision_keys = {
-        "vision_config",
-        "image_token_id",
-        "mm_vision_tower",
-        "vision_tower",
-        "image_processor",
-        "image_processor_class",
-        "vision_processor",
-        "vision_feature_select_strategy",
-        "image_seq_length",
-    }
-    vision_tokens = ("vision", "vl", "vla", "image", "multimodal", "multi-modal", "llava", "pixtral", "paligemma")
-    if isinstance(value, dict):
-        for key, item in value.items():
-            key_text = str(key or "").strip().lower()
-            if key_text in vision_keys and item not in (None, "", [], {}):
-                return True
-            if key_text in {"model_type", "processor_class", "feature_extractor_type"}:
-                item_text = str(item or "").strip().lower()
-                if any(token in item_text for token in vision_tokens):
-                    return True
-            if key_text == "architectures" and isinstance(item, list):
-                joined = " ".join(str(part or "") for part in item).lower()
-                if any(token in joined for token in vision_tokens):
-                    return True
-            if isinstance(item, (dict, list)) and _mlx_vlm_json_looks_vision_capable(item, depth=depth + 1):
-                return True
-        return False
-    if isinstance(value, list):
-        return any(_mlx_vlm_json_looks_vision_capable(item, depth=depth + 1) for item in value[:80])
-    return False
-
-
-def _mlx_vlm_model_path_looks_vision_capable(model_path: Any) -> bool:
-    raw_path = str(model_path or "").strip()
-    if not raw_path:
-        return False
-    path = Path(raw_path).expanduser()
-    if path.is_file():
-        path = path.parent
-    if not path.is_dir():
-        return False
-
-    vision_marker_files = {
-        "preprocessor_config.json",
-        "image_processor_config.json",
-        "processor_config.json",
-    }
-    try:
-        names = {item.name for item in path.iterdir() if item.is_file()}
-    except Exception:
-        names = set()
-    if names.intersection(vision_marker_files):
-        return True
-
-    for filename in ("config.json", "preprocessor_config.json", "processor_config.json", "chat_template.json", "tokenizer_config.json"):
-        candidate = path / filename
-        if not candidate.is_file():
-            continue
-        try:
-            if candidate.stat().st_size > 2_000_000:
-                continue
-            text = candidate.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if not text.strip():
-            continue
-        try:
-            parsed = json.loads(text)
-            if _mlx_vlm_json_looks_vision_capable(parsed):
-                return True
-        except Exception:
-            lowered = text.lower()
-            if any(token in lowered for token in ("<image", "image_token", "vision", "pixel_values")):
-                return True
-    return False
-
-
-def _mlx_vlm_should_handle_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> bool:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        return False
-    if _mlx_vlm_loaded_bundle_for_model(model_token):
-        return True
-    if _mlx_lm_loaded_bundle_for_model(model_token):
-        return False
-    if _mlx_vlm_text_fallback_reason(model_token):
-        return False
-    if _mlx_vlm_model_id_looks_vision_capable(model_token):
-        return True
-    try:
-        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-    except Exception:
-        return False
-    return _mlx_vlm_model_path_looks_vision_capable(model_path)
 
 
 def _load_mlx_vlm_bundle(
@@ -7830,51 +7622,6 @@ class MlxLmLLMClientWrapper:
         except Exception:
             return 0
 
-    def _vlm_prompt_text(self, messages: List[Dict[str, Any]]) -> str:
-        parts: List[str] = []
-        for item in (messages if isinstance(messages, list) else []):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip().lower()
-            content = _coerce_content_to_text(item.get("content")).strip()
-            if not content:
-                continue
-            if role == "system":
-                parts.append(f"System: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
-                parts.append(f"User: {content}")
-        return "\n\n".join(parts).strip() or "Hello."
-
-    def _vlm_chat_template_prompt(self, bundle: Dict[str, Any], messages: List[Dict[str, Any]]) -> str:
-        local_messages = _mlx_lm_disable_thinking_messages(messages)
-        prompt_text = self._vlm_prompt_text(local_messages)
-        apply_chat_template = bundle.get("apply_chat_template")
-        processor = bundle.get("processor")
-        config = bundle.get("config") or getattr(bundle.get("model"), "config", None)
-        if callable(apply_chat_template):
-            template_variants = [
-                _merge_template_kwargs(thinking, image)
-                for thinking in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
-                for image in ({"num_images": 0}, {})
-            ]
-            seen_variants: set[Tuple[Tuple[str, str], ...]] = set()
-            for extra in template_variants:
-                signature = tuple(sorted((str(key), repr(value)) for key, value in extra.items()))
-                if signature in seen_variants:
-                    continue
-                seen_variants.add(signature)
-                try:
-                    prompt = apply_chat_template(processor, config, prompt_text, **extra)
-                    return _coerce_content_to_text(prompt)
-                except TypeError:
-                    continue
-                except Exception as exc:
-                    logger.debug("MLX VLM chat template failed; using plain prompt: %s", exc)
-                    break
-        return prompt_text
-
     def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
@@ -7936,83 +7683,8 @@ class MlxLmLLMClientWrapper:
                 generation_kwargs[key] = kwargs.pop(key)
         return generation_kwargs
 
-    def _build_vlm_generation_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        generation_kwargs: Dict[str, Any] = {"verbose": False}
-        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
-        try:
-            generation_kwargs["max_tokens"] = max(1, int(max_tokens))
-        except Exception:
-            generation_kwargs["max_tokens"] = self.max_tokens
-        temperature = kwargs.pop("temperature", self.temperature)
-        try:
-            generation_kwargs["temperature"] = max(0.0, float(temperature))
-        except Exception:
-            generation_kwargs["temperature"] = self.temperature
-        return generation_kwargs
-
-    def _chat_sync_vlm(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
-        _ = timeout
-        stop = kwargs.pop("stop", None)
-        seed = kwargs.pop("seed", None)
-        bundle = _load_mlx_vlm_bundle(self.model)
-        model_obj = bundle["model"]
-        processor = bundle["processor"]
-        generation_lock = bundle["lock"]
-        prompt = self._vlm_chat_template_prompt(bundle, messages)
-        generation_kwargs = self._build_vlm_generation_kwargs(kwargs)
-
-        if seed is not None:
-            try:
-                import mlx.core as mx  # type: ignore
-
-                mx.random.seed(int(seed))
-            except Exception:
-                pass
-
-        tokenizer = _mlx_vlm_processor_tokenizer(bundle)
-        prompt_tokens = self._estimate_tokens(tokenizer, prompt)
-        generation_started = time.perf_counter()
-        with generation_lock:
-            output = _mlx_vlm_generate_with_fallback(
-                bundle.get("generate"),
-                model_obj,
-                processor,
-                prompt,
-                [],
-                generation_kwargs,
-                allow_no_images=True,
-            )
-        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-        content = _strip_local_thinking_blocks(_apply_local_stop_sequences(_mlx_vlm_result_text(output), stop)).strip()
-        completion_tokens = self._estimate_tokens(tokenizer, content)
-        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
-        return {
-            "model": self.model,
-            "message": {"role": "assistant", "content": content},
-            "_usage": {
-                "prompt_tokens": max(0, int(prompt_tokens)),
-                "completion_tokens": max(0, int(completion_tokens)),
-                "total_tokens": max(0, int(total_tokens)),
-            },
-            "_timing": {
-                "prompt_elapsed": 0.0,
-                "completion_elapsed": generation_elapsed,
-                "speed_basis": "mlx_vlm_generate",
-            },
-        }
-
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         _ = timeout
-        if _mlx_vlm_text_chat_enabled() and _mlx_vlm_should_handle_model(self.model):
-            try:
-                return self._chat_sync_vlm(messages, timeout=timeout, **dict(kwargs))
-            except Exception as exc:
-                reason = _mark_mlx_vlm_text_fallback(self.model, exc)
-                logger.warning(
-                    "[mlx-vlm] experimental text chat failed for %s; falling back to mlx-lm: %s",
-                    self.model,
-                    reason,
-                )
         stop = kwargs.pop("stop", None)
         seed = kwargs.pop("seed", None)
         bundle = _load_mlx_lm_bundle(self.model)
