@@ -546,6 +546,8 @@ _MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {
 _MLX_VLM_MODEL_CACHE: Dict[Tuple[str, bool, bool], Dict[str, Any]] = {}
 _MLX_VLM_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
+_MLX_VLM_TEXT_FALLBACKS: Dict[str, str] = {}
+_MLX_VLM_TEXT_FALLBACK_LOCK = threading.RLock()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -5134,20 +5136,30 @@ def preload_mlx_lm_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
+    vlm_fallback_warning = ""
     if _mlx_vlm_should_handle_model(model_id, progress_callback=progress_callback):
-        bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
-        return {
-            "ok": True,
-            "model": str(model_id or "").strip(),
-            "device": str(bundle.get("device") or "apple_silicon"),
-            "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
-            "model_path": str(bundle.get("model_path") or ""),
-            "supports_vision": True,
-            "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
-            "warning": str(bundle.get("chat_template_warning") or ""),
-            "runtime": "mlx-vlm",
-        }
+        try:
+            bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
+            return {
+                "ok": True,
+                "model": str(model_id or "").strip(),
+                "device": str(bundle.get("device") or "apple_silicon"),
+                "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
+                "model_path": str(bundle.get("model_path") or ""),
+                "supports_vision": True,
+                "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
+                "warning": str(bundle.get("chat_template_warning") or ""),
+                "runtime": "mlx-vlm",
+            }
+        except Exception as exc:
+            reason = _mark_mlx_vlm_text_fallback(model_id, exc)
+            vlm_fallback_warning = (
+                "MLX vision load failed, so Tater loaded this model with MLX LM for text chat. "
+                f"Vision remains unavailable for this model until mlx-vlm can load it: {reason}"
+            )
+            logger.warning("[mlx-vlm] %s", vlm_fallback_warning)
     bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
+    warning = _llama_cpp_warning_text(bundle.get("chat_template_warning"), vlm_fallback_warning)
     return {
         "ok": True,
         "model": str(model_id or "").strip(),
@@ -5155,7 +5167,7 @@ def preload_mlx_lm_llm_model(
         "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
         "model_path": str(bundle.get("model_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
-        "warning": str(bundle.get("chat_template_warning") or ""),
+        "warning": warning,
         "runtime": "mlx-lm",
     }
 
@@ -5196,6 +5208,26 @@ def _mlx_vlm_loaded_bundle_for_model(model_id: str) -> Optional[Dict[str, Any]]:
     with _MLX_VLM_MODEL_CACHE_LOCK:
         cached = _MLX_VLM_MODEL_CACHE.get(cache_key)
         return cached if isinstance(cached, dict) else None
+
+
+def _mlx_vlm_text_fallback_reason(model_id: Any) -> str:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        return ""
+    with _MLX_VLM_TEXT_FALLBACK_LOCK:
+        return str(_MLX_VLM_TEXT_FALLBACKS.get(model_token) or "")
+
+
+def _mark_mlx_vlm_text_fallback(model_id: Any, exc: BaseException) -> str:
+    model_token = str(model_id or "").strip()
+    reason = str(exc or "").strip() or exc.__class__.__name__
+    if len(reason) > 1200:
+        reason = reason[:1200].rstrip() + "..."
+    if not model_token:
+        return reason
+    with _MLX_VLM_TEXT_FALLBACK_LOCK:
+        _MLX_VLM_TEXT_FALLBACKS[model_token] = reason
+    return reason
 
 
 def _mlx_vlm_model_id_looks_vision_capable(model_id: Any) -> bool:
@@ -5315,6 +5347,8 @@ def _mlx_vlm_should_handle_model(
     if _mlx_vlm_loaded_bundle_for_model(model_token):
         return True
     if _mlx_lm_loaded_bundle_for_model(model_token):
+        return False
+    if _mlx_vlm_text_fallback_reason(model_token):
         return False
     if _mlx_vlm_model_id_looks_vision_capable(model_token):
         return True
@@ -7878,7 +7912,15 @@ class MlxLmLLMClientWrapper:
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         _ = timeout
         if _mlx_vlm_should_handle_model(self.model):
-            return self._chat_sync_vlm(messages, timeout=timeout, **kwargs)
+            try:
+                return self._chat_sync_vlm(messages, timeout=timeout, **kwargs)
+            except Exception as exc:
+                reason = _mark_mlx_vlm_text_fallback(self.model, exc)
+                logger.warning(
+                    "[mlx-vlm] text chat load failed for %s; falling back to mlx-lm: %s",
+                    self.model,
+                    reason,
+                )
         stop = kwargs.pop("stop", None)
         seed = kwargs.pop("seed", None)
         bundle = _load_mlx_lm_bundle(self.model)
