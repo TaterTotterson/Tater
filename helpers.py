@@ -2541,6 +2541,25 @@ def _mlx_lm_disable_thinking_enabled() -> bool:
     return _boolish(os.getenv("TATER_MLX_LM_DISABLE_THINKING"), default=True)
 
 
+def _local_no_thinking_template_variants(enabled: bool = True) -> Tuple[Dict[str, Any], ...]:
+    if not enabled:
+        return ({},)
+    return (
+        {"enable_thinking": False, "reasoning_budget": 0},
+        {"enable_thinking": False},
+        {"reasoning_budget": 0},
+        {},
+    )
+
+
+def _merge_template_kwargs(*items: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for item in items:
+        if isinstance(item, dict):
+            merged.update(item)
+    return merged
+
+
 def _mlx_lm_adapter_path() -> str:
     return os.path.abspath(os.path.expanduser(str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip())) if str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip() else ""
 
@@ -6169,7 +6188,7 @@ class LLMClientWrapper:
 
             choice = response.choices[0].message or {}
             raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
-            content_text = _coerce_content_to_text(raw_content)
+            content_text = _strip_local_thinking_blocks(raw_content).strip()
 
             return {
                 "model": getattr(response, "model", model),
@@ -6313,7 +6332,7 @@ class TransformersLLMClientWrapper:
         if block_messages != messages:
             variants.append(block_messages)
         last_exc: Optional[Exception] = None
-        thinking_variants = ({"enable_thinking": False}, {}) if _hf_transformers_disable_thinking_enabled() else ({},)
+        thinking_variants = _local_no_thinking_template_variants(_hf_transformers_disable_thinking_enabled())
         for variant in variants:
             for extra in thinking_variants:
                 try:
@@ -6682,8 +6701,12 @@ def _strip_local_thinking_blocks(text: Any) -> str:
     if not content:
         return ""
     content = re.sub(r"(?is)<think>.*?</think>", "", content).strip()
+    if re.search(r"(?is)</think>", content) and not re.search(r"(?is)<think>", content):
+        content = re.sub(r"(?is)^.*?</think>", "", content).strip()
     content = re.sub(r"(?is)^<think>.*", "", content).strip()
     content = re.sub(r"(?is)<\|channel\>thought\s*.*?<channel\|>", "", content).strip()
+    if re.search(r"(?is)<channel\|>", content) and not re.search(r"(?is)<\|channel\>thought", content):
+        content = re.sub(r"(?is)^.*?<channel\|>", "", content).strip()
     content = re.sub(r"(?is)^<\|channel\>thought\s*.*", "", content).strip()
     return content
 
@@ -6756,7 +6779,10 @@ class LlamaCppLLMClientWrapper:
         else:
             chat_template_kwargs = {}
         if _llama_cpp_disable_thinking_enabled():
-            chat_template_kwargs.setdefault("enable_thinking", False)
+            chat_template_kwargs = _merge_template_kwargs(
+                {"enable_thinking": False, "reasoning_budget": 0},
+                chat_template_kwargs,
+            )
         if chat_template_kwargs:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
@@ -7011,7 +7037,7 @@ class MlxLmLLMClientWrapper:
         template = getattr(tokenizer, "apply_chat_template", None)
         if callable(template):
             last_exc: Optional[Exception] = None
-            thinking_variants = ({"enable_thinking": False}, {}) if _mlx_lm_disable_thinking_enabled() else ({},)
+            thinking_variants = _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
             for extra in thinking_variants:
                 try:
                     prompt = template(local_messages, tokenize=False, add_generation_prompt=True, **extra)
@@ -7057,7 +7083,17 @@ class MlxLmLLMClientWrapper:
         processor = bundle.get("processor")
         config = bundle.get("config") or getattr(bundle.get("model"), "config", None)
         if callable(apply_chat_template):
-            for extra in ({"num_images": 0}, {}):
+            template_variants = [
+                _merge_template_kwargs(thinking, image)
+                for thinking in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
+                for image in ({"num_images": 0}, {})
+            ]
+            seen_variants: set[Tuple[Tuple[str, str], ...]] = set()
+            for extra in template_variants:
+                signature = tuple(sorted((str(key), repr(value)) for key, value in extra.items()))
+                if signature in seen_variants:
+                    continue
+                seen_variants.add(signature)
                 try:
                     prompt = apply_chat_template(processor, config, prompt_text, **extra)
                     return _coerce_content_to_text(prompt)
@@ -7749,10 +7785,32 @@ def _describe_image_with_mlx_vlm(
             raise RuntimeError("MLX vision runtime is missing generate/template helpers.")
 
         prompt_text = str(prompt or "").strip() or "Describe this image."
-        try:
-            formatted_prompt = apply_chat_template(processor, config, prompt_text, num_images=1)
-        except TypeError:
-            formatted_prompt = apply_chat_template(processor, config, prompt_text)
+        formatted_prompt = ""
+        template_variants = [
+            _merge_template_kwargs(thinking, image)
+            for thinking in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
+            for image in ({"num_images": 1}, {})
+        ]
+        seen_variants: set[Tuple[Tuple[str, str], ...]] = set()
+        last_template_exc: Optional[Exception] = None
+        for extra in template_variants:
+            signature = tuple(sorted((str(key), repr(value)) for key, value in extra.items()))
+            if signature in seen_variants:
+                continue
+            seen_variants.add(signature)
+            try:
+                formatted_prompt = _coerce_content_to_text(apply_chat_template(processor, config, prompt_text, **extra))
+                break
+            except TypeError as exc:
+                last_template_exc = exc
+                continue
+            except Exception as exc:
+                last_template_exc = exc
+                break
+        if not formatted_prompt:
+            if last_template_exc is not None:
+                logger.debug("MLX VLM image chat template failed; using plain prompt: %s", last_template_exc)
+            formatted_prompt = prompt_text
 
         generation_kwargs: Dict[str, Any] = {
             "max_tokens": 768,
