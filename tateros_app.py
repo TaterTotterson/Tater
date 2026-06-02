@@ -65,9 +65,13 @@ from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_
 from notify import notifier_destination_catalog
 from helpers import (
     DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
+    DEFAULT_LLAMA_CPP_FLASH_ATTN,
     DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_ENABLED,
+    DEFAULT_LLAMA_CPP_N_BATCH,
+    DEFAULT_LLAMA_CPP_N_UBATCH,
+    DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
     DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
     HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
     HYDRA_LLM_BASE_SERVERS_KEY,
@@ -77,8 +81,12 @@ from helpers import (
     HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
+    HYDRA_LLAMA_CPP_FLASH_ATTN_KEY,
     HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
     HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
+    HYDRA_LLAMA_CPP_N_BATCH_KEY,
+    HYDRA_LLAMA_CPP_N_UBATCH_KEY,
+    HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
     HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
     HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
     HfLlmDownloadCancelled,
@@ -6098,6 +6106,10 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_enabled: Optional[bool] = None
     hydra_llama_cpp_mtp_draft_tokens: Optional[Any] = None
+    hydra_llama_cpp_n_batch: Optional[Any] = None
+    hydra_llama_cpp_n_ubatch: Optional[Any] = None
+    hydra_llama_cpp_flash_attn: Optional[bool] = None
+    hydra_llama_cpp_offload_kqv: Optional[bool] = None
     hydra_mlx_lm_context_tokens: Optional[Any] = None
     spudex_llm_provider: Optional[str] = None
     spudex_llm_host: Optional[str] = None
@@ -12108,6 +12120,10 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
         "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
         "hydra_llama_cpp_mtp_draft_tokens": str(DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS),
+        "hydra_llama_cpp_n_batch": str(DEFAULT_LLAMA_CPP_N_BATCH),
+        "hydra_llama_cpp_n_ubatch": "",
+        "hydra_llama_cpp_flash_attn": bool(DEFAULT_LLAMA_CPP_FLASH_ATTN),
+        "hydra_llama_cpp_offload_kqv": bool(DEFAULT_LLAMA_CPP_OFFLOAD_KQV),
         "hydra_mlx_lm_context_tokens": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
@@ -12236,6 +12252,30 @@ def get_settings() -> Dict[str, Any]:
             DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
             minimum=1,
             maximum=16,
+        ),
+        "hydra_llama_cpp_n_batch": _read_bounded_int_setting(
+            HYDRA_LLAMA_CPP_N_BATCH_KEY,
+            ("TATER_LLAMA_CPP_N_BATCH",),
+            DEFAULT_LLAMA_CPP_N_BATCH,
+            minimum=32,
+            maximum=8192,
+        ),
+        "hydra_llama_cpp_n_ubatch": _read_bounded_int_setting(
+            HYDRA_LLAMA_CPP_N_UBATCH_KEY,
+            ("TATER_LLAMA_CPP_N_UBATCH",),
+            DEFAULT_LLAMA_CPP_N_UBATCH,
+            minimum=0,
+            maximum=8192,
+        ),
+        "hydra_llama_cpp_flash_attn": _read_bool_setting(
+            HYDRA_LLAMA_CPP_FLASH_ATTN_KEY,
+            ("TATER_LLAMA_CPP_FLASH_ATTN",),
+            DEFAULT_LLAMA_CPP_FLASH_ATTN,
+        ),
+        "hydra_llama_cpp_offload_kqv": _read_bool_setting(
+            HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
+            ("TATER_LLAMA_CPP_OFFLOAD_KQV",),
+            DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
         ),
         "hydra_mlx_lm_context_tokens": _read_local_llm_context_setting(
             HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
@@ -13528,6 +13568,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_context_tokens",
         "hydra_llama_cpp_mtp_enabled",
         "hydra_llama_cpp_mtp_draft_tokens",
+        "hydra_llama_cpp_n_batch",
+        "hydra_llama_cpp_n_ubatch",
+        "hydra_llama_cpp_flash_attn",
+        "hydra_llama_cpp_offload_kqv",
         "hydra_mlx_lm_context_tokens",
     }
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
@@ -13638,6 +13682,30 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         default=DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
         min_value=1,
         max_value=16,
+    )
+    _save_bounded_int_setting(
+        "hydra_llama_cpp_n_batch",
+        HYDRA_LLAMA_CPP_N_BATCH_KEY,
+        default=DEFAULT_LLAMA_CPP_N_BATCH,
+        min_value=32,
+        max_value=8192,
+    )
+    _save_bounded_int_setting(
+        "hydra_llama_cpp_n_ubatch",
+        HYDRA_LLAMA_CPP_N_UBATCH_KEY,
+        default=DEFAULT_LLAMA_CPP_N_UBATCH,
+        min_value=0,
+        max_value=8192,
+    )
+    _save_bool_setting(
+        "hydra_llama_cpp_flash_attn",
+        HYDRA_LLAMA_CPP_FLASH_ATTN_KEY,
+        default=DEFAULT_LLAMA_CPP_FLASH_ATTN,
+    )
+    _save_bool_setting(
+        "hydra_llama_cpp_offload_kqv",
+        HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
+        default=DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
     )
     _save_local_llm_context_setting(
         "hydra_mlx_lm_context_tokens",

@@ -16917,6 +16917,46 @@ async function loadSettingsView() {
                   <div id="hydra-llama-context-hint" class="small hydra-context-hint"></div>
                   <div id="hydra-llama-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="llama_cpp"></div>
                 </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Eval Batch Size
+                  <div class="hydra-context-control hydra-llama-perf-control">
+                    <input id="set_hydra_llama_cpp_n_batch_range" type="range" min="32" max="8192" step="32" value="${escapeHtml(
+                      settings.hydra_llama_cpp_n_batch || "512"
+                    )}" />
+                    <input id="set_hydra_llama_cpp_n_batch" type="number" min="32" max="8192" step="32" value="${escapeHtml(
+                      settings.hydra_llama_cpp_n_batch || "512"
+                    )}" />
+                  </div>
+                  <div class="small hydra-context-hint">LM Studio calls this eval batch size. Higher can improve prompt processing when memory allows.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Micro-Batch Size
+                  <div class="hydra-context-control hydra-llama-perf-control">
+                    <input id="set_hydra_llama_cpp_n_ubatch_range" type="range" min="0" max="8192" step="32" value="${escapeHtml(
+                      settings.hydra_llama_cpp_n_ubatch || "0"
+                    )}" />
+                    <input id="set_hydra_llama_cpp_n_ubatch" type="number" min="0" max="8192" step="32" value="${escapeHtml(
+                      settings.hydra_llama_cpp_n_ubatch || "0"
+                    )}" />
+                  </div>
+                  <div class="small hydra-context-hint">0 lets llama.cpp use its default, usually matching the eval batch size.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Flash Attention
+                  ${renderToggleRow(
+                    `<input id="set_hydra_llama_cpp_flash_attn" class="toggle-input" type="checkbox" ${
+                      settings.hydra_llama_cpp_flash_attn ? "checked" : ""
+                    } />`,
+                    "Enable"
+                  )}
+                  <div class="small hydra-context-hint">Matches LM Studio's Flash Attention load option when supported by the backend/model.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">GPU KV Offload
+                  ${renderToggleRow(
+                    `<input id="set_hydra_llama_cpp_offload_kqv" class="toggle-input" type="checkbox" ${
+                      settings.hydra_llama_cpp_offload_kqv !== false ? "checked" : ""
+                    } />`,
+                    "Enable"
+                  )}
+                  <div class="small hydra-context-hint">Keeps attention/KV work on the GPU when llama.cpp supports it.</div>
+                </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Multi-Token Prediction
                   ${renderToggleRow(
                     `<input id="set_hydra_llama_cpp_mtp_enabled" class="toggle-input" type="checkbox" ${
@@ -18293,6 +18333,42 @@ async function loadSettingsView() {
   llamaCppMtpDraftNumberEl?.addEventListener("input", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
   llamaCppMtpDraftNumberEl?.addEventListener("blur", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
   syncLlamaCppMtpDraftControl();
+  const syncPairedIntegerControl = ({ rangeEl, numberEl, fallback = 0, min = 0, max = 8192, step = 1 }) => {
+    if (!rangeEl || !numberEl) {
+      return;
+    }
+    const applyValue = (sourceEl = null) => {
+      const raw = Number(sourceEl?.value || numberEl.value || rangeEl.value || fallback);
+      let value = Number.isFinite(raw) ? Math.round(raw) : fallback;
+      value = Math.max(min, Math.min(max, value));
+      if (step > 1 && value > min) {
+        value = Math.round(value / step) * step;
+        value = Math.max(min, Math.min(max, value));
+      }
+      rangeEl.value = String(value);
+      numberEl.value = String(value);
+    };
+    rangeEl.addEventListener("input", () => applyValue(rangeEl));
+    numberEl.addEventListener("input", () => applyValue(numberEl));
+    numberEl.addEventListener("blur", () => applyValue(numberEl));
+    applyValue();
+  };
+  syncPairedIntegerControl({
+    rangeEl: document.getElementById("set_hydra_llama_cpp_n_batch_range"),
+    numberEl: document.getElementById("set_hydra_llama_cpp_n_batch"),
+    fallback: 512,
+    min: 32,
+    max: 8192,
+    step: 32,
+  });
+  syncPairedIntegerControl({
+    rangeEl: document.getElementById("set_hydra_llama_cpp_n_ubatch_range"),
+    numberEl: document.getElementById("set_hydra_llama_cpp_n_ubatch"),
+    fallback: 0,
+    min: 0,
+    max: 8192,
+    step: 32,
+  });
   const normalizeHydraBaseRowInput = (row) => ({
     provider: normalizeHydraBaseProvider(row?.provider || ""),
     host: String(row?.host || "").trim(),
@@ -20987,6 +21063,10 @@ async function loadSettingsView() {
     const llamaCppContextTokens = String(document.getElementById("set_hydra_llama_cpp_context_tokens")?.value || "").trim();
     const llamaCppMtpEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
     const llamaCppMtpDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
+    const llamaCppNBatch = String(document.getElementById("set_hydra_llama_cpp_n_batch")?.value || "512").trim();
+    const llamaCppNUbatch = String(document.getElementById("set_hydra_llama_cpp_n_ubatch")?.value || "0").trim();
+    const llamaCppFlashAttn = Boolean(document.getElementById("set_hydra_llama_cpp_flash_attn")?.checked);
+    const llamaCppOffloadKqv = Boolean(document.getElementById("set_hydra_llama_cpp_offload_kqv")?.checked);
     const mlxLmContextTokens = String(document.getElementById("set_hydra_mlx_lm_context_tokens")?.value || "").trim();
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [
@@ -21008,6 +21088,10 @@ async function loadSettingsView() {
         hydra_llama_cpp_context_tokens: llamaCppContextTokens,
         hydra_llama_cpp_mtp_enabled: llamaCppMtpEnabled,
         hydra_llama_cpp_mtp_draft_tokens: llamaCppMtpDraftTokens,
+        hydra_llama_cpp_n_batch: llamaCppNBatch,
+        hydra_llama_cpp_n_ubatch: llamaCppNUbatch,
+        hydra_llama_cpp_flash_attn: llamaCppFlashAttn,
+        hydra_llama_cpp_offload_kqv: llamaCppOffloadKqv,
         hydra_mlx_lm_context_tokens: mlxLmContextTokens,
         hydra_base_servers: hydraBaseServersPayload,
       },

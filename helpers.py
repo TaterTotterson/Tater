@@ -493,6 +493,10 @@ HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
 HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
+HYDRA_LLAMA_CPP_N_BATCH_KEY = "tater:hydra:llm:llama_cpp_n_batch"
+HYDRA_LLAMA_CPP_N_UBATCH_KEY = "tater:hydra:llm:llama_cpp_n_ubatch"
+HYDRA_LLAMA_CPP_FLASH_ATTN_KEY = "tater:hydra:llm:llama_cpp_flash_attn"
+HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY = "tater:hydra:llm:llama_cpp_offload_kqv"
 HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:hf_transformers_chat_template_overrides"
 HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
 HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
@@ -502,6 +506,10 @@ DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_MTP_ENABLED = False
 DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS = 3
+DEFAULT_LLAMA_CPP_N_BATCH = 512
+DEFAULT_LLAMA_CPP_N_UBATCH = 0
+DEFAULT_LLAMA_CPP_FLASH_ATTN = False
+DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 HYDRA_LLM_SETUP_ERROR = (
     "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
@@ -1286,12 +1294,28 @@ def _llama_cpp_n_batch(*, vision: bool = False) -> int:
         raw = str(os.getenv("TATER_LLAMA_CPP_VISION_N_BATCH") or "128").strip()
         default = 128
     else:
-        raw = str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or "512").strip()
-        default = 512
+        raw = str(_safe_redis_text_get(HYDRA_LLAMA_CPP_N_BATCH_KEY) or os.getenv("TATER_LLAMA_CPP_N_BATCH") or DEFAULT_LLAMA_CPP_N_BATCH).strip()
+        default = DEFAULT_LLAMA_CPP_N_BATCH
     try:
         value = int(raw)
     except Exception:
         value = default
+    return max(16 if vision else 32, min(8192, value))
+
+
+def _llama_cpp_n_ubatch(*, vision: bool = False) -> int:
+    if vision:
+        raw = str(os.getenv("TATER_LLAMA_CPP_VISION_N_UBATCH") or os.getenv("TATER_LLAMA_CPP_VISION_N_BATCH") or "128").strip()
+        default = 128
+    else:
+        raw = str(_safe_redis_text_get(HYDRA_LLAMA_CPP_N_UBATCH_KEY) or os.getenv("TATER_LLAMA_CPP_N_UBATCH") or DEFAULT_LLAMA_CPP_N_UBATCH).strip()
+        default = DEFAULT_LLAMA_CPP_N_UBATCH
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = int(default)
+    if value <= 0:
+        return 0
     return max(16 if vision else 32, min(8192, value))
 
 
@@ -1320,6 +1344,20 @@ def _llama_cpp_n_gpu_layers() -> int:
         return int(raw)
     except Exception:
         return -1
+
+
+def _llama_cpp_flash_attn_enabled() -> bool:
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_FLASH_ATTN_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_LLAMA_CPP_FLASH_ATTN)
+    return _boolish(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN"), default=DEFAULT_LLAMA_CPP_FLASH_ATTN)
+
+
+def _llama_cpp_offload_kqv_enabled() -> bool:
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY)
+    if raw:
+        return _boolish(raw, default=DEFAULT_LLAMA_CPP_OFFLOAD_KQV)
+    return _boolish(os.getenv("TATER_LLAMA_CPP_OFFLOAD_KQV"), default=DEFAULT_LLAMA_CPP_OFFLOAD_KQV)
 
 
 def _llama_cpp_mtp_enabled() -> bool:
@@ -2450,11 +2488,19 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "n_gpu_layers": _llama_cpp_n_gpu_layers(),
         "n_ctx": _llama_cpp_n_ctx(),
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
+        "n_batch": _llama_cpp_n_batch(),
+        "n_ubatch": _llama_cpp_n_ubatch(),
+        "flash_attn": _llama_cpp_flash_attn_enabled(),
+        "offload_kqv": _llama_cpp_offload_kqv_enabled(),
         "mtp_enabled": _llama_cpp_mtp_enabled(),
         "mtp_spec_type": _llama_cpp_mtp_spec_type(),
         "mtp_draft_tokens": _llama_cpp_mtp_draft_tokens(),
         "env": {
             "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
+            "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
+            "TATER_LLAMA_CPP_N_UBATCH": str(os.getenv("TATER_LLAMA_CPP_N_UBATCH") or ""),
+            "TATER_LLAMA_CPP_FLASH_ATTN": str(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN") or ""),
+            "TATER_LLAMA_CPP_OFFLOAD_KQV": str(os.getenv("TATER_LLAMA_CPP_OFFLOAD_KQV") or ""),
             "TATER_LLAMA_CPP_VISION_N_CTX": str(os.getenv("TATER_LLAMA_CPP_VISION_N_CTX") or ""),
             "TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS") or ""),
             "TATER_LLAMA_CPP_MTP_ENABLED": str(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED") or ""),
@@ -2551,6 +2597,10 @@ def _mlx_lm_lazy_load() -> bool:
 
 def _mlx_lm_disable_thinking_enabled() -> bool:
     return _boolish(os.getenv("TATER_MLX_LM_DISABLE_THINKING"), default=True)
+
+
+def _mlx_vlm_text_chat_enabled() -> bool:
+    return _boolish(os.getenv("TATER_MLX_VLM_TEXT_CHAT"), default=False)
 
 
 def _local_no_thinking_template_variants(enabled: bool = True) -> Tuple[Dict[str, Any], ...]:
@@ -4689,6 +4739,9 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_n_ctx(vision=vision),
         _llama_cpp_n_gpu_layers(),
         _llama_cpp_n_batch(vision=vision),
+        _llama_cpp_n_ubatch(vision=vision),
+        _llama_cpp_flash_attn_enabled(),
+        _llama_cpp_offload_kqv_enabled(),
         _llama_cpp_mtp_enabled(),
         _llama_cpp_mtp_draft_tokens(),
         _llama_cpp_mtp_spec_type(),
@@ -4775,11 +4828,14 @@ def _load_llama_cpp_bundle(
         system_info = _llama_cpp_system_info(llama_cpp_module)
         gpu_backend = _llama_cpp_gpu_backend(system_info)
         gpu_requested = cache_key[3] != 0
-        mtp_requested = bool(cache_key[5])
-        mtp_draft_tokens = int(cache_key[6])
-        mtp_spec_type = str(cache_key[7] or "draft-mtp")
-        chat_template_override_hash = str(cache_key[8] or "")
-        vision_requested = bool(cache_key[9])
+        n_ubatch = int(cache_key[5] or 0)
+        flash_attn_enabled = bool(cache_key[6])
+        offload_kqv_enabled = bool(cache_key[7])
+        mtp_requested = bool(cache_key[8])
+        mtp_draft_tokens = int(cache_key[9])
+        mtp_spec_type = str(cache_key[10] or "draft-mtp")
+        chat_template_override_hash = str(cache_key[11] or "")
+        vision_requested = bool(cache_key[12])
         gpu_warning = ""
         if gpu_requested and system_info and not gpu_backend:
             gpu_warning = (
@@ -4815,13 +4871,16 @@ def _load_llama_cpp_bundle(
             "n_threads": _llama_cpp_n_threads(),
             "verbose": _boolish(os.getenv("TATER_LLAMA_CPP_VERBOSE"), default=False),
         }
+        if n_ubatch > 0:
+            load_kwargs["n_ubatch"] = n_ubatch
+        load_kwargs["offload_kqv"] = offload_kqv_enabled
+        if flash_attn_enabled:
+            load_kwargs["flash_attn"] = True
         chat_format = cache_key[1]
         if chat_format:
             load_kwargs["chat_format"] = chat_format
         if _boolish(os.getenv("TATER_LLAMA_CPP_USE_MLOCK"), default=False):
             load_kwargs["use_mlock"] = True
-        if _boolish(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN"), default=False):
-            load_kwargs["flash_attn"] = True
 
         vision_warning = ""
         chat_handler_name = ""
@@ -4906,6 +4965,11 @@ def _load_llama_cpp_bundle(
             "model_root": _llama_cpp_model_root(),
             "lock": generation_lock,
             "n_gpu_layers": cache_key[3],
+            "n_ctx": cache_key[2],
+            "n_batch": cache_key[4],
+            "n_ubatch": n_ubatch,
+            "flash_attn": flash_attn_enabled,
+            "offload_kqv": offload_kqv_enabled,
             "device": device,
             "gpu_backend": gpu_backend,
             "gpu_warning": gpu_warning,
@@ -4956,6 +5020,12 @@ def preload_llama_cpp_llm_model(
         "model_root": str(bundle.get("model_root") or _llama_cpp_model_root()),
         "model_path": str(bundle.get("model_path") or ""),
         "gpu_backend": str(bundle.get("gpu_backend") or ""),
+        "n_ctx": int(bundle.get("n_ctx") or 0),
+        "n_gpu_layers": int(bundle.get("n_gpu_layers") or 0),
+        "n_batch": int(bundle.get("n_batch") or 0),
+        "n_ubatch": int(bundle.get("n_ubatch") or 0),
+        "flash_attn": bool(bundle.get("flash_attn")),
+        "offload_kqv": bool(bundle.get("offload_kqv")),
         "mtp_requested": bool(bundle.get("mtp_requested")),
         "mtp_enabled": bool(bundle.get("mtp_enabled")),
         "mtp_spec_type": str(bundle.get("mtp_spec_type") or ""),
@@ -5094,6 +5164,10 @@ def _load_mlx_lm_bundle(
         if chat_template_warning:
             logger.warning("[mlx-lm] %s", chat_template_warning)
 
+        supports_vision = (
+            _mlx_vlm_model_id_looks_vision_capable(model_token)
+            or _mlx_vlm_model_path_looks_vision_capable(model_path)
+        )
         generation_lock = _MLX_LM_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
             generation_lock = threading.RLock()
@@ -5112,6 +5186,8 @@ def _load_mlx_lm_bundle(
             "chat_template_override": bool(chat_template_override),
             "chat_template_handler": chat_template_handler,
             "chat_template_warning": chat_template_warning,
+            "supports_vision": bool(supports_vision),
+            "vision_chat_handler": "mlx-vlm" if supports_vision else "",
             "generate": mlx_generate,
             "stream_generate": mlx_stream_generate,
             "make_sampler": make_sampler,
@@ -5136,30 +5212,45 @@ def preload_mlx_lm_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
-    vlm_fallback_warning = ""
-    if _mlx_vlm_should_handle_model(model_id, progress_callback=progress_callback):
-        try:
-            bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
-            return {
-                "ok": True,
-                "model": str(model_id or "").strip(),
-                "device": str(bundle.get("device") or "apple_silicon"),
-                "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
-                "model_path": str(bundle.get("model_path") or ""),
-                "supports_vision": True,
-                "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
-                "warning": str(bundle.get("chat_template_warning") or ""),
-                "runtime": "mlx-vlm",
-            }
-        except Exception as exc:
-            reason = _mark_mlx_vlm_text_fallback(model_id, exc)
-            vlm_fallback_warning = (
-                "MLX vision load failed, so Tater loaded this model with MLX LM for text chat. "
-                f"Vision remains unavailable for this model until mlx-vlm can load it: {reason}"
-            )
-            logger.warning("[mlx-vlm] %s", vlm_fallback_warning)
-    bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
-    warning = _llama_cpp_warning_text(bundle.get("chat_template_warning"), vlm_fallback_warning)
+    try:
+        bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
+    except Exception as lm_exc:
+        reason = ""
+        if _mlx_vlm_text_chat_enabled() and _mlx_vlm_should_handle_model(
+            model_id,
+            progress_callback=progress_callback,
+        ):
+            try:
+                bundle = _load_mlx_vlm_bundle(model_id, progress_callback=progress_callback)
+                return {
+                    "ok": True,
+                    "model": str(model_id or "").strip(),
+                    "device": str(bundle.get("device") or "apple_silicon"),
+                    "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
+                    "model_path": str(bundle.get("model_path") or ""),
+                    "supports_vision": True,
+                    "vision_chat_handler": str(bundle.get("vision_chat_handler") or "mlx-vlm"),
+                    "warning": _llama_cpp_warning_text(
+                        "MLX VLM text chat is experimental and enabled by TATER_MLX_VLM_TEXT_CHAT.",
+                        bundle.get("chat_template_warning"),
+                    ),
+                    "runtime": "mlx-vlm",
+                }
+            except Exception as vlm_exc:
+                reason = str(vlm_exc or "").strip() or vlm_exc.__class__.__name__
+        if reason:
+            logger.warning("[mlx-vlm] experimental text chat load failed for %s: %s", model_id, reason)
+        detail = str(lm_exc or "").strip() or lm_exc.__class__.__name__
+        if len(detail) > 700:
+            detail = detail[:700].rstrip() + "..."
+        if _mlx_vlm_model_id_looks_vision_capable(model_id):
+            raise RuntimeError(
+                "MLX text chat uses mlx-lm, and this vision-capable repo could not be loaded as a text model. "
+                "Use a dedicated MLX-LM text model for chat, or use this repo only from the Vision model setting/image tool. "
+                f"Original mlx-lm error: {detail}"
+            ) from lm_exc
+        raise
+
     return {
         "ok": True,
         "model": str(model_id or "").strip(),
@@ -5167,7 +5258,8 @@ def preload_mlx_lm_llm_model(
         "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
         "model_path": str(bundle.get("model_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
-        "warning": warning,
+        "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
+        "warning": str(bundle.get("chat_template_warning") or ""),
         "runtime": "mlx-lm",
     }
 
@@ -7911,13 +8003,13 @@ class MlxLmLLMClientWrapper:
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         _ = timeout
-        if _mlx_vlm_should_handle_model(self.model):
+        if _mlx_vlm_text_chat_enabled() and _mlx_vlm_should_handle_model(self.model):
             try:
-                return self._chat_sync_vlm(messages, timeout=timeout, **kwargs)
+                return self._chat_sync_vlm(messages, timeout=timeout, **dict(kwargs))
             except Exception as exc:
                 reason = _mark_mlx_vlm_text_fallback(self.model, exc)
                 logger.warning(
-                    "[mlx-vlm] text chat load failed for %s; falling back to mlx-lm: %s",
+                    "[mlx-vlm] experimental text chat failed for %s; falling back to mlx-lm: %s",
                     self.model,
                     reason,
                 )
