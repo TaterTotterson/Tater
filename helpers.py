@@ -6783,6 +6783,7 @@ class LlamaCppLLMClientWrapper:
                 {"enable_thinking": False, "reasoning_budget": 0},
                 chat_template_kwargs,
             )
+            chat_kwargs["reasoning_budget"] = 0
         if chat_template_kwargs:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
@@ -6817,6 +6818,49 @@ class LlamaCppLLMClientWrapper:
         chat_kwargs["stream"] = False
         return chat_kwargs
 
+    def _create_chat_completion_with_fallback(
+        self,
+        model: Any,
+        messages: List[Dict[str, Any]],
+        chat_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        attempt_kwargs = dict(chat_kwargs)
+        last_exc: Optional[TypeError] = None
+        for _attempt in range(6):
+            try:
+                return model.create_chat_completion(messages=messages, **attempt_kwargs)
+            except TypeError as exc:
+                last_exc = exc
+                retry_kwargs = dict(attempt_kwargs)
+                template_kwargs = retry_kwargs.get("chat_template_kwargs")
+                template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else None
+                changed = False
+
+                if "reasoning_budget" in retry_kwargs:
+                    retry_kwargs.pop("reasoning_budget", None)
+                    changed = True
+                elif template_kwargs is not None and "reasoning_budget" in template_kwargs:
+                    template_kwargs.pop("reasoning_budget", None)
+                    retry_kwargs["chat_template_kwargs"] = template_kwargs
+                    changed = True
+                elif template_kwargs is not None and "enable_thinking" in template_kwargs:
+                    template_kwargs.pop("enable_thinking", None)
+                    if template_kwargs:
+                        retry_kwargs["chat_template_kwargs"] = template_kwargs
+                    else:
+                        retry_kwargs.pop("chat_template_kwargs", None)
+                    changed = True
+                elif "chat_template_kwargs" in retry_kwargs:
+                    retry_kwargs.pop("chat_template_kwargs", None)
+                    changed = True
+
+                if not changed or retry_kwargs == attempt_kwargs:
+                    raise
+                attempt_kwargs = retry_kwargs
+        if last_exc is not None:
+            raise last_exc
+        return model.create_chat_completion(messages=messages, **attempt_kwargs)
+
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
         bundle = _load_llama_cpp_bundle(self.model, vision=vision_requested)
@@ -6827,14 +6871,7 @@ class LlamaCppLLMClientWrapper:
 
         with generation_lock:
             generation_started = time.perf_counter()
-            try:
-                response = model.create_chat_completion(messages=local_messages, **chat_kwargs)
-            except TypeError as exc:
-                if "chat_template_kwargs" not in chat_kwargs or "chat_template_kwargs" not in str(exc):
-                    raise
-                retry_kwargs = dict(chat_kwargs)
-                retry_kwargs.pop("chat_template_kwargs", None)
-                response = model.create_chat_completion(messages=local_messages, **retry_kwargs)
+            response = self._create_chat_completion_with_fallback(model, local_messages, chat_kwargs)
         generation_elapsed = max(0.0, time.perf_counter() - generation_started)
 
         choices = response.get("choices") if isinstance(response, dict) else []
