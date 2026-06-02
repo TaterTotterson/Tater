@@ -1058,6 +1058,217 @@ async function runActionWithProgress(meta, actionFn) {
   }
 }
 
+function llamaCppChatTemplateCapabilityBadges(capabilities = {}) {
+  const items = [
+    ["enable_thinking", "enable_thinking"],
+    ["reasoning_budget", "reasoning budget"],
+    ["no_think_marker", "/no_think"],
+    ["think_tags", "think tags"],
+  ];
+  return items
+    .map(([key, label]) => {
+      const active = Boolean(capabilities?.[key]);
+      return `<span class="llama-template-badge${active ? " active" : ""}">${escapeHtml(label)} ${active ? "found" : "missing"}</span>`;
+    })
+    .join("");
+}
+
+function ensureLlamaCppChatTemplateModal() {
+  let modal = document.getElementById("llama-chat-template-modal");
+  if (modal) {
+    return modal;
+  }
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="llama-chat-template-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card llama-chat-template-dialog" role="dialog" aria-modal="true" aria-label="llama.cpp Chat Template">
+          <div class="card-head runtime-breakdown-modal-head">
+            <span class="runtime-breakdown-modal-badge" aria-hidden="true">CT</span>
+            <div>
+              <h3 id="llama-chat-template-title" class="card-title">Chat Template</h3>
+              <div id="llama-chat-template-model" class="small"></div>
+            </div>
+            <button type="button" class="inline-btn" id="llama-chat-template-close">Close</button>
+          </div>
+          <div class="cerb-modal-body llama-chat-template-body">
+            <div id="llama-chat-template-summary" class="llama-chat-template-summary"></div>
+            <textarea id="llama-chat-template-editor" class="llama-chat-template-editor" spellcheck="false"></textarea>
+            <div class="llama-chat-template-actions">
+              <button type="button" class="inline-btn" id="llama-chat-template-use-embedded">Use Embedded</button>
+              <button type="button" class="inline-btn" id="llama-chat-template-reload">Reload</button>
+              <button type="button" class="inline-btn" id="llama-chat-template-reset">Reset Override</button>
+              <button type="button" class="inline-btn primary" id="llama-chat-template-save">Save Override</button>
+            </div>
+            <div id="llama-chat-template-status" class="small llama-chat-template-status"></div>
+          </div>
+        </div>
+      </div>
+    `
+  );
+  modal = document.getElementById("llama-chat-template-modal");
+  const closeModal = () => closePopupModal(modal);
+  document.getElementById("llama-chat-template-close")?.addEventListener("click", closeModal);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      closeModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.classList.contains("active")) {
+      closeModal();
+    }
+  });
+  return modal;
+}
+
+async function openLlamaCppChatTemplateModal(model, options = {}) {
+  const modelId = String(model || "").trim();
+  if (!modelId) {
+    showToast("Select a llama.cpp model first.", "error", 2600);
+    return null;
+  }
+  const modal = ensureLlamaCppChatTemplateModal();
+  const titleEl = document.getElementById("llama-chat-template-title");
+  const modelEl = document.getElementById("llama-chat-template-model");
+  const summaryEl = document.getElementById("llama-chat-template-summary");
+  const editorEl = document.getElementById("llama-chat-template-editor");
+  const statusEl = document.getElementById("llama-chat-template-status");
+  const saveBtn = document.getElementById("llama-chat-template-save");
+  const resetBtn = document.getElementById("llama-chat-template-reset");
+  const reloadBtn = document.getElementById("llama-chat-template-reload");
+  const embeddedBtn = document.getElementById("llama-chat-template-use-embedded");
+  let latestPayload = null;
+
+  const setStatus = (text, tone = "") => {
+    if (!statusEl) {
+      return;
+    }
+    statusEl.textContent = String(text || "").trim();
+    statusEl.classList.toggle("success", tone === "success");
+    statusEl.classList.toggle("error", tone === "error");
+  };
+  const setBusy = (busy) => {
+    [
+      document.getElementById("llama-chat-template-save"),
+      document.getElementById("llama-chat-template-reset"),
+      document.getElementById("llama-chat-template-reload"),
+      document.getElementById("llama-chat-template-use-embedded"),
+    ].forEach((button) => {
+      if (button) {
+        button.disabled = Boolean(busy);
+      }
+    });
+  };
+  const renderPayload = (payload) => {
+    latestPayload = payload && typeof payload === "object" ? payload : {};
+    const effective = String(latestPayload.effective_template || latestPayload.override_template || latestPayload.embedded_template || "");
+    if (titleEl) {
+      titleEl.textContent = latestPayload.override_active ? "Chat Template Override" : "Chat Template";
+    }
+    if (modelEl) {
+      modelEl.textContent = modelId;
+    }
+    if (editorEl) {
+      editorEl.value = effective;
+    }
+    const templateNames = Array.isArray(latestPayload.template_names) ? latestPayload.template_names : [];
+    const source = String(latestPayload.source || "none").trim();
+    const sourceLabel = source === "override" ? "Override active" : source === "gguf" || source === "embedded" ? "Using embedded GGUF template" : "No embedded template found";
+    const embeddedChars = Number(latestPayload.embedded_template_chars || 0);
+    const overrideChars = Number(latestPayload.override_template_chars || 0);
+    const maxChars = Number(latestPayload.max_chars || 0);
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="llama-chat-template-summary-row">
+          <strong>${escapeHtml(sourceLabel)}</strong>
+          <span>${escapeHtml(templateNames.length ? templateNames.join(", ") : "default template")}</span>
+        </div>
+        <div class="llama-chat-template-badges">
+          ${llamaCppChatTemplateCapabilityBadges(latestPayload.capabilities || {})}
+        </div>
+        <div class="llama-chat-template-meta">
+          <span>Embedded ${embeddedChars.toLocaleString()} chars</span>
+          <span>Override ${overrideChars.toLocaleString()} chars</span>
+          ${maxChars > 0 ? `<span>Limit ${maxChars.toLocaleString()} chars</span>` : ""}
+        </div>
+      `;
+    }
+    const embeddedButton = document.getElementById("llama-chat-template-use-embedded");
+    if (embeddedButton) {
+      embeddedButton.disabled = embeddedChars <= 0;
+    }
+    setStatus(source === "none" || source === "fallback" ? "No embedded template was found for this model." : "Template loaded.");
+  };
+  const load = async () => {
+    setBusy(true);
+    setStatus("Loading chat template...");
+    try {
+      const payload = await api(`/api/settings/llama-cpp/chat-template?model=${encodeURIComponent(modelId)}`, {
+        _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+      });
+      renderPayload(payload);
+    } catch (error) {
+      setStatus(`Load failed: ${error.message}`, "error");
+      if (summaryEl) {
+        summaryEl.innerHTML = `<div class="hf-model-browser-empty">Template metadata could not be loaded.</div>`;
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async ({ reset = false } = {}) => {
+    setBusy(true);
+    setStatus(reset ? "Resetting override..." : "Saving override...");
+    try {
+      const payload = await api("/api/settings/llama-cpp/chat-template", {
+        method: "POST",
+        body: JSON.stringify({
+          model: modelId,
+          template: reset ? "" : String(editorEl?.value || ""),
+          reset,
+        }),
+        _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+      });
+      renderPayload(payload);
+      setStatus(reset ? "Override reset. The next model call will use the embedded template." : "Override saved. The matching loaded model was unloaded for a clean reload.", "success");
+      if (typeof options.onSaved === "function") {
+        options.onSaved(payload);
+      }
+    } catch (error) {
+      setStatus(`${reset ? "Reset" : "Save"} failed: ${error.message}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  saveBtn?.replaceWith(saveBtn.cloneNode(true));
+  resetBtn?.replaceWith(resetBtn.cloneNode(true));
+  reloadBtn?.replaceWith(reloadBtn.cloneNode(true));
+  embeddedBtn?.replaceWith(embeddedBtn.cloneNode(true));
+  document.getElementById("llama-chat-template-save")?.addEventListener("click", () => {
+    void save();
+  });
+  document.getElementById("llama-chat-template-reset")?.addEventListener("click", () => {
+    if (window.confirm(`Reset chat template override for ${modelId}?`)) {
+      void save({ reset: true });
+    }
+  });
+  document.getElementById("llama-chat-template-reload")?.addEventListener("click", () => {
+    void load();
+  });
+  document.getElementById("llama-chat-template-use-embedded")?.addEventListener("click", () => {
+    if (editorEl && latestPayload) {
+      editorEl.value = String(latestPayload.embedded_template || "");
+      setStatus("Embedded template copied into the editor.");
+    }
+  });
+
+  openPopupModal(modal);
+  await load();
+  return modal;
+}
+
 async function api(path, options = {}) {
   const requestOptions = options && typeof options === "object" ? options : {};
   const skipRedisRecovery = Boolean(requestOptions._skipRedisRecovery);
@@ -16646,6 +16857,10 @@ async function loadSettingsView() {
                   <select id="set_hydra_llm_model_select"></select>
                   <div id="hydra-local-model-status" class="small"></div>
                 </label>
+                <div id="settings-llama-chat-template-tools" class="hydra-chat-template-tools" data-hydra-provider-field="llama_cpp">
+                  <button type="button" id="settings-llama-chat-template-edit" class="inline-btn">Edit Chat Template</button>
+                  <span id="settings-llama-chat-template-status" class="small">Per-model template override.</span>
+                </div>
                 <label class="hydra-context-field" data-hydra-provider-field="hf_transformers">Context Length
                   <div class="hydra-context-control" data-hydra-context-control="hf_transformers">
                     <input id="set_hydra_hf_transformers_context_tokens_range" type="range" min="256" max="262144" step="256" value="${escapeHtml(
@@ -17829,6 +18044,8 @@ async function loadSettingsView() {
   const hydraBaseModelSelectEl = document.getElementById("set_hydra_llm_model_select");
   const hydraBaseModelLabelEl = document.getElementById("hydra-base-model-label");
   const hydraLocalModelStatusEl = document.getElementById("hydra-local-model-status");
+  const llamaChatTemplateEditEl = document.getElementById("settings-llama-chat-template-edit");
+  const llamaChatTemplateStatusEl = document.getElementById("settings-llama-chat-template-status");
   const contextControlConfig = {
     hf_transformers: {
       min: 256,
@@ -18143,6 +18360,20 @@ async function loadSettingsView() {
     }
     return String(hydraBaseModelEl?.value || "").trim();
   };
+  const syncLlamaChatTemplateTools = () => {
+    const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    const model = provider === "llama_cpp" ? getHydraBaseModelValue() : "";
+    if (llamaChatTemplateEditEl) {
+      llamaChatTemplateEditEl.disabled = !model;
+    }
+    if (llamaChatTemplateStatusEl) {
+      llamaChatTemplateStatusEl.textContent = provider !== "llama_cpp"
+        ? ""
+        : model
+          ? "Per-model template override."
+          : "Select a downloaded GGUF model first.";
+    }
+  };
   const refreshLocalLlmModels = async ({ selectModel = "", provider = "" } = {}) => {
     try {
       localLlmModelsPayload = await api("/api/settings/local-llm/models", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
@@ -18205,6 +18436,7 @@ async function loadSettingsView() {
     syncHydraProviderScopedFields(hydraBaseFieldsEl, provider);
     syncHydraModelInputForProvider(hydraBaseModelEl, hydraBaseModelLabelEl, provider);
     syncHydraPrimaryModelControl(provider);
+    syncLlamaChatTemplateTools();
   };
   const hydraRouteControls = [];
   const syncHydraRouteControl = (control, preferredModel = "") => {
@@ -18502,6 +18734,16 @@ async function loadSettingsView() {
     syncActiveHydraContextControl();
     renderHydraContextEstimateCards();
     syncVisionLlamaContextControl();
+    syncLlamaChatTemplateTools();
+  });
+  llamaChatTemplateEditEl?.addEventListener("click", () => {
+    const model = getHydraBaseModelValue();
+    void openLlamaCppChatTemplateModal(model, {
+      onSaved: () => {
+        void refreshLocalLlmModels({ provider: "llama_cpp", selectModel: model });
+        syncLlamaChatTemplateTools();
+      },
+    });
   });
   syncHydraPrimaryProviderFields();
   if (state.hydraContextEstimateRuntimeListener) {
@@ -18691,6 +18933,7 @@ async function loadSettingsView() {
             </div>
             ${pathLabel ? `<div class="local-model-path">${escapeHtml(pathLabel)}</div>` : ""}
             <div class="local-model-actions">
+              ${row.provider === "llama_cpp" ? `<button type="button" class="inline-btn" data-local-model-template data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Chat Template</button>` : ""}
               <button type="button" class="inline-btn danger" data-local-model-delete data-provider="${escapeHtml(row.provider)}" data-model="${escapeHtml(row.model)}">Delete</button>
             </div>
           </article>
@@ -19280,6 +19523,20 @@ async function loadSettingsView() {
     void refreshLocalLlmModels();
   });
   localModelManagerListEl?.addEventListener("click", (event) => {
+    const templateButton = event.target instanceof Element ? event.target.closest("[data-local-model-template]") : null;
+    if (templateButton) {
+      const provider = normalizeHydraBaseProvider(templateButton.getAttribute("data-provider") || "");
+      const model = templateButton.getAttribute("data-model") || "";
+      if (provider === "llama_cpp") {
+        void openLlamaCppChatTemplateModal(model, {
+          onSaved: () => {
+            void refreshLocalLlmModels({ provider: "llama_cpp", selectModel: model });
+            syncLlamaChatTemplateTools();
+          },
+        });
+      }
+      return;
+    }
     const button = event.target instanceof Element ? event.target.closest("[data-local-model-delete]") : null;
     if (!button) {
       return;

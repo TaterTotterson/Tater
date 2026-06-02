@@ -89,6 +89,7 @@ from helpers import (
     encrypt_current_redis_snapshot,
     ensure_redis_encryption_key,
     get_llama_cpp_runtime_diagnostics,
+    get_llama_cpp_chat_template_info,
     get_local_llm_loaded_models_snapshot,
     get_redis_connection_config,
     get_redis_encryption_status,
@@ -109,6 +110,8 @@ from helpers import (
     set_main_loop,
     shutdown_internal_redis,
     test_redis_connection_settings,
+    set_llama_cpp_chat_template_override,
+    clear_llama_cpp_chat_template_override,
     unload_local_llm_models,
 )
 from runtime_executors import configure_runtime_executors, run_dashboard, run_wake, shutdown_runtime_executors
@@ -2520,6 +2523,29 @@ def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     for row in models:
         by_provider.setdefault(str(row.get("provider") or ""), []).append(row)
     return {"models": models, "by_provider": by_provider, "updated_ts": time.time()}
+
+
+def _llama_cpp_chat_template_model_info(model: str) -> Dict[str, Any]:
+    model_token = str(model or "").strip()
+    if not model_token:
+        raise HTTPException(status_code=400, detail="llama.cpp model is required.")
+    payload = _local_llm_models_payload(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP)
+    row = next(
+        (
+            dict(item)
+            for item in payload.get("models", [])
+            if _normalize_hydra_llm_provider(item.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            and str(item.get("model") or "").strip() == model_token
+        ),
+        {},
+    )
+    model_path = str(row.get("model_path") or "").strip()
+    info = get_llama_cpp_chat_template_info(model_token, model_path=model_path)
+    info["installed"] = bool(row)
+    info["provider"] = HYDRA_LLM_PROVIDER_LLAMA_CPP
+    info["provider_label"] = _hydra_llm_provider_label(HYDRA_LLM_PROVIDER_LLAMA_CPP)
+    info["model_path"] = model_path or str(info.get("model_path") or "")
+    return info
 
 
 def _record_downloaded_local_llm_model(
@@ -5965,6 +5991,12 @@ class HfModelDownloadRequest(BaseModel):
 class LocalLlmModelDeleteRequest(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
+
+
+class LlamaCppChatTemplateRequest(BaseModel):
+    model: Optional[str] = None
+    template: Optional[str] = None
+    reset: Optional[bool] = None
 
 
 class HfLlmWarmupCancelRequest(BaseModel):
@@ -13045,6 +13077,30 @@ def delete_local_llm_model(request: LocalLlmModelDeleteRequest) -> Dict[str, Any
 @app.get("/api/settings/llama-cpp/diagnostics")
 def get_llama_cpp_diagnostics() -> Dict[str, Any]:
     return get_llama_cpp_runtime_diagnostics()
+
+
+@app.get("/api/settings/llama-cpp/chat-template")
+def get_llama_cpp_chat_template(model: str) -> Dict[str, Any]:
+    return _llama_cpp_chat_template_model_info(model)
+
+
+@app.post("/api/settings/llama-cpp/chat-template")
+def save_llama_cpp_chat_template(request: LlamaCppChatTemplateRequest) -> Dict[str, Any]:
+    model = str(request.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="llama.cpp model is required.")
+    try:
+        if request.reset:
+            clear_llama_cpp_chat_template_override(model)
+        else:
+            set_llama_cpp_chat_template_override(model, request.template or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    unload_result = unload_local_llm_models(provider=HYDRA_LLM_PROVIDER_LLAMA_CPP, model=model)
+    info = _llama_cpp_chat_template_model_info(model)
+    info["ok"] = True
+    info["unload"] = unload_result
+    return info
 
 
 @app.get("/api/settings/huggingface/models")

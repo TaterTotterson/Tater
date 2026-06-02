@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import hashlib
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -492,6 +493,7 @@ HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
 HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
+HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
 HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
 DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
@@ -2238,7 +2240,13 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
         "model_root": str((bundle or {}).get("model_root") or ""),
         "loaded_ts": float((bundle or {}).get("loaded_ts") or 0.0),
         "gpu_backend": str((bundle or {}).get("gpu_backend") or ""),
-        "warning": str((bundle or {}).get("gpu_warning") or (bundle or {}).get("mtp_warning") or ""),
+        "warning": _llama_cpp_warning_text(
+            (bundle or {}).get("gpu_warning"),
+            (bundle or {}).get("mtp_warning"),
+            (bundle or {}).get("chat_template_warning"),
+        ),
+        "chat_template_override": bool((bundle or {}).get("chat_template_override")),
+        "chat_template_handler": str((bundle or {}).get("chat_template_handler") or ""),
         "supports_vision": bool((bundle or {}).get("supports_vision")),
         "mmproj_path": str((bundle or {}).get("mmproj_path") or (bundle or {}).get("vision_projector_path") or ""),
         "vision_chat_handler": str((bundle or {}).get("vision_chat_handler") or ""),
@@ -2558,6 +2566,107 @@ def _merge_template_kwargs(*items: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(item, dict):
             merged.update(item)
     return merged
+
+
+def _llama_cpp_chat_template_max_chars() -> int:
+    try:
+        raw = int(float(os.getenv("TATER_LLAMA_CPP_CHAT_TEMPLATE_MAX_CHARS") or "200000"))
+    except Exception:
+        raw = 200000
+    return max(1024, min(1_000_000, raw))
+
+
+def _normalize_llama_cpp_chat_template(value: Any) -> str:
+    text = str(value or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if len(text) > _llama_cpp_chat_template_max_chars():
+        raise ValueError(f"Chat template is too large; max {_llama_cpp_chat_template_max_chars()} characters.")
+    return text
+
+
+def _llama_cpp_chat_template_field(model_id: Any) -> str:
+    token = str(model_id or "").strip()
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _llama_cpp_chat_template_capabilities(template: Any) -> Dict[str, bool]:
+    text = str(template or "")
+    lower = text.lower()
+    return {
+        "has_template": bool(text.strip()),
+        "enable_thinking": "enable_thinking" in text,
+        "reasoning_budget": "reasoning_budget" in text,
+        "no_think_marker": "/no_think" in text or "no_think" in text,
+        "think_tags": "<think" in lower or "</think" in lower,
+        "uses_enable_thinking": "enable_thinking" in text,
+        "uses_reasoning_budget": "reasoning_budget" in text,
+        "mentions_thinking": "thinking" in lower or "<think" in lower,
+    }
+
+
+def get_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    field = _llama_cpp_chat_template_field(model_token)
+    if not field:
+        return {}
+    try:
+        raw = redis_client.hget(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field)
+    except Exception:
+        raw = None
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except Exception:
+        payload = {"template": str(raw)}
+    template = _normalize_llama_cpp_chat_template(payload.get("template") if isinstance(payload, dict) else "")
+    if not template:
+        return {}
+    return {
+        "model": model_token,
+        "template": template,
+        "updated_ts": float((payload or {}).get("updated_ts") or 0.0) if isinstance(payload, dict) else 0.0,
+        "source": "override",
+    }
+
+
+def set_llama_cpp_chat_template_override(model_id: Any, template: Any) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise ValueError("llama.cpp model id is required.")
+    normalized = _normalize_llama_cpp_chat_template(template)
+    if not normalized.strip():
+        raise ValueError("Chat template cannot be blank. Reset the override to use the GGUF template.")
+    field = _llama_cpp_chat_template_field(model_token)
+    payload = {
+        "model": model_token,
+        "template": normalized,
+        "updated_ts": time.time(),
+    }
+    redis_client.hset(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field, json.dumps(payload, sort_keys=True))
+    return {**payload, "source": "override"}
+
+
+def clear_llama_cpp_chat_template_override(model_id: Any) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    field = _llama_cpp_chat_template_field(model_token)
+    if field:
+        try:
+            redis_client.hdel(HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY, field)
+        except Exception:
+            pass
+    return {"model": model_token, "template": "", "source": "gguf"}
+
+
+def _llama_cpp_chat_template_override_text(model_id: Any) -> str:
+    return str(get_llama_cpp_chat_template_override(model_id).get("template") or "")
+
+
+def _llama_cpp_chat_template_cache_token(model_id: Any) -> str:
+    template = _llama_cpp_chat_template_override_text(model_id)
+    return hashlib.sha256(template.encode("utf-8", errors="ignore")).hexdigest() if template else ""
 
 
 def _mlx_lm_adapter_path() -> str:
@@ -3475,6 +3584,175 @@ def _hf_processor_supports_vision(processor: Any) -> bool:
         return False
 
 
+def _gguf_read_u32(handle) -> int:
+    data = handle.read(4)
+    if len(data) != 4:
+        raise EOFError("short gguf u32")
+    return int.from_bytes(data, "little", signed=False)
+
+
+def _gguf_read_u64(handle) -> int:
+    data = handle.read(8)
+    if len(data) != 8:
+        raise EOFError("short gguf u64")
+    return int.from_bytes(data, "little", signed=False)
+
+
+def _gguf_read_i64(handle) -> int:
+    data = handle.read(8)
+    if len(data) != 8:
+        raise EOFError("short gguf i64")
+    return int.from_bytes(data, "little", signed=True)
+
+
+def _gguf_read_string(handle) -> str:
+    length = _gguf_read_u64(handle)
+    if length > _llama_cpp_chat_template_max_chars():
+        raise ValueError("gguf string too large")
+    return handle.read(int(length)).decode("utf-8", errors="replace")
+
+
+def _gguf_skip_value(handle, value_type: int) -> None:
+    scalar_sizes = {
+        0: 1,
+        1: 1,
+        2: 2,
+        3: 2,
+        4: 4,
+        5: 4,
+        6: 4,
+        7: 1,
+        10: 8,
+        11: 8,
+        12: 8,
+    }
+    if value_type in scalar_sizes:
+        handle.seek(scalar_sizes[value_type], os.SEEK_CUR)
+    elif value_type == 8:
+        length = _gguf_read_u64(handle)
+        handle.seek(int(length), os.SEEK_CUR)
+    elif value_type == 9:
+        item_type = _gguf_read_u32(handle)
+        count = _gguf_read_u64(handle)
+        if count > 1_000_000:
+            raise ValueError("gguf array too large")
+        for _ in range(int(count)):
+            _gguf_skip_value(handle, item_type)
+    else:
+        raise ValueError(f"unknown gguf metadata type {value_type}")
+
+
+def _gguf_read_metadata_value(handle, value_type: int) -> Any:
+    if value_type == 0:
+        return int.from_bytes(handle.read(1), "little", signed=False)
+    if value_type == 1:
+        return int.from_bytes(handle.read(1), "little", signed=True)
+    if value_type == 2:
+        return int.from_bytes(handle.read(2), "little", signed=False)
+    if value_type == 3:
+        return int.from_bytes(handle.read(2), "little", signed=True)
+    if value_type == 4:
+        return _gguf_read_u32(handle)
+    if value_type == 5:
+        return int.from_bytes(handle.read(4), "little", signed=True)
+    if value_type == 7:
+        return bool(int.from_bytes(handle.read(1), "little", signed=False))
+    if value_type == 8:
+        return _gguf_read_string(handle)
+    if value_type == 10:
+        return _gguf_read_u64(handle)
+    if value_type == 11:
+        return _gguf_read_i64(handle)
+    _gguf_skip_value(handle, value_type)
+    return None
+
+
+def _read_gguf_metadata(path: Any, *, key_prefixes: Tuple[str, ...] = (), keys: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    file_path = Path(str(path or "")).expanduser()
+    if not file_path.exists() or not file_path.is_file() or file_path.suffix.lower() != ".gguf":
+        return {}
+    wanted_keys = {str(key or "") for key in keys if str(key or "")}
+    wanted_prefixes = tuple(str(prefix or "") for prefix in key_prefixes if str(prefix or ""))
+    out: Dict[str, Any] = {}
+    try:
+        with file_path.open("rb") as handle:
+            if handle.read(4) != b"GGUF":
+                return {}
+            _version = _gguf_read_u32(handle)
+            _tensor_count = _gguf_read_u64(handle)
+            metadata_count = min(_gguf_read_u64(handle), 20000)
+            for _ in range(int(metadata_count)):
+                key = _gguf_read_string(handle)
+                value_type = _gguf_read_u32(handle)
+                wanted = (key in wanted_keys) or any(key.startswith(prefix) for prefix in wanted_prefixes)
+                if wanted:
+                    out[key] = _gguf_read_metadata_value(handle, value_type)
+                else:
+                    _gguf_skip_value(handle, value_type)
+    except Exception as exc:
+        logger.debug("[llama-cpp] failed reading GGUF metadata from %s: %s", file_path, exc)
+        return out
+    return out
+
+
+def read_llama_cpp_gguf_chat_templates(path: Any) -> Dict[str, str]:
+    metadata = _read_gguf_metadata(
+        path,
+        key_prefixes=("tokenizer.chat_template",),
+        keys=("general.name",),
+    )
+    templates: Dict[str, str] = {}
+    for key, value in metadata.items():
+        if not key.startswith("tokenizer.chat_template"):
+            continue
+        template = str(value or "")
+        if not template.strip():
+            continue
+        name = "chat_template.default" if key == "tokenizer.chat_template" else key[len("tokenizer.") :]
+        templates[name] = template
+    return templates
+
+
+def get_llama_cpp_chat_template_info(model_id: Any, *, model_path: Any = "") -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    path = str(model_path or "").strip()
+    if not path:
+        try:
+            ref = _parse_llama_cpp_model_ref(model_token)
+            if ref.get("kind") == "local":
+                path = str(ref.get("path") or "").strip()
+        except Exception:
+            path = ""
+    templates = read_llama_cpp_gguf_chat_templates(path) if path else {}
+    embedded_template = str(templates.get("chat_template.default") or "")
+    if not embedded_template and templates:
+        embedded_template = str(next(iter(templates.values())) or "")
+    override = get_llama_cpp_chat_template_override(model_token)
+    override_template = str(override.get("template") or "")
+    effective_template = override_template or embedded_template
+    chat_format = str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip()
+    source = "override" if override_template else ("gguf" if embedded_template else ("chat_format" if chat_format else "fallback"))
+    capabilities = _llama_cpp_chat_template_capabilities(effective_template)
+    return {
+        "model": model_token,
+        "model_path": path,
+        "chat_format": chat_format,
+        "source": source,
+        "has_override": bool(override_template),
+        "override_template": override_template,
+        "embedded_template": embedded_template,
+        "effective_template": effective_template,
+        "template_names": sorted(templates.keys()),
+        "updated_ts": float(override.get("updated_ts") or 0.0),
+        **capabilities,
+        "no_thinking_supported": bool(
+            capabilities.get("enable_thinking")
+            or capabilities.get("reasoning_budget")
+            or capabilities.get("no_think_marker")
+        ),
+    }
+
+
 def _parse_llama_cpp_model_ref(model_id: str) -> Dict[str, str]:
     raw = str(model_id or "").strip()
     if not raw:
@@ -4170,8 +4448,45 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_mtp_enabled(),
         _llama_cpp_mtp_draft_tokens(),
         _llama_cpp_mtp_spec_type(),
+        "" if vision else _llama_cpp_chat_template_cache_token(model_id),
         bool(vision),
     )
+
+
+def _llama_cpp_install_chat_template_override(model: Any, template: str) -> Tuple[str, str]:
+    if not str(template or "").strip():
+        return "", ""
+    try:
+        import llama_cpp.llama_chat_format as chat_format_module  # type: ignore
+    except Exception as exc:
+        return "", f"llama-cpp-python chat template override support is unavailable: {exc}"
+    try:
+        eos_token_id = model.token_eos() if callable(getattr(model, "token_eos", None)) else -1
+        bos_token_id = model.token_bos() if callable(getattr(model, "token_bos", None)) else -1
+        internals_model = getattr(model, "_model", None)
+        eos_token = internals_model.token_get_text(eos_token_id) if internals_model is not None and eos_token_id != -1 else ""
+        bos_token = internals_model.token_get_text(bos_token_id) if internals_model is not None and bos_token_id != -1 else ""
+        if isinstance(eos_token, bytes):
+            eos_token = eos_token.decode("utf-8", errors="replace")
+        if isinstance(bos_token, bytes):
+            bos_token = bos_token.decode("utf-8", errors="replace")
+        handler = chat_format_module.Jinja2ChatFormatter(
+            template=template,
+            eos_token=eos_token,
+            bos_token=bos_token,
+            stop_token_ids=[eos_token_id] if eos_token_id != -1 else [],
+        ).to_chat_handler()
+        handler_name = "tater.chat_template_override"
+        chat_handlers = getattr(model, "_chat_handlers", None)
+        if isinstance(chat_handlers, dict):
+            chat_handlers[handler_name] = handler
+            model.chat_handler = None
+            model.chat_format = handler_name
+        else:
+            model.chat_handler = handler
+        return handler_name, ""
+    except Exception as exc:
+        return "", f"Could not install llama.cpp chat template override: {exc}"
 
 
 def _load_llama_cpp_bundle(
@@ -4196,7 +4511,12 @@ def _load_llama_cpp_bundle(
                     "description": "GGUF model is already loaded",
                     "progress": 100.0,
                     "device": str(cached.get("device") or ""),
-                    "warning": _llama_cpp_warning_text(cached.get("gpu_warning"), cached.get("mtp_warning"), cached.get("vision_warning")),
+                    "warning": _llama_cpp_warning_text(
+                        cached.get("gpu_warning"),
+                        cached.get("mtp_warning"),
+                        cached.get("vision_warning"),
+                        cached.get("chat_template_warning"),
+                    ),
                 },
             )
             return cached
@@ -4214,7 +4534,8 @@ def _load_llama_cpp_bundle(
         mtp_requested = bool(cache_key[5])
         mtp_draft_tokens = int(cache_key[6])
         mtp_spec_type = str(cache_key[7] or "draft-mtp")
-        vision_requested = bool(cache_key[8])
+        chat_template_override_hash = str(cache_key[8] or "")
+        vision_requested = bool(cache_key[9])
         gpu_warning = ""
         if gpu_requested and system_info and not gpu_backend:
             gpu_warning = (
@@ -4319,6 +4640,16 @@ def _load_llama_cpp_bundle(
                     mmproj_path=mmproj_path,
                 )
             ) from exc
+        chat_template_override = "" if vision_requested else _llama_cpp_chat_template_override_text(model_token)
+        chat_template_handler_name = ""
+        chat_template_warning = ""
+        if chat_template_override:
+            chat_template_handler_name, chat_template_warning = _llama_cpp_install_chat_template_override(
+                model,
+                chat_template_override,
+            )
+            if chat_template_warning:
+                logger.warning("[llama-cpp] %s", chat_template_warning)
         device = gpu_backend if gpu_requested and gpu_backend else ("gpu" if gpu_requested and not system_info else "cpu")
         generation_lock = _LLAMA_CPP_GENERATION_LOCKS.get(cache_key)
         if generation_lock is None:
@@ -4341,6 +4672,10 @@ def _load_llama_cpp_bundle(
             "mtp_spec_type": mtp_spec_type,
             "mtp_draft_tokens": mtp_draft_tokens,
             "mtp_warning": mtp_warning,
+            "chat_template_override": bool(chat_template_override),
+            "chat_template_override_hash": chat_template_override_hash,
+            "chat_template_handler": chat_template_handler_name,
+            "chat_template_warning": chat_template_warning,
             "vision_requested": bool(vision_requested),
             "supports_vision": bool(vision_requested and mmproj_path and chat_handler_name),
             "vision_projector_path": mmproj_path,
@@ -4357,7 +4692,7 @@ def _load_llama_cpp_bundle(
                 "description": "GGUF model loaded",
                 "progress": 100.0,
                 "device": device,
-                "warning": _llama_cpp_warning_text(gpu_warning, mtp_warning),
+                "warning": _llama_cpp_warning_text(gpu_warning, mtp_warning, chat_template_warning),
             },
         )
         return bundle
