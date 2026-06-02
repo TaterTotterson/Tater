@@ -5,6 +5,7 @@ import inspect
 import logging
 import gc
 import io
+import functools
 import queue
 import shutil
 import signal
@@ -25,6 +26,7 @@ import websocket
 import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, urlunparse
 try:
     import httpx
@@ -558,6 +560,8 @@ _MLX_ENGINE_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _MLX_ENGINE_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
 _MLX_ENGINE_FALLBACK_WARNED: set[str] = set()
+_MLX_RUNTIME_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tater-mlx-runtime")
+_MLX_RUNTIME_LOCAL = threading.local()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -2792,6 +2796,28 @@ def _mlx_lm_max_kv_size() -> Optional[int]:
     )
 
 
+def _mlx_runtime_call(func: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+    previous = bool(getattr(_MLX_RUNTIME_LOCAL, "active", False))
+    _MLX_RUNTIME_LOCAL.active = True
+    try:
+        return func(*args, **kwargs)
+    finally:
+        _MLX_RUNTIME_LOCAL.active = previous
+
+
+def _run_mlx_runtime_sync(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    if bool(getattr(_MLX_RUNTIME_LOCAL, "active", False)):
+        return func(*args, **kwargs)
+    future = _MLX_RUNTIME_EXECUTOR.submit(_mlx_runtime_call, func, tuple(args), dict(kwargs))
+    return future.result()
+
+
+async def _run_mlx_runtime_async(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    loop = asyncio.get_running_loop()
+    call = functools.partial(_mlx_runtime_call, func, tuple(args), dict(kwargs))
+    return await loop.run_in_executor(_MLX_RUNTIME_EXECUTOR, call)
+
+
 def _mlx_engine_enabled() -> bool:
     return _boolish(os.getenv("TATER_MLX_ENGINE_ENABLED"), default=True)
 
@@ -2852,9 +2878,14 @@ def _mlx_engine_import_helpers() -> Dict[str, Any]:
     try:
         from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
     except Exception as exc:
-        hint = "Install the MLX engine checkout with setup_tater.sh, or set TATER_MLX_ENGINE_ENABLED=0 to use mlx-lm/mlx-vlm directly."
+        hint = (
+            "Install/update the MLX engine dependencies with setup_tater.sh, "
+            "or set TATER_MLX_ENGINE_ENABLED=0 to use mlx-lm/mlx-vlm directly."
+        )
         if checkout and not os.path.isdir(os.path.join(checkout, "mlx_engine")):
             hint = f"MLX engine checkout was not found at {checkout}. {hint}"
+        elif "outlines_core" in str(exc):
+            hint = f"MLX engine needs outlines-core==0.1.26. {hint}"
         raise RuntimeError(hint) from exc
     return {
         "load_model": load_model,
@@ -5541,7 +5572,7 @@ def _load_mlx_lm_bundle(
         return bundle
 
 
-def preload_mlx_lm_llm_model(
+def _preload_mlx_lm_llm_model_sync(
     model_id: str,
     *,
     progress_callback: Optional[HFProgressCallback] = None,
@@ -5575,6 +5606,18 @@ def preload_mlx_lm_llm_model(
         "warning": str(bundle.get("chat_template_warning") or ""),
         "runtime": "mlx-lm",
     }
+
+
+def preload_mlx_lm_llm_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    return _run_mlx_runtime_sync(
+        _preload_mlx_lm_llm_model_sync,
+        model_id,
+        progress_callback=progress_callback,
+    )
 
 
 def download_mlx_lm_llm_model(
@@ -8232,7 +8275,7 @@ class MlxLmLLMClientWrapper:
         final_model = str(self.model or "").strip()
         started_at = asyncio.get_running_loop().time()
         try:
-            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
+            result = await _run_mlx_runtime_async(self._chat_sync, messages, timeout=timeout, **kwargs)
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
             timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
@@ -8853,32 +8896,27 @@ def describe_image_with_local_llm(
                     timeout=timeout,
                 )
         elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-            if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
-                try:
-                    result = _describe_image_with_mlx_engine(
-                        model_token=model_token,
-                        image_bytes=image_bytes,
-                        filename=filename,
-                        prompt=prompt,
-                        timeout=timeout,
-                    )
-                except Exception as exc:
-                    _mlx_engine_log_fallback("vision", exc)
-                    result = _describe_image_with_mlx_vlm(
-                        model_token=model_token,
-                        image_bytes=image_bytes,
-                        filename=filename,
-                        prompt=prompt,
-                        timeout=timeout,
-                    )
-            else:
-                result = _describe_image_with_mlx_vlm(
+            def _describe_mlx_local() -> Dict[str, Any]:
+                if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
+                    try:
+                        return _describe_image_with_mlx_engine(
+                            model_token=model_token,
+                            image_bytes=image_bytes,
+                            filename=filename,
+                            prompt=prompt,
+                            timeout=timeout,
+                        )
+                    except Exception as exc:
+                        _mlx_engine_log_fallback("vision", exc)
+                return _describe_image_with_mlx_vlm(
                     model_token=model_token,
                     image_bytes=image_bytes,
                     filename=filename,
                     prompt=prompt,
                     timeout=timeout,
                 )
+
+            result = _run_mlx_runtime_sync(_describe_mlx_local)
         else:
             raise RuntimeError("OpenAI-compatible vision should use the API vision path.")
 
