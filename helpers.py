@@ -3799,6 +3799,12 @@ def read_local_llm_repo_chat_templates(path: Any) -> Dict[str, str]:
         root = root.parent
     if not root.is_dir():
         return {}
+    text_template_files = (
+        "chat_template.jinja",
+        "chat_template.j2",
+        "chat_template.tpl",
+        "chat_template.txt",
+    )
     files = (
         "tokenizer_config.json",
         "chat_template.json",
@@ -3807,6 +3813,18 @@ def read_local_llm_repo_chat_templates(path: Any) -> Dict[str, str]:
         "config.json",
     )
     templates: Dict[str, str] = {}
+    for filename in text_template_files:
+        candidate = root / filename
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.stat().st_size > 2_000_000:
+                continue
+            template = candidate.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if template.strip():
+            templates[filename] = template
     for filename in files:
         candidate = root / filename
         if not candidate.is_file():
