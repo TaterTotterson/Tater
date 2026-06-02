@@ -16926,7 +16926,7 @@ async function loadSettingsView() {
                       settings.hydra_llama_cpp_n_batch || "512"
                     )}" />
                   </div>
-                  <div class="small hydra-context-hint">LM Studio calls this eval batch size. Higher can improve prompt processing when memory allows.</div>
+                  <div class="small hydra-context-hint">Higher values can improve prompt processing when memory allows.</div>
                 </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Micro-Batch Size
                   <div class="hydra-context-control hydra-llama-perf-control">
@@ -16946,7 +16946,7 @@ async function loadSettingsView() {
                     } />`,
                     "Enable"
                   )}
-                  <div class="small hydra-context-hint">Matches LM Studio's Flash Attention load option when supported by the backend/model.</div>
+                  <div class="small hydra-context-hint">Optimizes attention computation when supported by the backend and model.</div>
                 </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">GPU KV Offload
                   ${renderToggleRow(
