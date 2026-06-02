@@ -64,7 +64,12 @@ from hydra import (
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from notify import notifier_destination_catalog
 from helpers import (
+    DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
     DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
+    DEFAULT_HF_TRANSFORMERS_DEVICE,
+    DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
+    DEFAULT_HF_TRANSFORMERS_DTYPE,
+    DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
     DEFAULT_LLAMA_CPP_FLASH_ATTN,
     DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
@@ -73,7 +78,14 @@ from helpers import (
     DEFAULT_LLAMA_CPP_N_UBATCH,
     DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
     DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
+    DEFAULT_MLX_LM_LAZY_LOAD,
+    DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
+    HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
     HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
+    HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
+    HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
+    HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
+    HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
     HYDRA_LLM_BASE_SERVERS_KEY,
     HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_KEY,
@@ -88,7 +100,13 @@ from helpers import (
     HYDRA_LLAMA_CPP_N_UBATCH_KEY,
     HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
     HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
+    HYDRA_MLX_ENGINE_KV_BITS_KEY,
+    HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
+    HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
+    HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
     HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
+    HYDRA_MLX_LM_LAZY_LOAD_KEY,
+    HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
     HfLlmDownloadCancelled,
     decrypt_current_redis_snapshot,
     download_hf_transformers_llm_model,
@@ -104,6 +122,7 @@ from helpers import (
     get_redis_encryption_status,
     get_redis_connection_status,
     get_llm_call_runtime_summary,
+    get_llm_debug_runtime_snapshot,
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
     preload_hf_transformers_llm_model,
@@ -546,6 +565,63 @@ def _read_bool_setting(redis_key: str, env_keys: Tuple[str, ...], default: bool)
     if not raw:
         return bool(default)
     return _as_bool_flag(raw, default=default)
+
+
+def _read_text_choice_setting(
+    redis_key: str,
+    env_keys: Tuple[str, ...],
+    default: str,
+    *,
+    allowed: Tuple[str, ...],
+) -> str:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    token = str(raw or default or "").strip().lower()
+    aliases = {
+        "fp16": "float16",
+        "half": "float16",
+        "bf16": "bfloat16",
+        "fp32": "float32",
+        "none": "disabled",
+        "off": "disabled",
+        "false": "disabled",
+        "0": "disabled",
+        "default": "default",
+        "auto": "auto",
+    }
+    token = aliases.get(token, token)
+    allowed_set = {str(item).strip().lower() for item in allowed}
+    default_token = str(default or "").strip().lower()
+    return token if token in allowed_set else default_token
+
+
+def _read_optional_int_setting(
+    redis_key: str,
+    env_keys: Tuple[str, ...],
+    *,
+    minimum: int = 0,
+    maximum: int = 1_048_576,
+    allow_zero: bool = False,
+) -> str:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    if not raw:
+        return ""
+    try:
+        value = int(float(raw))
+    except Exception:
+        return ""
+    if value < 0 or (value == 0 and not allow_zero):
+        return ""
+    return str(max(int(minimum), min(int(maximum), int(value))))
 
 
 def _read_bounded_int_setting(
@@ -6107,6 +6183,11 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_api_key: Optional[str] = None
     hydra_llm_provider: Optional[str] = None
     hydra_hf_transformers_context_tokens: Optional[Any] = None
+    hydra_hf_transformers_device: Optional[str] = None
+    hydra_hf_transformers_dtype: Optional[str] = None
+    hydra_hf_transformers_device_map: Optional[str] = None
+    hydra_hf_transformers_attn_implementation: Optional[str] = None
+    hydra_hf_transformers_trust_remote_code: Optional[bool] = None
     hydra_llama_cpp_context_tokens: Optional[Any] = None
     hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_enabled: Optional[bool] = None
@@ -6116,6 +6197,12 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_flash_attn: Optional[bool] = None
     hydra_llama_cpp_offload_kqv: Optional[bool] = None
     hydra_mlx_lm_context_tokens: Optional[Any] = None
+    hydra_mlx_lm_trust_remote_code: Optional[bool] = None
+    hydra_mlx_lm_lazy_load: Optional[bool] = None
+    hydra_mlx_engine_prefill_step_size: Optional[Any] = None
+    hydra_mlx_engine_kv_bits: Optional[Any] = None
+    hydra_mlx_engine_kv_group_size: Optional[Any] = None
+    hydra_mlx_engine_quantized_kv_start: Optional[Any] = None
     spudex_llm_provider: Optional[str] = None
     spudex_llm_host: Optional[str] = None
     spudex_llm_model: Optional[str] = None
@@ -10085,6 +10172,11 @@ def runtime_breakdown() -> Dict[str, Any]:
     return {"ok": True, **payload}
 
 
+@app.get("/api/runtime/llm/debug")
+def runtime_llm_debug(since_id: int = 0, limit: int = 200) -> Dict[str, Any]:
+    return get_llm_debug_runtime_snapshot(since_id=since_id, limit=limit)
+
+
 @app.post("/api/runtime/local-llm/unload")
 def unload_runtime_local_llm(payload: LocalLlmUnloadRequest) -> Dict[str, Any]:
     try:
@@ -12121,6 +12213,11 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_model": "",
         "hydra_llm_api_key": "",
         "hydra_hf_transformers_context_tokens": str(DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS),
+        "hydra_hf_transformers_device": DEFAULT_HF_TRANSFORMERS_DEVICE,
+        "hydra_hf_transformers_dtype": DEFAULT_HF_TRANSFORMERS_DTYPE,
+        "hydra_hf_transformers_device_map": DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
+        "hydra_hf_transformers_attn_implementation": DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
+        "hydra_hf_transformers_trust_remote_code": bool(DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE),
         "hydra_llama_cpp_context_tokens": str(DEFAULT_LLAMA_CPP_CONTEXT_TOKENS),
         "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
         "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
@@ -12130,6 +12227,12 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_flash_attn": bool(DEFAULT_LLAMA_CPP_FLASH_ATTN),
         "hydra_llama_cpp_offload_kqv": bool(DEFAULT_LLAMA_CPP_OFFLOAD_KQV),
         "hydra_mlx_lm_context_tokens": "",
+        "hydra_mlx_lm_trust_remote_code": bool(DEFAULT_MLX_LM_TRUST_REMOTE_CODE),
+        "hydra_mlx_lm_lazy_load": bool(DEFAULT_MLX_LM_LAZY_LOAD),
+        "hydra_mlx_engine_prefill_step_size": "",
+        "hydra_mlx_engine_kv_bits": "",
+        "hydra_mlx_engine_kv_group_size": "",
+        "hydra_mlx_engine_quantized_kv_start": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
@@ -12236,6 +12339,35 @@ def get_settings() -> Dict[str, Any]:
             ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
             DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
         ),
+        "hydra_hf_transformers_device": _read_text_choice_setting(
+            HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
+            ("TATER_HF_TRANSFORMERS_DEVICE",),
+            DEFAULT_HF_TRANSFORMERS_DEVICE,
+            allowed=("auto", "cuda", "mps", "cpu"),
+        ),
+        "hydra_hf_transformers_dtype": _read_text_choice_setting(
+            HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
+            ("TATER_HF_TRANSFORMERS_DTYPE",),
+            DEFAULT_HF_TRANSFORMERS_DTYPE,
+            allowed=("auto", "float16", "bfloat16", "float32"),
+        ),
+        "hydra_hf_transformers_device_map": _read_text_choice_setting(
+            HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
+            ("TATER_HF_TRANSFORMERS_DEVICE_MAP",),
+            DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
+            allowed=("default", "disabled", "auto", "balanced"),
+        ),
+        "hydra_hf_transformers_attn_implementation": _read_text_choice_setting(
+            HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
+            ("TATER_HF_TRANSFORMERS_ATTN_IMPLEMENTATION",),
+            DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
+            allowed=("", "auto", "sdpa", "flash_attention_2", "eager"),
+        ),
+        "hydra_hf_transformers_trust_remote_code": _read_bool_setting(
+            HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
+            ("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE",),
+            DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
+        ),
         "hydra_llama_cpp_context_tokens": _read_local_llm_context_setting(
             HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
             ("TATER_LLAMA_CPP_N_CTX", "LLM_CONTEXT_SIZE"),
@@ -12287,6 +12419,41 @@ def get_settings() -> Dict[str, Any]:
             ("TATER_MLX_LM_MAX_KV_SIZE",),
             None,
             minimum=128,
+        ),
+        "hydra_mlx_lm_trust_remote_code": _read_bool_setting(
+            HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
+            ("TATER_MLX_LM_TRUST_REMOTE_CODE",),
+            DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
+        ),
+        "hydra_mlx_lm_lazy_load": _read_bool_setting(
+            HYDRA_MLX_LM_LAZY_LOAD_KEY,
+            ("TATER_MLX_LM_LAZY",),
+            DEFAULT_MLX_LM_LAZY_LOAD,
+        ),
+        "hydra_mlx_engine_prefill_step_size": _read_optional_int_setting(
+            HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
+            ("TATER_MLX_ENGINE_PREFILL_STEP_SIZE",),
+            minimum=1,
+            maximum=32768,
+        ),
+        "hydra_mlx_engine_kv_bits": _read_text_choice_setting(
+            HYDRA_MLX_ENGINE_KV_BITS_KEY,
+            ("TATER_MLX_ENGINE_KV_BITS",),
+            "",
+            allowed=("", "2", "3", "4", "6", "8"),
+        ),
+        "hydra_mlx_engine_kv_group_size": _read_text_choice_setting(
+            HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
+            ("TATER_MLX_ENGINE_KV_GROUP_SIZE",),
+            "",
+            allowed=("", "32", "64", "128"),
+        ),
+        "hydra_mlx_engine_quantized_kv_start": _read_optional_int_setting(
+            HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
+            ("TATER_MLX_ENGINE_QUANTIZED_KV_START",),
+            minimum=0,
+            maximum=1_048_576,
+            allow_zero=True,
         ),
         "spudex_llm_provider": _normalize_hydra_llm_provider(spudex_settings.get("llm_provider") or ""),
         "spudex_llm_host": str(spudex_settings.get("llm_host") or ""),
@@ -13506,6 +13673,60 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             )
         redis_client.set(redis_key, str(int(parsed)))
 
+    def _save_text_choice_setting(
+        payload_key: str,
+        redis_key: str,
+        *,
+        allowed: Tuple[str, ...],
+        default: str = "",
+    ) -> None:
+        if payload_key not in updates:
+            return
+        token = str(updates.get(payload_key) or default or "").strip().lower()
+        aliases = {
+            "fp16": "float16",
+            "half": "float16",
+            "bf16": "bfloat16",
+            "fp32": "float32",
+            "none": "disabled",
+            "off": "disabled",
+            "false": "disabled",
+            "0": "disabled",
+            "default": "default",
+            "auto": "auto",
+        }
+        token = aliases.get(token, token)
+        allowed_set = {str(item).strip().lower() for item in allowed}
+        if token not in allowed_set:
+            raise HTTPException(status_code=400, detail=f"{payload_key} has an unsupported value.")
+        redis_client.set(redis_key, token)
+
+    def _save_optional_int_setting(
+        payload_key: str,
+        redis_key: str,
+        *,
+        min_value: int = 0,
+        max_value: int = 1_048_576,
+        allow_zero: bool = False,
+    ) -> None:
+        if payload_key not in updates:
+            return
+        raw = str(updates.get(payload_key) or "").strip()
+        if not raw:
+            redis_client.delete(redis_key)
+            return
+        try:
+            parsed = int(float(raw))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"{payload_key} must be a whole number.") from exc
+        if parsed < min_value or parsed > max_value or (parsed == 0 and not allow_zero):
+            lower = min_value if allow_zero or min_value > 0 else 1
+            raise HTTPException(
+                status_code=400,
+                detail=f"{payload_key} must be between {lower} and {max_value}.",
+            )
+        redis_client.set(redis_key, str(int(parsed)))
+
     _save_tater_api_settings_from_updates(updates)
 
     local_model_keys_cache: Optional[set[Tuple[str, str]]] = None
@@ -13570,6 +13791,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llm_provider",
         "hydra_base_servers",
         "hydra_hf_transformers_context_tokens",
+        "hydra_hf_transformers_device",
+        "hydra_hf_transformers_dtype",
+        "hydra_hf_transformers_device_map",
+        "hydra_hf_transformers_attn_implementation",
+        "hydra_hf_transformers_trust_remote_code",
         "hydra_llama_cpp_context_tokens",
         "hydra_llama_cpp_mtp_enabled",
         "hydra_llama_cpp_mtp_draft_tokens",
@@ -13578,6 +13804,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_flash_attn",
         "hydra_llama_cpp_offload_kqv",
         "hydra_mlx_lm_context_tokens",
+        "hydra_mlx_lm_trust_remote_code",
+        "hydra_mlx_lm_lazy_load",
+        "hydra_mlx_engine_prefill_step_size",
+        "hydra_mlx_engine_kv_bits",
+        "hydra_mlx_engine_kv_group_size",
+        "hydra_mlx_engine_quantized_kv_start",
     }
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
     vision_model_keys = {
@@ -13668,6 +13900,35 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_hf_transformers_context_tokens",
         HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
     )
+    _save_text_choice_setting(
+        "hydra_hf_transformers_device",
+        HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
+        allowed=("auto", "cuda", "mps", "cpu"),
+        default=DEFAULT_HF_TRANSFORMERS_DEVICE,
+    )
+    _save_text_choice_setting(
+        "hydra_hf_transformers_dtype",
+        HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
+        allowed=("auto", "float16", "bfloat16", "float32"),
+        default=DEFAULT_HF_TRANSFORMERS_DTYPE,
+    )
+    _save_text_choice_setting(
+        "hydra_hf_transformers_device_map",
+        HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
+        allowed=("default", "disabled", "auto", "balanced"),
+        default=DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
+    )
+    _save_text_choice_setting(
+        "hydra_hf_transformers_attn_implementation",
+        HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
+        allowed=("", "auto", "sdpa", "flash_attention_2", "eager"),
+        default=DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
+    )
+    _save_bool_setting(
+        "hydra_hf_transformers_trust_remote_code",
+        HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
+        default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
+    )
     _save_local_llm_context_setting(
         "hydra_llama_cpp_context_tokens",
         HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
@@ -13716,6 +13977,41 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_mlx_lm_context_tokens",
         HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
         min_value=128,
+    )
+    _save_bool_setting(
+        "hydra_mlx_lm_trust_remote_code",
+        HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
+        default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
+    )
+    _save_bool_setting(
+        "hydra_mlx_lm_lazy_load",
+        HYDRA_MLX_LM_LAZY_LOAD_KEY,
+        default=DEFAULT_MLX_LM_LAZY_LOAD,
+    )
+    _save_optional_int_setting(
+        "hydra_mlx_engine_prefill_step_size",
+        HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
+        min_value=1,
+        max_value=32768,
+    )
+    _save_text_choice_setting(
+        "hydra_mlx_engine_kv_bits",
+        HYDRA_MLX_ENGINE_KV_BITS_KEY,
+        allowed=("", "2", "3", "4", "6", "8"),
+        default="",
+    )
+    _save_text_choice_setting(
+        "hydra_mlx_engine_kv_group_size",
+        HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
+        allowed=("", "32", "64", "128"),
+        default="",
+    )
+    _save_optional_int_setting(
+        "hydra_mlx_engine_quantized_kv_start",
+        HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
+        min_value=0,
+        max_value=1_048_576,
+        allow_zero=True,
     )
 
     username = updates.get("username")
