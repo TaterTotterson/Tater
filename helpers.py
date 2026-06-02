@@ -554,6 +554,10 @@ _MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {
 _MLX_VLM_MODEL_CACHE: Dict[Tuple[str, bool, bool], Dict[str, Any]] = {}
 _MLX_VLM_MODEL_CACHE_LOCK = threading.RLock()
 _MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
+_MLX_ENGINE_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+_MLX_ENGINE_MODEL_CACHE_LOCK = threading.RLock()
+_MLX_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_MLX_ENGINE_FALLBACK_WARNED: set[str] = set()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -2298,6 +2302,7 @@ def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_MODEL_CACHE_LOCK),
     )
@@ -2400,6 +2405,7 @@ def unload_local_llm_models(
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_GENERATION_LOCKS, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_GENERATION_LOCKS, _MLX_ENGINE_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_GENERATION_LOCKS, _MLX_LM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_GENERATION_LOCKS, _MLX_VLM_MODEL_CACHE_LOCK),
     )
@@ -2421,6 +2427,12 @@ def unload_local_llm_models(
                 row = _local_llm_loaded_model_row(provider_token, key, bundle if isinstance(bundle, dict) else {})
                 removed.append(row)
                 if isinstance(bundle, dict):
+                    shutdown = getattr(bundle.get("model_kit"), "shutdown", None)
+                    if callable(shutdown):
+                        try:
+                            shutdown()
+                        except Exception:
+                            pass
                     removed_bundles.append(bundle)
                     bundle.clear()
                 cache.pop(raw_key, None)
@@ -2778,6 +2790,338 @@ def _mlx_lm_max_kv_size() -> Optional[int]:
         None,
         minimum=128,
     )
+
+
+def _mlx_engine_enabled() -> bool:
+    return _boolish(os.getenv("TATER_MLX_ENGINE_ENABLED"), default=True)
+
+
+def _mlx_engine_checkout_path() -> str:
+    raw = str(os.getenv("TATER_MLX_ENGINE_PATH") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    return str(Path(__file__).resolve().parent / ".runtime" / "mlx-engine")
+
+
+def _mlx_engine_max_seq_nums() -> int:
+    try:
+        raw = int(float(os.getenv("TATER_MLX_ENGINE_MAX_SEQ_NUMS") or "1"))
+    except Exception:
+        raw = 1
+    return max(1, min(64, raw))
+
+
+def _mlx_engine_prefill_step_size() -> Optional[int]:
+    raw = str(os.getenv("TATER_MLX_ENGINE_PREFILL_STEP_SIZE") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(1, int(float(raw)))
+    except Exception:
+        return None
+
+
+def _mlx_engine_optional_int_env(name: str) -> Optional[int]:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def _mlx_engine_max_image_size() -> Optional[Tuple[int, int]]:
+    value = _mlx_engine_optional_int_env("TATER_MLX_ENGINE_MAX_IMAGE_SIZE")
+    if value is None or value <= 0:
+        return None
+    side = max(64, min(4096, int(value)))
+    return (side, side)
+
+
+def _mlx_engine_prepare_import_path() -> str:
+    checkout = _mlx_engine_checkout_path()
+    package_dir = os.path.join(checkout, "mlx_engine")
+    if os.path.isdir(package_dir) and checkout not in sys.path:
+        sys.path.insert(0, checkout)
+    return checkout
+
+
+def _mlx_engine_import_helpers() -> Dict[str, Any]:
+    checkout = _mlx_engine_prepare_import_path()
+    try:
+        from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
+    except Exception as exc:
+        hint = "Install the MLX engine checkout with setup_tater.sh, or set TATER_MLX_ENGINE_ENABLED=0 to use mlx-lm/mlx-vlm directly."
+        if checkout and not os.path.isdir(os.path.join(checkout, "mlx_engine")):
+            hint = f"MLX engine checkout was not found at {checkout}. {hint}"
+        raise RuntimeError(hint) from exc
+    return {
+        "load_model": load_model,
+        "create_generator": create_generator,
+        "tokenize": tokenize,
+    }
+
+
+def _mlx_engine_config_json(model_path: str) -> Dict[str, Any]:
+    try:
+        path = Path(str(model_path or "")) / "config.json"
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _mlx_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
+    return (
+        str(model_id or "").strip(),
+        _mlx_lm_trust_remote_code(),
+        _mlx_lm_max_kv_size() or 0,
+        _mlx_engine_max_seq_nums(),
+        _mlx_engine_prefill_step_size() or 0,
+        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_KV_BITS") or 0,
+        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_KV_GROUP_SIZE") or 0,
+        _mlx_engine_optional_int_env("TATER_MLX_ENGINE_QUANTIZED_KV_START") or 0,
+    )
+
+
+def _mlx_engine_log_fallback(scope: str, exc: Exception) -> None:
+    reason = str(exc) or type(exc).__name__
+    key = f"{scope}:{type(exc).__name__}:{reason[:180]}"
+    with _MLX_ENGINE_MODEL_CACHE_LOCK:
+        if key in _MLX_ENGINE_FALLBACK_WARNED:
+            return
+        _MLX_ENGINE_FALLBACK_WARNED.add(key)
+    logger.warning("[mlx-engine] %s path unavailable; falling back to built-in MLX runtime: %s", scope, reason)
+
+
+def _load_mlx_engine_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("MLX model id or local path is required.")
+    if not _mlx_engine_enabled():
+        raise RuntimeError("MLX engine is disabled by TATER_MLX_ENGINE_ENABLED.")
+    if not _mlx_lm_is_apple_silicon():
+        raise RuntimeError("MLX engine runs on Apple Silicon Macs only.")
+    if _mlx_lm_adapter_path():
+        raise RuntimeError("MLX engine adapter loading is not wired in Tater yet.")
+
+    cache_key = _mlx_engine_cache_key(model_token)
+    with _MLX_ENGINE_MODEL_CACHE_LOCK:
+        cached = _MLX_ENGINE_MODEL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "MLX engine model is already loaded",
+                    "progress": 100.0,
+                    "device": "apple_silicon",
+                },
+            )
+            return cached
+
+        helpers = _mlx_engine_import_helpers()
+        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Loading MLX engine model into memory",
+                "progress": 0.0,
+            },
+        )
+
+        load_kwargs: Dict[str, Any] = {
+            "trust_remote_code": _mlx_lm_trust_remote_code(),
+            "max_seq_nums": _mlx_engine_max_seq_nums(),
+        }
+        max_kv_size = _mlx_lm_max_kv_size()
+        if max_kv_size is not None:
+            load_kwargs["max_kv_size"] = max(128, int(max_kv_size))
+        prefill_step_size = _mlx_engine_prefill_step_size()
+        if prefill_step_size is not None:
+            load_kwargs["prefill_step_size"] = prefill_step_size
+        for env_name, arg_name in (
+            ("TATER_MLX_ENGINE_KV_BITS", "kv_bits"),
+            ("TATER_MLX_ENGINE_KV_GROUP_SIZE", "kv_group_size"),
+            ("TATER_MLX_ENGINE_QUANTIZED_KV_START", "quantized_kv_start"),
+        ):
+            value = _mlx_engine_optional_int_env(env_name)
+            if value is not None:
+                load_kwargs[arg_name] = value
+
+        model_kit = helpers["load_model"](model_path, **load_kwargs)
+        config = _mlx_engine_config_json(model_path)
+        trust_kwargs: Dict[str, Any] = {}
+        if _mlx_lm_trust_remote_code():
+            trust_kwargs["trust_remote_code"] = True
+
+        tokenizer = getattr(model_kit, "tokenizer", None)
+        processor = None
+        try:
+            from transformers import AutoProcessor, AutoTokenizer  # type: ignore
+
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model_path, **trust_kwargs)
+            except Exception:
+                pass
+            if "vision_config" in config:
+                try:
+                    processor = AutoProcessor.from_pretrained(model_path, **trust_kwargs)
+                except Exception:
+                    processor = None
+        except Exception:
+            pass
+        if processor is None:
+            processor = tokenizer
+
+        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
+            HYDRA_LLM_PROVIDER_MLX_LM,
+            model_token,
+            tokenizer=tokenizer,
+            processor=processor,
+            config=config,
+            model=model_kit,
+        )
+        if chat_template_warning:
+            logger.warning("[mlx-engine] %s", chat_template_warning)
+
+        generation_lock = _MLX_ENGINE_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _MLX_ENGINE_GENERATION_LOCKS[cache_key] = generation_lock
+
+        bundle = {
+            "runtime": "mlx-engine",
+            "model_kit": model_kit,
+            "tokenizer": tokenizer,
+            "processor": processor,
+            "config": config,
+            "lock": generation_lock,
+            "model_path": model_path,
+            "model_root": _mlx_lm_model_root(),
+            "device": "apple_silicon",
+            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
+            "loaded_ts": time.time(),
+            "chat_template_override": bool(chat_template_override),
+            "chat_template_handler": chat_template_handler,
+            "chat_template_warning": chat_template_warning,
+            "supports_vision": bool("vision_config" in config),
+            "vision_chat_handler": "mlx-engine" if "vision_config" in config else "",
+            "create_generator": helpers["create_generator"],
+            "tokenize": helpers["tokenize"],
+        }
+        _MLX_ENGINE_MODEL_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "MLX engine model loaded",
+                "progress": 100.0,
+                "device": "apple_silicon",
+            },
+        )
+        return bundle
+
+
+def _mlx_engine_tokenize_prompt(bundle: Dict[str, Any], prompt: str) -> List[int]:
+    tokenize = bundle.get("tokenize")
+    model_kit = bundle.get("model_kit")
+    if callable(tokenize) and model_kit is not None:
+        tokens = tokenize(model_kit, prompt)
+        return list(tokens or [])
+    tokenizer = bundle.get("tokenizer") or bundle.get("processor")
+    encode = getattr(tokenizer, "encode", None)
+    if callable(encode):
+        tokens = encode(prompt)
+        return list(tokens or [])
+    return []
+
+
+def _mlx_engine_stop_strings(stop: Any) -> List[str]:
+    if not stop:
+        return []
+    items = stop if isinstance(stop, list) else [stop]
+    return [str(item) for item in items if str(item or "")]
+
+
+def _mlx_engine_run_generation(
+    bundle: Dict[str, Any],
+    prompt: str,
+    *,
+    max_tokens: int,
+    temp: float,
+    stop: Any = None,
+    images_b64: Optional[List[str]] = None,
+    max_image_size: Optional[Tuple[int, int]] = None,
+    extra_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    create_generator = bundle.get("create_generator")
+    model_kit = bundle.get("model_kit")
+    generation_lock = bundle.get("lock")
+    if not callable(create_generator) or model_kit is None:
+        raise RuntimeError("MLX engine runtime is missing generation helpers.")
+
+    prompt_tokens = _mlx_engine_tokenize_prompt(bundle, prompt)
+    generation_kwargs: Dict[str, Any] = {
+        "max_tokens": max(1, int(max_tokens or 1)),
+        "temp": max(0.0, float(temp)),
+        "request_id": f"tater-{uuid.uuid4().hex}",
+    }
+    stop_strings = _mlx_engine_stop_strings(stop)
+    if stop_strings:
+        generation_kwargs["stop_strings"] = stop_strings
+    if images_b64:
+        generation_kwargs["images_b64"] = [str(item) for item in images_b64 if str(item or "")]
+    if max_image_size is not None:
+        generation_kwargs["max_image_size"] = max_image_size
+    for key in (
+        "top_p",
+        "top_k",
+        "min_p",
+        "min_tokens_to_keep",
+        "seed",
+        "json_schema",
+        "repetition_penalty",
+        "repetition_context_size",
+        "num_draft_tokens",
+    ):
+        if extra_kwargs and key in extra_kwargs and extra_kwargs.get(key) is not None:
+            generation_kwargs[key] = extra_kwargs[key]
+
+    content = ""
+    completion_tokens = 0
+    generation_started = time.perf_counter()
+    lock = generation_lock if hasattr(generation_lock, "__enter__") else threading.RLock()
+    with lock:
+        for generation_result in create_generator(model_kit, prompt_tokens, **generation_kwargs):
+            text_part = _coerce_content_to_text(getattr(generation_result, "text", ""))
+            content += text_part
+            tokens = getattr(generation_result, "tokens", None)
+            try:
+                completion_tokens += len(tokens or [])
+            except Exception:
+                pass
+            if getattr(generation_result, "stop_condition", None) is not None:
+                break
+    generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+    content = _strip_local_thinking_blocks(_apply_local_stop_sequences(content, stop)).strip()
+    if completion_tokens <= 0:
+        completion_tokens = len(_mlx_engine_tokenize_prompt(bundle, content))
+    return {
+        "content": content,
+        "prompt_tokens": len(prompt_tokens),
+        "completion_tokens": max(0, int(completion_tokens)),
+        "elapsed": generation_elapsed,
+    }
 
 
 def _emit_hf_llm_progress(progress_callback: Optional[HFProgressCallback], payload: Dict[str, Any]) -> None:
@@ -5202,6 +5546,23 @@ def preload_mlx_lm_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
 ) -> Dict[str, Any]:
+    if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
+        try:
+            bundle = _load_mlx_engine_bundle(model_id, progress_callback=progress_callback)
+            return {
+                "ok": True,
+                "model": str(model_id or "").strip(),
+                "device": str(bundle.get("device") or "apple_silicon"),
+                "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
+                "model_path": str(bundle.get("model_path") or ""),
+                "supports_vision": bool(bundle.get("supports_vision")),
+                "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
+                "warning": str(bundle.get("chat_template_warning") or ""),
+                "runtime": "mlx-engine",
+            }
+        except Exception as exc:
+            _mlx_engine_log_fallback("preload", exc)
+
     bundle = _load_mlx_lm_bundle(model_id, progress_callback=progress_callback)
     return {
         "ok": True,
@@ -7683,10 +8044,82 @@ class MlxLmLLMClientWrapper:
                 generation_kwargs[key] = kwargs.pop(key)
         return generation_kwargs
 
+    def _build_engine_generation_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        generation_kwargs: Dict[str, Any] = {}
+        for key in ("top_p", "top_k", "min_p", "min_tokens_to_keep", "seed", "json_schema", "num_draft_tokens"):
+            if key in kwargs and kwargs.get(key) is not None:
+                generation_kwargs[key] = kwargs.pop(key)
+        repetition_penalty = kwargs.pop("repeat_penalty", kwargs.pop("repetition_penalty", None))
+        if repetition_penalty is not None:
+            generation_kwargs["repetition_penalty"] = repetition_penalty
+        repetition_context_size = kwargs.pop("repetition_context_size", None)
+        if repetition_context_size is not None:
+            generation_kwargs["repetition_context_size"] = repetition_context_size
+        return generation_kwargs
+
+    def _chat_sync_mlx_engine(
+        self,
+        bundle: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        *,
+        stop: Any = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        tokenizer = bundle.get("tokenizer") or bundle.get("processor")
+        prompt = self._chat_template_prompt(tokenizer, messages)
+        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        try:
+            max_tokens_i = max(1, int(max_tokens))
+        except Exception:
+            max_tokens_i = self.max_tokens
+        temperature = kwargs.pop("temperature", self.temperature)
+        try:
+            temp_value = max(0.0, float(temperature))
+        except Exception:
+            temp_value = self.temperature
+
+        output = _mlx_engine_run_generation(
+            bundle,
+            prompt,
+            max_tokens=max_tokens_i,
+            temp=temp_value,
+            stop=stop,
+            extra_kwargs=self._build_engine_generation_kwargs(kwargs),
+        )
+        content = str(output.get("content") or "").strip()
+        prompt_tokens = max(0, int(output.get("prompt_tokens") or 0))
+        completion_tokens = max(0, int(output.get("completion_tokens") or 0))
+        total_tokens = prompt_tokens + completion_tokens
+        generation_elapsed = _perf_nonnegative_float(output.get("elapsed"))
+        return {
+            "model": self.model,
+            "message": {"role": "assistant", "content": content},
+            "_usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            "_timing": {
+                "prompt_elapsed": 0.0,
+                "completion_elapsed": generation_elapsed,
+                "speed_basis": "mlx_engine",
+            },
+        }
+
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         _ = timeout
         stop = kwargs.pop("stop", None)
         seed = kwargs.pop("seed", None)
+        if seed is not None and "seed" not in kwargs:
+            kwargs["seed"] = seed
+        if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
+            try:
+                engine_bundle = _load_mlx_engine_bundle(self.model)
+                return self._chat_sync_mlx_engine(engine_bundle, messages, stop=stop, **dict(kwargs))
+            except Exception as exc:
+                _mlx_engine_log_fallback("text", exc)
+        if seed is not None:
+            kwargs.pop("seed", None)
         bundle = _load_mlx_lm_bundle(self.model)
         model = bundle["model"]
         tokenizer = bundle["tokenizer"]
@@ -8206,6 +8639,76 @@ def _mlx_vlm_result_text(output: Any) -> str:
     return str(output or "").strip()
 
 
+def _mlx_engine_vision_prompt(bundle: Dict[str, Any], prompt_text: str, image_b64: str) -> str:
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "base64": image_b64},
+                {"type": "text", "text": prompt_text},
+            ],
+        }
+    ]
+    targets = [bundle.get("processor"), bundle.get("tokenizer")]
+    seen: set[int] = set()
+    last_exc: Optional[Exception] = None
+    for target in targets:
+        if target is None:
+            continue
+        ident = id(target)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        template = getattr(target, "apply_chat_template", None)
+        if not callable(template):
+            continue
+        for extra in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled()):
+            try:
+                prompt = template(conversation, tokenize=False, add_generation_prompt=True, **extra)
+                return _coerce_content_to_text(prompt)
+            except TypeError as exc:
+                last_exc = exc
+                continue
+            except Exception as exc:
+                last_exc = exc
+                break
+    if last_exc is not None:
+        logger.debug("MLX engine vision chat template failed; using plain prompt: %s", last_exc)
+    return prompt_text
+
+
+def _describe_image_with_mlx_engine(
+    *,
+    model_token: str,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+    timeout: float,
+) -> Dict[str, Any]:
+    _ = timeout
+    prepared_bytes, _prepared_name = _local_vision_prepare_image_bytes(image_bytes, filename)
+    image_b64 = base64.b64encode(bytes(prepared_bytes or b"")).decode("utf-8")
+    if not image_b64:
+        raise RuntimeError("No image bytes were provided for MLX vision.")
+
+    bundle = _load_mlx_engine_bundle(model_token)
+    prompt_text = str(prompt or "").strip() or "Describe this image."
+    formatted_prompt = _mlx_engine_vision_prompt(bundle, prompt_text, image_b64)
+    output = _mlx_engine_run_generation(
+        bundle,
+        formatted_prompt,
+        max_tokens=768,
+        temp=0.2,
+        images_b64=[image_b64],
+        max_image_size=_mlx_engine_max_image_size(),
+    )
+    content = str(output.get("content") or "").strip()
+    return {
+        "model": model_token,
+        "message": {"role": "assistant", "content": content},
+    }
+
+
 def _describe_image_with_mlx_vlm(
     *,
     model_token: str,
@@ -8350,13 +8853,32 @@ def describe_image_with_local_llm(
                     timeout=timeout,
                 )
         elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-            result = _describe_image_with_mlx_vlm(
-                model_token=model_token,
-                image_bytes=image_bytes,
-                filename=filename,
-                prompt=prompt,
-                timeout=timeout,
-            )
+            if _mlx_engine_enabled() and not _mlx_lm_adapter_path():
+                try:
+                    result = _describe_image_with_mlx_engine(
+                        model_token=model_token,
+                        image_bytes=image_bytes,
+                        filename=filename,
+                        prompt=prompt,
+                        timeout=timeout,
+                    )
+                except Exception as exc:
+                    _mlx_engine_log_fallback("vision", exc)
+                    result = _describe_image_with_mlx_vlm(
+                        model_token=model_token,
+                        image_bytes=image_bytes,
+                        filename=filename,
+                        prompt=prompt,
+                        timeout=timeout,
+                    )
+            else:
+                result = _describe_image_with_mlx_vlm(
+                    model_token=model_token,
+                    image_bytes=image_bytes,
+                    filename=filename,
+                    prompt=prompt,
+                    timeout=timeout,
+                )
         else:
             raise RuntimeError("OpenAI-compatible vision should use the API vision path.")
 

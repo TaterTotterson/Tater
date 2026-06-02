@@ -272,6 +272,33 @@ install_llama_cpp_metal() {
   "${venv_python}" -m pip install --upgrade "${LLAMA_CPP_PYTHON_SPEC}" || warn "Default llama-cpp-python fallback failed."
 }
 
+install_mlx_engine_checkout() {
+  if [ "${TATER_SETUP_MLX_ENGINE:-1}" = "0" ]; then
+    warn "Skipping MLX engine checkout because TATER_SETUP_MLX_ENGINE=0."
+    return
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git was not found; skipping optional MLX engine checkout."
+    return
+  fi
+  mkdir -p "${RUNTIME_DIR}"
+  engine_dir="${RUNTIME_DIR}/mlx-engine"
+  if [ -d "${engine_dir}/mlx_engine" ]; then
+    ok "Using existing ${engine_dir}"
+    if [ -d "${engine_dir}/.git" ]; then
+      info "Updating optional MLX engine checkout"
+      git -C "${engine_dir}" pull --ff-only || warn "Could not update ${engine_dir}; using the existing checkout."
+    fi
+    return
+  fi
+  if [ -e "${engine_dir}" ]; then
+    warn "${engine_dir} exists but does not look like an mlx-engine checkout. Set TATER_MLX_ENGINE_PATH or remove it and rerun setup."
+    return
+  fi
+  info "Cloning optional MLX engine runtime"
+  git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git "${engine_dir}" || warn "Could not clone mlx-engine; Tater will use mlx-lm/mlx-vlm directly."
+}
+
 install_macos() {
   venv_python="$1"
   tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-macos.XXXXXX")"
@@ -304,6 +331,9 @@ install_macos() {
   info "Installing Apple-native speech extras"
   if ! "${venv_python}" -m pip install mlx-whisper kokoro; then
     warn "Apple-native speech extras failed to install. Tater will still run with Faster Whisper/Kokoro CPU fallbacks."
+  fi
+  if [ "${is_apple_silicon}" = "1" ]; then
+    install_mlx_engine_checkout
   fi
   rm -f "${tmp_req}"
   trap - EXIT
