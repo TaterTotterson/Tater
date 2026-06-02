@@ -50,6 +50,7 @@ transformers
 accelerate
 llama-cpp-python>=0.3.23
 mlx-lm; platform_system == "Darwin" and platform_machine == "arm64"
+mlx-vlm; platform_system == "Darwin" and platform_machine == "arm64"
 faster-whisper
 vosk
 pykokoro

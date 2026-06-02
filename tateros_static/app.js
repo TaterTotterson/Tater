@@ -4248,6 +4248,14 @@ function _sanitizeMarkdownHref(rawHref) {
   return "";
 }
 
+function _chatDirectMediaUrl(rawUrl) {
+  const safeHref = _sanitizeMarkdownHref(rawUrl);
+  if (!safeHref) {
+    return "";
+  }
+  return safeHref.startsWith("/") ? withBasePath(safeHref) : safeHref;
+}
+
 function _renderMarkdownInline(rawText) {
   const source = String(rawText ?? "");
   if (!source) {
@@ -4447,17 +4455,19 @@ function renderChatMessage(message) {
       `;
     } else {
       const contentType = String(content.type || "").toLowerCase();
-      const fileId = String(content.id || "").trim();
+      const fileId = String(content.id || content.file_id || "").trim();
       const fileName = String(content.name || "attachment").trim() || "attachment";
       const mimetype = String(content.mimetype || "").trim() || "application/octet-stream";
       const fileUrl = _chatFileUrl(fileId, mimetype);
+      const directMediaUrl = _chatDirectMediaUrl(content.url || content.src || content.href);
+      const mediaUrl = directMediaUrl || fileUrl;
       const hasDataB64 = typeof content.data_b64 === "string" && content.data_b64.trim().length > 0;
-      const hasFileUrl = Boolean(fileUrl);
+      const hasMediaUrl = Boolean(mediaUrl);
       if (contentType === "image" && hasDataB64) {
         const imageUrl = `data:${escapeHtml(content.mimetype || "image/png")};base64,${content.data_b64}`;
         bodyHtml = `<img class="chat-media-image" src="${imageUrl}" alt="${escapeHtml(content.name || "image")}" />`;
-      } else if (contentType === "image" && hasFileUrl) {
-        bodyHtml = `<img class="chat-media-image" src="${fileUrl}" alt="${escapeHtml(fileName)}" />`;
+      } else if (contentType === "image" && hasMediaUrl) {
+        bodyHtml = `<img class="chat-media-image" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(fileName)}" />`;
       } else if (contentType === "audio" && hasDataB64) {
         const mimetype = String(content.mimetype || "audio/mpeg");
         const audioUrl = `data:${escapeHtml(mimetype)};base64,${content.data_b64}`;
@@ -4468,12 +4478,12 @@ function renderChatMessage(message) {
             <a class="inline-btn" href="${audioUrl}" download="${escapeHtml(fileName)}">Download Audio</a>
           </div>
         `;
-      } else if (contentType === "audio" && hasFileUrl) {
+      } else if (contentType === "audio" && hasMediaUrl) {
         bodyHtml = `
           <div class="chat-media-wrap">
-            <audio controls preload="metadata" src="${fileUrl}"></audio>
+            <audio controls preload="metadata" src="${escapeHtml(mediaUrl)}"></audio>
             <div class="chat-file-meta">${escapeHtml(fileName)}</div>
-            <a class="inline-btn" href="${fileUrl}" download="${escapeHtml(fileName)}">Download Audio</a>
+            <a class="inline-btn" href="${escapeHtml(mediaUrl)}" download="${escapeHtml(fileName)}">Download Audio</a>
           </div>
         `;
       } else if (contentType === "video" && hasDataB64) {
@@ -4486,12 +4496,12 @@ function renderChatMessage(message) {
             <a class="inline-btn" href="${videoUrl}" download="${escapeHtml(fileName)}">Download Video</a>
           </div>
         `;
-      } else if (contentType === "video" && hasFileUrl) {
+      } else if (contentType === "video" && hasMediaUrl) {
         bodyHtml = `
           <div class="chat-media-wrap">
-            <video controls preload="metadata" src="${fileUrl}" class="chat-media-video"></video>
+            <video controls preload="metadata" src="${escapeHtml(mediaUrl)}" class="chat-media-video"></video>
             <div class="chat-file-meta">${escapeHtml(fileName)}</div>
-            <a class="inline-btn" href="${fileUrl}" download="${escapeHtml(fileName)}">Download Video</a>
+            <a class="inline-btn" href="${escapeHtml(mediaUrl)}" download="${escapeHtml(fileName)}">Download Video</a>
           </div>
         `;
       } else if (contentType === "file" && hasDataB64) {
@@ -4504,12 +4514,12 @@ function renderChatMessage(message) {
             )}">Download File</a>
           </div>
         `;
-      } else if (contentType === "file" && hasFileUrl) {
+      } else if (contentType === "file" && hasMediaUrl) {
         const sizeLabel = _formatBytes(content.size);
         bodyHtml = `
           <div class="chat-file-card">
             <div class="chat-file-meta">${escapeHtml(fileName)}${sizeLabel ? ` (${escapeHtml(sizeLabel)})` : ""}</div>
-            <a class="inline-btn" href="${fileUrl}" download="${escapeHtml(fileName)}">Download File</a>
+            <a class="inline-btn" href="${escapeHtml(mediaUrl)}" download="${escapeHtml(fileName)}">Download File</a>
           </div>
         `;
       } else {
