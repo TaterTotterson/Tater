@@ -636,7 +636,7 @@ def _accelerated_device_label(device: str) -> str:
 
 def _apply_speechbrain_yaml_compat_shim() -> None:
     # SpeechBrain/HyperPyYAML still assumes a max_depth attribute exists on the
-    # ruamel loader object, but ESPHome 2026.4.0 brings in ruamel.yaml 0.19.1.
+    # ruamel loader object, but recent ESPHome releases bring in ruamel.yaml 0.19.x.
     # Add a benign default so Speaker ID can coexist with ESPHome's pinned YAML.
     with contextlib.suppress(Exception):
         import ruamel.yaml  # type: ignore
