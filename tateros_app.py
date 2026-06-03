@@ -1895,6 +1895,291 @@ def _hf_browser_provider_search(provider: str, query: str, task: str = "text-gen
     return q
 
 
+HF_BROWSER_TATER_PICKS: Tuple[Dict[str, Any], ...] = (
+    {
+        "id": "TaterTotterson/gemma-4-26B-A4B-it-GGUF-Tater-NoThink",
+        "provider": HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        "author": "TaterTotterson",
+        "model_size": "26B",
+        "library_name": "llama.cpp",
+        "pipeline_tag": "image-text-to-text",
+        "license": "apache-2.0",
+        "supports_vision": True,
+        "tasks": ("text-generation", "image-text-to-text"),
+        "tags": (
+            "tater",
+            "nothink",
+            "gguf",
+            "llama.cpp",
+            "gemma4",
+            "vision",
+            "UD-Q4_K_M",
+        ),
+        "tater_pick_label": "Tater Pick",
+        "tater_pick_note": "NoThink UD-Q4_K_M with matching mmproj-F16.",
+        "preferred_gguf": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "preferred_mmproj": "mmproj-F16.gguf",
+    },
+)
+
+
+def _hf_browser_tater_pick_owner() -> str:
+    return str(os.getenv("TATER_HF_TATER_PICK_OWNER") or "TaterTotterson").strip()
+
+
+def _hf_browser_tater_pick_tag_tokens() -> Tuple[str, ...]:
+    raw = str(os.getenv("TATER_HF_TATER_PICK_TAGS") or "").strip()
+    if raw:
+        tags = [item.strip().lower() for item in re.split(r"[,;\s]+", raw) if item.strip()]
+    else:
+        tags = ["tater-pick", "tater-recommended", "tater-nothink"]
+    return tuple(dict.fromkeys(tags))
+
+
+def _hf_browser_card_tags(card_data: Any) -> List[str]:
+    if not card_data:
+        return []
+    if isinstance(card_data, dict):
+        raw = card_data.get("tags") or []
+    else:
+        raw = getattr(card_data, "tags", []) or []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(item or "").strip() for item in raw if str(item or "").strip()]
+    return []
+
+
+def _hf_browser_paths_to_file_rows(paths: List[str]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        path = str(raw_path or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        lower = path.lower()
+        rows.append(
+            {
+                "path": path,
+                "size": 0,
+                "is_gguf": lower.endswith(".gguf"),
+                "is_mmproj": lower.endswith(".gguf") and "mmproj" in lower,
+                "is_safetensors": lower.endswith(".safetensors"),
+                "is_config": os.path.basename(lower) in {"config.json", "tokenizer.json", "tokenizer.model"},
+                "quant": _hf_browser_file_quant(path),
+            }
+        )
+    return rows
+
+
+def _hf_browser_tater_pick_metadata(
+    model_id: Any,
+    *,
+    tags: Optional[List[str]] = None,
+    card_data: Any = None,
+    files: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    repo = str(model_id or "").strip()
+    if not repo:
+        return {}
+
+    static_row = _hf_browser_tater_pick_by_id(repo)
+    if static_row:
+        return static_row
+
+    owner = _hf_browser_tater_pick_owner().lower()
+    if not owner or "/" not in repo or repo.split("/", 1)[0].lower() != owner:
+        return {}
+
+    tag_set = {
+        str(item or "").strip().lower()
+        for item in [*(tags or []), *_hf_browser_card_tags(card_data)]
+        if str(item or "").strip()
+    }
+    pick_tags = set(_hf_browser_tater_pick_tag_tokens())
+    has_pick_tag = bool(tag_set.intersection(pick_tags))
+    has_nothink_marker = any(
+        token in tag_set
+        for token in (
+            "nothink",
+            "no-think",
+            "no_think",
+            "thinking-disabled",
+            "disable-thinking",
+            "non-thinking",
+        )
+    )
+    if not has_pick_tag:
+        return {}
+
+    file_rows = _hf_browser_paths_to_file_rows(files or [])
+    preferred_gguf = _hf_browser_preferred_gguf(file_rows) if file_rows else ""
+    preferred_mmproj = _hf_browser_preferred_mmproj(file_rows, preferred_gguf) if file_rows else ""
+    quant = _hf_browser_file_quant(preferred_gguf)
+    note_bits: List[str] = []
+    if has_nothink_marker:
+        note_bits.append("NoThink")
+    if quant:
+        note_bits.append(quant)
+    if preferred_mmproj:
+        note_bits.append("with matching projector")
+    note = " ".join(note_bits).strip()
+    return {
+        "id": repo,
+        "tater_pick_label": "Tater Pick",
+        "tater_pick_note": note or "Curated Tater model.",
+        "preferred_gguf": preferred_gguf,
+        "preferred_mmproj": preferred_mmproj,
+    }
+
+
+def _hf_browser_tater_pick_by_id(model_id: Any) -> Dict[str, Any]:
+    needle = str(model_id or "").strip().lower()
+    if not needle:
+        return {}
+    for row in HF_BROWSER_TATER_PICKS:
+        if str(row.get("id") or "").strip().lower() == needle:
+            return dict(row)
+    return {}
+
+
+def _hf_browser_tater_pick_matches_query(row: Dict[str, Any], query: str) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return True
+    haystack = " ".join(
+        [
+            str(row.get("id") or ""),
+            str(row.get("provider") or ""),
+            str(row.get("library_name") or ""),
+            str(row.get("model_size") or ""),
+            str(row.get("tater_pick_note") or ""),
+            " ".join(str(item or "") for item in (row.get("tags") or [])),
+        ]
+    ).lower()
+    return all(token in haystack for token in q.split())
+
+
+def _hf_browser_tater_pick_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(row.get("provider"))
+    tags = [str(item or "").strip() for item in (row.get("tags") or []) if str(item or "").strip()]
+    return {
+        "id": str(row.get("id") or "").strip(),
+        "author": str(row.get("author") or "").strip(),
+        "model_size": str(row.get("model_size") or "").strip(),
+        "downloads": 0,
+        "likes": 0,
+        "last_modified": "",
+        "pipeline_tag": str(row.get("pipeline_tag") or "").strip(),
+        "library_name": str(row.get("library_name") or "").strip(),
+        "tags": tags[:30],
+        "license": str(row.get("license") or "").strip(),
+        "private": False,
+        "gated": "",
+        "compatible": True,
+        "supports_vision": bool(row.get("supports_vision")),
+        "provider": provider_token,
+        "provider_label": _hydra_llm_provider_label(provider_token),
+        "tater_pick": True,
+        "tater_pick_label": str(row.get("tater_pick_label") or "Tater Pick").strip(),
+        "tater_pick_note": str(row.get("tater_pick_note") or "").strip(),
+        "preferred_gguf": str(row.get("preferred_gguf") or "").strip(),
+        "preferred_mmproj": str(row.get("preferred_mmproj") or "").strip(),
+    }
+
+
+def _hf_browser_provider_for_model(model: Any, fallback: str = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS) -> str:
+    for provider_token in (HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM, HYDRA_LLM_PROVIDER_HF_TRANSFORMERS):
+        try:
+            if _hf_browser_provider_matches(model, provider_token):
+                return provider_token
+        except Exception:
+            continue
+    return _normalize_hydra_llm_provider(fallback)
+
+
+def _hf_browser_tater_pick_models_from_hub(*, query: str, task: str, limit: int, provider: str) -> List[Dict[str, Any]]:
+    owner = _hf_browser_tater_pick_owner()
+    if not owner:
+        return []
+    try:
+        from huggingface_hub import HfApi  # type: ignore
+    except Exception:
+        return []
+
+    api = HfApi(token=_hf_browser_token())
+    try:
+        iterator = _hf_hub_call_compat(
+            api.list_models,
+            author=owner,
+            sort="lastModified",
+            direction=-1,
+            limit=max(50, min(200, int(limit or 24) * 4)),
+            full=True,
+            cardData=True,
+            fetch_config=True,
+        )
+        raw_models = list(iterator or [])
+    except Exception as exc:
+        logger.warning("[huggingface-browser] Tater Picks live lookup failed: %s", exc)
+        return []
+
+    task_token = _normalize_hf_browser_task(task)
+    provider_filter = _normalize_hydra_llm_provider(provider)
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for model in raw_models:
+        model_id = str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or "").strip()
+        if not model_id or model_id.lower() in seen:
+            continue
+        seen.add(model_id.lower())
+        tags = [
+            str(item or "").strip()
+            for item in (_hf_browser_object_value(model, "tags", []) or [])
+            if str(item or "").strip()
+        ]
+        siblings = _hf_browser_object_value(model, "siblings", []) or []
+        files = [
+            str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+            for item in siblings
+            if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
+        ]
+        card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
+        if not _hf_browser_tater_pick_metadata(model_id, tags=tags, card_data=card_data, files=files):
+            continue
+        provider_token = _hf_browser_provider_for_model(model, fallback=HYDRA_LLM_PROVIDER_LLAMA_CPP)
+        if provider_token != provider_filter:
+            continue
+        summary = _hf_browser_model_summary(model, provider=provider_token)
+        if task_token == "image-text-to-text" and not bool(summary.get("supports_vision")):
+            continue
+        if not _hf_browser_tater_pick_matches_query(summary, query):
+            continue
+        rows.append(summary)
+    return rows[: max(1, min(100, int(limit or 24)))]
+
+
+def _hf_browser_tater_pick_models(*, query: str, task: str, limit: int, provider: str) -> List[Dict[str, Any]]:
+    task_token = _normalize_hf_browser_task(task)
+    provider_filter = _normalize_hydra_llm_provider(provider)
+    live_rows = _hf_browser_tater_pick_models_from_hub(query=query, task=task_token, limit=limit, provider=provider_filter)
+    rows: List[Dict[str, Any]] = list(live_rows)
+    seen = {str(row.get("id") or "").strip().lower() for row in rows if str(row.get("id") or "").strip()}
+    for row in HF_BROWSER_TATER_PICKS:
+        if str(row.get("id") or "").strip().lower() in seen:
+            continue
+        if _normalize_hydra_llm_provider(row.get("provider")) != provider_filter:
+            continue
+        tasks = {str(item or "").strip() for item in (row.get("tasks") or []) if str(item or "").strip()}
+        if tasks and task_token not in tasks:
+            continue
+        if not _hf_browser_tater_pick_matches_query(row, query):
+            continue
+        rows.append(_hf_browser_tater_pick_summary(row))
+    return rows[: max(1, min(100, int(limit or 24)))]
+
+
 def _hf_browser_provider_app_filter(provider: str, task: str = "text-generation") -> str:
     provider_token = _normalize_hydra_llm_provider(provider)
     task_token = _normalize_hf_browser_task(task)
@@ -2028,9 +2313,26 @@ def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
 
 def _hf_browser_file_quant(path: str) -> str:
     name = os.path.basename(str(path or "")).upper()
-    for quant in ("Q2_K", "Q3_K_M", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16", "BF16"):
+    for quant in (
+        "UD-Q4_K_M",
+        "UD_Q4_K_M",
+        "UD-Q4_K_S",
+        "UD_Q4_K_S",
+        "UD-Q5_K_M",
+        "UD_Q5_K_M",
+        "Q2_K",
+        "Q3_K_M",
+        "Q4_K_M",
+        "Q4_K_S",
+        "Q5_K_M",
+        "Q5_K_S",
+        "Q6_K",
+        "Q8_0",
+        "F16",
+        "BF16",
+    ):
         if quant in name:
-            return quant
+            return quant.replace("_Q", "-Q", 1) if quant.startswith("UD_") else quant
     return ""
 
 
@@ -2038,7 +2340,7 @@ def _hf_browser_preferred_gguf(files: List[Dict[str, Any]]) -> str:
     ggufs = [row for row in files if bool(row.get("is_gguf")) and "mmproj" not in str(row.get("path") or "").lower()]
     if not ggufs:
         return ""
-    preferred = ("Q4_K_M", "Q5_K_M", "Q4_K_S", "Q5_0", "Q4_0", "Q8_0")
+    preferred = ("UD-Q4_K_M", "Q4_K_M", "UD-Q5_K_M", "Q5_K_M", "UD-Q4_K_S", "Q4_K_S", "Q5_0", "Q4_0", "Q8_0")
 
     def _score(row: Dict[str, Any]) -> Tuple[int, int, str]:
         path = str(row.get("path") or "")
@@ -2091,6 +2393,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
     lower_files = " ".join(files).lower()
     lower_library = str(_hf_browser_object_value(model, "library_name") or "").strip().lower()
     provider_haystack = f"{lower_id} {lower_library} {lower_tags} {lower_files}"
+    card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
+    tater_pick = _hf_browser_tater_pick_metadata(model_id, tags=tags, card_data=card_data, files=files)
     supports_vision = _hf_browser_is_vision_model(model) or "mmproj" in lower_files
     if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         compatible = (
@@ -2111,9 +2415,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
         )
     else:
         compatible = ".gguf" not in lower_files
-    card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
     model_size_label = _hf_browser_model_size_label(model_id, tags, files, model, card_data)
-    return {
+    summary = {
         "id": model_id,
         "author": str(_hf_browser_object_value(model, "author") or "").strip(),
         "model_size": model_size_label,
@@ -2134,6 +2437,17 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
         "provider": provider_token,
         "provider_label": _hydra_llm_provider_label(provider_token),
     }
+    if tater_pick:
+        summary.update(
+            {
+                "tater_pick": True,
+                "tater_pick_label": str(tater_pick.get("tater_pick_label") or "Tater Pick").strip(),
+                "tater_pick_note": str(tater_pick.get("tater_pick_note") or "").strip(),
+                "preferred_gguf": str(tater_pick.get("preferred_gguf") or "").strip(),
+                "preferred_mmproj": str(tater_pick.get("preferred_mmproj") or "").strip(),
+            }
+        )
+    return summary
 
 
 def _hf_browser_file_rows(info: Any, fallback_files: List[str]) -> List[Dict[str, Any]]:
@@ -13367,6 +13681,25 @@ def get_huggingface_models(
         provider_token = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
     view_token = str(view or "trending").strip().lower().replace("_", "-")
     task_token = _normalize_hf_browser_task(task)
+    clean_limit = max(4, min(48, int(limit or 24)))
+    search = _hf_browser_provider_search(provider_token, query, task_token)
+    integration_status = _hf_browser_integration_status()
+    if view_token in {"picks", "tater", "tater-picks", "recommended"}:
+        models = _hf_browser_tater_pick_models(query=search, task=task_token, limit=clean_limit, provider=provider_token)
+        return {
+            "provider": provider_token,
+            "provider_label": _hydra_llm_provider_label(provider_token),
+            "view": "picks",
+            "query": search,
+            "task": task_token,
+            "library": "",
+            "app_filter": "",
+            "integration": integration_status,
+            "limit": clean_limit,
+            "has_next": False,
+            "next_cursor": "",
+            "models": models,
+        }
     if view_token in {"new", "recent", "latest"}:
         sort = "lastModified"
         response_view = "new"
@@ -13376,9 +13709,6 @@ def get_huggingface_models(
     else:
         sort = "trendingScore"
         response_view = "trending"
-    clean_limit = max(4, min(48, int(limit or 24)))
-    search = _hf_browser_provider_search(provider_token, query, task_token)
-    integration_status = _hf_browser_integration_status()
     page_url = _hf_browser_cursor_decode(cursor) if str(cursor or "").strip() else _hf_browser_models_api_url(
         provider=provider_token,
         search=search,
