@@ -3029,6 +3029,28 @@ def _mlx_vlm_token_from_id(tokenizer: Any, token_id: Any, fallback: str) -> str:
     return fallback
 
 
+def _mlx_vlm_first_token_id(value: Any) -> Optional[int]:
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            parsed = _mlx_vlm_first_token_id(item)
+            if parsed is not None:
+                return parsed
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _mlx_vlm_config_token_id(config: Dict[str, Any], key: str) -> Optional[int]:
+    for source in (config, config.get("text_config", {}), config.get("vision_config", {})):
+        if isinstance(source, dict) and key in source:
+            parsed = _mlx_vlm_first_token_id(source.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def _mlx_vlm_set_missing_attr(target: Any, name: str, value: Any) -> None:
     if target is None or value is None:
         return
@@ -3038,6 +3060,27 @@ def _mlx_vlm_set_missing_attr(target: Any, name: str, value: Any) -> None:
             setattr(target, name, value)
     except Exception:
         pass
+
+
+def _mlx_vlm_normalize_special_tokens(target: Any, config: Dict[str, Any], token_source: Any) -> None:
+    if target is None:
+        return
+    eos_token_id = _mlx_vlm_config_token_id(config, "eos_token_id")
+    bos_token_id = _mlx_vlm_config_token_id(config, "bos_token_id")
+    pad_token_id = _mlx_vlm_config_token_id(config, "pad_token_id")
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
+
+    eos_token = _mlx_vlm_token_from_id(token_source, eos_token_id, "<eos>") if eos_token_id is not None else None
+    bos_token = _mlx_vlm_token_from_id(token_source, bos_token_id, "<bos>") if bos_token_id is not None else None
+    pad_token = _mlx_vlm_token_from_id(token_source, pad_token_id, eos_token or "<pad>") if pad_token_id is not None else None
+
+    _mlx_vlm_set_missing_attr(target, "eos_token_id", eos_token_id)
+    _mlx_vlm_set_missing_attr(target, "bos_token_id", bos_token_id)
+    _mlx_vlm_set_missing_attr(target, "pad_token_id", pad_token_id)
+    _mlx_vlm_set_missing_attr(target, "eos_token", eos_token)
+    _mlx_vlm_set_missing_attr(target, "bos_token", bos_token)
+    _mlx_vlm_set_missing_attr(target, "pad_token", pad_token)
 
 
 def _mlx_vlm_normalize_vision_tokens(processor: Any, tokenizer: Any, config: Any) -> None:
@@ -3068,6 +3111,7 @@ def _mlx_vlm_normalize_vision_tokens(processor: Any, tokenizer: Any, config: Any
         _mlx_vlm_set_missing_attr(target, "image_token", image_token)
         _mlx_vlm_set_missing_attr(target, "boi_token", boi_token)
         _mlx_vlm_set_missing_attr(target, "eoi_token", eoi_token)
+        _mlx_vlm_normalize_special_tokens(target, config, token_source)
 
     image_seq_length = (
         config.get("image_seq_length")
