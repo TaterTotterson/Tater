@@ -3088,6 +3088,23 @@ def _mlx_vlm_normalize_vision_tokens(processor: Any, tokenizer: Any, config: Any
             pass
 
 
+def _mlx_engine_normalize_bundle_vision_tokens(bundle: Dict[str, Any]) -> None:
+    config = bundle.get("config")
+    if not isinstance(config, dict) or "vision_config" not in config:
+        return
+    model_kit = bundle.get("model_kit")
+    _mlx_vlm_normalize_vision_tokens(
+        getattr(model_kit, "processor", None),
+        getattr(model_kit, "tokenizer", None),
+        config,
+    )
+    _mlx_vlm_normalize_vision_tokens(
+        bundle.get("processor"),
+        bundle.get("tokenizer"),
+        config,
+    )
+
+
 def _mlx_engine_import_helpers() -> Dict[str, Any]:
     checkout = _mlx_engine_prepare_import_path()
     try:
@@ -3168,6 +3185,7 @@ def _load_mlx_engine_bundle(
     with _MLX_ENGINE_MODEL_CACHE_LOCK:
         cached = _MLX_ENGINE_MODEL_CACHE.get(cache_key)
         if isinstance(cached, dict):
+            _mlx_engine_normalize_bundle_vision_tokens(cached)
             _emit_hf_llm_progress(
                 progress_callback,
                 {
@@ -3239,6 +3257,11 @@ def _load_mlx_engine_bundle(
             logger.info("[mlx-engine] KV cache quantization settings are ignored for vision-capable model %s.", model_token)
 
         model_kit = helpers["load_model"](model_path, **load_kwargs)
+        _mlx_vlm_normalize_vision_tokens(
+            getattr(model_kit, "processor", None),
+            getattr(model_kit, "tokenizer", None),
+            config,
+        )
         trust_kwargs: Dict[str, Any] = {}
         if _mlx_lm_trust_remote_code():
             trust_kwargs["trust_remote_code"] = True
@@ -3305,6 +3328,7 @@ def _load_mlx_engine_bundle(
             "create_generator": helpers["create_generator"],
             "tokenize": helpers["tokenize"],
         }
+        _mlx_engine_normalize_bundle_vision_tokens(bundle)
         _MLX_ENGINE_MODEL_CACHE[cache_key] = bundle
         _emit_hf_llm_progress(
             progress_callback,
@@ -9228,6 +9252,7 @@ def _describe_image_with_mlx_engine(
         raise RuntimeError("No image bytes were provided for MLX vision.")
 
     bundle = _load_mlx_engine_bundle(model_token)
+    _mlx_engine_normalize_bundle_vision_tokens(bundle)
     prompt_text = str(prompt or "").strip() or "Describe this image."
     formatted_prompt = _mlx_engine_vision_prompt(bundle, prompt_text, image_b64)
     output = _mlx_engine_run_generation(
