@@ -16841,7 +16841,8 @@ async function loadSettingsView() {
                       <option value="image-text-to-text">Vision</option>
                     </select>
                     <div class="hf-model-browser-view-switch" role="group" aria-label="Model list">
-                      <button type="button" class="active" data-hf-model-view="trending">Trending</button>
+                      <button type="button" class="active" data-hf-model-view="picks">Tater Picks</button>
+                      <button type="button" data-hf-model-view="trending">Trending</button>
                       <button type="button" data-hf-model-view="new">New</button>
                       <button type="button" data-hf-model-view="downloads">Most Downloaded</button>
                     </div>
@@ -19095,7 +19096,7 @@ async function loadSettingsView() {
   const hfModelBrowserState = {
     provider: isHydraLocalProvider(hydraPrimaryBaseRow.provider) ? hydraPrimaryBaseRow.provider : "hf_transformers",
     task: "text-generation",
-    view: "trending",
+    view: "picks",
     query: "",
     loaded: false,
     loadingSeq: 0,
@@ -19121,6 +19122,9 @@ async function loadSettingsView() {
   const hfModelTaskLabel = (task) => normalizeHfModelTask(task) === "image-text-to-text" ? "vision" : "text";
   const normalizeHfModelView = (value) => {
     const token = String(value || "trending").trim().toLowerCase().replace(/_/g, "-");
+    if (["picks", "tater", "tater-picks", "recommended"].includes(token)) {
+      return "picks";
+    }
     if (token === "new" || token === "recent" || token === "latest") {
       return "new";
     }
@@ -19131,6 +19135,9 @@ async function loadSettingsView() {
   };
   const hfModelViewLabel = (value) => {
     const view = normalizeHfModelView(value);
+    if (view === "picks") {
+      return "Tater Picks";
+    }
     if (view === "new") {
       return "new";
     }
@@ -19348,20 +19355,24 @@ async function loadSettingsView() {
         const library = String(model?.library_name || model?.pipeline_tag || "").trim();
         const compatible = Boolean(model?.compatible);
         const supportsVision = Boolean(model?.supports_vision) || normalizeHfModelTask(model?.task) === "image-text-to-text" || normalizeHfModelTask(hfModelBrowserState.task) === "image-text-to-text";
+        const isTaterPick = Boolean(model?.tater_pick);
+        const taterPickLabel = String(model?.tater_pick_label || "Tater Pick").trim();
+        const taterPickNote = String(model?.tater_pick_note || "").trim();
         const isMlxProvider = provider === "mlx_lm";
         const downloadLabel = isMlxProvider ? "Download Repo" : "Download";
         return `
-          <article class="hf-model-card ${compatible ? "" : "is-uncertain"}" role="button" tabindex="0" aria-label="Show files for ${escapeHtml(id)}" data-hf-model-card data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">
+          <article class="hf-model-card ${compatible ? "" : "is-uncertain"} ${isTaterPick ? "is-tater-pick" : ""}" role="button" tabindex="0" aria-label="Show files for ${escapeHtml(id)}" data-hf-model-card data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">
             <div class="hf-model-card-head">
               <div>
                 <strong>${escapeHtml(id)}</strong>
                 <span>${escapeHtml(library || hfModelProviderLabel(provider))}</span>
               </div>
-              <span class="hf-model-provider-pill">${escapeHtml(hfModelProviderLabel(provider))}</span>
+              <span class="${isTaterPick ? "hf-model-tater-pill" : "hf-model-provider-pill"}">${escapeHtml(isTaterPick ? taterPickLabel : hfModelProviderLabel(provider))}</span>
             </div>
             <div class="hf-model-card-meta">
               ${modelSize ? `<span class="hf-model-size-pill">${escapeHtml(modelSize)}</span>` : ""}
               ${supportsVision ? `<span class="hf-model-vision-pill" title="Supports vision models">Vision</span>` : ""}
+              ${isTaterPick && taterPickNote ? `<span class="hf-model-pick-note">${escapeHtml(taterPickNote)}</span>` : ""}
               <span>${escapeHtml(downloads)} downloads</span>
               <span>${escapeHtml(likes)} likes</span>
               ${updated ? `<span>${escapeHtml(updated)}</span>` : ""}
@@ -19469,7 +19480,13 @@ async function loadSettingsView() {
     hfModelBrowserState.provider = provider;
     hfModelBrowserState.task = task;
     hfModelBrowserState.query = query;
-    setHfModelBrowserStatus(`Loading ${hfModelViewLabel(hfModelBrowserState.view)} ${hfModelProviderLabel(provider)} ${hfModelTaskLabel(task)} models page ${hfModelBrowserState.pageIndex + 1}...`);
+    const viewLabel = hfModelViewLabel(hfModelBrowserState.view);
+    const viewIsPicks = normalizeHfModelView(hfModelBrowserState.view) === "picks";
+    setHfModelBrowserStatus(
+      viewIsPicks
+        ? `Loading ${viewLabel} ${hfModelProviderLabel(provider)} ${hfModelTaskLabel(task)} models...`
+        : `Loading ${viewLabel} ${hfModelProviderLabel(provider)} ${hfModelTaskLabel(task)} models page ${hfModelBrowserState.pageIndex + 1}...`
+    );
     if (hfModelBrowserResultsEl) {
       hfModelBrowserResultsEl.innerHTML = `<div class="hf-model-browser-empty">Loading models...</div>`;
     }
@@ -19496,7 +19513,12 @@ async function loadSettingsView() {
       }
       renderHfModelCards(payload?.models || []);
       renderHfModelBrowserPagination();
-      setHfModelBrowserStatus(`Page ${hfModelBrowserState.pageIndex + 1}: ${(payload?.models || []).length} models loaded.`, "success");
+      setHfModelBrowserStatus(
+        viewIsPicks
+          ? `${(payload?.models || []).length} ${viewLabel} ${hfModelProviderLabel(provider)} model${(payload?.models || []).length === 1 ? "" : "s"} loaded.`
+          : `Page ${hfModelBrowserState.pageIndex + 1}: ${(payload?.models || []).length} models loaded.`,
+        "success"
+      );
     } catch (error) {
       if (seq !== hfModelBrowserState.loadingSeq) {
         return;

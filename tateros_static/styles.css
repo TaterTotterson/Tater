@@ -2458,17 +2458,50 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .hf-model-card {
   cursor: pointer;
-  transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  position: relative;
+  transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
 
 .hf-model-card.is-uncertain {
   border-color: rgba(255, 255, 255, 0.075);
 }
 
+.hf-model-card.is-tater-pick {
+  border-color: rgba(255, 151, 83, 0.74);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(255, 151, 83, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(37, 33, 29, 0.99), rgba(24, 23, 23, 0.98));
+  box-shadow:
+    0 0 0 1px rgba(255, 151, 83, 0.28),
+    0 0 24px rgba(255, 129, 55, 0.24),
+    0 12px 32px rgba(0, 0, 0, 0.38);
+}
+
+.hf-model-card.is-tater-pick::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(255, 151, 83, 0.42), rgba(255, 194, 104, 0.08), rgba(255, 151, 83, 0.28));
+  filter: blur(8px);
+  opacity: 0.72;
+  pointer-events: none;
+}
+
 .hf-model-card:hover,
 .hf-model-card:focus-visible {
   border-color: rgba(255, 151, 83, 0.38);
   background: linear-gradient(180deg, rgba(35, 34, 34, 0.98), rgba(24, 24, 25, 0.97));
+}
+
+.hf-model-card.is-tater-pick:hover,
+.hf-model-card.is-tater-pick:focus-visible {
+  border-color: rgba(255, 176, 102, 0.9);
+  box-shadow:
+    0 0 0 1px rgba(255, 151, 83, 0.34),
+    0 0 32px rgba(255, 129, 55, 0.34),
+    0 16px 36px rgba(0, 0, 0, 0.42);
 }
 
 .hf-model-card:focus-visible {
@@ -2517,6 +2550,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .hf-model-provider-pill,
+.hf-model-tater-pill,
 .hf-model-tags span {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 151, 83, 0.24);
@@ -2529,6 +2563,14 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .hf-model-provider-pill {
   padding: 5px 8px;
+}
+
+.hf-model-tater-pill {
+  padding: 5px 9px;
+  border-color: rgba(255, 176, 102, 0.58);
+  background: linear-gradient(180deg, rgba(255, 151, 83, 0.24), rgba(255, 129, 55, 0.14));
+  color: #ffd2a8;
+  box-shadow: 0 0 14px rgba(255, 129, 55, 0.2);
 }
 
 .hf-model-card-meta {
@@ -2554,6 +2596,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   color: #98f1c8;
   padding: 3px 7px;
   font-weight: 850;
+}
+
+.hf-model-pick-note {
+  color: #ffc086;
+  font-weight: 800;
 }
 
 .hf-model-tags {
