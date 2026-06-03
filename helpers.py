@@ -3007,6 +3007,87 @@ def _mlx_engine_patch_batched_vision_loader() -> None:
     setattr(kit_cls, "_load_model", _load_model_compat)
 
 
+def _mlx_vlm_token_from_id(tokenizer: Any, token_id: Any, fallback: str) -> str:
+    if token_id is None:
+        return fallback
+    convert = getattr(tokenizer, "convert_ids_to_tokens", None)
+    if callable(convert):
+        try:
+            token = convert(int(token_id))
+            if isinstance(token, str) and token:
+                return token
+        except Exception:
+            pass
+    decode = getattr(tokenizer, "decode", None)
+    if callable(decode):
+        try:
+            token = decode([int(token_id)])
+            if isinstance(token, str) and token:
+                return token
+        except Exception:
+            pass
+    return fallback
+
+
+def _mlx_vlm_set_missing_attr(target: Any, name: str, value: Any) -> None:
+    if target is None or value is None:
+        return
+    try:
+        current = getattr(target, name, None)
+        if current in (None, ""):
+            setattr(target, name, value)
+    except Exception:
+        pass
+
+
+def _mlx_vlm_normalize_vision_tokens(processor: Any, tokenizer: Any, config: Any) -> None:
+    if not isinstance(config, dict) or "vision_config" not in config:
+        return
+    nested_tokenizer = getattr(processor, "tokenizer", None)
+    token_source = nested_tokenizer or tokenizer or processor
+
+    image_token_id = config.get("image_token_id") or config.get("vision_config", {}).get("image_token_id")
+    boi_token_id = config.get("boi_token_id") or config.get("vision_config", {}).get("boi_token_id")
+    eoi_token_id = config.get("eoi_token_id") or config.get("vision_config", {}).get("eoi_token_id")
+    image_token = _mlx_vlm_token_from_id(token_source, image_token_id, "<|image|>")
+    boi_token = _mlx_vlm_token_from_id(token_source, boi_token_id, "<|image>")
+    eoi_token = _mlx_vlm_token_from_id(token_source, eoi_token_id, "<image|>")
+
+    targets = [processor, tokenizer, nested_tokenizer]
+    seen: set[int] = set()
+    for target in targets:
+        if target is None:
+            continue
+        ident = id(target)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        _mlx_vlm_set_missing_attr(target, "image_token_id", image_token_id)
+        _mlx_vlm_set_missing_attr(target, "boi_token_id", boi_token_id)
+        _mlx_vlm_set_missing_attr(target, "eoi_token_id", eoi_token_id)
+        _mlx_vlm_set_missing_attr(target, "image_token", image_token)
+        _mlx_vlm_set_missing_attr(target, "boi_token", boi_token)
+        _mlx_vlm_set_missing_attr(target, "eoi_token", eoi_token)
+
+    image_seq_length = (
+        config.get("image_seq_length")
+        or config.get("vision_soft_tokens_per_image")
+        or config.get("vision_config", {}).get("image_seq_length")
+        or config.get("vision_config", {}).get("max_soft_tokens")
+        or getattr(processor, "image_seq_length", None)
+    )
+    try:
+        image_seq_length_int = int(image_seq_length)
+    except Exception:
+        image_seq_length_int = 0
+    if processor is not None and image_seq_length_int > 0 and image_token:
+        try:
+            processor.image_seq_length = image_seq_length_int
+            processor.full_image_sequence = f"{boi_token}{image_token * image_seq_length_int}{eoi_token}"
+        except Exception:
+            pass
+
+
 def _mlx_engine_import_helpers() -> Dict[str, Any]:
     checkout = _mlx_engine_prepare_import_path()
     try:
@@ -3163,7 +3244,7 @@ def _load_mlx_engine_bundle(
             trust_kwargs["trust_remote_code"] = True
 
         tokenizer = getattr(model_kit, "tokenizer", None)
-        processor = None
+        processor = getattr(model_kit, "processor", None) if "vision_config" in config else None
         try:
             from transformers import AutoProcessor, AutoTokenizer  # type: ignore
 
@@ -3175,11 +3256,12 @@ def _load_mlx_engine_bundle(
                 try:
                     processor = AutoProcessor.from_pretrained(model_path, **trust_kwargs)
                 except Exception:
-                    processor = None
+                    pass
         except Exception:
             pass
         if processor is None:
             processor = tokenizer
+        _mlx_vlm_normalize_vision_tokens(processor, tokenizer, config)
 
         chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
             HYDRA_LLM_PROVIDER_MLX_LM,
@@ -5898,7 +5980,7 @@ def _load_mlx_vlm_bundle(
         processor = loaded[1]
 
         config = getattr(model_obj, "config", None)
-        if config is None and callable(mlx_vlm_load_config):
+        if not isinstance(config, dict) and callable(mlx_vlm_load_config):
             try:
                 config_kwargs: Dict[str, Any] = {}
                 if cache_key[1]:
@@ -5909,6 +5991,7 @@ def _load_mlx_vlm_bundle(
                     config = mlx_vlm_load_config(model_path)
             except Exception:
                 config = None
+        _mlx_vlm_normalize_vision_tokens(processor, getattr(processor, "tokenizer", None), config)
         chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
             HYDRA_LLM_PROVIDER_MLX_LM,
             model_token,
