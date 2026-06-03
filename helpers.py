@@ -2970,10 +2970,48 @@ def _mlx_engine_prepare_import_path() -> str:
     return checkout
 
 
+def _mlx_engine_patch_batched_vision_loader() -> None:
+    try:
+        from mlx_engine.model_kit.batched_vision import model_kit as batched_vision_model_kit  # type: ignore
+    except Exception:
+        return
+
+    kit_cls = getattr(batched_vision_model_kit, "BatchedVisionModelKit", None)
+    if kit_cls is None:
+        return
+    current = getattr(kit_cls, "_load_model", None)
+    if getattr(current, "_tater_mlx_vlm_load_compat", False):
+        return
+
+    mlx_vlm_module = getattr(batched_vision_model_kit, "mlx_vlm", None)
+    mx_module = getattr(batched_vision_model_kit, "mx", None)
+    if mlx_vlm_module is None or mx_module is None:
+        return
+
+    def _load_model_compat(self: Any) -> None:
+        loaded = mlx_vlm_module.utils.load_model(
+            self._model_path,
+            lazy=False,
+            trust_remote_code=self._trust_remote_code,
+        )
+        if isinstance(loaded, (tuple, list)):
+            if not loaded:
+                raise RuntimeError("mlx-vlm returned no model object.")
+            self.model = loaded[0]
+        else:
+            self.model = loaded
+        mx_module.synchronize()
+        mx_module.clear_cache()
+
+    setattr(_load_model_compat, "_tater_mlx_vlm_load_compat", True)
+    setattr(kit_cls, "_load_model", _load_model_compat)
+
+
 def _mlx_engine_import_helpers() -> Dict[str, Any]:
     checkout = _mlx_engine_prepare_import_path()
     try:
         from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
+        _mlx_engine_patch_batched_vision_loader()
     except Exception as exc:
         hint = (
             "Install/update the MLX engine dependencies with setup_tater.sh so the MLX provider can run."
