@@ -23,6 +23,7 @@ import yaml
 
 from helpers import redis_client
 
+from . import display_bus
 from . import runtime as esphome_runtime
 from . import ui_helpers as esphome_ui_helpers
 
@@ -83,6 +84,7 @@ _PREBUILT_FIRMWARE_TEMPLATE_KEYS = {
     "respeaker_lite",
     "koala",
     "respeaker_xvf3800",
+    "s3box_display",
 }
 _WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
     {"key": "microWakeWords", "label": "microWakeWords"},
@@ -261,9 +263,10 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
         "key": "s3box_display",
         "label": "Tater ESP32-S3-BOX-3 Display",
         "source_urls": [
-            "https://github.com/TaterTotterson/Tater-S3Box-Display/raw/refs/heads/main/esp32-s3-box-3.yaml",
+            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/esp32-s3-box-3.yaml",
         ],
         "candidates": [
+            ("microWakeWords", "esp32-s3-box-3.yaml"),
             ("Tater-S3Box-Display", "esp32-s3-box-3.yaml"),
         ],
         "fixed_keys": {"device_name"},
@@ -1990,6 +1993,184 @@ def _display_profile_save(template_key: str, selector: str, values: Dict[str, st
     redis_client.hset(DISPLAY_PROFILE_HASH_KEY, target, json.dumps(payload, ensure_ascii=False))
 
 
+def _display_profile_rows_from_store() -> Dict[str, Dict[str, Any]]:
+    rows: Dict[str, Dict[str, Any]] = {}
+    try:
+        raw_rows = redis_client.hgetall(DISPLAY_PROFILE_HASH_KEY)
+    except Exception:
+        return rows
+    if not isinstance(raw_rows, dict):
+        return rows
+    for raw_key, raw_value in raw_rows.items():
+        fallback_target = _text(raw_key)
+        if not fallback_target:
+            continue
+        try:
+            parsed = json.loads(_text(raw_value))
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        template = _lower(parsed.get("template"))
+        if template and template != "s3box_display":
+            continue
+        target = _text(parsed.get("target")) or fallback_target
+        if not target:
+            continue
+        slots = parsed.get("slots") if isinstance(parsed.get("slots"), dict) else {}
+        rows[target] = {
+            **parsed,
+            "target": target,
+            "slots": {str(key): _text(value) for key, value in slots.items() if _text(key)},
+        }
+    return rows
+
+
+def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ready = bool(sensor_select.get("ready"))
+    message = _text(sensor_select.get("message"))
+    options = sensor_select.get("options") if isinstance(sensor_select.get("options"), list) else []
+    fields: List[Dict[str, Any]] = []
+    for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
+        fields.append(
+            {
+                "key": alias,
+                "label": _S3BOX_SENSOR_FIELD_LABELS.get(profile_key) or _firmware_field_label(profile_key),
+                "type": "select",
+                "value": _text(slots.get(alias)),
+                "options": copy.deepcopy(options),
+                "disabled": not ready,
+                "description": (
+                    "Choose the Tater sensor shown in this display slot."
+                    if ready
+                    else message or "Install Environment Core to choose display sensors."
+                ),
+            }
+        )
+    return fields
+
+
+def _display_sensor_slots_from_context(context: Dict[str, Any], saved_profile: Dict[str, Any]) -> Dict[str, str]:
+    saved_slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
+    if saved_slots:
+        return {alias: _text(saved_slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS}
+
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    fields_meta = context.get("fields_meta") if isinstance(context.get("fields_meta"), dict) else {}
+    slots: Dict[str, str] = {}
+    for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
+        meta = fields_meta.get(profile_key) if isinstance(fields_meta.get(profile_key), dict) else {}
+        slots[alias] = _text(profile.get(profile_key)) or _text(meta.get("resolved_value"))
+    return slots
+
+
+def _display_sensor_profile_from_context(
+    selector: str,
+    context: Dict[str, Any],
+    sensor_select: Dict[str, Any],
+    saved_profiles: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if _lower(context.get("template_key")) != "s3box_display":
+        return None
+    fields_meta = context.get("fields_meta") if isinstance(context.get("fields_meta"), dict) else {}
+    display_meta = fields_meta.get("display_target") if isinstance(fields_meta.get("display_target"), dict) else {}
+    target = _text(display_meta.get("resolved_value")) or _text(selector)
+    if not target:
+        return None
+    saved_profile = saved_profiles.get(target) if isinstance(saved_profiles.get(target), dict) else {}
+    item = context.get("item") if isinstance(context.get("item"), dict) else {}
+    slots = _display_sensor_slots_from_context(context, saved_profile)
+    return {
+        "target": target,
+        "selector": _text(selector),
+        "title": _text(item.get("title")) or target,
+        "detail": _text(item.get("subtitle") or item.get("detail")),
+        "connected": bool(item.get("connected")),
+        "updated_at": saved_profile.get("updated_at"),
+        "fields": _display_sensor_field_rows(slots, sensor_select),
+    }
+
+
+def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    sensor_select = _tater_sensor_select_state("")
+    saved_profiles = _display_profile_rows_from_store()
+    profiles_by_target: Dict[str, Dict[str, Any]] = {}
+    for target, saved_profile in saved_profiles.items():
+        slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
+        profiles_by_target[target] = {
+            "target": target,
+            "selector": _text(saved_profile.get("selector")),
+            "title": target,
+            "detail": "Saved S3Box display profile",
+            "connected": False,
+            "updated_at": saved_profile.get("updated_at"),
+            "fields": _display_sensor_field_rows(
+                {alias: _text(slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS},
+                sensor_select,
+            ),
+        }
+
+    for row in display_contexts:
+        selector = _text(row.get("selector"))
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        profile = _display_sensor_profile_from_context(selector, context, sensor_select, saved_profiles)
+        if isinstance(profile, dict) and _text(profile.get("target")):
+            profiles_by_target[_text(profile.get("target"))] = profile
+
+    profiles = sorted(
+        profiles_by_target.values(),
+        key=lambda item: (
+            not bool(item.get("connected")),
+            _lower(item.get("title")),
+            _lower(item.get("target")),
+        ),
+    )
+    active = next((_text(row.get("target")) for row in profiles if bool(row.get("connected"))), "")
+    if not active and profiles:
+        active = _text(profiles[0].get("target"))
+    return {
+        "ready": bool(sensor_select.get("ready")),
+        "message": _text(sensor_select.get("message")),
+        "profiles": profiles,
+        "active_target": active,
+    }
+
+
+def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    target = _text(body.get("target") or body.get("display_target"))
+    selector = _text(body.get("selector") or body.get("id")) or target
+    if not target:
+        raise ValueError("target is required")
+    if not selector:
+        raise ValueError("selector is required")
+
+    slot_source = body.get("slots") if isinstance(body.get("slots"), dict) else {}
+    values = _profile_load("s3box_display", selector)
+    values["display_target"] = target
+    values["selector"] = selector
+    for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
+        if alias in slot_source:
+            values[profile_key] = _text(slot_source.get(alias))
+        elif profile_key in slot_source:
+            values[profile_key] = _text(slot_source.get(profile_key))
+        elif alias in body:
+            values[profile_key] = _text(body.get(alias))
+        elif profile_key in body:
+            values[profile_key] = _text(body.get(profile_key))
+        else:
+            values.setdefault(profile_key, "")
+    _profile_save("s3box_display", selector, values)
+    with contextlib.suppress(Exception):
+        display_bus.request_display_refresh(target, reason="sensor_profile")
+    return {
+        "ok": True,
+        "action": "voice_display_sensors_save",
+        "target": target,
+        "selector": selector,
+        "message": f"Updated display sensors for {target}.",
+    }
+
 def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
     haystack = " ".join(
@@ -2731,6 +2912,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     variants: Dict[str, Dict[str, Dict[str, Any]]] = {row["value"]: {} for row in template_options if _text(row.get("value"))}
     warnings: List[str] = []
     seen_warnings: set[str] = set()
+    display_contexts: List[Dict[str, Any]] = []
 
     def append_device_option(device_option: Dict[str, Any], *, template_key: str = "") -> None:
         value = _text(device_option.get("value"))
@@ -2792,6 +2974,8 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                     template_key=template_key,
                 )
                 variants.setdefault(template_key, {})[selector_token] = context["item"]
+                if template_key == "s3box_display":
+                    display_contexts.append({"selector": selector_token, "context": context})
 
     usb_recovery_option = _firmware_device_option(_FIRMWARE_USB_RECOVERY_SELECTOR, {"firmware_usb_recovery": True})
     if isinstance(usb_recovery_option, dict):
@@ -2901,6 +3085,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "firmware_update_count": len(firmware_updates),
         "firmware_flash_targets": firmware_flash_targets,
         "firmware_flash_target_count": len(firmware_flash_targets),
+        "display_sensors": _display_sensor_profiles_payload(display_contexts),
         "active_selector": active_selector,
         "active_template_key": active_template_key,
         "empty_message": empty_message,
@@ -4224,6 +4409,9 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         result = _clean_firmware_workspace()
         result["action"] = action_name
         return result
+
+    if action_name == "voice_display_sensors_save":
+        return _save_display_sensor_profile(payload if isinstance(payload, dict) else {})
 
     if action_name == "voice_firmware_mark_installed":
         body = payload if isinstance(payload, dict) else {}

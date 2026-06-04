@@ -41,10 +41,10 @@ import core_registry as core_registry_module
 import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
-from esphome import firmware as esphome_firmware_module
-from esphome import home as esphome_home_module
-from esphome import nanowakeword_engine as esphome_nanowakeword_module
-from esphome import openwakeword_engine as esphome_openwakeword_module
+from tater_voice import firmware as esphome_firmware_module
+from tater_voice import home as esphome_home_module
+from tater_voice import nanowakeword_engine as esphome_nanowakeword_module
+from tater_voice import openwakeword_engine as esphome_openwakeword_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
@@ -3262,7 +3262,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
     kind = str(item.get("kind") or "").strip()
     backend = str(item.get("backend") or "").strip()
     if kind == "stt":
-        from esphome import voice_pipeline as voice_pipeline
+        from tater_voice import voice_pipeline as voice_pipeline
 
         token = voice_pipeline._normalize_stt_backend(backend)
         if token == "wyoming":
@@ -3287,7 +3287,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         return f"loaded STT {token}"
 
     if kind == "tts":
-        from esphome import voice_pipeline
+        from tater_voice import voice_pipeline
 
         token = voice_pipeline._normalize_tts_backend(backend)
         model = str(item.get("model") or "").strip()
@@ -3306,7 +3306,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         return f"loaded TTS {token}"
 
     if kind == "speaker_id":
-        from esphome import speaker_id as esphome_speaker_id
+        from tater_voice import speaker_id as esphome_speaker_id
 
         token = backend.lower()
         if token != "speechbrain":
@@ -3314,7 +3314,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         return esphome_speaker_id.warmup_model(enabled_only=True)
 
     if kind == "emotion_id":
-        from esphome import emotion_id as esphome_emotion_id
+        from tater_voice import emotion_id as esphome_emotion_id
 
         token = backend.lower()
         if token != "speechbrain":
@@ -3322,8 +3322,8 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         return esphome_emotion_id.warmup_model(enabled_only=True)
 
     if kind == "wake_word":
-        from esphome import openwakeword_engine
-        from esphome import nanowakeword_engine
+        from tater_voice import openwakeword_engine
+        from tater_voice import nanowakeword_engine
 
         token = backend.lower()
         if token == "openwakeword":
@@ -3473,7 +3473,7 @@ def _reload_local_tts_model_caches(*, reason: str) -> Dict[str, Any]:
         "errors": [],
     }
     try:
-        from esphome import voice_pipeline
+        from tater_voice import voice_pipeline
 
         result["voice_pipeline"] = voice_pipeline.clear_tts_model_caches()
     except Exception as exc:
@@ -7289,7 +7289,7 @@ def _runtime_tts_cache_rows(module: Any, *, scope_label: str, provider_prefix: s
 def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     try:
-        from esphome import voice_pipeline
+        from tater_voice import voice_pipeline
     except Exception:
         return rows
 
@@ -7397,7 +7397,7 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     rows.extend(_runtime_voice_pipeline_model_rows())
     rows.extend(_runtime_announcement_tts_model_rows())
     try:
-        from esphome import speaker_id as speaker_id_module
+        from tater_voice import speaker_id as speaker_id_module
 
         rows.extend(
             _runtime_speechbrain_engine_row(
@@ -7411,7 +7411,7 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     except Exception:
         pass
     try:
-        from esphome import emotion_id as emotion_id_module
+        from tater_voice import emotion_id as emotion_id_module
 
         rows.extend(
             _runtime_speechbrain_engine_row(

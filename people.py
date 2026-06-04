@@ -509,7 +509,7 @@ def _discover_webui_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Di
 
 def _discover_voice_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict[str, str]]) -> None:
     with contextlib.suppress(Exception):
-        from esphome import speaker_id as esphome_speaker_id
+        from tater_voice import speaker_id as esphome_speaker_id
 
         for row in esphome_speaker_id.speaker_identity_aliases():
             _add_discovered_alias(out, linked, row)
