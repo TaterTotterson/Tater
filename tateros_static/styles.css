@@ -6501,6 +6501,117 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
     0 12px 28px rgba(0, 0, 0, 0.18);
 }
 
+.firmware-prebuilt-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(240, 131, 69, 0.26);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.13), rgba(255, 255, 255, 0.035)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 3px 0 0 rgba(240, 131, 69, 0.7);
+}
+
+.firmware-prebuilt-strip.is-warning {
+  border-color: rgba(245, 186, 92, 0.32);
+  background:
+    linear-gradient(135deg, rgba(245, 186, 92, 0.12), rgba(255, 255, 255, 0.025)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 3px 0 0 rgba(245, 186, 92, 0.72);
+}
+
+.firmware-prebuilt-strip > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.firmware-prebuilt-strip strong {
+  color: #f7f0e7;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.firmware-prebuilt-strip span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.firmware-prebuilt-kicker {
+  color: var(--accent-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.firmware-prebuilt-artifacts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.firmware-prebuilt-artifacts span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  color: #f4eadf;
+  white-space: nowrap;
+}
+
+.firmware-prebuilt-artifacts b {
+  color: var(--accent-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+}
+
+.firmware-usb-wifi-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(240, 131, 69, 0.24);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.firmware-usb-wifi-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: #f7f0e7;
+  font-weight: 700;
+}
+
+.firmware-usb-wifi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.firmware-usb-wifi-grid label {
+  display: grid;
+  gap: 5px;
+}
+
+.firmware-usb-wifi-grid span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .firmware-update-head {
   display: flex;
   align-items: flex-start;
@@ -8527,6 +8638,10 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
     justify-content: flex-start;
   }
 
+  .firmware-prebuilt-artifacts {
+    justify-content: flex-start;
+  }
+
   .dashboard-overview-grid,
   .dashboard-awareness-event-card,
   .dashboard-setting-select,
@@ -8536,6 +8651,8 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
   .dashboard-updates-grid,
   .dashboard-guardian-grid,
   .dashboard-personal-outlook,
+  .firmware-prebuilt-strip,
+  .firmware-usb-wifi-grid,
   .firmware-update-row,
   .dashboard-weather-visuals,
   .dashboard-snapshot-layout,

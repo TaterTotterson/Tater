@@ -7127,6 +7127,8 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
   const subtitle = String(item?.subtitle || "").trim();
   const detail = String(item?.detail || "").trim();
   const saveAction = String(item?.save_action || "").trim();
+  const identifyAction = String(item?.identify_action || "").trim();
+  const identifyLabel = String(item?.identify_label || "Identify").trim() || "Identify";
   const removeAction = String(item?.remove_action || "").trim();
   const runAction = String(item?.run_action || "").trim();
   const runConfirm = String(item?.run_confirm || "").trim();
@@ -7188,6 +7190,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
       data-core-item-id="${encodedId}"
       data-core-item-group="satellite"
       data-core-save-action="${escapeHtml(saveAction)}"
+      data-core-identify-action="${escapeHtml(identifyAction)}"
       data-core-remove-action="${escapeHtml(removeAction)}"
       data-core-run-action="${escapeHtml(runAction)}"
       data-core-run-confirm="${escapeHtml(runConfirm)}"
@@ -7204,6 +7207,13 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
       ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
       <div class="inline-row" style="margin-top:10px;">
         ${saveAction ? `<button type="button" class="action-btn core-manager-save">Save</button>` : ""}
+        ${
+          identifyAction
+            ? `<button type="button" class="inline-btn esphome-satellite-identify" ${
+                connected ? "" : 'disabled title="Connect this satellite before identifying it."'
+              }>${escapeHtml(identifyLabel)}</button>`
+            : ""
+        }
         <button type="button" class="inline-btn esphome-entities-refresh">Refresh Entities</button>
         ${popupFields.length ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(settingsLabel)}</button>` : ""}
         ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">Forget</button>` : ""}
@@ -7336,7 +7346,7 @@ function orderEspHomeFirmwareSections(sections) {
 function renderEspHomeFirmwareSections(sections) {
   const rows = orderEspHomeFirmwareSections(sections);
   if (!rows.length) {
-    return renderNotice("No firmware substitutions are available for this device.");
+    return renderNotice("No firmware options are available for this device.");
   }
   return rows
     .map((section) => {
@@ -7637,7 +7647,7 @@ function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) 
   const currentUrl = String(urlInput.value || "").trim();
   const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
   if (String(picker.value || "").trim() === "__none__") {
-    // Keep the user's saved URL around while the build is configured for no wake sound.
+    // Keep the user's saved URL around while this firmware target is configured for no wake sound.
   } else if (currentUrl && optionValues.includes(currentUrl)) {
     picker.value = currentUrl;
   } else if (optionValues.includes("__custom__")) {
@@ -7710,7 +7720,7 @@ function bindEspHomeWakeSoundPreview(root = document) {
         const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
         if (pickerValue === "__none__") {
           if (status instanceof HTMLElement) {
-            status.textContent = "Wake sound disabled for this build.";
+            status.textContent = "Wake sound disabled for this firmware.";
           }
           return;
         }
@@ -7770,7 +7780,6 @@ function bindEspHomeWakeSoundPreview(root = document) {
 function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
-  const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
   const selection = normalizeEspHomeFirmwareSelection(body);
   const devices = espHomeFirmwareDevicesForTemplate(body, selection.templateKey);
   const selectedTemplate =
@@ -7791,11 +7800,22 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const heroImageAlt = String(variant?.hero_image_alt || `${title} firmware target`).trim() || title;
   const templateLabel =
     String(variant?.template_label || selectedTemplate?.label || selection.templateKey || "Firmware").trim() || "Firmware";
-  const cliAvailable = boolFromAny(variant?.cli_available ?? cli?.available, false);
-  const cliReason = String(variant?.cli_reason || cli?.detail || "").trim();
   const links = Array.isArray(variant?.links) ? variant.links : [];
   const heroBadges = Array.isArray(variant?.hero_badges) ? variant.hero_badges : [];
   const firmwareStatus = String(variant?.firmware_update_status || "").trim();
+  const prebuilt = variant?.prebuilt_firmware && typeof variant.prebuilt_firmware === "object" ? variant.prebuilt_firmware : {};
+  const prebuiltAvailable = boolFromAny(variant?.prebuilt_firmware_available ?? prebuilt?.available, false);
+  const prebuiltVersion = String(prebuilt?.version || variant?.firmware_version || "").trim();
+  const prebuiltArtifacts = prebuilt?.artifacts && typeof prebuilt.artifacts === "object" ? prebuilt.artifacts : {};
+  const prebuiltOta = prebuiltArtifacts?.ota && typeof prebuiltArtifacts.ota === "object" ? prebuiltArtifacts.ota : {};
+  const prebuiltFactory = prebuiltArtifacts?.factory && typeof prebuiltArtifacts.factory === "object" ? prebuiltArtifacts.factory : {};
+  const prebuiltOtaAvailable = prebuiltAvailable && Boolean(String(prebuiltOta?.path || "").trim());
+  const prebuiltFactoryAvailable = prebuiltAvailable && Boolean(String(prebuiltFactory?.path || "").trim());
+  const prebuiltError = String(prebuilt?.error || "").trim();
+  const artifactSizeLabel = (artifact) => {
+    const size = Number(artifact?.size_bytes || 0);
+    return size > 0 ? formatBytes(size) : "Ready";
+  };
   const linksHtml = links.length
     ? `
       <div class="small" style="margin-top:10px;">
@@ -7814,11 +7834,15 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
     `
     : "";
   const targetConnected = boolFromAny(variant?.connected ?? selectedDevice?.connected, false);
-  const saveDisabledAttr = variantAvailable ? "" : " disabled";
-  const otaFlashDisabledAttr = cliAvailable && variantAvailable && targetConnected ? "" : " disabled";
+  const otaFlashDisabledAttr = prebuiltOtaAvailable && variantAvailable && targetConnected ? "" : " disabled";
   const otaLogsDisabledAttr = variantAvailable && targetConnected ? "" : " disabled";
-  const browserFlashDisabledAttr = cliAvailable && variantAvailable ? "" : " disabled";
+  const browserFlashDisabledAttr = prebuiltFactoryAvailable && variantAvailable ? "" : " disabled";
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
+  const otaActionLabel = "OTA Update";
+  const otaWorkingText = "Uploading prebuilt firmware...";
+  const browserActionLabel = "Browser USB Flash";
+  const browserWorkingText = "Preparing prebuilt USB image...";
+  const browserSuccessText = "Prebuilt USB image ready.";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
   const controlsHtml = `
     <section class="core-inline-section" style="margin-top:12px;">
@@ -7830,7 +7854,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           type: "select",
           value: selection.templateKey,
           options: templates,
-          description: "Pick the firmware YAML to use for this build.",
+          description: "Matched from the device name/model for connected satellites. Use Browser USB Recovery to pick a firmware family manually.",
         })}
         ${renderCoreManagerField({
           key: "selector",
@@ -7838,14 +7862,36 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           type: "select",
           value: selection.selector,
           options: devices,
-          description: "Choose a live ESPHome device for OTA, or Browser USB Recovery when the device is blank.",
+          description: "Choose a live device for OTA, or Browser USB Recovery when the device is blank.",
         })}
       </div>
     </section>
   `;
-  const sectionsHtml = variant
-    ? renderEspHomeFirmwareSections(Array.isArray(variant?.sections) ? variant.sections : [])
-    : renderNotice("No firmware form is available for the current template/device selection.");
+  const prebuiltSummaryHtml = prebuiltAvailable
+    ? `
+      <section class="firmware-prebuilt-strip" aria-label="Prebuilt firmware">
+        <div>
+          <div class="firmware-prebuilt-kicker">Prebuilt Firmware</div>
+          <strong>${escapeHtml(prebuiltVersion || "Ready")}</strong>
+          <span>No local compile. OTA uses the app image; USB uses the factory image with optional Wi-Fi setup.</span>
+        </div>
+        <div class="firmware-prebuilt-artifacts">
+          <span><b>OTA</b>${escapeHtml(artifactSizeLabel(prebuiltOta))}</span>
+          <span><b>USB</b>${escapeHtml(artifactSizeLabel(prebuiltFactory))}</span>
+        </div>
+      </section>
+    `
+    : prebuiltError
+    ? `
+      <section class="firmware-prebuilt-strip is-warning" aria-label="Prebuilt firmware unavailable">
+        <div>
+          <div class="firmware-prebuilt-kicker">Prebuilt Firmware</div>
+          <strong>Manifest unavailable</strong>
+          <span>${escapeHtml(prebuiltError)}</span>
+        </div>
+      </section>
+    `
+    : "";
   const targetSummaryHtml = heroImageSrc
     ? `
       <div class="core-satellite-summary">
@@ -7888,48 +7934,37 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
       data-core-key="${escapeHtml(coreKey)}"
       data-core-item-id="${itemId}"
       data-firmware-selector="${escapeHtml(selection.selector)}"
-      data-firmware-template-key="${escapeHtml(selection.templateKey)}">
+      data-firmware-template-key="${escapeHtml(selection.templateKey)}"
+      data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
+      data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
+      data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}">
       <div class="card-head">
         <h3 class="card-title">${escapeHtml(title)}</h3>
         <span class="small">${escapeHtml(templateLabel)}</span>
       </div>
       ${targetSummaryHtml}
-      ${
-        !cliAvailable && cliReason
-          ? `<div class="small" style="margin-top:8px;">ESPHome CLI unavailable: ${escapeHtml(cliReason)}</div>`
-          : ""
-      }
+      ${prebuiltSummaryHtml}
       ${linksHtml}
       ${controlsHtml}
-      ${sectionsHtml}
       <div class="inline-row" style="margin-top:12px;">
         <button
           type="button"
           class="action-btn esphome-firmware-action"
-          data-firmware-action="voice_firmware_save"
-          data-firmware-title="Saving Firmware Settings"
-          data-firmware-working="Saving firmware substitutions..."
-          data-firmware-success="Firmware substitutions saved."
-          data-firmware-error="Firmware save failed"${saveDisabledAttr}
-        >Save</button>
-        <button
-          type="button"
-          class="action-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_flash_start"
-          data-firmware-title="Flashing Firmware"
-          data-firmware-working="Building and flashing firmware..."
+          data-firmware-title="Updating Firmware"
+          data-firmware-working="${escapeHtml(otaWorkingText)}"
           data-firmware-success="Firmware flash finished."
           data-firmware-error="Firmware flash failed"${otaFlashDisabledAttr}
-        >Build + Flash</button>
+        >${escapeHtml(otaActionLabel)}</button>
         <button
           type="button"
           class="action-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_browser_build"
-          data-firmware-title="Building Browser Flash"
-          data-firmware-working="Building browser flash firmware..."
-          data-firmware-success="Browser flash firmware ready."
-          data-firmware-error="Browser flash build failed"${browserFlashDisabledAttr}
-        >Browser USB Flash</button>
+          data-firmware-title="Preparing Browser USB Flash"
+          data-firmware-working="${escapeHtml(browserWorkingText)}"
+          data-firmware-success="${escapeHtml(browserSuccessText)}"
+          data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}
+        >${escapeHtml(browserActionLabel)}</button>
         <button
           type="button"
           class="action-btn esphome-firmware-action"
@@ -7952,18 +7987,18 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           type="button"
           class="action-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_clean"
-          data-firmware-title="Cleaning Build Files"
-          data-firmware-working="Cleaning firmware build files..."
-          data-firmware-success="Firmware build files cleaned."
+          data-firmware-title="Cleaning Firmware Cache"
+          data-firmware-working="Cleaning firmware cache..."
+          data-firmware-success="Firmware cache cleaned."
           data-firmware-error="Firmware cleanup failed"
-        >Clean Build Files</button>
+        >Clean Firmware Cache</button>
         <span class="small core-manager-status"></span>
       </div>
     </article>
   `;
 }
 
-function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", cliAvailable = false) {
+function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome") {
   const rows = (Array.isArray(firmwareUpdates) ? firmwareUpdates : [])
     .map((row) => {
       const selector = String(row?.selector || "").trim();
@@ -7978,6 +8013,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
         templateLabel: String(row?.template_label || templateKey || "Firmware").trim() || "Firmware",
         installed: String(row?.installed || "unknown").trim() || "unknown",
         latest: String(row?.latest || "").trim(),
+        prebuilt: boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false),
       };
     })
     .filter(Boolean);
@@ -7985,6 +8021,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
     return "";
   }
   const count = rows.length;
+  const canUpdateAll = rows.every((row) => row.prebuilt);
   return `
     <section class="firmware-update-panel" aria-label="Firmware updates">
       <div class="firmware-update-head">
@@ -7996,7 +8033,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
         <button
           type="button"
           class="action-btn esphome-firmware-update-all"
-          data-core-key="${escapeHtml(coreKey)}"${cliAvailable ? "" : " disabled"}
+          data-core-key="${escapeHtml(coreKey)}"${canUpdateAll ? "" : " disabled"}
         >Update All (${escapeHtml(count)})</button>
       </div>
       <div class="firmware-update-list">
@@ -8023,7 +8060,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
                   class="inline-btn primary firmware-update-device-action esphome-firmware-update-one"
                   data-core-key="${escapeHtml(coreKey)}"
                   data-selector="${escapeHtml(row.selector)}"
-                  data-template-key="${escapeHtml(row.templateKey)}"${cliAvailable ? "" : " disabled"}
+                  data-template-key="${escapeHtml(row.templateKey)}"${row.prebuilt ? "" : " disabled"}
                 >Update</button>
               </article>
             `
@@ -8034,7 +8071,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome", 
   `;
 }
 
-function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome", cliAvailable = false) {
+function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome") {
   const rows = (Array.isArray(firmwareTargets) ? firmwareTargets : [])
     .map((row) => {
       const selector = String(row?.selector || "").trim();
@@ -8047,6 +8084,7 @@ function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome"
         templateKey,
         title: String(row?.title || selector || "ESPHome device").trim() || "ESPHome device",
         templateLabel: String(row?.template_label || row?.templateLabel || templateKey || "Firmware").trim() || "Firmware",
+        prebuilt: boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false),
       };
     })
     .filter(Boolean);
@@ -8054,18 +8092,19 @@ function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome"
     return "";
   }
   const count = rows.length;
+  const canFlashAll = rows.every((row) => row.prebuilt);
   return `
     <section class="firmware-update-panel" aria-label="Flash all firmware devices">
       <div class="firmware-update-head">
         <div>
           <div class="firmware-update-kicker">Saved Firmware Flash</div>
           <h4>${escapeHtml(count)} connected device${count === 1 ? "" : "s"}</h4>
-          <p>Builds fresh firmware from the latest template and flashes each connected target with its saved settings.</p>
+          <p>Flashes matching prebuilt firmware one device at a time over OTA.</p>
         </div>
         <button
           type="button"
           class="action-btn esphome-firmware-flash-all"
-          data-core-key="${escapeHtml(coreKey)}"${cliAvailable ? "" : " disabled"}
+          data-core-key="${escapeHtml(coreKey)}"${canFlashAll ? "" : " disabled"}
         >Flash All Devices (${escapeHtml(count)})</button>
       </div>
     </section>
@@ -8078,10 +8117,11 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const warnings = Array.isArray(body?.warnings) ? body.warnings : [];
   const firmwareUpdates = Array.isArray(body?.firmware_updates) ? body.firmware_updates : [];
   const firmwareFlashTargets = Array.isArray(body?.firmware_flash_targets) ? body.firmware_flash_targets : [];
-  const cli = body?.cli && typeof body.cli === "object" ? body.cli : {};
-  const cliAvailable = boolFromAny(cli?.available, false);
-  const cliLabel = String(cli?.label || "Unavailable").trim() || "Unavailable";
-  const cliDetail = String(cli?.detail || "").trim();
+  const prebuilt = body?.prebuilt_firmware && typeof body.prebuilt_firmware === "object" ? body.prebuilt_firmware : {};
+  const prebuiltAvailable = boolFromAny(prebuilt?.available, false);
+  const prebuiltVersion = String(prebuilt?.version || "").trim();
+  const prebuiltDeviceCount = Number(prebuilt?.device_count || 0);
+  const prebuiltError = String(prebuilt?.error || "").trim();
   const wifiNote = String(body?.wifi_note || "").trim();
   const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
@@ -8091,29 +8131,28 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   return `
     <div class="card">
       <div class="card-head">
-        <h3 class="card-title">Firmware Builder</h3>
+        <h3 class="card-title">Firmware Flasher</h3>
         <span class="small">${escapeHtml(coreKey)}</span>
       </div>
       <div class="small">
-        Pick a firmware template, choose an ESPHome target, then flash OTA or build a browser USB installer.
+        Select a connected satellite, let Tater match the firmware, then update by OTA or Browser USB without compiling.
       </div>
       <div class="small" style="margin-top:8px;">
-        ESPHome CLI: ${escapeHtml(cliLabel)}${cliDetail ? ` • ${escapeHtml(cliDetail)}` : ""}
+        ${
+          prebuiltAvailable
+            ? `Prebuilt firmware: ${escapeHtml(prebuiltVersion || "available")} for ${escapeHtml(String(prebuiltDeviceCount || ""))} device${prebuiltDeviceCount === 1 ? "" : "s"}`
+            : `Prebuilt firmware: ${prebuiltError ? escapeHtml(prebuiltError) : "unavailable"}`
+        }
       </div>
       ${wifiNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(wifiNote)}</div>` : ""}
       ${browserFlashNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(browserFlashNote)}</div>` : ""}
-      ${
-        !cliAvailable
-          ? `<div class="small" style="margin-top:8px;">Build and flash actions stay disabled until ESPHome is runnable from this machine.</div>`
-          : ""
-      }
       ${
         warnings.length
           ? `<div class="small" style="margin-top:8px;">${warnings.map((warning) => escapeHtml(String(warning || "").trim())).filter(Boolean).join("<br>")}</div>`
           : ""
       }
-      ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey, cliAvailable)}
-      ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey, cliAvailable)}
+      ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey)}
+      ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey)}
     </div>
     ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
   `;
@@ -9214,12 +9253,12 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   shell.dataset.coreKey = "esphome";
   shell.dataset.runtimeLoaded = "loading";
   shell.dataset.runtimePanel = targetPanel;
-  head.innerHTML = renderNotice(force ? "Refreshing ESPHome runtime..." : "Loading ESPHome runtime...");
+  head.innerHTML = renderNotice(force ? "Refreshing Tater Voice runtime..." : "Loading Tater Voice runtime...");
   if (targetPanel === "satellites") {
     satellitesHost.innerHTML = renderNotice("Loading satellites...");
     addHost.innerHTML = renderNotice("Loading add form...");
   } else if (targetPanel === "firmware") {
-    firmwareHost.innerHTML = renderNotice("Loading firmware builder...");
+    firmwareHost.innerHTML = renderNotice("Loading firmware flasher...");
   } else if (targetPanel === "speakerid") {
     speakerIdHost.innerHTML = renderNotice("Loading Speaker ID...");
   } else if (targetPanel === "emotionid") {
@@ -9237,7 +9276,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const tabSpec =
         result?.tab && typeof result.tab === "object"
           ? result.tab
-          : { core_key: "esphome", label: "ESPHome", surface_kind: "esphome" };
+          : { core_key: "esphome", label: "Tater Voice", surface_kind: "esphome" };
       const payload = result?.payload && typeof result.payload === "object" ? result.payload : result;
       const body = payload && typeof payload === "object" ? payload : {};
       const ui = body?.ui && typeof body.ui === "object" ? body.ui : {};
@@ -9291,7 +9330,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       if (requestSeq !== state.esphomeRuntimeRequestSeq) {
         return;
       }
-      const message = error instanceof Error ? error.message : String(error || "Failed to load ESPHome runtime.");
+      const message = error instanceof Error ? error.message : String(error || "Failed to load Tater Voice runtime.");
       head.innerHTML = renderNotice(message);
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = renderNotice(message);
@@ -9501,6 +9540,41 @@ function bindEspHomeEntityControls(root = document) {
       } finally {
         if (document.body.contains(input)) {
           input.disabled = false;
+        }
+      }
+    });
+  });
+
+  root.querySelectorAll(".esphome-satellite-identify").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeBound === "1") {
+      return;
+    }
+    button.dataset.esphomeBound = "1";
+    button.addEventListener("click", async () => {
+      const card = button.closest(".esphome-satellite-card");
+      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      const action = String(card?.dataset?.coreIdentifyAction || "voice_satellite_identify").trim();
+      if (!(card instanceof HTMLElement) || !coreKey || !selector || !action) {
+        return;
+      }
+      button.disabled = true;
+      setCoreManagerStatus(card, "Playing identify message...");
+      try {
+        const result = await runCoreManagerAction(card, coreKey, action, {
+          id: selector,
+          selector,
+        });
+        const message = String(result?.message || "Identify message played.");
+        setCoreManagerStatus(card, message);
+        showToast(message, "success", 2600);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "Failed to identify satellite.");
+        setCoreManagerStatus(card, `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3200);
+      } finally {
+        if (document.body.contains(button)) {
+          button.disabled = false;
         }
       }
     });
@@ -9882,6 +9956,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
     String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
+  const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltOta || "").trim() === "1";
   const values = collectCoreManagerValues(card);
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before flashing.", "error", 3200);
@@ -9980,7 +10055,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
     if (!rows.length && reset) {
       const emptyEl = document.createElement("div");
       emptyEl.className = "voice-log-empty";
-      emptyEl.textContent = "Waiting for ESPHome build output...";
+      emptyEl.textContent = "Waiting for OTA upload output...";
       logConsole.appendChild(emptyEl);
     } else if (rows.length) {
       rows.forEach((entry) => renderConsoleLine(entry));
@@ -10062,7 +10137,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   };
 
   openRuntimeSettingsModal({
-    title: `${templateLabel} Build + Flash`,
+    title: `${templateLabel} OTA Update`,
     meta: [deviceLabel, selector].filter(Boolean).join(" • "),
     fields: [
       {
@@ -10070,7 +10145,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         label: "Firmware Log",
         type: "textarea",
         value: "",
-        description: "ESPHome build output, upload progress, and live device logs stay in this window.",
+        description: "Prebuilt OTA upload progress and live device logs stay in this window.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -10097,7 +10172,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         }
       }
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = `Starting firmware flash for ${deviceLabel}...`;
+        statusNode.textContent = `Starting prebuilt OTA update for ${deviceLabel}...`;
         statusNode.classList.add("voice-log-status");
       }
       try {
@@ -10115,7 +10190,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
         }
-        setCoreManagerStatus(card, "Firmware flash in progress...");
+        setCoreManagerStatus(card, "Prebuilt OTA update in progress...");
         schedulePoll(900);
       } catch (error) {
         const message = String(error?.message || "unknown error");
@@ -10352,7 +10427,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     appendEspHomeFirmwareLog(logConsole, `Connected to ${chipName || "ESP device"}.`, "info");
 
     if (statusNode instanceof HTMLElement) {
-      statusNode.textContent = "Downloading compiled firmware from Tater...";
+      statusNode.textContent = "Downloading prebuilt firmware from Tater...";
     }
     const firmwareData = await fetchFirmwareBinary(binaryUrl);
     appendEspHomeFirmwareLog(logConsole, `Firmware downloaded (${firmwareData.byteLength} bytes).`, "info");
@@ -10416,6 +10491,342 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
   }
 }
 
+const IMPROV_SERIAL_HEADER = [0x49, 0x4d, 0x50, 0x52, 0x4f, 0x56];
+const IMPROV_SERIAL_VERSION = 0x01;
+const IMPROV_SERIAL_TYPE = {
+  CURRENT_STATE: 0x01,
+  ERROR_STATE: 0x02,
+  RPC: 0x03,
+  RPC_RESPONSE: 0x04,
+};
+const IMPROV_SERIAL_COMMAND = {
+  WIFI_SETTINGS: 0x01,
+  GET_CURRENT_STATE: 0x02,
+  GET_DEVICE_INFO: 0x03,
+};
+const IMPROV_SERIAL_STATE = {
+  STOPPED: 0x00,
+  AWAITING_AUTHORIZATION: 0x01,
+  AUTHORIZED: 0x02,
+  PROVISIONING: 0x03,
+  PROVISIONED: 0x04,
+};
+const IMPROV_SERIAL_ERROR = {
+  NONE: 0x00,
+  INVALID_RPC: 0x01,
+  UNKNOWN_RPC: 0x02,
+  UNABLE_TO_CONNECT: 0x03,
+  NOT_AUTHORIZED: 0x04,
+  UNKNOWN: 0xff,
+};
+const IMPROV_TEXT_ENCODER = new TextEncoder();
+const IMPROV_TEXT_DECODER = new TextDecoder();
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function improvSerialStateLabel(stateValue) {
+  switch (Number(stateValue)) {
+    case IMPROV_SERIAL_STATE.STOPPED:
+      return "Stopped";
+    case IMPROV_SERIAL_STATE.AWAITING_AUTHORIZATION:
+      return "Awaiting authorization";
+    case IMPROV_SERIAL_STATE.AUTHORIZED:
+      return "Ready for Wi-Fi credentials";
+    case IMPROV_SERIAL_STATE.PROVISIONING:
+      return "Connecting to Wi-Fi";
+    case IMPROV_SERIAL_STATE.PROVISIONED:
+      return "Wi-Fi connected";
+    default:
+      return `Unknown state ${stateValue}`;
+  }
+}
+
+function improvSerialErrorLabel(errorValue) {
+  switch (Number(errorValue)) {
+    case IMPROV_SERIAL_ERROR.NONE:
+      return "No error";
+    case IMPROV_SERIAL_ERROR.INVALID_RPC:
+      return "Invalid Improv command";
+    case IMPROV_SERIAL_ERROR.UNKNOWN_RPC:
+      return "Unknown Improv command";
+    case IMPROV_SERIAL_ERROR.UNABLE_TO_CONNECT:
+      return "Unable to connect to Wi-Fi";
+    case IMPROV_SERIAL_ERROR.NOT_AUTHORIZED:
+      return "Not authorized";
+    case IMPROV_SERIAL_ERROR.UNKNOWN:
+      return "Unknown Improv error";
+    default:
+      return `Improv error ${errorValue}`;
+  }
+}
+
+function improvEncodeString(value) {
+  const bytes = IMPROV_TEXT_ENCODER.encode(String(value || ""));
+  if (bytes.length > 255) {
+    throw new Error("Improv Serial values must be shorter than 256 bytes.");
+  }
+  return [bytes.length, ...bytes];
+}
+
+function improvBuildRpcPayload(command, strings = []) {
+  const data = [];
+  (Array.isArray(strings) ? strings : []).forEach((value) => {
+    data.push(...improvEncodeString(value));
+  });
+  if (data.length > 255) {
+    throw new Error("Improv Serial command is too large.");
+  }
+  return [command, data.length, ...data];
+}
+
+function improvBuildSerialPacket(type, payload = []) {
+  const bytes = [...IMPROV_SERIAL_HEADER, IMPROV_SERIAL_VERSION, type, payload.length, ...payload];
+  const checksum = bytes.reduce((sum, byte) => (sum + byte) & 0xff, 0);
+  return new Uint8Array([...bytes, checksum, 0x0a]);
+}
+
+function improvParseRpcPayload(payload) {
+  const bytes = Array.from(payload || []);
+  const command = Number(bytes[0] || 0);
+  const dataLength = Number(bytes[1] || 0);
+  const dataEnd = Math.min(bytes.length, 2 + dataLength);
+  const strings = [];
+  let offset = 2;
+  while (offset < dataEnd) {
+    const length = Number(bytes[offset] || 0);
+    offset += 1;
+    if (offset + length > dataEnd) {
+      break;
+    }
+    strings.push(IMPROV_TEXT_DECODER.decode(new Uint8Array(bytes.slice(offset, offset + length))));
+    offset += length;
+  }
+  return { command, strings };
+}
+
+class ImprovSerialParser {
+  constructor() {
+    this.buffer = [];
+  }
+
+  feed(chunk) {
+    const bytes = chunk instanceof Uint8Array ? Array.from(chunk) : [];
+    this.buffer.push(...bytes);
+    const packets = [];
+    while (this.buffer.length >= IMPROV_SERIAL_HEADER.length) {
+      const headerIndex = this.buffer.findIndex((byte, index, rows) =>
+        IMPROV_SERIAL_HEADER.every((headerByte, headerOffset) => rows[index + headerOffset] === headerByte)
+      );
+      if (headerIndex < 0) {
+        this.buffer.splice(0, Math.max(0, this.buffer.length - IMPROV_SERIAL_HEADER.length + 1));
+        break;
+      }
+      if (headerIndex > 0) {
+        this.buffer.splice(0, headerIndex);
+      }
+      if (this.buffer.length < 10) {
+        break;
+      }
+      if (this.buffer[6] !== IMPROV_SERIAL_VERSION) {
+        this.buffer.shift();
+        continue;
+      }
+      const type = Number(this.buffer[7] || 0);
+      const payloadLength = Number(this.buffer[8] || 0);
+      const checksumIndex = 9 + payloadLength;
+      if (this.buffer.length <= checksumIndex) {
+        break;
+      }
+      const checksum = this.buffer
+        .slice(0, checksumIndex)
+        .reduce((sum, byte) => (sum + Number(byte || 0)) & 0xff, 0);
+      if (checksum !== Number(this.buffer[checksumIndex] || 0)) {
+        this.buffer.shift();
+        continue;
+      }
+      const payload = new Uint8Array(this.buffer.slice(9, 9 + payloadLength));
+      const nextOffset = this.buffer[checksumIndex + 1] === 0x0a ? checksumIndex + 2 : checksumIndex + 1;
+      this.buffer.splice(0, nextOffset);
+      packets.push({ type, payload });
+    }
+    return packets;
+  }
+}
+
+async function openImprovSerialPort(port, logConsole) {
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      await port.open({ baudRate: 115200, bufferSize: 255 });
+      return;
+    } catch (error) {
+      const message = String(error?.message || error || "");
+      if (error?.name === "InvalidStateError" || message.toLowerCase().includes("already open")) {
+        return;
+      }
+      if (attempt >= 6) {
+        throw error;
+      }
+      appendEspHomeFirmwareLog(logConsole, `Waiting for USB serial to reconnect (${attempt}/6)...`, "debug");
+      await sleep(1000);
+    }
+  }
+}
+
+async function setupImprovWifi(port, options, logConsole, statusNode) {
+  const ssid = String(options?.ssid || "").trim();
+  const password = String(options?.password || "");
+  if (!ssid) {
+    appendEspHomeFirmwareLog(logConsole, "Wi-Fi setup skipped.", "info");
+    return;
+  }
+
+  if (statusNode instanceof HTMLElement) {
+    statusNode.textContent = "Waiting for the device to restart for Wi-Fi setup...";
+  }
+  appendEspHomeFirmwareLog(logConsole, "Waiting for the flashed device to restart into Improv Serial.", "info");
+  await sleep(3600);
+  await openImprovSerialPort(port, logConsole);
+  appendEspHomeFirmwareLog(logConsole, "Connected to Improv Serial.", "info");
+
+  const parser = new ImprovSerialParser();
+  const reader = port.readable?.getReader?.();
+  const writer = port.writable?.getWriter?.();
+  if (!reader || !writer) {
+    throw new Error("USB serial reader/writer was not available for Wi-Fi setup.");
+  }
+
+  let stopped = false;
+  let currentState = null;
+  let currentError = IMPROV_SERIAL_ERROR.NONE;
+  let lastStateLabel = "";
+  let responseUrls = [];
+
+  const handlePacket = (packet) => {
+    if (!packet || typeof packet !== "object") {
+      return;
+    }
+    if (packet.type === IMPROV_SERIAL_TYPE.CURRENT_STATE) {
+      currentState = Number(packet.payload?.[0] ?? -1);
+      const label = improvSerialStateLabel(currentState);
+      if (label !== lastStateLabel) {
+        lastStateLabel = label;
+        appendEspHomeFirmwareLog(logConsole, `Improv: ${label}.`, "info");
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = `Wi-Fi setup: ${label}.`;
+        }
+      }
+      return;
+    }
+    if (packet.type === IMPROV_SERIAL_TYPE.ERROR_STATE) {
+      currentError = Number(packet.payload?.[0] ?? IMPROV_SERIAL_ERROR.UNKNOWN);
+      if (currentError !== IMPROV_SERIAL_ERROR.NONE) {
+        appendEspHomeFirmwareLog(logConsole, `Improv error: ${improvSerialErrorLabel(currentError)}.`, "error");
+      }
+      return;
+    }
+    if (packet.type === IMPROV_SERIAL_TYPE.RPC_RESPONSE) {
+      const response = improvParseRpcPayload(packet.payload);
+      if (response.command === IMPROV_SERIAL_COMMAND.GET_DEVICE_INFO && response.strings.length) {
+        appendEspHomeFirmwareLog(logConsole, `Device info: ${response.strings.filter(Boolean).join(" • ")}`, "info");
+      }
+      if (
+        response.command === IMPROV_SERIAL_COMMAND.WIFI_SETTINGS ||
+        response.command === IMPROV_SERIAL_COMMAND.GET_CURRENT_STATE
+      ) {
+        responseUrls = response.strings.filter(Boolean);
+        if (responseUrls.length) {
+          appendEspHomeFirmwareLog(logConsole, `Device URL: ${responseUrls[0]}`, "info");
+        }
+      }
+    }
+  };
+
+  const readLoop = (async () => {
+    while (!stopped) {
+      try {
+        const result = await reader.read();
+        if (result?.done) {
+          break;
+        }
+        parser.feed(result?.value).forEach(handlePacket);
+      } catch (error) {
+        if (!stopped) {
+          appendEspHomeFirmwareLog(logConsole, `Improv read warning: ${String(error?.message || error)}`, "warn");
+        }
+        break;
+      }
+    }
+  })();
+
+  const sendRpc = async (command, strings = []) => {
+    await writer.write(improvBuildSerialPacket(IMPROV_SERIAL_TYPE.RPC, improvBuildRpcPayload(command, strings)));
+  };
+
+  let pollTimer = 0;
+  try {
+    await sendRpc(IMPROV_SERIAL_COMMAND.GET_DEVICE_INFO);
+    await sendRpc(IMPROV_SERIAL_COMMAND.GET_CURRENT_STATE);
+    await sleep(650);
+    appendEspHomeFirmwareLog(logConsole, `Sending Wi-Fi credentials for ${ssid}.`, "info");
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = `Sending Wi-Fi credentials for ${ssid}...`;
+    }
+    await sendRpc(IMPROV_SERIAL_COMMAND.WIFI_SETTINGS, [ssid, password]);
+    pollTimer = window.setInterval(() => {
+      void sendRpc(IMPROV_SERIAL_COMMAND.GET_CURRENT_STATE).catch(() => {});
+    }, 1500);
+
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      if (currentError && currentError !== IMPROV_SERIAL_ERROR.NONE) {
+        throw new Error(improvSerialErrorLabel(currentError));
+      }
+      if (currentState === IMPROV_SERIAL_STATE.PROVISIONED) {
+        const urlSuffix = responseUrls.length ? ` ${responseUrls[0]}` : "";
+        appendEspHomeFirmwareLog(logConsole, `Wi-Fi setup complete.${urlSuffix}`, "info");
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent = "Wi-Fi setup complete.";
+        }
+        return;
+      }
+      await sleep(300);
+    }
+    throw new Error("Timed out waiting for Improv Serial Wi-Fi setup.");
+  } finally {
+    if (pollTimer) {
+      window.clearInterval(pollTimer);
+    }
+    stopped = true;
+    try {
+      await reader.cancel();
+    } catch (_error) {
+      // Ignore reader cancellation cleanup failures.
+    }
+    try {
+      await readLoop;
+    } catch (_error) {
+      // Ignore read-loop cleanup failures.
+    }
+    try {
+      reader.releaseLock();
+    } catch (_error) {
+      // Ignore lock cleanup failures.
+    }
+    try {
+      writer.releaseLock();
+    } catch (_error) {
+      // Ignore lock cleanup failures.
+    }
+    try {
+      await port.close();
+    } catch (_error) {
+      // Ignore close cleanup failures.
+    }
+  }
+}
+
 function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   if (!(card instanceof HTMLElement)) {
     return;
@@ -10428,9 +10839,13 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
     String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
-  const values = collectCoreManagerValues(card);
+  const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltFactory || "").trim() === "1";
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before browser USB flashing.", "error", 3200);
+    return;
+  }
+  if (!prebuiltAvailable) {
+    showToast("No prebuilt USB image is available for this firmware target.", "error", 3600);
     return;
   }
 
@@ -10439,9 +10854,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   setCoreManagerStatus(card, "Opening browser USB flash log...");
 
   let stopped = false;
-  let sessionId = "";
-  let cursor = 0;
-  let pollTimer = 0;
   let selectedPort = null;
   let logConsole = null;
   let statusNode = null;
@@ -10449,6 +10861,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   let selectButton = null;
   let portListNode = null;
   let selectedNode = null;
+  let wifiSetupCheckbox = null;
+  let wifiSsidInput = null;
+  let wifiPasswordInput = null;
   let modalDialog = null;
 
   const updateSelectedPort = () => {
@@ -10458,7 +10873,16 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         : "No USB device selected.";
     }
     if (buildButton instanceof HTMLButtonElement) {
-      buildButton.disabled = !selectedPort;
+      const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
+      const ssid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
+      if (wifiSsidInput instanceof HTMLInputElement) {
+        wifiSsidInput.disabled = !wifiEnabled;
+      }
+      if (wifiPasswordInput instanceof HTMLInputElement) {
+        wifiPasswordInput.disabled = !wifiEnabled;
+      }
+      buildButton.disabled = !selectedPort || (wifiEnabled && !ssid);
+      buildButton.textContent = wifiEnabled ? "Flash + Set Up Wi-Fi" : "Flash Firmware";
     }
   };
 
@@ -10497,20 +10921,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
 
   const stopViewer = async () => {
     stopped = true;
-    if (pollTimer) {
-      window.clearTimeout(pollTimer);
-      pollTimer = 0;
-    }
-    if (sessionId) {
-      try {
-        await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
-          session_id: sessionId,
-          id: sessionId,
-        });
-      } catch (_error) {
-        // Ignore cleanup failures while closing the browser flash log.
-      }
-    }
     setEspHomeFirmwareCardBusy(card, false);
     void reloadEspHomeRuntimePayloadOnly();
   };
@@ -10531,61 +10941,39 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     } catch (_error) {
       // The flash succeeded; failing to record the local version should not make recovery look failed.
     }
+    const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
+    if (wifiEnabled) {
+      await setupImprovWifi(
+        selectedPort,
+        {
+          ssid: wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value : "",
+          password: wifiPasswordInput instanceof HTMLInputElement ? wifiPasswordInput.value : "",
+        },
+        logConsole,
+        statusNode
+      );
+    } else {
+      appendEspHomeFirmwareLog(logConsole, "Wi-Fi setup skipped by user.", "info");
+    }
+    if (selectButton instanceof HTMLButtonElement) {
+      selectButton.disabled = false;
+    }
+    setEspHomeFirmwareCardBusy(card, false);
+    updateSelectedPort();
     setCoreManagerStatus(card, "Browser USB flash finished.");
     showToast("Browser USB flash finished.");
   };
 
-  const schedulePoll = (delayMs = 1200) => {
-    if (stopped || !sessionId) {
-      return;
-    }
-    pollTimer = window.setTimeout(async () => {
-      if (stopped || !sessionId) {
-        return;
-      }
-      try {
-        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
-          session_id: sessionId,
-          id: sessionId,
-          after_seq: cursor,
-        });
-        const entries = Array.isArray(result?.entries) ? result.entries : [];
-        if (entries.length) {
-          renderEspHomeFirmwareLogEntries(logConsole, entries, false);
-        }
-        cursor = Number(result?.cursor || cursor || 0);
-        if (statusNode instanceof HTMLElement) {
-          statusNode.textContent =
-            String(result?.status_text || result?.message || "").trim() || "Building browser flash firmware...";
-        }
-        if (boolFromAny(result?.active, true)) {
-          schedulePoll(1100);
-          return;
-        }
-        sessionId = "";
-        if (String(result?.phase || "").trim() === "failed") {
-          throw new Error(String(result?.error || result?.message || "Browser flash build failed."));
-        }
-        if (!String(result?.binary_url || "").trim()) {
-          throw new Error("Browser flash build finished without a firmware binary.");
-        }
-        await runBrowserFlash(result);
-      } catch (error) {
-        const message = String(error?.message || "unknown error");
-        appendEspHomeFirmwareLog(logConsole, `Browser USB flash failed: ${message}`, "error");
-        if (statusNode instanceof HTMLElement) {
-          statusNode.textContent = `Browser USB flash failed: ${message}`;
-        }
-        setCoreManagerStatus(card, `Failed: ${message}`);
-        showToast(`Failed: ${message}`, "error", 4200);
-        setEspHomeFirmwareCardBusy(card, false);
-      }
-    }, delayMs);
-  };
-
   const startBuild = async () => {
     if (!selectedPort) {
-      showToast("Select a USB device before building.", "error", 3000);
+      showToast("Select a USB device before flashing.", "error", 3000);
+      return;
+    }
+    const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
+    const wifiSsid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
+    if (wifiEnabled && !wifiSsid) {
+      showToast("Enter a Wi-Fi SSID or turn off Wi-Fi setup.", "error", 3200);
+      updateSelectedPort();
       return;
     }
     if (buildButton instanceof HTMLButtonElement) {
@@ -10594,29 +10982,29 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     if (selectButton instanceof HTMLButtonElement) {
       selectButton.disabled = true;
     }
-    setCoreManagerStatus(card, "Browser flash build in progress...");
-    appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
-    appendEspHomeFirmwareLog(logConsole, "Starting Tater firmware build...", "info");
+    setCoreManagerStatus(card, "Preparing prebuilt USB firmware...");
+    if (selectedPort) {
+      appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
+    }
+    appendEspHomeFirmwareLog(logConsole, "Preparing prebuilt USB firmware image.", "info");
     try {
       const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
         id: selector,
         selector,
         template_key: templateKey,
-        values,
       });
-      sessionId = String(result?.session_id || "").trim();
-      cursor = Number(result?.cursor || 0);
       clearEspHomeFirmwareDraft(templateKey, selector);
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
-      if (!sessionId) {
-        throw new Error("Browser flash build did not create a log session.");
+      if (String(result?.binary_url || "").trim()) {
+        await runBrowserFlash(result);
+        return;
       }
-      schedulePoll(900);
+      throw new Error("Prebuilt USB image did not include a firmware binary.");
     } catch (error) {
       const message = String(error?.message || "unknown error");
-      appendEspHomeFirmwareLog(logConsole, `Failed to start browser flash build: ${message}`, "error");
+      appendEspHomeFirmwareLog(logConsole, `Browser USB flash failed: ${message}`, "error");
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = `Browser flash build failed to start: ${message}`;
+        statusNode.textContent = `Browser USB flash failed: ${message}`;
       }
       setEspHomeFirmwareCardBusy(card, false);
       setCoreManagerStatus(card, `Failed: ${message}`);
@@ -10639,7 +11027,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         label: "Firmware Log",
         type: "textarea",
         value: "",
-        description: "Select the USB device first, then Tater builds and this browser flashes it.",
+        description: "Select the USB device, flash the prebuilt factory image, then optionally set up Wi-Fi over Improv Serial.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -10659,13 +11047,29 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         controls.style.marginTop = "12px";
         controls.innerHTML = `
           <div class="small core-inline-section-title">USB Device</div>
-          <div class="small">Choose the ESP32-S3 from this browser before Tater starts building.</div>
+          <div class="small">Choose the ESP32-S3 USB serial device from this browser.</div>
           <div class="inline-row" style="margin-top:10px;">
             <button type="button" class="action-btn esphome-browser-usb-select">Select USB Device</button>
-            <button type="button" class="action-btn esphome-browser-usb-build" disabled>Build & Flash Selected Device</button>
+            <button type="button" class="action-btn esphome-browser-usb-build" disabled>Flash + Set Up Wi-Fi</button>
           </div>
           <div class="small esphome-browser-usb-selected" style="margin-top:8px;"></div>
           <div class="inline-row esphome-browser-usb-list" style="margin-top:8px;"></div>
+          <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup">
+            <label class="firmware-usb-wifi-toggle">
+              <input type="checkbox" class="esphome-browser-usb-wifi-enabled" checked>
+              <span>Set up Wi-Fi after USB flash</span>
+            </label>
+            <div class="firmware-usb-wifi-grid">
+              <label>
+                <span>Wi-Fi SSID</span>
+                <input type="text" class="esphome-browser-usb-wifi-ssid" autocomplete="off" placeholder="Network name">
+              </label>
+              <label>
+                <span>Wi-Fi Password</span>
+                <input type="password" class="esphome-browser-usb-wifi-password" autocomplete="current-password" placeholder="Network password">
+              </label>
+            </div>
+          </section>
         `;
         const consoleEl = document.createElement("div");
         consoleEl.className = "voice-log-console";
@@ -10682,12 +11086,20 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         buildButton = controls.querySelector(".esphome-browser-usb-build");
         portListNode = controls.querySelector(".esphome-browser-usb-list");
         selectedNode = controls.querySelector(".esphome-browser-usb-selected");
+        wifiSetupCheckbox = controls.querySelector(".esphome-browser-usb-wifi-enabled");
+        wifiSsidInput = controls.querySelector(".esphome-browser-usb-wifi-ssid");
+        wifiPasswordInput = controls.querySelector(".esphome-browser-usb-wifi-password");
       }
       if (statusNode instanceof HTMLElement) {
         statusNode.textContent = "Select the USB device to continue.";
         statusNode.classList.add("voice-log-status");
       }
-      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Select a USB device to start.");
+      renderEspHomeFirmwareLogEntries(
+        logConsole,
+        [],
+        true,
+        "Select a USB device to start."
+      );
       updateSelectedPort();
       try {
         await renderAuthorizedPorts();
@@ -10706,6 +11118,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
           }
         });
       }
+      [wifiSetupCheckbox, wifiSsidInput, wifiPasswordInput].forEach((field) => {
+        if (field instanceof HTMLElement) {
+          field.addEventListener("input", updateSelectedPort);
+          field.addEventListener("change", updateSelectedPort);
+        }
+      });
       if (buildButton instanceof HTMLButtonElement) {
         buildButton.addEventListener("click", () => {
           void startBuild();
@@ -11175,6 +11593,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
     return;
   }
   const singleUpdate = updates.length === 1;
+  const allPrebuilt = updates.every((row) =>
+    boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false)
+  );
 
   const currentCard = document.querySelector(".esphome-firmware-card");
   const currentTemplateKey = String(currentCard?.dataset?.firmwareTemplateKey || "").trim();
@@ -11354,10 +11775,10 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
         type: "textarea",
         value: "",
         description: singleUpdate
-          ? "Tater builds fresh firmware and uploads it over OTA."
+          ? "Tater uploads the matching prebuilt firmware over OTA."
           : flashAllMode
-          ? "Tater flashes one device at a time with its saved settings and moves to the next after the upload completes."
-          : "Tater updates one satellite at a time and moves to the next after the upload completes.",
+          ? "Tater flashes one device at a time with matching prebuilt firmware and moves to the next after upload completes."
+          : "Tater updates one satellite at a time with matching prebuilt firmware and moves to the next after upload completes.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -16507,10 +16928,11 @@ async function loadSettingsView() {
     ? announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel]
     : [];
   const esphomeUi = settings?.esphome_ui && typeof settings.esphome_ui === "object" ? settings.esphome_ui : {};
+  const taterVoiceSettingsLabel = String(esphomeUi.label || "Tater Voice").trim() || "Tater Voice";
   const esphomeFields = Array.isArray(esphomeUi.fields) ? esphomeUi.fields : [];
   const esphomeFieldsHtml = esphomeFields.length
     ? esphomeFields.map((field) => renderCoreManagerField(field)).join("")
-    : renderNotice("ESPHome settings are unavailable right now.");
+    : renderNotice("Tater Voice settings are unavailable right now.");
   const esphomeSections = Array.isArray(esphomeUi.sections) ? esphomeUi.sections : [];
   const esphomeTaterVoiceSection = esphomeSections.find(
     (section) => String(section?.label || "").trim().toLowerCase() === "tater voice extras"
@@ -16662,7 +17084,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Integrations, ESPHome, Redis, Misc, Advanced.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Integrations, Tater Voice, Redis, Misc, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -16671,7 +17093,7 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="models">Models</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="esphome">ESPHome</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="esphome">${escapeHtml(taterVoiceSettingsLabel)}</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
@@ -17628,9 +18050,9 @@ async function loadSettingsView() {
 
         <section class="settings-tab-panel" data-settings-panel="esphome">
           ${renderSettingsSectionIntro(
-            "ESPHome",
+            taterVoiceSettingsLabel,
             "Manage satellites, firmware, stats, and native voice runtime settings from one place.",
-            "ESP"
+            "VOICE"
           )}
           <div
             id="settings-esphome-shell"
@@ -17646,7 +18068,7 @@ async function loadSettingsView() {
             </div>
 
             <div id="settings-esphome-runtime-head">
-              ${renderNotice("Open the ESPHome tab to load the built-in ESPHome runtime.")}
+              ${renderNotice("Open the Tater Voice tab to load the built-in voice runtime.")}
             </div>
 
             <div class="settings-subpanel active" data-esphome-panel="satellites">
@@ -17657,7 +18079,7 @@ async function loadSettingsView() {
                 "subtle"
               )}
               <div id="settings-esphome-runtime-satellites">
-                ${renderNotice("Open the ESPHome tab to load satellites.")}
+                ${renderNotice("Open the Tater Voice tab to load satellites.")}
               </div>
               <div style="margin-top:16px;">
                 <div class="settings-section-title">Add Satellite</div>
@@ -17665,7 +18087,7 @@ async function loadSettingsView() {
                   Manually add a satellite by host or IP when discovery has not found it yet.
                 </div>
                 <div id="settings-esphome-runtime-add">
-                  ${renderNotice("Open the ESPHome tab to load the add form.")}
+                  ${renderNotice("Open the Tater Voice tab to load the add form.")}
                 </div>
               </div>
             </div>
@@ -17673,21 +18095,21 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="platform">
               ${renderSettingsSectionIntro(
                 "Voice Runtime",
-                "Built-in ESPHome services and native voice pipeline behavior for connected satellites.",
+                "Built-in Tater Voice services and native voice pipeline behavior for connected satellites.",
                 "RUN",
                 "subtle"
               )}
               <div id="settings-esphome-form">
                 <section class="core-inline-section">
-                  <div class="small core-inline-section-title">ESPHome Platform</div>
+                  <div class="small core-inline-section-title">Tater Voice Platform</div>
                   <div class="small">
                     ${escapeHtml(
-                      String(esphomeUi.description || "Built-in ESPHome services for Tater.")
+                      String(esphomeUi.description || "Built-in voice satellite services for Tater.")
                     )}
                   </div>
                   <div class="small" style="margin-top:8px;">
                     ${escapeHtml(
-                      String(esphomeUi.runtime_tab_hint || "Live voice satellites, entities, and logs are managed directly in this ESPHome settings area.")
+                      String(esphomeUi.runtime_tab_hint || "Live voice satellites, entities, and logs are managed directly in this Tater Voice area.")
                     )}
                   </div>
                 </section>
@@ -17720,7 +18142,7 @@ async function loadSettingsView() {
                 <div class="inline-row" style="margin-top:12px;">
                   <button type="button" id="settings-save-esphome" class="action-btn">Save Settings</button>
                   <button type="button" id="settings-reset-esphome-defaults" class="inline-btn danger">Restore Default Settings</button>
-                  <span class="small">Saves built-in ESPHome device settings for Tater.</span>
+                  <span class="small">Saves built-in Tater Voice device settings.</span>
                 </div>
               </div>
             </div>
@@ -17728,12 +18150,12 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="firmware">
               ${renderSettingsSectionIntro(
                 "Firmware",
-                "Build OTA firmware or browser USB installers for Tater voice satellites and ESP32-S3-BOX-3 display devices after reviewing template substitutions.",
+                "Flash prebuilt satellite firmware over OTA or Browser USB without compiling firmware in Tater.",
                 "FW",
                 "subtle"
               )}
               <div id="settings-esphome-runtime-firmware">
-                ${renderNotice("Open the ESPHome tab to load the firmware builder.")}
+                ${renderNotice("Open the Tater Voice tab to load the firmware flasher.")}
               </div>
             </div>
 
@@ -17745,7 +18167,7 @@ async function loadSettingsView() {
                 "subtle"
               )}
               <div id="settings-esphome-runtime-stats">
-                ${renderNotice("Open the ESPHome tab to load stats.")}
+                ${renderNotice("Open the Tater Voice tab to load stats.")}
               </div>
             </div>
 
