@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import gzip
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -30,6 +33,7 @@ FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "
 FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
 FIRMWARE_BUILD_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_builds"
 FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_AGENT_LABS_ROOT / "web_flash"
+FIRMWARE_PREBUILT_ROOT = FIRMWARE_AGENT_LABS_ROOT / "prebuilt_firmware"
 FIRMWARE_RUNNER_ROOT = FIRMWARE_AGENT_LABS_ROOT / "runner"
 FIRMWARE_PLATFORMIO_ROOT = FIRMWARE_AGENT_LABS_ROOT / "platformio"
 FIRMWARE_HOME_ROOT = FIRMWARE_AGENT_LABS_ROOT / "home"
@@ -66,6 +70,20 @@ _WAKE_SOUND_MANIFEST_URLS: tuple[str, ...] = (
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_sound_manifest.json",
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-sound-manifest.json",
 )
+_PREBUILT_FIRMWARE_RAW_BASE_URL = (
+    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}"
+)
+_PREBUILT_FIRMWARE_LATEST_URL = f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/prebuilt_firmware/latest.json"
+_PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+_PREBUILT_OTA_PORT = 3232
+_PREBUILT_OTA_BLOCK_SIZE = 8192
+_PREBUILT_FIRMWARE_TEMPLATE_KEYS = {
+    "satellite1",
+    "voicepe",
+    "respeaker_lite",
+    "koala",
+    "respeaker_xvf3800",
+}
 _WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
     {"key": "microWakeWords", "label": "microWakeWords"},
     {"key": "microWakeWordsV2", "label": "microWakeWordsV2"},
@@ -622,6 +640,7 @@ def _ensure_agent_labs_dirs() -> None:
         FIRMWARE_CONFIG_ROOT,
         FIRMWARE_BUILD_ROOT,
         FIRMWARE_WEB_FLASH_ROOT,
+        FIRMWARE_PREBUILT_ROOT,
         FIRMWARE_RUNNER_ROOT,
         FIRMWARE_PLATFORMIO_ROOT,
         FIRMWARE_HOME_ROOT,
@@ -659,7 +678,7 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
         raise RuntimeError(f"Stop the active firmware session(s) first: {joined}{more}.")
 
     removed: List[str] = []
-    for path in (FIRMWARE_CONFIG_ROOT, FIRMWARE_BUILD_ROOT, FIRMWARE_RUNNER_ROOT):
+    for path in (FIRMWARE_CONFIG_ROOT, FIRMWARE_BUILD_ROOT, FIRMWARE_RUNNER_ROOT, FIRMWARE_WEB_FLASH_ROOT, FIRMWARE_PREBUILT_ROOT):
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
             removed.append(path.name)
@@ -668,7 +687,7 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
         "ok": True,
         "removed": removed,
         "message": (
-            "Cleaned firmware build files: "
+            "Cleaned firmware cache: "
             + (", ".join(removed) if removed else "nothing to remove")
             + "."
         ),
@@ -866,6 +885,222 @@ def _remote_json(url: str, *, force_refresh: bool = False) -> Any:
     with _REMOTE_JSON_LOCK:
         _REMOTE_JSON_CACHE[target] = {"ts": now, "data": copy.deepcopy(payload)}
     return payload
+
+
+def _prebuilt_firmware_raw_url(path_or_url: Any) -> str:
+    token = _text(path_or_url).strip()
+    if not token:
+        return ""
+    parsed = urllib_parse.urlparse(token)
+    if parsed.scheme and parsed.netloc:
+        return token
+    clean = token.lstrip("/")
+    quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
+    return f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/{quoted}"
+
+
+def _load_prebuilt_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
+    latest_payload = _remote_json(_PREBUILT_FIRMWARE_LATEST_URL, force_refresh=force_refresh)
+    if not isinstance(latest_payload, dict):
+        raise RuntimeError("Prebuilt firmware latest.json did not parse into an object.")
+
+    manifest_ref = _text(latest_payload.get("manifest"))
+    if not manifest_ref:
+        raise RuntimeError("Prebuilt firmware latest.json is missing a manifest path.")
+
+    manifest_url = _prebuilt_firmware_raw_url(manifest_ref)
+    manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
+    if not isinstance(manifest_payload, dict):
+        raise RuntimeError("Prebuilt firmware manifest did not parse into an object.")
+
+    devices = manifest_payload.get("devices")
+    if not isinstance(devices, list):
+        raise RuntimeError("Prebuilt firmware manifest is missing its devices list.")
+
+    version = _text(manifest_payload.get("version")) or _text(latest_payload.get("version"))
+    payload = copy.deepcopy(manifest_payload)
+    payload["version"] = version
+    payload["latest_url"] = _PREBUILT_FIRMWARE_LATEST_URL
+    payload["manifest_url"] = manifest_url
+    payload["manifest_path"] = manifest_ref
+    payload["devices_by_key"] = {
+        _text(row.get("key")): dict(row)
+        for row in devices
+        if isinstance(row, dict) and _text(row.get("key"))
+    }
+    return payload
+
+
+def _prebuilt_firmware_info(template_key: Any, *, force_refresh: bool = False) -> Dict[str, Any]:
+    key = _lower(template_key)
+    if key not in _PREBUILT_FIRMWARE_TEMPLATE_KEYS:
+        return {"available": False, "template_key": key, "reason": "not_prebuilt"}
+    try:
+        manifest = _load_prebuilt_firmware_manifest(force_refresh=force_refresh)
+    except Exception as exc:
+        return {
+            "available": False,
+            "template_key": key,
+            "reason": "manifest_unavailable",
+            "error": _text(exc) or exc.__class__.__name__,
+        }
+
+    devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
+    device = devices_by_key.get(key) if isinstance(devices_by_key.get(key), dict) else None
+    if not isinstance(device, dict):
+        return {
+            "available": False,
+            "template_key": key,
+            "reason": "missing_device",
+            "version": _text(manifest.get("version")),
+            "manifest_url": _text(manifest.get("manifest_url")),
+        }
+
+    artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
+    return {
+        "available": bool(artifacts.get("ota") or artifacts.get("factory")),
+        "template_key": key,
+        "version": _text(manifest.get("version")),
+        "manifest_url": _text(manifest.get("manifest_url")),
+        "latest_url": _text(manifest.get("latest_url")),
+        "device": copy.deepcopy(device),
+        "artifacts": copy.deepcopy(artifacts),
+    }
+
+
+def _prebuilt_artifact_meta(context: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
+    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
+    artifact = artifacts.get(_lower(kind)) if isinstance(artifacts.get(_lower(kind)), dict) else None
+    if not isinstance(artifact, dict):
+        label = _text(context.get("template_label")) or _text(context.get("template_key")) or "firmware"
+        raise RuntimeError(f"No prebuilt {kind} firmware artifact is available for {label}.")
+    path = _text(artifact.get("path"))
+    if not path:
+        raise RuntimeError(f"Prebuilt {kind} firmware artifact is missing its path.")
+    return dict(artifact)
+
+
+def _prebuilt_artifact_available(context: Dict[str, Any], kind: str) -> bool:
+    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
+    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
+    artifact = artifacts.get(_lower(kind)) if isinstance(artifacts.get(_lower(kind)), dict) else None
+    return isinstance(artifact, dict) and bool(_text(artifact.get("path")))
+
+
+def _prebuilt_cache_path(context: Dict[str, Any], artifact: Dict[str, Any]) -> Path:
+    version = _sanitize_token(
+        _text((context.get("prebuilt_firmware") or {}).get("version") if isinstance(context.get("prebuilt_firmware"), dict) else "")
+        or _text(context.get("firmware_version"))
+        or "latest"
+    )
+    template_key = _sanitize_token(context.get("template_key"))
+    name = Path(_text(artifact.get("path"))).name or f"{template_key}-{_text(artifact.get('kind')) or 'firmware'}.bin"
+    return FIRMWARE_PREBUILT_ROOT / version / template_key / name
+
+
+def _prebuilt_binary_is_valid(path: Path, artifact: Dict[str, Any]) -> bool:
+    if not path.is_file():
+        return False
+    expected_size = _as_int(artifact.get("size_bytes"), 0, minimum=0)
+    if expected_size and int(path.stat().st_size) != expected_size:
+        return False
+    expected_sha = _lower(artifact.get("sha256"))
+    if expected_sha:
+        actual_sha = hashlib.sha256(path.read_bytes()).hexdigest().lower()
+        if actual_sha != expected_sha:
+            return False
+    return True
+
+
+def _download_prebuilt_firmware_binary(
+    context: Dict[str, Any],
+    kind: str,
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    artifact = _prebuilt_artifact_meta(context, kind)
+    target_path = _prebuilt_cache_path(context, artifact)
+    if not force_refresh and _prebuilt_binary_is_valid(target_path, artifact):
+        return {
+            "path": target_path,
+            "artifact": artifact,
+            "url": _prebuilt_firmware_raw_url(artifact.get("path")),
+            "cached": True,
+        }
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    url = _prebuilt_firmware_raw_url(artifact.get("path"))
+    if not url:
+        raise RuntimeError("Prebuilt firmware URL is missing.")
+    req = urllib_request.Request(
+        url,
+        headers={
+            "User-Agent": "Tater/1.0",
+            "Accept": "application/octet-stream, */*",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    tmp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with urllib_request.urlopen(req, timeout=_PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            tmp_path.write_bytes(response.read())
+        if not _prebuilt_binary_is_valid(tmp_path, artifact):
+            raise RuntimeError(f"Downloaded prebuilt firmware failed verification: {target_path.name}.")
+        tmp_path.replace(target_path)
+    except Exception:
+        with contextlib.suppress(Exception):
+            tmp_path.unlink()
+        raise
+    return {
+        "path": target_path,
+        "artifact": artifact,
+        "url": url,
+        "cached": False,
+    }
+
+
+def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
+    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
+    return {
+        "available": bool(prebuilt.get("available")),
+        "version": _text(prebuilt.get("version")),
+        "manifest_url": _text(prebuilt.get("manifest_url")),
+        "error": _text(prebuilt.get("error")),
+        "artifacts": {
+            kind: {
+                "kind": _text(row.get("kind") or kind),
+                "path": _text(row.get("path")),
+                "size_bytes": _as_int(row.get("size_bytes"), 0, minimum=0),
+                "sha256": _text(row.get("sha256")),
+            }
+            for kind, row in artifacts.items()
+            if isinstance(row, dict)
+        },
+    }
+
+
+def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str, Any]:
+    try:
+        manifest = _load_prebuilt_firmware_manifest(force_refresh=force_refresh)
+    except Exception as exc:
+        return {
+            "available": False,
+            "version": "",
+            "device_count": 0,
+            "manifest_url": "",
+            "error": _text(exc) or exc.__class__.__name__,
+        }
+    devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
+    return {
+        "available": True,
+        "version": _text(manifest.get("version")),
+        "device_count": len([row for row in devices if isinstance(row, dict)]),
+        "manifest_url": _text(manifest.get("manifest_url")),
+        "latest_url": _text(manifest.get("latest_url")),
+        "error": "",
+    }
 
 
 def _wake_word_label_from_slug(slug: str) -> str:
@@ -1812,17 +2047,30 @@ def _build_device_context(
     if not (connected or selected or usb_recovery):
         return None
 
-    template_ctx = _load_template_context(template_spec, force_remote_refresh=force_remote_refresh)
+    template_key = _text(template_spec.get("key"))
+    prebuilt_firmware = _prebuilt_firmware_info(template_key, force_refresh=force_remote_refresh)
+    try:
+        template_ctx = _load_template_context(template_spec, force_remote_refresh=force_remote_refresh)
+    except Exception:
+        if not bool(prebuilt_firmware.get("available")):
+            raise
+        template_ctx = {
+            "substitutions": {},
+            "sections": {},
+            "firmware_version": "",
+            "firmware_project": "",
+        }
     substitutions = template_ctx["substitutions"]
     field_order = [key for key in substitutions.keys() if _text(key)]
-    if not field_order:
-        return None
 
     selector_token = _text(selector)
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
-    template_key = _text(template_spec.get("key"))
-    latest_firmware_version = _text(template_ctx.get("firmware_version"))
+    latest_firmware_version = (
+        _text(prebuilt_firmware.get("version"))
+        if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
+        else _text(template_ctx.get("firmware_version"))
+    )
     firmware_project = _text(template_ctx.get("firmware_project"))
     matched_template_key = _matched_template_key(selector_token, client_row)
     update_if_missing_installed = bool(
@@ -2183,7 +2431,11 @@ def _build_device_context(
             },
         )
 
-    cli_status = esphome_cli_status()
+    cli_status = {
+        "available": False,
+        "label": "Prebuilt only",
+        "detail": "Firmware flashing uses prebuilt OTA and USB images; ESPHome CLI builds are not used.",
+    }
     links = [
         {"label": "Template YAML", "href": _text((template_spec.get("source_urls") or [""])[0])},
         {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
@@ -2224,6 +2476,8 @@ def _build_device_context(
                 else "Firmware version metadata unavailable"
             )
         ),
+        "prebuilt_firmware_available": bool(prebuilt_firmware.get("available")),
+        "prebuilt_firmware": _prebuilt_artifact_ui_summary(prebuilt_firmware),
         "hero_badges": firmware_badges,
         "hero_image_src": esphome_ui_helpers.device_image_src(
             display_name,
@@ -2253,6 +2507,7 @@ def _build_device_context(
         "firmware_project": firmware_project,
         "template_spec": template_spec,
         "template_ctx": template_ctx,
+        "prebuilt_firmware": prebuilt_firmware,
         "profile": profile,
         "field_order": field_order,
         "fields_meta": fields_meta,
@@ -2425,7 +2680,7 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
             "label": "Browser USB Recovery",
             "title": "Browser USB Recovery",
             "host": "",
-            "detail": "Build firmware in Tater, then flash from this browser over Web Serial.",
+            "detail": "Choose a firmware family, then flash from this browser over Web Serial.",
             "connected": False,
         }
 
@@ -2454,7 +2709,11 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
 
 def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
-    cli_status = esphome_cli_status()
+    cli_status = {
+        "available": False,
+        "label": "Prebuilt only",
+        "detail": "Firmware flashing uses prebuilt OTA and USB images; ESPHome CLI builds are not used.",
+    }
 
     template_options = [
         {"value": _text(spec.get("key")), "label": _text(spec.get("label")) or _text(spec.get("key"))}
@@ -2608,7 +2867,17 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 "template_label": _text(item.get("template_label")),
                 "installed": _text(item.get("installed_firmware_version")) or "unknown",
                 "latest": _text(item.get("firmware_version")),
+                "prebuilt_firmware_available": bool(item.get("prebuilt_firmware_available")),
+                "prebuilt_firmware": copy.deepcopy(item.get("prebuilt_firmware") if isinstance(item.get("prebuilt_firmware"), dict) else {}),
             }
+            row_prebuilt = row_payload["prebuilt_firmware"] if isinstance(row_payload["prebuilt_firmware"], dict) else {}
+            row_artifacts = row_prebuilt.get("artifacts") if isinstance(row_prebuilt.get("artifacts"), dict) else {}
+            row_payload["prebuilt_firmware_ota_available"] = bool(
+                isinstance(row_artifacts.get("ota"), dict) and _text(row_artifacts["ota"].get("path"))
+            )
+            row_payload["prebuilt_firmware_factory_available"] = bool(
+                isinstance(row_artifacts.get("factory"), dict) and _text(row_artifacts["factory"].get("path"))
+            )
             if bool(item.get("connected")) and not bool(item.get("unmatched_template")):
                 firmware_flash_targets.append(dict(row_payload))
             if not bool(item.get("firmware_update_available")):
@@ -2623,6 +2892,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
 
     payload = {
         "cli": cli_status,
+        "prebuilt_firmware": _prebuilt_firmware_panel_summary(),
         "devices": devices,
         "devices_by_template": devices_by_template,
         "templates": template_options,
@@ -2635,12 +2905,11 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "active_template_key": active_template_key,
         "empty_message": empty_message,
         "wifi_note": (
-            "Wi-Fi SSID is stored per device in Tater. "
-            "Leave the Wi-Fi password blank to keep the saved password for that device."
+            "Prebuilt firmware is selected from the matched satellite family; no local ESPHome compile step is used."
         ),
         "browser_flash_note": (
-            "Browser USB flash builds firmware in Tater, then uses Web Serial from this browser. "
-            "Plug the device into the computer running the browser, and use Chrome or Edge on a secure context."
+            "Browser USB flash writes the prebuilt factory image from this browser, then can set up Wi-Fi over Improv Serial. "
+            "Plug the device into this computer and use Chrome or Edge on a secure context."
         ),
     }
     if warnings:
@@ -2872,35 +3141,8 @@ def _reset_build_path_for_context(context: Dict[str, Any]) -> Optional[Path]:
         return None
     shutil.rmtree(build_path, ignore_errors=True)
     if build_path.exists():
-        raise RuntimeError(f"Could not clear stale ESPHome build output at {build_path}.")
+        raise RuntimeError(f"Could not clear stale firmware workspace output at {build_path}.")
     return build_path
-
-
-def _find_browser_flash_binary(context: Dict[str, Any]) -> Path:
-    build_path = _build_path_for_context(context)
-    if not build_path.exists():
-        raise RuntimeError(f"ESPHome build output was not found at {build_path}.")
-
-    bins = [path for path in build_path.rglob("*.bin") if path.is_file()]
-    if not bins:
-        raise RuntimeError(f"ESPHome did not produce a browser-flashable .bin under {build_path}.")
-
-    preferred_names = (
-        "firmware.factory.bin",
-        "firmware-factory.bin",
-        "factory.bin",
-        "merged-firmware.bin",
-        "merged.bin",
-    )
-    for wanted in preferred_names:
-        matches = [path for path in bins if path.name == wanted]
-        if matches:
-            return max(matches, key=lambda path: path.stat().st_size)
-
-    raise RuntimeError(
-        "ESPHome built firmware, but no factory/merged .bin was found for browser flashing. "
-        "ESP Web Tools needs a single factory image for ESP32-S3 browser installs."
-    )
 
 
 def _browser_flash_artifact_id(context: Dict[str, Any]) -> str:
@@ -2926,33 +3168,12 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     target_binary_path = artifact_dir / target_binary_name
     shutil.copy2(binary_path, target_binary_path)
 
-    display_name = _text(context.get("display_name")) or _text(context.get("template_label")) or "Tater Firmware"
-    manifest = {
-        "name": display_name,
-        "version": time.strftime("%Y.%m.%d.%H%M%S", time.localtime()),
-        "new_install_prompt_erase": True,
-        "builds": [
-            {
-                "chipFamily": "ESP32-S3",
-                "parts": [
-                    {
-                        "path": target_binary_name,
-                        "offset": 0,
-                    }
-                ],
-            }
-        ],
-    }
-    manifest_path = artifact_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
     template_ctx = context.get("template_ctx") if isinstance(context.get("template_ctx"), dict) else {}
     template_doc = template_ctx.get("template_doc") if isinstance(template_ctx.get("template_doc"), dict) else {}
     esp32_block = template_doc.get("esp32") if isinstance(template_doc.get("esp32"), dict) else {}
     base_url = f"/api/settings/esphome/firmware-web/{artifact_id}"
     return {
         "artifact_id": artifact_id,
-        "manifest_url": f"{base_url}/manifest.json",
         "binary_url": f"{base_url}/{target_binary_name}",
         "binary_name": target_binary_name,
         "selector": _text(context.get("selector")),
@@ -2967,41 +3188,192 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     }
 
 
-def _prepare_browser_flash_build(
-    context: Dict[str, Any],
-    profile_values: Dict[str, str],
-    cli_status: Dict[str, Any],
-) -> Dict[str, Any]:
-    config_path = _prepare_config_path(context, profile_values)
-    argv = list(cli_status.get("argv") or [])
-    if not argv:
-        raise RuntimeError("ESPHome CLI runner is not configured.")
-
-    command = [*argv, "compile", str(config_path)]
-    proc = _run_esphome_command(
-        command,
-        cwd=_text(cli_status.get("cwd")),
-        env=_runner_env(cli_status),
-    )
-    summary = _summarize_process_output(proc.stdout, proc.stderr)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"ESPHome browser flash build failed for {context.get('display_name') or context.get('selector')}.\n\n"
-            f"{summary or 'No CLI output was captured.'}"
-        )
-
-    binary_path = _find_browser_flash_binary(context)
-    artifact = _create_browser_flash_artifact(context, binary_path)
+def _prepare_prebuilt_browser_flash_artifact(context: Dict[str, Any]) -> Dict[str, Any]:
+    binary = _download_prebuilt_firmware_binary(context, "factory", force_refresh=True)
+    artifact = _create_browser_flash_artifact(context, binary["path"])
+    template_label = _text(context.get("template_label")) or "firmware"
+    display_name = _text(context.get("display_name")) or _text(context.get("selector")) or "device"
+    cached_text = "cached" if bool(binary.get("cached")) else "downloaded"
     return {
         "ok": True,
         "selector": context.get("selector"),
         "template_key": context.get("template_key"),
-        "config_path": str(config_path),
-        "command": command,
-        "message": f"Built browser flash firmware for {context.get('display_name') or context.get('selector')}.",
-        "output_tail": summary,
+        "firmware_version": _text(context.get("firmware_version")),
+        "message": f"Prepared prebuilt browser USB firmware for {display_name}.",
+        "entries": [
+            {
+                "seq": 1,
+                "time": _entry_time_text(),
+                "level": "info",
+                "message": f"Using prebuilt {template_label} factory firmware {context.get('firmware_version') or ''}.",
+                "display": f"Using prebuilt {template_label} factory firmware {context.get('firmware_version') or ''}.",
+                "source": "session",
+            },
+            {
+                "seq": 2,
+                "time": _entry_time_text(),
+                "level": "info",
+                "message": f"Factory image {cached_text}: {Path(binary['path']).name}.",
+                "display": f"Factory image {cached_text}: {Path(binary['path']).name}.",
+                "source": "session",
+            },
+        ],
         **artifact,
     }
+
+
+class _NativeOTAError(RuntimeError):
+    pass
+
+
+def _native_ota_check(data: bytes, expected: Optional[set[int]] = None) -> None:
+    error_messages = {
+        0x80: "Invalid magic byte",
+        0x81: "Device could not prepare flash memory for update.",
+        0x82: "OTA authentication failed.",
+        0x83: "Writing OTA data to flash failed.",
+        0x84: "Finishing OTA update failed.",
+        0x85: "Manual reset is required before this OTA update.",
+        0x86: "Current flash configuration does not match this firmware.",
+        0x87: "New firmware flash configuration does not match this device.",
+        0x89: "The OTA partition is too small for this firmware.",
+        0x8A: "The OTA partition could not be found. Recover with Browser USB.",
+        0x8B: "OTA MD5 mismatch. Retry or use Browser USB.",
+        0x8D: "Firmware signature verification failed.",
+        0x8E: "This OTA type is not supported by the device.",
+        0xFF: "Unknown OTA error from device.",
+    }
+    if not data:
+        raise _NativeOTAError("Device closed the OTA connection without responding.")
+    code = int(data[0])
+    if code in error_messages:
+        raise _NativeOTAError(error_messages[code])
+    if expected is not None and code not in expected:
+        expected_text = ", ".join(f"0x{item:02X}" for item in sorted(expected))
+        raise _NativeOTAError(f"Unexpected OTA response 0x{code:02X}; expected {expected_text}.")
+
+
+def _native_ota_receive(sock: socket.socket, amount: int, label: str, expected: Optional[set[int]] = None) -> bytes:
+    data = b""
+    while len(data) < amount:
+        try:
+            chunk = sock.recv(amount - len(data))
+        except OSError as exc:
+            raise _NativeOTAError(f"OTA receive failed while reading {label}: {exc}") from exc
+        if not chunk:
+            raise _NativeOTAError(f"OTA connection closed while reading {label}.")
+        data += chunk
+        if len(data) == 1:
+            _native_ota_check(data, expected)
+    if len(data) > 1 and expected is not None:
+        _native_ota_check(data[:1], expected)
+    return data
+
+
+def _native_ota_send(sock: socket.socket, data: bytes | str | int | List[int], label: str) -> None:
+    if isinstance(data, str):
+        payload = data.encode("utf-8")
+    elif isinstance(data, int):
+        payload = bytes([data])
+    elif isinstance(data, list):
+        payload = bytes(data)
+    else:
+        payload = data
+    try:
+        sock.sendall(payload)
+    except OSError as exc:
+        raise _NativeOTAError(f"OTA send failed while writing {label}: {exc}") from exc
+
+
+def _native_ota_upload(
+    host: str,
+    binary_path: Path,
+    *,
+    progress_callback: Optional[Any] = None,
+    stop_requested: Optional[Any] = None,
+) -> str:
+    if not host:
+        raise _NativeOTAError("OTA target host is missing.")
+    if not binary_path.is_file():
+        raise _NativeOTAError(f"OTA firmware file was not found: {binary_path}.")
+
+    upload_contents = binary_path.read_bytes()
+    sock: Optional[socket.socket] = None
+    try:
+        sock = socket.create_connection((host, _PREBUILT_OTA_PORT), timeout=20.0)
+        sock.settimeout(20.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _native_ota_send(sock, bytes([0x6C, 0x26, 0xF7, 0x5C, 0x45]), "magic bytes")
+        version_response = _native_ota_receive(sock, 2, "OTA version", {0x00})
+        version = int(version_response[1])
+        if version not in {1, 2}:
+            raise _NativeOTAError(f"Device uses unsupported OTA protocol version {version}.")
+
+        client_features = 0x01 | 0x04
+        _native_ota_send(sock, client_features, "client features")
+        feature_response = _native_ota_receive(sock, 1, "server features")
+        extended_proto = False
+        server_features = 0
+        first_feature = int(feature_response[0])
+        if first_feature == 0x48:
+            extended_proto = True
+            server_features = int(_native_ota_receive(sock, 1, "server feature flags")[0])
+        elif first_feature == 0x46:
+            server_features = 0x01
+
+        auth_response = int(_native_ota_receive(sock, 1, "OTA auth", {0x01, 0x02, 0x41})[0])
+        if auth_response != 0x41:
+            raise _NativeOTAError("Device requested OTA authentication, but Tater prebuilt OTA has no password configured.")
+
+        sock.settimeout(90.0)
+        if extended_proto:
+            _native_ota_send(sock, 0x00, "OTA app update type")
+
+        if server_features & 0x01:
+            upload_contents = gzip.compress(upload_contents, compresslevel=9)
+
+        upload_size = len(upload_contents)
+        _native_ota_send(
+            sock,
+            [
+                (upload_size >> 24) & 0xFF,
+                (upload_size >> 16) & 0xFF,
+                (upload_size >> 8) & 0xFF,
+                upload_size & 0xFF,
+            ],
+            "binary size",
+        )
+        _native_ota_receive(sock, 1, "update prepare", {0x42})
+        _native_ota_send(sock, hashlib.md5(upload_contents).hexdigest(), "binary md5")
+        _native_ota_receive(sock, 1, "md5 check", {0x43})
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+
+        sent = 0
+        last_percent = -1
+        while sent < upload_size:
+            if callable(stop_requested) and stop_requested():
+                raise _NativeOTAError("OTA update stopped.")
+            chunk = upload_contents[sent : sent + _PREBUILT_OTA_BLOCK_SIZE]
+            _native_ota_send(sock, chunk, "firmware chunk")
+            sent += len(chunk)
+            if version >= 2:
+                _native_ota_receive(sock, 1, "chunk acknowledgement", {0x47})
+            percent = int((sent / upload_size) * 100) if upload_size else 100
+            if callable(progress_callback) and (percent >= last_percent + 5 or percent == 100):
+                last_percent = percent
+                progress_callback(percent, sent, upload_size)
+
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _native_ota_receive(sock, 1, "receive result", {0x44})
+        _native_ota_receive(sock, 1, "update end", {0x45})
+        _native_ota_send(sock, 0x00, "end acknowledgement")
+        return host
+    except OSError as exc:
+        raise _NativeOTAError(f"OTA connection to {host}:{_PREBUILT_OTA_PORT} failed: {exc}") from exc
+    finally:
+        if sock is not None:
+            with contextlib.suppress(Exception):
+                sock.close()
 
 
 def browser_flash_artifact_path(artifact_id: str, relative_path: str) -> Path:
@@ -3278,7 +3650,8 @@ def _firmware_session_worker(session_id: str) -> None:
         command = list(session.get("command") or [])
         cwd = _text(session.get("cwd"))
         env = session.get("env") if isinstance(session.get("env"), dict) else None
-        _set_session_phase_locked(session, "building")
+        initial_phase = "uploading" if _lower(session.get("operation")) == "prebuilt_ota_upload" else "building"
+        _set_session_phase_locked(session, initial_phase)
 
     proc: Optional[subprocess.Popen[str]] = None
     try:
@@ -3354,33 +3727,20 @@ def _firmware_session_worker(session_id: str) -> None:
         session["returncode"] = int(returncode)
         stop_requested = bool(session.get("stop_requested"))
         if stop_requested:
-            operation = _lower(session.get("operation"))
             session["active"] = False
-            session["message"] = (
-                "Browser flash build stopped."
-                if operation == "browser_build"
-                else "Firmware flash stopped."
-            )
+            session["message"] = "Firmware flash stopped."
             _set_session_phase_locked(session, "cancelled")
             _append_session_entry_locked(
                 session,
                 level="warn",
-                message=(
-                    "Browser flash build cancelled."
-                    if operation == "browser_build"
-                    else "Firmware flash cancelled."
-                ),
+                message="Firmware flash cancelled.",
                 source="cli",
             )
             return
         if returncode != 0:
             session["active"] = False
             session["error"] = f"ESPHome exited with code {int(returncode)}."
-            session["message"] = (
-                "Browser flash build failed."
-                if _lower(session.get("operation")) == "browser_build"
-                else "Firmware flash failed."
-            )
+            session["message"] = "Firmware flash failed."
             _set_session_phase_locked(session, "failed")
             _append_session_entry_locked(
                 session,
@@ -3390,31 +3750,14 @@ def _firmware_session_worker(session_id: str) -> None:
             )
             return
         if _lower(session.get("operation")) == "browser_build":
-            try:
-                context = session.get("context") if isinstance(session.get("context"), dict) else {}
-                binary_path = _find_browser_flash_binary(context)
-                artifact = _create_browser_flash_artifact(context, binary_path)
-            except Exception as exc:
-                session["active"] = False
-                session["error"] = _text(exc) or exc.__class__.__name__
-                session["message"] = "Browser flash build failed."
-                _set_session_phase_locked(session, "failed")
-                _append_session_entry_locked(
-                    session,
-                    level="error",
-                    message=f"Browser flash artifact failed: {_text(exc) or exc.__class__.__name__}.",
-                    source="session",
-                )
-                return
-            session.update(artifact)
             session["active"] = False
-            session["returncode"] = 0
-            session["message"] = "Browser flash firmware is ready."
-            _set_session_phase_locked(session, "completed")
+            session["error"] = "Browser build sessions are no longer supported."
+            session["message"] = "Firmware session type is no longer supported."
+            _set_session_phase_locked(session, "failed")
             _append_session_entry_locked(
                 session,
-                level="info",
-                message=f"Browser flash firmware ready: {artifact.get('binary_name')} ({artifact.get('binary_size')} bytes).",
+                level="error",
+                message="Browser build sessions are disabled; use prebuilt USB firmware instead.",
                 source="session",
             )
             return
@@ -3433,7 +3776,11 @@ def _firmware_session_worker(session_id: str) -> None:
             _append_session_entry_locked(
                 session,
                 level="info",
-                message="Build and upload finished.",
+                message=(
+                    "Prebuilt firmware upload finished."
+                    if _lower(session.get("operation")) == "prebuilt_ota_upload"
+                    else "Build and upload finished."
+                ),
                 source="session",
             )
             return
@@ -3445,7 +3792,11 @@ def _firmware_session_worker(session_id: str) -> None:
         _append_session_entry_locked(
             session,
             level="info",
-            message="Build and upload finished. Waiting for the device to reconnect so live logs can continue here.",
+            message=(
+                "Prebuilt firmware upload finished. Waiting for the device to reconnect so live logs can continue here."
+                if _lower(session.get("operation")) == "prebuilt_ota_upload"
+                else "Build and upload finished. Waiting for the device to reconnect so live logs can continue here."
+            ),
             source="session",
         )
 
@@ -3541,6 +3892,121 @@ def _pump_session_device_logs(session_id: str) -> None:
                 _append_session_passthrough_locked(session, entry, source="device")
 
 
+def _prebuilt_ota_session_worker(session_id: str) -> None:
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        host = _text(session.get("host"))
+        binary_path = Path(_text(session.get("source_binary")))
+        display_name = _text(session.get("display_name")) or _text(session.get("selector")) or "device"
+        _set_session_phase_locked(session, "uploading")
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Connecting to {host}:{_PREBUILT_OTA_PORT} for prebuilt OTA upload.",
+            source="session",
+        )
+
+    def stop_requested() -> bool:
+        with _FIRMWARE_SESSION_LOCK:
+            live = _FIRMWARE_SESSIONS.get(session_id)
+            return not isinstance(live, dict) or bool(live.get("stop_requested"))
+
+    def progress(percent: int, sent: int, total: int) -> None:
+        with _FIRMWARE_SESSION_LOCK:
+            live = _FIRMWARE_SESSIONS.get(session_id)
+            if not isinstance(live, dict):
+                return
+            _set_session_phase_locked(live, "uploading")
+            _append_session_entry_locked(
+                live,
+                level="info",
+                message=f"OTA upload progress: {percent}% ({sent}/{total} bytes).",
+                source="session",
+            )
+
+    try:
+        uploaded_host = _native_ota_upload(
+            host,
+            binary_path,
+            progress_callback=progress,
+            stop_requested=stop_requested,
+        )
+    except Exception as exc:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                if bool(session.get("stop_requested")):
+                    session["error"] = ""
+                    session["message"] = "Firmware flash stopped."
+                    _set_session_phase_locked(session, "cancelled")
+                    _append_session_entry_locked(
+                        session,
+                        level="warn",
+                        message="Prebuilt OTA upload stopped.",
+                        source="session",
+                    )
+                else:
+                    session["error"] = _text(exc) or exc.__class__.__name__
+                    session["message"] = "Firmware flash failed."
+                    _set_session_phase_locked(session, "failed")
+                    _append_session_entry_locked(
+                        session,
+                        level="error",
+                        message=f"Prebuilt OTA upload failed: {_text(exc) or exc.__class__.__name__}.",
+                        source="session",
+                    )
+        return
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        if bool(session.get("stop_requested")):
+            session["active"] = False
+            session["message"] = "Firmware flash stopped."
+            _set_session_phase_locked(session, "cancelled")
+            _append_session_entry_locked(
+                session,
+                level="warn",
+                message="Prebuilt OTA upload stopped.",
+                source="session",
+            )
+            return
+        _save_recorded_firmware_version(
+            session.get("selector"),
+            session.get("template_key"),
+            session.get("firmware_version"),
+            display_name=session.get("display_name"),
+            source="prebuilt_ota_flash",
+        )
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Prebuilt OTA upload successful{f' to {uploaded_host}' if uploaded_host else ''}.",
+            source="session",
+        )
+        if not bool(session.get("follow_logs", True)):
+            session["active"] = False
+            session["returncode"] = 0
+            session["message"] = "Firmware uploaded successfully."
+            _set_session_phase_locked(session, "completed")
+            return
+        session["returncode"] = 0
+        session["message"] = "Firmware uploaded successfully. Waiting for live device logs."
+        session["device_log_next_retry_ts"] = time.time() + 1.0
+        session["device_log_retry_count"] = 0
+        _set_session_phase_locked(session, "awaiting_device_logs")
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Waiting for {display_name} to reconnect so live logs can continue here.",
+            source="session",
+        )
+
+
 def _start_flash_session(
     context: Dict[str, Any],
     profile_values: Dict[str, str],
@@ -3556,12 +4022,17 @@ def _start_flash_session(
             f"A firmware flash session is already active for {_text(context.get('display_name')) or selector}."
         )
 
-    config_path = _prepare_config_path(context, profile_values)
     host = _text(context.get("host"))
-    argv = list(cli_status.get("argv") or [])
-    if not argv:
-        raise RuntimeError("ESPHome CLI runner is not configured.")
-    command = [*argv, "run", str(config_path), "--no-logs", "--device", host or "OTA"]
+    prebuilt_upload = _prebuilt_artifact_available(context, "ota")
+    if not prebuilt_upload:
+        raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
+    config_path: Optional[Path] = None
+    if not host:
+        raise RuntimeError("OTA target host is missing.")
+    prebuilt_binary = _download_prebuilt_firmware_binary(context, "ota")
+    command = ["native_ota", host, str(prebuilt_binary["path"])]
+    operation = "prebuilt_ota_upload"
+    command_display = f"Native ESPHome OTA upload --device {host} --file {Path(prebuilt_binary['path']).name}"
     session_id = f"fw_{uuid.uuid4().hex}"
     target_label = _text(context.get("display_name")) or selector
     session = {
@@ -3571,9 +4042,11 @@ def _start_flash_session(
         "firmware_version": _text(context.get("firmware_version")),
         "display_name": target_label,
         "host": host,
+        "operation": operation,
         "context": context,
-        "config_path": str(config_path),
+        "config_path": str(config_path) if config_path else "",
         "command": command,
+        "source_binary": str(prebuilt_binary.get("path") or ""),
         "cwd": _text(cli_status.get("cwd")),
         "env": _runner_env(cli_status),
         "created_ts": time.time(),
@@ -3585,9 +4058,9 @@ def _start_flash_session(
         "active": True,
         "error": "",
         "message": (
-            f"Streaming build, upload, and live device logs for {target_label}."
+            f"Streaming prebuilt upload and live device logs for {target_label}."
             if follow_logs
-            else f"Streaming build and upload logs for {target_label}."
+            else f"Streaming prebuilt upload logs for {target_label}."
         ),
         "returncode": None,
         "proc": None,
@@ -3605,111 +4078,34 @@ def _start_flash_session(
             session,
             level="info",
             message=(
-                f"Preparing {_text(context.get('template_label')) or 'firmware'} for "
-                f"{target_label} via OTA."
+                f"Preparing prebuilt {_text(context.get('template_label')) or 'firmware'} "
+                f"{_text(context.get('firmware_version')) or ''} for {target_label} via OTA."
             ),
             source="session",
         )
+        if prebuilt_upload:
+            cached_text = "cached" if bool(prebuilt_binary.get("cached")) else "downloaded"
+            _append_session_entry_locked(
+                session,
+                level="info",
+                message=f"OTA image {cached_text}: {Path(prebuilt_binary['path']).name}.",
+                source="session",
+            )
+        if config_path is not None:
+            _append_session_entry_locked(
+                session,
+                level="debug",
+                message=f"Config written to {str(config_path)}",
+                source="session",
+            )
         _append_session_entry_locked(
             session,
             level="debug",
-            message=f"Config written to {str(config_path)}",
-            source="session",
-        )
-        _append_session_entry_locked(
-            session,
-            level="debug",
-            message="Command: " + " ".join(command),
+            message="Command: " + command_display,
             source="session",
         )
 
-    worker = threading.Thread(target=_firmware_session_worker, args=(session_id,), daemon=True)
-    with _FIRMWARE_SESSION_LOCK:
-        live_session = _FIRMWARE_SESSIONS.get(session_id)
-        if isinstance(live_session, dict):
-            live_session["worker"] = worker
-    worker.start()
-
-    with _FIRMWARE_SESSION_LOCK:
-        live_session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(live_session, dict):
-            raise RuntimeError("Firmware session was not created.")
-        return _session_payload_locked(live_session, after_seq=0)
-
-
-def _start_browser_build_session(
-    context: Dict[str, Any],
-    profile_values: Dict[str, str],
-    cli_status: Dict[str, Any],
-) -> Dict[str, Any]:
-    _prune_firmware_sessions()
-    selector = _text(context.get("selector"))
-    active_session = _active_flash_for_selector(selector)
-    if isinstance(active_session, dict):
-        raise RuntimeError(
-            f"A firmware session is already active for {_text(context.get('display_name')) or selector}."
-        )
-
-    config_path = _prepare_config_path(context, profile_values)
-    argv = list(cli_status.get("argv") or [])
-    if not argv:
-        raise RuntimeError("ESPHome CLI runner is not configured.")
-    command = [*argv, "compile", str(config_path)]
-    session_id = f"fw_{uuid.uuid4().hex}"
-    target_label = _text(context.get("display_name")) or selector
-    session = {
-        "id": session_id,
-        "selector": selector,
-        "template_key": _text(context.get("template_key")),
-        "firmware_version": _text(context.get("firmware_version")),
-        "display_name": target_label,
-        "host": _text(context.get("host")),
-        "operation": "browser_build",
-        "context": context,
-        "config_path": str(config_path),
-        "command": command,
-        "cwd": _text(cli_status.get("cwd")),
-        "env": _runner_env(cli_status),
-        "created_ts": time.time(),
-        "updated_ts": time.time(),
-        "cursor": 0,
-        "entries": [],
-        "phase": "starting",
-        "status_text": _phase_status_text("starting", target_label),
-        "active": True,
-        "error": "",
-        "message": f"Building browser flash firmware for {target_label}.",
-        "returncode": None,
-        "proc": None,
-        "stop_requested": False,
-        "device_logs_started": False,
-        "device_log_cursor": 0,
-        "device_log_next_retry_ts": 0.0,
-        "device_log_retry_count": 0,
-        "device_log_error": "",
-    }
-    with _FIRMWARE_SESSION_LOCK:
-        _FIRMWARE_SESSIONS[session_id] = session
-        _append_session_entry_locked(
-            session,
-            level="info",
-            message=f"Preparing browser flash firmware for {target_label}.",
-            source="session",
-        )
-        _append_session_entry_locked(
-            session,
-            level="debug",
-            message=f"Config written to {str(config_path)}",
-            source="session",
-        )
-        _append_session_entry_locked(
-            session,
-            level="debug",
-            message="Command: " + " ".join(command),
-            source="session",
-        )
-
-    worker = threading.Thread(target=_firmware_session_worker, args=(session_id,), daemon=True)
+    worker = threading.Thread(target=_prebuilt_ota_session_worker, args=(session_id,), daemon=True)
     with _FIRMWARE_SESSION_LOCK:
         live_session = _FIRMWARE_SESSIONS.get(session_id)
         if isinstance(live_session, dict):
@@ -3773,21 +4169,12 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         if not isinstance(session, dict):
             return {"ok": True, "session_id": session_token, "stopped": True}
         session["device_logs_started"] = False
-        operation = _lower(session.get("operation"))
         if _lower(session.get("phase")) not in {"failed", "cancelled"}:
             _set_session_phase_locked(session, _final_session_phase(session))
         if _lower(session.get("phase")) == "completed":
-            session["message"] = (
-                "Browser flash firmware is ready."
-                if operation == "browser_build"
-                else "Firmware flash completed."
-            )
+            session["message"] = "Firmware flash completed."
         elif _lower(session.get("phase")) == "cancelled":
-            session["message"] = (
-                "Browser flash build stopped."
-                if operation == "browser_build"
-                else "Firmware flash stopped."
-            )
+            session["message"] = "Firmware flash stopped."
         return {
             "ok": True,
             "session_id": session_token,
@@ -3866,8 +4253,6 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         }
 
     if action_name not in {
-        "voice_firmware_save",
-        "voice_firmware_build",
         "voice_firmware_browser_build",
         "voice_firmware_flash",
         "voice_firmware_flash_start",
@@ -3897,7 +4282,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
             selected_label = _text(template_spec.get("label")) or template_key
             raise RuntimeError(
                 f"{selector} looks like a {matched_label} target, not {selected_label}. "
-                f"Select the {matched_label} firmware template before building or flashing."
+                f"Select the {matched_label} firmware template before flashing."
             )
     if (
         action_name in {"voice_firmware_flash", "voice_firmware_flash_start"}
@@ -3905,96 +4290,64 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     ):
         raise RuntimeError(f"ESPHome device {selector} is offline. Use Browser USB Flash to recover it from this browser.")
 
-    force_remote_refresh = action_name in {
-        "voice_firmware_build",
-        "voice_firmware_browser_build",
-        "voice_firmware_flash",
-        "voice_firmware_flash_start",
-    }
     context = _build_device_context(
         selector,
         client_row,
         template_spec,
-        force_remote_refresh=force_remote_refresh,
+        force_remote_refresh=True,
     )
     if not isinstance(context, dict):
         raise RuntimeError(f"Connected ESPHome device {selector} is not available for firmware actions.")
 
-    values = esphome_runtime.payload_values(body)
-    profile_values = _normalize_profile_values(context, values)
-
-    if action_name == "voice_firmware_save":
-        _profile_save(_text(context.get("template_key")), _text(context.get("selector")) or selector, profile_values)
-        return {
-            "ok": True,
-            "action": action_name,
-            "selector": selector,
-            "template_key": context.get("template_key"),
-            "message": f"Saved firmware substitutions for {context.get('display_name') or selector}.",
-        }
-
-    _validate_profile_values(context, profile_values)
-    _profile_save(_text(context.get("template_key")), _text(context.get("selector")) or selector, profile_values)
-    cli_status = esphome_cli_status(force=True)
-    if not bool(cli_status.get("available")):
-        raise RuntimeError(_text(cli_status.get("detail")) or "ESPHome CLI is unavailable.")
-
     if action_name == "voice_firmware_flash_start":
+        if not _prebuilt_artifact_available(context, "ota"):
+            raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
         result = _start_flash_session(
             context,
-            profile_values,
-            cli_status,
+            {},
+            {"cwd": str(FIRMWARE_RUNNER_ROOT), "env": {}},
             follow_logs=_as_bool(body.get("follow_logs"), True),
         )
         result["action"] = action_name
         return result
 
     if action_name == "voice_firmware_browser_build":
-        result = _start_browser_build_session(context, profile_values, cli_status)
+        if not _prebuilt_artifact_available(context, "factory"):
+            raise RuntimeError("No prebuilt USB image is available for this firmware target.")
+        result = _prepare_prebuilt_browser_flash_artifact(context)
         result["action"] = action_name
         return result
 
-    config_path = _prepare_config_path(context, profile_values)
     host = _text(context.get("host"))
-    argv = list(cli_status.get("argv") or [])
-    if not argv:
-        raise RuntimeError("ESPHome CLI runner is not configured.")
-
-    if action_name == "voice_firmware_build":
-        command = [*argv, "compile", str(config_path)]
-    else:
-        command = [*argv, "run", str(config_path), "--no-logs", "--device", host or "OTA"]
-
-    proc = _run_esphome_command(
-        command,
-        cwd=_text(cli_status.get("cwd")),
-        env=_runner_env(cli_status),
-    )
-    summary = _summarize_process_output(proc.stdout, proc.stderr)
-    if proc.returncode != 0:
-        verb = "flash" if action_name == "voice_firmware_flash" else "build"
+    if not _prebuilt_artifact_available(context, "ota"):
+        raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
+    if not host:
+        raise RuntimeError("OTA target host is missing.")
+    prebuilt_binary = _download_prebuilt_firmware_binary(context, "ota")
+    command = ["native_ota", host, str(prebuilt_binary["path"])]
+    try:
+        prebuilt_upload_result = _native_ota_upload(host, Path(prebuilt_binary["path"]))
+    except Exception as exc:
         raise RuntimeError(
-            f"ESPHome {verb} failed for {context.get('display_name') or selector}.\n\n{summary or 'No CLI output was captured.'}"
-        )
+            f"ESPHome prebuilt OTA failed for {context.get('display_name') or selector}.\n\n"
+            f"{_text(exc) or exc.__class__.__name__}"
+        ) from exc
 
-    if action_name == "voice_firmware_flash":
-        _save_recorded_firmware_version(
-            selector,
-            context.get("template_key"),
-            context.get("firmware_version"),
-            display_name=context.get("display_name"),
-            source="ota_flash",
-        )
-        message = f"Built and flashed {context.get('display_name') or selector}."
-    else:
-        message = f"Built firmware for {context.get('display_name') or selector}."
+    summary = f"Prebuilt OTA upload completed{f' to {prebuilt_upload_result}' if prebuilt_upload_result else ''}."
+    _save_recorded_firmware_version(
+        selector,
+        context.get("template_key"),
+        context.get("firmware_version"),
+        display_name=context.get("display_name"),
+        source="prebuilt_ota_flash",
+    )
     return {
         "ok": True,
         "action": action_name,
         "selector": selector,
         "template_key": context.get("template_key"),
-        "config_path": str(config_path),
+        "config_path": "",
         "command": command,
-        "message": message,
+        "message": f"Updated {context.get('display_name') or selector} with prebuilt firmware.",
         "output_tail": summary,
     }

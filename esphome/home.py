@@ -12,6 +12,10 @@ from . import settings as esphome_settings
 from . import speaker_id as esphome_speaker_id
 from . import emotion_id as esphome_emotion_id
 
+IDENTIFY_SATELLITE_TEXT = (
+    "Hey, over here. This is the satellite you're looking for. Yeah, over here. Can you hear me?"
+)
+
 
 def settings_hash_key() -> str:
     return esphome_settings.settings_hash_key()
@@ -39,7 +43,7 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
 
 def runtime_tab_spec() -> Dict[str, Any]:
     return {
-        "label": "ESPHome",
+        "label": "Tater Voice",
         "core_key": "esphome",
         "surface_key": "esphome",
         "surface_kind": "esphome",
@@ -323,6 +327,82 @@ def get_runtime_payload(
     return payload
 
 
+def _satellite_display_name(selector: str, row: Dict[str, Any], client_row: Dict[str, Any]) -> str:
+    device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
+    return (
+        esphome_runtime.text(row.get("name"))
+        or esphome_runtime.text(device_info.get("friendly_name"))
+        or esphome_runtime.text(device_info.get("name"))
+        or esphome_runtime.text(row.get("host"))
+        or selector
+    )
+
+
+def _identify_satellite(selector: str, *, redis_client: Any = None) -> Dict[str, Any]:
+    if not selector:
+        raise ValueError("selector is required")
+
+    status = esphome_runtime.status()
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    client_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
+    if not client_row or not bool(client_row.get("connected")):
+        raise RuntimeError("Satellite is not connected.")
+
+    row = esphome_runtime.satellite_lookup(selector)
+    name = _satellite_display_name(selector, row, client_row)
+
+    from speech_settings import get_speech_settings
+    from speech_tts import speak_announcement_targets
+
+    speech_settings = get_speech_settings()
+    try:
+        ha_config = esphome_reply_playback.load_homeassistant_config(required=False, client=redis_client)
+    except Exception:
+        ha_config = {"base": "", "token": ""}
+
+    backend = esphome_runtime.text(speech_settings.get("announcement_tts_backend")) or esphome_runtime.text(
+        speech_settings.get("tts_backend")
+    ) or "wyoming"
+    result = esphome_runtime.run_async_blocking(
+        speak_announcement_targets(
+            text=IDENTIFY_SATELLITE_TEXT,
+            backend=backend,
+            ha_base=esphome_runtime.text(ha_config.get("base")),
+            token=esphome_runtime.text(ha_config.get("token")),
+            targets=[selector],
+            public_base_url="",
+            model=esphome_runtime.text(speech_settings.get("announcement_tts_model"))
+            or esphome_runtime.text(speech_settings.get("tts_model")),
+            voice=esphome_runtime.text(speech_settings.get("announcement_tts_voice"))
+            or esphome_runtime.text(speech_settings.get("tts_voice")),
+            wyoming_host=esphome_runtime.text(speech_settings.get("announcement_wyoming_tts_host"))
+            or esphome_runtime.text(speech_settings.get("wyoming_tts_host")),
+            wyoming_port=speech_settings.get("announcement_wyoming_tts_port") or speech_settings.get("wyoming_tts_port"),
+            wyoming_voice=esphome_runtime.text(speech_settings.get("announcement_wyoming_tts_voice"))
+            or esphome_runtime.text(speech_settings.get("wyoming_tts_voice")),
+            openai_base_url=esphome_runtime.text(speech_settings.get("announcement_openai_tts_base_url"))
+            or esphome_runtime.text(speech_settings.get("openai_tts_base_url")),
+            openai_api_key=esphome_runtime.text(speech_settings.get("announcement_openai_tts_api_key"))
+            or esphome_runtime.text(speech_settings.get("openai_tts_api_key")),
+            default_backend=backend,
+            tts_kind="identify",
+        ),
+        timeout=120.0,
+    )
+    if not isinstance(result, dict):
+        result = {}
+    if not result.get("ok") and int(result.get("sent_count") or 0) <= 0:
+        raise RuntimeError(esphome_runtime.text(result.get("error")) or "Identify playback failed.")
+
+    return {
+        "ok": True,
+        "selector": selector,
+        "sent_count": int(result.get("sent_count") or 0),
+        "backend": esphome_runtime.text(result.get("backend")) or backend,
+        "message": f"Identify message played on {name}.",
+    }
+
+
 def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "esphome") -> Dict[str, Any]:
     action_name = esphome_runtime.lower(action)
     body = payload if isinstance(payload, dict) else {}
@@ -409,6 +489,11 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         with contextlib.suppress(Exception):
             esphome_runtime.disconnect_selector(selector, reason="manual_remove", timeout=20.0)
         return {"ok": True, "action": action_name, "selector": selector, "removed": bool(removed), "message": "Satellite removed." if removed else "Satellite was already absent.", "status": esphome_runtime.status()}
+
+    if action_name == "voice_satellite_identify":
+        selector = esphome_runtime.payload_selector(body)
+        result = _identify_satellite(selector, redis_client=redis_client)
+        return {"action": action_name, "status": esphome_runtime.status(), **result}
 
     if action_name == "voice_discover":
         rows = esphome_runtime.discover_once()

@@ -379,6 +379,8 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 ],
                 "save_action": "voice_satellite_save",
                 "save_label": "Save",
+                "identify_action": "voice_satellite_identify",
+                "identify_label": "Identify",
                 "remove_action": "voice_satellite_remove",
                 "remove_label": "Forget",
                 "remove_confirm": f"Forget satellite {name}?",
