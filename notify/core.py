@@ -229,7 +229,7 @@ def _dispatch_display(
     meta_map = meta if isinstance(meta, dict) else {}
     origin_map = origin if isinstance(origin, dict) else {}
     try:
-        from esphome import display_bus
+        from tater_voice import display_bus
 
         display_bus.publish_display_event(
             {

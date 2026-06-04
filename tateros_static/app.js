@@ -111,6 +111,7 @@ const state = {
     templateKey: "",
     selector: "",
   },
+  esphomeDisplaySensorTarget: "",
   esphomeFirmwareDrafts: {},
   esphomeBrowserUsbPorts: {},
   esptoolJsModule: null,
@@ -8111,6 +8112,100 @@ function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome"
   `;
 }
 
+const ESPHOME_DISPLAY_SENSOR_SLOT_KEYS = [
+  "temp_out",
+  "temp_in",
+  "humidity_out",
+  "humidity_in",
+  "wind_speed",
+  "rain_rate",
+  "lightning_strikes",
+];
+
+function normalizeEspHomeDisplaySensorTarget(displaySensors) {
+  const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
+  const profiles = Array.isArray(body?.profiles) ? body.profiles : [];
+  const targets = profiles.map((row) => String(row?.target || "").trim()).filter(Boolean);
+  const requested = String(state.esphomeDisplaySensorTarget || body?.active_target || targets[0] || "").trim();
+  return targets.includes(requested) ? requested : targets[0] || "";
+}
+
+function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome") {
+  const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
+  const profiles = Array.isArray(body?.profiles) ? body.profiles : [];
+  if (!profiles.length) {
+    return "";
+  }
+  const selectedTarget = normalizeEspHomeDisplaySensorTarget(body);
+  const profile =
+    profiles.find((row) => String(row?.target || "").trim() === selectedTarget) || profiles[0] || {};
+  const target = String(profile?.target || selectedTarget || "").trim();
+  const selector = String(profile?.selector || target || "").trim();
+  const title = String(profile?.title || target || "S3Box Display").trim() || "S3Box Display";
+  const detail = String(profile?.detail || "").trim();
+  const connected = boolFromAny(profile?.connected, false);
+  const ready = boolFromAny(body?.ready, false);
+  const message = String(body?.message || "").trim();
+  const targetOptions = profiles
+    .map((row) => {
+      const value = String(row?.target || "").trim();
+      if (!value) {
+        return null;
+      }
+      const rowTitle = String(row?.title || value).trim() || value;
+      const suffix = boolFromAny(row?.connected, false) ? "online" : "saved";
+      return { value, label: `${rowTitle} (${value}, ${suffix})` };
+    })
+    .filter(Boolean);
+  const fields = Array.isArray(profile?.fields) ? profile.fields : [];
+  const fieldsHtml = fields
+    .map((field) =>
+      renderCoreManagerField({
+        ...field,
+        disabled: boolFromAny(field?.disabled, false) || !ready,
+      })
+    )
+    .join("");
+  return `
+    <article class="card core-manager-item esphome-display-sensors-card"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-display-target="${escapeHtml(target)}"
+      data-display-selector="${escapeHtml(selector)}">
+      <div class="card-head">
+        <h3 class="card-title">S3Box Display Sensors</h3>
+        <span class="small">${connected ? "Online" : "Saved profile"}</span>
+      </div>
+      <div class="small">
+        Choose which Tater sensors this display watches. Changes are saved in Tater and picked up by the display feed without rebuilding firmware.
+      </div>
+      <section class="core-inline-section" style="margin-top:12px;">
+        <div class="small core-inline-section-title">Display</div>
+        <div class="form-grid two-col">
+          ${renderCoreManagerField({
+            key: "target",
+            label: "Display Target",
+            type: "select",
+            value: target,
+            options: targetOptions,
+            description: detail || title,
+          })}
+        </div>
+      </section>
+      <section class="core-inline-section" style="margin-top:12px;">
+        <div class="small core-inline-section-title">Sensor Slots</div>
+        <div class="form-grid two-col">
+          ${fieldsHtml || `<div class="small">No display sensor slots are available for this profile.</div>`}
+        </div>
+      </section>
+      ${message ? `<div class="small" style="margin-top:8px;">${escapeHtml(message)}</div>` : ""}
+      <div class="inline-row" style="margin-top:12px;">
+        <button type="button" class="action-btn esphome-display-sensors-save"${ready ? "" : " disabled"}>Save Display Sensors</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
 function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const devices = Array.isArray(body?.devices) ? body.devices : [];
@@ -8122,6 +8217,7 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const prebuiltVersion = String(prebuilt?.version || "").trim();
   const prebuiltDeviceCount = Number(prebuilt?.device_count || 0);
   const prebuiltError = String(prebuilt?.error || "").trim();
+  const displaySensors = body?.display_sensors && typeof body.display_sensors === "object" ? body.display_sensors : {};
   const wifiNote = String(body?.wifi_note || "").trim();
   const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
@@ -8154,6 +8250,7 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
       ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey)}
       ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey)}
     </div>
+    ${renderEspHomeDisplaySensorPanel(displaySensors, coreKey)}
     ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
   `;
 }
@@ -9923,6 +10020,75 @@ function bindEspHomeFirmwareSelectors(root = document) {
     sync();
   });
 
+}
+
+function bindEspHomeDisplaySensorControls(root = document) {
+  root.querySelectorAll('.esphome-display-sensors-card select[data-core-field-key="target"]').forEach((input) => {
+    if (!(input instanceof HTMLSelectElement) || input.dataset.esphomeDisplayTargetBound === "1") {
+      return;
+    }
+    input.dataset.esphomeDisplayTargetBound = "1";
+    input.addEventListener("change", () => {
+      state.esphomeDisplaySensorTarget = String(input.value || "").trim();
+      rerenderEspHomeFirmwarePanel(document);
+    });
+  });
+
+  root.querySelectorAll(".esphome-display-sensors-save").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeDisplaySensorsBound === "1") {
+      return;
+    }
+    button.dataset.esphomeDisplaySensorsBound = "1";
+    button.addEventListener("click", async (event) => {
+      const card = event.currentTarget?.closest?.(".esphome-display-sensors-card");
+      if (!(card instanceof HTMLElement)) {
+        return;
+      }
+      const coreKey = String(card.dataset?.coreKey || "esphome").trim() || "esphome";
+      const values = collectCoreManagerValues(card);
+      const target = String(values?.target || card.dataset?.displayTarget || "").trim();
+      const selector = String(card.dataset?.displaySelector || target || "").trim();
+      const slots = {};
+      ESPHOME_DISPLAY_SENSOR_SLOT_KEYS.forEach((key) => {
+        slots[key] = String(values?.[key] ?? "").trim();
+      });
+      if (!target) {
+        showToast("Choose a display target before saving sensors.", "error", 3200);
+        return;
+      }
+      button.disabled = true;
+      setCoreManagerStatus(card, "Saving display sensors...");
+      try {
+        const result = await runActionWithProgress(
+          {
+            title: "Saving Display Sensors",
+            detail: target,
+            workingText: "Saving display sensors...",
+            successText: "Display sensors saved.",
+            errorPrefix: "Display sensor save failed",
+          },
+          () =>
+            runCoreManagerAction(card, coreKey, "voice_display_sensors_save", {
+              target,
+              selector,
+              slots,
+            })
+        );
+        state.esphomeDisplaySensorTarget = target;
+        await reloadEspHomeRuntimePayloadOnly();
+        const message = String(result?.message || "Display sensors saved.").trim();
+        showToast(message);
+      } catch (error) {
+        const message = String(error?.message || "Display sensor save failed.");
+        setCoreManagerStatus(card, `Failed: ${message}`);
+        showToast(`Failed: ${message}`, "error", 3600);
+      } finally {
+        if (document.body.contains(button)) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
 }
 
 function setEspHomeFirmwareCardBusy(card, busy) {
@@ -12145,6 +12311,7 @@ function bindCoreTabManagers() {
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
   bindEspHomeWakeSoundPreview();
+  bindEspHomeDisplaySensorControls();
   bindEspHomeFirmwareActions();
   bindEspHomeSpeakerIdActions();
   bindEspHomeEmotionIdActions();

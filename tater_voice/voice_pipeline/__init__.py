@@ -430,7 +430,7 @@ CORE_WEBUI_TAB = {
 
 PLATFORM_SETTINGS = CORE_SETTINGS
 PLATFORM_WEBUI_TAB = CORE_WEBUI_TAB
-# ESPHome settings/schema now live in esphome.settings so the native ESPHome
+# ESPHome settings/schema now live in tater_voice.settings so the native ESPHome
 # surface can grow beyond voice-only devices without piling more UI metadata
 # into the live voice runtime.
 
@@ -4212,8 +4212,8 @@ def _awaiting_announcement_state(runtime: Dict[str, Any]) -> Optional[AwaitingAn
 
 # -------------------- ESPHome Runtime Bridge --------------------
 # Generic ESPHome discovery and device-runtime internals now live in
-# `esphome.device_runtime`, and UI-only presentation helpers live in
-# `esphome.ui_helpers`. The voice pipeline keeps only the voice-specific
+# `tater_voice.device_runtime`, and UI-only presentation helpers live in
+# `tater_voice.ui_helpers`. The voice pipeline keeps only the voice-specific
 # runtime hooks that still need to coordinate live sessions.
 from .. import device_runtime as _esphome_device_runtime
 from .. import ui_helpers as _esphome_ui_helpers
@@ -6390,7 +6390,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
 
 # -------------------- Compatibility Helpers --------------------
-# These small helpers are still used by `esphome.runtime` and the native
+# These small helpers are still used by `tater_voice.runtime` and the native
 # ESPHome settings/runtime surface even though the older HTMLUI tab bridge
 # has been removed.
 def _format_ts_label(ts_value: Any) -> str:

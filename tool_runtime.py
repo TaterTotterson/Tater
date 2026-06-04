@@ -901,7 +901,7 @@ async def _run_intercom_tool(
     origin: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     del platform
-    from esphome import intercom as voice_intercom
+    from tater_voice import intercom as voice_intercom
 
     action = _arg_text(args, "action", "mode").lower()
     if action == "status":

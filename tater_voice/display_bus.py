@@ -245,6 +245,19 @@ def _schedule_display_refresh_nudge(event: Dict[str, Any]) -> None:
         logger.debug("[display] failed to schedule refresh nudge: %s", exc)
 
 
+def request_display_refresh(target: str = "", *, reason: str = "manual") -> Dict[str, Any]:
+    clean_target = _clean_target(target) if _text(target) else "all"
+    event = {
+        "id": f"refresh-{uuid.uuid4().hex}",
+        "target": clean_target,
+        "targets": [clean_target],
+        "kind": "status",
+        "reason": _text(reason) or "manual",
+    }
+    _schedule_display_refresh_nudge(event)
+    return {"ok": True, "target": clean_target}
+
+
 def _event_from_payload(payload: Dict[str, Any], *, seq: int) -> Dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     now = time.time()

@@ -210,7 +210,7 @@ def _voice_core_selector_from_row(row: Dict[str, Any]) -> str:
 
 def _voice_core_connected_clients() -> Dict[str, Dict[str, Any]]:
     try:
-        from esphome import runtime as esphome_runtime
+        from tater_voice import runtime as esphome_runtime
 
         status = esphome_runtime.status()
     except Exception:
