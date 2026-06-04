@@ -160,6 +160,7 @@ def get_runtime_payload(
             ],
         }
         payload["ui"]["item_forms"] = item_forms
+        payload["display_sensors"] = esphome_firmware.display_sensor_profiles_payload(status)
 
     if include_firmware:
         payload["firmware"] = esphome_firmware.firmware_panel_payload(status)
