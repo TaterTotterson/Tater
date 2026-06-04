@@ -2888,6 +2888,27 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
     }
 
 
+def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    spec = _template_spec_by_key("s3box_display")
+    display_contexts: List[Dict[str, Any]] = []
+    if not isinstance(spec, dict):
+        return _display_sensor_profiles_payload(display_contexts)
+
+    for selector, client_row in sorted(clients.items(), key=lambda item: _lower(item[0])):
+        selector_token = _text(selector)
+        row = client_row if isinstance(client_row, dict) else {}
+        if not selector_token or _matched_template_key(selector_token, row) != "s3box_display":
+            continue
+        try:
+            context = _build_device_context(selector_token, row, dict(spec))
+        except Exception:
+            continue
+        if isinstance(context, dict):
+            display_contexts.append({"selector": selector_token, "context": context})
+    return _display_sensor_profiles_payload(display_contexts)
+
+
 def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     cli_status = {

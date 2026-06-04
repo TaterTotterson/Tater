@@ -7121,7 +7121,7 @@ function renderEspHomeSensorRows(sensorRows, sensorTitle = "Live Entities", conn
   `;
 }
 
-function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
+function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = null) {
   const itemId = String(item?.id || "").trim();
   const encodedId = escapeHtml(encodeCoreManagerId(itemId));
   const title = String(item?.title || itemId || "Satellite").trim() || "Satellite";
@@ -7148,6 +7148,11 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
   const sensorRows = Array.isArray(item?.sensor_rows) ? item.sensor_rows : [];
   const sensorTitle = String(item?.sensor_title || "Live Entities").trim() || "Live Entities";
   const connected = boolFromAny(item?.connected, false);
+  const displaySensorsHtml = renderEspHomeDisplaySensorPanel(displaySensors, coreKey, {
+    satellite: item,
+    embedded: true,
+    showTargetSelector: false,
+  });
 
   const heroBadgesHtml = heroBadges.length
     ? `
@@ -7206,6 +7211,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome") {
       </div>
       ${summaryBlockHtml}
       ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
+      ${displaySensorsHtml}
       <div class="inline-row" style="margin-top:10px;">
         ${saveAction ? `<button type="button" class="action-btn core-manager-save">Save</button>` : ""}
         ${
@@ -8130,22 +8136,61 @@ function normalizeEspHomeDisplaySensorTarget(displaySensors) {
   return targets.includes(requested) ? requested : targets[0] || "";
 }
 
-function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome") {
+function getEspHomeDisplaySensorProfiles(displaySensors) {
   const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
-  const profiles = Array.isArray(body?.profiles) ? body.profiles : [];
+  return Array.isArray(body?.profiles) ? body.profiles : [];
+}
+
+function displaySensorProfileMatchesSatellite(profile, satellite) {
+  const item = satellite && typeof satellite === "object" ? satellite : {};
+  const tokens = [
+    item?.id,
+    item?.selector,
+    item?.title,
+    item?.display_target,
+    item?.host,
+  ]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!tokens.length) {
+    return false;
+  }
+  return [profile?.selector, profile?.target, profile?.title]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .some((value) => tokens.includes(value));
+}
+
+function resolveEspHomeDisplaySensorProfile(displaySensors, options = {}) {
+  const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
+  const profiles = getEspHomeDisplaySensorProfiles(body);
   if (!profiles.length) {
-    return "";
+    return null;
+  }
+  const satellite = options?.satellite && typeof options.satellite === "object" ? options.satellite : null;
+  if (satellite) {
+    return profiles.find((row) => displaySensorProfileMatchesSatellite(row, satellite)) || null;
   }
   const selectedTarget = normalizeEspHomeDisplaySensorTarget(body);
-  const profile =
-    profiles.find((row) => String(row?.target || "").trim() === selectedTarget) || profiles[0] || {};
-  const target = String(profile?.target || selectedTarget || "").trim();
+  return profiles.find((row) => String(row?.target || "").trim() === selectedTarget) || profiles[0] || null;
+}
+
+function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", options = {}) {
+  const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
+  const profiles = getEspHomeDisplaySensorProfiles(body);
+  const profile = resolveEspHomeDisplaySensorProfile(body, options);
+  if (!profile) {
+    return "";
+  }
+  const target = String(profile?.target || "").trim();
   const selector = String(profile?.selector || target || "").trim();
   const title = String(profile?.title || target || "S3Box Display").trim() || "S3Box Display";
   const detail = String(profile?.detail || "").trim();
   const connected = boolFromAny(profile?.connected, false);
   const ready = boolFromAny(body?.ready, false);
   const message = String(body?.message || "").trim();
+  const showTargetSelector = boolFromAny(options?.showTargetSelector, true);
+  const embedded = boolFromAny(options?.embedded, false);
   const targetOptions = profiles
     .map((row) => {
       const value = String(row?.target || "").trim();
@@ -8166,31 +8211,39 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome") {
       })
     )
     .join("");
+  const wrapperClass = embedded
+    ? "core-inline-section esphome-display-sensors-card"
+    : "card core-manager-item esphome-display-sensors-card";
   return `
-    <article class="card core-manager-item esphome-display-sensors-card"
+    <section class="${wrapperClass}"
       data-core-key="${escapeHtml(coreKey)}"
       data-display-target="${escapeHtml(target)}"
-      data-display-selector="${escapeHtml(selector)}">
+      data-display-selector="${escapeHtml(selector)}"
+      style="margin-top:12px;">
       <div class="card-head">
         <h3 class="card-title">S3Box Display Sensors</h3>
         <span class="small">${connected ? "Online" : "Saved profile"}</span>
       </div>
       <div class="small">
-        Choose which Tater sensors this display watches. Changes are saved in Tater and picked up by the display feed without rebuilding firmware.
+        Choose which Tater sensors ${escapeHtml(title)} watches. Changes are saved in Tater and picked up by the display feed without rebuilding firmware.
       </div>
-      <section class="core-inline-section" style="margin-top:12px;">
-        <div class="small core-inline-section-title">Display</div>
-        <div class="form-grid two-col">
-          ${renderCoreManagerField({
-            key: "target",
-            label: "Display Target",
-            type: "select",
-            value: target,
-            options: targetOptions,
-            description: detail || title,
-          })}
-        </div>
-      </section>
+      ${
+        showTargetSelector
+          ? `<section class="core-inline-section" style="margin-top:12px;">
+              <div class="small core-inline-section-title">Display</div>
+              <div class="form-grid two-col">
+                ${renderCoreManagerField({
+                  key: "target",
+                  label: "Display Target",
+                  type: "select",
+                  value: target,
+                  options: targetOptions,
+                  description: detail || title,
+                })}
+              </div>
+            </section>`
+          : `<div class="small" style="margin-top:6px;">${escapeHtml(detail || `Display target: ${target || selector}`)}</div>`
+      }
       <section class="core-inline-section" style="margin-top:12px;">
         <div class="small core-inline-section-title">Sensor Slots</div>
         <div class="form-grid two-col">
@@ -8202,7 +8255,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome") {
         <button type="button" class="action-btn esphome-display-sensors-save"${ready ? "" : " disabled"}>Save Display Sensors</button>
         <span class="small core-manager-status"></span>
       </div>
-    </article>
+    </section>
   `;
 }
 
@@ -8217,7 +8270,6 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const prebuiltVersion = String(prebuilt?.version || "").trim();
   const prebuiltDeviceCount = Number(prebuilt?.device_count || 0);
   const prebuiltError = String(prebuilt?.error || "").trim();
-  const displaySensors = body?.display_sensors && typeof body.display_sensors === "object" ? body.display_sensors : {};
   const wifiNote = String(body?.wifi_note || "").trim();
   const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
@@ -8250,7 +8302,6 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
       ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey)}
       ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey)}
     </div>
-    ${renderEspHomeDisplaySensorPanel(displaySensors, coreKey)}
     ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
   `;
 }
@@ -9385,6 +9436,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
       const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
       const firmware = body?.firmware && typeof body.firmware === "object" ? body.firmware : {};
+      const displaySensors = body?.display_sensors && typeof body.display_sensors === "object" ? body.display_sensors : {};
       const speakerId = body?.speaker_id && typeof body.speaker_id === "object" ? body.speaker_id : {};
       const emotionId = body?.emotion_id && typeof body.emotion_id === "object" ? body.emotion_id : {};
       const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
@@ -9399,7 +9451,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = satelliteItems.length
           ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
-              .map((item) => renderEspHomeSatelliteCard(item, coreKey))
+              .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
               .join("")}</div>`
           : renderNotice(emptyMessage);
         addHost.innerHTML = renderEspHomeAddPanel(addForm, coreKey);
@@ -10030,7 +10082,7 @@ function bindEspHomeDisplaySensorControls(root = document) {
     input.dataset.esphomeDisplayTargetBound = "1";
     input.addEventListener("change", () => {
       state.esphomeDisplaySensorTarget = String(input.value || "").trim();
-      rerenderEspHomeFirmwarePanel(document);
+      void reloadEspHomeRuntimePayloadOnly();
     });
   });
 
