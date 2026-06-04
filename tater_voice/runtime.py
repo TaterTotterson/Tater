@@ -113,6 +113,11 @@ def status() -> Dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
+def entities_for_selector(selector: str) -> Dict[str, Any]:
+    result = device_runtime.entities_for_selector(selector)
+    return result if isinstance(result, dict) else {}
+
+
 def discover_once() -> List[Dict[str, Any]]:
     rows = device_runtime.run_on_native_loop(device_runtime.discover_mdns_once(), timeout=30.0)
     return rows if isinstance(rows, list) else []
