@@ -8186,6 +8186,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
   const selector = String(profile?.selector || target || "").trim();
   const title = String(profile?.title || target || "S3Box Display").trim() || "S3Box Display";
   const detail = String(profile?.detail || "").trim();
+  const displayUrl = String(profile?.display_url || "").trim();
   const connected = boolFromAny(profile?.connected, false);
   const ready = boolFromAny(body?.ready, false);
   const message = String(body?.message || "").trim();
@@ -8219,6 +8220,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
       data-core-key="${escapeHtml(coreKey)}"
       data-display-target="${escapeHtml(target)}"
       data-display-selector="${escapeHtml(selector)}"
+      data-display-url="${escapeHtml(displayUrl)}"
       style="margin-top:12px;">
       <div class="card-head">
         <h3 class="card-title">S3Box Display Sensors</h3>
@@ -8244,6 +8246,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
             </section>`
           : `<div class="small" style="margin-top:6px;">${escapeHtml(detail || `Display target: ${target || selector}`)}</div>`
       }
+      ${displayUrl ? `<div class="small" style="margin-top:6px;">Display feed: ${escapeHtml(displayUrl)}</div>` : ""}
       <section class="core-inline-section" style="margin-top:12px;">
         <div class="small core-inline-section-title">Sensor Slots</div>
         <div class="form-grid two-col">
@@ -10100,6 +10103,7 @@ function bindEspHomeDisplaySensorControls(root = document) {
       const values = collectCoreManagerValues(card);
       const target = String(values?.target || card.dataset?.displayTarget || "").trim();
       const selector = String(card.dataset?.displaySelector || target || "").trim();
+      const displayUrl = String(card.dataset?.displayUrl || "").trim();
       const slots = {};
       ESPHOME_DISPLAY_SENSOR_SLOT_KEYS.forEach((key) => {
         slots[key] = String(values?.[key] ?? "").trim();
@@ -10123,6 +10127,7 @@ function bindEspHomeDisplaySensorControls(root = document) {
             runCoreManagerAction(card, coreKey, "voice_display_sensors_save", {
               target,
               selector,
+              display_url: displayUrl,
               slots,
             })
         );

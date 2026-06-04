@@ -417,6 +417,90 @@ def _normalize_http_base_url(value: Any, *, default_scheme: str = "http") -> str
     return token.rstrip("/")
 
 
+def _main_app_port(default: int = 8501) -> int:
+    try:
+        port = int(_text(os.getenv("HTMLUI_PORT") or default) or default)
+    except Exception:
+        port = int(default)
+    if port < 1 or port > 65535:
+        port = int(default)
+    return int(port)
+
+
+def _host_from_url_or_host(value: Any) -> str:
+    token = _text(value).strip()
+    if not token:
+        return ""
+    candidate = token if "://" in token else f"//{token}"
+    try:
+        parsed = urllib_parse.urlparse(candidate)
+        return _text(parsed.hostname) or token.split(":", 1)[0]
+    except Exception:
+        return token.split(":", 1)[0]
+
+
+def _format_url_host(host: str) -> str:
+    token = _text(host).strip()
+    if ":" in token and not token.startswith("["):
+        return f"[{token}]"
+    return token
+
+
+def _tater_display_base_url_for_peer(peer_host: Any) -> str:
+    configured = _text(os.getenv("VOICE_CORE_PUBLIC_BASE_URL") or os.getenv("VOICE_CORE_PUBLIC_HOST")).rstrip("/")
+    if configured:
+        if configured.startswith(("http://", "https://")):
+            return _normalize_http_base_url(configured)
+        return f"http://{configured}:{_main_app_port()}"
+
+    htmlui_host = _text(os.getenv("HTMLUI_HOST", "0.0.0.0"))
+    if htmlui_host and htmlui_host not in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+        return f"http://{_format_url_host(htmlui_host)}:{_main_app_port()}"
+
+    peer = _host_from_url_or_host(peer_host)
+    local_ip = ""
+    targets = [peer] if peer and not peer.startswith("127.") else []
+    targets.append("8.8.8.8")
+    for target in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.2)
+                sock.connect((target, 80))
+                candidate = _text(sock.getsockname()[0])
+                if candidate and not candidate.startswith("127."):
+                    local_ip = candidate
+                    break
+        except Exception:
+            continue
+
+    if not local_ip:
+        with contextlib.suppress(Exception):
+            local_ip = _text(socket.gethostbyname(socket.gethostname()))
+    if not local_ip or local_ip.startswith("127."):
+        local_ip = "tater.local"
+
+    return f"http://{_format_url_host(local_ip)}:{_main_app_port()}"
+
+
+def _selector_host(selector: Any) -> str:
+    token = _text(selector)
+    if not token:
+        return ""
+    host = _text(esphome_runtime.satellite_host_from_selector(token))
+    if host:
+        return host
+    if token.startswith("host:"):
+        return token[5:]
+    status = esphome_runtime.status()
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    row = clients.get(token) if isinstance(clients.get(token), dict) else {}
+    return _text(row.get("host"))
+
+
+def _tater_display_base_url_for_selector(selector: Any) -> str:
+    return _tater_display_base_url_for_peer(_selector_host(selector))
+
+
 def _integration_source_label(provider: Any) -> str:
     token = _text(provider).strip()
     if not token:
@@ -2087,6 +2171,7 @@ def _display_sensor_profile_from_context(
         "detail": _text(item.get("subtitle") or item.get("detail")),
         "connected": bool(item.get("connected")),
         "updated_at": saved_profile.get("updated_at"),
+        "display_url": _text(context.get("display_base_url")),
         "fields": _display_sensor_field_rows(slots, sensor_select),
     }
 
@@ -2104,6 +2189,7 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             "detail": "Saved S3Box display profile",
             "connected": False,
             "updated_at": saved_profile.get("updated_at"),
+            "display_url": _tater_display_base_url_for_selector(saved_profile.get("selector") or target),
             "fields": _display_sensor_field_rows(
                 {alias: _text(slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS},
                 sensor_select,
@@ -2136,6 +2222,69 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     }
 
 
+def _display_url_entity_match(row: Dict[str, Any]) -> bool:
+    kind = _lower(row.get("kind"))
+    if "text" not in kind:
+        return False
+    haystack = " ".join(
+        _lower(row.get(key))
+        for key in ("key", "name", "label", "object_id")
+        if _text(row.get(key))
+    )
+    return "tater display url" in haystack or "tater_display_url" in haystack
+
+
+def _display_url_entity_key(selector: str) -> str:
+    for refresh in (False, True):
+        try:
+            payload = (
+                esphome_runtime.refresh_entity_catalog(selector, timeout=20.0)
+                if refresh
+                else esphome_runtime.entities_for_selector(selector)
+            )
+        except Exception:
+            continue
+        rows = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+        rows = list(rows)
+        if not rows:
+            rows = list(payload.get("entity_rows") or []) if isinstance(payload.get("entity_rows"), list) else []
+        for row in rows:
+            if isinstance(row, dict) and _display_url_entity_match(row):
+                return _text(row.get("key"))
+    return ""
+
+
+def _apply_s3box_display_url(selector: str, display_url: str) -> Dict[str, Any]:
+    selector_token = _text(selector)
+    clean_url = _normalize_http_base_url(display_url)
+    if not selector_token or not clean_url:
+        return {"applied": False, "reason": "missing_selector_or_url"}
+    entity_key = _display_url_entity_key(selector_token)
+    if not entity_key:
+        return {"applied": False, "reason": "entity_missing"}
+    try:
+        esphome_runtime.command_entity(
+            selector_token,
+            entity_key=entity_key,
+            command="text_set",
+            value=clean_url,
+            timeout=20.0,
+        )
+    except Exception as exc:
+        return {
+            "applied": False,
+            "reason": "command_failed",
+            "error": _text(exc) or exc.__class__.__name__,
+            "entity_key": entity_key,
+            "display_url": clean_url,
+        }
+    return {
+        "applied": True,
+        "entity_key": entity_key,
+        "display_url": clean_url,
+    }
+
+
 def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     target = _text(body.get("target") or body.get("display_target"))
@@ -2161,14 +2310,29 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             values.setdefault(profile_key, "")
     _profile_save("s3box_display", selector, values)
+
+    display_url = _normalize_http_base_url(body.get("display_url")) or _tater_display_base_url_for_selector(selector)
+    display_url_result = _apply_s3box_display_url(selector, display_url) if display_url else {"applied": False, "reason": "missing_url"}
+
     with contextlib.suppress(Exception):
         display_bus.request_display_refresh(target, reason="sensor_profile")
+
+    message = f"Updated display sensors for {target}."
+    if bool(display_url_result.get("applied")):
+        message = f"{message} Display URL set to {_text(display_url_result.get('display_url'))}."
+    elif _text(display_url_result.get("reason")) == "entity_missing":
+        message = f"{message} Flash the latest S3Box firmware once to enable automatic Display URL updates."
+    elif _text(display_url_result.get("reason")) == "command_failed":
+        message = f"{message} Display URL update failed: {_text(display_url_result.get('error'))}."
+
     return {
         "ok": True,
         "action": "voice_display_sensors_save",
         "target": target,
         "selector": selector,
-        "message": f"Updated display sensors for {target}.",
+        "display_url": display_url,
+        "display_url_result": display_url_result,
+        "message": message,
     }
 
 def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2246,6 +2410,7 @@ def _build_device_context(
 
     selector_token = _text(selector)
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
+    display_base_url = _tater_display_base_url_for_peer(host)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
@@ -2676,11 +2841,13 @@ def _build_device_context(
         "cli_available": bool(cli_status.get("available")),
         "cli_reason": _text(cli_status.get("detail")),
         "host": host,
+        "display_base_url": display_base_url,
     }
 
     return {
         "selector": selector_token,
         "host": host,
+        "display_base_url": display_base_url,
         "display_name": display_name,
         "template_key": template_key,
         "template_label": _text(template_spec.get("label")),
