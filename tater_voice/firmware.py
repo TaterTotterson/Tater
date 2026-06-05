@@ -2234,7 +2234,19 @@ def _display_url_entity_match(row: Dict[str, Any]) -> bool:
     return "tater display url" in haystack or "tater_display_url" in haystack
 
 
-def _display_url_entity_key(selector: str) -> str:
+def _display_target_entity_match(row: Dict[str, Any]) -> bool:
+    kind = _lower(row.get("kind"))
+    if "text" not in kind:
+        return False
+    haystack = " ".join(
+        _lower(row.get(key))
+        for key in ("key", "name", "label", "object_id")
+        if _text(row.get(key))
+    )
+    return "tater display target" in haystack or "tater_display_target" in haystack
+
+
+def _display_entity_key(selector: str, matcher: Any) -> str:
     for refresh in (False, True):
         try:
             payload = (
@@ -2249,9 +2261,17 @@ def _display_url_entity_key(selector: str) -> str:
         if not rows:
             rows = list(payload.get("entity_rows") or []) if isinstance(payload.get("entity_rows"), list) else []
         for row in rows:
-            if isinstance(row, dict) and _display_url_entity_match(row):
+            if isinstance(row, dict) and matcher(row):
                 return _text(row.get("key"))
     return ""
+
+
+def _display_url_entity_key(selector: str) -> str:
+    return _display_entity_key(selector, _display_url_entity_match)
+
+
+def _display_target_entity_key(selector: str) -> str:
+    return _display_entity_key(selector, _display_target_entity_match)
 
 
 def _apply_s3box_display_url(selector: str, display_url: str) -> Dict[str, Any]:
@@ -2285,6 +2305,36 @@ def _apply_s3box_display_url(selector: str, display_url: str) -> Dict[str, Any]:
     }
 
 
+def _apply_s3box_display_target(selector: str, target: str) -> Dict[str, Any]:
+    selector_token = _text(selector)
+    target_token = _text(target)
+    if not selector_token or not target_token:
+        return {"applied": False, "reason": "missing_selector_or_target"}
+    entity_key = _display_target_entity_key(selector_token)
+    if not entity_key:
+        return {"applied": False, "reason": "entity_missing"}
+    try:
+        esphome_runtime.command_entity(
+            selector_token,
+            entity_key=entity_key,
+            command="text_set",
+            value=target_token,
+            timeout=20.0,
+        )
+    except Exception as exc:
+        return {
+            "applied": False,
+            "reason": "command_failed",
+            "error": _text(exc) or exc.__class__.__name__,
+            "entity_key": entity_key,
+        }
+    return {
+        "applied": True,
+        "entity_key": entity_key,
+        "display_target": target_token,
+    }
+
+
 def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     target = _text(body.get("target") or body.get("display_target"))
@@ -2313,6 +2363,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     display_url = _normalize_http_base_url(body.get("display_url")) or _tater_display_base_url_for_selector(selector)
     display_url_result = _apply_s3box_display_url(selector, display_url) if display_url else {"applied": False, "reason": "missing_url"}
+    display_target_result = _apply_s3box_display_target(selector, target)
 
     with contextlib.suppress(Exception):
         display_bus.request_display_refresh(target, reason="sensor_profile")
@@ -2324,6 +2375,8 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         message = f"{message} Flash the latest S3Box firmware once to enable automatic Display URL updates."
     elif _text(display_url_result.get("reason")) == "command_failed":
         message = f"{message} Display URL update failed: {_text(display_url_result.get('error'))}."
+    if _text(display_target_result.get("reason")) == "command_failed":
+        message = f"{message} Display target update failed: {_text(display_target_result.get('error'))}."
 
     return {
         "ok": True,
@@ -2332,6 +2385,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         "selector": selector,
         "display_url": display_url,
         "display_url_result": display_url_result,
+        "display_target_result": display_target_result,
         "message": message,
     }
 
@@ -2842,6 +2896,7 @@ def _build_device_context(
         "cli_reason": _text(cli_status.get("detail")),
         "host": host,
         "display_base_url": display_base_url,
+        "display_target": _text(fields_meta.get("display_target", {}).get("resolved_value")),
     }
 
     return {
