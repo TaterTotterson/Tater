@@ -10611,6 +10611,49 @@ function uint8ArrayToBinaryString(bytes) {
   return chunks.join("");
 }
 
+async function browserUsbSetSignals(port, signals, timeoutMs = 1200) {
+  if (!port || typeof port.setSignals !== "function") {
+    return false;
+  }
+  await browserUsbWithTimeout(
+    port.setSignals(signals),
+    timeoutMs,
+    "Timed out setting USB serial control signals."
+  );
+  return true;
+}
+
+async function browserUsbReleaseBootSignals(port, logConsole) {
+  try {
+    const changed = await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
+    if (changed) {
+      appendEspHomeFirmwareLog(logConsole, "Released USB boot/reset control lines.", "debug");
+    }
+    return changed;
+  } catch (error) {
+    appendEspHomeFirmwareLog(logConsole, `USB reset line release warning: ${String(error?.message || error)}`, "warn");
+    return false;
+  }
+}
+
+async function browserUsbPulseRunReset(port, logConsole) {
+  if (!port || typeof port.setSignals !== "function") {
+    return false;
+  }
+  try {
+    appendEspHomeFirmwareLog(logConsole, "Pulsing USB reset lines to start the flashed firmware.", "info");
+    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
+    await sleep(120);
+    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
+    await sleep(650);
+    await browserUsbReleaseBootSignals(port, logConsole);
+    return true;
+  } catch (error) {
+    appendEspHomeFirmwareLog(logConsole, `USB reset pulse warning: ${String(error?.message || error)}`, "warn");
+    return false;
+  }
+}
+
 async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
   const module = await ensureEsptoolJsLoaded();
   const { ESPLoader, Transport } = module;
@@ -10701,7 +10744,19 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
       });
     }
     appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
-    await loader.after("hard_reset");
+    try {
+      await loader.after("hard_reset");
+    } catch (error) {
+      appendEspHomeFirmwareLog(logConsole, `esptool reset warning: ${String(error?.message || error)}`, "warn");
+    }
+    const pulseWorked = await browserUsbPulseRunReset(port, logConsole);
+    if (!pulseWorked) {
+      appendEspHomeFirmwareLog(
+        logConsole,
+        "If the device screen does not restart, unplug and reconnect USB once to leave bootloader mode.",
+        "warn"
+      );
+    }
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = "Browser USB flash finished.";
     }
@@ -10925,6 +10980,11 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
     statusNode.textContent = "Waiting for the device to restart for Wi-Fi setup...";
   }
   appendEspHomeFirmwareLog(logConsole, "Waiting for the flashed device to restart into Improv Serial.", "info");
+  appendEspHomeFirmwareLog(
+    logConsole,
+    "If the screen stays blank or bootloader-like, unplug and reconnect USB once; Tater will keep watching for Improv.",
+    "warn"
+  );
   await sleep(3600);
   await openImprovSerialPort(port, logConsole);
   appendEspHomeFirmwareLog(logConsole, "USB serial reopened. Checking Improv Serial.", "info");
