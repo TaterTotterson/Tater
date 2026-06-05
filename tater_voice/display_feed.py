@@ -37,9 +37,12 @@ _DEFAULT_SLOT_LABELS: Dict[str, str] = {
 
 _RESERVED_QUERY_KEYS = {
     "compact",
+    "device",
     "format",
     "limit",
     "mode",
+    "selector",
+    "target",
     "token",
     "x_tater_token",
 }
