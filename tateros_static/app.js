@@ -10749,6 +10749,22 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+async function browserUsbWithTimeout(promise, timeoutMs, message) {
+  let timeoutId = 0;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error(message)), Math.max(1, Number(timeoutMs) || 1));
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
 function improvSerialStateLabel(stateValue) {
   switch (Number(stateValue)) {
     case IMPROV_SERIAL_STATE.STOPPED:
@@ -10911,7 +10927,7 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
   appendEspHomeFirmwareLog(logConsole, "Waiting for the flashed device to restart into Improv Serial.", "info");
   await sleep(3600);
   await openImprovSerialPort(port, logConsole);
-  appendEspHomeFirmwareLog(logConsole, "Connected to Improv Serial.", "info");
+  appendEspHomeFirmwareLog(logConsole, "USB serial reopened. Checking Improv Serial.", "info");
 
   const parser = new ImprovSerialParser();
   const reader = port.readable?.getReader?.();
@@ -10925,11 +10941,13 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
   let currentError = IMPROV_SERIAL_ERROR.NONE;
   let lastStateLabel = "";
   let responseUrls = [];
+  let seenImprovPacket = false;
 
   const handlePacket = (packet) => {
     if (!packet || typeof packet !== "object") {
       return;
     }
+    seenImprovPacket = true;
     if (packet.type === IMPROV_SERIAL_TYPE.CURRENT_STATE) {
       currentState = Number(packet.payload?.[0] ?? -1);
       const label = improvSerialStateLabel(currentState);
@@ -10984,14 +11002,29 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
   })();
 
   const sendRpc = async (command, strings = []) => {
-    await writer.write(improvBuildSerialPacket(IMPROV_SERIAL_TYPE.RPC, improvBuildRpcPayload(command, strings)));
+    await browserUsbWithTimeout(
+      writer.write(improvBuildSerialPacket(IMPROV_SERIAL_TYPE.RPC, improvBuildRpcPayload(command, strings))),
+      4000,
+      "Timed out writing Improv Serial command."
+    );
   };
 
   let pollTimer = 0;
   try {
     await sendRpc(IMPROV_SERIAL_COMMAND.GET_DEVICE_INFO);
     await sendRpc(IMPROV_SERIAL_COMMAND.GET_CURRENT_STATE);
-    await sleep(650);
+    const helloDeadline = Date.now() + 8000;
+    while (!seenImprovPacket && Date.now() < helloDeadline) {
+      if (currentError && currentError !== IMPROV_SERIAL_ERROR.NONE) {
+        throw new Error(improvSerialErrorLabel(currentError));
+      }
+      await sleep(150);
+    }
+    if (!seenImprovPacket) {
+      throw new Error("No Improv Serial response from the flashed firmware. Turn off Wi-Fi setup for images with saved Wi-Fi, or flash an image that includes improv_serial.");
+    }
+    appendEspHomeFirmwareLog(logConsole, "Connected to Improv Serial.", "info");
+    await sleep(300);
     appendEspHomeFirmwareLog(logConsole, `Sending Wi-Fi credentials for ${ssid}.`, "info");
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = `Sending Wi-Fi credentials for ${ssid}...`;
