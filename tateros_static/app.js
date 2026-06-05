@@ -10647,12 +10647,49 @@ async function browserUsbHardResetAfterFlash(transport, loader, port, logConsole
     await sleep(100);
     await loader.after();
     await sleep(1000);
-    await browserUsbReleaseBootSignals(port, logConsole);
     return true;
   } catch (error) {
     appendEspHomeFirmwareLog(logConsole, `USB reset warning: ${String(error?.message || error)}`, "warn");
     return false;
   }
+}
+
+function browserUsbSameDevice(left, right) {
+  const leftInfo = left?.getInfo?.() || {};
+  const rightInfo = right?.getInfo?.() || {};
+  const leftVendor = Number(leftInfo.usbVendorId || 0);
+  const leftProduct = Number(leftInfo.usbProductId || 0);
+  const rightVendor = Number(rightInfo.usbVendorId || 0);
+  const rightProduct = Number(rightInfo.usbProductId || 0);
+  return Boolean(leftVendor && leftProduct && leftVendor === rightVendor && leftProduct === rightProduct);
+}
+
+async function browserUsbWaitForReconnect(previousPort, selector, logConsole, statusNode, timeoutMs = 18000) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 1000);
+  let lastLogAt = 0;
+  while (Date.now() < deadline) {
+    let ports = [];
+    try {
+      ports = await browserUsbAuthorizedPorts();
+    } catch (_error) {
+      ports = [];
+    }
+    const matchingPort = ports.find((port) => browserUsbSameDevice(previousPort, port)) || (ports.length === 1 ? ports[0] : null);
+    if (matchingPort) {
+      state.esphomeBrowserUsbPorts[String(selector || "default").trim() || "default"] = matchingPort;
+      appendEspHomeFirmwareLog(logConsole, `Reconnected ${browserUsbPortLabel(matchingPort)} for Wi-Fi setup.`, "info");
+      return matchingPort;
+    }
+    if (Date.now() - lastLogAt > 2500) {
+      lastLogAt = Date.now();
+      appendEspHomeFirmwareLog(logConsole, "Waiting for Chrome to expose the rebooted USB serial device...", "debug");
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = "Waiting for the rebooted USB device...";
+      }
+    }
+    await sleep(750);
+  }
+  throw new Error("The device rebooted, but Chrome did not expose the reconnected USB serial device. Click Select USB Device again and retry Wi-Fi setup.");
 }
 
 async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
@@ -11255,6 +11292,8 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     }
     const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
     if (wifiEnabled) {
+      selectedPort = await browserUsbWaitForReconnect(selectedPort, selector, logConsole, statusNode);
+      updateSelectedPort();
       await setupImprovWifi(
         selectedPort,
         {
