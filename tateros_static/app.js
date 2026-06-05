@@ -10636,27 +10636,21 @@ async function browserUsbReleaseBootSignals(port, logConsole) {
   }
 }
 
-async function browserUsbPulseRunReset(port, logConsole) {
-  if (!port || typeof port.setSignals !== "function") {
-    return false;
-  }
+async function browserUsbHardResetAfterFlash(transport, loader, port, logConsole) {
   try {
-    appendEspHomeFirmwareLog(logConsole, "Using ESP32-S3 USB/JTAG reset sequence to start the flashed firmware.", "info");
-    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
+    appendEspHomeFirmwareLog(logConsole, "Resetting with ESP Web Tools USB reset sequence.", "info");
+    if (transport && typeof transport.setRTS === "function") {
+      await transport.setRTS(true);
+    } else {
+      await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
+    }
     await sleep(100);
-    await browserUsbSetSignals(port, { dataTerminalReady: true, requestToSend: false, break: false });
-    await sleep(100);
-    await browserUsbSetSignals(port, { dataTerminalReady: true, requestToSend: true, break: false });
-    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
-    // Match esptool's USB/JTAG reset workaround by repeating RTS after DTR is released.
-    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
-    await sleep(100);
-    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
-    await sleep(1200);
+    await loader.after();
+    await sleep(1000);
     await browserUsbReleaseBootSignals(port, logConsole);
     return true;
   } catch (error) {
-    appendEspHomeFirmwareLog(logConsole, `USB reset pulse warning: ${String(error?.message || error)}`, "warn");
+    appendEspHomeFirmwareLog(logConsole, `USB reset warning: ${String(error?.message || error)}`, "warn");
     return false;
   }
 }
@@ -10671,7 +10665,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
   if (!binaryUrl) {
     throw new Error("Browser flash binary URL is missing.");
   }
-  const transport = new Transport(port, false);
+  const transport = new Transport(port);
   const terminal = {
     clean() {},
     writeLine(data) {
@@ -10751,13 +10745,8 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
       });
     }
     appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
-    try {
-      await loader.after("hard_reset");
-    } catch (error) {
-      appendEspHomeFirmwareLog(logConsole, `esptool reset warning: ${String(error?.message || error)}`, "warn");
-    }
-    const pulseWorked = await browserUsbPulseRunReset(port, logConsole);
-    if (!pulseWorked) {
+    const resetWorked = await browserUsbHardResetAfterFlash(transport, loader, port, logConsole);
+    if (!resetWorked) {
       appendEspHomeFirmwareLog(
         logConsole,
         "If the device screen does not restart, unplug and reconnect USB once to leave bootloader mode.",
@@ -10992,7 +10981,7 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
     "If the screen stays off, unplug and reconnect USB once; Tater will keep watching for Improv.",
     "warn"
   );
-  await sleep(3600);
+  await sleep(10000);
   await openImprovSerialPort(port, logConsole);
   appendEspHomeFirmwareLog(logConsole, "USB serial reopened. Checking Improv Serial.", "info");
 
