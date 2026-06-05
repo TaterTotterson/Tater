@@ -10641,11 +10641,18 @@ async function browserUsbPulseRunReset(port, logConsole) {
     return false;
   }
   try {
-    appendEspHomeFirmwareLog(logConsole, "Pulsing USB reset lines to start the flashed firmware.", "info");
-    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
-    await sleep(120);
+    appendEspHomeFirmwareLog(logConsole, "Using ESP32-S3 USB/JTAG reset sequence to start the flashed firmware.", "info");
     await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
-    await sleep(650);
+    await sleep(100);
+    await browserUsbSetSignals(port, { dataTerminalReady: true, requestToSend: false, break: false });
+    await sleep(100);
+    await browserUsbSetSignals(port, { dataTerminalReady: true, requestToSend: true, break: false });
+    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
+    // Match esptool's USB/JTAG reset workaround by repeating RTS after DTR is released.
+    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: true, break: false });
+    await sleep(100);
+    await browserUsbSetSignals(port, { dataTerminalReady: false, requestToSend: false, break: false });
+    await sleep(1200);
     await browserUsbReleaseBootSignals(port, logConsole);
     return true;
   } catch (error) {
@@ -10982,7 +10989,7 @@ async function setupImprovWifi(port, options, logConsole, statusNode) {
   appendEspHomeFirmwareLog(logConsole, "Waiting for the flashed device to restart into Improv Serial.", "info");
   appendEspHomeFirmwareLog(
     logConsole,
-    "If the screen stays blank or bootloader-like, unplug and reconnect USB once; Tater will keep watching for Improv.",
+    "If the screen stays off, unplug and reconnect USB once; Tater will keep watching for Improv.",
     "warn"
   );
   await sleep(3600);
