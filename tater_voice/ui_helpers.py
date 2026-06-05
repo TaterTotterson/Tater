@@ -321,12 +321,17 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
             if isinstance(sensor, dict)
         ]
         wake_engine_value = ""
+        display_target = ""
         for sensor in sensor_rows:
-            if esphome_runtime.lower(sensor.get("label")) == "wake engine":
+            sensor_label = esphome_runtime.lower(sensor.get("label"))
+            if sensor_label == "wake engine":
                 wake_engine_value = esphome_runtime.text(sensor.get("value"))
-                break
+            elif sensor_label == "tater display target":
+                display_target = esphome_runtime.text(sensor.get("value"))
         if wake_engine_value:
             summary_rows.insert(3, {"label": "Wake Engine", "value": wake_engine_value})
+        if not display_target and esphome_runtime.lower(project_name) == "tater.s3box_display":
+            display_target = "livingroom"
 
         fields: List[Dict[str, Any]] = [
             {
@@ -361,6 +366,7 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "summary_rows": summary_rows,
                 "sensor_rows": sensor_rows,
                 "sensor_title": "Live Entities" if sensor_rows else "No Entities",
+                "display_target": display_target,
                 "fields": fields,
                 "popup_mode": "voice-satellite-log",
                 "popup_config": {
