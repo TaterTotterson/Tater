@@ -4683,6 +4683,11 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
         pairing_expires_at = float(raw.get("pairing_expires_at") or 0)
     except Exception:
         pairing_expires_at = 0.0
+    hub_connected_at = 0.0
+    try:
+        hub_connected_at = float(raw.get("hub_connected_at") or 0)
+    except Exception:
+        hub_connected_at = 0.0
     settings: Dict[str, Any] = {
         "mode": mode,
         "enabled": mode != SPUD_LINK_MODE_DISABLED,
@@ -4695,6 +4700,9 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
         "telemetry_enabled": _as_bool_flag(raw.get("telemetry_enabled"), default=True),
         "request_previews_enabled": _as_bool_flag(raw.get("request_previews_enabled"), default=False),
         "hub_url": str(raw.get("hub_url") or "").strip(),
+        "hub_name": str(raw.get("hub_name") or "").strip(),
+        "hub_mode": _normalize_spud_link_tater_mode(raw.get("hub_mode"), default=SPUD_LINK_MODE_HUB),
+        "hub_connected_at": hub_connected_at,
         "node_token_set": bool(token_value),
         "pairing_code_active": bool(str(raw.get("pairing_code_hash") or "").strip() and pairing_expires_at > time.time()),
         "pairing_expires_at": pairing_expires_at if pairing_expires_at > time.time() else 0.0,
@@ -5067,6 +5075,20 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
     server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
     is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
     little_spud_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    hub_url = str(settings.get("hub_url") or "").strip()
+    node_token_set = bool(settings.get("node_token_set"))
+    paired_hub = {
+        "connected": bool(server_mode == SPUD_LINK_MODE_SPUDLET and hub_url and node_token_set),
+        "hub_url": hub_url,
+        "hub_name": str(settings.get("hub_name") or "").strip(),
+        "hub_mode": _normalize_spud_link_tater_mode(settings.get("hub_mode"), default=SPUD_LINK_MODE_HUB),
+        "connected_at": float(settings.get("hub_connected_at") or 0),
+        "node_token_set": node_token_set,
+        "node_name": str(settings.get("node_name") or _spud_link_local_node_name()).strip() or "Tater",
+        "public_url": str(settings.get("public_url") or "").strip(),
+        "model_provider": "spud_link" if server_mode == SPUD_LINK_MODE_SPUDLET else "",
+        "model": "tater/base" if server_mode == SPUD_LINK_MODE_SPUDLET else "",
+    }
     return {
         **settings,
         "roles": {
@@ -5091,6 +5113,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
             "little_spud_clients": is_server and bool(settings.get("allow_little_spuds")),
             "spudlet_clients": is_server and bool(settings.get("allow_spudlets")),
         },
+        "paired_hub": paired_hub,
         "linked_nodes": _spud_link_load_nodes(),
     }
 
@@ -11981,6 +12004,7 @@ def connect_to_spud_hub(payload: SpudLinkConnectRequest) -> Dict[str, Any]:
     if not isinstance(result, dict) or not result.get("node_token"):
         raise HTTPException(status_code=502, detail="Spud Link server did not return a node token.")
     node_token = str(result.get("node_token") or "").strip()
+    server_payload = result.get("server") if isinstance(result.get("server"), dict) else result.get("hub") if isinstance(result.get("hub"), dict) else {}
     redis_client.hset(
         SPUD_LINK_SETTINGS_KEY,
         mapping={
@@ -11988,6 +12012,9 @@ def connect_to_spud_hub(payload: SpudLinkConnectRequest) -> Dict[str, Any]:
             "node_name": node_name,
             "public_url": public_url,
             "hub_url": hub_url,
+            "hub_name": str(server_payload.get("name") or "").strip()[:120],
+            "hub_mode": _normalize_spud_link_tater_mode(server_payload.get("mode"), default=SPUD_LINK_MODE_HUB),
+            "hub_connected_at": str(time.time()),
             "node_token": node_token,
         },
     )
@@ -11996,8 +12023,8 @@ def connect_to_spud_hub(payload: SpudLinkConnectRequest) -> Dict[str, Any]:
         "mode": role,
         "mode_label": _spud_link_mode_label(role),
         "hub_url": hub_url,
-        "hub": result.get("hub") if isinstance(result.get("hub"), dict) else {},
-        "server": result.get("server") if isinstance(result.get("server"), dict) else result.get("hub") if isinstance(result.get("hub"), dict) else {},
+        "hub": server_payload,
+        "server": server_payload,
         "node": result.get("node") if isinstance(result.get("node"), dict) else {},
         "node_token_set": True,
     }

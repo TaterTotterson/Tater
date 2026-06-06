@@ -2130,6 +2130,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .spud-link-node-row,
+.spud-link-hub-status,
 .spud-link-empty {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) minmax(96px, auto);
@@ -2143,6 +2144,42 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .spud-link-empty {
   grid-template-columns: 1fr;
+  color: #bdb4aa;
+}
+
+.spud-link-hub-status {
+  grid-template-columns: auto minmax(0, 1fr);
+  margin-top: 10px;
+  border-color: rgba(255, 157, 78, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(255, 145, 64, 0.12), transparent 34%),
+    rgba(0, 0, 0, 0.18);
+}
+
+.spud-link-hub-status.is-disconnected .spud-link-node-dot {
+  background: #9f9184;
+  box-shadow: none;
+}
+
+.spud-link-token-status {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid rgba(255, 164, 88, 0.18);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.spud-link-token-status span {
+  color: #bdb4aa;
+  font-size: 0.78rem;
+}
+
+.spud-link-token-status strong {
+  color: #ffe1b6;
+}
+
+.spud-link-token-status small {
   color: #bdb4aa;
 }
 
