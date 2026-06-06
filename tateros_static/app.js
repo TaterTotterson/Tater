@@ -229,7 +229,7 @@ const VIEW_META = {
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
-const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "misc", "advanced"];
+const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "spudhub", "misc", "advanced"];
 
 const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
 const POPUP_EFFECT_CLOSE_MS = {
@@ -2730,7 +2730,13 @@ function hydraPlatformLabel(platform) {
   const labels = {
     all: "All",
     webui: "WebUI",
+    discord: "Discord",
+    irc: "IRC",
+    telegram: "Telegram",
+    matrix: "Matrix",
     homeassistant: "Home Assistant",
+    voice_core: "Voice Core",
+    little_spud: "Little Spud",
     homekit: "HomeKit",
     xbmc: "XBMC",
     automation: "Automations",
@@ -8136,6 +8142,14 @@ function normalizeEspHomeDisplaySensorTarget(displaySensors) {
   return targets.includes(requested) ? requested : targets[0] || "";
 }
 
+function normalizeEspHomeDisplayTargetKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function getEspHomeDisplaySensorProfiles(displaySensors) {
   const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
   return Array.isArray(body?.profiles) ? body.profiles : [];
@@ -8183,8 +8197,9 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
     return "";
   }
   const target = String(profile?.target || "").trim();
+  const targetLabel = String(profile?.target_label || "").trim();
   const selector = String(profile?.selector || target || "").trim();
-  const title = String(profile?.title || target || "S3Box Display").trim() || "S3Box Display";
+  const title = String(profile?.title || targetLabel || target || "S3Box Display").trim() || "S3Box Display";
   const detail = String(profile?.detail || "").trim();
   const displayUrl = String(profile?.display_url || "").trim();
   const connected = boolFromAny(profile?.connected, false);
@@ -8192,13 +8207,14 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
   const message = String(body?.message || "").trim();
   const showTargetSelector = boolFromAny(options?.showTargetSelector, true);
   const embedded = boolFromAny(options?.embedded, false);
+  const targetInputLabel = targetLabel || target;
   const targetOptions = profiles
     .map((row) => {
       const value = String(row?.target || "").trim();
       if (!value) {
         return null;
       }
-      const rowTitle = String(row?.title || value).trim() || value;
+      const rowTitle = String(row?.target_label || row?.title || value).trim() || value;
       const suffix = boolFromAny(row?.connected, false) ? "online" : "saved";
       return { value, label: `${rowTitle} (${value}, ${suffix})` };
     })
@@ -8213,19 +8229,9 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
     )
     .join("");
   const wrapperClass = embedded
-    ? "core-inline-section esphome-display-sensors-card"
+    ? "core-inline-section esphome-display-sensors-card esphome-display-sensors-card-collapsible"
     : "card core-manager-item esphome-display-sensors-card";
-  return `
-    <section class="${wrapperClass}"
-      data-core-key="${escapeHtml(coreKey)}"
-      data-display-target="${escapeHtml(target)}"
-      data-display-selector="${escapeHtml(selector)}"
-      data-display-url="${escapeHtml(displayUrl)}"
-      style="margin-top:12px;">
-      <div class="card-head">
-        <h3 class="card-title">S3Box Display Sensors</h3>
-        <span class="small">${connected ? "Online" : "Saved profile"}</span>
-      </div>
+  const panelContentHtml = `
       <div class="small">
         Choose which Tater sensors ${escapeHtml(title)} watches. Changes are saved in Tater and picked up by the display feed without rebuilding firmware.
       </div>
@@ -8244,6 +8250,20 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
                 })}
               </div>
             </section>`
+          : embedded
+          ? `<section class="core-inline-section" style="margin-top:12px;">
+              <div class="small core-inline-section-title">Display</div>
+              <div class="form-grid two-col">
+                ${renderCoreManagerField({
+                  key: "target",
+                  label: "S3Box Display Target",
+                  type: "text",
+                  value: targetInputLabel,
+                  placeholder: "Living Room",
+                  description: "Type the display feed target for this S3Box. Spaces are saved cleanly, for example Living Room becomes living_room.",
+                })}
+              </div>
+            </section>`
           : `<div class="small" style="margin-top:6px;">${escapeHtml(detail || `Display target: ${target || selector}`)}</div>`
       }
       ${displayUrl ? `<div class="small" style="margin-top:6px;">Display feed: ${escapeHtml(displayUrl)}</div>` : ""}
@@ -8258,6 +8278,42 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
         <button type="button" class="action-btn esphome-display-sensors-save"${ready ? "" : " disabled"}>Save Display Sensors</button>
         <span class="small core-manager-status"></span>
       </div>
+  `;
+  if (embedded) {
+    return `
+      <details class="${wrapperClass}"
+        data-core-key="${escapeHtml(coreKey)}"
+        data-display-target="${escapeHtml(target)}"
+        data-display-target-label="${escapeHtml(targetLabel)}"
+        data-display-selector="${escapeHtml(selector)}"
+        data-display-url="${escapeHtml(displayUrl)}"
+        style="margin-top:12px;">
+        <summary class="esphome-display-sensors-summary">
+          <span class="esphome-display-sensors-summary-main">
+            <span class="card-title">S3Box Display Sensors</span>
+            <span class="small">${escapeHtml(detail || `Display target: ${target || selector}`)}</span>
+          </span>
+          <span class="status-chip ${connected ? "running" : ""}">${connected ? "Online" : "Saved"}</span>
+        </summary>
+        <div class="esphome-display-sensors-body">
+          ${panelContentHtml}
+        </div>
+      </details>
+    `;
+  }
+  return `
+    <section class="${wrapperClass}"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-display-target="${escapeHtml(target)}"
+      data-display-target-label="${escapeHtml(targetLabel)}"
+      data-display-selector="${escapeHtml(selector)}"
+      data-display-url="${escapeHtml(displayUrl)}"
+      style="margin-top:12px;">
+      <div class="card-head">
+        <h3 class="card-title">S3Box Display Sensors</h3>
+        <span class="small">${connected ? "Online" : "Saved profile"}</span>
+      </div>
+      ${panelContentHtml}
     </section>
   `;
 }
@@ -10101,7 +10157,11 @@ function bindEspHomeDisplaySensorControls(root = document) {
       }
       const coreKey = String(card.dataset?.coreKey || "esphome").trim() || "esphome";
       const values = collectCoreManagerValues(card);
-      const target = String(values?.target || card.dataset?.displayTarget || "").trim();
+      const rawTarget = String(values?.target || card.dataset?.displayTarget || "").trim();
+      const normalizedTarget = normalizeEspHomeDisplayTargetKey(rawTarget);
+      const target = rawTarget;
+      const existingTargetLabel = String(card.dataset?.displayTargetLabel || "").trim();
+      const targetLabel = rawTarget && normalizedTarget && rawTarget !== normalizedTarget ? rawTarget : existingTargetLabel;
       const selector = String(card.dataset?.displaySelector || target || "").trim();
       const displayUrl = String(card.dataset?.displayUrl || "").trim();
       const slots = {};
@@ -10126,6 +10186,7 @@ function bindEspHomeDisplaySensorControls(root = document) {
           () =>
             runCoreManagerAction(card, coreKey, "voice_display_sensors_save", {
               target,
+              target_label: targetLabel,
               selector,
               display_url: displayUrl,
               slots,
@@ -16883,14 +16944,19 @@ async function loadSettingsView() {
     if (["mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"].includes(token)) {
       return "mlx_lm";
     }
+    if (["spud", "spudlink", "spud_link", "spud_hub", "spudlet", "tater_native", "tater_spud_link"].includes(token)) {
+      return "spud_link";
+    }
     return "openai_compatible";
   };
   const isHydraLocalProvider = (value) => ["hf_transformers", "llama_cpp", "mlx_lm"].includes(normalizeHydraBaseProvider(value));
+  const isHydraSpudLinkProvider = (value) => normalizeHydraBaseProvider(value) === "spud_link";
   const hydraProviderOptions = [
     { value: "openai_compatible", label: "OpenAI-Compatible API" },
     { value: "hf_transformers", label: "Hugging Face Transformers" },
     { value: "llama_cpp", label: "llama.cpp GGUF" },
     { value: "mlx_lm", label: "MLX LM (Apple Silicon)" },
+    { value: "spud_link", label: "Spudlet via Spud Hub" },
   ];
   const hydraOpenAiModelPlaceholder = "Model served by your API";
   const hydraHfModelPlaceholder = "Qwen/Qwen2.5-0.5B-Instruct";
@@ -16907,6 +16973,9 @@ async function loadSettingsView() {
     if (provider === "mlx_lm") {
       return hydraMlxLmModelPlaceholder;
     }
+    if (provider === "spud_link") {
+      return "Uses the paired Spud Hub model";
+    }
     return hydraOpenAiModelPlaceholder;
   };
   const hydraModelLabelForProvider = (value, remoteLabel = "Base Model") => {
@@ -16920,11 +16989,15 @@ async function loadSettingsView() {
     if (provider === "mlx_lm") {
       return "Downloaded MLX Model";
     }
+    if (provider === "spud_link") {
+      return "Spud Hub Model";
+    }
     return remoteLabel;
   };
-  const renderHydraProviderOptions = (currentValue) => {
+  const renderHydraProviderOptions = (currentValue, { includeSpudLink = false } = {}) => {
     const selected = normalizeHydraBaseProvider(currentValue);
     return hydraProviderOptions
+      .filter((option) => includeSpudLink || option.value !== "spud_link")
       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
       .join("");
   };
@@ -17017,7 +17090,18 @@ async function loadSettingsView() {
   const normalizedHydraBaseSeen = new Set();
   const appendHydraBaseRow = (row) => {
     const normalized = normalizeHydraBaseRow(row);
+    if (isHydraSpudLinkProvider(normalized.provider)) {
+      normalized.model = normalized.model || "tater/base";
+      normalized.host = normalized.host || "";
+      normalized.port = "";
+      normalized.api_key = "";
+    }
     if (!normalized.model || (!isHydraLocalProvider(normalized.provider) && !normalized.host)) {
+      if (!isHydraSpudLinkProvider(normalized.provider)) {
+        return;
+      }
+    }
+    if (!normalized.model) {
       return;
     }
     const signature = `${normalized.provider}|${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}`;
@@ -17036,6 +17120,17 @@ async function loadSettingsView() {
       model: settings.hydra_llm_model || "",
       api_key: settings.hydra_llm_api_key || "",
       provider: settings.hydra_llm_provider || "",
+    });
+  }
+  if (String(settings?.spud_link_mode || settings?.spud_link?.mode || "").trim().toLowerCase() === "spudlet") {
+    normalizedHydraBaseRows.length = 0;
+    normalizedHydraBaseSeen.clear();
+    appendHydraBaseRow({
+      provider: "spud_link",
+      host: "",
+      port: "",
+      model: "tater/base",
+      api_key: "",
     });
   }
   if (!normalizedHydraBaseRows.length) {
@@ -17186,7 +17281,19 @@ async function loadSettingsView() {
       <button type="button" class="inline-btn" data-hf-integration-setup>Open Integrations</button>
     `;
   };
-  const hydraPlatforms = ["webui", "discord", "irc", "telegram", "matrix", "homeassistant", "homekit", "xbmc", "automation"];
+  const hydraPlatforms = [
+    "webui",
+    "discord",
+    "irc",
+    "telegram",
+    "matrix",
+    "homeassistant",
+    "voice_core",
+    "little_spud",
+    "homekit",
+    "xbmc",
+    "automation",
+  ];
   const hydraPlatformOptionsHtml = hydraPlatforms
     .map((platform) => `<option value="${escapeHtml(platform)}">${escapeHtml(hydraPlatformLabel(platform))}</option>`)
     .join("");
@@ -17203,6 +17310,238 @@ async function loadSettingsView() {
   const taterApiModelsEndpoint = `${window.location.origin.replace(/\/$/, "")}/v1/models`;
   const taterApiMode = String(settings?.tater_api_mode || "direct").trim().toLowerCase() === "hydra" ? "hydra" : "direct";
   const taterApiKeySet = Boolean(settings?.tater_api_key_set);
+  const spudLink = settings?.spud_link && typeof settings.spud_link === "object" ? settings.spud_link : {};
+  const spudLinkMode = String(settings?.spud_link_mode || spudLink.mode || "disabled").trim().toLowerCase();
+  const spudLinkEndpoint = `${window.location.origin.replace(/\/$/, "")}/api/spudlink/v1/tater/llm`;
+  const spudLinkPairEndpoint = `${window.location.origin.replace(/\/$/, "")}/api/spudlink/pair`;
+  const spudLinkNodes = Array.isArray(spudLink.linked_nodes) ? spudLink.linked_nodes : [];
+  const spudLinkModeLabel = (mode) => {
+    const token = String(mode || "").trim().toLowerCase();
+    if (token === "hub") return "Spud Hub";
+    if (token === "little_spud") return "Little Spud";
+    if (token === "spudlet") return "Spudlet";
+    return "Disabled";
+  };
+  const renderSpudLinkNodes = () => {
+    if (!spudLinkNodes.length) {
+      return `<div class="spud-link-empty">No linked Spuds yet. Enable Hub pairing and create a pairing code to connect one.</div>`;
+    }
+    const shortText = (value, fallback = "-") => {
+      const text = String(value || "").trim();
+      if (!text) return fallback;
+      return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+    };
+    return spudLinkNodes
+      .map((node) => {
+        const name = String(node?.name || node?.id || "Linked Spud").trim();
+        const role = spudLinkModeLabel(node?.role);
+        const nodeId = String(node?.id || "").trim();
+        const lastSeen = Number(node?.last_seen_at || 0);
+        const lastSeenText = lastSeen > 0 ? new Date(lastSeen * 1000).toLocaleString() : "Never";
+        const createdAt = Number(node?.created_at || 0);
+        const createdText = createdAt > 0 ? new Date(createdAt * 1000).toLocaleDateString() : "";
+        const activity = node?.activity && typeof node.activity === "object" ? node.activity : {};
+        const metadata = node?.metadata && typeof node.metadata === "object" ? node.metadata : {};
+        const stats = node?.stats && typeof node.stats === "object" ? node.stats : {};
+        const userName = shortText(activity.last_user || metadata.user_name || metadata.username || "");
+        const deviceName = shortText(activity.last_device || metadata.device_name || metadata.device || "");
+        const clientName = shortText(metadata.client || stats.platform || "");
+        const clientVersion = shortText(node?.version || metadata.client_version || "");
+        const remoteAddr = shortText(node?.last_remote_addr || node?.first_remote_addr || "");
+        const userAgent = shortText(node?.last_user_agent || metadata.user_agent || stats.user_agent || "");
+        const modeText = String(activity.last_call_mode || node?.remote_mode || "").trim();
+        const modelText = String(activity.last_model || "").trim();
+        const detailItems = [
+          userName !== "-" ? `User: ${userName}` : "",
+          deviceName !== "-" ? `Device: ${deviceName}` : "",
+          remoteAddr !== "-" ? `IP: ${remoteAddr}` : "",
+          clientName !== "-" ? `Client: ${clientName}${clientVersion !== "-" ? ` ${clientVersion}` : ""}` : "",
+          createdText ? `Paired: ${createdText}` : "",
+        ].filter(Boolean);
+        return `
+          <div class="spud-link-node-row" data-spud-link-node-id="${escapeHtml(nodeId)}">
+            <span class="spud-link-node-dot" aria-hidden="true"></span>
+            <span class="spud-link-node-main">
+              <strong>${escapeHtml(name)}</strong>
+              <small>${escapeHtml(role)} • last seen ${escapeHtml(lastSeenText)}</small>
+              ${detailItems.length ? `<span class="spud-link-node-details">${detailItems.map((item) => `<small>${escapeHtml(item)}</small>`).join("")}</span>` : ""}
+              ${userAgent !== "-" ? `<small class="spud-link-node-agent" title="${escapeHtml(userAgent)}">${escapeHtml(userAgent)}</small>` : ""}
+            </span>
+            <span class="spud-link-node-meta">
+              ${modeText ? `<small>${escapeHtml(modeText)}</small>` : ""}
+              ${modelText ? `<small>${escapeHtml(modelText)}</small>` : ""}
+              ${nodeId ? `<button type="button" class="inline-btn danger spud-link-revoke-btn" data-spud-link-revoke-node="${escapeHtml(nodeId)}">Revoke</button>` : ""}
+            </span>
+          </div>
+        `;
+      })
+      .join("");
+  };
+  const renderSpudLinkPanel = () => `
+    <section class="settings-tab-panel" data-settings-panel="spudhub">
+      ${renderSettingsSectionIntro(
+        "Spud Hub",
+        "Link Tater instances and lightweight Little Spud clients to a central model, Hydra, tools, and telemetry endpoint.",
+        "HUB"
+      )}
+      <div class="form-grid">
+        <section class="core-inline-section spud-link-hero">
+          <div class="spud-link-orbit" aria-hidden="true">
+            <span class="spud-link-spud hub"></span>
+            <span class="spud-link-spud spudlet"></span>
+            <span class="spud-link-spud little"></span>
+          </div>
+          <div class="spud-link-hero-copy">
+            <div class="small core-inline-section-title">Spud Link Roles</div>
+            <div class="spud-link-role-grid">
+              <span><strong>Spud Hub</strong><small>Main Tater with the model/GPU power, Hydra, tools, pairing, and linked Spud monitoring.</small></span>
+              <span><strong>Spudlet</strong><small>Full Tater install that keeps its local app features while using Spud Hub model power.</small></span>
+              <span><strong>Little Spud</strong><small>Lightweight chat client that pairs by QR or code and runs through its linked Tater.</small></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="core-inline-section spud-link-pairing-card">
+          <div class="spud-link-pairing-head">
+            <div>
+              <div class="small core-inline-section-title">Pair Little Spuds</div>
+              <p class="spud-link-pairing-copy">Create a short-lived code, then scan the QR or paste the manual code into a Little Spud client.</p>
+            </div>
+            <button type="button" id="settings-spud-link-generate-pairing" class="inline-btn">Create Pairing Code</button>
+          </div>
+          <span id="settings-spud-link-pairing-status" class="small spud-link-pairing-status">${
+            spudLink.pairing_code_active ? "A pairing code is active." : "No active pairing code."
+          }</span>
+          <div id="settings-spud-link-sync-card" class="spud-link-sync-card" style="display:none;">
+            <div class="spud-link-sync-info">
+              <strong>Little Spud Sync</strong>
+              <small>Use the QR for camera pairing, or copy the manual code for devices without a camera.</small>
+            </div>
+            <div id="settings-spud-link-qr-wrap" class="spud-link-qr-wrap" style="display:none;">
+              <img id="settings-spud-link-qr-img" alt="Little Spud pairing QR code" />
+            </div>
+            <div class="spud-link-sync-fields">
+              <label>Manual Code
+                <input id="settings-spud-link-manual-code" type="text" readonly />
+              </label>
+              <label>QR Payload
+                <textarea id="settings-spud-link-qr-payload" readonly rows="4"></textarea>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="core-inline-section spud-link-settings-card">
+          <div class="small core-inline-section-title">This Tater</div>
+          <div class="form-grid two-col">
+            <label>Role
+              <select id="set_spud_link_mode">
+                <option value="disabled" ${spudLinkMode === "disabled" ? "selected" : ""}>Disabled</option>
+                <option value="hub" ${spudLinkMode === "hub" ? "selected" : ""}>Spud Hub</option>
+                <option value="spudlet" ${spudLinkMode === "spudlet" ? "selected" : ""}>Spudlet</option>
+              </select>
+              <div class="small">Little Spud is a separate lightweight client, not a full Tater mode.</div>
+            </label>
+            <label>Node Name
+              <input id="set_spud_link_node_name" type="text" value="${escapeHtml(settings.spud_link_node_name || spudLink.node_name || "Tater")}" />
+            </label>
+            <label style="grid-column: 1 / -1;">Public / LAN URL
+              <input id="set_spud_link_public_url" type="text" value="${escapeHtml(settings.spud_link_public_url || spudLink.public_url || "")}" placeholder="http://tater.local:8501" />
+              <div class="small">Optional address other linked Tater instances can call back.</div>
+            </label>
+          </div>
+        </section>
+
+        <section class="core-inline-section spud-link-settings-card">
+          <div class="small core-inline-section-title">Server Controls</div>
+          <div class="form-grid two-col">
+            <label>Enable Pairing
+              ${renderToggleRow(
+                `<input id="set_spud_link_pairing_enabled" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_pairing_enabled ? "checked" : ""
+                } />`
+              )}
+            </label>
+            <label>Allow Spudlet Clients
+              ${renderToggleRow(
+                `<input id="set_spud_link_allow_spudlets" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_allow_spudlets !== false ? "checked" : ""
+                } />`
+              )}
+            </label>
+            <label>Allow Little Spuds
+              ${renderToggleRow(
+                `<input id="set_spud_link_allow_little_spuds" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_allow_little_spuds !== false ? "checked" : ""
+                } />`
+              )}
+            </label>
+            <label>Little Spud Tool Use
+              ${renderToggleRow(
+                `<input id="set_spud_link_little_spud_tools_enabled" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_little_spud_tools_enabled !== false ? "checked" : ""
+                } />`
+              )}
+              <div class="small">Applies to Little Spud Hydra calls on this server.</div>
+            </label>
+            <label>Telemetry
+              ${renderToggleRow(
+                `<input id="set_spud_link_telemetry_enabled" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_telemetry_enabled !== false ? "checked" : ""
+                } />`
+              )}
+            </label>
+            <label>Request Previews
+              ${renderToggleRow(
+                `<input id="set_spud_link_request_previews_enabled" class="toggle-input" type="checkbox" ${
+                  settings.spud_link_request_previews_enabled ? "checked" : ""
+                } />`
+              )}
+              <div class="small">Off by default; keeps Hub logs metadata-first.</div>
+            </label>
+            <div class="spud-link-endpoints">
+              <span>Spudlet Model</span>
+              <code>${escapeHtml(spudLinkEndpoint)}</code>
+              <span>Pair</span>
+              <code>${escapeHtml(spudLinkPairEndpoint)}</code>
+            </div>
+          </div>
+        </section>
+
+        <section class="core-inline-section spud-link-settings-card">
+          <div class="small core-inline-section-title">Connect This Tater As Spudlet</div>
+          <div class="form-grid two-col">
+            <label style="grid-column: 1 / -1;">Server URL
+              <input id="set_spud_link_hub_url" type="text" value="${escapeHtml(settings.spud_link_hub_url || spudLink.hub_url || "")}" placeholder="http://spud-hub.local:8501" />
+            </label>
+            <label style="grid-column: 1 / -1;">Pairing Code
+              <input id="set_spud_link_pairing_code" type="text" autocomplete="off" placeholder="Paste code from Spud Hub" />
+            </label>
+            <label style="grid-column: 1 / -1;">Node Token
+              <input id="set_spud_link_node_token" type="password" autocomplete="new-password" placeholder="${
+                settings.spud_link_node_token_set ? "Saved token is active; enter a new token to replace it." : "Paste token returned by Hub pairing."
+              }" />
+              <div class="small">${settings.spud_link_node_token_set ? "A Hub token is saved." : "No Hub token saved yet."}</div>
+            </label>
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-spud-link-connect" class="inline-btn">Connect As Spudlet</button>
+              <span id="settings-spud-link-connect-status" class="small"></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="core-inline-section spud-link-settings-card">
+          <div class="small core-inline-section-title">Linked Spuds</div>
+          <div class="spud-link-node-list">${renderSpudLinkNodes()}</div>
+        </section>
+
+        <div class="inline-row" style="grid-column: 1 / -1;">
+          <button type="button" id="settings-save-spudhub" class="action-btn">Save Spud Link</button>
+          <span class="small">Saves Spud Link settings.</span>
+        </div>
+      </div>
+    </section>
+  `;
   const speechUi = settings?.speech_ui && typeof settings.speech_ui === "object" ? settings.speech_ui : {};
   const announcementSpeechUi =
     settings?.announcement_speech_ui && typeof settings.announcement_speech_ui === "object"
@@ -17436,7 +17775,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Integrations, Tater Voice, Redis, Misc, Advanced.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Integrations, Tater Voice, Redis, Spud Hub, Misc, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -17447,6 +17786,7 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="esphome">${escapeHtml(taterVoiceSettingsLabel)}</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Hub</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
       </div>
@@ -17690,10 +18030,10 @@ async function loadSettingsView() {
               </div>
               <div id="settings-hydra-base-fields" class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Base Model</div>
-                <div class="small hydra-model-panel-note">Used for regular AI calls. Multiple base servers rotate in round-robin order.</div>
+      <div class="small hydra-model-panel-note">Used for regular AI calls. In Spudlet mode this routes through the paired Spud Hub.</div>
                 <label style="grid-column: 1 / -1;">Base Provider
                   <select id="set_hydra_llm_provider">
-                    ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider)}
+                    ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider, { includeSpudLink: true })}
                   </select>
                 </label>
                 <label id="hydra-base-host-wrap" data-hydra-provider-field="openai_compatible">Base Host / IP
@@ -18527,6 +18867,8 @@ async function loadSettingsView() {
         </section>
 
         ${renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus)}
+
+        ${renderSpudLinkPanel()}
 
         <section class="settings-tab-panel" data-settings-panel="misc">
           ${renderSettingsSectionIntro(
@@ -19394,17 +19736,23 @@ async function loadSettingsView() {
   };
   const syncHydraPrimaryModelControl = (provider) => {
     const local = isHydraLocalProvider(provider);
+    const spudLink = isHydraSpudLinkProvider(provider);
     if (hydraBaseModelEl) {
       hydraBaseModelEl.style.display = local ? "none" : "";
-      hydraBaseModelEl.disabled = local;
+      hydraBaseModelEl.disabled = local || spudLink;
+      if (spudLink) {
+        hydraBaseModelEl.value = "tater/base";
+      }
     }
     if (hydraBaseModelSelectEl) {
       hydraBaseModelSelectEl.style.display = local ? "" : "none";
       hydraBaseModelSelectEl.disabled = !local;
     }
     if (hydraLocalModelStatusEl) {
-      hydraLocalModelStatusEl.style.display = local ? "" : "none";
-      if (!local) {
+      hydraLocalModelStatusEl.style.display = local || spudLink ? "" : "none";
+      if (spudLink) {
+        hydraLocalModelStatusEl.textContent = "Spudlet mode uses the paired Spud Hub. Configure pairing in Settings > Spud Hub.";
+      } else if (!local) {
         hydraLocalModelStatusEl.textContent = "";
       }
     }
@@ -19414,6 +19762,9 @@ async function loadSettingsView() {
   };
   const getHydraBaseModelValue = () => {
     const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    if (isHydraSpudLinkProvider(provider)) {
+      return "tater/base";
+    }
     if (isHydraLocalProvider(provider)) {
       return String(hydraBaseModelSelectEl?.value || "").trim();
     }
@@ -19484,7 +19835,7 @@ async function loadSettingsView() {
         .map((token) => (String(token || "").trim() === "local" ? "local" : normalizeHydraBaseProvider(token)))
         .filter(Boolean);
       const show = tokens.includes("openai_compatible")
-        ? !local
+        ? !local && normalized !== "spud_link"
         : tokens.includes(normalized) || (tokens.includes("local") && local);
       wrapEl.style.display = show ? "" : "none";
       wrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
@@ -19787,6 +20138,17 @@ async function loadSettingsView() {
   hydraBaseProviderEl?.addEventListener("change", () => {
     syncHydraPrimaryProviderFields();
     syncVisionModeFields();
+  });
+  document.getElementById("set_spud_link_mode")?.addEventListener("change", (event) => {
+    const mode = String(event.currentTarget?.value || "").trim().toLowerCase();
+    if (mode === "spudlet" && hydraBaseProviderEl) {
+      hydraBaseProviderEl.value = "spud_link";
+      if (hydraBaseModelEl) {
+        hydraBaseModelEl.value = "tater/base";
+      }
+      syncHydraPrimaryProviderFields();
+      syncVisionModeFields();
+    }
   });
   hydraBaseModelSelectEl?.addEventListener("change", () => {
     if (hydraBaseModelEl) {
@@ -22283,6 +22645,17 @@ async function loadSettingsView() {
     const mlxEngineKvBits = String(document.getElementById("set_hydra_mlx_engine_kv_bits")?.value || "").trim();
     const mlxEngineKvGroupSize = String(document.getElementById("set_hydra_mlx_engine_kv_group_size")?.value || "").trim();
     const mlxEngineQuantizedKvStart = String(document.getElementById("set_hydra_mlx_engine_quantized_kv_start")?.value || "").trim();
+    if (isHydraSpudLinkProvider(baseProvider)) {
+      return {
+        baseProvider,
+        baseModel: "tater/base",
+        rows: [],
+        loadTargets: [],
+        payload: {
+          spud_link_mode: "spudlet",
+        },
+      };
+    }
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [
       normalizeHydraBaseRowInput({ provider: baseProvider, host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
@@ -23103,11 +23476,25 @@ async function loadSettingsView() {
       tater_api_enabled: Boolean(document.getElementById("set_tater_api_enabled")?.checked),
       tater_api_mode: document.getElementById("set_tater_api_mode")?.value || "direct",
       tater_api_hydra_tools_enabled: Boolean(document.getElementById("set_tater_api_hydra_tools_enabled")?.checked),
+      spud_link_mode: document.getElementById("set_spud_link_mode")?.value || "disabled",
+      spud_link_node_name: String(document.getElementById("set_spud_link_node_name")?.value || "").trim(),
+      spud_link_public_url: String(document.getElementById("set_spud_link_public_url")?.value || "").trim(),
+      spud_link_pairing_enabled: Boolean(document.getElementById("set_spud_link_pairing_enabled")?.checked),
+      spud_link_allow_spudlets: Boolean(document.getElementById("set_spud_link_allow_spudlets")?.checked),
+      spud_link_allow_little_spuds: Boolean(document.getElementById("set_spud_link_allow_little_spuds")?.checked),
+      spud_link_little_spud_tools_enabled: Boolean(document.getElementById("set_spud_link_little_spud_tools_enabled")?.checked),
+      spud_link_telemetry_enabled: Boolean(document.getElementById("set_spud_link_telemetry_enabled")?.checked),
+      spud_link_request_previews_enabled: Boolean(document.getElementById("set_spud_link_request_previews_enabled")?.checked),
+      spud_link_hub_url: String(document.getElementById("set_spud_link_hub_url")?.value || "").trim(),
       esphome_settings: esphomeSettingsValues,
     };
     const taterApiKey = String(document.getElementById("set_tater_api_key")?.value || "").trim();
     if (taterApiKey) {
       payload.tater_api_key = taterApiKey;
+    }
+    const spudLinkNodeToken = String(document.getElementById("set_spud_link_node_token")?.value || "").trim();
+    if (spudLinkNodeToken) {
+      payload.spud_link_node_token = spudLinkNodeToken;
     }
     if (clearWebuiPasswordRequested) {
       payload.clear_webui_password = true;
@@ -23161,6 +23548,10 @@ async function loadSettingsView() {
       }
       if (taterApiKeyStatusEl && payload.tater_api_key) {
         taterApiKeyStatusEl.textContent = "A key is saved. Tater will never show it back here.";
+      }
+      const spudLinkTokenEl = document.getElementById("set_spud_link_node_token");
+      if (spudLinkTokenEl) {
+        spudLinkTokenEl.value = "";
       }
       clearWebuiPasswordRequested = false;
       if (payload.clear_webui_password) {
@@ -23217,11 +23608,125 @@ async function loadSettingsView() {
     }
   });
 
+  document.getElementById("settings-spud-link-generate-pairing")?.addEventListener("click", async () => {
+    const pairingStatusEl = document.getElementById("settings-spud-link-pairing-status");
+    const mode = String(document.getElementById("set_spud_link_mode")?.value || "disabled").trim();
+    const pairingEnabled = Boolean(document.getElementById("set_spud_link_pairing_enabled")?.checked);
+    if (!["hub", "spudlet"].includes(mode)) {
+      const message = "Set this Tater to Spud Hub or Spudlet before creating a pairing code.";
+      if (pairingStatusEl) pairingStatusEl.textContent = message;
+      showToast(message, "error", 3600);
+      return;
+    }
+    if (!pairingEnabled) {
+      const message = "Enable pairing first, then save or create the code again.";
+      if (pairingStatusEl) pairingStatusEl.textContent = message;
+      showToast(message, "error", 3600);
+      return;
+    }
+    if (pairingStatusEl) pairingStatusEl.textContent = "Saving Hub settings...";
+    try {
+      await runSettingsSave();
+      if (pairingStatusEl) pairingStatusEl.textContent = "Creating pairing code...";
+      const result = await api("/api/spudlink/pairing-code", { method: "POST" });
+      const code = String(result?.pairing_code || "").trim();
+      const pairingUri = String(result?.pairing_uri || "").trim();
+      const pairingPayloadText = String(result?.pairing_payload_text || pairingUri || "").trim();
+      const pairingQrSvg = String(result?.pairing_qr_svg || "").trim();
+      const expiresAt = Number(result?.expires_at || 0);
+      const expiresText = expiresAt > 0 ? new Date(expiresAt * 1000).toLocaleTimeString() : "soon";
+      if (pairingStatusEl) {
+        pairingStatusEl.innerHTML = code
+          ? `Pairing code: <code>${escapeHtml(code)}</code> expires ${escapeHtml(expiresText)}`
+          : "Pairing code created.";
+      }
+      const syncCard = document.getElementById("settings-spud-link-sync-card");
+      const qrWrap = document.getElementById("settings-spud-link-qr-wrap");
+      const qrImg = document.getElementById("settings-spud-link-qr-img");
+      const manualCodeEl = document.getElementById("settings-spud-link-manual-code");
+      const qrPayloadEl = document.getElementById("settings-spud-link-qr-payload");
+      if (qrImg) qrImg.src = pairingQrSvg;
+      if (qrWrap) qrWrap.style.display = pairingQrSvg ? "" : "none";
+      if (manualCodeEl) manualCodeEl.value = code;
+      if (qrPayloadEl) qrPayloadEl.value = pairingUri || pairingPayloadText;
+      if (syncCard) syncCard.style.display = code || pairingPayloadText ? "" : "none";
+      showToast("Spud Link pairing code created.");
+    } catch (error) {
+      const message = `Pairing failed: ${error.message}`;
+      if (pairingStatusEl) pairingStatusEl.textContent = message;
+      showToast(message, "error", 4200);
+    }
+  });
+
+  document.getElementById("settings-spud-link-connect")?.addEventListener("click", async () => {
+    const connectStatusEl = document.getElementById("settings-spud-link-connect-status");
+    const hubUrl = String(document.getElementById("set_spud_link_hub_url")?.value || "").trim();
+    const pairingCode = String(document.getElementById("set_spud_link_pairing_code")?.value || "").trim();
+    const role = "spudlet";
+    const nodeName = String(document.getElementById("set_spud_link_node_name")?.value || "").trim();
+    const publicUrl = String(document.getElementById("set_spud_link_public_url")?.value || "").trim();
+    if (!hubUrl || !pairingCode) {
+      const message = "Server URL and pairing code are required.";
+      if (connectStatusEl) connectStatusEl.textContent = message;
+      showToast(message, "error", 3600);
+      return;
+    }
+    if (connectStatusEl) connectStatusEl.textContent = "Connecting to Spud Link server...";
+    try {
+      const result = await api("/api/spudlink/connect", {
+        method: "POST",
+        body: JSON.stringify({
+          hub_url: hubUrl,
+          pairing_code: pairingCode,
+          role,
+          node_name: nodeName,
+          public_url: publicUrl,
+        }),
+      });
+      const label = String(result?.mode_label || "Spud Link").trim();
+      const notice = `Connected to Spud Link server as ${label}.`;
+      state.notice = notice;
+      showToast(notice);
+      await loadSettingsView();
+    } catch (error) {
+      const message = `Connect failed: ${error.message}`;
+      if (connectStatusEl) connectStatusEl.textContent = message;
+      showToast(message, "error", 4200);
+    }
+  });
+
+  document.querySelectorAll("[data-spud-link-revoke-node]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nodeId = String(button.getAttribute("data-spud-link-revoke-node") || "").trim();
+      const row = button.closest(".spud-link-node-row");
+      const nodeName = String(row?.querySelector(".spud-link-node-main strong")?.textContent || "this linked Spud").trim();
+      if (!nodeId) return;
+      if (!window.confirm(`Revoke ${nodeName}? This device will need to pair again before it can use Spud Link.`)) {
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "Revoking...";
+      try {
+        await api("/api/spudlink/revoke-node", {
+          method: "POST",
+          body: JSON.stringify({ node_id: nodeId }),
+        });
+        showToast(`${nodeName} revoked.`);
+        await loadSettingsView();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Revoke";
+        showToast(`Revoke failed: ${error.message}`, "error", 4200);
+      }
+    });
+  });
+
   [
     "settings-save",
     "settings-save-general",
     "settings-save-integrations",
     "settings-save-esphome",
+    "settings-save-spudhub",
     "settings-save-misc",
     "settings-save-advanced",
   ].forEach((buttonId) => {

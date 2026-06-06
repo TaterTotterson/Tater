@@ -262,7 +262,7 @@ def hermes_final_render_system_prompt(
         "- Treat payload.current_user_message as the current request and highest priority for this turn.\n"
         "- Use payload.recent_history only for context/reference resolution; do not let older turns override payload.current_user_message.\n"
         "- If history and current request conflict, follow payload.current_user_message.\n"
-        "- Use payload.tool_results_full as the authoritative full tool outputs for exact values.\n"
+        "- Use payload.tool_results_full as the authoritative compact tool outputs for exact values.\n"
         "- Prefer exact values from payload.tool_results_full over paraphrases when there is any mismatch.\n"
         "- Do not invent new facts.\n"
         "- If payload.instruction is provided, apply it as the highest-priority style directive.\n"

@@ -194,6 +194,14 @@ def _slug(value: Any, fallback: str = "entity") -> str:
     return clean or fallback
 
 
+def _display_target_key(value: Any) -> str:
+    token = _lower(value)
+    if not token:
+        return ""
+    clean = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    return clean or token
+
+
 def _integration_source_label(provider: Any) -> str:
     token = _lower(provider)
     if not token:
@@ -310,7 +318,8 @@ def _slot_map_from_saved_display_profile(query: Any, client: Any) -> Dict[str, s
         firmware_profile = _json_from_hash(client, _FIRMWARE_PROFILE_HASH_KEY, firmware_profile_key)
         if not firmware_profile:
             continue
-        if target and _text(firmware_profile.get("display_target")) not in {"", target}:
+        firmware_target = _display_target_key(firmware_profile.get("display_target"))
+        if target and firmware_target not in {"", target}:
             continue
         slots = _slots_from_profile_values(firmware_profile)
         if slots:
@@ -345,7 +354,7 @@ def _target_from_query(query: Any) -> str:
     for raw_key, raw_value in _iter_query_items(query):
         key = _lower(raw_key)
         if key in {"target", "device", "selector"}:
-            return _text(raw_value)
+            return _display_target_key(raw_value)
     return ""
 
 

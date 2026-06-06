@@ -2058,9 +2058,13 @@ def _profile_save(template_key: str, selector: str, values: Dict[str, Any]) -> N
 def _display_profile_save(template_key: str, selector: str, values: Dict[str, str]) -> None:
     if _lower(template_key) != "s3box_display":
         return
-    target = _text(values.get("display_target")) or _text(values.get("selector")) or _text(values.get("device_name"))
+    raw_target = _text(values.get("display_target")) or _text(values.get("selector")) or _text(values.get("device_name"))
+    target = _display_target_key(raw_target)
     if not target:
         return
+    target_label = _text(values.get("display_target_label"))
+    if not target_label and raw_target and raw_target != target:
+        target_label = raw_target
     slots = {
         alias: _text(values.get(key))
         for alias, key in _S3BOX_DISPLAY_SLOT_KEYS.items()
@@ -2068,6 +2072,7 @@ def _display_profile_save(template_key: str, selector: str, values: Dict[str, st
     }
     payload = {
         "target": target,
+        "target_label": target_label,
         "template": "s3box_display",
         "selector": _text(selector),
         "profile_key": _profile_storage_key(template_key, selector),
@@ -2098,13 +2103,18 @@ def _display_profile_rows_from_store() -> Dict[str, Dict[str, Any]]:
         template = _lower(parsed.get("template"))
         if template and template != "s3box_display":
             continue
-        target = _text(parsed.get("target")) or fallback_target
+        raw_target = _text(parsed.get("target")) or fallback_target
+        target = _display_target_key(raw_target)
         if not target:
             continue
         slots = parsed.get("slots") if isinstance(parsed.get("slots"), dict) else {}
+        target_label = _text(parsed.get("target_label"))
+        if not target_label and raw_target and raw_target != target:
+            target_label = raw_target
         rows[target] = {
             **parsed,
             "target": target,
+            "target_label": target_label,
             "slots": {str(key): _text(value) for key, value in slots.items() if _text(key)},
         }
     return rows
@@ -2158,14 +2168,19 @@ def _display_sensor_profile_from_context(
         return None
     fields_meta = context.get("fields_meta") if isinstance(context.get("fields_meta"), dict) else {}
     display_meta = fields_meta.get("display_target") if isinstance(fields_meta.get("display_target"), dict) else {}
-    target = _text(display_meta.get("resolved_value")) or _text(selector)
+    raw_target = _text(display_meta.get("resolved_value")) or _text(selector)
+    target = _display_target_key(raw_target)
     if not target:
         return None
     saved_profile = saved_profiles.get(target) if isinstance(saved_profiles.get(target), dict) else {}
     item = context.get("item") if isinstance(context.get("item"), dict) else {}
     slots = _display_sensor_slots_from_context(context, saved_profile)
+    target_label = _text(saved_profile.get("target_label"))
+    if not target_label and raw_target and raw_target != target:
+        target_label = raw_target
     return {
         "target": target,
+        "target_label": target_label,
         "selector": _text(selector),
         "title": _text(item.get("title")) or target,
         "detail": _text(item.get("subtitle") or item.get("detail")),
@@ -2182,11 +2197,13 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     profiles_by_target: Dict[str, Dict[str, Any]] = {}
     for target, saved_profile in saved_profiles.items():
         slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
+        target_label = _text(saved_profile.get("target_label"))
         profiles_by_target[target] = {
             "target": target,
+            "target_label": target_label,
             "selector": _text(saved_profile.get("selector")),
-            "title": target,
-            "detail": "Saved S3Box display profile",
+            "title": target_label or target,
+            "detail": f"Display target: {target}" if target_label and target_label != target else "Saved S3Box display profile",
             "connected": False,
             "updated_at": saved_profile.get("updated_at"),
             "display_url": _tater_display_base_url_for_selector(saved_profile.get("selector") or target),
@@ -2274,6 +2291,14 @@ def _display_target_entity_key(selector: str) -> str:
     return _display_entity_key(selector, _display_target_entity_match)
 
 
+def _display_target_key(value: Any) -> str:
+    token = _lower(value)
+    if not token:
+        return ""
+    clean = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    return clean or token
+
+
 def _apply_s3box_display_url(selector: str, display_url: str) -> Dict[str, Any]:
     selector_token = _text(selector)
     clean_url = _normalize_http_base_url(display_url)
@@ -2337,7 +2362,8 @@ def _apply_s3box_display_target(selector: str, target: str) -> Dict[str, Any]:
 
 def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
-    target = _text(body.get("target") or body.get("display_target"))
+    raw_target = _text(body.get("target") or body.get("display_target"))
+    target = _display_target_key(raw_target)
     selector = _text(body.get("selector") or body.get("id")) or target
     if not target:
         raise ValueError("target is required")
@@ -2347,6 +2373,13 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     slot_source = body.get("slots") if isinstance(body.get("slots"), dict) else {}
     values = _profile_load("s3box_display", selector)
     values["display_target"] = target
+    target_label = _text(body.get("target_label")) if "target_label" in body else ""
+    if target_label and _display_target_key(target_label) == target and target_label != target:
+        values["display_target_label"] = target_label
+    elif "target_label" in body:
+        values.pop("display_target_label", None)
+    elif raw_target and raw_target != target:
+        values["display_target_label"] = raw_target
     values["selector"] = selector
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
@@ -2368,7 +2401,10 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     with contextlib.suppress(Exception):
         display_bus.request_display_refresh(target, reason="sensor_profile")
 
-    message = f"Updated display sensors for {target}."
+    display_name = target_label or (raw_target if raw_target and raw_target != target else target)
+    message = f"Updated display sensors for {display_name}."
+    if display_name and display_name != target:
+        message = f"{message} Device target set to {target}."
     if bool(display_url_result.get("applied")):
         message = f"{message} Display URL set to {_text(display_url_result.get('display_url'))}."
     elif _text(display_url_result.get("reason")) == "entity_missing":
@@ -2382,6 +2418,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         "ok": True,
         "action": "voice_display_sensors_save",
         "target": target,
+        "target_label": target_label or (raw_target if raw_target and raw_target != target else ""),
         "selector": selector,
         "display_url": display_url,
         "display_url_result": display_url_result,

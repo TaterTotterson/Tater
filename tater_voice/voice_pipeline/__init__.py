@@ -1764,19 +1764,11 @@ def _classify_no_op_outcome(
     return _VOICE_OUTCOME_WAKE_NO_SPEECH if wake_word_session else _VOICE_OUTCOME_CLIPPED
 
 
-def _response_followup_heuristic(text: str) -> bool:
-    tail = _text(text).strip()[-200:]
-    if not tail:
-        return False
-    return "?" in tail and tail.rstrip().endswith("?")
-
-
 async def _response_is_followup_question(text: str) -> bool:
     reply = _text(text).strip()
     if not reply:
         return False
 
-    heuristic = _response_followup_heuristic(reply)
     prompt = (
         "You classify whether an assistant reply is genuinely asking the user for another spoken response right now.\n"
         "Return strict JSON only with exactly this shape: {\"follow_up\": true}\n"
@@ -1787,7 +1779,6 @@ async def _response_is_followup_question(text: str) -> bool:
     user_text = (
         "Assistant reply:\n"
         f"{reply}\n\n"
-        f"Heuristic guess: {'true' if heuristic else 'false'}\n"
         "Return JSON only."
     )
 
@@ -1810,16 +1801,16 @@ async def _response_is_followup_question(text: str) -> bool:
             if isinstance(parsed, dict) and isinstance(parsed.get("follow_up"), bool):
                 decision = bool(parsed.get("follow_up"))
                 _native_debug(
-                    f"continued chat classifier follow_up={decision} heuristic={heuristic} reply_tail={reply[-120:]!r}"
+                    f"continued chat classifier follow_up={decision} reply_tail={reply[-120:]!r}"
                 )
                 return decision
         _native_debug(
-            f"continued chat classifier invalid_json heuristic={heuristic} raw={content[:200]!r}"
+            f"continued chat classifier invalid_json raw={content[:200]!r}"
         )
     except Exception as exc:
-        _native_debug(f"continued chat classifier failed heuristic={heuristic} error={exc}")
+        _native_debug(f"continued chat classifier failed error={exc}")
 
-    return heuristic
+    return False
 
 
 def _require_api_auth(x_tater_token: Optional[str]) -> None:

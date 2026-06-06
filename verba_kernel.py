@@ -16,6 +16,7 @@ KNOWN_PLATFORMS: Tuple[str, ...] = (
     "xbmc",
     "automation",
     "rss",
+    "little_spud",
 )
 
 _BOTH_EXPANSION: Tuple[str, ...] = (

@@ -490,6 +490,8 @@ HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
 HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
+SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
+SPUD_LINK_MODE_SPUDLET = "spudlet"
 HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY = "tater:hydra:llm:hf_transformers_context_tokens"
 HYDRA_HF_TRANSFORMERS_DEVICE_KEY = "tater:hydra:llm:hf_transformers_device"
 HYDRA_HF_TRANSFORMERS_DTYPE_KEY = "tater:hydra:llm:hf_transformers_dtype"
@@ -537,11 +539,13 @@ HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
 HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
 HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
+HYDRA_LLM_PROVIDER_SPUD_LINK = "spud_link"
 HYDRA_LLM_PROVIDER_CHOICES = {
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
     HYDRA_LLM_PROVIDER_MLX_LM,
+    HYDRA_LLM_PROVIDER_SPUD_LINK,
 }
 _HYDRA_BASE_RR_LOCK = threading.Lock()
 _HYDRA_BASE_RR_INDEX: Dict[str, int] = {}
@@ -1127,6 +1131,8 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
         return HYDRA_LLM_PROVIDER_MLX_LM
+    if token in {"spud", "spudlink", "spud_link", "spud_hub", "spudlet", "tater_native", "tater_spud_link"}:
+        return HYDRA_LLM_PROVIDER_SPUD_LINK
     return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
 
 
@@ -6229,10 +6235,63 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
     }
 
 
+def _normalize_spud_link_hub_url(value: Any) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    path = str(parsed.path or "").rstrip("/")
+    for suffix in ("/api/spudlink/v1/chat/completions", "/api/spudlink/v1", "/api/spudlink"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+            break
+    return urlunparse(parsed._replace(path=path, params="", query="", fragment="")).rstrip("/")
+
+
+def _resolve_spud_link_base_server(*, redis_conn: Any = None) -> Optional[Dict[str, str]]:
+    client = redis_conn or redis_client
+    try:
+        raw = client.hgetall(SPUD_LINK_SETTINGS_KEY) or {}
+    except Exception:
+        return None
+    mode = str(raw.get("mode") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if mode != SPUD_LINK_MODE_SPUDLET:
+        return None
+    hub_url = _normalize_spud_link_hub_url(raw.get("hub_url"))
+    node_token = str(raw.get("node_token") or "").strip()
+    if not hub_url or not node_token:
+        return None
+    endpoint = f"{hub_url}/api/spudlink/v1"
+    return {
+        "provider": HYDRA_LLM_PROVIDER_SPUD_LINK,
+        "host": hub_url,
+        "port": "",
+        "model": "tater/base",
+        "api_key": node_token,
+        "endpoint": endpoint,
+    }
+
+
 def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
     client = redis_conn or redis_client
     rows: List[Dict[str, str]] = []
     seen: set[Tuple[str, str, str, str]] = set()
+
+    spud_link_row = _resolve_spud_link_base_server(redis_conn=client)
+    if spud_link_row:
+        signature = (
+            spud_link_row.get("provider", HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE),
+            spud_link_row["endpoint"],
+            spud_link_row["model"],
+            spud_link_row.get("api_key", ""),
+        )
+        seen.add(signature)
+        rows.append(spud_link_row)
+        return rows
 
     raw_payload = _safe_redis_text_get(HYDRA_LLM_BASE_SERVERS_KEY, redis_conn=client)
     parsed_payload: Any = []
@@ -7145,6 +7204,8 @@ def _make_llm_client_for_provider(
         return LlamaCppLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_MLX_LM:
         return MlxLmLLMClientWrapper(model=model, **kwargs)
+    if selected_provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
+        return SpudLinkLLMClientWrapper(host=host, model=model, api_key=api_key, **kwargs)
     return LLMClientWrapper(host=host, model=model, api_key=api_key, **kwargs)
 
 
@@ -7701,6 +7762,208 @@ class LLMClientWrapper:
                 error=call_error,
                 response_model=final_model,
             )
+
+
+class SpudLinkLLMClientWrapper:
+    def __init__(self, host, model=None, **kwargs):
+        explicit_api_key = str(kwargs.pop("api_key", "") or "").strip()
+        resolved_host = str(host or "").strip().rstrip("/")
+        resolved_model = str(model or "").strip() or "tater/base"
+        if not resolved_host or not explicit_api_key:
+            raise RuntimeError("Spud Link model routing is not paired. Connect this Spudlet to a Spud Hub first.")
+
+        if resolved_host.endswith("/api/spudlink/v1/tater/llm"):
+            endpoint = resolved_host
+        elif resolved_host.endswith("/api/spudlink/v1"):
+            endpoint = f"{resolved_host}/tater/llm"
+        else:
+            endpoint = f"{resolved_host}/api/spudlink/v1/tater/llm"
+
+        self.host = endpoint
+        self.model = resolved_model
+        self.api_key = explicit_api_key
+        self.provider = HYDRA_LLM_PROVIDER_SPUD_LINK
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        self._client = httpx.AsyncClient() if httpx is not None else None
+
+        self._llm_calls = 0
+        self._llm_elapsed_sec = 0.0
+        self._llm_prompt_elapsed_sec = 0.0
+        self._llm_completion_elapsed_sec = 0.0
+        self._llm_prompt_tokens = 0
+        self._llm_completion_tokens = 0
+        self._llm_total_tokens = 0
+        self._llm_model_last = resolved_model
+        self._llm_speed_basis = "spud_link_native"
+
+    async def aclose(self):
+        client = getattr(self, "_client", None)
+        if client is not None:
+            await client.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
+        out = _build_llm_perf_stats(
+            model=str(self._llm_model_last or self.model or "Spud Link"),
+            elapsed=self._llm_elapsed_sec,
+            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
+            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
+            prompt_tokens=self._llm_prompt_tokens,
+            completion_tokens=self._llm_completion_tokens,
+            total_tokens=self._llm_total_tokens,
+            calls=self._llm_calls,
+            speed_basis=getattr(self, "_llm_speed_basis", "spud_link_native"),
+        )
+        if reset:
+            self._llm_calls = 0
+            self._llm_elapsed_sec = 0.0
+            self._llm_prompt_elapsed_sec = 0.0
+            self._llm_completion_elapsed_sec = 0.0
+            self._llm_prompt_tokens = 0
+            self._llm_completion_tokens = 0
+            self._llm_total_tokens = 0
+        return out
+
+    async def chat(self, messages, **kwargs):
+        timeout = kwargs.pop("timeout", None)
+        timeout_ms = kwargs.pop("timeout_ms", None)
+        if timeout is None and timeout_ms is not None:
+            try:
+                timeout = float(timeout_ms) / 1000.0
+            except Exception:
+                timeout = None
+        timeout = float(timeout or 120.0)
+
+        stream = bool(kwargs.pop("stream", False))
+        if stream:
+            raise RuntimeError("Spud Link native LLM routing does not support streaming model calls yet.")
+        activity_hint = kwargs.pop("activity", "")
+        model = str(kwargs.pop("model", self.model) or self.model).strip() or "tater/base"
+
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self.max_tokens
+        elif kwargs.get("max_tokens") is None:
+            kwargs.pop("max_tokens", None)
+        if "temperature" not in kwargs:
+            kwargs["temperature"] = self.temperature
+
+        try:
+            messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
+        except Exception:
+            messages = messages if isinstance(messages, list) else []
+
+        call_id = _register_active_llm_call(
+            host=str(self.host or "").strip(),
+            model=model,
+            stream=False,
+            message_count=(len(messages) if isinstance(messages, list) else 0),
+            messages=(messages if isinstance(messages, list) else []),
+            activity_hint=str(activity_hint or "spud_link_native"),
+        )
+        call_error: Optional[Exception] = None
+        final_model = model
+
+        try:
+            _append_llm_debug_event(
+                phase="prompt",
+                level="info",
+                message="Native Spud Link prompt submitted",
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_SPUD_LINK,
+                host=str(self.host or "").strip(),
+                model=model,
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+            )
+            body = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+            }
+            for key in ("max_tokens", "temperature", "top_p", "stop"):
+                if key in kwargs:
+                    body[key] = kwargs[key]
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "X-Spudlink-Token": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            started_at = asyncio.get_running_loop().time()
+            if self._client is not None:
+                response = await self._client.post(self.host, json=body, headers=headers, timeout=timeout)
+                response.raise_for_status()
+                payload = response.json()
+            else:
+                def _post_sync() -> Any:
+                    response_sync = requests.post(self.host, json=body, headers=headers, timeout=timeout)
+                    response_sync.raise_for_status()
+                    return response_sync.json()
+
+                payload = await asyncio.to_thread(_post_sync)
+
+            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            self._llm_calls += 1
+            self._llm_elapsed_sec += elapsed
+
+            if not isinstance(payload, dict):
+                raise RuntimeError("Spud Link Hub returned an invalid native LLM response.")
+            response_model = str(payload.get("model") or model or "").strip()
+            if response_model:
+                self._llm_model_last = response_model
+                final_model = response_model
+
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+            try:
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                completion_tokens = int(usage.get("completion_tokens") or 0)
+                total_tokens = int(usage.get("total_tokens") or 0)
+            except Exception:
+                prompt_tokens = completion_tokens = total_tokens = 0
+            if total_tokens <= 0:
+                total_tokens = max(0, prompt_tokens + completion_tokens)
+            self._llm_prompt_tokens += max(0, prompt_tokens)
+            self._llm_completion_tokens += max(0, completion_tokens)
+            self._llm_total_tokens += max(0, total_tokens)
+
+            message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+            content_text = _strip_local_thinking_blocks(str(message.get("content") or "")).strip()
+            result = {
+                "model": response_model or model,
+                "message": {
+                    "role": str(message.get("role") or "assistant"),
+                    "content": content_text,
+                },
+            }
+            _append_llm_debug_result(
+                call_id=call_id,
+                provider=HYDRA_LLM_PROVIDER_SPUD_LINK,
+                host=str(self.host or "").strip(),
+                model=final_model,
+                result=result,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                timing={"speed_basis": "spud_link_native"},
+                elapsed=elapsed,
+            )
+            return result
+        except Exception as exc:
+            call_error = exc
+            raise
+        finally:
+            _finish_active_llm_call(call_id, error=call_error, response_model=final_model)
 
 
 class TransformersLLMClientWrapper:
