@@ -17315,6 +17315,7 @@ async function loadSettingsView() {
   const spudLinkEndpoint = `${window.location.origin.replace(/\/$/, "")}/api/spudlink/v1/tater/llm`;
   const spudLinkPairEndpoint = `${window.location.origin.replace(/\/$/, "")}/api/spudlink/pair`;
   const spudLinkNodes = Array.isArray(spudLink.linked_nodes) ? spudLink.linked_nodes : [];
+  const spudLinkPairedHub = spudLink.paired_hub && typeof spudLink.paired_hub === "object" ? spudLink.paired_hub : {};
   const spudLinkModeLabel = (mode) => {
     const token = String(mode || "").trim().toLowerCase();
     if (token === "hub") return "Spud Hub";
@@ -17322,15 +17323,15 @@ async function loadSettingsView() {
     if (token === "spudlet") return "Spudlet";
     return "Disabled";
   };
+  const shortSpudLinkText = (value, fallback = "-") => {
+    const text = String(value || "").trim();
+    if (!text) return fallback;
+    return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+  };
   const renderSpudLinkNodes = () => {
     if (!spudLinkNodes.length) {
       return `<div class="spud-link-empty">No linked Spuds yet. Enable Hub pairing and create a pairing code to connect one.</div>`;
     }
-    const shortText = (value, fallback = "-") => {
-      const text = String(value || "").trim();
-      if (!text) return fallback;
-      return text.length > 96 ? `${text.slice(0, 93)}...` : text;
-    };
     return spudLinkNodes
       .map((node) => {
         const name = String(node?.name || node?.id || "Linked Spud").trim();
@@ -17343,12 +17344,12 @@ async function loadSettingsView() {
         const activity = node?.activity && typeof node.activity === "object" ? node.activity : {};
         const metadata = node?.metadata && typeof node.metadata === "object" ? node.metadata : {};
         const stats = node?.stats && typeof node.stats === "object" ? node.stats : {};
-        const userName = shortText(activity.last_user || metadata.user_name || metadata.username || "");
-        const deviceName = shortText(activity.last_device || metadata.device_name || metadata.device || "");
-        const clientName = shortText(metadata.client || stats.platform || "");
-        const clientVersion = shortText(node?.version || metadata.client_version || "");
-        const remoteAddr = shortText(node?.last_remote_addr || node?.first_remote_addr || "");
-        const userAgent = shortText(node?.last_user_agent || metadata.user_agent || stats.user_agent || "");
+        const userName = shortSpudLinkText(activity.last_user || metadata.user_name || metadata.username || "");
+        const deviceName = shortSpudLinkText(activity.last_device || metadata.device_name || metadata.device || "");
+        const clientName = shortSpudLinkText(metadata.client || stats.platform || "");
+        const clientVersion = shortSpudLinkText(node?.version || metadata.client_version || "");
+        const remoteAddr = shortSpudLinkText(node?.last_remote_addr || node?.first_remote_addr || "");
+        const userAgent = shortSpudLinkText(node?.last_user_agent || metadata.user_agent || stats.user_agent || "");
         const modeText = String(activity.last_call_mode || node?.remote_mode || "").trim();
         const modelText = String(activity.last_model || "").trim();
         const detailItems = [
@@ -17376,6 +17377,36 @@ async function loadSettingsView() {
         `;
       })
       .join("");
+  };
+  const renderSpudletHubStatus = () => {
+    const connected = Boolean(spudLinkPairedHub.connected);
+    const hubName = shortSpudLinkText(spudLinkPairedHub.hub_name || "Spud Hub", "Spud Hub");
+    const hubUrl = shortSpudLinkText(spudLinkPairedHub.hub_url || settings.spud_link_hub_url || spudLink.hub_url || "");
+    const nodeName = shortSpudLinkText(spudLinkPairedHub.node_name || settings.spud_link_node_name || spudLink.node_name || "");
+    const publicUrl = shortSpudLinkText(spudLinkPairedHub.public_url || settings.spud_link_public_url || spudLink.public_url || "");
+    const connectedAt = Number(spudLinkPairedHub.connected_at || 0);
+    const connectedText = connectedAt > 0 ? new Date(connectedAt * 1000).toLocaleString() : "";
+    const modelText = shortSpudLinkText(spudLinkPairedHub.model || "tater/base", "tater/base");
+    const providerText = spudLinkPairedHub.model_provider === "spud_link" ? "Spud Link" : "";
+    const tokenSet = Boolean(spudLinkPairedHub.node_token_set || settings.spud_link_node_token_set);
+    const detailItems = [
+      hubUrl !== "-" ? `Hub URL: ${hubUrl}` : "",
+      nodeName !== "-" ? `This Spudlet: ${nodeName}` : "",
+      publicUrl !== "-" ? `Callback URL: ${publicUrl}` : "",
+      connectedText ? `Paired: ${connectedText}` : "",
+      tokenSet ? "Token: saved automatically" : "Token: not paired",
+      providerText ? `Model route: ${providerText} / ${modelText}` : "",
+    ].filter(Boolean);
+    return `
+      <div class="spud-link-hub-status ${connected ? "is-connected" : "is-disconnected"}">
+        <span class="spud-link-node-dot" aria-hidden="true"></span>
+        <span class="spud-link-node-main">
+          <strong>${connected ? `Connected to ${escapeHtml(hubName)}` : "Not connected to a Spud Hub"}</strong>
+          <small>${connected ? "This Tater is routing local LLM calls through the paired Hub." : "Pair this Spudlet with a Hub using the manual pairing code."}</small>
+          ${detailItems.length ? `<span class="spud-link-node-details">${detailItems.map((item) => `<small>${escapeHtml(item)}</small>`).join("")}</span>` : ""}
+        </span>
+      </div>
+    `;
   };
   const renderSpudLinkPanel = () => `
     <section class="settings-tab-panel" data-settings-panel="spudhub">
@@ -17513,16 +17544,17 @@ async function loadSettingsView() {
           <div class="form-grid two-col">
             <label style="grid-column: 1 / -1;">Server URL
               <input id="set_spud_link_hub_url" type="text" value="${escapeHtml(settings.spud_link_hub_url || spudLink.hub_url || "")}" placeholder="http://spud-hub.local:8501" />
+              <div class="small">Use the Spud Hub LAN/public URL shown in the Hub pairing panel.</div>
             </label>
-            <label style="grid-column: 1 / -1;">Pairing Code
+            <label style="grid-column: 1 / -1;">Manual Pairing Code
               <input id="set_spud_link_pairing_code" type="text" autocomplete="off" placeholder="Paste code from Spud Hub" />
+              <div class="small">This is the Manual Code from Spud Hub. QR pairing is mainly for Little Spud clients; Spudlets paste the manual code here.</div>
             </label>
-            <label style="grid-column: 1 / -1;">Node Token
-              <input id="set_spud_link_node_token" type="password" autocomplete="new-password" placeholder="${
-                settings.spud_link_node_token_set ? "Saved token is active; enter a new token to replace it." : "Paste token returned by Hub pairing."
-              }" />
-              <div class="small">${settings.spud_link_node_token_set ? "A Hub token is saved." : "No Hub token saved yet."}</div>
-            </label>
+            <div class="spud-link-token-status" style="grid-column: 1 / -1;">
+              <span>Node Token</span>
+              <strong>${settings.spud_link_node_token_set ? "Saved automatically" : "Not paired yet"}</strong>
+              <small>${settings.spud_link_node_token_set ? "Reconnect this Spudlet to replace the saved Hub token." : "The Hub returns and saves this token after a successful pairing."}</small>
+            </div>
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-spud-link-connect" class="inline-btn">Connect As Spudlet</button>
               <span id="settings-spud-link-connect-status" class="small"></span>
@@ -17530,8 +17562,17 @@ async function loadSettingsView() {
           </div>
         </section>
 
+        ${
+          spudLinkMode === "spudlet" || settings.spud_link_node_token_set || settings.spud_link_hub_url
+            ? `<section class="core-inline-section spud-link-settings-card">
+          <div class="small core-inline-section-title">Connected Spud Hub</div>
+          ${renderSpudletHubStatus()}
+        </section>`
+            : ""
+        }
+
         <section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">Linked Spuds</div>
+          <div class="small core-inline-section-title">Linked Spuds & Spudlets</div>
           <div class="spud-link-node-list">${renderSpudLinkNodes()}</div>
         </section>
 
