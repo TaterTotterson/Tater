@@ -12,6 +12,7 @@ Pillow
 moviepy
 python-dotenv
 requests
+qrcode
 youtube-transcript-api
 redis
 redislite

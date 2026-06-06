@@ -535,6 +535,8 @@ def _platform_from_history_key(key: Any) -> str:
         return "xbmc"
     if text.startswith("tater:macos:"):
         return "macos"
+    if text.startswith("tater:little_spud:"):
+        return "little_spud"
     return ""
 
 
@@ -552,6 +554,10 @@ def _session_id_from_history_key(key: Any, platform: str) -> str:
         prefix = "tater:macos:session:"
         if text.startswith(prefix):
             return text.removeprefix(prefix).removesuffix(":history")
+    if platform == "little_spud":
+        prefix = "tater:little_spud:"
+        if text.startswith(prefix):
+            return text.removeprefix(prefix).removesuffix(":history")
     return ""
 
 
@@ -567,6 +573,7 @@ def _portal_label(platform: Any) -> str:
         "macos": "macOS",
         "webui": "WebUI",
         "voice_core": "Voice Core",
+        "little_spud": "Little Spud",
     }
     token = _platform(platform)
     return labels.get(token, token.title() if token else "Portal")
@@ -617,6 +624,7 @@ def _discover_portal_history_aliases(out: Dict[str, Dict[str, Any]], linked: Dic
         "tater:homekit:session:*:history",
         "tater:xbmc:session:*:history",
         "tater:macos:session:*:history",
+        "tater:little_spud:*:history",
     )
     seen_keys = 0
     for pattern in patterns:

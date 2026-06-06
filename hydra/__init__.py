@@ -1,3 +1,4 @@
+import asyncio
 import json
 import mimetypes
 import re
@@ -122,6 +123,7 @@ DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
 DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED = True
+HYDRA_HERMES_FINAL_RENDER_TIMEOUT_SECONDS = 24.0
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
@@ -170,6 +172,7 @@ _PLATFORM_DISPLAY = {
     "homeassistant": "Home Assistant",
     "meshtastic": "Meshtastic",
     "voice_core": "Voice Core",
+    "little_spud": "Little Spud",
     "homekit": "HomeKit",
     "xbmc": "XBMC",
     "automation": "automation",
@@ -3587,6 +3590,99 @@ def _select_final_answer_text(
     return candidate
 
 
+_HERMES_BINARY_PAYLOAD_KEYS = {
+    "bytes",
+    "byte_data",
+    "data_b64",
+    "base64",
+    "b64",
+    "blob",
+    "blob_data",
+    "raw",
+    "raw_data",
+}
+_HERMES_MEDIA_TYPES = {"image", "audio", "video", "file"}
+
+
+def _hermes_safe_json_value(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            size = len(value)
+        except Exception:
+            size = None
+        out: Dict[str, Any] = {"omitted": "binary_media"}
+        if size is not None:
+            out["size"] = size
+        return out
+    if isinstance(value, str):
+        limit = 1600 if depth <= 2 else 700
+        return _short_text(value, limit=limit)
+    if depth >= 6:
+        return _short_text(value, limit=240)
+    if isinstance(value, dict):
+        media_type = str(value.get("type") or "").strip().lower()
+        if media_type in _HERMES_MEDIA_TYPES:
+            compact: Dict[str, Any] = {}
+            for key in ("type", "name", "filename", "mimetype", "size", "url", "uri", "path", "artifact_id", "id", "sha256"):
+                if key in value:
+                    compact[key] = _hermes_safe_json_value(value.get(key), depth=depth + 1)
+            if "size" not in compact:
+                raw_bytes = value.get("bytes")
+                if isinstance(raw_bytes, (bytes, bytearray, memoryview)):
+                    compact["size"] = len(raw_bytes)
+            return compact
+
+        out: Dict[str, Any] = {}
+        for raw_key, raw_item in value.items():
+            key = str(raw_key)
+            key_norm = key.strip().lower()
+            if (
+                key_norm in _HERMES_BINARY_PAYLOAD_KEYS
+                or key_norm.endswith("_bytes")
+                or key_norm.endswith("_b64")
+                or "base64" in key_norm
+            ):
+                marker: Dict[str, Any] = {"omitted": "binary_or_large_media"}
+                if isinstance(raw_item, (bytes, bytearray, memoryview)):
+                    marker["size"] = len(raw_item)
+                out[key] = marker
+                continue
+            out[key] = _hermes_safe_json_value(raw_item, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        limit = 12 if depth <= 2 else 6
+        compact_items = [_hermes_safe_json_value(item, depth=depth + 1) for item in items[:limit]]
+        if len(items) > limit:
+            compact_items.append({"omitted_items": len(items) - limit})
+        return compact_items
+    return _short_text(value, limit=500)
+
+
+def _hermes_safe_tool_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    try:
+        normalized = normalize_verba_result(payload)
+        safe_payload = result_for_llm(normalized)
+        raw_artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+        safe_artifacts = safe_payload.get("artifacts") if isinstance(safe_payload.get("artifacts"), list) else []
+        if raw_artifacts and safe_artifacts:
+            for idx, item in enumerate(safe_artifacts):
+                if not isinstance(item, dict) or item.get("size") is not None:
+                    continue
+                raw_item = raw_artifacts[idx] if idx < len(raw_artifacts) and isinstance(raw_artifacts[idx], dict) else {}
+                raw_bytes = raw_item.get("bytes") if isinstance(raw_item, dict) else None
+                if isinstance(raw_bytes, (bytes, bytearray, memoryview)):
+                    item["size"] = len(raw_bytes)
+    except Exception:
+        safe_payload = dict(payload)
+    safe_value = _hermes_safe_json_value(safe_payload)
+    return safe_value if isinstance(safe_value, dict) else {}
+
+
 async def _synthesize_completed_steps_answer(
     *,
     llm_client: Any,
@@ -3694,7 +3790,9 @@ async def _run_hermes_final_render(
     for result in full_tool_results:
         if not isinstance(result, dict):
             continue
-        full_results_payload.append(dict(result))
+        safe_result = _hermes_safe_tool_payload(result)
+        if safe_result:
+            full_results_payload.append(safe_result)
     history_payload: List[Dict[str, str]] = []
     for item in recent_history:
         if not isinstance(item, dict):
@@ -4324,18 +4422,19 @@ def _result_memory_prompt(result_memory: List[Dict[str, Any]]) -> str:
 def _thanatos_previous_step_payloads_prompt(previous_payloads: List[Dict[str, Any]]) -> str:
     if not isinstance(previous_payloads, list) or not previous_payloads:
         return ""
-    lines = ["Tool results so far this turn (full payloads, execution order):"]
+    lines = ["Tool results so far this turn (compact payloads, execution order):"]
     kept = 0
     for idx, payload in enumerate(previous_payloads, start=1):
         if not isinstance(payload, dict) or not payload:
             continue
+        safe_payload = _hermes_safe_tool_payload(payload)
         try:
-            payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+            payload_json = json.dumps(safe_payload, ensure_ascii=False, default=str)
         except Exception:
             payload_json = "{}"
         if payload_json in {"{}", "null"}:
             continue
-        lines.append(f"Result {idx} full payload JSON:\n{payload_json}")
+        lines.append(f"Result {idx} compact payload JSON:\n{payload_json}")
         kept += 1
     if kept == 0:
         return ""
@@ -5074,7 +5173,7 @@ async def _run_hydra_turn_impl(
             if synthesized:
                 composed_text = synthesized
 
-        hermes_text = await _run_hermes_final_render(
+        hermes_render = _run_hermes_final_render(
             llm_client=llm_client_hermes,
             platform=platform,
             user_text=user_request_text,
@@ -5089,6 +5188,16 @@ async def _run_hydra_turn_impl(
             platform_preamble=platform_preamble,
             max_tokens=None,
         )
+        try:
+            if HYDRA_HERMES_FINAL_RENDER_TIMEOUT_SECONDS > 0:
+                hermes_text = await asyncio.wait_for(
+                    hermes_render,
+                    timeout=HYDRA_HERMES_FINAL_RENDER_TIMEOUT_SECONDS,
+                )
+            else:
+                hermes_text = await hermes_render
+        except asyncio.TimeoutError:
+            hermes_text = ""
         if hermes_text:
             composed_text = hermes_text
             await _mark_auto_continue_from_head(
@@ -5560,7 +5669,7 @@ async def _run_hydra_turn_impl(
         tool_origin_payload = dict(origin_payload) if isinstance(origin_payload, dict) else {}
         if raw_tool_payload_history:
             tool_origin_payload["tool_results_full"] = [
-                dict(item)
+                _hermes_safe_tool_payload(item)
                 for item in raw_tool_payload_history[-8:]
                 if isinstance(item, dict)
             ]
@@ -5586,7 +5695,9 @@ async def _run_hydra_turn_impl(
         raw_payload = doer_exec.get("payload")
         raw_tool_payload_out = raw_payload if isinstance(raw_payload, dict) else None
         if isinstance(raw_tool_payload_out, dict) and raw_tool_payload_out:
-            raw_tool_payload_history.append(raw_tool_payload_out)
+            safe_tool_payload_out = _hermes_safe_tool_payload(raw_tool_payload_out)
+            if safe_tool_payload_out:
+                raw_tool_payload_history.append(safe_tool_payload_out)
         tool_result_for_checker = doer_exec.get("minos_result")
         if not isinstance(tool_result_for_checker, dict):
             tool_result_for_checker = doer_exec.get("checker_result")
@@ -5632,7 +5743,7 @@ async def _run_hydra_turn_impl(
             origin_payload["available_artifacts"] = [dict(item) for item in turn_available_artifacts]
         else:
             origin_payload.pop("available_artifacts", None)
-        artifacts = ((tool_result_for_checker or {}).get("artifacts") or [])
+        artifacts = new_turn_artifacts if new_turn_artifacts else ((tool_result_for_checker or {}).get("artifacts") or [])
         if isinstance(artifacts, list):
             for item in artifacts:
                 if not isinstance(item, dict):

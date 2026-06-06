@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import hmac
 import importlib
+import io
 import json
 import logging
 import mimetypes
@@ -18,12 +19,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import dotenv
 
@@ -92,6 +94,7 @@ from helpers import (
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
     HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+    HYDRA_LLM_PROVIDER_SPUD_LINK,
     HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
     HYDRA_LLAMA_CPP_FLASH_ATTN_KEY,
     HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
@@ -248,6 +251,29 @@ TATER_API_SETTINGS_KEY = "tater:openai_api:settings"
 TATER_API_MODE_DIRECT = "direct"
 TATER_API_MODE_HYDRA = "hydra"
 TATER_API_MODE_CHOICES = {TATER_API_MODE_DIRECT, TATER_API_MODE_HYDRA}
+SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
+SPUD_LINK_NODES_KEY = "tater:spudlink:nodes:v1"
+SPUD_LINK_MODE_DISABLED = "disabled"
+SPUD_LINK_MODE_HUB = "hub"
+SPUD_LINK_MODE_SPUDLET = "spudlet"
+SPUD_LINK_MODE_LITTLE_SPUD = "little_spud"
+SPUD_LINK_MODE_CHOICES = {
+    SPUD_LINK_MODE_DISABLED,
+    SPUD_LINK_MODE_HUB,
+    SPUD_LINK_MODE_SPUDLET,
+    SPUD_LINK_MODE_LITTLE_SPUD,
+}
+SPUD_LINK_TATER_MODE_CHOICES = {
+    SPUD_LINK_MODE_DISABLED,
+    SPUD_LINK_MODE_HUB,
+    SPUD_LINK_MODE_SPUDLET,
+}
+SPUD_LINK_SERVER_MODE_CHOICES = {
+    SPUD_LINK_MODE_HUB,
+    SPUD_LINK_MODE_SPUDLET,
+}
+SPUD_LINK_PAIRING_TTL_SECONDS = 10 * 60
+SPUD_LINK_ACTIVE_RUN_TTL_SECONDS = 24 * 60 * 60
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
@@ -3534,6 +3560,8 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
         return HYDRA_LLM_PROVIDER_MLX_LM
+    if token in {"spud", "spudlink", "spud_link", "spud_hub", "spudlet", "tater_native", "tater_spud_link"}:
+        return HYDRA_LLM_PROVIDER_SPUD_LINK
     return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
 
 
@@ -3553,6 +3581,8 @@ def _hydra_llm_provider_label(provider: Any) -> str:
         return "llama.cpp GGUF"
     if token == HYDRA_LLM_PROVIDER_MLX_LM:
         return "MLX LM"
+    if token == HYDRA_LLM_PROVIDER_SPUD_LINK:
+        return "Spud Link"
     return "OpenAI-Compatible API"
 
 
@@ -3575,6 +3605,8 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         model = str(row.get("model") or "").strip()
         api_key = str(row.get("api_key") or "").strip()
 
+        if provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
+            continue
         if not host and not port and not model:
             continue
         if _is_local_hydra_llm_provider(provider):
@@ -4466,6 +4498,603 @@ def _save_tater_api_settings_from_updates(updates: Dict[str, Any]) -> None:
         redis_client.hset(TATER_API_SETTINGS_KEY, mapping=mapping)
 
 
+def _normalize_spud_link_mode(value: Any, default: str = SPUD_LINK_MODE_DISABLED) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "off": SPUD_LINK_MODE_DISABLED,
+        "none": SPUD_LINK_MODE_DISABLED,
+        "master": SPUD_LINK_MODE_HUB,
+        "spud_hub": SPUD_LINK_MODE_HUB,
+        "hub": SPUD_LINK_MODE_HUB,
+        "mini": SPUD_LINK_MODE_SPUDLET,
+        "mini_spud": SPUD_LINK_MODE_SPUDLET,
+        "llm": SPUD_LINK_MODE_SPUDLET,
+        "llm_only": SPUD_LINK_MODE_SPUDLET,
+        "linked": SPUD_LINK_MODE_LITTLE_SPUD,
+        "linked_spud": SPUD_LINK_MODE_LITTLE_SPUD,
+        "little": SPUD_LINK_MODE_LITTLE_SPUD,
+        "little_spud": SPUD_LINK_MODE_LITTLE_SPUD,
+        "tools": SPUD_LINK_MODE_LITTLE_SPUD,
+    }
+    token = aliases.get(token, token)
+    if token in SPUD_LINK_MODE_CHOICES:
+        return token
+    fallback = str(default or SPUD_LINK_MODE_DISABLED).strip().lower()
+    return fallback if fallback in SPUD_LINK_MODE_CHOICES else SPUD_LINK_MODE_DISABLED
+
+
+def _normalize_spud_link_tater_mode(value: Any, default: str = SPUD_LINK_MODE_DISABLED) -> str:
+    mode = _normalize_spud_link_mode(value, default=default)
+    if mode == SPUD_LINK_MODE_LITTLE_SPUD:
+        return SPUD_LINK_MODE_SPUDLET
+    if mode in SPUD_LINK_TATER_MODE_CHOICES:
+        return mode
+    fallback = _normalize_spud_link_mode(default, default=SPUD_LINK_MODE_DISABLED)
+    return fallback if fallback in SPUD_LINK_TATER_MODE_CHOICES else SPUD_LINK_MODE_DISABLED
+
+
+def _spud_link_first_header_value(value: Any) -> str:
+    return str(value or "").split(",", 1)[0].strip()
+
+
+def _spud_link_forwarded_header_parts(request: Request) -> Dict[str, str]:
+    raw = str(request.headers.get("forwarded") or "").split(",", 1)[0].strip()
+    parts: Dict[str, str] = {}
+    if not raw:
+        return parts
+    for item in raw.split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip().strip('"')
+        if key and value:
+            parts[key] = value
+    return parts
+
+
+def _spud_link_external_request_base_url(request: Optional[Request]) -> str:
+    if request is None:
+        return ""
+    forwarded = _spud_link_forwarded_header_parts(request)
+    scheme = (
+        _spud_link_first_header_value(request.headers.get("x-forwarded-proto"))
+        or forwarded.get("proto")
+        or str(request.url.scheme or "")
+    ).lower()
+    if scheme not in {"http", "https"}:
+        scheme = "https" if str(request.url.scheme or "").lower() == "https" else "http"
+    host = (
+        _spud_link_first_header_value(request.headers.get("x-forwarded-host"))
+        or forwarded.get("host")
+        or str(request.headers.get("host") or "")
+        or str(request.url.netloc or "")
+    ).strip()
+    if not host:
+        return ""
+    port = _spud_link_first_header_value(request.headers.get("x-forwarded-port"))
+    if port and ":" not in host and not ((scheme == "https" and port == "443") or (scheme == "http" and port == "80")):
+        host = f"{host}:{port}"
+    prefix = (
+        _spud_link_first_header_value(request.headers.get("x-forwarded-prefix"))
+        or _spud_link_first_header_value(request.headers.get("x-script-name"))
+        or str(request.scope.get("root_path") or "")
+    ).strip()
+    if prefix:
+        prefix = "/" + prefix.strip("/")
+        if prefix == "/":
+            prefix = ""
+    return f"{scheme}://{host}{prefix}".rstrip("/")
+
+
+def _spud_link_server_url(settings: Dict[str, Any], request: Optional[Request] = None) -> str:
+    public_url = str(settings.get("public_url") or "").strip().rstrip("/")
+    if public_url:
+        return public_url
+    request_url = _spud_link_external_request_base_url(request)
+    if request_url:
+        return request_url
+    return ""
+
+
+def _spud_link_pairing_payload(
+    *,
+    settings: Dict[str, Any],
+    code: str,
+    expires_at: float,
+    request: Optional[Request] = None,
+    default_role: str = SPUD_LINK_MODE_LITTLE_SPUD,
+) -> Dict[str, Any]:
+    role = _normalize_spud_link_mode(default_role, default=SPUD_LINK_MODE_LITTLE_SPUD)
+    if role not in {SPUD_LINK_MODE_SPUDLET, SPUD_LINK_MODE_LITTLE_SPUD}:
+        role = SPUD_LINK_MODE_LITTLE_SPUD
+    supported_roles: List[str] = []
+    if bool(settings.get("allow_little_spuds")):
+        supported_roles.append(SPUD_LINK_MODE_LITTLE_SPUD)
+    if bool(settings.get("allow_spudlets")):
+        supported_roles.append(SPUD_LINK_MODE_SPUDLET)
+    if supported_roles and role not in supported_roles:
+        role = supported_roles[0]
+    server_url = _spud_link_server_url(settings, request=request)
+    payload = {
+        "schema": "tater.spudlink.pair.v1",
+        "hub_url": server_url,
+        "pair_url": f"{server_url}/api/spudlink/pair" if server_url else "",
+        "pairing_code": code,
+        "role": role,
+        "supported_roles": supported_roles,
+        "expires_at": expires_at,
+        "hub_name": str(settings.get("node_name") or _spud_link_local_node_name()),
+        "server_mode": _normalize_spud_link_tater_mode(settings.get("mode")),
+    }
+    return payload
+
+
+def _spud_link_pairing_uri(payload: Dict[str, Any]) -> str:
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    return f"tater-spudlink://pair?data={encoded.rstrip('=')}"
+
+
+def _spud_link_qr_svg_data_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        import qrcode  # type: ignore
+        from qrcode.image.svg import SvgPathImage  # type: ignore
+    except Exception:
+        return ""
+    try:
+        image = qrcode.make(text, image_factory=SvgPathImage, border=2)
+        buffer = io.BytesIO()
+        image.save(buffer)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/svg+xml;base64,{encoded}"
+    except Exception:
+        return ""
+
+
+def _spud_link_token_digest(token: Any) -> str:
+    text = str(token or "").strip()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _spud_link_local_node_name() -> str:
+    configured = str(redis_client.hget(SPUD_LINK_SETTINGS_KEY, "node_name") or "").strip()
+    if configured:
+        return configured
+    try:
+        node = str(os.uname().nodename or "").strip()
+    except Exception:
+        node = ""
+    return node or "Tater"
+
+
+def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
+    raw = redis_client.hgetall(SPUD_LINK_SETTINGS_KEY) or {}
+    mode = _normalize_spud_link_tater_mode(raw.get("mode"))
+    token_value = str(raw.get("node_token") or "").strip()
+    pairing_expires_at = 0.0
+    try:
+        pairing_expires_at = float(raw.get("pairing_expires_at") or 0)
+    except Exception:
+        pairing_expires_at = 0.0
+    settings: Dict[str, Any] = {
+        "mode": mode,
+        "enabled": mode != SPUD_LINK_MODE_DISABLED,
+        "node_name": str(raw.get("node_name") or _spud_link_local_node_name()).strip() or "Tater",
+        "public_url": str(raw.get("public_url") or "").strip(),
+        "pairing_enabled": _as_bool_flag(raw.get("pairing_enabled"), default=False),
+        "allow_spudlets": _as_bool_flag(raw.get("allow_spudlets"), default=True),
+        "allow_little_spuds": _as_bool_flag(raw.get("allow_little_spuds"), default=True),
+        "little_spud_tools_enabled": _as_bool_flag(raw.get("little_spud_tools_enabled"), default=True),
+        "telemetry_enabled": _as_bool_flag(raw.get("telemetry_enabled"), default=True),
+        "request_previews_enabled": _as_bool_flag(raw.get("request_previews_enabled"), default=False),
+        "hub_url": str(raw.get("hub_url") or "").strip(),
+        "node_token_set": bool(token_value),
+        "pairing_code_active": bool(str(raw.get("pairing_code_hash") or "").strip() and pairing_expires_at > time.time()),
+        "pairing_expires_at": pairing_expires_at if pairing_expires_at > time.time() else 0.0,
+    }
+    if include_secret:
+        settings["node_token"] = token_value
+        settings["pairing_code_hash"] = str(raw.get("pairing_code_hash") or "").strip()
+    return settings
+
+
+def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
+    keys = {
+        "spud_link_mode",
+        "spud_link_node_name",
+        "spud_link_public_url",
+        "spud_link_pairing_enabled",
+        "spud_link_allow_spudlets",
+        "spud_link_allow_little_spuds",
+        "spud_link_little_spud_tools_enabled",
+        "spud_link_telemetry_enabled",
+        "spud_link_request_previews_enabled",
+        "spud_link_hub_url",
+        "spud_link_node_token",
+        "clear_spud_link_node_token",
+    }
+    if not any(key in updates for key in keys):
+        return
+    mapping: Dict[str, str] = {}
+    if "spud_link_mode" in updates:
+        mapping["mode"] = _normalize_spud_link_tater_mode(updates.get("spud_link_mode"))
+    if "spud_link_node_name" in updates:
+        mapping["node_name"] = str(updates.get("spud_link_node_name") or "").strip()[:120]
+    if "spud_link_public_url" in updates:
+        mapping["public_url"] = str(updates.get("spud_link_public_url") or "").strip()[:500]
+    if "spud_link_pairing_enabled" in updates:
+        mapping["pairing_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_pairing_enabled"), default=False) else "false"
+        )
+    if "spud_link_allow_spudlets" in updates:
+        mapping["allow_spudlets"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_allow_spudlets"), default=True) else "false"
+        )
+    if "spud_link_allow_little_spuds" in updates:
+        mapping["allow_little_spuds"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_allow_little_spuds"), default=True) else "false"
+        )
+    if "spud_link_little_spud_tools_enabled" in updates:
+        mapping["little_spud_tools_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_little_spud_tools_enabled"), default=True) else "false"
+        )
+    if "spud_link_telemetry_enabled" in updates:
+        mapping["telemetry_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_telemetry_enabled"), default=True) else "false"
+        )
+    if "spud_link_request_previews_enabled" in updates:
+        mapping["request_previews_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_request_previews_enabled"), default=False) else "false"
+        )
+    if "spud_link_hub_url" in updates:
+        mapping["hub_url"] = str(updates.get("spud_link_hub_url") or "").strip()[:500]
+    if bool(updates.get("clear_spud_link_node_token")):
+        redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "node_token")
+    elif "spud_link_node_token" in updates:
+        node_token = str(updates.get("spud_link_node_token") or "").strip()
+        if node_token:
+            mapping["node_token"] = node_token
+    if mapping:
+        redis_client.hset(SPUD_LINK_SETTINGS_KEY, mapping=mapping)
+
+
+def _spud_link_load_nodes() -> List[Dict[str, Any]]:
+    raw = redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    nodes: List[Dict[str, Any]] = []
+    for node_id, raw_value in raw.items():
+        try:
+            row = json.loads(str(raw_value or "{}"))
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        row["id"] = str(row.get("id") or node_id or "").strip()
+        row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+        row["token_set"] = bool(str(row.get("token_hash") or "").strip())
+        row.pop("token_hash", None)
+        nodes.append(row)
+    nodes.sort(key=lambda row: (-float(row.get("last_seen_at") or row.get("created_at") or 0), str(row.get("name") or row.get("id") or "")))
+    return nodes
+
+
+def _spud_link_store_node(node: Dict[str, Any]) -> Dict[str, Any]:
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        node_id = f"spud_{uuid.uuid4().hex[:16]}"
+        node["id"] = node_id
+    redis_client.hset(SPUD_LINK_NODES_KEY, node_id, json.dumps(node, separators=(",", ":"), ensure_ascii=False))
+    redacted = dict(node)
+    redacted["token_set"] = bool(str(redacted.get("token_hash") or "").strip())
+    redacted.pop("token_hash", None)
+    return redacted
+
+
+def _spud_link_request_network_info(request: Request) -> Dict[str, str]:
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    forwarded_host = str(request.headers.get("x-real-ip") or "").strip()
+    client_host = str(getattr(request.client, "host", "") or "").strip()
+    remote_addr = forwarded_for or forwarded_host or client_host
+    user_agent = str(request.headers.get("user-agent") or "").strip()
+    return {
+        "remote_addr": remote_addr[:120],
+        "user_agent": user_agent[:260],
+    }
+
+
+def _spud_link_touch_node_from_request(node: Dict[str, Any], request: Request) -> None:
+    now = time.time()
+    network_info = _spud_link_request_network_info(request)
+    remote_addr = network_info.get("remote_addr") or ""
+    user_agent = network_info.get("user_agent") or ""
+    node["last_seen_at"] = now
+    if remote_addr:
+        node["last_remote_addr"] = remote_addr
+        node.setdefault("first_remote_addr", remote_addr)
+    if user_agent:
+        node["last_user_agent"] = user_agent
+
+
+def _spud_link_sanitize_activity(value: Any, *, allow_previews: bool = False) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    sensitive_markers = {
+        "prompt",
+        "message",
+        "messages",
+        "content",
+        "text",
+        "preview",
+        "request",
+        "response",
+        "raw",
+        "tool_result",
+        "user_message",
+    }
+    clean: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        key_lower = key.lower()
+        if not allow_previews and any(marker in key_lower for marker in sensitive_markers):
+            clean[key] = "[redacted]"
+            continue
+        if raw_value is None or isinstance(raw_value, (bool, int, float, str)):
+            clean[key] = raw_value
+        elif allow_previews:
+            clean[key] = raw_value
+        else:
+            clean[key] = str(raw_value)[:240]
+    return clean
+
+
+def _spud_link_identity_text(value: Any, *, default: str, limit: int = 80) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        text = default
+    return text[: max(1, int(limit or 80))].strip() or default
+
+
+def _spud_link_history_key(identity: Dict[str, str]) -> str:
+    raw = f"{identity.get('user_name') or 'User'}:{identity.get('device_name') or 'Little Spud'}"
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "_", raw).strip("_")[:120]
+    if not token:
+        token = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"tater:little_spud:{token}:history"
+
+
+def _spud_link_active_run_key(identity: Dict[str, str]) -> str:
+    history_key = str(identity.get("history_key") or "").strip()
+    if history_key:
+        return f"{history_key}:active_runs"
+    return f"{_spud_link_history_key(identity)}:active_runs"
+
+
+def _spud_link_identity_from_request(
+    payload: Any,
+    request: Request,
+    node: Dict[str, Any],
+) -> Dict[str, str]:
+    metadata = payload.metadata if isinstance(getattr(payload, "metadata", None), dict) else {}
+    user_name = _spud_link_identity_text(
+        getattr(payload, "user_name", None)
+        or metadata.get("user_name")
+        or metadata.get("username")
+        or request.headers.get("x-spudlink-user")
+        or request.headers.get("x-little-spud-user")
+        or getattr(payload, "user", None),
+        default="User",
+    )
+    device_name = _spud_link_identity_text(
+        getattr(payload, "device_name", None)
+        or metadata.get("device_name")
+        or metadata.get("device")
+        or request.headers.get("x-spudlink-device")
+        or request.headers.get("x-little-spud-device")
+        or node.get("name"),
+        default="Little Spud",
+    )
+    alias_id = f"{user_name}:{device_name}"
+    display_name = f"{user_name} on {device_name}"
+    return {
+        "user_name": user_name,
+        "device_name": device_name,
+        "alias_id": alias_id,
+        "display_name": display_name,
+        "scope": f"user:{alias_id}",
+        "history_key": _spud_link_history_key({"user_name": user_name, "device_name": device_name}),
+    }
+
+
+def _save_little_spud_history(
+    identity: Dict[str, str],
+    *,
+    role: str,
+    content: Any,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    key = str(identity.get("history_key") or "").strip()
+    if not key:
+        return
+    payload = {
+        "id": f"lsmsg_{uuid.uuid4().hex[:16]}",
+        "role": str(role or "assistant"),
+        "platform": "little_spud",
+        "username": str(identity.get("display_name") or identity.get("user_name") or "User"),
+        "user": str(identity.get("user_name") or "User"),
+        "user_id": str(identity.get("alias_id") or identity.get("user_name") or "User"),
+        "device_name": str(identity.get("device_name") or "Little Spud"),
+        "device_id": str(identity.get("device_name") or "Little Spud"),
+        "content": content,
+        "ts": time.time(),
+    }
+    if isinstance(attachments, list) and attachments:
+        payload["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
+    if isinstance(meta, dict) and meta:
+        payload["meta"] = dict(meta)
+    redis_client.rpush(key, json.dumps(payload, ensure_ascii=False))
+    max_store = _read_non_negative_int("tater:max_store", DEFAULT_MAX_STORE)
+    if max_store > 0:
+        redis_client.ltrim(key, -max_store, -1)
+
+
+def _load_little_spud_history(identity: Dict[str, str], *, limit: int = 80) -> List[Dict[str, Any]]:
+    key = str(identity.get("history_key") or "").strip()
+    if not key:
+        return []
+    count = max(1, min(int(limit or 80), 200))
+    rows: List[Dict[str, Any]] = []
+    try:
+        raw_items = redis_client.lrange(key, -count, -1) or []
+    except Exception:
+        return []
+    for raw in raw_items:
+        try:
+            item = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant", "system"}:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False) if content is not None else ""
+        content = str(content or "").strip()
+        if not content:
+            continue
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        attachments = item.get("attachments") if isinstance(item.get("attachments"), list) else []
+        row = {
+            "id": str(item.get("id") or f"lsmsg_{hashlib.sha256((role + content).encode('utf-8', errors='ignore')).hexdigest()[:16]}"),
+            "role": role,
+            "content": content,
+            "createdAt": int(float(item.get("ts") or time.time()) * 1000),
+            "meta": {
+                **meta,
+                "source": "spud_hub_history",
+                "device_name": str(item.get("device_name") or identity.get("device_name") or "Little Spud"),
+            },
+        }
+        if attachments:
+            row["attachments"] = [dict(artifact) for artifact in attachments if isinstance(artifact, dict)]
+        rows.append(
+            row
+        )
+    return rows
+
+
+def _save_little_spud_active_run(identity: Dict[str, str], payload: Dict[str, Any]) -> None:
+    key = _spud_link_active_run_key(identity)
+    if not key:
+        return
+    row = dict(payload or {})
+    run_id = str(row.get("run_id") or "").strip() or f"lsrun_{uuid.uuid4().hex[:16]}"
+    row["run_id"] = run_id
+    row.setdefault("status", "running")
+    row.setdefault("text", "Tater is thinking")
+    row.setdefault("started_at", time.time())
+    row["updated_at"] = time.time()
+    row["identity"] = {
+        "user_name": str(identity.get("user_name") or "User"),
+        "device_name": str(identity.get("device_name") or "Little Spud"),
+        "scope": str(identity.get("scope") or ""),
+    }
+    try:
+        redis_client.hset(key, run_id, json.dumps(row, separators=(",", ":"), ensure_ascii=False))
+        redis_client.expire(key, SPUD_LINK_ACTIVE_RUN_TTL_SECONDS)
+    except Exception:
+        logger.exception("[spudlink] failed saving Little Spud active run")
+
+
+def _load_little_spud_active_runs(identity: Dict[str, str]) -> List[Dict[str, Any]]:
+    key = _spud_link_active_run_key(identity)
+    if not key:
+        return []
+    try:
+        raw_items = redis_client.hgetall(key) or {}
+    except Exception:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for run_id, raw in raw_items.items():
+        try:
+            row = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        if status not in {"queued", "running"}:
+            continue
+        row["run_id"] = str(row.get("run_id") or run_id or "").strip()
+        rows.append(row)
+    rows.sort(key=lambda item: float(item.get("updated_at") or item.get("started_at") or 0), reverse=True)
+    return rows
+
+
+def _load_little_spud_active_run(identity: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    rows = _load_little_spud_active_runs(identity)
+    return rows[0] if rows else None
+
+
+def _clear_little_spud_active_run(identity: Dict[str, str], run_id: str = "") -> None:
+    key = _spud_link_active_run_key(identity)
+    if not key:
+        return
+    try:
+        run_id = str(run_id or "").strip()
+        if run_id:
+            redis_client.hdel(key, run_id)
+        else:
+            redis_client.delete(key)
+    except Exception:
+        pass
+
+
+def _spud_link_public_settings_payload() -> Dict[str, Any]:
+    settings = _load_spud_link_settings(include_secret=False)
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
+    little_spud_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    return {
+        **settings,
+        "roles": {
+            "disabled": "Disabled",
+            "hub": "Spud Hub",
+            "spudlet": "Spudlet",
+        },
+        "client_roles": {
+            "little_spud": "Little Spud",
+            "spudlet": "Spudlet",
+        },
+        "local_status": {
+            "node_name": settings.get("node_name") or _spud_link_local_node_name(),
+            "mode": server_mode,
+            "time": time.time(),
+        },
+        "capabilities": {
+            "server": is_server,
+            "llm": is_server,
+            "hydra": is_server,
+            "tools": little_spud_tools_enabled,
+            "little_spud_clients": is_server and bool(settings.get("allow_little_spuds")),
+            "spudlet_clients": is_server and bool(settings.get("allow_spudlets")),
+        },
+        "linked_nodes": _spud_link_load_nodes(),
+    }
+
+
 def _extract_tater_api_token(request: Request) -> str:
     auth = str(request.headers.get("authorization") or "").strip()
     if auth.lower().startswith("bearer "):
@@ -4595,8 +5224,9 @@ def _openai_chat_completion_response(
     model: str,
     usage: Optional[Dict[str, int]] = None,
     completion_id: str = "",
+    spud_link: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "id": completion_id or f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -4610,6 +5240,9 @@ def _openai_chat_completion_response(
         ],
         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+    if isinstance(spud_link, dict) and spud_link:
+        payload["spud_link"] = spud_link
+    return payload
 
 
 async def _run_tater_api_direct_completion(
@@ -4658,15 +5291,35 @@ async def _run_tater_api_hydra_completion(
     *,
     tools_enabled: bool,
     request: Request,
+    platform: str = "openai_api",
+    origin_override: Optional[Dict[str, Any]] = None,
+    scope_override: Optional[str] = None,
+    platform_preamble: str = "External OpenAI-compatible API request.",
+    context_extra: Optional[Dict[str, Any]] = None,
+    wait_callback: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     user_text, history_messages = _openai_user_text_and_history(messages)
     session_id = str(request.headers.get("x-tater-session") or payload.user or "default").strip() or "default"
-    origin = {
-        "platform": "openai_api",
-        "user": str(payload.user or "api").strip() or "api",
-        "user_id": str(payload.user or "api").strip() or "api",
-        "session_id": session_id,
+    platform_token = str(platform or "openai_api").strip() or "openai_api"
+    if isinstance(origin_override, dict):
+        origin = dict(origin_override)
+        origin.setdefault("platform", platform_token)
+        origin.setdefault("session_id", session_id)
+    else:
+        origin = {
+            "platform": platform_token,
+            "user": str(payload.user or "api").strip() or "api",
+            "user_id": str(payload.user or "api").strip() or "api",
+            "session_id": session_id,
+        }
+    context_payload = {
+        "raw_message": user_text,
+        "openai_api": platform_token == "openai_api",
+        "spud_link": platform_token == "little_spud",
+        "tools_enabled": bool(tools_enabled),
     }
+    if isinstance(context_extra, dict):
+        context_payload.update(context_extra)
 
     verba_registry_module.ensure_verbas_loaded()
     registry = dict(verba_registry_module.get_verba_registry() or {}) if tools_enabled else {}
@@ -4675,16 +5328,17 @@ async def _run_tater_api_hydra_completion(
     async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
         result = await run_hydra_turn(
             llm_client=llm_client,
-            platform="openai_api",
+            platform=platform_token,
             history_messages=history_messages,
             registry=registry,
             enabled_predicate=(get_verba_enabled if tools_enabled else None),
-            context={"raw_message": user_text, "openai_api": True, "tools_enabled": bool(tools_enabled)},
+            context=context_payload,
             user_text=user_text,
-            scope=f"session:{session_id}",
+            scope=scope_override if scope_override is not None else f"session:{session_id}",
             origin=origin,
             redis_client=redis_client,
-            platform_preamble="External OpenAI-compatible API request.",
+            platform_preamble=platform_preamble,
+            wait_callback=wait_callback,
         )
         try:
             perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
@@ -4695,12 +5349,38 @@ async def _run_tater_api_hydra_completion(
             logger.exception("[tater-api] failed saving Hydra LLM speed stats")
 
     content = ""
+    spud_link_payload: Dict[str, Any] = {}
     if isinstance(result, dict):
         text = result.get("text")
         if isinstance(text, str):
             content = text
+        artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+        response_artifacts: List[Dict[str, Any]] = []
+        for item in artifacts:
+            normalized_item = _normalize_plugin_response_item(item)
+            if not isinstance(normalized_item, dict):
+                continue
+            media_type = str(normalized_item.get("type") or "").strip().lower()
+            mimetype_value = str(normalized_item.get("mimetype") or normalized_item.get("mime_type") or "").strip()
+            file_id = str(normalized_item.get("id") or normalized_item.get("file_id") or "").strip()
+            response_item = {
+                "type": media_type,
+                "name": str(normalized_item.get("name") or normalized_item.get("filename") or "attachment").strip() or "attachment",
+                "mimetype": mimetype_value,
+                "size": normalized_item.get("size"),
+            }
+            if file_id:
+                response_item["id"] = file_id
+                response_item["url"] = f"/api/spudlink/v1/files/{file_id}?mimetype={quote(mimetype_value or 'application/octet-stream')}"
+            for key in ("url", "previewUrl", "dataUrl"):
+                value = str(normalized_item.get(key) or "").strip()
+                if value and key not in response_item:
+                    response_item[key] = value
+            response_artifacts.append(response_item)
+        if response_artifacts:
+            spud_link_payload["artifacts"] = response_artifacts
+            spud_link_payload["artifact_count"] = len(response_artifacts)
         if not content.strip():
-            artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
             content_parts: List[str] = []
             for item in artifacts:
                 if isinstance(item, str):
@@ -4715,7 +5395,176 @@ async def _run_tater_api_hydra_completion(
         content=content,
         model="tater/hydra",
         usage=_openai_usage_from_perf(perf),
+        spud_link=spud_link_payload,
     )
+
+
+async def _run_spud_link_native_llm_completion(
+    payload: Any,
+    messages: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    generation_kwargs: Dict[str, Any] = {"activity": "spud_link_model"}
+    if payload.max_tokens is not None:
+        try:
+            generation_kwargs["max_tokens"] = max(1, int(payload.max_tokens))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_tokens must be a positive integer.")
+    if payload.temperature is not None:
+        generation_kwargs["temperature"] = payload.temperature
+    if payload.top_p is not None:
+        generation_kwargs["top_p"] = payload.top_p
+    if payload.stop is not None:
+        generation_kwargs["stop"] = payload.stop
+
+    perf: Dict[str, Any] = {}
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        result = await llm_client.chat(messages, stream=False, **generation_kwargs)
+        try:
+            perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
+            if isinstance(perf, dict):
+                perf["updated_at"] = time.time()
+                _save_last_llm_stats(perf)
+        except Exception:
+            logger.exception("[spudlink] failed saving native model LLM speed stats")
+
+    response_message = result.get("message") if isinstance(result, dict) else {}
+    content = ""
+    role = "assistant"
+    if isinstance(response_message, dict):
+        content = str(response_message.get("content") or "")
+        role = str(response_message.get("role") or "assistant").strip() or "assistant"
+    model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
+    return {
+        "ok": True,
+        "model": model,
+        "message": {"role": role, "content": content},
+        "usage": _openai_usage_from_perf(perf),
+        "stats": perf if isinstance(perf, dict) else {},
+    }
+
+
+def _spud_link_hydra_native_payload_from_result(result: Any, perf: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    content = ""
+    artifacts = result.get("artifacts") if isinstance(result, dict) and isinstance(result.get("artifacts"), list) else []
+    if isinstance(result, dict):
+        for key in ("text", "answer", "message", "content", "response", "output"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                content = value.strip()
+                break
+        if not content:
+            content_parts: List[str] = []
+            for item in artifacts:
+                if isinstance(item, str):
+                    content_parts.append(item)
+                elif isinstance(item, dict):
+                    summary = item.get("summary_for_user") or item.get("summary") or item.get("text") or item.get("message")
+                    if summary:
+                        content_parts.append(str(summary))
+            content = "\n".join(part for part in content_parts if part).strip()
+
+    response_artifacts: List[Dict[str, Any]] = []
+    for item in artifacts:
+        normalized_item = _normalize_plugin_response_item(item)
+        if not isinstance(normalized_item, dict):
+            continue
+        media_type = str(normalized_item.get("type") or "").strip().lower()
+        mimetype_value = str(normalized_item.get("mimetype") or normalized_item.get("mime_type") or "").strip()
+        file_id = str(normalized_item.get("id") or normalized_item.get("file_id") or "").strip()
+        response_item = {
+            "type": media_type,
+            "name": str(normalized_item.get("name") or normalized_item.get("filename") or "attachment").strip() or "attachment",
+            "mimetype": mimetype_value,
+            "size": normalized_item.get("size"),
+        }
+        if file_id:
+            response_item["id"] = file_id
+            response_item["url"] = f"/api/spudlink/v1/files/{file_id}?mimetype={quote(mimetype_value or 'application/octet-stream')}"
+        for key in ("url", "previewUrl", "dataUrl"):
+            value = str(normalized_item.get(key) or "").strip()
+            if value and key not in response_item:
+                response_item[key] = value
+        response_artifacts.append(response_item)
+
+    return {
+        "content": content,
+        "artifacts": response_artifacts,
+        "artifact_count": len(response_artifacts),
+        "usage": _openai_usage_from_perf(perf),
+    }
+
+
+async def _run_spud_link_native_hydra_completion(
+    payload: Any,
+    messages: List[Dict[str, str]],
+    *,
+    tools_enabled: bool,
+    request: Request,
+    platform: str = "little_spud",
+    origin_override: Optional[Dict[str, Any]] = None,
+    scope_override: Optional[str] = None,
+    platform_preamble: str = "Little Spud native Tater client request.",
+    context_extra: Optional[Dict[str, Any]] = None,
+    wait_callback: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    user_text, history_messages = _openai_user_text_and_history(messages)
+    session_id = str(request.headers.get("x-tater-session") or getattr(payload, "user", None) or "default").strip() or "default"
+    platform_token = str(platform or "little_spud").strip() or "little_spud"
+    if isinstance(origin_override, dict):
+        origin = dict(origin_override)
+        origin.setdefault("platform", platform_token)
+        origin.setdefault("session_id", session_id)
+    else:
+        origin = {
+            "platform": platform_token,
+            "user": str(getattr(payload, "user", None) or "little_spud").strip() or "little_spud",
+            "user_id": str(getattr(payload, "user", None) or "little_spud").strip() or "little_spud",
+            "session_id": session_id,
+        }
+    context_payload = {
+        "raw_message": user_text,
+        "spud_link": True,
+        "native_spud_link": True,
+        "tools_enabled": bool(tools_enabled),
+    }
+    if isinstance(context_extra, dict):
+        context_payload.update(context_extra)
+
+    verba_registry_module.ensure_verbas_loaded()
+    registry = dict(verba_registry_module.get_verba_registry() or {}) if tools_enabled else {}
+
+    perf: Dict[str, Any] = {}
+    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+        result = await run_hydra_turn(
+            llm_client=llm_client,
+            platform=platform_token,
+            history_messages=history_messages,
+            registry=registry,
+            enabled_predicate=(get_verba_enabled if tools_enabled else None),
+            context=context_payload,
+            user_text=user_text,
+            scope=scope_override if scope_override is not None else f"session:{session_id}",
+            origin=origin,
+            redis_client=redis_client,
+            platform_preamble=platform_preamble,
+            wait_callback=wait_callback,
+        )
+        try:
+            perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
+            if isinstance(perf, dict):
+                perf["updated_at"] = time.time()
+                _save_last_llm_stats(perf)
+        except Exception:
+            logger.exception("[spudlink] failed saving native Hydra LLM speed stats")
+
+    native_payload = _spud_link_hydra_native_payload_from_result(result, perf)
+    if not str(native_payload.get("content") or "").strip() and not native_payload.get("artifacts"):
+        logger.warning(
+            "[spudlink] native Hydra returned empty payload status=%s keys=%s",
+            str(result.get("status") or "") if isinstance(result, dict) else type(result).__name__,
+            sorted(result.keys()) if isinstance(result, dict) else [],
+        )
+    return native_payload
 
 
 async def _run_tater_api_chat_completion(
@@ -4738,7 +5587,7 @@ async def _run_tater_api_chat_completion(
     return await _run_tater_api_direct_completion(payload, messages)
 
 
-async def _stream_openai_chat_completion(completion: Dict[str, Any]):
+async def _stream_openai_chat_completion(completion: Dict[str, Any], *, include_done: bool = True):
     completion_id = str(completion.get("id") or f"chatcmpl-{uuid.uuid4().hex}")
     created = int(completion.get("created") or time.time())
     model = str(completion.get("model") or "tater/base")
@@ -4770,7 +5619,73 @@ async def _stream_openai_chat_completion(completion: Dict[str, Any]):
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
     yield f"data: {json.dumps(final, separators=(',', ':'))}\n\n"
-    yield "data: [DONE]\n\n"
+    if include_done:
+        yield "data: [DONE]\n\n"
+
+
+def _extract_spud_link_token(request: Request) -> str:
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(request.headers.get("x-spudlink-token") or request.query_params.get("token") or "").strip()
+
+
+def _find_spud_link_node_by_token(token: str) -> Dict[str, Any]:
+    digest = _spud_link_token_digest(token)
+    if not digest:
+        raise HTTPException(status_code=401, detail="Missing Spud Link token.")
+    raw = redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    for node_id, raw_value in raw.items():
+        try:
+            row = json.loads(str(raw_value or "{}"))
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if hmac.compare_digest(str(row.get("token_hash") or ""), digest):
+            row["id"] = str(row.get("id") or node_id or "").strip()
+            row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+            return row
+    raise HTTPException(status_code=401, detail="Invalid Spud Link token.")
+
+
+def _require_spud_link_hub_enabled() -> Dict[str, Any]:
+    settings = _load_spud_link_settings(include_secret=True)
+    if _normalize_spud_link_mode(settings.get("mode")) != SPUD_LINK_MODE_HUB:
+        raise HTTPException(status_code=404, detail="Spud Hub is not enabled.")
+    return settings
+
+
+def _require_spud_link_server_enabled() -> Dict[str, Any]:
+    settings = _load_spud_link_settings(include_secret=True)
+    if _normalize_spud_link_tater_mode(settings.get("mode")) not in SPUD_LINK_SERVER_MODE_CHOICES:
+        raise HTTPException(status_code=404, detail="Spud Link server is not enabled.")
+    return settings
+
+
+def _require_spud_link_node_request(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    settings = _require_spud_link_server_enabled()
+    node = _find_spud_link_node_by_token(_extract_spud_link_token(request))
+    return settings, node
+
+
+def _spud_link_node_response(node: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(node)
+    row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    row["token_set"] = bool(str(row.get("token_hash") or "").strip())
+    row.pop("token_hash", None)
+    return row
+
+
+def _spud_link_mode_label(mode: Any) -> str:
+    token = _normalize_spud_link_mode(mode)
+    if token == SPUD_LINK_MODE_HUB:
+        return "Spud Hub"
+    if token == SPUD_LINK_MODE_LITTLE_SPUD:
+        return "Little Spud"
+    if token == SPUD_LINK_MODE_SPUDLET:
+        return "Spudlet"
+    return "Disabled"
 
 
 def _save_chat_message(role: str, username: str, content: Any) -> None:
@@ -6314,6 +7229,58 @@ class OpenAIChatCompletionRequest(BaseModel):
     stop: Optional[Any] = None
     stream: Optional[bool] = None
     user: Optional[str] = None
+    user_name: Optional[str] = None
+    device_name: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudLinkTaterChatRequest(BaseModel):
+    message: Optional[Any] = None
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    user: Optional[str] = None
+    user_name: Optional[str] = None
+    device_name: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudLinkPairRequest(BaseModel):
+    pairing_code: str = Field(min_length=1)
+    role: Optional[str] = None
+    node_name: Optional[str] = None
+    public_url: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudLinkConnectRequest(BaseModel):
+    hub_url: str = Field(min_length=1)
+    pairing_code: str = Field(min_length=1)
+    role: Optional[str] = None
+    node_name: Optional[str] = None
+    public_url: Optional[str] = None
+
+
+class SpudLinkHeartbeatRequest(BaseModel):
+    node_name: Optional[str] = None
+    public_url: Optional[str] = None
+    mode: Optional[str] = None
+    version: Optional[str] = None
+    stats: Dict[str, Any] = Field(default_factory=dict)
+    activity: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudLinkTtsRequest(BaseModel):
+    text: Optional[str] = None
+
+
+class SpudLinkSttRequest(BaseModel):
+    audio_base64: Optional[str] = None
+    content_type: Optional[str] = None
+    language: Optional[str] = None
+
+
+class SpudLinkRevokeNodeRequest(BaseModel):
+    node_id: Optional[str] = None
 
 
 class ShopItemRequest(BaseModel):
@@ -6558,6 +7525,18 @@ class AppSettingsRequest(BaseModel):
     clear_tater_api_key: Optional[bool] = None
     tater_api_mode: Optional[str] = None
     tater_api_hydra_tools_enabled: Optional[bool] = None
+    spud_link_mode: Optional[str] = None
+    spud_link_node_name: Optional[str] = None
+    spud_link_public_url: Optional[str] = None
+    spud_link_pairing_enabled: Optional[bool] = None
+    spud_link_allow_spudlets: Optional[bool] = None
+    spud_link_allow_little_spuds: Optional[bool] = None
+    spud_link_little_spud_tools_enabled: Optional[bool] = None
+    spud_link_telemetry_enabled: Optional[bool] = None
+    spud_link_request_previews_enabled: Optional[bool] = None
+    spud_link_hub_url: Optional[str] = None
+    spud_link_node_token: Optional[str] = None
+    clear_spud_link_node_token: Optional[bool] = None
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
@@ -6649,6 +7628,53 @@ class WebUiAuthLoginRequest(BaseModel):
 
 
 app = FastAPI(title="TaterOS", version="0.2.0")
+
+
+_SPUD_LINK_EXTERNAL_API_PATHS = {
+    "/api/spudlink/status",
+    "/api/spudlink/pair",
+    "/api/spudlink/heartbeat",
+}
+_SPUD_LINK_EXTERNAL_API_PREFIXES = (
+    "/api/spudlink/v1/",
+)
+
+
+def _is_spud_link_path(path: str) -> bool:
+    return path == "/api/spudlink" or path.startswith("/api/spudlink/")
+
+
+def _is_spud_link_external_api_path(path: str) -> bool:
+    clean_path = path.rstrip("/") or "/"
+    if clean_path in _SPUD_LINK_EXTERNAL_API_PATHS:
+        return True
+    return any(clean_path.startswith(prefix) for prefix in _SPUD_LINK_EXTERNAL_API_PREFIXES)
+
+
+@app.middleware("http")
+async def _spud_link_cors_middleware(request: Request, call_next: Callable[[Request], Any]) -> Response:
+    if not _is_spud_link_path(str(request.url.path or "")):
+        return await call_next(request)
+
+    if request.method.upper() == "OPTIONS":
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+
+    origin = str(request.headers.get("origin") or "").strip()
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = str(
+        request.headers.get("access-control-request-headers")
+        or "authorization, content-type, accept, x-spudlink-device, x-spudlink-token, x-spudlink-user"
+    )
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    response.headers["Access-Control-Max-Age"] = "600"
+    return response
+
+
 esphome_home_module.include_routes(app)
 
 STATIC_DIR = Path(__file__).resolve().parent / "tateros_static"
@@ -6750,6 +7776,10 @@ def index() -> FileResponse:
 @app.middleware("http")
 async def _webui_auth_middleware(request: Request, call_next):
     path = str(request.url.path or "")
+    if request.method.upper() == "OPTIONS" and _is_spud_link_path(path):
+        return await call_next(request)
+    if _is_spud_link_external_api_path(path):
+        return await call_next(request)
     if path.startswith("/api/speech/tts/runtime/"):
         return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
@@ -6861,6 +7891,7 @@ _RUNTIME_PLATFORM_LABELS: Dict[str, str] = {
     "matrix": "Matrix",
     "homeassistant": "Home Assistant",
     "voice_core": "Voice Core",
+    "little_spud": "Little Spud",
     "homekit": "HomeKit",
     "xbmc": "XBMC",
     "automation": "Automation",
@@ -10505,6 +11536,1145 @@ def unload_runtime_local_llm(payload: LocalLlmUnloadRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc) or "Failed to unload local model.") from exc
 
 
+async def _spud_link_follow_up_decision(assistant_content: str) -> Dict[str, Any]:
+    text = str(assistant_content or "").strip()
+    payload: Dict[str, Any] = {
+        "enabled": False,
+        "reopen_mic": False,
+        "source": "disabled",
+    }
+    if not text:
+        return payload
+    try:
+        from tater_voice import voice_pipeline
+
+        if not bool(voice_pipeline._continued_chat_enabled()):
+            return payload
+        reopen_mic = bool(await voice_pipeline._response_is_followup_question(text))
+        return {
+            "enabled": True,
+            "reopen_mic": reopen_mic,
+            "source": "ai_classifier",
+        }
+    except Exception as exc:
+        logger.warning("[spudlink] follow-up classifier failed: %s", exc)
+        return {
+            "enabled": True,
+            "reopen_mic": False,
+            "source": "ai_classifier_error",
+            "error": str(exc)[:240],
+        }
+
+
+def _spud_link_tool_notice_payload(
+    func_name: str,
+    plugin_obj: Any,
+    wait_text: str = "",
+    wait_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    progress_payload = dict(wait_payload) if isinstance(wait_payload, dict) else {}
+    text = str(wait_text or progress_payload.get("text") or "").strip()
+    if not text:
+        text = "I'm working on that now."
+    tool_name = str(func_name or progress_payload.get("tool") or "").strip()
+    display_name = ""
+    if plugin_obj is None:
+        display_name = f"kernel::{tool_name}" if tool_name else ""
+    else:
+        display_name = (
+            getattr(plugin_obj, "verba_name", None)
+            or getattr(plugin_obj, "pretty_name", None)
+            or getattr(plugin_obj, "name", None)
+            or tool_name
+        )
+    progress_payload["text"] = text
+    if tool_name:
+        progress_payload.setdefault("tool", tool_name)
+    return {
+        "type": "tool",
+        "status": "running",
+        "phase": str(progress_payload.get("phase") or "tool_start"),
+        "tool": tool_name,
+        "display_name": str(display_name or tool_name or "").strip(),
+        "text": text,
+        "wait_text": text,
+        "wait_payload": progress_payload,
+        "created_at": time.time(),
+    }
+
+
+def _normalize_spud_link_tater_chat_messages(payload: SpudLinkTaterChatRequest) -> List[Dict[str, str]]:
+    messages: List[Dict[str, str]] = []
+    history = payload.history if isinstance(payload.history, list) else []
+    for raw_message in history[-80:]:
+        if not isinstance(raw_message, dict):
+            continue
+        role = str(raw_message.get("role") or "").strip().lower()
+        if role not in {"system", "user", "assistant", "tool"}:
+            continue
+        content = _openai_content_to_text(
+            raw_message.get("content")
+            if "content" in raw_message
+            else raw_message.get("text")
+        ).strip()
+        if content:
+            messages.append({"role": role, "content": content})
+
+    message_text = _openai_content_to_text(payload.message).strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="message is required.")
+    messages.append({"role": "user", "content": message_text})
+    return messages
+
+
+async def _stream_spud_link_tater_completion(
+    *,
+    payload: OpenAIChatCompletionRequest,
+    messages: List[Dict[str, str]],
+    tools_enabled: bool,
+    request: Request,
+    platform: str,
+    origin_override: Optional[Dict[str, Any]],
+    scope_override: Optional[str],
+    platform_preamble: str,
+    context_extra: Optional[Dict[str, Any]],
+    little_spud_identity: Dict[str, str],
+):
+    event_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+    run_id = f"lsrun_{uuid.uuid4().hex[:16]}"
+    tool_notices: List[Dict[str, Any]] = []
+
+    async def _on_tool(
+        func_name: str,
+        plugin_obj: Any,
+        wait_text: str = "",
+        wait_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        notice = _spud_link_tool_notice_payload(
+            func_name,
+            plugin_obj,
+            wait_text=wait_text,
+            wait_payload=wait_payload,
+        )
+        notice["run_id"] = run_id
+        tool_notices.append(dict(notice))
+        _save_little_spud_active_run(
+            little_spud_identity,
+            {
+                "run_id": run_id,
+                "status": "running",
+                "phase": str(notice.get("phase") or "tool_start"),
+                "tool": str(notice.get("tool") or ""),
+                "display_name": str(notice.get("display_name") or ""),
+                "text": str(notice.get("text") or "Tater is thinking"),
+                "wait_payload": notice.get("wait_payload") if isinstance(notice.get("wait_payload"), dict) else {},
+            },
+        )
+        _save_little_spud_history(
+            little_spud_identity,
+            role="assistant",
+            content=str(notice.get("text") or ""),
+            meta={
+                "kind": "tool_notice",
+                "tool": str(notice.get("display_name") or notice.get("tool") or "").strip(),
+                "run_id": run_id,
+                "phase": str(notice.get("phase") or "tool_start"),
+            },
+        )
+        await event_queue.put({"type": "tool", "payload": notice})
+
+    async def _runner() -> None:
+        try:
+            started_payload = {
+                "type": "run_start",
+                "run_id": run_id,
+                "status": "running",
+                "text": "Tater is thinking",
+                "created_at": time.time(),
+            }
+            _save_little_spud_active_run(
+                little_spud_identity,
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "phase": "thinking",
+                    "text": "Tater is thinking",
+                },
+            )
+            await event_queue.put({"type": "run", "payload": started_payload})
+            completion = await _run_spud_link_native_hydra_completion(
+                payload,
+                messages,
+                tools_enabled=tools_enabled,
+                request=request,
+                platform=platform,
+                origin_override=origin_override,
+                scope_override=scope_override,
+                platform_preamble=platform_preamble,
+                context_extra=context_extra,
+                wait_callback=_on_tool,
+            )
+            assistant_content = str(completion.get("content") or "").strip() if isinstance(completion, dict) else ""
+            spud_link_artifacts = (
+                completion.get("artifacts")
+                if isinstance(completion, dict) and isinstance(completion.get("artifacts"), list)
+                else []
+            )
+            if assistant_content:
+                _save_little_spud_history(
+                    little_spud_identity,
+                    role="assistant",
+                    content=assistant_content,
+                    attachments=[dict(item) for item in spud_link_artifacts if isinstance(item, dict)],
+                )
+                completion["follow_up"] = await _spud_link_follow_up_decision(assistant_content)
+            _clear_little_spud_active_run(little_spud_identity, run_id=run_id)
+            await event_queue.put({"type": "completion", "completion": completion})
+        except Exception as exc:
+            logger.exception("[spudlink] native streamed Hydra completion failed")
+            _clear_little_spud_active_run(little_spud_identity, run_id=run_id)
+            _save_little_spud_history(little_spud_identity, role="system", content=f"Request failed: {str(exc) or 'Hydra request failed.'}")
+            await event_queue.put(
+                {
+                    "type": "error",
+                    "payload": {
+                        "type": "error",
+                        "run_id": run_id,
+                        "message": str(exc) or "Hydra request failed.",
+                    },
+                }
+            )
+
+    def _observe_runner_result(done_task: asyncio.Task) -> None:
+        try:
+            done_task.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    task = asyncio.create_task(_runner())
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if task.done() and event_queue.empty():
+                    break
+                yield _sse("tater.ping", {"type": "ping", "run_id": run_id, "ts": time.time()})
+                continue
+
+            event_type = str(event.get("type") or "").strip()
+            if event_type == "run":
+                event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                yield _sse("tater.run", event_payload)
+                continue
+            if event_type == "tool":
+                event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                yield _sse("tater.tool", event_payload)
+                continue
+            if event_type == "error":
+                event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                yield _sse("tater.error", event_payload)
+                yield _sse("tater.done", {"type": "done", "run_id": run_id, "ok": False})
+                yield "data: [DONE]\n\n"
+                break
+            if event_type == "completion":
+                completion = event.get("completion") if isinstance(event.get("completion"), dict) else {}
+                content = str(completion.get("content") or "")
+                artifacts = completion.get("artifacts") if isinstance(completion.get("artifacts"), list) else []
+                follow_up = completion.get("follow_up") if isinstance(completion.get("follow_up"), dict) else {}
+                if not content.strip() and not artifacts:
+                    yield _sse(
+                        "tater.error",
+                        {
+                            "type": "error",
+                            "run_id": run_id,
+                            "message": "Tater returned no message content.",
+                        },
+                    )
+                    yield _sse("tater.done", {"type": "done", "run_id": run_id, "ok": False})
+                    yield "data: [DONE]\n\n"
+                    break
+                yield _sse(
+                    "tater.message",
+                    {
+                        "type": "message",
+                        "run_id": run_id,
+                        "role": "assistant",
+                        "content": content,
+                        "tool_notices": tool_notices[-12:],
+                    },
+                )
+                if artifacts:
+                    yield _sse(
+                        "tater.artifacts",
+                        {
+                            "type": "artifacts",
+                            "run_id": run_id,
+                            "artifacts": artifacts,
+                        },
+                    )
+                if follow_up:
+                    yield _sse(
+                        "tater.follow_up",
+                        {
+                            "type": "follow_up",
+                            "run_id": run_id,
+                            "follow_up": follow_up,
+                        },
+                    )
+                yield _sse("tater.done", {"type": "done", "run_id": run_id, "ok": True})
+                yield "data: [DONE]\n\n"
+                break
+    finally:
+        if not task.done():
+            task.add_done_callback(_observe_runner_result)
+
+
+@app.get("/api/spudlink/status")
+def spud_link_status() -> Dict[str, Any]:
+    return {"ok": True, "spud_link": _spud_link_public_settings_payload()}
+
+
+@app.post("/api/spudlink/pairing-code")
+def create_spud_link_pairing_code(request: Request) -> Dict[str, Any]:
+    settings = _require_spud_link_server_enabled()
+    if not bool(settings.get("pairing_enabled")):
+        raise HTTPException(status_code=400, detail="Enable Spud Link pairing before creating a pairing code.")
+    code = f"spud-{secrets.token_urlsafe(18)}"
+    expires_at = time.time() + SPUD_LINK_PAIRING_TTL_SECONDS
+    redis_client.hset(
+        SPUD_LINK_SETTINGS_KEY,
+        mapping={
+            "pairing_code_hash": _spud_link_token_digest(code),
+            "pairing_expires_at": str(float(expires_at)),
+        },
+    )
+    pairing_payload = _spud_link_pairing_payload(settings=settings, code=code, expires_at=expires_at, request=request)
+    pairing_uri = _spud_link_pairing_uri(pairing_payload)
+    return {
+        "ok": True,
+        "pairing_code": code,
+        "manual_code": code,
+        "pairing_payload": pairing_payload,
+        "pairing_payload_text": json.dumps(pairing_payload, separators=(",", ":"), ensure_ascii=False),
+        "pairing_uri": pairing_uri,
+        "pairing_qr_svg": _spud_link_qr_svg_data_url(pairing_uri),
+        "expires_at": expires_at,
+        "expires_in_seconds": SPUD_LINK_PAIRING_TTL_SECONDS,
+    }
+
+
+@app.post("/api/spudlink/pair")
+def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[str, Any]:
+    settings = _require_spud_link_server_enabled()
+    if not bool(settings.get("pairing_enabled")):
+        raise HTTPException(status_code=403, detail="Spud Link pairing is disabled.")
+    expected_hash = str(settings.get("pairing_code_hash") or "").strip()
+    expires_at = float(settings.get("pairing_expires_at") or 0)
+    if not expected_hash or expires_at <= time.time():
+        raise HTTPException(status_code=400, detail="Spud Link pairing code is expired or missing.")
+    supplied_hash = _spud_link_token_digest(payload.pairing_code)
+    if not hmac.compare_digest(expected_hash, supplied_hash):
+        raise HTTPException(status_code=401, detail="Invalid Spud Link pairing code.")
+
+    role = _normalize_spud_link_mode(payload.role, default=SPUD_LINK_MODE_SPUDLET)
+    if role == SPUD_LINK_MODE_HUB:
+        raise HTTPException(status_code=400, detail="A linked node cannot pair as another Spud Link server.")
+    if role == SPUD_LINK_MODE_DISABLED:
+        role = SPUD_LINK_MODE_SPUDLET
+    if role == SPUD_LINK_MODE_SPUDLET and not bool(settings.get("allow_spudlets")):
+        raise HTTPException(status_code=403, detail="Spudlets are not allowed by this Spud Link server.")
+    if role == SPUD_LINK_MODE_LITTLE_SPUD and not bool(settings.get("allow_little_spuds")):
+        raise HTTPException(status_code=403, detail="Little Spuds are not allowed by this Spud Link server.")
+
+    node_token = f"spudlink-{secrets.token_urlsafe(32)}"
+    now = time.time()
+    node = {
+        "id": f"spud_{uuid.uuid4().hex[:16]}",
+        "name": str(payload.node_name or _spud_link_mode_label(role)).strip()[:120] or _spud_link_mode_label(role),
+        "role": role,
+        "role_label": _spud_link_mode_label(role),
+        "public_url": str(payload.public_url or "").strip()[:500],
+        "created_at": now,
+        "last_seen_at": now,
+        "token_hash": _spud_link_token_digest(node_token),
+        "metadata": payload.metadata if isinstance(payload.metadata, dict) else {},
+        "stats": {},
+        "activity": {},
+    }
+    _spud_link_touch_node_from_request(node, request)
+    stored = _spud_link_store_node(node)
+    redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "pairing_code_hash", "pairing_expires_at")
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
+    hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    server_payload = {
+        "name": settings.get("node_name") or _spud_link_local_node_name(),
+        "mode": server_mode,
+        "tools_enabled": hydra_tools_enabled,
+        "capabilities": {
+            "llm": is_server,
+            "hydra": is_server,
+            "tools": hydra_tools_enabled,
+        },
+    }
+    return {
+        "ok": True,
+        "node": stored,
+        "node_token": node_token,
+        "hub": server_payload,
+        "server": server_payload,
+    }
+
+
+@app.post("/api/spudlink/connect")
+def connect_to_spud_hub(payload: SpudLinkConnectRequest) -> Dict[str, Any]:
+    hub_url = str(payload.hub_url or "").strip().rstrip("/")
+    if not hub_url:
+        raise HTTPException(status_code=400, detail="Spud Link server URL is required.")
+    if "://" not in hub_url:
+        hub_url = f"http://{hub_url}"
+    parsed = urlparse(hub_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Spud Link server URL must be an http(s) URL.")
+    role = _normalize_spud_link_tater_mode(payload.role, default=SPUD_LINK_MODE_SPUDLET)
+    if role in {SPUD_LINK_MODE_DISABLED, SPUD_LINK_MODE_HUB}:
+        role = SPUD_LINK_MODE_SPUDLET
+    node_name = str(payload.node_name or _spud_link_local_node_name()).strip()[:120] or "Tater"
+    public_url = str(payload.public_url or "").strip()[:500]
+    body = {
+        "pairing_code": str(payload.pairing_code or "").strip(),
+        "role": role,
+        "node_name": node_name,
+        "public_url": public_url,
+        "metadata": {
+            "client": "tater-spudlet",
+            "connected_at": time.time(),
+        },
+    }
+    data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        f"{hub_url}/api/spudlink/pair",
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        with contextlib.suppress(Exception):
+            payload_text = exc.read().decode("utf-8", errors="ignore")
+            parsed_error = json.loads(payload_text)
+            if isinstance(parsed_error, dict):
+                detail = str(parsed_error.get("detail") or "")
+        raise HTTPException(status_code=exc.code or 502, detail=detail or "Spud Link server rejected pairing.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach Spud Link server: {exc}") from exc
+    try:
+        result = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Spud Link server returned an invalid pairing response.") from exc
+    if not isinstance(result, dict) or not result.get("node_token"):
+        raise HTTPException(status_code=502, detail="Spud Link server did not return a node token.")
+    node_token = str(result.get("node_token") or "").strip()
+    redis_client.hset(
+        SPUD_LINK_SETTINGS_KEY,
+        mapping={
+            "mode": role,
+            "node_name": node_name,
+            "public_url": public_url,
+            "hub_url": hub_url,
+            "node_token": node_token,
+        },
+    )
+    return {
+        "ok": True,
+        "mode": role,
+        "mode_label": _spud_link_mode_label(role),
+        "hub_url": hub_url,
+        "hub": result.get("hub") if isinstance(result.get("hub"), dict) else {},
+        "server": result.get("server") if isinstance(result.get("server"), dict) else result.get("hub") if isinstance(result.get("hub"), dict) else {},
+        "node": result.get("node") if isinstance(result.get("node"), dict) else {},
+        "node_token_set": True,
+    }
+
+
+@app.post("/api/spudlink/revoke-node")
+def revoke_spud_link_node(payload: SpudLinkRevokeNodeRequest) -> Dict[str, Any]:
+    node_id = str(payload.node_id or "").strip()
+    if not node_id:
+        raise HTTPException(status_code=400, detail="Spud Link node id is required.")
+    removed = int(redis_client.hdel(SPUD_LINK_NODES_KEY, node_id) or 0)
+    if removed <= 0:
+        raise HTTPException(status_code=404, detail="Linked Spud was not found.")
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "linked_nodes": _spud_link_load_nodes(),
+    }
+
+
+@app.post("/api/spudlink/heartbeat")
+def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> Dict[str, Any]:
+    settings, node = _require_spud_link_node_request(request)
+    if bool(settings.get("telemetry_enabled")):
+        node["stats"] = payload.stats if isinstance(payload.stats, dict) else {}
+        node["activity"] = _spud_link_sanitize_activity(
+            payload.activity,
+            allow_previews=bool(settings.get("request_previews_enabled")),
+        )
+    node["name"] = str(payload.node_name or node.get("name") or _spud_link_mode_label(node.get("role"))).strip()[:120]
+    node["public_url"] = str(payload.public_url or node.get("public_url") or "").strip()[:500]
+    node["remote_mode"] = _normalize_spud_link_mode(payload.mode, default=node.get("role"))
+    node["version"] = str(payload.version or node.get("version") or "").strip()[:80]
+    _spud_link_touch_node_from_request(node, request)
+    stored = _spud_link_store_node(node)
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
+    hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    server_payload = {
+        "name": settings.get("node_name") or _spud_link_local_node_name(),
+        "mode": server_mode,
+        "telemetry_enabled": bool(settings.get("telemetry_enabled")),
+        "request_previews_enabled": bool(settings.get("request_previews_enabled")),
+        "little_spud_tools_enabled": hydra_tools_enabled,
+        "capabilities": {
+            "llm": is_server,
+            "hydra": is_server,
+            "tools": hydra_tools_enabled,
+        },
+    }
+    return {
+        "ok": True,
+        "node": stored,
+        "hub": server_payload,
+        "server": server_payload,
+    }
+
+
+@app.get("/api/spudlink/v1/history")
+def spud_link_history(request: Request, limit: int = 80) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    identity_payload = type(
+        "SpudLinkHistoryIdentityPayload",
+        (),
+        {
+            "metadata": {},
+            "user_name": request.headers.get("x-spudlink-user"),
+            "device_name": request.headers.get("x-spudlink-device"),
+            "user": request.headers.get("x-spudlink-user"),
+        },
+    )()
+    identity = _spud_link_identity_from_request(identity_payload, request, node)
+    rows = _load_little_spud_history(identity, limit=limit)
+    active_runs = _load_little_spud_active_runs(identity)
+    active_run = active_runs[0] if active_runs else None
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "messages": rows,
+        "active_run": active_run,
+        "active_runs": active_runs,
+        "identity": {
+            "user_name": identity.get("user_name"),
+            "device_name": identity.get("device_name"),
+            "scope": identity.get("scope"),
+        },
+    }
+
+
+@app.get("/api/spudlink/v1/files/{file_id}")
+def spud_link_file(file_id: str, request: Request, mimetype: str = "application/octet-stream") -> Response:
+    _settings, node = _require_spud_link_node_request(request)
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    blob = _load_file_blob_from_redis(file_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="Attachment not found or expired.")
+    media_type = str(mimetype or "application/octet-stream").strip() or "application/octet-stream"
+    return Response(content=blob, media_type=media_type)
+
+
+@app.post("/api/spudlink/v1/tater/chat")
+async def spud_link_tater_chat(
+    payload: SpudLinkTaterChatRequest,
+    request: Request,
+) -> Any:
+    settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    if server_mode not in SPUD_LINK_SERVER_MODE_CHOICES or role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Native Spud Link chat requires a paired Little Spud client.")
+
+    messages = _normalize_spud_link_tater_chat_messages(payload)
+    user_text, _history_messages = _openai_user_text_and_history(messages)
+    little_spud_identity = _spud_link_identity_from_request(payload, request, node)
+    tools_enabled = bool(settings.get("little_spud_tools_enabled"))
+
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "tater_native",
+            "last_model": "tater/hydra",
+            "last_user": little_spud_identity.get("user_name"),
+            "last_device": little_spud_identity.get("device_name"),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+
+    if user_text:
+        _save_little_spud_history(little_spud_identity, role="user", content=user_text)
+
+    origin_override = {
+        "platform": "little_spud",
+        "source": "spud_link",
+        "protocol": "tater_native",
+        "user": little_spud_identity.get("user_name"),
+        "username": little_spud_identity.get("user_name"),
+        "display_name": little_spud_identity.get("display_name"),
+        "user_id": little_spud_identity.get("alias_id"),
+        "device_name": little_spud_identity.get("device_name"),
+        "device_id": little_spud_identity.get("device_name"),
+        "node_id": node.get("id"),
+        "node_name": node.get("name"),
+        "spud_link_role": role,
+        "server_mode": server_mode,
+        "session_id": little_spud_identity.get("scope"),
+    }
+    context_extra = {
+        "little_spud_user": little_spud_identity.get("user_name"),
+        "little_spud_device": little_spud_identity.get("device_name"),
+        "native_spud_link": True,
+        "attachments": [dict(item) for item in payload.attachments if isinstance(item, dict)],
+    }
+    openai_payload = OpenAIChatCompletionRequest(
+        model="tater/hydra",
+        messages=messages,
+        stream=True,
+        user=payload.user or payload.user_name or little_spud_identity.get("user_name"),
+        user_name=payload.user_name or little_spud_identity.get("user_name"),
+        device_name=payload.device_name or little_spud_identity.get("device_name"),
+        metadata={
+            **(payload.metadata if isinstance(payload.metadata, dict) else {}),
+            "protocol": "tater_native",
+        },
+    )
+    return StreamingResponse(
+        _stream_spud_link_tater_completion(
+            payload=openai_payload,
+            messages=messages,
+            tools_enabled=tools_enabled,
+            request=request,
+            platform="little_spud",
+            origin_override=origin_override,
+            scope_override=little_spud_identity.get("scope"),
+            platform_preamble="Little Spud native Tater client request.",
+            context_extra=context_extra,
+            little_spud_identity=little_spud_identity,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/spudlink/v1/tater/llm")
+async def spud_link_tater_llm(
+    payload: OpenAIChatCompletionRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    if server_mode not in SPUD_LINK_SERVER_MODE_CHOICES or role != SPUD_LINK_MODE_SPUDLET:
+        raise HTTPException(status_code=403, detail="Native Spud Link model calls require a paired Spudlet client.")
+
+    messages = _normalize_openai_chat_messages(payload.messages)
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages must include at least one text message.")
+
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "spudlet_native_llm",
+            "last_model": str(payload.model or "tater/base"),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+
+    return await _run_spud_link_native_llm_completion(payload, messages)
+
+
+@app.post("/api/spudlink/v1/chat/completions")
+async def spud_link_chat_completions(
+    payload: OpenAIChatCompletionRequest,
+    request: Request,
+) -> Any:
+    _ = payload
+    _settings, _node = _require_spud_link_node_request(request)
+    raise HTTPException(
+        status_code=410,
+        detail="Spud Link uses native Tater endpoints. Use /api/spudlink/v1/tater/llm for Spudlets or /api/spudlink/v1/tater/chat for Little Spuds.",
+    )
+
+
+@app.post("/api/spudlink/v1/tts/speech")
+async def spud_link_tts_speech(payload: SpudLinkTtsRequest, request: Request) -> Response:
+    settings, node = _require_spud_link_node_request(request)
+    _spud_link_touch_node_from_request(node, request)
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="TTS text is required.")
+    if len(text) > 4000:
+        text = text[:4000].rstrip()
+
+    current_speech = get_shared_speech_settings()
+    try:
+        wav_bytes = await synthesize_preview_wav(
+            text=text,
+            backend=str(current_speech.get("tts_backend") or "").strip(),
+            model=str(current_speech.get("tts_model") or "").strip(),
+            voice=str(current_speech.get("tts_voice") or "").strip(),
+            kokoro_output_gain=current_speech.get("kokoro_output_gain"),
+            pocket_tts_output_gain=current_speech.get("pocket_tts_output_gain"),
+            acceleration=str(current_speech.get("acceleration") or "").strip(),
+            wyoming_host=str(current_speech.get("wyoming_tts_host") or "").strip(),
+            wyoming_port=str(current_speech.get("wyoming_tts_port") or "").strip(),
+            wyoming_voice=str(current_speech.get("wyoming_tts_voice") or "").strip(),
+            openai_base_url=str(current_speech.get("openai_tts_base_url") or "").strip(),
+            openai_api_key=str(current_speech.get("openai_tts_api_key") or "").strip(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Spud Link TTS failed.") from exc
+
+    if not wav_bytes:
+        raise HTTPException(status_code=400, detail="Spud Link TTS produced no audio.")
+
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "tts",
+            "last_model": str(current_speech.get("tts_backend") or "tts"),
+            "last_user": str(request.headers.get("x-spudlink-user") or "").strip(),
+            "last_device": str(request.headers.get("x-spudlink-device") or "").strip(),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _decode_spud_link_wav_audio(wav_bytes: bytes) -> Tuple[bytes, Dict[str, int]]:
+    raw = bytes(wav_bytes or b"")
+    if len(raw) < 44 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        raise HTTPException(status_code=400, detail="Little Spud STT expects WAV audio.")
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+            return frames, {
+                "rate": int(wav_file.getframerate() or 16000),
+                "width": int(wav_file.getsampwidth() or 2),
+                "channels": int(wav_file.getnchannels() or 1),
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read Little Spud STT WAV audio: {exc}") from exc
+
+
+async def _spud_link_transcribe_wyoming_audio(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    *,
+    language: str = "",
+) -> str:
+    from tater_voice import voice_pipeline
+
+    if (
+        voice_pipeline.AsyncTcpClient is None
+        or voice_pipeline.Transcribe is None
+        or voice_pipeline.Transcript is None
+        or voice_pipeline.WyomingAudioStart is None
+        or voice_pipeline.WyomingAudioChunk is None
+        or voice_pipeline.WyomingAudioStop is None
+        or voice_pipeline.WyomingError is None
+    ):
+        raise RuntimeError(f"Wyoming STT dependency unavailable: {voice_pipeline.WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    current_speech = get_shared_speech_settings()
+    host = str(current_speech.get("wyoming_stt_host") or voice_pipeline.DEFAULT_WYOMING_STT_HOST).strip()
+    port = int(current_speech.get("wyoming_stt_port") or voice_pipeline.DEFAULT_WYOMING_STT_PORT)
+    timeout = voice_pipeline._wyoming_timeout_s()
+    rate = int(audio_format.get("rate") or 16000)
+    width = int(audio_format.get("width") or 2)
+    channels = int(audio_format.get("channels") or 1)
+    chunk_size = max(width * channels * max(1, rate // 10), 3200)
+
+    async with voice_pipeline.AsyncTcpClient(host, port) as client:
+        await asyncio.wait_for(
+            client.write_event(voice_pipeline.Transcribe(language=str(language or "").strip() or None).event()),
+            timeout=timeout,
+        )
+        await asyncio.wait_for(
+            client.write_event(voice_pipeline.WyomingAudioStart(rate=rate, width=width, channels=channels).event()),
+            timeout=timeout,
+        )
+        for offset in range(0, len(audio_bytes), chunk_size):
+            chunk = audio_bytes[offset : offset + chunk_size]
+            if not chunk:
+                continue
+            await asyncio.wait_for(
+                client.write_event(
+                    voice_pipeline.WyomingAudioChunk(rate=rate, width=width, channels=channels, audio=chunk).event()
+                ),
+                timeout=timeout,
+            )
+        await asyncio.wait_for(client.write_event(voice_pipeline.WyomingAudioStop().event()), timeout=timeout)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            left = max(0.1, deadline - time.monotonic())
+            event = await asyncio.wait_for(client.read_event(), timeout=left)
+            if event is None:
+                break
+            if voice_pipeline.Transcript.is_type(event.type):
+                return str(voice_pipeline.Transcript.from_event(event).text or "").strip()
+            if voice_pipeline.WyomingError.is_type(event.type):
+                err = voice_pipeline.WyomingError.from_event(event)
+                raise RuntimeError(f"Wyoming STT error: {err.text} ({err.code or 'unknown'})")
+    return ""
+
+
+async def _spud_link_transcribe_pcm_audio(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    *,
+    language: str = "",
+) -> Tuple[str, str, str]:
+    from tater_voice import voice_pipeline
+
+    current_speech = get_shared_speech_settings()
+    requested_backend = voice_pipeline._normalize_stt_backend(str(current_speech.get("stt_backend") or "").strip())
+    backend, backend_note = voice_pipeline._resolve_stt_backend_selected(requested_backend)
+    if backend == "wyoming":
+        transcript = await _spud_link_transcribe_wyoming_audio(audio_bytes, audio_format, language=language)
+    else:
+        transcript = await voice_pipeline._native_transcribe_local_audio_bytes(
+            backend=backend,
+            audio_bytes=audio_bytes,
+            audio_format=audio_format,
+            language=language or None,
+            selector="little_spud",
+            session_id=f"little-spud-stt-{uuid.uuid4().hex}",
+            partial=False,
+        )
+    return str(transcript or "").strip(), backend, backend_note
+
+
+@app.post("/api/spudlink/v1/stt/transcribe")
+async def spud_link_stt_transcribe(payload: SpudLinkSttRequest, request: Request) -> Dict[str, Any]:
+    settings, node = _require_spud_link_node_request(request)
+    _spud_link_touch_node_from_request(node, request)
+    encoded = str(payload.audio_base64 or "").strip()
+    if not encoded:
+        raise HTTPException(status_code=400, detail="STT audio is required.")
+    if encoded.startswith("data:") and "," in encoded:
+        encoded = encoded.split(",", 1)[1]
+    try:
+        wav_bytes = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="STT audio was not valid base64.") from exc
+    if not wav_bytes:
+        raise HTTPException(status_code=400, detail="STT audio is empty.")
+    if len(wav_bytes) > 16 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="STT audio is too large.")
+
+    audio_bytes, audio_format = _decode_spud_link_wav_audio(wav_bytes)
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="STT audio did not contain any samples.")
+    duration_s = len(audio_bytes) / max(
+        1.0,
+        float(int(audio_format.get("rate") or 16000) * int(audio_format.get("width") or 2) * int(audio_format.get("channels") or 1)),
+    )
+    if duration_s > 75.0:
+        raise HTTPException(status_code=413, detail="STT audio is too long.")
+
+    language = str(payload.language or "").strip()
+    try:
+        transcript, backend, backend_note = await _spud_link_transcribe_pcm_audio(
+            audio_bytes,
+            audio_format,
+            language=language,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Spud Link STT failed.") from exc
+
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "stt",
+            "last_model": backend,
+            "last_user": str(request.headers.get("x-spudlink-user") or "").strip(),
+            "last_device": str(request.headers.get("x-spudlink-device") or "").strip(),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "text": str(transcript or "").strip(),
+        "backend": backend,
+        "backend_note": backend_note,
+        "duration_s": duration_s,
+    }
+
+
+@app.websocket("/api/spudlink/v1/stt/stream")
+async def spud_link_stt_stream(websocket: WebSocket) -> None:
+    await websocket.accept()
+    client_host = getattr(websocket.client, "host", "") if websocket.client is not None else ""
+    try:
+        settings = _require_spud_link_server_enabled()
+        node = _find_spud_link_node_by_token(_extract_spud_link_token(websocket))  # type: ignore[arg-type]
+    except HTTPException as exc:
+        await websocket.send_json({"ok": False, "type": "error", "error": str(exc.detail or "Spud Link auth failed.")})
+        await websocket.close(code=1008)
+        return
+    except Exception as exc:
+        await websocket.send_json({"ok": False, "type": "error", "error": str(exc) or "Spud Link auth failed."})
+        await websocket.close(code=1008)
+        return
+
+    def _ws_query_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+        raw = str(websocket.query_params.get(name) or "").strip()
+        try:
+            parsed = int(raw) if raw else int(default)
+        except Exception:
+            parsed = int(default)
+        return max(int(minimum), min(int(maximum), parsed))
+
+    audio_bits = _ws_query_int("bits", 16, minimum=8, maximum=32)
+    audio_format = {
+        "rate": _ws_query_int("rate", 16000, minimum=8000, maximum=48000),
+        "width": max(1, audio_bits // 8),
+        "channels": _ws_query_int("channels", 1, minimum=1, maximum=2),
+    }
+    language = str(websocket.query_params.get("language") or "").strip()
+    user_name = str(websocket.query_params.get("user") or websocket.headers.get("x-spudlink-user") or "").strip()
+    device_name = str(websocket.query_params.get("device") or websocket.headers.get("x-spudlink-device") or "").strip()
+    selector = f"little_spud:{str(node.get('id') or client_host or 'remote').strip()}"
+
+    from tater_voice import voice_pipeline
+
+    cfg = voice_pipeline._voice_config_snapshot()
+    eou_engine = voice_pipeline._build_eou_engine(audio_format, selector=selector, cfg=cfg)
+    eou_cfg = cfg.get("eou") if isinstance(cfg.get("eou"), dict) else {}
+    limits_cfg = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+    max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or voice_pipeline.DEFAULT_MAX_AUDIO_BYTES)
+    max_chunk_bytes = 256 * 1024
+    audio_buffer = bytearray()
+    started_ts = time.time()
+    first_audio_ts = 0.0
+    speech_started_sent = False
+    frame_count = 0
+    finalize_reason = "client_stop"
+    metrics: Dict[str, Any] = {}
+
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    logger.info(
+        "[spudlink-stt] stream-start node=%s role=%s client=%s rate=%s width=%s ch=%s vad=%s user=%s device=%s",
+        node.get("id") or "-",
+        role,
+        client_host or "-",
+        audio_format.get("rate"),
+        audio_format.get("width"),
+        audio_format.get("channels"),
+        getattr(eou_engine, "backend_name", ""),
+        user_name or "-",
+        device_name or "-",
+    )
+    await websocket.send_json(
+        {
+            "ok": True,
+            "type": "listening",
+            "vad_backend": getattr(eou_engine, "backend_name", ""),
+            "silence_s": eou_cfg.get("silence_s"),
+            "timeout_s": eou_cfg.get("timeout_s"),
+        }
+    )
+
+    try:
+        while True:
+            message = await websocket.receive()
+            message_type = str(message.get("type") or "")
+            if message_type == "websocket.disconnect":
+                return
+            text_message = message.get("text")
+            if text_message is not None:
+                try:
+                    command = json.loads(str(text_message or "{}"))
+                except Exception:
+                    command = {}
+                command_type = str(command.get("type") or "").strip().lower()
+                if command_type in {"stop", "end"}:
+                    finalize_reason = "client_stop"
+                    break
+                if command_type in {"cancel", "abort"}:
+                    await websocket.send_json({"ok": True, "type": "cancelled"})
+                    await websocket.close(code=1000)
+                    return
+                continue
+
+            audio_bytes = message.get("bytes")
+            if audio_bytes is None:
+                continue
+            audio_bytes = bytes(audio_bytes or b"")
+            if not audio_bytes:
+                continue
+            if len(audio_bytes) > max_chunk_bytes:
+                await websocket.send_json({"ok": False, "type": "error", "error": "STT audio chunk is too large."})
+                await websocket.close(code=1009)
+                return
+            if len(audio_buffer) + len(audio_bytes) > max_audio_bytes:
+                finalize_reason = "max_audio"
+                break
+
+            now_ts = time.time()
+            if first_audio_ts <= 0.0:
+                first_audio_ts = now_ts
+            audio_buffer.extend(audio_bytes)
+            frame_count += 1
+
+            metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
+            if bool(metrics.get("vad_error")):
+                await websocket.send_json(
+                    {
+                        "ok": False,
+                        "type": "error",
+                        "error": str(metrics.get("error") or "VAD backend unavailable."),
+                        "vad_backend": str(metrics.get("backend") or ""),
+                    }
+                )
+                await websocket.close(code=1011)
+                return
+
+            if bool(metrics.get("voice_seen")) and not speech_started_sent:
+                speech_started_sent = True
+                await websocket.send_json(
+                    {
+                        "ok": True,
+                        "type": "speech_start",
+                        "speech_s": float(metrics.get("speech_s") or 0.0),
+                        "score": float(metrics.get("max_probability", metrics.get("probability", 0.0)) or 0.0),
+                    }
+                )
+
+            if bool(metrics.get("should_finalize")):
+                finalize_reason = "server_vad"
+                break
+    except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"ok": False, "type": "error", "error": str(exc) or type(exc).__name__})
+            await websocket.close(code=1011)
+        return
+
+    if not audio_buffer:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"ok": True, "type": "final", "text": "", "reason": "no_audio"})
+            await websocket.close(code=1000)
+        return
+
+    await websocket.send_json(
+        {
+            "ok": True,
+            "type": "speech_end",
+            "reason": finalize_reason,
+            "speech_s": float(metrics.get("speech_s") or 0.0),
+            "silence_s": float(metrics.get("silence_s") or 0.0),
+            "timed_out": bool(metrics.get("timed_out")),
+        }
+    )
+
+    duration_s = len(audio_buffer) / max(
+        1.0,
+        float(int(audio_format.get("rate") or 16000) * int(audio_format.get("width") or 2) * int(audio_format.get("channels") or 1)),
+    )
+    try:
+        transcript, backend, backend_note = await _spud_link_transcribe_pcm_audio(
+            bytes(audio_buffer),
+            audio_format,
+            language=language,
+        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({"ok": False, "type": "error", "error": str(exc) or "Spud Link STT failed."})
+            await websocket.close(code=1011)
+        return
+
+    _spud_link_touch_node_from_request(node, websocket)  # type: ignore[arg-type]
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "stt_stream",
+            "last_model": backend,
+            "last_user": user_name,
+            "last_device": device_name,
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+    logger.info(
+        "[spudlink-stt] stream-final node=%s reason=%s frames=%s bytes=%s duration_s=%.2f transcript_len=%s stt=%s elapsed_ms=%.1f",
+        node.get("id") or "-",
+        finalize_reason,
+        frame_count,
+        len(audio_buffer),
+        duration_s,
+        len(transcript),
+        backend,
+        max(0.0, (time.time() - started_ts) * 1000.0),
+    )
+    await websocket.send_json(
+        {
+            "ok": True,
+            "type": "final",
+            "text": transcript,
+            "backend": backend,
+            "backend_note": backend_note,
+            "reason": finalize_reason,
+            "duration_s": duration_s,
+        }
+    )
+    await websocket.close(code=1000)
+
+
 @app.get("/api/chat/history")
 def chat_history(limit: int = 0) -> Dict[str, Any]:
     max_display = _read_positive_int("tater:max_display", DEFAULT_MAX_DISPLAY)
@@ -11945,6 +14115,7 @@ _HYDRA_METRIC_PLATFORMS = (
     "matrix",
     "homeassistant",
     "voice_core",
+    "little_spud",
     "homekit",
     "xbmc",
     "automation",
@@ -11966,6 +14137,7 @@ def _hydra_platform_display_label(platform: str) -> str:
         "webui": "WebUI",
         "homeassistant": "Home Assistant",
         "voice_core": "Voice Core",
+        "little_spud": "Little Spud",
         "homekit": "HomeKit",
         "xbmc": "XBMC",
         "automation": "Automations",
@@ -12480,17 +14652,20 @@ def get_settings() -> Dict[str, Any]:
     admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
 
     hydra_base_servers_raw = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
-    hydra_base_servers: List[Dict[str, str]] = [
-        {
-            "provider": _normalize_hydra_llm_provider(row.get("provider")),
-            "host": str(row.get("host") or "").strip(),
-            "port": str(row.get("port") or "").strip(),
-            "model": str(row.get("model") or "").strip(),
-            "api_key": str(row.get("api_key") or "").strip(),
-        }
-        for row in hydra_base_servers_raw
-        if isinstance(row, dict)
-    ]
+    hydra_base_servers: List[Dict[str, str]] = []
+    for row in hydra_base_servers_raw:
+        if not isinstance(row, dict):
+            continue
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        hydra_base_servers.append(
+            {
+                "provider": provider,
+                "host": str(row.get("host") or "").strip(),
+                "port": str(row.get("port") or "").strip(),
+                "model": str(row.get("model") or "").strip(),
+                "api_key": "" if provider == HYDRA_LLM_PROVIDER_SPUD_LINK else str(row.get("api_key") or "").strip(),
+            }
+        )
     first_hydra_base = hydra_base_servers[0] if hydra_base_servers else {}
     hydra_llm_provider = _normalize_hydra_llm_provider(
         first_hydra_base.get("provider") or redis_client.get(HYDRA_LLM_PROVIDER_KEY)
@@ -12561,6 +14736,7 @@ def get_settings() -> Dict[str, Any]:
         "updates_available": integration_shop_snapshot.get("updates_available") or 0,
     }
     tater_api_settings = _load_tater_api_settings(include_secret=False)
+    spud_link_settings = _spud_link_public_settings_payload()
 
     return {
         "username": chat_settings.get("username", "User"),
@@ -12792,6 +14968,18 @@ def get_settings() -> Dict[str, Any]:
         "tater_api_key_set": bool(tater_api_settings.get("api_key_set")),
         "tater_api_mode": _normalize_tater_api_mode(tater_api_settings.get("mode")),
         "tater_api_hydra_tools_enabled": bool(tater_api_settings.get("hydra_tools_enabled")),
+        "spud_link": spud_link_settings,
+        "spud_link_mode": _normalize_spud_link_mode(spud_link_settings.get("mode")),
+        "spud_link_node_name": str(spud_link_settings.get("node_name") or ""),
+        "spud_link_public_url": str(spud_link_settings.get("public_url") or ""),
+        "spud_link_pairing_enabled": bool(spud_link_settings.get("pairing_enabled")),
+        "spud_link_allow_spudlets": bool(spud_link_settings.get("allow_spudlets")),
+        "spud_link_allow_little_spuds": bool(spud_link_settings.get("allow_little_spuds")),
+        "spud_link_little_spud_tools_enabled": bool(spud_link_settings.get("little_spud_tools_enabled")),
+        "spud_link_telemetry_enabled": bool(spud_link_settings.get("telemetry_enabled")),
+        "spud_link_request_previews_enabled": bool(spud_link_settings.get("request_previews_enabled")),
+        "spud_link_hub_url": str(spud_link_settings.get("hub_url") or ""),
+        "spud_link_node_token_set": bool(spud_link_settings.get("node_token_set")),
         "webui_password_set": _webui_password_is_set(),
     }
 
@@ -14058,6 +16246,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         redis_client.set(redis_key, str(int(parsed)))
 
     _save_tater_api_settings_from_updates(updates)
+    _save_spud_link_settings_from_updates(updates)
 
     local_model_keys_cache: Optional[set[Tuple[str, str]]] = None
 
