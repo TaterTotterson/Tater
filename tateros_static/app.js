@@ -8647,11 +8647,11 @@ function renderEspHomeEmotionIdPanel(payload, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeRuntimeHeader({ title = "Tater Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
+function renderEspHomeRuntimeHeader({ title = "Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
   return `
     <div class="card esphome-runtime-shell">
       <div class="card-head">
-        <h3 class="card-title">${escapeHtml(String(title || "Tater Voice"))}</h3>
+        <h3 class="card-title">${escapeHtml(String(title || "Voice"))}</h3>
         <span class="small">${escapeHtml(String(coreKey || "esphome"))}</span>
       </div>
       ${summary ? `<div class="small">${escapeHtml(summary)}</div>` : ""}
@@ -9475,7 +9475,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   shell.dataset.coreKey = "esphome";
   shell.dataset.runtimeLoaded = "loading";
   shell.dataset.runtimePanel = targetPanel;
-  head.innerHTML = renderNotice(force ? "Refreshing Tater Voice runtime..." : "Loading Tater Voice runtime...");
+  head.innerHTML = renderNotice(force ? "Refreshing Voice runtime..." : "Loading Voice runtime...");
   if (targetPanel === "satellites") {
     satellitesHost.innerHTML = renderNotice("Loading satellites...");
     addHost.innerHTML = renderNotice("Loading add form...");
@@ -9498,7 +9498,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const tabSpec =
         result?.tab && typeof result.tab === "object"
           ? result.tab
-          : { core_key: "esphome", label: "Tater Voice", surface_kind: "esphome" };
+          : { core_key: "esphome", label: "Voice", surface_kind: "esphome" };
       const payload = result?.payload && typeof result.payload === "object" ? result.payload : result;
       const body = payload && typeof payload === "object" ? payload : {};
       const ui = body?.ui && typeof body.ui === "object" ? body.ui : {};
@@ -9517,7 +9517,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
 
       head.innerHTML = renderEspHomeRuntimeHeader({
-        title: String(ui?.title || tabSpec?.label || "Tater Voice"),
+        title: String(ui?.title || tabSpec?.label || "Voice"),
         summary,
         stats: headerStats,
         coreKey,
@@ -9553,7 +9553,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       if (requestSeq !== state.esphomeRuntimeRequestSeq) {
         return;
       }
-      const message = error instanceof Error ? error.message : String(error || "Failed to load Tater Voice runtime.");
+      const message = error instanceof Error ? error.message : String(error || "Failed to load Voice runtime.");
       head.innerHTML = renderNotice(message);
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = renderNotice(message);
@@ -17427,9 +17427,9 @@ async function loadSettingsView() {
   const renderSpudLinkPanel = () => `
     <section class="settings-tab-panel" data-settings-panel="spudhub">
       ${renderSettingsSectionIntro(
-        "Spud Hub",
+        "Spud Link",
         "Link Tater instances and lightweight Little Spud clients to a central model, Hydra, tools, and telemetry endpoint.",
-        "HUB"
+        "LINK"
       )}
       <div class="form-grid">
         <section class="core-inline-section spud-link-hero">
@@ -17676,10 +17676,11 @@ async function loadSettingsView() {
     ? announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel]
     : [];
   const esphomeUi = settings?.esphome_ui && typeof settings.esphome_ui === "object" ? settings.esphome_ui : {};
+  const taterVoiceSettingsLabel = String(esphomeUi.label || esphomeUi.runtime_tab_label || "Voice").trim() || "Voice";
   const esphomeFields = Array.isArray(esphomeUi.fields) ? esphomeUi.fields : [];
   const esphomeFieldsHtml = esphomeFields.length
     ? esphomeFields.map((field) => renderCoreManagerField(field)).join("")
-    : renderNotice("Tater Voice settings are unavailable right now.");
+    : renderNotice(`${taterVoiceSettingsLabel} settings are unavailable right now.`);
   const esphomeSections = Array.isArray(esphomeUi.sections) ? esphomeUi.sections : [];
   const esphomeTaterVoiceSection = esphomeSections.find(
     (section) => String(section?.label || "").trim().toLowerCase() === "tater voice extras"
@@ -18818,7 +18819,7 @@ async function loadSettingsView() {
             </div>
 
             <div id="settings-esphome-runtime-head">
-              ${renderNotice("Open the Tater Voice tab to load the built-in voice runtime.")}
+              ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the built-in voice runtime.`)}
             </div>
 
             <div class="settings-subpanel active" data-esphome-panel="satellites">
@@ -18829,7 +18830,7 @@ async function loadSettingsView() {
                 "subtle"
               )}
               <div id="settings-esphome-runtime-satellites">
-                ${renderNotice("Open the Tater Voice tab to load satellites.")}
+                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load satellites.`)}
               </div>
               <div style="margin-top:16px;">
                 <div class="settings-section-title">Add Satellite</div>
@@ -18837,7 +18838,7 @@ async function loadSettingsView() {
                   Manually add a satellite by host or IP when discovery has not found it yet.
                 </div>
                 <div id="settings-esphome-runtime-add">
-                  ${renderNotice("Open the Tater Voice tab to load the add form.")}
+                  ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the add form.`)}
                 </div>
               </div>
             </div>
@@ -18905,7 +18906,7 @@ async function loadSettingsView() {
                 "subtle"
               )}
               <div id="settings-esphome-runtime-firmware">
-                ${renderNotice("Open the Tater Voice tab to load the firmware flasher.")}
+                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the firmware flasher.`)}
               </div>
             </div>
 
@@ -18917,7 +18918,7 @@ async function loadSettingsView() {
                 "subtle"
               )}
               <div id="settings-esphome-runtime-stats">
-                ${renderNotice("Open the Tater Voice tab to load stats.")}
+                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load stats.`)}
               </div>
             </div>
 
@@ -20065,7 +20066,7 @@ async function loadSettingsView() {
     if (hydraLocalModelStatusEl) {
       hydraLocalModelStatusEl.style.display = local || spudLink ? "" : "none";
       if (spudLink) {
-        hydraLocalModelStatusEl.textContent = "Spudlet mode uses the paired Spud Hub. Configure pairing in Settings > Spud Hub.";
+        hydraLocalModelStatusEl.textContent = "Spudlet mode uses the paired Spud Hub. Configure pairing in Settings > Spud Link.";
       } else if (!local) {
         hydraLocalModelStatusEl.textContent = "";
       }

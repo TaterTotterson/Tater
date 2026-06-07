@@ -13504,7 +13504,7 @@ def get_esphome_runtime_payload(panel: str = "") -> Dict[str, Any]:
     tab = _esphome_platform_tab_spec()
     return {
         "tab": {
-            "label": str(tab.get("label") or "Tater Voice"),
+            "label": str(tab.get("label") or "Voice"),
             "core_key": str(tab.get("core_key") or "esphome"),
             "surface_kind": str(tab.get("surface_kind") or "esphome"),
             "running": bool(tab.get("running")),
@@ -14799,13 +14799,13 @@ def get_settings() -> Dict[str, Any]:
         logger.exception("[settings] failed building voice model settings sections")
         voice_model_sections = []
     esphome_ui = {
-        "label": "Tater Voice",
+        "label": "Voice",
         "description": "Built-in voice satellite services for Tater. Satellites, firmware, live entities, and device logs live here.",
         "fields": esphome_fields,
         "sections": esphome_sections,
         "running": bool(esphome_home_module.is_running()),
-        "runtime_tab_label": "Tater Voice",
-        "runtime_tab_hint": "Satellites, live entities, rooms, and logs are managed directly in this Tater Voice area.",
+        "runtime_tab_label": "Voice",
+        "runtime_tab_hint": "Satellites, live entities, rooms, and logs are managed directly in this Voice area.",
     }
     voice_model_ui = {
         "label": "Voice Models",
