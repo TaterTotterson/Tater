@@ -17051,6 +17051,7 @@ async function loadSettingsView() {
     settings?.local_llm_models && typeof settings.local_llm_models === "object"
       ? settings.local_llm_models
       : { models: [], by_provider: {} };
+  const hydraRecoveryNotice = String(settings?.hydra_llm_recovery_notice || "").trim();
   const localLlmModelsForProvider = (provider) => {
     const normalized = normalizeHydraBaseProvider(provider);
     const grouped = localLlmModelsPayload?.by_provider && typeof localLlmModelsPayload.by_provider === "object"
@@ -17660,7 +17661,6 @@ async function loadSettingsView() {
     ? announcementTtsVoiceOptionsByModel[currentAnnouncementTtsModel]
     : [];
   const esphomeUi = settings?.esphome_ui && typeof settings.esphome_ui === "object" ? settings.esphome_ui : {};
-  const taterVoiceSettingsLabel = String(esphomeUi.label || "Tater Voice").trim() || "Tater Voice";
   const esphomeFields = Array.isArray(esphomeUi.fields) ? esphomeUi.fields : [];
   const esphomeFieldsHtml = esphomeFields.length
     ? esphomeFields.map((field) => renderCoreManagerField(field)).join("")
@@ -17816,7 +17816,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Integrations, Tater Voice, Redis, Spud Hub, Misc, Advanced.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Integrations, Voice, Redis, Spud Link, Misc, Advanced.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -17825,9 +17825,9 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="models">Models</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="esphome">${escapeHtml(taterVoiceSettingsLabel)}</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="esphome">Voice</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Hub</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Link</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
       </div>
@@ -18071,7 +18071,8 @@ async function loadSettingsView() {
               </div>
               <div id="settings-hydra-base-fields" class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Base Model</div>
-      <div class="small hydra-model-panel-note">Used for regular AI calls. In Spudlet mode this routes through the paired Spud Hub.</div>
+                <div class="small hydra-model-panel-note">Used for regular AI calls. In Spudlet mode this routes through the paired Spud Hub.</div>
+                ${hydraRecoveryNotice ? `<div style="grid-column: 1 / -1;">${renderNotice(hydraRecoveryNotice)}</div>` : ""}
                 <label style="grid-column: 1 / -1;">Base Provider
                   <select id="set_hydra_llm_provider">
                     ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider, { includeSpudLink: true })}

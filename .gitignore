@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 
 agent_lab/logs/*.log
+agent_lab/matrix-store/*.db
+agent_lab/matrix-store/*.db-*
+agent_lab/matrix-store/*.sqlite*
+agent_lab/matrix-store/.DS_Store
 agent_lab/models/
 agent_lab/redis/
 agent_lab/speaker_id/

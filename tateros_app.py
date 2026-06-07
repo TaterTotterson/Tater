@@ -218,6 +218,7 @@ logging.basicConfig(
 
 redis_client = shared_redis_client
 redis_blob_client = shared_redis_blob_client
+HYDRA_LLM_RECOVERY_NOTICE_KEY = "tater:hydra:llm:recovery_notice"
 
 
 def _integration_module(integration_id: str, *, auto_restore: bool = True):
@@ -963,6 +964,64 @@ def _hf_llm_warmup_models(base_rows: List[Dict[str, str]]) -> List[Dict[str, str
     return _dedupe_hf_llm_warmup_targets(models)
 
 
+def _sanitize_hydra_base_rows_for_startup(base_rows: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    rows = [dict(row) for row in (base_rows or []) if isinstance(row, dict)]
+    local_rows: List[Dict[str, str]] = []
+    for row in rows:
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        model = str(row.get("model") or "").strip()
+        if model and _is_local_hydra_llm_provider(provider):
+            local_rows.append({"provider": provider, "model": model})
+    if not local_rows:
+        return rows, {}
+
+    try:
+        installed_models = _local_llm_models_payload().get("models", [])
+        installed_keys = {
+            (_normalize_hydra_llm_provider(item.get("provider")), str(item.get("model") or "").strip())
+            for item in installed_models
+            if isinstance(item, dict) and str(item.get("model") or "").strip()
+        }
+    except Exception as exc:
+        logger.warning("[local-llm-warmup] startup could not verify installed local models: %s", exc)
+        return rows, {}
+
+    missing_rows = [
+        row
+        for row in local_rows
+        if (_normalize_hydra_llm_provider(row.get("provider")), str(row.get("model") or "").strip()) not in installed_keys
+    ]
+    if not missing_rows:
+        return rows, {}
+
+    labels = [
+        f"{_hydra_llm_provider_label(row.get('provider'))} {str(row.get('model') or '').strip()}"
+        for row in missing_rows
+    ]
+    preview = "; ".join(labels[:3])
+    if len(labels) > 3:
+        preview = f"{preview}; +{len(labels) - 3} more"
+    notice = (
+        "Tater reset the Base model to blank because the selected local model is no longer installed: "
+        f"{preview}. Open Settings > Models and choose a downloaded model to load it again."
+    )
+
+    try:
+        redis_client.delete(HYDRA_LLM_BASE_SERVERS_KEY)
+        _set_hydra_legacy_base_keys([])
+        redis_client.set(HYDRA_LLM_RECOVERY_NOTICE_KEY, notice)
+    except Exception as exc:
+        logger.warning("[local-llm-warmup] startup found missing local base model but could not reset settings: %s", exc)
+
+    logger.warning("[local-llm-warmup] startup reset stale local base model selection: %s", preview)
+    return [], {
+        "reset": True,
+        "reason": "missing_local_base_model",
+        "missing_models": labels,
+        "notice": notice,
+    }
+
+
 def _hf_llm_warmup_update_item(provider: str, model: str, updates: Dict[str, Any]) -> None:
     provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model or "").strip()
@@ -1525,16 +1584,21 @@ def _start_local_llm_warmup_for_startup(*, reason: str) -> Dict[str, Any]:
         logger.warning("[local-llm-warmup] startup failed to read base models: %s", exc)
         return snapshot
 
+    rows, recovery = _sanitize_hydra_base_rows_for_startup(rows)
     models = _hf_llm_warmup_models(rows)
     if not models:
         snapshot = _hf_llm_warmup_snapshot()
         snapshot["started"] = False
         snapshot["skipped"] = True
         snapshot["skip_reason"] = "no local base models configured"
+        if recovery:
+            snapshot["recovery"] = recovery
         logger.info("[local-llm-warmup] startup warmup skipped (no local base models configured)")
         return snapshot
 
     snapshot = _start_hf_llm_warmup(models, reason=reason, load_models=True)
+    if recovery:
+        snapshot["recovery"] = recovery
     wait_seconds = _local_llm_warmup_startup_wait_seconds()
     if wait_seconds <= 0:
         snapshot["waited_seconds"] = 0.0
@@ -14834,6 +14898,7 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_openai_tts_api_key": str(speech_settings.get("announcement_openai_tts_api_key") or ""),
         "speech_model_warmup": _speech_model_warmup_snapshot(),
         "hf_llm_warmup": _hf_llm_warmup_snapshot(),
+        "hydra_llm_recovery_notice": str(redis_client.get(HYDRA_LLM_RECOVERY_NOTICE_KEY) or ""),
         "local_llm_models": _local_llm_models_payload(),
         "speech_ui": speech_ui,
         "announcement_speech_ui": announcement_speech_ui,
@@ -17050,6 +17115,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         else:
             redis_client.delete(HYDRA_LLM_BASE_SERVERS_KEY)
         _set_hydra_legacy_base_keys(normalized_base_rows)
+        redis_client.delete(HYDRA_LLM_RECOVERY_NOTICE_KEY)
         hf_models = _hf_llm_warmup_models(normalized_base_rows)
         if hf_models and not explicit_local_model_load_targets and _hf_llm_warmup_on_save_enabled():
             hf_llm_warmup_result = _start_hf_llm_warmup(hf_models, reason="settings-save")
