@@ -134,6 +134,12 @@ const state = {
   llmDebugEvents: [],
   llmDebugLastSnapshot: null,
   llmDebugAutoScroll: String(safeStorageGet("tater_llm_debug_auto_scroll", "true")).trim().toLowerCase() !== "false",
+  settingsLogPollTimer: 0,
+  settingsLogInFlight: false,
+  settingsLogNextSeq: 0,
+  settingsLogEntries: [],
+  settingsLogAutoScroll: String(safeStorageGet("tater_settings_log_auto_scroll", "true")).trim().toLowerCase() !== "false",
+  settingsLogPaused: false,
   runtimeSettingsSaveHandler: null,
   runtimeSettingsOpenHandler: null,
   runtimeSettingsCloseHandler: null,
@@ -193,6 +199,14 @@ function clearLlmDebugPollTimer() {
   state.llmDebugInFlight = false;
 }
 
+function clearSettingsLogPollTimer() {
+  if (state.settingsLogPollTimer) {
+    window.clearTimeout(state.settingsLogPollTimer);
+    state.settingsLogPollTimer = 0;
+  }
+  state.settingsLogInFlight = false;
+}
+
 const APP_BASE_PATH = (() => {
   const rawPath = String(window.location.pathname || "/").trim();
   const normalized = rawPath.replace(/\/+$/, "");
@@ -229,7 +243,7 @@ const VIEW_META = {
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
-const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "spudhub", "misc", "advanced"];
+const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "spudhub", "misc", "advanced", "logs"];
 
 const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
 const POPUP_EFFECT_CLOSE_MS = {
@@ -498,6 +512,7 @@ let webuiAuthRecoveryLastAt = 0;
 const REDIS_BOOTSTRAP_STATUS_TIMEOUT_MS = 900;
 const REDIS_STATUS_TIMEOUT_MS = 2400;
 const HEALTH_REQUEST_TIMEOUT_MS = 1200;
+const SETTINGS_LOG_REQUEST_TIMEOUT_MS = 5000;
 const HEALTH_POLL_RECOVERY_MS = 2200;
 const HEALTH_POLL_CONNECTED_MS = 8000;
 const REDIS_RECOVERY_PROMPT_COOLDOWN_MS = 1200;
@@ -17816,7 +17831,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Integrations, Voice, Redis, Spud Link, Misc, Advanced.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Integrations, Voice, Redis, Spud Link, Misc, Advanced, Logs.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -17830,6 +17845,7 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Link</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="logs">Logs</button>
       </div>
 
       <form id="settings-form">
@@ -19215,6 +19231,52 @@ async function loadSettingsView() {
           </div>
         </section>
 
+        <section class="settings-tab-panel" data-settings-panel="logs">
+          ${renderSettingsSectionIntro(
+            "Logs",
+            "Live Tater application logs captured from the same Python logging stream used by the server console.",
+            "LOG"
+          )}
+          <div class="form-grid">
+            <section class="core-inline-section app-log-console-shell">
+              <div class="hf-model-browser-hero app-log-hero">
+                <div class="hf-model-browser-spud" aria-hidden="true">
+                  <span class="hf-model-browser-spud-eye left"></span>
+                  <span class="hf-model-browser-spud-eye right"></span>
+                  <span class="hf-model-browser-spud-spark"></span>
+                </div>
+                <div class="hf-model-browser-title">
+                  <strong>Runtime Console</strong>
+                  <span>Live app logs, warnings, backend errors, and core/portal activity.</span>
+                </div>
+                <div class="app-log-actions">
+                  <button type="button" id="settings-log-refresh" class="inline-btn">Refresh</button>
+                  <button type="button" id="settings-log-pause" class="inline-btn">Pause</button>
+                  <button type="button" id="settings-log-autoscroll" class="inline-btn">Auto-scroll On</button>
+                  <button type="button" id="settings-log-copy" class="inline-btn">Copy Visible</button>
+                  <button type="button" id="settings-log-clear" class="inline-btn danger">Clear View</button>
+                </div>
+              </div>
+              <div class="app-log-filter-row">
+                <label>Level
+                  <select id="settings-log-level">
+                    <option value="">All levels</option>
+                    <option value="info">Info+</option>
+                    <option value="warning">Warning+</option>
+                    <option value="error">Error+</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+                <label>Logger
+                  <input id="settings-log-logger" type="text" placeholder="Filter logger name" />
+                </label>
+                <span id="settings-log-status" class="small hf-model-browser-status">Open Logs to start live tailing.</span>
+              </div>
+              <div id="settings-log-events" class="app-log-events" role="log" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+
       </form>
     </div>
   `;
@@ -19270,6 +19332,205 @@ async function loadSettingsView() {
   });
   refreshWebuiPasswordUi();
 
+  const settingsLogEventsEl = document.getElementById("settings-log-events");
+  const settingsLogStatusEl = document.getElementById("settings-log-status");
+  const settingsLogRefreshEl = document.getElementById("settings-log-refresh");
+  const settingsLogPauseEl = document.getElementById("settings-log-pause");
+  const settingsLogAutoscrollEl = document.getElementById("settings-log-autoscroll");
+  const settingsLogCopyEl = document.getElementById("settings-log-copy");
+  const settingsLogClearEl = document.getElementById("settings-log-clear");
+  const settingsLogLevelEl = document.getElementById("settings-log-level");
+  const settingsLogLoggerEl = document.getElementById("settings-log-logger");
+  const appLogTimeLabel = (value) => {
+    const seconds = Number(value || 0);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return "--:--:--";
+    }
+    try {
+      return new Date(seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    } catch (_error) {
+      return "--:--:--";
+    }
+  };
+  const normalizeAppLogEntry = (row) => ({
+    seq: Math.max(0, Number(row?.seq || 0)),
+    ts: Number(row?.ts || 0),
+    level: String(row?.level || "info").trim().toLowerCase() || "info",
+    logger: String(row?.logger || "root").trim() || "root",
+    module: String(row?.module || "").trim(),
+    function: String(row?.function || "").trim(),
+    line: Math.max(0, Number(row?.line || 0)),
+    message: String(row?.message || "").trim(),
+    display: String(row?.display || row?.message || "").trim(),
+    exception: String(row?.exception || "").trim(),
+  });
+  const setSettingsLogStatus = (message, tone = "") => {
+    if (!settingsLogStatusEl) {
+      return;
+    }
+    settingsLogStatusEl.textContent = String(message || "");
+    settingsLogStatusEl.classList.toggle("error", tone === "error");
+    settingsLogStatusEl.classList.toggle("success", tone === "success");
+  };
+  const updateSettingsLogButtons = () => {
+    if (settingsLogPauseEl) {
+      settingsLogPauseEl.textContent = state.settingsLogPaused ? "Resume" : "Pause";
+      settingsLogPauseEl.classList.toggle("active", Boolean(state.settingsLogPaused));
+    }
+    if (settingsLogAutoscrollEl) {
+      settingsLogAutoscrollEl.textContent = state.settingsLogAutoScroll ? "Auto-scroll On" : "Auto-scroll Off";
+      settingsLogAutoscrollEl.classList.toggle("active", Boolean(state.settingsLogAutoScroll));
+    }
+  };
+  const renderSettingsLogs = () => {
+    if (!settingsLogEventsEl) {
+      return;
+    }
+    const rows = Array.isArray(state.settingsLogEntries) ? state.settingsLogEntries.slice(-500) : [];
+    if (!rows.length) {
+      settingsLogEventsEl.innerHTML = `<div class="app-log-empty">No app logs captured yet.</div>`;
+      return;
+    }
+    const shouldScroll =
+      state.settingsLogAutoScroll &&
+      Math.abs(settingsLogEventsEl.scrollHeight - settingsLogEventsEl.clientHeight - settingsLogEventsEl.scrollTop) < 72;
+    settingsLogEventsEl.innerHTML = rows
+      .map((entry) => {
+        const location = [entry.module, entry.function, entry.line ? `:${entry.line}` : ""].filter(Boolean).join("");
+        const display = entry.display || entry.message || "";
+        return `
+          <article class="app-log-line ${escapeHtml(entry.level)}">
+            <span class="app-log-time">${escapeHtml(appLogTimeLabel(entry.ts))}</span>
+            <span class="app-log-level">${escapeHtml(entry.level.toUpperCase())}</span>
+            <div class="app-log-body">
+              <strong>${escapeHtml(entry.logger)}</strong>
+              ${location ? `<small>${escapeHtml(location)}</small>` : ""}
+              <pre>${escapeHtml(display)}</pre>
+              ${entry.exception ? `<pre class="app-log-exception">${escapeHtml(entry.exception)}</pre>` : ""}
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+    if (shouldScroll) {
+      settingsLogEventsEl.scrollTop = settingsLogEventsEl.scrollHeight;
+    }
+  };
+  const refreshSettingsLogs = async ({ reset = false } = {}) => {
+    if (
+      !settingsLogEventsEl ||
+      !document.body.contains(settingsLogEventsEl) ||
+      document.body.dataset.view !== "settings" ||
+      state.settingsLogInFlight
+    ) {
+      return;
+    }
+    state.settingsLogInFlight = true;
+    try {
+      const sinceSeq = reset ? 0 : Math.max(0, Number(state.settingsLogNextSeq || 0));
+      const params = new URLSearchParams({
+        after_seq: String(sinceSeq),
+        limit: "500",
+        level: String(settingsLogLevelEl?.value || ""),
+        logger_name: String(settingsLogLoggerEl?.value || "").trim(),
+      });
+      const payload = await api(`/api/settings/logs?${params.toString()}`, { _skipRedisRecovery: true, _timeoutMs: SETTINGS_LOG_REQUEST_TIMEOUT_MS });
+      const entries = Array.isArray(payload?.entries) ? payload.entries.map((row) => normalizeAppLogEntry(row)).filter((row) => row.seq > 0) : [];
+      if (reset) {
+        state.settingsLogEntries = entries;
+      } else if (entries.length) {
+        const merged = new Map((Array.isArray(state.settingsLogEntries) ? state.settingsLogEntries : []).map((row) => [Number(row.seq), row]));
+        entries.forEach((entry) => merged.set(Number(entry.seq), entry));
+        state.settingsLogEntries = Array.from(merged.values()).sort((a, b) => Number(a.seq) - Number(b.seq)).slice(-800);
+      }
+      state.settingsLogNextSeq = Math.max(Number(state.settingsLogNextSeq || 0), Number(payload?.next_seq || 0));
+      renderSettingsLogs();
+      const visible = Array.isArray(state.settingsLogEntries) ? state.settingsLogEntries.length : 0;
+      const levelCounts = payload?.level_counts && typeof payload.level_counts === "object" ? payload.level_counts : {};
+      const warnCount = Number(levelCounts.warning || levelCounts.warn || 0);
+      const errorCount = Number(levelCounts.error || 0) + Number(levelCounts.critical || 0);
+      setSettingsLogStatus(`${visible} visible · ${warnCount} warnings · ${errorCount} errors`, "success");
+    } catch (error) {
+      setSettingsLogStatus(`Log refresh failed: ${error.message}`, "error");
+    } finally {
+      state.settingsLogInFlight = false;
+    }
+  };
+  const scheduleSettingsLogPoll = (delayMs = 1000) => {
+    clearSettingsLogPollTimer();
+    if (
+      !settingsLogEventsEl ||
+      !document.body.contains(settingsLogEventsEl) ||
+      document.body.dataset.view !== "settings" ||
+      state.settingsLogPaused
+    ) {
+      return;
+    }
+    state.settingsLogPollTimer = window.setTimeout(async () => {
+      state.settingsLogPollTimer = 0;
+      await refreshSettingsLogs();
+      scheduleSettingsLogPoll(1000);
+    }, Math.max(300, Number(delayMs || 1000)));
+  };
+  const resetSettingsLogTail = () => {
+    state.settingsLogNextSeq = 0;
+    state.settingsLogEntries = [];
+    renderSettingsLogs();
+    void refreshSettingsLogs({ reset: true });
+    scheduleSettingsLogPoll(1000);
+  };
+  updateSettingsLogButtons();
+  renderSettingsLogs();
+  settingsLogRefreshEl?.addEventListener("click", () => resetSettingsLogTail());
+  settingsLogPauseEl?.addEventListener("click", () => {
+    state.settingsLogPaused = !state.settingsLogPaused;
+    updateSettingsLogButtons();
+    if (state.settingsLogPaused) {
+      clearSettingsLogPollTimer();
+      setSettingsLogStatus("Log tail paused.");
+    } else {
+      void refreshSettingsLogs();
+      scheduleSettingsLogPoll(250);
+    }
+  });
+  settingsLogAutoscrollEl?.addEventListener("click", () => {
+    state.settingsLogAutoScroll = !state.settingsLogAutoScroll;
+    safeStorageSet("tater_settings_log_auto_scroll", state.settingsLogAutoScroll ? "true" : "false");
+    updateSettingsLogButtons();
+    if (state.settingsLogAutoScroll && settingsLogEventsEl) {
+      settingsLogEventsEl.scrollTop = settingsLogEventsEl.scrollHeight;
+    }
+  });
+  settingsLogClearEl?.addEventListener("click", () => {
+    state.settingsLogEntries = [];
+    renderSettingsLogs();
+    setSettingsLogStatus("Visible log view cleared. Live tail will continue.");
+  });
+  settingsLogCopyEl?.addEventListener("click", async () => {
+    const rows = Array.isArray(state.settingsLogEntries) ? state.settingsLogEntries : [];
+    const text = rows
+      .map((entry) => `${appLogTimeLabel(entry.ts)} ${entry.level.toUpperCase().padEnd(8)} ${entry.logger} ${entry.message || entry.display || ""}`)
+      .join("\n");
+    if (!text.trim()) {
+      setSettingsLogStatus("No visible logs to copy.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSettingsLogStatus(`Copied ${rows.length} visible log line${rows.length === 1 ? "" : "s"}.`, "success");
+    } catch (error) {
+      setSettingsLogStatus(`Copy failed: ${error.message}`, "error");
+    }
+  });
+  settingsLogLevelEl?.addEventListener("change", () => resetSettingsLogTail());
+  settingsLogLoggerEl?.addEventListener("change", () => resetSettingsLogTail());
+  settingsLogLoggerEl?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      resetSettingsLogTail();
+    }
+  });
+
   const tabButtons = Array.from(root.querySelectorAll(".settings-tab-btn"));
   const tabPanels = Array.from(root.querySelectorAll(".settings-tab-panel"));
   const initialSettingsTab = !redisStatus.connected ? "redis" : normalizeSettingsTab(state.settingsTab || "general");
@@ -19283,6 +19544,17 @@ async function loadSettingsView() {
       panel.classList.toggle("active", panel.dataset.settingsPanel === normalizedTab);
     });
     setPreferredSettingsTab(normalizedTab);
+    if (normalizedTab === "logs") {
+      updateSettingsLogButtons();
+      if (!state.settingsLogEntries.length || state.settingsLogNextSeq <= 0) {
+        void refreshSettingsLogs({ reset: true });
+      } else {
+        void refreshSettingsLogs();
+      }
+      scheduleSettingsLogPoll(500);
+    } else {
+      clearSettingsLogPollTimer();
+    }
     if (normalizedTab === "esphome") {
       void ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
     } else if (normalizedTab === "models") {
@@ -25532,6 +25804,7 @@ async function loadView(viewName) {
   }
   if (state.view !== "settings") {
     clearLlmDebugPollTimer();
+    clearSettingsLogPollTimer();
   }
   document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
@@ -25622,6 +25895,7 @@ window.addEventListener("beforeunload", () => {
   clearDashboardRefreshTimer();
   clearSpudexPollTimer();
   clearLlmDebugPollTimer();
+  clearSettingsLogPollTimer();
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();
