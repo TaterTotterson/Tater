@@ -22,6 +22,7 @@ from urllib import parse as urllib_parse, request as urllib_request
 import yaml
 
 from helpers import redis_client
+from tater_paths import agent_lab_path
 
 from . import display_bus
 from . import runtime as esphome_runtime
@@ -30,7 +31,7 @@ from . import ui_helpers as esphome_ui_helpers
 FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
-FIRMWARE_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "esphome"
+FIRMWARE_AGENT_LABS_ROOT = agent_lab_path("esphome")
 FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
 FIRMWARE_BUILD_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_builds"
 FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_AGENT_LABS_ROOT / "web_flash"

@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 logger = logging.getLogger("portal_registry")
 
 PORTAL_DIR = Path(os.getenv("TATER_PORTAL_DIR", "portals"))
+PORTAL_BUILTIN_DIR = Path(os.getenv("TATER_PORTAL_BUILTIN_DIR", "")) if os.getenv("TATER_PORTAL_BUILTIN_DIR") else None
 _SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_]+_portal$")
 
 _DEFAULT_PORTAL_ORDER = [
@@ -36,6 +37,52 @@ portal_registry: List[Dict[str, Any]] = []
 portal_registry_errors: List[str] = []
 
 
+def _unique_dirs(*dirs: Path | None) -> List[Path]:
+    out: List[Path] = []
+    seen = set()
+    for raw in dirs:
+        if raw is None:
+            continue
+        path = Path(raw).expanduser().resolve()
+        token = str(path)
+        if token and token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
+
+
+def _portal_dirs() -> List[Path]:
+    return _unique_dirs(PORTAL_DIR, PORTAL_BUILTIN_DIR)
+
+
+def _ensure_portal_import_context() -> None:
+    dirs = _portal_dirs()
+    for directory in reversed(dirs):
+        parent = str(directory.parent)
+        if parent and parent not in sys.path:
+            sys.path.insert(0, parent)
+
+    try:
+        package = importlib.import_module("portals")
+    except Exception:
+        return
+
+    package_paths = getattr(package, "__path__", None)
+    if package_paths is None:
+        return
+
+    normalized = {str(Path(path).resolve()) for path in package_paths}
+    for directory in reversed(dirs):
+        token = str(directory)
+        if token in normalized:
+            continue
+        try:
+            package_paths.insert(0, token)
+        except AttributeError:
+            package_paths.append(token)
+        normalized.add(token)
+
+
 def _portal_sort_key(module_key: str) -> tuple[int, str]:
     try:
         idx = _DEFAULT_PORTAL_ORDER.index(module_key)
@@ -45,14 +92,14 @@ def _portal_sort_key(module_key: str) -> tuple[int, str]:
 
 
 def _discover_portal_module_keys() -> List[str]:
-    if not PORTAL_DIR.exists() or not PORTAL_DIR.is_dir():
-        return []
-
     discovered = set()
-    for file_path in PORTAL_DIR.glob("*_portal.py"):
-        stem = str(file_path.stem or "").strip()
-        if stem and _SAFE_MODULE_RE.fullmatch(stem):
-            discovered.add(stem)
+    for directory in _portal_dirs():
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for file_path in directory.glob("*_portal.py"):
+            stem = str(file_path.stem or "").strip()
+            if stem and _SAFE_MODULE_RE.fullmatch(stem):
+                discovered.add(stem)
 
     return sorted(discovered, key=_portal_sort_key)
 
@@ -106,6 +153,7 @@ def _load_portal_settings(module_key: str) -> tuple[Dict[str, Any] | None, str]:
 
 def refresh_portal_registry() -> List[Dict[str, Any]]:
     importlib.invalidate_caches()
+    _ensure_portal_import_context()
     discovered = _discover_portal_module_keys()
 
     updated: List[Dict[str, Any]] = []

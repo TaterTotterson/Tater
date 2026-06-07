@@ -2,6 +2,7 @@ import atexit
 import hashlib
 import json
 import os
+import signal
 import shutil
 import socket
 import ssl
@@ -15,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import redis
 from redis.exceptions import RedisError
 
+from tater_paths import agent_lab_dir, runtime_dir
+
 
 class RedisNotConfiguredError(RedisError):
     """Raised when Redis is required but connection settings are missing."""
@@ -27,7 +30,7 @@ _CONFIG_CACHE: Optional[Dict[str, Any]] = None
 _CONFIG_SOURCE = "unknown"
 _CONFIG_ERROR = ""
 _CONFIG_FALLBACK_REASON = ""
-_RUNTIME_DIR = (Path(__file__).resolve().parent / ".runtime").resolve()
+_RUNTIME_DIR = runtime_dir()
 _INTERNAL_REDIS_PROCESS: Optional[subprocess.Popen] = None
 _INTERNAL_REDIS_INFO: Dict[str, Any] = {}
 _INTERNAL_REDIS_ATEXIT_REGISTERED = False
@@ -472,17 +475,11 @@ def _config_path() -> Path:
         if not path.is_absolute():
             path = (Path(__file__).resolve().parent / path).resolve()
         return path
-    return (Path(__file__).resolve().parent / ".runtime" / "redis_connection.json").resolve()
+    return (_RUNTIME_DIR / "redis_connection.json").resolve()
 
 
 def _agent_lab_dir() -> Path:
-    raw = str(os.getenv("TATER_AGENT_ROOT", "") or "").strip()
-    if raw:
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = (Path(__file__).resolve().parent / path).resolve()
-        return path.resolve()
-    return (Path(__file__).resolve().parent / "agent_lab").resolve()
+    return agent_lab_dir()
 
 
 def _default_internal_redis_data_path() -> Path:
@@ -843,6 +840,85 @@ def _internal_redis_existing_ping(
         _close_client(client)
 
 
+def _read_internal_redis_pid(path: Path) -> int:
+    try:
+        return _to_int(path.read_text(encoding="utf-8").strip(), default=0, min_value=0)
+    except Exception:
+        return 0
+
+
+def _pid_is_running(pid: int) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _internal_redis_process_id(
+    *,
+    socket_path: Optional[Path] = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    db: int = 0,
+    timeout_seconds: float = 0.35,
+) -> int:
+    kwargs: Dict[str, Any] = {
+        "db": int(db),
+        "decode_responses": True,
+        "socket_timeout": float(timeout_seconds),
+        "socket_connect_timeout": float(timeout_seconds),
+        "health_check_interval": 30,
+    }
+    if socket_path is not None:
+        if not socket_path.exists():
+            return 0
+        kwargs["unix_socket_path"] = str(socket_path)
+    else:
+        if int(port or 0) <= 0:
+            return 0
+        kwargs["host"] = str(host or "127.0.0.1")
+        kwargs["port"] = int(port)
+
+    client = None
+    try:
+        client = redis.Redis(**kwargs)
+        info = client.info("server")
+        if isinstance(info, dict):
+            return _to_int(info.get("process_id"), default=0, min_value=0)
+    except Exception:
+        return 0
+    finally:
+        _close_client(client)
+    return 0
+
+
+def _internal_existing_redis_pid(
+    paths: Dict[str, Path],
+    *,
+    use_unix_socket: bool,
+    host: str,
+    port: int,
+    db: int,
+) -> int:
+    pidfile_pid = _read_internal_redis_pid(paths["pid_path"])
+    if pidfile_pid <= 0:
+        return 0
+
+    if use_unix_socket:
+        server_pid = _internal_redis_process_id(socket_path=paths["socket_path"], db=db)
+    else:
+        server_pid = _internal_redis_process_id(host=host, port=port, db=db)
+
+    if server_pid > 0 and server_pid == pidfile_pid and _pid_is_running(pidfile_pid):
+        return int(pidfile_pid)
+    return 0
+
+
 def _internal_redis_state_key(config: Dict[str, Any]) -> str:
     paths = _internal_redis_paths(config)
     return json.dumps(
@@ -904,11 +980,14 @@ def _stop_internal_redis_locked() -> None:
     info = dict(_INTERNAL_REDIS_INFO or {})
     _INTERNAL_REDIS_PROCESS = None
     _INTERNAL_REDIS_INFO = {}
-    if proc is None or proc.poll() is not None:
+    proc_running = proc is not None and proc.poll() is None
+    if not proc_running and not bool(info.get("managed")):
         return
 
     use_unix_socket = bool(info.get("use_unix_socket"))
+    pid = _to_int(info.get("pid"), default=0, min_value=0)
     client = None
+    shutdown_requested = False
     try:
         if use_unix_socket:
             socket_path = str(info.get("socket_path") or "")
@@ -934,16 +1013,30 @@ def _stop_internal_redis_locked() -> None:
         if client is not None:
             try:
                 client.execute_command("SHUTDOWN", "SAVE")
+                shutdown_requested = True
             except redis.exceptions.ConnectionError:
+                shutdown_requested = True
                 pass
     except Exception:
         pass
     finally:
         _close_client(client)
 
-    try:
-        proc.wait(timeout=5.0)
-    except Exception:
+    if proc_running:
+        try:
+            proc.wait(timeout=5.0)
+            return
+        except Exception:
+            pass
+
+    if pid > 0 and shutdown_requested:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not _pid_is_running(pid):
+                return
+            time.sleep(0.1)
+
+    if proc_running:
         try:
             proc.terminate()
             proc.wait(timeout=3.0)
@@ -952,6 +1045,11 @@ def _stop_internal_redis_locked() -> None:
                 proc.kill()
             except Exception:
                 pass
+    elif pid > 0 and bool(info.get("adopted")) and _pid_is_running(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
 
 
 def shutdown_internal_redis() -> None:
@@ -992,24 +1090,37 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
     else:
         ping_ok, _ping_error = _internal_redis_existing_ping(host=host, port=existing_port, db=db)
     if ping_ok:
-        info = {
-            "mode": _REDIS_MODE_INTERNAL,
-            "managed": False,
-            "pid": 0,
-            "state_key": state_key,
-            "data_path": str(paths["data_path"]),
-            "data_dir": str(paths["data_dir"]),
-            "host": host,
-            "port": int(existing_port),
-            "use_unix_socket": bool(use_unix_socket),
-            "socket_path": str(paths["socket_path"]),
-            "config_path": str(paths["config_path"]),
-            "log_path": str(paths["log_path"]),
-            "server_path": "",
-            "server_source": "existing",
-        }
-        _INTERNAL_REDIS_INFO = dict(info)
-        return dict(info)
+        existing_pid = _internal_existing_redis_pid(
+            paths,
+            use_unix_socket=use_unix_socket,
+            host=host,
+            port=existing_port,
+            db=db,
+        )
+        if existing_pid > 0:
+            info = {
+                "mode": _REDIS_MODE_INTERNAL,
+                "managed": True,
+                "adopted": True,
+                "pid": int(existing_pid),
+                "state_key": state_key,
+                "data_path": str(paths["data_path"]),
+                "data_dir": str(paths["data_dir"]),
+                "host": host,
+                "port": int(existing_port),
+                "use_unix_socket": bool(use_unix_socket),
+                "socket_path": str(paths["socket_path"]),
+                "config_path": str(paths["config_path"]),
+                "log_path": str(paths["log_path"]),
+                "server_path": "",
+                "server_source": "existing",
+            }
+            _INTERNAL_REDIS_INFO = dict(info)
+            return dict(info)
+        if use_unix_socket:
+            raise RedisNotConfiguredError(
+                f"Internal Redis socket is already in use but does not match Tater's pidfile: {paths['socket_path']}"
+            )
 
     for cleanup_path in (paths["socket_path"], paths["pid_path"], paths["port_path"]):
         try:
@@ -1482,6 +1593,7 @@ def get_redis_connection_status() -> Dict[str, Any]:
                 "redis_log_path": str(info.get("log_path") or paths["log_path"]),
                 "redis_pid": int(info.get("pid") or 0),
                 "redis_managed": bool(info.get("managed")),
+                "redis_adopted": bool(info.get("adopted")),
                 "redis_server_path": str(info.get("server_path") or ""),
                 "redis_server_source": str(info.get("server_source") or ""),
             }

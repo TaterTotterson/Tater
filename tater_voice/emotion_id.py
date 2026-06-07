@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from helpers import redis_client
+from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
 
 from . import runtime as esphome_runtime
@@ -84,7 +85,7 @@ def _temporary_huggingface_env(cache_root: Optional[Path] = None):
 
 EMOTION_ID_SETTINGS_HASH_KEY = "voice_emotion_id_settings"
 EMOTION_ID_LAST_HASH_KEY = "voice_emotion_id_last"
-EMOTION_ID_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "emotion_id"
+EMOTION_ID_MODEL_ROOT = agent_lab_path("models", "emotion_id")
 
 DEFAULT_EMOTION_ID_ENABLED = False
 DEFAULT_EMOTION_ID_PROMPT_HINT_ENABLED = True
