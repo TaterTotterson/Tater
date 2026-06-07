@@ -214,16 +214,15 @@ async def startup() -> None:
 
 async def shutdown() -> None:
     vp = _vp()
-    for key, task in list(vp._background_tasks.items()):
-        if isinstance(task, asyncio.Task):
+    tasks = [task for task in list(vp._background_tasks.values()) if isinstance(task, asyncio.Task)]
+    for task in tasks:
+        if not task.done():
             task.cancel()
-    for task in list(vp._background_tasks.values()):
-        if isinstance(task, asyncio.Task):
-            with contextlib.suppress(Exception):
-                await task
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     vp._background_tasks.clear()
 
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(asyncio.CancelledError, Exception):
         await vp._esphome_disconnect_all("portal_shutdown")
 
 

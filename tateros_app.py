@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import hmac
 import importlib
+import inspect
 import io
 import json
 import logging
@@ -20,7 +21,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -219,6 +220,53 @@ logging.basicConfig(
 redis_client = shared_redis_client
 redis_blob_client = shared_redis_blob_client
 HYDRA_LLM_RECOVERY_NOTICE_KEY = "tater:hydra:llm:recovery_notice"
+APP_LOG_BUFFER_LIMIT = 5000
+app_log_lock = threading.Lock()
+app_log_entries: deque[Dict[str, Any]] = deque(maxlen=APP_LOG_BUFFER_LIMIT)
+app_log_next_seq = 1
+
+
+class _TaterAppLogBufferHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        global app_log_next_seq
+        try:
+            message = record.getMessage()
+            display = self.format(record)
+            exc_text = ""
+            if record.exc_info:
+                formatter = self.formatter or logging.Formatter()
+                exc_text = formatter.formatException(record.exc_info)
+            entry = {
+                "seq": 0,
+                "ts": float(getattr(record, "created", time.time()) or time.time()),
+                "level": str(record.levelname or "").lower(),
+                "levelno": int(record.levelno or 0),
+                "logger": str(record.name or "root"),
+                "module": str(getattr(record, "module", "") or ""),
+                "function": str(getattr(record, "funcName", "") or ""),
+                "line": int(getattr(record, "lineno", 0) or 0),
+                "message": str(message or ""),
+                "display": str(display or message or ""),
+                "exception": str(exc_text or ""),
+            }
+            with app_log_lock:
+                entry["seq"] = app_log_next_seq
+                app_log_next_seq += 1
+                app_log_entries.append(entry)
+        except Exception:
+            self.handleError(record)
+
+
+def _install_app_log_buffer_handler() -> None:
+    root_logger = logging.getLogger()
+    if any(isinstance(handler, _TaterAppLogBufferHandler) for handler in root_logger.handlers):
+        return
+    handler = _TaterAppLogBufferHandler(level=logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(name)-20s %(message)s"))
+    root_logger.addHandler(handler)
+
+
+_install_app_log_buffer_handler()
 
 
 def _integration_module(integration_id: str, *, auto_restore: bool = True):
@@ -521,15 +569,42 @@ class SurfaceRuntimeManager:
             "reason": "stop-timeout" if running else "stopped",
         }
 
-    def stop_all(self, *, timeout: float = 2.0) -> None:
+    def stop_all(self, *, timeout: float = 8.0) -> None:
         with self.lock:
             keys = list(self.threads.keys())
+            stop_flags = {key: self.stop_flags.get(key) for key in keys}
 
         for key in keys:
-            try:
-                self.stop(key, timeout=timeout)
-            except Exception:  # pragma: no cover - best effort during shutdown
-                logger.exception("[%s] failed stopping %s", self.kind, key)
+            logger.info("[%s] stopping %s", self.kind, key)
+            stop_flag = stop_flags.get(key)
+            if stop_flag:
+                stop_flag.set()
+
+        deadline = time.monotonic() + max(0.1, float(timeout or 0))
+        pending = set(keys)
+        while pending and time.monotonic() < deadline:
+            for key in list(pending):
+                with self.lock:
+                    thread = self.threads.get(key)
+                if not thread or not thread.is_alive():
+                    with self.lock:
+                        self.threads.pop(key, None)
+                        self.stop_flags.pop(key, None)
+                    logger.info("[%s] stopped %s", self.kind, key)
+                    pending.discard(key)
+            if pending:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+        for key in list(pending):
+            with self.lock:
+                thread = self.threads.get(key)
+            if thread and thread.is_alive():
+                logger.warning("[%s] stop timed out for %s", self.kind, key)
+            else:
+                with self.lock:
+                    self.threads.pop(key, None)
+                    self.stop_flags.pop(key, None)
+                logger.info("[%s] stopped %s", self.kind, key)
 
 
 core_runtime = SurfaceRuntimeManager(
@@ -7835,15 +7910,34 @@ async def _startup_event() -> None:
     logger.info("TaterOS backend started")
 
 
+async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: float = 10.0) -> bool:
+    try:
+        result = func()
+        if inspect.isawaitable(result):
+            if timeout and timeout > 0:
+                await asyncio.wait_for(result, timeout=float(timeout))
+            else:
+                await result
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("[shutdown] %s timed out after %.1fs", name, float(timeout or 0))
+    except asyncio.CancelledError:
+        logger.info("[shutdown] %s cancelled during shutdown", name)
+    except Exception as exc:
+        logger.warning("[shutdown] %s failed: %s", name, exc, exc_info=True)
+    return False
+
+
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
-    await _stop_dashboard_brief_scheduler()
-    core_runtime.stop_all()
-    await esphome_home_module.shutdown()
-    portal_runtime.stop_all()
-    await stop_integration_runtime()
-    shutdown_runtime_executors(wait=False, cancel_futures=True)
-    shutdown_internal_redis()
+    logger.info("TaterOS backend stopping")
+    await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
+    await _run_shutdown_step("core runtime", lambda: core_runtime.stop_all(timeout=8.0), timeout=10.0)
+    await _run_shutdown_step("ESPHome voice runtime", esphome_home_module.shutdown, timeout=10.0)
+    await _run_shutdown_step("portal runtime", lambda: portal_runtime.stop_all(timeout=8.0), timeout=10.0)
+    await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
+    await _run_shutdown_step("runtime executors", lambda: shutdown_runtime_executors(wait=False, cancel_futures=True), timeout=5.0)
+    await _run_shutdown_step("internal Redis", shutdown_internal_redis, timeout=5.0)
     logger.info("TaterOS backend stopped")
 
 
@@ -16124,6 +16218,56 @@ def get_settings_integrations_runtime() -> Dict[str, Any]:
 @app.get("/api/settings/integrations/runtime/events")
 def get_settings_integrations_runtime_events(after_seq: int = 0, limit: int = 200) -> Dict[str, Any]:
     return integration_runtime_events(redis_client, after_seq=after_seq, limit=limit)
+
+
+@app.get("/api/settings/logs")
+def get_settings_logs(after_seq: int = 0, limit: int = 300, level: str = "", logger_name: str = "") -> Dict[str, Any]:
+    requested_limit = max(1, min(1000, int(limit or 300)))
+    after = max(0, int(after_seq or 0))
+    level_token = str(level or "").strip().lower()
+    logger_filter = str(logger_name or "").strip().lower()
+    min_levels = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }
+    min_level = min_levels.get(level_token, 0)
+    with app_log_lock:
+        rows = list(app_log_entries)
+        latest_seq = app_log_next_seq - 1
+
+    level_counts = Counter(str(row.get("level") or "info").lower() for row in rows)
+    logger_names = sorted(
+        {
+            str(row.get("logger") or "root").strip()
+            for row in rows
+            if str(row.get("logger") or "root").strip()
+        }
+    )
+
+    filtered: List[Dict[str, Any]] = []
+    for row in rows:
+        seq = int(row.get("seq") or 0)
+        if after and seq <= after:
+            continue
+        if min_level and int(row.get("levelno") or 0) < min_level:
+            continue
+        if logger_filter and logger_filter not in str(row.get("logger") or "").lower():
+            continue
+        filtered.append(dict(row))
+
+    return {
+        "entries": filtered[-requested_limit:],
+        "next_seq": latest_seq,
+        "oldest_seq": int(rows[0].get("seq") or 0) if rows else 0,
+        "buffer_limit": APP_LOG_BUFFER_LIMIT,
+        "level_counts": dict(level_counts),
+        "loggers": logger_names,
+        "filtered_total": len(filtered),
+    }
 
 
 @app.get("/api/settings/integrations/runtime/states")

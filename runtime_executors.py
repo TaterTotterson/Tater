@@ -20,6 +20,7 @@ EXECUTOR_WORKER_BOUNDS: Dict[str, Dict[str, int]] = {
 _EXECUTOR_LOCK = threading.RLock()
 _EXECUTORS: Dict[str, ThreadPoolExecutor] = {}
 _WORKERS: Dict[str, int] = {}
+_EXECUTORS_SHUTTING_DOWN = False
 
 
 def _coerce_workers(name: str, value: Any, *, default: int) -> int:
@@ -62,6 +63,8 @@ def _ensure_worker_defaults_locked() -> None:
 def _ensure_executor(name: str) -> ThreadPoolExecutor:
     token = name if name in EXECUTOR_WORKER_BOUNDS else "background"
     with _EXECUTOR_LOCK:
+        if _EXECUTORS_SHUTTING_DOWN:
+            raise RuntimeError("Tater runtime executors are shutting down")
         _ensure_worker_defaults_locked()
         executor = _EXECUTORS.get(token)
         if executor is None:
@@ -98,6 +101,7 @@ def configure_runtime_executors(
     dashboard_workers: Optional[Any] = None,
     background_workers: Optional[Any] = None,
 ) -> Dict[str, Any]:
+    global _EXECUTORS_SHUTTING_DOWN
     explicit = {
         "wake": wake_workers,
         "stt": stt_workers if stt_workers is not None else speech_workers,
@@ -107,6 +111,7 @@ def configure_runtime_executors(
         "background": background_workers,
     }
     with _EXECUTOR_LOCK:
+        _EXECUTORS_SHUTTING_DOWN = False
         _ensure_worker_defaults_locked()
         for name in EXECUTOR_WORKER_BOUNDS:
             desired = _desired_worker_count(name, explicit.get(name))
@@ -151,7 +156,9 @@ async def run_background(func: Callable[..., Any], *args: Any, **kwargs: Any) ->
 
 
 def shutdown_runtime_executors(*, wait: bool = False, cancel_futures: bool = True) -> None:
+    global _EXECUTORS_SHUTTING_DOWN
     with _EXECUTOR_LOCK:
+        _EXECUTORS_SHUTTING_DOWN = True
         executors = list(_EXECUTORS.values())
         _EXECUTORS.clear()
     for executor in executors:

@@ -189,8 +189,10 @@ async def startup() -> None:
 async def shutdown() -> None:
     if not is_running():
         return
-    await _vp().shutdown()
-    selector_runtime("__esphome_home__")["service_running"] = False
+    try:
+        await _vp().shutdown()
+    finally:
+        selector_runtime("__esphome_home__")["service_running"] = False
 
 
 def include_routes(app: Any) -> None:

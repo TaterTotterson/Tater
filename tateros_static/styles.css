@@ -2820,6 +2820,127 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   color: #e7f4ec;
 }
 
+.app-log-console-shell {
+  min-width: 0;
+}
+
+.app-log-hero {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.app-log-actions,
+.app-log-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app-log-actions .inline-btn.active {
+  border-color: rgba(214, 90, 31, 0.52);
+  background: rgba(214, 90, 31, 0.16);
+  color: var(--accent-soft);
+}
+
+.app-log-filter-row {
+  align-items: end;
+  justify-content: flex-start;
+}
+
+.app-log-filter-row label {
+  min-width: min(240px, 100%);
+}
+
+.app-log-events {
+  max-height: min(62vh, 720px);
+  min-height: 430px;
+  overflow: auto;
+  border: 1px solid rgba(240, 131, 69, 0.2);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(10, 11, 13, 0.96), rgba(8, 9, 11, 0.98)),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0, rgba(255, 255, 255, 0.018) 1px, transparent 1px, transparent 24px);
+  box-shadow: var(--shadow-soft);
+  padding: 10px;
+  color: #e5e9e4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.app-log-line {
+  display: grid;
+  grid-template-columns: 88px 74px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.app-log-time {
+  color: #8f9aa5;
+  white-space: nowrap;
+}
+
+.app-log-level {
+  color: #8ddfb1;
+  font-weight: 900;
+  text-transform: lowercase;
+}
+
+.app-log-line.warning .app-log-level {
+  color: #ffd08a;
+}
+
+.app-log-line.error .app-log-level,
+.app-log-line.critical .app-log-level {
+  color: #ff9b8e;
+}
+
+.app-log-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.app-log-body strong {
+  color: #f5efe7;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.app-log-body small {
+  color: #aeb8c2;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.app-log-body pre {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #ccd5dc;
+  font: inherit;
+}
+
+.app-log-exception {
+  padding: 8px;
+  border-left: 2px solid rgba(255, 155, 142, 0.55);
+  border-radius: 6px;
+  background: rgba(255, 155, 142, 0.07);
+  color: #ffe6e1;
+}
+
+.app-log-empty {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+}
+
 .hf-model-card,
 .local-model-card,
 .hf-model-browser-detail {
@@ -3467,11 +3588,20 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
     justify-content: flex-start;
   }
 
-  .llm-debug-line {
+  .app-log-actions,
+  .app-log-hero,
+  .app-log-filter-row {
+    justify-content: flex-start;
+    grid-template-columns: 1fr;
+  }
+
+  .llm-debug-line,
+  .app-log-line {
     grid-template-columns: 72px minmax(0, 1fr);
   }
 
-  .llm-debug-body {
+  .llm-debug-body,
+  .app-log-body {
     grid-column: 1 / -1;
   }
 
