@@ -146,7 +146,7 @@ private final class BackendManager {
     func recoverIfBackendMissing() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            guard self.process == nil, self.setupProcess == nil else {
+            guard self.setupProcess == nil else {
                 return
             }
             if self.isWebReady() {
@@ -154,6 +154,9 @@ private final class BackendManager {
                     self.appendLauncherLog("Recovery found web UI ready; marking running.\n")
                     self.state = .running
                 }
+                return
+            }
+            guard self.process == nil else {
                 return
             }
             switch self.state {
