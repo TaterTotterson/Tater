@@ -6018,9 +6018,15 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_START", "STT_START"), None)
         return 0
 
-    async def _handle_audio(data: bytes) -> None:
+    async def _handle_audio(data: bytes, data2: Optional[bytes] = None) -> None:
         audio_bytes = bytes(data or b"")
+        secondary_audio_bytes = bytes(data2 or b"")
+        if not audio_bytes and not secondary_audio_bytes:
+            return
         if not audio_bytes:
+            _native_debug(
+                f"esphome secondary-only audio ignored selector={token} bytes={len(secondary_audio_bytes)}"
+            )
             return
 
         async with lock:
@@ -6040,7 +6046,14 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         audio_bytes = _pcm_apply_gain(audio_bytes, sample_width=width, gain=input_gain)
         if not audio_bytes:
             return
+        if secondary_audio_bytes:
+            secondary_audio_bytes = _pcm_apply_gain(secondary_audio_bytes, sample_width=width, gain=input_gain)
         chunk_dbfs = _pcm_dbfs(audio_bytes, sample_width=width)
+        secondary_chunk_dbfs = (
+            _pcm_dbfs(secondary_audio_bytes, sample_width=width)
+            if secondary_audio_bytes
+            else None
+        )
 
         now_ts = _now()
         async with lock:
@@ -6197,11 +6210,36 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 session.audio_chunks += 1
                 if session.stt_queue is not None:
                     _enqueue_stt_stream_item(session, audio_bytes, reason="stt_stream_queue_full")
+            if secondary_audio_bytes and session.secondary_audio_bytes + len(secondary_audio_bytes) <= max_audio_bytes:
+                first_secondary_chunk = session.secondary_audio_chunks <= 0
+                session.secondary_audio_buffer.extend(secondary_audio_bytes)
+                session.secondary_audio_bytes += len(secondary_audio_bytes)
+                session.secondary_audio_chunks += 1
+                if secondary_chunk_dbfs is not None:
+                    session.secondary_audio_level_chunks += 1
+                    if float(secondary_chunk_dbfs) > float(session.secondary_audio_peak_dbfs or -120.0):
+                        session.secondary_audio_peak_dbfs = float(secondary_chunk_dbfs)
+                if first_secondary_chunk:
+                    logger.info(
+                        "[native-voice] multi-channel audio detected selector=%s session_id=%s primary_bytes=%s secondary_bytes=%s secondary_dbfs=%s",
+                        token,
+                        sid,
+                        len(audio_bytes),
+                        len(secondary_audio_bytes),
+                        f"{float(secondary_chunk_dbfs):.1f}" if secondary_chunk_dbfs is not None else "-",
+                    )
 
             chunks = int(session.audio_chunks)
             if chunks in {1, 5, 10} or (chunks % 50 == 0):
                 prob = metrics.get("probability", "-")
                 peak_prob = metrics.get("max_probability", "-")
+                secondary_note = (
+                    f" secondary_chunks={session.secondary_audio_chunks} "
+                    f"secondary_bytes={session.secondary_audio_bytes} "
+                    f"secondary_peak_dbfs={float(session.secondary_audio_peak_dbfs or -120.0):.1f}"
+                    if int(session.secondary_audio_chunks or 0) > 0
+                    else ""
+                )
                 _native_debug(
                     "esphome audio "
                     f"selector={token} session_id={sid} chunks={chunks} bytes={session.audio_bytes} "
@@ -6211,6 +6249,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     f"vad_ignored={bool(metrics.get('vad_startup_ignored'))} "
                     f"chunk_dbfs={chunk_dbfs if chunk_dbfs is not None else '-'} "
                     f"peak_dbfs={float(session.audio_peak_dbfs or -120.0):.1f}"
+                    f"{secondary_note}"
                 )
 
             if session.completeness_hold_until_ts > 0.0 and float(metrics.get("silence_s") or 0.0) <= 0.05:
