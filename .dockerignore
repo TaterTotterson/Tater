@@ -1,8 +1,22 @@
 .DS_Store
+.git/
+.github/
 __pycache__/
 *.py[cod]
 
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.safetensors
+.cache/
+.runtime/
+
+agent_lab/downloads/
 agent_lab/logs/*.log
+agent_lab/models/
+agent_lab/redis/
+agent_lab/speaker_id/
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 

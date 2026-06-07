@@ -1,42 +1,54 @@
-# Use an official Python runtime as a parent image.
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Prevent some pip noise & keep Python stdout unbuffered
 ENV PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-# Set the working directory in the container.
 WORKDIR /app
 
-# Install system dependencies + CA certs (for HTTPS)
-# + libolm-dev + libffi-dev + pkg-config to build python-olm (Matrix E2EE)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN python -m venv /opt/venv \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     git \
     libpq-dev \
-    wget \
-    ffmpeg \
     libolm-dev \
     libffi-dev \
     pkg-config \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file into the container.
 COPY requirements.txt .
 
-# Upgrade pip and install Python dependencies.
-RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+RUN python -m pip install --upgrade pip \
+ && python -m pip install -r requirements.txt
 
-# Copy the rest of your application code into the container.
+
+FROM python:3.11-slim AS runtime
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    HTMLUI_PORT=8501
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    ffmpeg \
+    libpq5 \
+    libolm3 \
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
-# Expose HTML UI port.
 EXPOSE 8501
 
-# Set environment variables for HTML UI.
-ENV HTMLUI_PORT=8501
-
-# Command to run HTML UI.
 CMD ["sh", "run_ui.sh"]

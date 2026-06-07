@@ -1,27 +1,24 @@
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
 ARG LLAMA_CPP_CUDA_WHEEL=cu124
 ARG LLAMA_CPP_PYTHON_MIN_VERSION=0.3.23
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN python -m venv /opt/venv \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     git \
     libpq-dev \
-    wget \
-    ffmpeg \
-    libsndfile1 \
-    libgomp1 \
     libolm-dev \
     libffi-dev \
     pkg-config \
@@ -40,10 +37,35 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install onnxruntime-gpu \
  && python -c "from importlib import metadata; from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'), 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
 
+
+FROM python:3.11-slim AS runtime
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/curand/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cusolver/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cusparse/lib:/opt/venv/lib/python3.11/site-packages/nvidia/nvjitlink/lib \
+    HTMLUI_PORT=8501
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    ffmpeg \
+    libsndfile1 \
+    libgomp1 \
+    libpq5 \
+    libolm3 \
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
 EXPOSE 8501
-
-ENV HTMLUI_PORT=8501
 
 CMD ["sh", "run_ui.sh"]
