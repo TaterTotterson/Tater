@@ -17092,6 +17092,21 @@ async function loadSettingsView() {
       }))
       .filter((row) => row.model);
   };
+  const resolveLocalLlmModelValue = (provider, rows, preferredModel) => {
+    const normalized = normalizeHydraBaseProvider(provider);
+    const preferred = String(preferredModel || "").trim();
+    if (!preferred) {
+      return "";
+    }
+    if (rows.some((row) => row.model === preferred)) {
+      return preferred;
+    }
+    if (normalized === "llama_cpp" && !preferred.includes("::")) {
+      const fileRow = rows.find((row) => row.repo_id === preferred && row.filename && row.model.includes("::"));
+      return fileRow?.model || "";
+    }
+    return "";
+  };
   const normalizeHydraBaseRow = (row) => ({
     provider: normalizeHydraBaseProvider(row?.provider || settings?.hydra_llm_provider || ""),
     host: String(row?.host || "").trim(),
@@ -19775,7 +19790,9 @@ async function loadSettingsView() {
     if (!selectedModel) {
       return null;
     }
-    return localLlmModelsForProvider(normalized).find((row) => row.model === selectedModel) || null;
+    const rows = localLlmModelsForProvider(normalized);
+    const resolvedModel = resolveLocalLlmModelValue(normalized, rows, selectedModel);
+    return rows.find((row) => row.model === resolvedModel) || null;
   };
   const renderHydraContextEstimateForProvider = (provider, { loading = false } = {}) => {
     const normalized = normalizeHydraBaseProvider(provider);
@@ -20025,10 +20042,11 @@ async function loadSettingsView() {
         return `<option value="${escapeHtml(row.model)}">${escapeHtml(label)}</option>`;
       }),
     ].join("");
-    const matched = rows.some((row) => row.model === preferred);
-    selectEl.value = matched ? preferred : "";
+    const resolved = resolveLocalLlmModelValue(normalized, rows, preferred);
+    const matched = Boolean(resolved);
+    selectEl.value = matched ? resolved : "";
     if (inputEl && matched) {
-      inputEl.value = preferred;
+      inputEl.value = resolved;
     }
     if (statusEl) {
       statusEl.textContent = matched

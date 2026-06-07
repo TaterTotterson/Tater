@@ -3015,6 +3015,24 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     model = str(row.get("model") or row.get("model_id") or "").strip()
     repo_id = str(row.get("repo_id") or "").strip()
     filename = str(row.get("filename") or "").strip()
+    model_path = str(row.get("model_path") or "").strip()
+    model_root = str(row.get("model_root") or "").strip()
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        if "::" in model:
+            model_repo, model_filename = model.split("::", 1)
+            repo_id = repo_id or model_repo.strip()
+            filename = filename or model_filename.strip()
+        elif model and "/" in model and not repo_id:
+            repo_id = model
+        path_obj = Path(model_path).expanduser() if model_path else Path()
+        if repo_id and not filename and path_obj.is_file() and path_obj.suffix.lower() == ".gguf" and "mmproj" not in path_obj.name.lower():
+            snapshot_path = _local_llm_repo_snapshot_path(model_root, repo_id)
+            try:
+                filename = path_obj.relative_to(snapshot_path).as_posix() if snapshot_path.exists() else path_obj.name
+            except Exception:
+                filename = path_obj.name
+        if repo_id and filename:
+            model = f"{repo_id}::{filename}"
     if not model and repo_id:
         model = _hf_browser_effective_model_id(provider, repo_id, filename)
     max_context = _local_llm_context_value(row.get("max_context_tokens"))
@@ -3022,8 +3040,8 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     if not max_context:
         max_context, context_source = _local_llm_detect_max_context(
             provider,
-            model_path=str(row.get("model_path") or "").strip(),
-            model_root=str(row.get("model_root") or "").strip(),
+            model_path=model_path,
+            model_root=model_root,
             repo_id=repo_id or (model.split("::", 1)[0] if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP else model),
         )
     supports_vision = bool(row.get("supports_vision"))
@@ -3049,8 +3067,8 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "model": model,
         "repo_id": repo_id,
         "filename": filename,
-        "model_path": str(row.get("model_path") or "").strip(),
-        "model_root": str(row.get("model_root") or "").strip(),
+        "model_path": model_path,
+        "model_root": model_root,
         "status": str(row.get("status") or "ready").strip() or "ready",
         "source": str(row.get("source") or "").strip(),
         "downloaded_ts": float(row.get("downloaded_ts") or row.get("updated_ts") or 0.0),
@@ -3062,12 +3080,53 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _local_llm_model_dedupe_key(row: Dict[str, Any]) -> Tuple[str, str]:
+    provider = _normalize_hydra_llm_provider(row.get("provider"))
+    model = str(row.get("model") or "").strip()
+    if provider != HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return (provider, model)
+    repo_id = str(row.get("repo_id") or "").strip()
+    filename = str(row.get("filename") or "").strip()
+    if "::" in model:
+        model_repo, model_filename = model.split("::", 1)
+        repo_id = repo_id or model_repo.strip()
+        filename = filename or model_filename.strip()
+    if repo_id and filename:
+        return (provider, f"{repo_id}::{filename}")
+    if repo_id:
+        return (provider, repo_id)
+    return (provider, model)
+
+
+def _local_llm_model_row_score(row: Dict[str, Any]) -> Tuple[int, int, int, float]:
+    provider = _normalize_hydra_llm_provider(row.get("provider"))
+    model = str(row.get("model") or "").strip()
+    filename = str(row.get("filename") or "").strip()
+    explicit_file = provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and bool(filename or "::" in model)
+    cache_scan = str(row.get("source") or "").strip() == "cache-scan"
+    model_path = str(row.get("model_path") or "").strip()
+    path_exists = bool(model_path and Path(model_path).expanduser().exists())
+    return (
+        1 if explicit_file else 0,
+        1 if cache_scan else 0,
+        1 if path_exists else 0,
+        float(row.get("downloaded_ts") or 0.0),
+    )
+
+
 def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     provider_filter = _normalize_hydra_llm_provider(provider) if str(provider or "").strip() else ""
     rows = [_normalize_local_llm_model_row(row) for row in _read_local_llm_model_registry()]
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_HF_TRANSFORMERS))
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_LLAMA_CPP))
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_MLX_LM))
+    explicit_llama_repos = {
+        str(row.get("repo_id") or "").strip()
+        for row in rows
+        if _normalize_hydra_llm_provider(row.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+        and str(row.get("repo_id") or "").strip()
+        and str(row.get("filename") or "").strip()
+    }
     deduped: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
         provider_token = _normalize_hydra_llm_provider(row.get("provider"))
@@ -3076,9 +3135,15 @@ def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
             continue
         if provider_filter and provider_token != provider_filter:
             continue
-        key = (provider_token, model)
+        if (
+            provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            and not str(row.get("filename") or "").strip()
+            and str(row.get("repo_id") or "").strip() in explicit_llama_repos
+        ):
+            continue
+        key = _local_llm_model_dedupe_key(row)
         current = deduped.get(key)
-        if not current or float(row.get("downloaded_ts") or 0.0) >= float(current.get("downloaded_ts") or 0.0):
+        if not current or _local_llm_model_row_score(row) >= _local_llm_model_row_score(current):
             row["provider"] = provider_token
             row["provider_label"] = _hydra_llm_provider_label(provider_token)
             deduped[key] = row
@@ -3166,10 +3231,32 @@ def _record_downloaded_local_llm_model(
     if max_context:
         next_row["max_context_tokens"] = max_context
         next_row["context_source"] = context_source
+    next_key = _local_llm_model_dedupe_key(next_row)
     replaced = False
     out: List[Dict[str, Any]] = []
     for row in rows:
-        if _normalize_hydra_llm_provider(row.get("provider")) == provider_token and str(row.get("model") or "").strip() == model_token:
+        row_provider = _normalize_hydra_llm_provider(row.get("provider"))
+        row_repo = str(row.get("repo_id") or "").strip()
+        row_filename = str(row.get("filename") or "").strip()
+        stale_llama_repo_row = (
+            provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            and row_provider == provider_token
+            and bool(str(next_row.get("repo_id") or "").strip())
+            and bool(str(next_row.get("filename") or "").strip())
+            and row_repo == str(next_row.get("repo_id") or "").strip()
+            and not row_filename
+        )
+        replace_row = (
+            row_provider == provider_token
+            and (
+                str(row.get("model") or "").strip() == model_token
+                or _local_llm_model_dedupe_key(row) == next_key
+                or stale_llama_repo_row
+            )
+        )
+        if replace_row:
+            if replaced:
+                continue
             merged_row = dict(next_row)
             if not bool(merged_row.get("supports_vision")) and bool(row.get("supports_vision")):
                 merged_row["supports_vision"] = True
@@ -16484,30 +16571,54 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     _save_tater_api_settings_from_updates(updates)
     _save_spud_link_settings_from_updates(updates)
 
-    local_model_keys_cache: Optional[set[Tuple[str, str]]] = None
+    local_model_rows_cache: Optional[List[Dict[str, Any]]] = None
 
-    def _downloaded_local_model_keys() -> set[Tuple[str, str]]:
-        nonlocal local_model_keys_cache
-        if local_model_keys_cache is None:
-            local_model_keys_cache = {
-                (_normalize_hydra_llm_provider(row.get("provider")), str(row.get("model") or "").strip())
+    def _downloaded_local_model_rows() -> List[Dict[str, Any]]:
+        nonlocal local_model_rows_cache
+        if local_model_rows_cache is None:
+            local_model_rows_cache = [
+                row
                 for row in _local_llm_models_payload().get("models", [])
                 if isinstance(row, dict)
-            }
-        return local_model_keys_cache
+            ]
+        return local_model_rows_cache
 
-    def _require_downloaded_local_model(provider: Any, model: Any, label: str) -> None:
+    def _resolve_downloaded_local_model(provider: Any, model: Any) -> str:
         provider_token = _normalize_hydra_llm_provider(provider)
         model_token = str(model or "").strip()
+        if not provider_token or not model_token:
+            return ""
+        rows = _downloaded_local_model_rows()
+        for row in rows:
+            if _normalize_hydra_llm_provider(row.get("provider")) == provider_token and str(row.get("model") or "").strip() == model_token:
+                return model_token
+        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and "::" not in model_token:
+            candidates = [
+                str(row.get("model") or "").strip()
+                for row in rows
+                if _normalize_hydra_llm_provider(row.get("provider")) == provider_token
+                and str(row.get("repo_id") or "").strip() == model_token
+                and str(row.get("filename") or "").strip()
+                and str(row.get("model") or "").strip()
+            ]
+            if candidates:
+                return candidates[0]
+        return ""
+
+    def _require_downloaded_local_model(provider: Any, model: Any, label: str) -> str:
+        provider_token = _normalize_hydra_llm_provider(provider)
+        model_token = str(model or "").strip()
+        resolved_model = _resolve_downloaded_local_model(provider_token, model_token)
         if (
             _is_local_hydra_llm_provider(provider_token)
             and model_token
-            and (provider_token, model_token) not in _downloaded_local_model_keys()
+            and not resolved_model
         ):
             raise HTTPException(
                 status_code=400,
                 detail=f"{label} {_hydra_llm_provider_label(provider_token)} model must be downloaded from the Hugging Face tab before saving.",
             )
+        return resolved_model or model_token
 
     explicit_local_model_load_targets = "hydra_local_model_load_targets" in updates
 
@@ -16525,7 +16636,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             model_token = str(raw_target.get("model") or "").strip()
             if not _is_local_hydra_llm_provider(provider_token) or not model_token:
                 continue
-            _require_downloaded_local_model(provider_token, model_token, "Load target")
+            model_token = _require_downloaded_local_model(provider_token, model_token, "Load target")
             key = (provider_token, model_token)
             if key in seen:
                 continue
@@ -16932,7 +17043,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
         vision_model = str(updates.get("vision_model", current_vision.get("model") or "")).strip()
         if vision_mode == "dedicated" and _is_local_hydra_llm_provider(vision_provider):
-            _require_downloaded_local_model(vision_provider, vision_model, "Vision")
+            vision_model = _require_downloaded_local_model(vision_provider, vision_model, "Vision")
         save_shared_vision_settings(
             api_base=str(updates.get("vision_api_base", current_vision.get("api_base") or "")).strip(),
             model=vision_model,
@@ -17068,7 +17179,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         spudex_host = str(updates.get("spudex_llm_host", current_spudex.get("llm_host") or "") or "").strip()
         spudex_model = str(updates.get("spudex_llm_model", current_spudex.get("llm_model") or "") or "").strip()
         if _is_local_hydra_llm_provider(spudex_provider):
-            _require_downloaded_local_model(spudex_provider, spudex_model, "Spudex")
+            spudex_model = _require_downloaded_local_model(spudex_provider, spudex_model, "Spudex")
             spudex_host = ""
         save_spudex_settings(
             {
@@ -17252,7 +17363,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         for row in normalized_base_rows:
             row_provider = _normalize_hydra_llm_provider(row.get("provider"))
             row_model = str(row.get("model") or "").strip()
-            _require_downloaded_local_model(row_provider, row_model, "Base")
+            row["model"] = _require_downloaded_local_model(row_provider, row_model, "Base")
 
         if normalized_base_rows:
             redis_client.set(HYDRA_LLM_BASE_SERVERS_KEY, json.dumps(normalized_base_rows))
@@ -17292,7 +17403,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         role_api_key = str(updates.get(f"hydra_llm_{role}_api_key", redis_client.get(_hydra_role_llm_key(role, "api_key")) or "") or "").strip()
 
         if _is_local_hydra_llm_provider(role_provider):
-            _require_downloaded_local_model(role_provider, role_model, role.title())
+            role_model = _require_downloaded_local_model(role_provider, role_model, role.title())
             role_host = ""
             role_port = ""
             role_api_key = ""
