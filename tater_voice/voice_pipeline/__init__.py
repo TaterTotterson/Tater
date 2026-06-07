@@ -3944,7 +3944,7 @@ def _service_host_for_peer(peer_host: str) -> str:
         return env_host
 
     htmlui_host = _text(os.getenv("HTMLUI_HOST", "0.0.0.0"))
-    if htmlui_host not in {"0.0.0.0", "::"}:
+    if htmlui_host not in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
         return htmlui_host
 
     targets: List[str] = []
