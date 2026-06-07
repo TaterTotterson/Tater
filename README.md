@@ -58,6 +58,36 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 > **Note**:
 > - Tater can run any compatible local or OpenAI-compatible model. If you use a thinking model, disable thinking for best Hydra/tool behavior. Tater's built-in local providers try to suppress thinking automatically where supported.
 
+## macOS App Installation
+
+The easiest Mac install is the native **Tater.app** build. It runs the same Tater Python/FastAPI app, but wraps it in a macOS window with a menu bar icon, first-run setup, private runtime storage, and app-only update checks.
+
+1. **Download the latest macOS installer**
+
+   [Download Tater v88 for macOS](https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/Tater-v88.dmg)
+
+2. **Install Tater**
+
+   Open the DMG, then drag **Tater.app** into **Applications**.
+
+3. **Launch Tater**
+
+   Open **Tater** from Applications. On first launch, the app prepares its private runtime under:
+
+   ```text
+   ~/.taterassistant/
+   ```
+
+   The app stores its managed Python runtime, virtual environment, runtime settings, logs, updates, and `agent_lab` data there. It does not use this source checkout's `.venv`, `.runtime`, or `agent_lab` folders.
+
+4. **Finish setup in TaterOS**
+
+   The app starts Tater on `127.0.0.1:8501` and opens the WebUI in the native window. If Python 3.11 is not already available, the launcher downloads a standalone CPython 3.11 runtime into `~/.taterassistant/python/` and uses it to build the private venv.
+
+Closing the window keeps Tater running in the menu bar. Use the menu bar item to reopen Tater, open it in a browser, stop, restart, show logs, check for updates, install available updates, or quit.
+
+Once the WebUI is up, continue to **Post-Install Setup** below.
+
 ## Local Installation
 
 ### Prerequisites
