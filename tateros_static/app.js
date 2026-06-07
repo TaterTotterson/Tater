@@ -23184,7 +23184,7 @@ async function loadSettingsView() {
     loadTargets = dedupeLocalLoadTargets(loadTargets);
     payload.hydra_local_model_load_targets = loadLocalModels ? loadTargets : [];
     statusEl.textContent = loadLocalModels
-      ? `Saving ${label.toLowerCase()}, unloading the previous local model for this section, and loading the selected one...`
+      ? `Saving ${label.toLowerCase()}, loading the selected local model, and refreshing running cores/portals after it is ready...`
       : `Saving ${label.toLowerCase()}...`;
     try {
       const saveResult = await api("/api/settings", {
@@ -23195,9 +23195,9 @@ async function loadSettingsView() {
       const hfWarmup = saveResult?.hf_llm_warmup && typeof saveResult.hf_llm_warmup === "object" ? saveResult.hf_llm_warmup : null;
       let message = `${label} saved.`;
       if (warmup?.started && hfWarmup?.started) {
-        message = `${label} saved. Warming voice models and swapping selected local LLMs in the background.`;
+        message = `${label} saved. Warming voice models and refreshing running cores/portals after the selected local LLM loads.`;
       } else if (hfWarmup?.started) {
-        message = `${label} saved. Swapping selected local LLMs in the background.`;
+        message = `${label} saved. Running cores/portals will refresh after the selected local LLM loads.`;
       } else if (hfWarmup?.already_running || (loadLocalModels && hfWarmup?.running)) {
         message = `${label} saved. Local LLM download/load is already running.`;
       } else if (warmup?.started) {

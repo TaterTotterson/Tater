@@ -392,6 +392,7 @@ hf_llm_warmup_state: Dict[str, Any] = {
     "errors": [],
     "unload_before": [],
     "unload_result": {},
+    "runtime_restart": {},
     "progress": 0.0,
     "active_key": "",
     "cancel_requested": False,
@@ -948,6 +949,7 @@ def _hf_llm_warmup_snapshot() -> Dict[str, Any]:
             "errors": list(hf_llm_warmup_state.get("errors") or []),
             "unload_before": list(hf_llm_warmup_state.get("unload_before") or []),
             "unload_result": dict(hf_llm_warmup_state.get("unload_result") or {}),
+            "runtime_restart": dict(hf_llm_warmup_state.get("runtime_restart") or {}),
             "progress": max(0.0, min(100.0, progress)),
             "active_key": active_key,
             "cancel_requested": cancel_requested,
@@ -1402,6 +1404,7 @@ def _run_hf_llm_warmup(
                 "errors": [],
                 "unload_before": list(unload_targets),
                 "unload_result": {},
+                "runtime_restart": {},
                 "progress": 0.0,
                 "active_key": "",
                 "cancel_requested": cancel_requested,
@@ -1566,6 +1569,40 @@ def _run_hf_llm_warmup(
             ]
             hf_llm_warmup_state["errors"] = list(errors)
 
+    runtime_restart: Dict[str, Any] = {}
+    settings_triggered = str(reason or "").strip().lower().startswith("settings-save")
+    loaded_count = sum(1 for item in item_states if str(item.get("status") or "").strip().lower() == "loaded")
+    if load_models and settings_triggered and loaded_count > 0:
+        with hf_llm_warmup_lock:
+            hf_llm_warmup_state["active_key"] = "__runtime_restart__"
+            hf_llm_warmup_state["progress"] = 99.0
+            hf_llm_warmup_state["runtime_restart"] = {
+                "running": True,
+                "reason": reason,
+                "started_ts": time.time(),
+                "active_before": {},
+                "stopped": {},
+                "resumed": {},
+            }
+        try:
+            runtime_restart = _restart_running_surfaces_for_local_llm_reload(reason=reason)
+        except Exception as exc:
+            runtime_restart = {
+                "reason": reason,
+                "started_ts": time.time(),
+                "finished_ts": time.time(),
+                "error": str(exc) or type(exc).__name__,
+                "active_before": {},
+                "stopped": {},
+                "resumed": {},
+            }
+            logger.warning("[local-llm-warmup] runtime restart after model load failed: %s", runtime_restart["error"], exc_info=True)
+        runtime_restart["running"] = False
+        with hf_llm_warmup_lock:
+            hf_llm_warmup_state["runtime_restart"] = dict(runtime_restart)
+            if str(hf_llm_warmup_state.get("active_key") or "") == "__runtime_restart__":
+                hf_llm_warmup_state["active_key"] = ""
+
     with hf_llm_warmup_lock:
         cancelled = any(str(item.get("status") or "").lower() in {"cancelled", "canceled"} for item in item_states)
         hf_llm_warmup_state.update(
@@ -1576,6 +1613,7 @@ def _run_hf_llm_warmup(
                 "errors": errors,
                 "progress": 100.0 if not errors else _hf_llm_warmup_snapshot().get("progress", 0.0),
                 "active_key": "",
+                "runtime_restart": dict(runtime_restart),
                 "cancelled": cancelled,
                 "load_models": bool(load_models),
             }
@@ -1615,6 +1653,7 @@ def _start_hf_llm_warmup(
                 "errors": [],
                 "unload_before": list(clean_unload_items),
                 "unload_result": {},
+                "runtime_restart": {},
                 "progress": 0.0,
                 "active_key": "",
                 "cancel_requested": False,
@@ -7206,6 +7245,70 @@ def _resume_surface_keys(runtime: SurfaceRuntimeManager, keys: List[str]) -> Dic
         "already_running": already_running,
         "failed": failed,
     }
+
+
+def _restart_running_surfaces_for_local_llm_reload(*, reason: str = "") -> Dict[str, Any]:
+    core_keys = _running_surface_keys(core_runtime)
+    portal_keys = _running_surface_keys(portal_runtime)
+    stop_timeout = _read_positive_float_env("TATER_LOCAL_LLM_RESTART_STOP_TIMEOUT_SECONDS", 3.0)
+    late_grace_seconds = _read_positive_float_env("TATER_LOCAL_LLM_RESTART_LATE_GRACE_SECONDS", 8.0)
+    started_ts = time.time()
+
+    logger.info(
+        "[local-llm-warmup] restarting running cores/portals after model load reason=%s cores=%d portals=%d",
+        str(reason or "").strip() or "-",
+        len(core_keys),
+        len(portal_keys),
+    )
+    stopped_portals = _stop_surface_keys(
+        portal_runtime,
+        portal_keys,
+        timeout=stop_timeout,
+        late_grace_seconds=late_grace_seconds,
+    )
+    stopped_cores = _stop_surface_keys(
+        core_runtime,
+        core_keys,
+        timeout=stop_timeout,
+        late_grace_seconds=late_grace_seconds,
+    )
+
+    failed_core_keys = {str(row.get("key") or "").strip() for row in stopped_cores.get("failed") or []}
+    failed_portal_keys = {str(row.get("key") or "").strip() for row in stopped_portals.get("failed") or []}
+    core_resume_keys = [key for key in core_keys if key not in failed_core_keys]
+    portal_resume_keys = [key for key in portal_keys if key not in failed_portal_keys]
+    resumed_cores = _resume_surface_keys(core_runtime, core_resume_keys)
+    resumed_portals = _resume_surface_keys(portal_runtime, portal_resume_keys)
+    result = {
+        "reason": str(reason or "").strip(),
+        "started_ts": started_ts,
+        "finished_ts": time.time(),
+        "active_before": {
+            "cores": core_keys,
+            "portals": portal_keys,
+        },
+        "stopped": {
+            "cores": stopped_cores,
+            "portals": stopped_portals,
+        },
+        "resumed": {
+            "cores": resumed_cores,
+            "portals": resumed_portals,
+        },
+    }
+    failed_count = (
+        len(stopped_cores.get("failed") or [])
+        + len(stopped_portals.get("failed") or [])
+        + len(resumed_cores.get("failed") or [])
+        + len(resumed_portals.get("failed") or [])
+    )
+    logger.info(
+        "[local-llm-warmup] runtime restart finished cores=%d portals=%d failures=%d",
+        len(core_keys),
+        len(portal_keys),
+        failed_count,
+    )
+    return result
 
 
 def _quiesce_surfaces_for_redis_maintenance(
