@@ -11,6 +11,7 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 SOURCE_SNAPSHOT_DIR="${RESOURCES_DIR}/TaterSource"
+CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
 
 swift build -c release --package-path "${PROJECT_DIR}"
 BIN_DIR="$(swift build -c release --package-path "${PROJECT_DIR}" --show-bin-path)"
@@ -46,5 +47,9 @@ rsync -a --delete \
   "${REPO_ROOT}/" "${SOURCE_SNAPSHOT_DIR}/"
 
 chmod +x "${MACOS_DIR}/TaterAssistant"
+
+find "${APP_DIR}" -exec xattr -c {} +
+codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
 printf 'Built %s\n' "${APP_DIR}"
