@@ -1,7 +1,7 @@
 {
   "version": "88",
   "build": 88,
-  "url": "https://github.com/TaterTotterson/Tater/releases/download/v88/Tater-v88.zip",
-  "sha256": "5466465ce0f9fcba93ac97982c4855253214e37d22cba603edd8537eb6106369",
+  "url": "https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/Tater-v88.zip",
+  "sha256": "d31dbfd3f5e6f07f1ecc9379fcd8d09948f808fe6b0cc7c63654cc0243471dc2",
   "notes": "Tater macOS update v88."
 }

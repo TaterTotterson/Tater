@@ -75,9 +75,11 @@ That writes:
 ```text
 macos/Tater/build/Tater-v<version>.zip
 macos/Tater/build/update-manifest.json
+macos/Tater/releases/Tater-v<version>.zip
+macos/Tater/update-manifest.json
 ```
 
-Publish the zip as a release asset on the matching GitHub release tag, such as `v88`, update `macos/Tater/update-manifest.json` with the release URL and generated SHA-256, then push it. When the app sees a newer Tater version such as `88.1` or `89`, it shows an orange update item in the menu bar menu.
+By default, the manifest points at the tracked zip under `macos/Tater/releases/` on the `main` branch, so pushing the generated release file and manifest is enough for update checks. You can pass a custom URL to `package_update.sh` if you prefer to host the zip as a GitHub Release asset. When the app sees a newer Tater version such as `88.1` or `89`, it shows an orange update item in the menu bar menu.
 
 ## First-Time Installer DMG
 
@@ -91,6 +93,7 @@ That writes:
 
 ```text
 macos/Tater/build/Tater-v<version>.dmg
+macos/Tater/releases/Tater-v<version>.dmg
 ```
 
 The DMG mounts with `Tater.app`, an `Applications` alias, and the branded background from `Resources/TaterDmgBackground.png`. This is separate from the app auto-update zip; use the DMG for new installs and the zip/manifest for in-app updates.
