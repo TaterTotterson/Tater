@@ -17,6 +17,7 @@ from helpers import redis_client
 logger = logging.getLogger("integration_store")
 
 INTEGRATION_DIR = os.getenv("TATER_INTEGRATION_DIR", "integrations")
+INTEGRATION_BUILTIN_DIR = os.getenv("TATER_INTEGRATION_BUILTIN_DIR", "")
 INTEGRATION_SHOP_MANIFEST_URLS_KEY = "tater:integration_shop_manifest_urls"
 INTEGRATION_ENABLED_HASH = "tater:integration_enabled"
 DEFAULT_INTEGRATION_SHOP_LABEL = "Tater Integration Shop"
@@ -88,10 +89,11 @@ def _redis_text(value) -> str:
 
 
 def ensure_integration_import_context() -> None:
-    integration_dir = Path(INTEGRATION_DIR).resolve()
-    parent = str(integration_dir.parent)
-    if parent and parent not in sys.path:
-        sys.path.insert(0, parent)
+    integration_dirs = _integration_dirs()
+    for integration_dir in reversed(integration_dirs):
+        parent = str(integration_dir.parent)
+        if parent and parent not in sys.path:
+            sys.path.insert(0, parent)
 
     package = sys.modules.get("integrations")
     if package is not None and not isinstance(package, ModuleType):
@@ -104,10 +106,16 @@ def ensure_integration_import_context() -> None:
 
     package_paths = getattr(package, "__path__", None)
     if package_paths is not None:
-        expected = str(integration_dir)
         normalized = {str(Path(path).resolve()) for path in package_paths}
-        if expected not in normalized:
-            package_paths.append(expected)
+        for integration_dir in reversed(integration_dirs):
+            expected = str(integration_dir)
+            if expected in normalized:
+                continue
+            try:
+                package_paths.insert(0, expected)
+            except AttributeError:
+                package_paths.append(expected)
+            normalized.add(expected)
 
 
 def _normalize_manifest_url(url: str | None) -> str:
@@ -163,6 +171,38 @@ def _safe_integration_file_path(integration_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_]+", normalized_id or ""):
         raise ValueError("Invalid integration id")
     return os.path.join(INTEGRATION_DIR, f"{normalized_id}.py")
+
+
+def _integration_dirs() -> list[Path]:
+    dirs = [Path(INTEGRATION_DIR)]
+    if INTEGRATION_BUILTIN_DIR:
+        dirs.append(Path(INTEGRATION_BUILTIN_DIR))
+
+    out: list[Path] = []
+    seen = set()
+    for raw in dirs:
+        path = raw.expanduser().resolve()
+        token = str(path)
+        if token and token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
+
+
+def _integration_file_paths(integration_id: str) -> list[str]:
+    primary = _safe_integration_file_path(integration_id)
+    paths = [primary]
+    if INTEGRATION_BUILTIN_DIR:
+        normalized_id = _normalize_integration_id(integration_id)
+        paths.append(os.path.join(INTEGRATION_BUILTIN_DIR, f"{normalized_id}.py"))
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        token = os.path.abspath(path)
+        if token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
 
 
 def _boolish(value, default: bool = False) -> bool:
@@ -412,7 +452,7 @@ def load_integration_shop_catalog(manifest_sources=None) -> tuple[list[dict], li
 
 def is_integration_installed(integration_id: str) -> bool:
     try:
-        return os.path.exists(_safe_integration_file_path(integration_id))
+        return any(os.path.exists(path) for path in _integration_file_paths(integration_id))
     except Exception:
         return False
 
@@ -728,8 +768,10 @@ def huggingface_environment(overrides: dict | None = None, client=None) -> dict:
 
 def _installed_integration_ids() -> list[str]:
     installed_ids = set()
-    if os.path.isdir(INTEGRATION_DIR):
-        for filename in os.listdir(INTEGRATION_DIR):
+    for directory in [INTEGRATION_DIR, INTEGRATION_BUILTIN_DIR]:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
             if filename == "__init__.py" or not filename.endswith(".py"):
                 continue
             integration_id = _normalize_integration_id(filename[:-3])
@@ -758,10 +800,11 @@ def _literal_integration_definition(text: str) -> dict:
 
 def _get_installed_integration_version(integration_id: str) -> str:
     try:
-        path = _safe_integration_file_path(integration_id)
+        paths = _integration_file_paths(integration_id)
     except Exception:
         return "0.0.0"
-    if not os.path.exists(path):
+    path = next((candidate for candidate in paths if os.path.exists(candidate)), "")
+    if not path:
         return "0.0.0"
     try:
         with open(path, "r", encoding="utf-8") as file_obj:
@@ -807,10 +850,11 @@ def _integration_display_name(integration_id: str, fallback: str | None = None) 
 
 def _load_installed_definition(integration_id: str) -> dict:
     try:
-        path = _safe_integration_file_path(integration_id)
+        paths = _integration_file_paths(integration_id)
     except Exception:
         return {}
-    if not os.path.exists(path):
+    path = next((candidate for candidate in paths if os.path.exists(candidate)), "")
+    if not path:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as file_obj:

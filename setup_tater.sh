@@ -4,11 +4,11 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
 cd "${SCRIPT_DIR}"
 
-VENV_DIR=".venv"
-RUNTIME_DIR=".runtime"
-PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
-PROFILE_ENV="${RUNTIME_DIR}/tater_profile.env"
-REQUIREMENTS_FILE="requirements.txt"
+VENV_DIR="${TATER_VENV_DIR:-.venv}"
+RUNTIME_DIR="${TATER_RUNTIME_DIR:-.runtime}"
+PROFILE_FILE="${TATER_SETUP_PROFILE_FILE:-${RUNTIME_DIR}/setup_profile}"
+PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
+REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
 LLAMA_CPP_PYTHON_SPEC="${TATER_LLAMA_CPP_PYTHON_SPEC:-llama-cpp-python>=0.3.23}"
 
 RED=""
@@ -129,7 +129,25 @@ find_python() {
     printf '%s' "${PYTHON}"
     return
   fi
-  for candidate in python3.11 python3 python; do
+  for candidate in \
+    python3.11 \
+    /opt/homebrew/opt/python@3.11/bin/python3.11 \
+    /opt/homebrew/bin/python3.11 \
+    /usr/local/opt/python@3.11/bin/python3.11 \
+    /usr/local/bin/python3.11 \
+    python3.12 \
+    /opt/homebrew/opt/python@3.12/bin/python3.12 \
+    /opt/homebrew/bin/python3.12 \
+    /usr/local/opt/python@3.12/bin/python3.12 \
+    /usr/local/bin/python3.12 \
+    python3.13 \
+    /opt/homebrew/opt/python@3.13/bin/python3.13 \
+    /opt/homebrew/bin/python3.13 \
+    /usr/local/opt/python@3.13/bin/python3.13 \
+    /usr/local/bin/python3.13 \
+    python3 \
+    python
+  do
     if command -v "${candidate}" >/dev/null 2>&1; then
       printf '%s' "${candidate}"
       return
@@ -158,6 +176,14 @@ confirm() {
   esac
 }
 
+truthy_env() {
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_venv() {
   profile="$1"
   python_bin="$2"
@@ -166,9 +192,12 @@ ensure_venv() {
     existing_profile="$(cat "${PROFILE_FILE}" 2>/dev/null || true)"
   fi
 
-  if [ -d "${VENV_DIR}" ] && [ "${existing_profile}" != "${profile}" ]; then
+  if [ -x "${VENV_DIR}/bin/python" ] && [ "${existing_profile}" != "${profile}" ]; then
     warn "Existing ${VENV_DIR} was prepared for '${existing_profile:-unknown}', not '${profile}'."
-    if confirm "Rebuild ${VENV_DIR} for ${profile}? [y/N]" "n"; then
+    if truthy_env "${TATER_SETUP_REBUILD:-}"; then
+      info "Rebuilding ${VENV_DIR} for ${profile}"
+      rm -rf "${VENV_DIR}"
+    elif confirm "Rebuild ${VENV_DIR} for ${profile}? [y/N]" "n"; then
       rm -rf "${VENV_DIR}"
     else
       fail "Setup cancelled. Re-run with the matching profile or rebuild the venv."
@@ -177,6 +206,7 @@ ensure_venv() {
 
   if [ ! -x "${VENV_DIR}/bin/python" ]; then
     info "Creating ${VENV_DIR}"
+    mkdir -p "$(dirname "${VENV_DIR}")"
     if [ "${profile}" = "jetson" ] || [ "${profile}" = "thor" ]; then
       "${python_bin}" -m venv --system-site-packages "${VENV_DIR}"
     else
@@ -225,6 +255,21 @@ filtered_without_llama_cpp_requirements() {
       line = $0
       lower = tolower(line)
       if (lower ~ /^[[:space:]]*llama-cpp-python([[:space:]]|[=<>!~]|$)/) {
+        next
+      }
+      print line
+    }
+  ' "${REQUIREMENTS_FILE}" > "${output_file}"
+}
+
+filtered_macos_requirements() {
+  output_file="$1"
+  awk '
+    /^[[:space:]]*($|#)/ { print; next }
+    {
+      line = $0
+      lower = tolower(line)
+      if (lower ~ /^[[:space:]]*(llama-cpp-python|pykokoro)([[:space:]]|[=<>!~]|$)/) {
         next
       }
       print line
@@ -303,7 +348,7 @@ install_macos() {
   venv_python="$1"
   tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-macos.XXXXXX")"
   trap 'rm -f "${tmp_req}"' EXIT
-  filtered_without_llama_cpp_requirements "${tmp_req}"
+  filtered_macos_requirements "${tmp_req}"
   is_apple_silicon="0"
   if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ]; then
     warn "macOS profile selected on a non-macOS host."

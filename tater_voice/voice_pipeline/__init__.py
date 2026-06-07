@@ -55,6 +55,7 @@ from fastapi import HTTPException
 
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from runtime_executors import run_background, run_speech
+from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
 import verba_registry
 from verba_settings import get_verba_enabled
@@ -319,12 +320,8 @@ DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-DEFAULT_STT_MODEL_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "agent_lab", "models", "stt")
-)
-DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "agent_lab", "models", "tts")
-)
+DEFAULT_STT_MODEL_ROOT = str(agent_lab_path("models", "stt"))
+DEFAULT_TTS_MODEL_ROOT = str(agent_lab_path("models", "tts"))
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
 DEFAULT_KOKORO_ENGINE = "auto"

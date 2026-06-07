@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from helpers import redis_client
+from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
 
 from . import runtime as esphome_runtime
@@ -81,8 +82,8 @@ def _temporary_huggingface_env(cache_root: Optional[Path] = None):
 SPEAKER_ID_SETTINGS_HASH_KEY = "voice_speaker_id_settings"
 SPEAKER_ID_LAST_HASH_KEY = "voice_speaker_id_last"
 SPEAKER_ID_PENDING_TTL_S = 15 * 60
-SPEAKER_ID_AGENT_LABS_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "speaker_id"
-SPEAKER_ID_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "speaker_id"
+SPEAKER_ID_AGENT_LABS_ROOT = agent_lab_path("speaker_id")
+SPEAKER_ID_MODEL_ROOT = agent_lab_path("models", "speaker_id")
 SPEAKER_ID_PROFILES_PATH = SPEAKER_ID_AGENT_LABS_ROOT / "profiles.json"
 
 DEFAULT_SPEAKER_ID_ENABLED = False

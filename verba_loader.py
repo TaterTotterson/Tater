@@ -14,6 +14,24 @@ def _verba_dir() -> Path:
     return Path(verba_dir)
 
 
+def _verba_dirs(verba_dir: Optional[str] = None) -> list[Path]:
+    primary = Path(verba_dir) if verba_dir else _verba_dir()
+    dirs = [primary]
+    builtin = str(os.getenv("TATER_VERBA_BUILTIN_DIR", "") or "").strip()
+    if builtin:
+        dirs.append(Path(builtin))
+
+    out: list[Path] = []
+    seen = set()
+    for raw in dirs:
+        path = raw.expanduser().resolve()
+        token = str(path)
+        if token and token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
+
+
 def load_verbas_from_directory(
     verba_dir: Optional[str] = None,
     *,
@@ -23,69 +41,72 @@ def load_verbas_from_directory(
     Load verbas by scanning a directory for *.py files and importing them directly
     from file paths. Each module must expose a global `verba` instance.
     """
-    base = Path(verba_dir) if verba_dir else _verba_dir()
-    base.mkdir(parents=True, exist_ok=True)
-
     registry: Dict[str, ToolVerba] = {}
 
-    # Stable order: deterministic loads help debugging.
-    for path in sorted(base.glob("*.py")):
-        name = path.stem
-        if name.startswith("_"):
-            continue
-        if not _SAFE_ID_RE.fullmatch(name):
-            print(f"WARNING: Skipping verba with unsafe filename: {path.name}")
+    for index, base in enumerate(_verba_dirs(verba_dir)):
+        if index == 0:
+            base.mkdir(parents=True, exist_ok=True)
+        if not base.exists() or not base.is_dir():
             continue
 
-        try:
-            module_name = f"tater_verba_{name}_{int(path.stat().st_mtime_ns)}"
-            spec = importlib.util.spec_from_file_location(module_name, str(path))
-            if spec is None or spec.loader is None:
-                print(f"WARNING: Verba load failed (no spec/loader): {path}")
+        # Stable order: deterministic loads help debugging.
+        for path in sorted(base.glob("*.py")):
+            name = path.stem
+            if name.startswith("_"):
                 continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # type: ignore[attr-defined]
-        except Exception as exc:
-            print(f"WARNING: Verba import failed: {path.name}: {exc}")
-            continue
+            if not _SAFE_ID_RE.fullmatch(name):
+                print(f"WARNING: Skipping verba with unsafe filename: {path.name}")
+                continue
 
-        verba = getattr(module, "verba", None)
-        if not isinstance(verba, ToolVerba):
-            continue
+            try:
+                module_name = f"tater_verba_{name}_{int(path.stat().st_mtime_ns)}"
+                spec = importlib.util.spec_from_file_location(module_name, str(path))
+                if spec is None or spec.loader is None:
+                    print(f"WARNING: Verba load failed (no spec/loader): {path}")
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore[attr-defined]
+            except Exception as exc:
+                print(f"WARNING: Verba import failed: {path.name}: {exc}")
+                continue
 
-        declared_id = str(getattr(verba, "name", "") or "").strip()
-        vid = declared_id or name
-        if id_from_filename:
-            vid = name
-            if declared_id and declared_id != name:
-                current_label = str(getattr(verba, "verba_name", "") or "").strip()
-                if not current_label:
-                    verba.verba_name = declared_id
-                print(
-                    f"WARNING: Verba '{path.name}' declares name '{declared_id}'; "
-                    f"using filename id '{name}'."
-                )
-        vid = str(vid).strip() or name
+            verba = getattr(module, "verba", None)
+            if not isinstance(verba, ToolVerba):
+                continue
 
-        # Normalize verba.name to registry id.
-        verba.name = vid
+            declared_id = str(getattr(verba, "name", "") or "").strip()
+            vid = declared_id or name
+            if id_from_filename:
+                vid = name
+                if declared_id and declared_id != name:
+                    current_label = str(getattr(verba, "verba_name", "") or "").strip()
+                    if not current_label:
+                        verba.verba_name = declared_id
+                    print(
+                        f"WARNING: Verba '{path.name}' declares name '{declared_id}'; "
+                        f"using filename id '{name}'."
+                    )
+            vid = str(vid).strip() or name
 
-        if not str(getattr(verba, "verba_name", "") or "").strip():
-            verba.verba_name = vid
+            # Normalize verba.name to registry id.
+            verba.name = vid
 
-        try:
-            examples = getattr(verba, "example_calls", None)
-            if not isinstance(examples, list) or not examples:
-                usage = getattr(verba, "usage", "") or ""
-                if isinstance(usage, str) and usage.strip():
-                    verba.example_calls = [usage.strip()]
-        except Exception:
-            pass
+            if not str(getattr(verba, "verba_name", "") or "").strip():
+                verba.verba_name = vid
 
-        if vid in registry:
-            print(f"WARNING: Duplicate verba id '{vid}' from file {path.name}; skipping.")
-            continue
+            try:
+                examples = getattr(verba, "example_calls", None)
+                if not isinstance(examples, list) or not examples:
+                    usage = getattr(verba, "usage", "") or ""
+                    if isinstance(usage, str) and usage.strip():
+                        verba.example_calls = [usage.strip()]
+            except Exception:
+                pass
 
-        registry[vid] = verba
+            if vid in registry:
+                print(f"WARNING: Duplicate verba id '{vid}' from file {path.name}; skipping.")
+                continue
+
+            registry[vid] = verba
 
     return registry

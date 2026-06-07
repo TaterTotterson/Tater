@@ -23,6 +23,7 @@ import requests
 from announcement_targets import split_announcement_targets
 from helpers import redis_client
 from runtime_executors import run_background, run_tts
+from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -149,9 +150,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
     PIPER_IMPORT_ERROR = str(exc)
 
 
-DEFAULT_TTS_MODEL_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "agent_lab", "models", "tts")
-)
+DEFAULT_TTS_MODEL_ROOT = str(agent_lab_path("models", "tts"))
 DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5

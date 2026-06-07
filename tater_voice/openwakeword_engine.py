@@ -13,6 +13,7 @@ from urllib import request as urllib_request
 from urllib.parse import unquote, urljoin, urlparse
 
 from helpers import redis_client
+from tater_paths import agent_lab_path
 
 from . import runtime as esphome_runtime
 
@@ -21,7 +22,7 @@ logger = logging.getLogger("voice_core")
 
 OPENWAKEWORD_SETTINGS_HASH_KEY = "voice_openwakeword_settings"
 OPENWAKEWORD_TRAINER_URL_KEY = "voice_openwakeword:trainer_url"
-OPENWAKEWORD_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "openwakeword"
+OPENWAKEWORD_MODEL_ROOT = agent_lab_path("models", "openwakeword")
 
 DEFAULT_OPENWAKEWORD_TRAINER_URL = "http://127.0.0.1:8791"
 DEFAULT_OPENWAKEWORD_ENABLED = True

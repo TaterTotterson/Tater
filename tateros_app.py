@@ -44,6 +44,7 @@ import core_registry as core_registry_module
 import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
+from tater_paths import agent_lab_path
 from tater_voice import firmware as esphome_firmware_module
 from tater_voice import home as esphome_home_module
 from tater_voice import nanowakeword_engine as esphome_nanowakeword_module
@@ -2710,7 +2711,7 @@ def _local_llm_model_registry_path() -> Path:
     raw = str(os.getenv("TATER_LOCAL_LLM_MODEL_REGISTRY") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    return Path(__file__).resolve().parent / "agent_lab" / "models" / "llm" / "downloaded_models.json"
+    return agent_lab_path("models", "llm", "downloaded_models.json")
 
 
 def _local_llm_model_root(provider: str) -> Path:
@@ -2728,7 +2729,7 @@ def _local_llm_model_root(provider: str) -> Path:
         HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp",
         HYDRA_LLM_PROVIDER_MLX_LM: "mlx",
     }.get(provider_token, "huggingface")
-    return Path(__file__).resolve().parent / "agent_lab" / "models" / "llm" / folder
+    return agent_lab_path("models", "llm", folder)
 
 
 def _local_llm_context_value(value: Any, *, maximum: int = 1_048_576) -> int:

@@ -15,13 +15,14 @@ from urllib import request as urllib_request
 from urllib.parse import unquote, urljoin, urlparse
 
 from helpers import redis_client
+from tater_paths import agent_lab_path
 
 
 logger = logging.getLogger(__name__)
 
 NANOWAKEWORD_SETTINGS_HASH_KEY = "voice_nanowakeword_settings"
 NANOWAKEWORD_TRAINER_URL_KEY = "voice_nanowakeword:trainer_url"
-NANOWAKEWORD_MODEL_ROOT = Path(__file__).resolve().parents[1] / "agent_lab" / "models" / "nanowakeword"
+NANOWAKEWORD_MODEL_ROOT = agent_lab_path("models", "nanowakeword")
 NANOWAKEWORD_SUPPORT_MODEL_ROOT = NANOWAKEWORD_MODEL_ROOT / "support"
 
 DEFAULT_NANOWAKEWORD_TRAINER_URL = "http://127.0.0.1:8792"

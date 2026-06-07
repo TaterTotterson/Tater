@@ -3,6 +3,7 @@ import asyncio
 import threading
 import inspect
 import logging
+import contextlib
 import gc
 import io
 import functools
@@ -47,6 +48,7 @@ from redis_runtime import (
     shutdown_internal_redis,
     test_redis_connection_settings,
 )
+from tater_paths import agent_lab_path, runtime_dir
 
 load_dotenv()
 nest_asyncio.apply()
@@ -1148,21 +1150,21 @@ def _hf_llm_model_root() -> str:
     raw = str(os.getenv("TATER_HF_TRANSFORMERS_MODEL_ROOT") or "").strip()
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "huggingface"))
+    return str(agent_lab_path("models", "llm", "huggingface"))
 
 
 def _llama_cpp_model_root() -> str:
     raw = str(os.getenv("TATER_LLAMA_CPP_MODEL_ROOT") or "").strip()
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "llama-cpp"))
+    return str(agent_lab_path("models", "llm", "llama-cpp"))
 
 
 def _mlx_lm_model_root() -> str:
     raw = str(os.getenv("TATER_MLX_LM_MODEL_ROOT") or "").strip()
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "agent_lab", "models", "llm", "mlx"))
+    return str(agent_lab_path("models", "llm", "mlx"))
 
 
 def _hf_llm_device_pref() -> str:
@@ -2135,50 +2137,146 @@ def _jetson_tegrastats_snapshot() -> Optional[Dict[str, Any]]:
     }
 
 
+def _apple_ioreg_float(text: str, key: str) -> Optional[float]:
+    match = re.search(rf'"{re.escape(key)}"\s*=\s*([-+]?\d+(?:\.\d+)?)', text)
+    if not match:
+        return None
+    return _system_gpu_float(match.group(1))
+
+
+def _apple_ioreg_int(text: str, key: str) -> int:
+    parsed = _apple_ioreg_float(text, key)
+    if parsed is None:
+        return 0
+    return max(0, int(parsed))
+
+
+def _apple_ioreg_metal_snapshot() -> Optional[Dict[str, Any]]:
+    exe = shutil.which("ioreg")
+    if not exe:
+        return None
+    output = ""
+    for class_name in ("IOAccelerator", "AGXAccelerator"):
+        try:
+            proc = subprocess.run(
+                [exe, "-r", "-d", "1", "-w", "0", "-c", class_name],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+        except Exception:
+            continue
+        if proc.returncode == 0 and str(proc.stdout or "").strip():
+            output = str(proc.stdout or "")
+            break
+    if not output or "PerformanceStatistics" not in output:
+        return None
+
+    perf_match = re.search(r'"PerformanceStatistics"\s*=\s*\{([^}]*)\}', output, flags=re.DOTALL)
+    perf_text = perf_match.group(1) if perf_match else output
+    utilization_values = [
+        value
+        for value in (
+            _apple_ioreg_float(perf_text, "Device Utilization %"),
+            _apple_ioreg_float(perf_text, "Renderer Utilization %"),
+            _apple_ioreg_float(perf_text, "Tiler Utilization %"),
+        )
+        if value is not None
+    ]
+    utilization = max(utilization_values) if utilization_values else None
+
+    used_candidates = [
+        _apple_ioreg_int(perf_text, "In use system memory"),
+        _apple_ioreg_int(perf_text, "In use system memory (driver)"),
+        _apple_ioreg_int(perf_text, "In use video memory"),
+        _apple_ioreg_int(perf_text, "In use vid memory"),
+        _apple_ioreg_int(perf_text, "vramUsedBytes"),
+    ]
+    allocated = _apple_ioreg_int(perf_text, "Alloc system memory")
+    used = max([value for value in used_candidates if value > 0] or [0])
+    if used <= 0 and allocated > 0:
+        used = allocated
+
+    model_match = re.search(r'"model"\s*=\s*"([^"]+)"', output)
+    model = str(model_match.group(1) if model_match else "").strip()
+    if model and "gpu" not in model.lower():
+        model = f"{model} GPU"
+    core_count = _apple_ioreg_int(output, "gpu-core-count")
+
+    return {
+        "name": model or "Apple Metal GPU",
+        "used_bytes": used,
+        "allocated_bytes": allocated,
+        "utilization_percent": round(max(0.0, min(100.0, utilization)), 2) if utilization is not None else None,
+        "core_count": core_count,
+    }
+
+
 def _apple_metal_vram_snapshot() -> Optional[Dict[str, Any]]:
     if platform.system().lower() != "darwin":
         return None
+    apple_silicon = platform.machine().lower() in {"arm64", "aarch64"}
     used_candidates: List[int] = []
     total_candidates: List[int] = []
     detail_parts: List[str] = []
-    try:
-        import torch  # type: ignore
+    ioreg_snapshot = _apple_ioreg_metal_snapshot()
+    if ioreg_snapshot:
+        detail_parts.append("IORegistry")
+        used_candidates.append(max(0, int(ioreg_snapshot.get("used_bytes") or 0)))
+    if not ioreg_snapshot:
+        try:
+            import torch  # type: ignore
 
-        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
-        mps_runtime = getattr(torch, "mps", None)
-        if mps_backend is not None and bool(getattr(mps_backend, "is_available", lambda: False)()):
-            detail_parts.append("MPS")
-            for attr in ("current_allocated_memory", "driver_allocated_memory"):
-                getter = getattr(mps_runtime, attr, None) if mps_runtime is not None else None
+            mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+            mps_runtime = getattr(torch, "mps", None)
+            if mps_backend is not None and bool(getattr(mps_backend, "is_available", lambda: False)()):
+                detail_parts.append("MPS")
+                for attr in ("current_allocated_memory", "driver_allocated_memory"):
+                    getter = getattr(mps_runtime, attr, None) if mps_runtime is not None else None
+                    if callable(getter):
+                        with contextlib.suppress(Exception):
+                            used_candidates.append(max(0, int(getter() or 0)))
+                getter = getattr(mps_runtime, "recommended_max_memory", None) if mps_runtime is not None else None
+                if callable(getter):
+                    with contextlib.suppress(Exception):
+                        total_candidates.append(max(0, int(getter() or 0)))
+        except Exception:
+            pass
+        try:
+            import mlx.core as mx  # type: ignore
+
+            detail_parts.append("MLX")
+            for attr in ("get_active_memory", "get_cache_memory"):
+                getter = getattr(mx, attr, None)
                 if callable(getter):
                     with contextlib.suppress(Exception):
                         used_candidates.append(max(0, int(getter() or 0)))
-            getter = getattr(mps_runtime, "recommended_max_memory", None) if mps_runtime is not None else None
+            getter = getattr(mx, "get_peak_memory", None)
             if callable(getter):
                 with contextlib.suppress(Exception):
                     total_candidates.append(max(0, int(getter() or 0)))
-    except Exception:
-        pass
-    try:
-        import mlx.core as mx  # type: ignore
-
-        detail_parts.append("MLX")
-        for attr in ("get_active_memory", "get_cache_memory"):
-            getter = getattr(mx, attr, None)
-            if callable(getter):
-                with contextlib.suppress(Exception):
-                    used_candidates.append(max(0, int(getter() or 0)))
-        getter = getattr(mx, "get_peak_memory", None)
-        if callable(getter):
-            with contextlib.suppress(Exception):
-                total_candidates.append(max(0, int(getter() or 0)))
-    except Exception:
-        pass
-    if not detail_parts:
+        except Exception:
+            pass
+    ram_snapshot = _system_ram_snapshot()
+    unified_total = max(0, int(ram_snapshot.get("total_bytes") or 0))
+    unified_memory = bool(apple_silicon)
+    if unified_total > 0 and unified_memory:
+        total_candidates.append(unified_total)
+    if not detail_parts and not apple_silicon:
         return None
     used = max(used_candidates) if used_candidates else 0
     total = max(total_candidates) if total_candidates else 0
+    if total > 0:
+        used = min(used, total)
     free = max(0, total - used) if total > 0 else 0
+    utilization_percent = None
+    if ioreg_snapshot:
+        utilization_percent = ioreg_snapshot.get("utilization_percent")
+    utilization_percent = _system_gpu_clamped_percent(utilization_percent)
+    device_name = str((ioreg_snapshot or {}).get("name") or "Apple Metal GPU").strip() or "Apple Metal GPU"
+    core_count = max(0, int((ioreg_snapshot or {}).get("core_count") or 0))
+    device_detail = " / ".join(dict.fromkeys(detail_parts)) if detail_parts else "Unified memory"
     return {
         "available": True,
         "backend": "metal",
@@ -2186,19 +2284,22 @@ def _apple_metal_vram_snapshot() -> Optional[Dict[str, Any]]:
         "free_bytes": free,
         "used_bytes": used,
         "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
-        "utilization_percent": None,
-        "unified": True,
+        "utilization_percent": utilization_percent,
+        "unified": unified_memory,
         "devices": [
             {
                 "index": 0,
-                "name": "Apple Metal",
+                "name": device_name,
                 "total_bytes": total,
                 "free_bytes": free,
                 "used_bytes": used,
                 "percent": round((used / total) * 100.0, 2) if total > 0 else 0.0,
-                "utilization_percent": None,
-                "unified": True,
-                "detail": " / ".join(dict.fromkeys(detail_parts)),
+                "utilization_percent": utilization_percent,
+                "unified": unified_memory,
+                "shared_memory_total_bytes": total if unified_memory else 0,
+                "shared_memory_used_bytes": used if unified_memory else 0,
+                "core_count": core_count,
+                "detail": device_detail,
             }
         ],
     }
@@ -2905,7 +3006,7 @@ def _mlx_engine_checkout_path() -> str:
     raw = str(os.getenv("TATER_MLX_ENGINE_PATH") or "").strip()
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
-    return str(Path(__file__).resolve().parent / ".runtime" / "mlx-engine")
+    return str(runtime_dir() / "mlx-engine")
 
 
 def _mlx_engine_max_seq_nums() -> int:

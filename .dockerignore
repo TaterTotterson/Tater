@@ -6,6 +6,9 @@ agent_lab/logs/*.log
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 
+# Native macOS app wrapper and release artifacts are not used by Docker images.
+macos/
+
 # Verba source now lives in the verba store; exclude local verba files from build context.
 verba/*
 !verba/__init__.py

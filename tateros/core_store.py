@@ -9,6 +9,7 @@ import requests
 from helpers import redis_client
 
 CORE_DIR = os.getenv("TATER_CORE_DIR", "cores")
+CORE_BUILTIN_DIR = os.getenv("TATER_CORE_BUILTIN_DIR", "")
 
 CORE_SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_CORE_SHOP_MANIFEST_URL",
@@ -49,6 +50,22 @@ def _safe_core_file_path(platform_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_]+", normalized_id or ""):
         raise ValueError("Invalid core id")
     return os.path.join(CORE_DIR, f"{normalized_id}_core.py")
+
+
+def _core_file_paths(platform_id: str) -> list[str]:
+    primary = _safe_core_file_path(platform_id)
+    paths = [primary]
+    if CORE_BUILTIN_DIR:
+        normalized_id = _normalize_core_id(platform_id)
+        paths.append(os.path.join(CORE_BUILTIN_DIR, f"{normalized_id}_core.py"))
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        token = os.path.abspath(path)
+        if token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
 
 
 def _normalize_manifest_repo_entry(raw) -> dict[str, str] | None:
@@ -222,7 +239,7 @@ def is_core_installed(platform_id: str) -> bool:
     if _is_reserved_builtin_core_id(platform_id):
         return False
     try:
-        return os.path.exists(_safe_core_file_path(platform_id))
+        return any(os.path.exists(path) for path in _core_file_paths(platform_id))
     except Exception:
         return False
 
@@ -488,8 +505,10 @@ def _core_display_name(platform_id: str, fallback: str | None = None) -> str:
 
 def _installed_core_ids() -> list[str]:
     installed_ids = set()
-    if os.path.isdir(CORE_DIR):
-        for filename in os.listdir(CORE_DIR):
+    for directory in [CORE_DIR, CORE_BUILTIN_DIR]:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
             if filename == "__init__.py" or not filename.endswith("_core.py"):
                 continue
             stem = filename[:-3]
@@ -518,10 +537,11 @@ def _semver_tuple(v: str) -> tuple[int, int, int]:
 
 def _get_installed_core_version(platform_id: str) -> str:
     try:
-        path = _safe_core_file_path(platform_id)
+        paths = _core_file_paths(platform_id)
     except Exception:
         return "0.0.0"
-    if not os.path.exists(path):
+    path = next((candidate for candidate in paths if os.path.exists(candidate)), "")
+    if not path:
         return "0.0.0"
     try:
         with open(path, "r", encoding="utf-8") as file_obj:
