@@ -678,7 +678,7 @@ private final class BackendManager {
         environment["TATER_MLX_LM_MODEL_ROOT"] = llmRoot.appendingPathComponent("mlx", isDirectory: true).path
         environment["HF_HOME"] = agentRoot.appendingPathComponent("models/huggingface-cache", isDirectory: true).path
         environment["TORCH_HOME"] = agentRoot.appendingPathComponent("models/torch-cache", isDirectory: true).path
-        environment["HTMLUI_HOST"] = "127.0.0.1"
+        environment["HTMLUI_HOST"] = "0.0.0.0"
         environment["HTMLUI_PORT"] = "\(taterPort)"
         environment["TATER_PYTHON"] = venvDir.appendingPathComponent("bin/python").path
         return environment
