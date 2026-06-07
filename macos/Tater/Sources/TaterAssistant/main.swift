@@ -489,11 +489,12 @@ private final class BackendManager {
         let profile = runtimeDir.appendingPathComponent("tater_profile.env")
         let venvReady = FileManager.default.isExecutableFile(atPath: python.path)
         let profileReady = FileManager.default.fileExists(atPath: profile.path)
-        guard !venvReady || !profileReady else {
+        let dependenciesReady = venvReady ? pinnedRuntimeDependenciesReady(using: python) : false
+        guard !venvReady || !profileReady || !dependenciesReady else {
             appendLog("Private runtime is ready: \(venvDir.path)\n")
             return
         }
-        appendLog("Private runtime is incomplete; venvReady=\(venvReady) profileReady=\(profileReady). Running setup.\n")
+        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady). Running setup.\n")
 
         guard FileManager.default.fileExists(atPath: sourceRoot.appendingPathComponent("setup_tater.sh").path) else {
             throw LauncherError("Could not find setup_tater.sh in \(sourceRoot.path)")
@@ -525,6 +526,67 @@ private final class BackendManager {
         guard process.terminationStatus == 0 else {
             throw LauncherError("macOS setup failed. See \(logsDir.appendingPathComponent("setup.log").path)")
         }
+    }
+
+    private func pinnedRuntimeDependenciesReady(using python: URL) -> Bool {
+        guard let expected = pinnedRequirementVersion(for: "aioesphomeapi") else {
+            return true
+        }
+        guard let installed = installedPackageVersion("aioesphomeapi", using: python) else {
+            appendLog("Private runtime is missing aioesphomeapi; setup will install \(expected).\n")
+            return false
+        }
+        if installed == expected {
+            return true
+        }
+        appendLog("Private runtime has aioesphomeapi \(installed); setup will install \(expected).\n")
+        return false
+    }
+
+    private func pinnedRequirementVersion(for packageName: String) -> String? {
+        let requirements = sourceRoot.appendingPathComponent("requirements.txt")
+        guard let contents = try? String(contentsOf: requirements) else {
+            return nil
+        }
+
+        let prefix = "\(packageName)=="
+        for rawLine in contents.components(separatedBy: .newlines) {
+            let uncommented = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? rawLine
+            let line = uncommented.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.range(of: prefix, options: [.anchored, .caseInsensitive]) != nil else {
+                continue
+            }
+            return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    private func installedPackageVersion(_ packageName: String, using python: URL) -> String? {
+        let process = Process()
+        process.executableURL = python
+        process.arguments = [
+            "-c",
+            "from importlib.metadata import PackageNotFoundError, version\nimport sys\ntry:\n    print(version(sys.argv[1]))\nexcept PackageNotFoundError:\n    sys.exit(2)",
+            packageName
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? nil : output
     }
 
     private func launchBackend() throws {
