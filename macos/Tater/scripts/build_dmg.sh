@@ -6,6 +6,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 INFO_PLIST="${PROJECT_DIR}/Resources/Info.plist"
 BACKGROUND_IMAGE="${PROJECT_DIR}/Resources/TaterDmgBackground.png"
 APP_DIR="${PROJECT_DIR}/build/Tater.app"
+RELEASES_DIR="${PROJECT_DIR}/releases"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
 VERSION_TOKEN="$(printf '%s' "${VERSION}" | sed 's/^[vV]//')"
@@ -13,6 +14,7 @@ VERSION_LABEL="v${VERSION_TOKEN}"
 VOLUME_NAME="Install Tater ${VERSION_LABEL}"
 DMG_NAME="Tater-${VERSION_LABEL}.dmg"
 FINAL_DMG="${PROJECT_DIR}/build/${DMG_NAME}"
+RELEASE_DMG="${RELEASES_DIR}/${DMG_NAME}"
 RW_DMG="${PROJECT_DIR}/build/.${DMG_NAME%.dmg}.rw.dmg"
 STAGING_DIR="${PROJECT_DIR}/build/dmg-staging"
 MOUNT_DIR=""
@@ -116,4 +118,8 @@ hdiutil convert "${RW_DMG}" \
 
 hdiutil verify "${FINAL_DMG}" >/dev/null
 
+mkdir -p "${RELEASES_DIR}"
+cp "${FINAL_DMG}" "${RELEASE_DMG}"
+
 printf 'Built %s\n' "${FINAL_DMG}"
+printf 'Copied %s\n' "${RELEASE_DMG}"
