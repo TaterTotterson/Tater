@@ -1,39 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG PYTHON_IMAGE=python:3.11-slim
-ARG NVIDIA_DEVEL_IMAGE=nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 ARG NVIDIA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
-
-
-FROM ${NVIDIA_DEVEL_IMAGE} AS llama-builder-nvidia
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1 \
-    VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:$PATH
-
-ARG CUDA_ARCH="86;89"
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        cmake \
-        git \
-        ninja-build \
-        pkg-config \
-        python3.11 \
-        python3.11-dev \
-        python3.11-venv \
-    && python3.11 -m venv /opt/venv \
-    && python -m pip install --upgrade pip setuptools wheel \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH}" \
-    FORCE_CMAKE=1 \
-    CUDACXX=/usr/local/cuda/bin/nvcc \
-    python -m pip wheel --no-deps --wheel-dir /wheels "llama-cpp-python>=0.3.23"
 
 
 FROM ${PYTHON_IMAGE} AS builder
@@ -111,6 +79,7 @@ FROM ${NVIDIA_RUNTIME_IMAGE} AS runtime-nvidia
 ARG TORCH_VERSION=2.7.1
 ARG TORCHAUDIO_VERSION=2.7.1
 ARG TORCHVISION_VERSION=0.22.1
+ARG LLAMA_CPP_CUDA_WHEEL=cu124
 ARG ONNXRUNTIME_GPU_WHEEL=https://files.pythonhosted.org/packages/dc/0f/696b4f94a282952239ffed39db78cb17a00ad993acd929cfac010a09759b/onnxruntime_gpu-1.26.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -151,8 +120,9 @@ RUN python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}"
 
-RUN --mount=type=bind,from=llama-builder-nvidia,source=/wheels,target=/tmp/llama-wheels \
-    python -m pip install --no-deps /tmp/llama-wheels/*.whl
+RUN python -m pip install \
+    --extra-index-url "https://abetlen.github.io/llama-cpp-python/whl/${LLAMA_CPP_CUDA_WHEEL}" \
+    "llama-cpp-python>=0.3.23"
 
 COPY requirements.txt .
 

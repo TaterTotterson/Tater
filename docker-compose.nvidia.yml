@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       target: runtime-nvidia
       args:
-        CUDA_ARCH: ${TATER_CUDA_ARCH:-86;89}
+        LLAMA_CPP_CUDA_WHEEL: ${TATER_LLAMA_CPP_CUDA_WHEEL:-cu124}
     gpus: all
     environment:
       TATER_SPEECH_ACCELERATION: ${TATER_SPEECH_ACCELERATION:-auto}
