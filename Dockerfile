@@ -58,6 +58,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        gosu \
         git \
         wget \
         ffmpeg \
@@ -71,6 +72,7 @@ COPY . .
 
 EXPOSE 8501
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["sh", "run_ui.sh"]
 
 
@@ -99,6 +101,7 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         ffmpeg \
+        gosu \
         git \
         libgomp1 \
         libolm3 \
@@ -140,6 +143,7 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.environ.get('HTMLUI_PORT', '8501'); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=3)" || exit 1
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["sh", "run_ui.sh"]
 
 
