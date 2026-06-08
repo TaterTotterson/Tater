@@ -64,7 +64,7 @@ The easiest Mac install is the native **Tater.app** build. It runs the same Tate
 
 1. **Download the latest macOS installer**
 
-   [Download Tater v88 for macOS](https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/Tater-v88.dmg)
+   [Download the latest Tater for macOS](https://taterassistant.com)
 
 2. **Install Tater**
 
