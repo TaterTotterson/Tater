@@ -107,8 +107,6 @@ RUN apt-get update \
         python3.11 \
         python3.11-venv \
         wget \
-    && groupadd --gid 10001 tater \
-    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin tater \
     && python3.11 -m venv /opt/venv \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -133,12 +131,9 @@ RUN grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python|onnxru
 
 RUN python -c "from importlib import metadata; import ctranslate2, onnxruntime, torch, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'onnxruntime', onnxruntime.__version__, 'ctranslate2', ctranslate2.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'))"
 
-COPY --chown=tater:tater . .
+COPY . .
 
-RUN mkdir -p /app/.runtime \
-    && chown -R tater:tater /app
-
-USER tater
+RUN mkdir -p /app/.runtime
 
 EXPOSE 8501
 
