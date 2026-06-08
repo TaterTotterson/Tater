@@ -72,25 +72,29 @@ RUN apt-get update \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+RUN python -m pip install --upgrade pip setuptools wheel
 
-RUN python -m pip install --upgrade pip setuptools wheel \
- && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python|onnxruntime)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt
-
-# Resolve the complete Python environment in the runtime venv. Keep the wheel
-# provided CUDA libraries installed; import validation fails without them.
+# Keep the large CUDA/PyTorch wheels in a layer that does not depend on
+# application source or the general requirements file.
 RUN python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
       "torch==${TORCH_VERSION}" \
       "torchaudio==${TORCHAUDIO_VERSION}" \
-      "torchvision==${TORCHVISION_VERSION}" \
- && python -m pip install -r /tmp/requirements.nvidia.txt \
- && python -m pip install "${ONNXRUNTIME_GPU_WHEEL}" \
- && rm -f /tmp/requirements.nvidia.txt
+      "torchvision==${TORCHVISION_VERSION}"
 
 # Mount the builder output for installation without retaining the wheel archive
 # as a second copy in the runtime image.
 RUN --mount=type=bind,from=llama-builder,source=/wheels,target=/tmp/llama-wheels \
     python -m pip install --no-deps /tmp/llama-wheels/*.whl
+
+COPY requirements.txt .
+
+RUN grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python|onnxruntime)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt
+
+# Resolve the rest of the Python environment in the runtime venv. Keep the wheel
+# provided CUDA libraries installed; import validation fails without them.
+RUN python -m pip install -r /tmp/requirements.nvidia.txt \
+ && python -m pip install "${ONNXRUNTIME_GPU_WHEEL}" \
+ && rm -f /tmp/requirements.nvidia.txt
 
 RUN python -c "from importlib import metadata; import ctranslate2, onnxruntime, torch, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'onnxruntime', onnxruntime.__version__, 'ctranslate2', ctranslate2.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'))"
 
