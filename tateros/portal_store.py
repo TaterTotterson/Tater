@@ -9,6 +9,7 @@ import requests
 from helpers import redis_client
 
 PORTAL_DIR = os.getenv("TATER_PORTAL_DIR", "portals")
+PORTAL_BUILTIN_DIR = os.getenv("TATER_PORTAL_BUILTIN_DIR", "")
 
 PORTAL_SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_PORTAL_SHOP_MANIFEST_URL",
@@ -41,6 +42,22 @@ def _safe_portal_file_path(platform_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_]+", normalized_id or ""):
         raise ValueError("Invalid portal id")
     return os.path.join(PORTAL_DIR, f"{normalized_id}_portal.py")
+
+
+def _portal_file_paths(platform_id: str) -> list[str]:
+    primary = _safe_portal_file_path(platform_id)
+    paths = [primary]
+    if PORTAL_BUILTIN_DIR:
+        normalized_id = _normalize_portal_id(platform_id)
+        paths.append(os.path.join(PORTAL_BUILTIN_DIR, f"{normalized_id}_portal.py"))
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        token = os.path.abspath(path)
+        if token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
 
 
 def _normalize_manifest_repo_entry(raw) -> dict[str, str] | None:
@@ -210,7 +227,7 @@ def load_portal_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[st
 
 def is_portal_installed(platform_id: str) -> bool:
     try:
-        return os.path.exists(_safe_portal_file_path(platform_id))
+        return any(os.path.exists(path) for path in _portal_file_paths(platform_id))
     except Exception:
         return False
 
@@ -472,8 +489,10 @@ def _portal_display_name(platform_id: str, fallback: str | None = None) -> str:
 
 def _installed_portal_ids() -> list[str]:
     installed_ids = set()
-    if os.path.isdir(PORTAL_DIR):
-        for filename in os.listdir(PORTAL_DIR):
+    for directory in [PORTAL_DIR, PORTAL_BUILTIN_DIR]:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
             if filename == "__init__.py" or not filename.endswith("_portal.py"):
                 continue
             stem = filename[:-3]
@@ -500,10 +519,11 @@ def _semver_tuple(v: str) -> tuple[int, int, int]:
 
 def _get_installed_portal_version(platform_id: str) -> str:
     try:
-        path = _safe_portal_file_path(platform_id)
+        paths = _portal_file_paths(platform_id)
     except Exception:
         return "0.0.0"
-    if not os.path.exists(path):
+    path = next((candidate for candidate in paths if os.path.exists(candidate)), "")
+    if not path:
         return "0.0.0"
     try:
         with open(path, "r", encoding="utf-8") as file_obj:
@@ -610,4 +630,3 @@ def _build_installed_portal_entries(catalog_items: list[dict]) -> list[dict]:
 
     entries.sort(key=lambda item: item["display_name"].lower())
     return entries
-

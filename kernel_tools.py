@@ -47,17 +47,11 @@ from vision_settings import (
     DEFAULT_VISION_MODEL,
     get_vision_settings,
 )
+from tater_paths import agent_lab_dir
 
 
 BASE_DIR = Path(__file__).resolve().parent
-_agent_root_env = str(os.getenv("TATER_AGENT_ROOT", "") or "").strip()
-if _agent_root_env:
-    _agent_root_path = Path(_agent_root_env).expanduser()
-    if not _agent_root_path.is_absolute():
-        _agent_root_path = BASE_DIR / _agent_root_path
-else:
-    _agent_root_path = BASE_DIR / "agent_lab"
-AGENT_LAB_DIR = _agent_root_path.resolve()
+AGENT_LAB_DIR = agent_lab_dir()
 AGENT_PLUGINS_DIR = AGENT_LAB_DIR / "verba"
 AGENT_PORTALS_DIR = AGENT_LAB_DIR / "portals"
 AGENT_ARTIFACTS_DIR = AGENT_LAB_DIR / "artifacts"

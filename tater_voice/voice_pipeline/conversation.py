@@ -31,6 +31,10 @@ class VoiceSessionRuntime:
 
     audio_chunks: int = 0
     audio_bytes: int = 0
+    secondary_audio_chunks: int = 0
+    secondary_audio_bytes: int = 0
+    secondary_audio_peak_dbfs: float = -120.0
+    secondary_audio_level_chunks: int = 0
     dropped_startup_chunks: int = 0
     vad_startup_ignored_chunks: int = 0
     capture_started: bool = False
@@ -54,6 +58,7 @@ class VoiceSessionRuntime:
     audio_input_gain: float = field(default_factory=lambda: _vp().DEFAULT_AUDIO_INPUT_GAIN)
 
     audio_buffer: bytearray = field(default_factory=bytearray)
+    secondary_audio_buffer: bytearray = field(default_factory=bytearray)
     eou_engine: Any = None
 
     stt_task: Optional[asyncio.Task] = None

@@ -12,6 +12,7 @@ from helpers import redis_client
 from verba_kernel import expand_verba_platforms
 
 VERBA_DIR = os.getenv("TATER_VERBA_DIR", "verba")
+VERBA_BUILTIN_DIR = os.getenv("TATER_VERBA_BUILTIN_DIR", "")
 SHOP_MANIFEST_URL_DEFAULT = os.getenv(
     "TATER_SHOP_MANIFEST_URL",
     "https://raw.githubusercontent.com/TaterTotterson/Tater_Shop/main/manifest.json",
@@ -90,6 +91,21 @@ def _safe_verba_file_path(plugin_id: str) -> str:
     if not _re.fullmatch(r"[a-zA-Z0-9_\-]+", plugin_id or ""):
         raise ValueError("Invalid plugin id")
     return os.path.join(VERBA_DIR, f"{plugin_id}.py")
+
+
+def _verba_file_paths(plugin_id: str) -> list[str]:
+    primary = _safe_verba_file_path(plugin_id)
+    paths = [primary]
+    if VERBA_BUILTIN_DIR:
+        paths.append(os.path.join(VERBA_BUILTIN_DIR, f"{plugin_id}.py"))
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        token = os.path.abspath(path)
+        if token not in seen:
+            seen.add(token)
+            out.append(path)
+    return out
 
 
 def _normalize_manifest_repo_entry(raw) -> dict[str, str] | None:
@@ -272,7 +288,7 @@ def load_shop_catalog(manifest_sources=None) -> tuple[list[dict], list[str]]:
 
 def is_verba_installed(plugin_id: str) -> bool:
     try:
-        return os.path.exists(_safe_verba_file_path(plugin_id))
+        return any(os.path.exists(path) for path in _verba_file_paths(plugin_id))
     except Exception:
         return False
 
@@ -524,8 +540,10 @@ def _get_loaded_verba_description(verba) -> str:
 def _installed_verba_ids() -> list[str]:
     installed_ids = set()
 
-    if os.path.isdir(VERBA_DIR):
-        for filename in os.listdir(VERBA_DIR):
+    for directory in [VERBA_DIR, VERBA_BUILTIN_DIR]:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
             if not filename.endswith(".py") or filename == "__init__.py":
                 continue
             installed_ids.add(filename[:-3])

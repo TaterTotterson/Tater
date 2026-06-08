@@ -33,3 +33,7 @@ integrations/*
 
 # Local runtime config/cache.
 .runtime/
+
+# macOS launcher build products.
+macos/Tater/.build/
+macos/Tater/build/
