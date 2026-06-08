@@ -3,7 +3,6 @@ set -eu
 
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
-UMASK="${UMASK:-022}"
 
 case "$PUID:$PGID" in
   *[!0-9:]* | :* | *: )
@@ -12,7 +11,15 @@ case "$PUID:$PGID" in
     ;;
 esac
 
-umask "$UMASK"
+echo "PUID: $PUID"
+echo "PGID: $PGID"
+echo "UMASK: $UMASK"
+
+if [ -n "$UMASK" ]; then
+    umask "$UMASK"
+else
+    umask "0022"
+fi
 
 mkdir -p /app/.runtime /app/agent_lab
 
