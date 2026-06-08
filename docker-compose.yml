@@ -2,6 +2,7 @@ services:
   tater:
     build:
       context: .
+      target: runtime-cpu
     container_name: tater_app
     restart: unless-stopped
     network_mode: host

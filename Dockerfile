@@ -147,4 +147,4 @@ ENTRYPOINT ["./entrypoint.sh"]
 CMD ["sh", "run_ui.sh"]
 
 
-FROM runtime-base AS runtime
+FROM runtime-base AS runtime-cpu
