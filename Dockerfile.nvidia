@@ -1,72 +1,109 @@
-# Optional NVIDIA build for local STT/TTS acceleration.
-# The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
-FROM python:3.11-slim AS builder
+# syntax=docker/dockerfile:1.7
 
-ENV PIP_NO_CACHE_DIR=1 \
+# NVIDIA build for local STT/TTS and llama.cpp acceleration.
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 AS llama-builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
-ARG LLAMA_CPP_CUDA_WHEEL=cu124
-ARG LLAMA_CPP_PYTHON_MIN_VERSION=0.3.23
+ARG CUDA_ARCH="86;89"
 
-WORKDIR /app
-
-RUN python -m venv /opt/venv \
- && apt-get update \
+RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    ca-certificates \
     build-essential \
-    git \
-    libpq-dev \
-    libolm-dev \
-    libffi-dev \
-    pkg-config \
- && update-ca-certificates \
+    ca-certificates \
+    cmake \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+ && python3.11 -m venv /opt/venv \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+RUN python -m pip install --upgrade pip setuptools wheel
 
-RUN python -m pip install --upgrade pip \
- && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt \
- && python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
- && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
- && python -m pip install -r /tmp/requirements.nvidia.txt \
- && python -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/${LLAMA_CPP_CUDA_WHEEL}" --extra-index-url https://pypi.org/simple "llama-cpp-python>=${LLAMA_CPP_PYTHON_MIN_VERSION}" \
- && python -m pip uninstall -y onnxruntime \
- && python -m pip install onnxruntime-gpu \
- && python -c "from importlib import metadata; from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'), 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
+RUN CUDACXX=/usr/local/cuda/bin/nvcc \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined" \
+    FORCE_CMAKE=1 \
+    python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels llama-cpp-python
 
 
-FROM python:3.11-slim AS runtime
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04 AS runtime
 
-ENV PIP_NO_CACHE_DIR=1 \
+ARG TORCH_VERSION=2.7.1
+ARG TORCHAUDIO_VERSION=2.7.1
+ARG TORCHVISION_VERSION=0.22.1
+ARG ONNXRUNTIME_GPU_WHEEL=https://files.pythonhosted.org/packages/dc/0f/696b4f94a282952239ffed39db78cb17a00ad993acd929cfac010a09759b/onnxruntime_gpu-1.26.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+
+LABEL org.opencontainers.image.description="TaterOS runtime with NVIDIA CUDA acceleration" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/curand/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cusolver/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cusparse/lib:/opt/venv/lib/python3.11/site-packages/nvidia/nvjitlink/lib \
     HTMLUI_PORT=8501
 
 WORKDIR /app
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+    build-essential \
     ca-certificates \
-    git \
-    wget \
     ffmpeg \
-    libsndfile1 \
+    git \
     libgomp1 \
-    libpq5 \
     libolm3 \
+    libpq5 \
+    libsndfile1 \
+    python3.11 \
+    python3.11-venv \
+    wget \
+ && groupadd --system --gid 10001 tater \
+ && useradd --system --uid 10001 --gid tater --create-home --home-dir /home/tater tater \
+ && python3.11 -m venv /opt/venv \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /opt/venv /opt/venv
-COPY . .
+COPY requirements.txt .
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python|onnxruntime)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt
+
+# Resolve the complete Python environment in the runtime venv. Keep the wheel
+# provided CUDA libraries installed; import validation fails without them.
+RUN python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
+      "torch==${TORCH_VERSION}" \
+      "torchaudio==${TORCHAUDIO_VERSION}" \
+      "torchvision==${TORCHVISION_VERSION}" \
+ && python -m pip install -r /tmp/requirements.nvidia.txt \
+ && python -m pip install "${ONNXRUNTIME_GPU_WHEEL}" \
+ && rm -f /tmp/requirements.nvidia.txt
+
+# Mount the builder output for installation without retaining the wheel archive
+# as a second copy in the runtime image.
+RUN --mount=type=bind,from=llama-builder,source=/wheels,target=/tmp/llama-wheels \
+    python -m pip install --no-deps /tmp/llama-wheels/*.whl
+
+RUN python -c "from importlib import metadata; import ctranslate2, onnxruntime, torch, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'onnxruntime', onnxruntime.__version__, 'ctranslate2', ctranslate2.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'))"
+
+COPY --chown=tater:tater . .
+
+RUN mkdir -p /app/.runtime \
+ && chown -R tater:tater /app
+
+USER tater
 
 EXPOSE 8501
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import os, urllib.request; port = os.environ.get('HTMLUI_PORT', '8501'); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=3)" || exit 1
 
 CMD ["sh", "run_ui.sh"]
