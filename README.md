@@ -158,7 +158,7 @@ brew install ffmpeg libolm pkg-config
 
 NVIDIA desktop/server:
 - The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, a CUDA-enabled `llama-cpp-python`, and the GPU ONNX Runtime build.
-- `llama-cpp-python` defaults to the upstream CUDA 12.4 wheel index (`TATER_LLAMA_CPP_CUDA_WHEEL=cu124`) because that index carries current published CUDA wheels; set `TATER_LLAMA_CPP_CUDA_WHEEL=source` to compile locally with `CMAKE_ARGS="-DGGML_CUDA=on"` instead.
+- `llama-cpp-python` is built from source with CUDA enabled; set `TATER_CUDA_ARCH` for other GPU architectures.
 - In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
 - Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
 - To override Faster Whisper compute type, use **Settings -> ESPHome -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
@@ -276,7 +276,8 @@ Build and push the NVIDIA image:
 ```bash
 docker buildx build \
   --platform linux/amd64 \
-  -f Dockerfile.nvidia \
+  -f Dockerfile \
+  --target runtime-nvidia \
   -t ghcr.io/tatertotterson/tater:nvidia \
   --push .
 ```
