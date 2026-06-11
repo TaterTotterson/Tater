@@ -534,6 +534,10 @@ DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 DEFAULT_MLX_LM_TRUST_REMOTE_CODE = False
 DEFAULT_MLX_LM_LAZY_LOAD = False
+DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE = 2048
+MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE = 4096
+FAST_MLX_ENGINE_PREFILL_STEP_SIZE = 8192
+MAX_MLX_ENGINE_PREFILL_STEP_SIZE = 32768
 HYDRA_LLM_SETUP_ERROR = (
     "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
@@ -3017,13 +3021,54 @@ def _mlx_engine_max_seq_nums() -> int:
     return max(1, min(64, raw))
 
 
+def _mlx_engine_prefill_step_size_raw() -> str:
+    raw = _safe_redis_text_get(HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY)
+    if not raw:
+        raw = str(os.getenv("TATER_MLX_ENGINE_PREFILL_STEP_SIZE") or "").strip()
+    return raw
+
+
+def _mlx_engine_parse_prefill_step_size(raw: Any) -> Optional[int]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = int(float(text))
+    except Exception:
+        return None
+    if value < 1:
+        return None
+    return max(1, min(MAX_MLX_ENGINE_PREFILL_STEP_SIZE, value))
+
+
+def _mlx_engine_auto_prefill_step_size() -> int:
+    if not _mlx_lm_is_apple_silicon():
+        return DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE
+    try:
+        total_bytes = max(0, int(_system_ram_snapshot().get("total_bytes") or 0))
+    except Exception:
+        total_bytes = 0
+    total_gib = total_bytes / float(1024**3) if total_bytes > 0 else 0.0
+    if total_gib >= 64:
+        return FAST_MLX_ENGINE_PREFILL_STEP_SIZE
+    if total_gib >= 32:
+        return MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE
+    return DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE
+
+
+def _mlx_engine_resolve_prefill_step_size() -> Tuple[Optional[int], str]:
+    raw = _mlx_engine_prefill_step_size_raw()
+    token = raw.strip().lower()
+    if token in {"runtime", "engine", "mlx-default"}:
+        return None, "runtime_default"
+    manual = _mlx_engine_parse_prefill_step_size(raw)
+    if manual is not None:
+        return manual, "manual"
+    return _mlx_engine_auto_prefill_step_size(), "auto"
+
+
 def _mlx_engine_prefill_step_size() -> Optional[int]:
-    return _mlx_engine_optional_int_setting(
-        HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
-        "TATER_MLX_ENGINE_PREFILL_STEP_SIZE",
-        minimum=1,
-        maximum=32768,
-    )
+    return _mlx_engine_resolve_prefill_step_size()[0]
 
 
 def _mlx_engine_optional_int_setting(
@@ -3075,6 +3120,54 @@ def _mlx_engine_prepare_import_path() -> str:
     if os.path.isdir(package_dir) and checkout not in sys.path:
         sys.path.insert(0, checkout)
     return checkout
+
+
+def _mlx_engine_patch_gemma4_blockwise_overlay() -> None:
+    try:
+        from mlx_vlm.models.gemma4 import language as gemma4_language  # type: ignore
+    except Exception:
+        return
+
+    model_cls = getattr(gemma4_language, "Gemma4TextModel", None)
+    if model_cls is None:
+        return
+    current = getattr(model_cls, "_apply_blockwise_bidirectional_overlay", None)
+    if getattr(current, "_tater_mlx_gemma4_overlay_compat", False):
+        return
+    mx_module = getattr(gemma4_language, "mx", None)
+    if mx_module is None or not callable(current):
+        return
+
+    original = current
+
+    def _apply_blockwise_bidirectional_overlay_compat(self: Any, base_mask: Any, mm_token_type_ids: Any) -> Any:
+        if mm_token_type_ids is None:
+            return base_mask
+        try:
+            key_len = int(base_mask.shape[-1])
+            query_len = int(base_mask.shape[-2])
+            token_len = int(mm_token_type_ids.shape[1])
+        except Exception:
+            return original(self, base_mask, mm_token_type_ids)
+        if token_len != key_len or query_len <= 0:
+            return base_mask
+
+        try:
+            block_sequence_ids = self._block_sequence_ids_for_mask(mm_token_type_ids)
+            if query_len < token_len:
+                start = token_len - query_len
+                query_blocks = block_sequence_ids[:, start : start + query_len]
+            else:
+                query_blocks = block_sequence_ids
+            q_blocks = mx_module.expand_dims(query_blocks, -1)
+            k_blocks = mx_module.expand_dims(block_sequence_ids, -2)
+            same_block = (q_blocks != -1) & (q_blocks == k_blocks)
+            return base_mask | mx_module.expand_dims(same_block, 1)
+        except Exception:
+            return original(self, base_mask, mm_token_type_ids)
+
+    setattr(_apply_blockwise_bidirectional_overlay_compat, "_tater_mlx_gemma4_overlay_compat", True)
+    setattr(model_cls, "_apply_blockwise_bidirectional_overlay", _apply_blockwise_bidirectional_overlay_compat)
 
 
 def _mlx_engine_patch_batched_vision_loader() -> None:
@@ -3260,6 +3353,7 @@ def _mlx_engine_import_helpers() -> Dict[str, Any]:
     checkout = _mlx_engine_prepare_import_path()
     try:
         from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
+        _mlx_engine_patch_gemma4_blockwise_overlay()
         _mlx_engine_patch_batched_vision_loader()
     except Exception as exc:
         hint = (
@@ -3319,6 +3413,58 @@ def _mlx_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         or 0,
     )
 
+
+def _mlx_engine_bundle_backend_exception(bundle: Any) -> Optional[Exception]:
+    if not isinstance(bundle, dict):
+        return None
+    model_kit = bundle.get("model_kit")
+    backend_exception = getattr(model_kit, "_backend_exception", None)
+    return backend_exception if isinstance(backend_exception, Exception) else None
+
+
+def _mlx_engine_bundle_is_poisoned(bundle: Any) -> bool:
+    if _mlx_engine_bundle_backend_exception(bundle) is not None:
+        return True
+    model_kit = bundle.get("model_kit") if isinstance(bundle, dict) else None
+    is_shutdown = getattr(model_kit, "is_shutdown", None)
+    if callable(is_shutdown):
+        try:
+            return bool(is_shutdown())
+        except Exception:
+            return False
+    return False
+
+
+def _mlx_engine_shutdown_bundle(bundle: Any) -> None:
+    if not isinstance(bundle, dict):
+        return
+    shutdown = getattr(bundle.get("model_kit"), "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown()
+        except Exception:
+            logger.debug("[mlx-engine] Failed to shut down poisoned model kit.", exc_info=True)
+
+
+def _mlx_engine_evict_bundle(bundle: Any, *, reason: str) -> None:
+    if not isinstance(bundle, dict):
+        return
+    cache_key = bundle.get("cache_key")
+    with _MLX_ENGINE_MODEL_CACHE_LOCK:
+        if cache_key is not None and _MLX_ENGINE_MODEL_CACHE.get(cache_key) is bundle:
+            _MLX_ENGINE_MODEL_CACHE.pop(cache_key, None)
+            _MLX_ENGINE_GENERATION_LOCKS.pop(cache_key, None)
+    _mlx_engine_shutdown_bundle(bundle)
+    logger.warning("[mlx-engine] Evicted cached model after backend failure: %s", reason)
+
+
+def _mlx_engine_generation_exception_is_fatal(bundle: Dict[str, Any], exc: Exception) -> bool:
+    if _mlx_engine_bundle_backend_exception(bundle) is not None:
+        return True
+    detail = str(exc or "")
+    return "Encountered fatal exception in the backend generation thread" in detail
+
+
 def _load_mlx_engine_bundle(
     model_id: str,
     *,
@@ -3336,18 +3482,21 @@ def _load_mlx_engine_bundle(
     with _MLX_ENGINE_MODEL_CACHE_LOCK:
         cached = _MLX_ENGINE_MODEL_CACHE.get(cache_key)
         if isinstance(cached, dict):
-            _mlx_engine_normalize_bundle_vision_tokens(cached)
-            _emit_hf_llm_progress(
-                progress_callback,
-                {
-                    "event": "complete",
-                    "stage": "load",
-                    "description": "MLX engine model is already loaded",
-                    "progress": 100.0,
-                    "device": "apple_silicon",
-                },
-            )
-            return cached
+            if _mlx_engine_bundle_is_poisoned(cached):
+                _mlx_engine_evict_bundle(cached, reason="cached model kit has a backend exception")
+            else:
+                _mlx_engine_normalize_bundle_vision_tokens(cached)
+                _emit_hf_llm_progress(
+                    progress_callback,
+                    {
+                        "event": "complete",
+                        "stage": "load",
+                        "description": "MLX engine model is already loaded",
+                        "progress": 100.0,
+                        "device": "apple_silicon",
+                    },
+                )
+                return cached
 
         helpers = _mlx_engine_import_helpers()
         model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
@@ -3369,7 +3518,7 @@ def _load_mlx_engine_bundle(
         max_kv_size = _mlx_lm_max_kv_size()
         if max_kv_size is not None:
             load_kwargs["max_kv_size"] = max(128, int(max_kv_size))
-        prefill_step_size = _mlx_engine_prefill_step_size()
+        prefill_step_size, prefill_step_size_source = _mlx_engine_resolve_prefill_step_size()
         if prefill_step_size is not None:
             load_kwargs["prefill_step_size"] = prefill_step_size
         if "vision_config" not in config:
@@ -3455,6 +3604,7 @@ def _load_mlx_engine_bundle(
 
         bundle = {
             "runtime": "mlx-engine",
+            "cache_key": cache_key,
             "model_kit": model_kit,
             "tokenizer": tokenizer,
             "processor": processor,
@@ -3471,6 +3621,7 @@ def _load_mlx_engine_bundle(
             "trust_remote_code": _mlx_lm_trust_remote_code(),
             "max_kv_size": max_kv_size,
             "prefill_step_size": prefill_step_size,
+            "prefill_step_size_source": prefill_step_size_source,
             "kv_bits": load_kwargs.get("kv_bits"),
             "kv_group_size": load_kwargs.get("kv_group_size"),
             "quantized_kv_start": load_kwargs.get("quantized_kv_start"),
@@ -3563,17 +3714,23 @@ def _mlx_engine_run_generation(
     completion_tokens = 0
     generation_started = time.perf_counter()
     lock = generation_lock if hasattr(generation_lock, "__enter__") else threading.RLock()
-    with lock:
-        for generation_result in create_generator(model_kit, prompt_tokens, **generation_kwargs):
-            text_part = _coerce_content_to_text(getattr(generation_result, "text", ""))
-            content += text_part
-            tokens = getattr(generation_result, "tokens", None)
-            try:
-                completion_tokens += len(tokens or [])
-            except Exception:
-                pass
-            if getattr(generation_result, "stop_condition", None) is not None:
-                break
+    try:
+        with lock:
+            for generation_result in create_generator(model_kit, prompt_tokens, **generation_kwargs):
+                text_part = _coerce_content_to_text(getattr(generation_result, "text", ""))
+                content += text_part
+                tokens = getattr(generation_result, "tokens", None)
+                try:
+                    completion_tokens += len(tokens or [])
+                except Exception:
+                    pass
+                if getattr(generation_result, "stop_condition", None) is not None:
+                    break
+    except Exception as exc:
+        if _mlx_engine_generation_exception_is_fatal(bundle, exc):
+            reason = (str(exc or type(exc).__name__) or type(exc).__name__).replace("\n", " ")[:240]
+            _mlx_engine_evict_bundle(bundle, reason=reason)
+        raise
     generation_elapsed = max(0.0, time.perf_counter() - generation_started)
     content = _strip_local_thinking_blocks(_apply_local_stop_sequences(content, stop)).strip()
     if completion_tokens <= 0:
