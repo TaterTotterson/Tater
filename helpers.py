@@ -579,6 +579,9 @@ _HF_LLM_GENERATION_LOCKS: Dict[Tuple[str, str, str, bool], threading.RLock] = {}
 _LLAMA_CPP_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _LLAMA_CPP_MODEL_CACHE_LOCK = threading.RLock()
 _LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_LLAMA_CPP_ENGINE_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+_LLAMA_CPP_ENGINE_CACHE_LOCK = threading.RLock()
+_LLAMA_CPP_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
 _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = False
 _LLAMA_CPP_VISION_FAILURE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK = threading.RLock()
@@ -2470,6 +2473,7 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
         "model_root": str((bundle or {}).get("model_root") or ""),
         "loaded_ts": float((bundle or {}).get("loaded_ts") or 0.0),
         "gpu_backend": str((bundle or {}).get("gpu_backend") or ""),
+        "runtime": str((bundle or {}).get("runtime") or ""),
         "warning": _llama_cpp_warning_text(
             (bundle or {}).get("gpu_warning"),
             (bundle or {}).get("mtp_warning"),
@@ -2487,6 +2491,7 @@ def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict
     rows: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_MODEL_CACHE_LOCK),
@@ -2590,6 +2595,7 @@ def unload_local_llm_models(
     removed_bundles: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_GENERATION_LOCKS, _HF_LLM_MODEL_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_GENERATION_LOCKS, _LLAMA_CPP_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_GENERATION_LOCKS, _MLX_ENGINE_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_GENERATION_LOCKS, _MLX_LM_MODEL_CACHE_LOCK),
@@ -2613,6 +2619,12 @@ def unload_local_llm_models(
                 row = _local_llm_loaded_model_row(provider_token, key, bundle if isinstance(bundle, dict) else {})
                 removed.append(row)
                 if isinstance(bundle, dict):
+                    shutdown_engine = getattr(bundle.get("engine"), "shutdown", None)
+                    if callable(shutdown_engine):
+                        try:
+                            shutdown_engine()
+                        except Exception:
+                            pass
                     shutdown = getattr(bundle.get("model_kit"), "shutdown", None)
                     if callable(shutdown):
                         try:
@@ -5761,6 +5773,457 @@ def _llama_cpp_install_chat_template_override(model: Any, template: str) -> Tupl
         return "", f"Could not install llama.cpp chat template override: {exc}"
 
 
+_LLAMA_CPP_ENGINE_WORKER_ARG = "--tater-llama-cpp-engine-worker"
+_LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
+_LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
+
+
+def _llama_cpp_create_chat_completion_with_fallback(
+    model: Any,
+    messages: List[Dict[str, Any]],
+    chat_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    attempt_kwargs = dict(chat_kwargs)
+    last_exc: Optional[TypeError] = None
+    for _attempt in range(6):
+        try:
+            return model.create_chat_completion(messages=messages, **attempt_kwargs)
+        except TypeError as exc:
+            last_exc = exc
+            retry_kwargs = dict(attempt_kwargs)
+            template_kwargs = retry_kwargs.get("chat_template_kwargs")
+            template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else None
+            changed = False
+
+            if "reasoning_budget" in retry_kwargs:
+                retry_kwargs.pop("reasoning_budget", None)
+                changed = True
+            elif template_kwargs is not None and "reasoning_budget" in template_kwargs:
+                template_kwargs.pop("reasoning_budget", None)
+                retry_kwargs["chat_template_kwargs"] = template_kwargs
+                changed = True
+            elif template_kwargs is not None and "enable_thinking" in template_kwargs:
+                template_kwargs.pop("enable_thinking", None)
+                if template_kwargs:
+                    retry_kwargs["chat_template_kwargs"] = template_kwargs
+                else:
+                    retry_kwargs.pop("chat_template_kwargs", None)
+                changed = True
+            elif "chat_template_kwargs" in retry_kwargs:
+                retry_kwargs.pop("chat_template_kwargs", None)
+                changed = True
+
+            if not changed or retry_kwargs == attempt_kwargs:
+                raise
+            attempt_kwargs = retry_kwargs
+    if last_exc is not None:
+        raise last_exc
+    return model.create_chat_completion(messages=messages, **attempt_kwargs)
+
+
+def _llama_cpp_result_from_response(
+    *,
+    model_token: str,
+    model_obj: Any,
+    response: Any,
+    generation_elapsed: float,
+) -> Dict[str, Any]:
+    choices = response.get("choices") if isinstance(response, dict) else []
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content = ""
+    if isinstance(message, dict):
+        content = _coerce_content_to_text(message.get("content"))
+    if not content and isinstance(first_choice, dict):
+        content = _coerce_content_to_text(first_choice.get("text"))
+    content = _strip_local_thinking_blocks(content).strip()
+    usage = response.get("usage", {}) if isinstance(response, dict) else {}
+    prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+    completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+    if completion_tokens <= 0:
+        completion_tokens = _llama_cpp_count_text_tokens(model_obj, content)
+    total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
+    timing = _llama_cpp_response_timing(
+        response,
+        fallback_elapsed=generation_elapsed,
+        prompt_tokens=max(0, prompt_tokens),
+        completion_tokens=max(0, completion_tokens),
+    )
+    return {
+        "model": str(model_token or "").strip(),
+        "message": {"role": "assistant", "content": content},
+        "_usage": {
+            "prompt_tokens": max(0, prompt_tokens),
+            "completion_tokens": max(0, completion_tokens),
+            "total_tokens": max(0, total_tokens),
+        },
+        "_timing": timing,
+    }
+
+
+def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    keys = (
+        "model_path",
+        "mmproj_path",
+        "model_root",
+        "n_gpu_layers",
+        "n_ctx",
+        "n_batch",
+        "n_ubatch",
+        "flash_attn",
+        "offload_kqv",
+        "device",
+        "gpu_backend",
+        "gpu_warning",
+        "memory_estimate_bytes",
+        "loaded_ts",
+        "mtp_requested",
+        "mtp_enabled",
+        "mtp_spec_type",
+        "mtp_draft_tokens",
+        "mtp_warning",
+        "chat_template_override",
+        "chat_template_override_hash",
+        "chat_template_handler",
+        "chat_template_warning",
+        "vision_requested",
+        "supports_vision",
+        "vision_projector_path",
+        "vision_chat_handler",
+        "vision_warning",
+        "llama_cpp_system_info",
+    )
+    out: Dict[str, Any] = {}
+    for key in keys:
+        value = (bundle or {}).get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            out[key] = value
+    return out
+
+
+def _llama_cpp_direct_chat_completion(
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    chat_kwargs: Dict[str, Any],
+    *,
+    vision: bool = False,
+) -> Dict[str, Any]:
+    bundle = _load_llama_cpp_bundle(model_token, vision=vision)
+    if vision and not bool(bundle.get("supports_vision")):
+        detail = str(bundle.get("vision_warning") or "").strip()
+        if not detail and not str(bundle.get("mmproj_path") or "").strip():
+            detail = "No matching mmproj vision projector was found for this GGUF."
+        raise RuntimeError(detail or f"{model_token} is not loaded as a llama.cpp vision model.")
+    model = bundle["model"]
+    generation_lock = bundle["lock"]
+    local_messages = _llama_cpp_disable_thinking_messages(messages)
+    with generation_lock:
+        generation_started = time.perf_counter()
+        response = _llama_cpp_create_chat_completion_with_fallback(model, local_messages, dict(chat_kwargs))
+    generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+    return _llama_cpp_result_from_response(
+        model_token=model_token,
+        model_obj=model,
+        response=response,
+        generation_elapsed=generation_elapsed,
+    )
+
+
+class _TaterLlamaCppEngineProcess:
+    def __init__(self, *, cache_key: Tuple[Any, ...], model_token: str):
+        self.cache_key = tuple(cache_key)
+        self.model_token = str(model_token or "").strip()
+        self.process: Optional[subprocess.Popen[str]] = None
+        self._send_lock = threading.RLock()
+        self._response_cv = threading.Condition()
+        self._responses: Dict[str, Dict[str, Any]] = {}
+        self._stdout_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_tail: List[str] = []
+
+    def _command(self) -> List[str]:
+        return [sys.executable, os.path.abspath(__file__), _LLAMA_CPP_ENGINE_WORKER_ARG]
+
+    def start(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            return
+        env = dict(os.environ)
+        env[_LLAMA_CPP_ENGINE_WORKER_ENV] = "1"
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        self.process = subprocess.Popen(
+            self._command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
+        )
+        self._stdout_thread = threading.Thread(
+            target=self._read_stdout,
+            name=f"tater-llama-engine-stdout-{abs(hash(self.cache_key))}",
+            daemon=True,
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._read_stderr,
+            name=f"tater-llama-engine-stderr-{abs(hash(self.cache_key))}",
+            daemon=True,
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def _read_stdout(self) -> None:
+        proc = self.process
+        stream = proc.stdout if proc is not None else None
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:
+                    logger.debug("[llama-cpp-engine] non-protocol stdout: %s", _tail_text(text, 1000))
+                    continue
+                request_id = str(payload.get("id") or "").strip()
+                if not request_id:
+                    continue
+                with self._response_cv:
+                    self._responses[request_id] = payload
+                    self._response_cv.notify_all()
+        finally:
+            with self._response_cv:
+                self._response_cv.notify_all()
+
+    def _read_stderr(self) -> None:
+        proc = self.process
+        stream = proc.stderr if proc is not None else None
+        if stream is None:
+            return
+        for line in stream:
+            text = str(line or "").rstrip()
+            if not text:
+                continue
+            self._stderr_tail.append(text)
+            if len(self._stderr_tail) > 40:
+                del self._stderr_tail[: len(self._stderr_tail) - 40]
+            lowered = text.lower()
+            if any(token in lowered for token in ("traceback", "ggml_assert", "fatal", "error")):
+                logger.warning("[llama-cpp-engine] %s", _tail_text(text, 1400))
+            else:
+                logger.debug("[llama-cpp-engine] %s", text)
+
+    def _exit_detail(self, op: str) -> str:
+        proc = self.process
+        code = proc.poll() if proc is not None else "unknown"
+        detail = _tail_text("\n".join(self._stderr_tail), 1800)
+        suffix = f" Logs: {detail}" if detail else ""
+        return f"Tater llama.cpp engine exited during {op} (exit {code}).{suffix}"
+
+    def request(self, op: str, payload: Optional[Dict[str, Any]] = None, *, timeout: Optional[float] = None) -> Any:
+        self.start()
+        proc = self.process
+        if proc is None or proc.stdin is None:
+            raise RuntimeError("Tater llama.cpp engine failed to start.")
+        if proc.poll() is not None:
+            raise RuntimeError(self._exit_detail(op))
+
+        request_id = str(uuid.uuid4())
+        message = {
+            "id": request_id,
+            "protocol": _LLAMA_CPP_ENGINE_PROTOCOL_VERSION,
+            "op": str(op or ""),
+            "payload": payload or {},
+        }
+        try:
+            line = json.dumps(message, separators=(",", ":"), default=str)
+        except Exception:
+            line = json.dumps({"id": request_id, "protocol": _LLAMA_CPP_ENGINE_PROTOCOL_VERSION, "op": op, "payload": {}})
+        with self._send_lock:
+            try:
+                proc.stdin.write(f"{line}\n")
+                proc.stdin.flush()
+            except Exception as exc:
+                raise RuntimeError("Tater llama.cpp engine is not accepting requests.") from exc
+
+        deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else 0.0
+        with self._response_cv:
+            while request_id not in self._responses:
+                if proc.poll() is not None:
+                    raise RuntimeError(self._exit_detail(op))
+                if deadline > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"Tater llama.cpp engine timed out during {op}.")
+                    self._response_cv.wait(timeout=min(1.0, max(0.05, remaining)))
+                else:
+                    self._response_cv.wait(timeout=1.0)
+            response = self._responses.pop(request_id)
+
+        if not bool(response.get("ok")):
+            detail = str(response.get("error") or "").strip() or f"Tater llama.cpp engine {op} failed."
+            raise RuntimeError(detail)
+        return response.get("result")
+
+    def shutdown(self) -> None:
+        proc = self.process
+        if proc is None:
+            return
+        if proc.poll() is None:
+            try:
+                self.request("shutdown", {}, timeout=2.0)
+            except Exception:
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+
+
+def _load_llama_cpp_engine_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("llama.cpp GGUF model id or path is required.")
+    cache_key = _llama_cpp_cache_key(model_token, vision=False)
+    with _LLAMA_CPP_ENGINE_CACHE_LOCK:
+        cached = _LLAMA_CPP_ENGINE_CACHE.get(cache_key)
+        cached_engine = cached.get("engine") if isinstance(cached, dict) else None
+        if isinstance(cached, dict) and callable(getattr(cached_engine, "alive", None)) and cached_engine.alive():
+            _emit_hf_llm_progress(
+                progress_callback,
+                {
+                    "event": "complete",
+                    "stage": "load",
+                    "description": "Tater llama.cpp engine is already loaded",
+                    "progress": 100.0,
+                    "device": str(cached.get("device") or ""),
+                    "warning": _llama_cpp_warning_text(
+                        cached.get("gpu_warning"),
+                        cached.get("mtp_warning"),
+                        cached.get("chat_template_warning"),
+                    ),
+                },
+            )
+            return cached
+        if isinstance(cached, dict):
+            shutdown_engine = getattr(cached.get("engine"), "shutdown", None)
+            if callable(shutdown_engine):
+                try:
+                    shutdown_engine()
+                except Exception:
+                    pass
+            _LLAMA_CPP_ENGINE_CACHE.pop(cache_key, None)
+
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Starting Tater llama.cpp engine",
+                "progress": 0.0,
+            },
+        )
+        engine = _TaterLlamaCppEngineProcess(cache_key=cache_key, model_token=model_token)
+        try:
+            load_timeout = max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900"))
+        except Exception:
+            load_timeout = 900.0
+        try:
+            metadata = engine.request(
+                "load",
+                {"model": model_token},
+                timeout=load_timeout,
+            )
+        except Exception:
+            engine.shutdown()
+            raise
+        if not isinstance(metadata, dict):
+            engine.shutdown()
+            raise RuntimeError("Tater llama.cpp engine returned invalid load metadata.")
+        generation_lock = _LLAMA_CPP_ENGINE_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _LLAMA_CPP_ENGINE_GENERATION_LOCKS[cache_key] = generation_lock
+        bundle = dict(metadata)
+        bundle.update(
+            {
+                "engine": engine,
+                "lock": generation_lock,
+                "runtime": "tater-llama-engine",
+                "loaded_ts": float(metadata.get("loaded_ts") or time.time()),
+            }
+        )
+        _LLAMA_CPP_ENGINE_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "Tater llama.cpp engine loaded",
+                "progress": 100.0,
+                "device": str(bundle.get("device") or ""),
+                "warning": _llama_cpp_warning_text(
+                    bundle.get("gpu_warning"),
+                    bundle.get("mtp_warning"),
+                    bundle.get("chat_template_warning"),
+                ),
+            },
+        )
+        return bundle
+
+
+def _llama_cpp_engine_chat_completion(
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    chat_kwargs: Dict[str, Any],
+    *,
+    timeout: Any = None,
+) -> Dict[str, Any]:
+    bundle = _load_llama_cpp_engine_bundle(model_token)
+    engine = bundle.get("engine")
+    generation_lock = bundle.get("lock")
+    if not callable(getattr(engine, "request", None)):
+        raise RuntimeError("Tater llama.cpp engine is not loaded.")
+    try:
+        timeout_seconds = float(timeout) + 30.0 if timeout is not None and float(timeout) > 0 else 0.0
+    except Exception:
+        timeout_seconds = 0.0
+    local_messages = _llama_cpp_disable_thinking_messages(messages)
+    lock_obj = generation_lock if hasattr(generation_lock, "__enter__") and hasattr(generation_lock, "__exit__") else None
+    if lock_obj is None:
+        return engine.request(
+            "chat",
+            {"model": model_token, "messages": local_messages, "chat_kwargs": dict(chat_kwargs)},
+            timeout=timeout_seconds,
+        )
+    with lock_obj:
+        return engine.request(
+            "chat",
+            {"model": model_token, "messages": local_messages, "chat_kwargs": dict(chat_kwargs)},
+            timeout=timeout_seconds,
+        )
+
+
 def _load_llama_cpp_bundle(
     model_id: str,
     *,
@@ -5987,7 +6450,11 @@ def preload_llama_cpp_llm_model(
     progress_callback: Optional[HFProgressCallback] = None,
     vision: bool = False,
 ) -> Dict[str, Any]:
-    bundle = _load_llama_cpp_bundle(model_id, progress_callback=progress_callback, vision=vision)
+    bundle = (
+        _load_llama_cpp_bundle(model_id, progress_callback=progress_callback, vision=True)
+        if vision
+        else _load_llama_cpp_engine_bundle(model_id, progress_callback=progress_callback)
+    )
     return {
         "ok": True,
         "model": str(model_id or "").strip(),
@@ -6008,6 +6475,7 @@ def preload_llama_cpp_llm_model(
         "mmproj_path": str(bundle.get("mmproj_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
+        "runtime": str(bundle.get("runtime") or ("llama-cpp-python" if vision else "tater-llama-engine")),
         "warning": _llama_cpp_warning_text(
             bundle.get("gpu_warning"),
             bundle.get("mtp_warning"),
@@ -8867,87 +9335,25 @@ class LlamaCppLLMClientWrapper:
         messages: List[Dict[str, Any]],
         chat_kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
-        attempt_kwargs = dict(chat_kwargs)
-        last_exc: Optional[TypeError] = None
-        for _attempt in range(6):
-            try:
-                return model.create_chat_completion(messages=messages, **attempt_kwargs)
-            except TypeError as exc:
-                last_exc = exc
-                retry_kwargs = dict(attempt_kwargs)
-                template_kwargs = retry_kwargs.get("chat_template_kwargs")
-                template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else None
-                changed = False
-
-                if "reasoning_budget" in retry_kwargs:
-                    retry_kwargs.pop("reasoning_budget", None)
-                    changed = True
-                elif template_kwargs is not None and "reasoning_budget" in template_kwargs:
-                    template_kwargs.pop("reasoning_budget", None)
-                    retry_kwargs["chat_template_kwargs"] = template_kwargs
-                    changed = True
-                elif template_kwargs is not None and "enable_thinking" in template_kwargs:
-                    template_kwargs.pop("enable_thinking", None)
-                    if template_kwargs:
-                        retry_kwargs["chat_template_kwargs"] = template_kwargs
-                    else:
-                        retry_kwargs.pop("chat_template_kwargs", None)
-                    changed = True
-                elif "chat_template_kwargs" in retry_kwargs:
-                    retry_kwargs.pop("chat_template_kwargs", None)
-                    changed = True
-
-                if not changed or retry_kwargs == attempt_kwargs:
-                    raise
-                attempt_kwargs = retry_kwargs
-        if last_exc is not None:
-            raise last_exc
-        return model.create_chat_completion(messages=messages, **attempt_kwargs)
+        return _llama_cpp_create_chat_completion_with_fallback(model, messages, chat_kwargs)
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
-        bundle = _load_llama_cpp_bundle(self.model, vision=vision_requested)
-        model = bundle["model"]
-        generation_lock = bundle["lock"]
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
-
-        with generation_lock:
-            generation_started = time.perf_counter()
-            response = self._create_chat_completion_with_fallback(model, local_messages, chat_kwargs)
-        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-
-        choices = response.get("choices") if isinstance(response, dict) else []
-        first_choice = choices[0] if isinstance(choices, list) and choices else {}
-        message = first_choice.get("message") if isinstance(first_choice, dict) else {}
-        content = ""
-        if isinstance(message, dict):
-            content = _coerce_content_to_text(message.get("content"))
-        if not content and isinstance(first_choice, dict):
-            content = _coerce_content_to_text(first_choice.get("text"))
-        content = _strip_local_thinking_blocks(content).strip()
-        usage = response.get("usage", {}) if isinstance(response, dict) else {}
-        prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
-        completion_tokens = int((usage or {}).get("completion_tokens") or 0)
-        if completion_tokens <= 0:
-            completion_tokens = _llama_cpp_count_text_tokens(model, content)
-        total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
-        timing = _llama_cpp_response_timing(
-            response,
-            fallback_elapsed=generation_elapsed,
-            prompt_tokens=max(0, prompt_tokens),
-            completion_tokens=max(0, completion_tokens),
+        if vision_requested:
+            return _llama_cpp_direct_chat_completion(
+                self.model,
+                local_messages,
+                chat_kwargs,
+                vision=True,
+            )
+        return _llama_cpp_engine_chat_completion(
+            self.model,
+            local_messages,
+            chat_kwargs,
+            timeout=timeout,
         )
-        return {
-            "model": self.model,
-            "message": {"role": "assistant", "content": content},
-            "_usage": {
-                "prompt_tokens": max(0, prompt_tokens),
-                "completion_tokens": max(0, completion_tokens),
-                "total_tokens": max(0, total_tokens),
-            },
-            "_timing": timing,
-        }
 
     async def chat(self, messages, **kwargs):
         timeout = kwargs.pop("timeout", None)
@@ -9617,14 +10023,15 @@ def _describe_image_with_llama_cpp_direct(
     messages: List[Dict[str, Any]],
     timeout: float,
 ) -> Dict[str, Any]:
-    bundle = _load_llama_cpp_bundle(model_token, vision=True)
-    if not bool(bundle.get("supports_vision")):
-        detail = str(bundle.get("vision_warning") or "").strip()
-        if not detail and not str(bundle.get("mmproj_path") or "").strip():
-            detail = "No matching mmproj vision projector was found for this GGUF."
-        raise RuntimeError(detail or f"{model_token} is not loaded as a llama.cpp vision model.")
-    client = LlamaCppLLMClientWrapper(model=model_token, vision=True)
-    return client._chat_sync(messages, timeout=timeout, max_tokens=768, temperature=0.2)
+    chat_kwargs = {
+        "max_tokens": 768,
+        "temperature": 0.2,
+        "stream": False,
+    }
+    if _llama_cpp_disable_thinking_enabled():
+        chat_kwargs["reasoning_budget"] = 0
+        chat_kwargs["chat_template_kwargs"] = {"enable_thinking": False, "reasoning_budget": 0}
+    return _llama_cpp_direct_chat_completion(model_token, messages, chat_kwargs, vision=True)
 
 
 def _describe_image_with_llama_cpp_subprocess(
@@ -10505,6 +10912,91 @@ def run_comfy_prompt(base_http: str, base_ws: str, prompt: dict):
             pass
 
 
+def _llama_cpp_engine_protocol_output():
+    try:
+        protocol_fd = os.dup(sys.stdout.fileno())
+        protocol_out = os.fdopen(protocol_fd, "w", buffering=1)
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        return protocol_out
+    except Exception:
+        return sys.stdout
+
+
+def _llama_cpp_engine_worker_reply(protocol_out: Any, payload: Dict[str, Any]) -> None:
+    try:
+        protocol_out.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
+        protocol_out.flush()
+    except Exception:
+        pass
+
+
+def _llama_cpp_engine_worker_main() -> int:
+    protocol_out = _llama_cpp_engine_protocol_output()
+    current_model = ""
+    return_code = 0
+    for line in sys.stdin:
+        request_id = ""
+        try:
+            request = json.loads(str(line or "").strip() or "{}")
+            request_id = str(request.get("id") or "").strip()
+            op = str(request.get("op") or "").strip().lower()
+            payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+            if not request_id:
+                continue
+            if op == "shutdown":
+                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": {"shutdown": True}})
+                return_code = 0
+                break
+            if op == "load":
+                model_token = str((payload or {}).get("model") or "").strip()
+                if not model_token:
+                    raise RuntimeError("llama.cpp engine load needs a model id.")
+                bundle = _load_llama_cpp_bundle(model_token, vision=False)
+                current_model = model_token
+                result = _llama_cpp_public_bundle_metadata(bundle)
+                result["runtime"] = "tater-llama-engine"
+                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
+                continue
+            if op == "chat":
+                model_token = str((payload or {}).get("model") or current_model or "").strip()
+                if not model_token:
+                    raise RuntimeError("llama.cpp engine chat needs a loaded model.")
+                if current_model and model_token != current_model:
+                    raise RuntimeError(
+                        f"Tater llama.cpp engine is loaded with {current_model}; got request for {model_token}."
+                    )
+                messages = (payload or {}).get("messages")
+                if not isinstance(messages, list):
+                    messages = []
+                chat_kwargs = (payload or {}).get("chat_kwargs")
+                if not isinstance(chat_kwargs, dict):
+                    chat_kwargs = {}
+                result = _llama_cpp_direct_chat_completion(model_token, messages, chat_kwargs, vision=False)
+                current_model = model_token
+                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
+                continue
+            raise RuntimeError(f"Unknown llama.cpp engine op: {op or 'missing'}")
+        except Exception as exc:
+            if request_id:
+                _llama_cpp_engine_worker_reply(
+                    protocol_out,
+                    {
+                        "id": request_id,
+                        "ok": False,
+                        "error": str(exc) or exc.__class__.__name__,
+                    },
+                )
+            else:
+                logger.warning("[llama-cpp-engine] failed handling request: %s", exc, exc_info=True)
+    try:
+        protocol_out.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(return_code)
+    return return_code
+
+
 def _llama_cpp_vision_worker_main() -> int:
     try:
         raw_payload = sys.stdin.read()
@@ -10537,6 +11029,11 @@ def _llama_cpp_vision_worker_main() -> int:
     # produced its result. Exit directly so setup users do not get a Python crash dialog.
     os._exit(return_code)
     return return_code
+
+
+if __name__ == "__main__" and _LLAMA_CPP_ENGINE_WORKER_ARG in sys.argv[1:]:
+    _llama_cpp_engine_worker_main()
+    os._exit(1)
 
 
 if __name__ == "__main__" and _LLAMA_CPP_VISION_WORKER_ARG in sys.argv[1:]:
