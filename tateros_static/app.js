@@ -18313,7 +18313,7 @@ async function loadSettingsView() {
                   <input id="set_hydra_mlx_engine_prefill_step_size" type="number" min="1" max="32768" step="1" placeholder="Auto" value="${escapeHtml(
                     settings.hydra_mlx_engine_prefill_step_size || ""
                   )}" />
-                  <div class="small hydra-context-hint">Blank lets the MLX runtime choose the prompt prefill chunk size.</div>
+                  <div class="small hydra-context-hint">Blank auto-selects 2048, 4096, or 8192 by Mac memory. Reload the model to apply changes.</div>
                 </label>
                 <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Quantized KV Bits
                   <select id="set_hydra_mlx_engine_kv_bits">
