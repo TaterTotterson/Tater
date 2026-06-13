@@ -308,6 +308,34 @@ llama_cpp_native_cmake_args() {
   esac
 }
 
+llama_cpp_cuda_stub_dir() {
+  profile="$1"
+  case "${profile}" in
+    nvidia|jetson|thor)
+      ;;
+    *)
+      return
+      ;;
+  esac
+  candidates=""
+  if [ "${TATER_LLAMA_CPP_CUDA_STUB_DIR:-}" ]; then
+    candidates="${candidates} ${TATER_LLAMA_CPP_CUDA_STUB_DIR}"
+  fi
+  if [ "${CUDA_HOME:-}" ]; then
+    candidates="${candidates} ${CUDA_HOME}/lib64/stubs ${CUDA_HOME}/targets/x86_64-linux/lib/stubs ${CUDA_HOME}/targets/aarch64-linux/lib/stubs"
+  fi
+  if [ "${CUDA_PATH:-}" ]; then
+    candidates="${candidates} ${CUDA_PATH}/lib64/stubs ${CUDA_PATH}/targets/x86_64-linux/lib/stubs ${CUDA_PATH}/targets/aarch64-linux/lib/stubs"
+  fi
+  candidates="${candidates} /usr/local/cuda/lib64/stubs /usr/local/cuda/targets/x86_64-linux/lib/stubs /usr/local/cuda/targets/aarch64-linux/lib/stubs"
+  for candidate in ${candidates}; do
+    if [ -f "${candidate}/libcuda.so" ]; then
+      printf '%s' "${candidate}"
+      return
+    fi
+  done
+}
+
 install_llama_cpp_native() {
   profile="$1"
   if [ "${TATER_SETUP_LLAMA_CPP_NATIVE:-1}" = "0" ]; then
@@ -330,9 +358,18 @@ install_llama_cpp_native() {
     git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
   fi
   cmake_args="$(llama_cpp_native_cmake_args "${profile}")"
+  cuda_stub_dir="$(llama_cpp_cuda_stub_dir "${profile}")"
   info "Building native llama-server${cmake_args:+ (${cmake_args})}"
-  # shellcheck disable=SC2086
-  cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} || { warn "llama.cpp configure failed."; return; }
+  if [ "${cuda_stub_dir}" ]; then
+    info "Using CUDA driver stubs for llama.cpp link: ${cuda_stub_dir}"
+    # shellcheck disable=SC2086
+    cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} \
+      "-DCMAKE_EXE_LINKER_FLAGS=-L${cuda_stub_dir} -Wl,-rpath-link,${cuda_stub_dir}" \
+      "-DCMAKE_SHARED_LINKER_FLAGS=-L${cuda_stub_dir} -Wl,-rpath-link,${cuda_stub_dir}" || { warn "llama.cpp configure failed."; return; }
+  else
+    # shellcheck disable=SC2086
+    cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} || { warn "llama.cpp configure failed."; return; }
+  fi
   cmake --build "${LLAMA_CPP_DIR}/build" --config Release --target llama-server -j "${TATER_LLAMA_CPP_BUILD_JOBS:-4}" || { warn "llama-server build failed."; return; }
   if check_llama_cpp_native "${LLAMA_CPP_SERVER_BIN}"; then
     ok "Built native llama.cpp server at ${LLAMA_CPP_SERVER_BIN}"
