@@ -76,6 +76,7 @@ from helpers import (
     DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
     DEFAULT_LLAMA_CPP_FLASH_ATTN,
     DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
+    DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
     DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_ENABLED,
     DEFAULT_LLAMA_CPP_N_BATCH,
@@ -99,6 +100,7 @@ from helpers import (
     HYDRA_LLM_PROVIDER_SPUD_LINK,
     HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
     HYDRA_LLAMA_CPP_FLASH_ATTN_KEY,
+    HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY,
     HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
     HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
     HYDRA_LLAMA_CPP_N_BATCH_KEY,
@@ -669,6 +671,16 @@ def _read_bool_setting(redis_key: str, env_keys: Tuple[str, ...], default: bool)
     if not raw:
         return bool(default)
     return _as_bool_flag(raw, default=default)
+
+
+def _read_text_setting(redis_key: str, env_keys: Tuple[str, ...], default: str = "") -> str:
+    raw = str(redis_client.get(redis_key) or "").strip()
+    if not raw:
+        for env_key in env_keys:
+            raw = str(os.getenv(env_key) or "").strip()
+            if raw:
+                break
+    return str(raw or default or "").strip()
 
 
 def _read_text_choice_setting(
@@ -3822,7 +3834,7 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
         return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
         return HYDRA_LLM_PROVIDER_MLX_LM
@@ -7826,6 +7838,7 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_enabled: Optional[bool] = None
     hydra_llama_cpp_mtp_draft_tokens: Optional[Any] = None
+    hydra_llama_cpp_mtp_draft_model: Optional[str] = None
     hydra_llama_cpp_n_batch: Optional[Any] = None
     hydra_llama_cpp_n_ubatch: Optional[Any] = None
     hydra_llama_cpp_flash_attn: Optional[bool] = None
@@ -15087,6 +15100,7 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
         "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
         "hydra_llama_cpp_mtp_draft_tokens": str(DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS),
+        "hydra_llama_cpp_mtp_draft_model": DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
         "hydra_llama_cpp_n_batch": str(DEFAULT_LLAMA_CPP_N_BATCH),
         "hydra_llama_cpp_n_ubatch": "",
         "hydra_llama_cpp_flash_attn": bool(DEFAULT_LLAMA_CPP_FLASH_ATTN),
@@ -15256,6 +15270,11 @@ def get_settings() -> Dict[str, Any]:
             DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
             minimum=1,
             maximum=16,
+        ),
+        "hydra_llama_cpp_mtp_draft_model": _read_text_setting(
+            HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY,
+            ("TATER_LLAMA_CPP_MTP_DRAFT_MODEL",),
+            DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
         ),
         "hydra_llama_cpp_n_batch": _read_bounded_int_setting(
             HYDRA_LLAMA_CPP_N_BATCH_KEY,
@@ -16618,6 +16637,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             )
         redis_client.set(redis_key, str(int(parsed)))
 
+    def _save_text_setting(payload_key: str, redis_key: str, *, max_length: int = 4096) -> None:
+        if payload_key not in updates:
+            return
+        raw = str(updates.get(payload_key) or "").strip()
+        if not raw:
+            redis_client.delete(redis_key)
+            return
+        if len(raw) > int(max_length):
+            raise HTTPException(status_code=400, detail=f"{payload_key} is too long.")
+        redis_client.set(redis_key, raw)
+
     def _save_text_choice_setting(
         payload_key: str,
         redis_key: str,
@@ -16769,6 +16799,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_context_tokens",
         "hydra_llama_cpp_mtp_enabled",
         "hydra_llama_cpp_mtp_draft_tokens",
+        "hydra_llama_cpp_mtp_draft_model",
         "hydra_llama_cpp_n_batch",
         "hydra_llama_cpp_n_ubatch",
         "hydra_llama_cpp_flash_attn",
@@ -16918,6 +16949,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         default=DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
         min_value=1,
         max_value=16,
+    )
+    _save_text_setting(
+        "hydra_llama_cpp_mtp_draft_model",
+        HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY,
+        max_length=512,
     )
     _save_bounded_int_setting(
         "hydra_llama_cpp_n_batch",

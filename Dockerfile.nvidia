@@ -6,10 +6,11 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    TATER_LLAMA_CPP_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
 
-ARG LLAMA_CPP_CUDA_WHEEL=cu124
-ARG LLAMA_CPP_PYTHON_MIN_VERSION=0.3.23
+ARG LLAMA_CPP_REF=master
+ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
 
 WORKDIR /app
 
@@ -24,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libolm-dev \
     libffi-dev \
+    cmake \
     pkg-config \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -31,14 +33,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 RUN python -m pip install --upgrade pip \
- && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt \
+ && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt \
  && python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
  && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
  && python -m pip install -r /tmp/requirements.nvidia.txt \
- && python -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/${LLAMA_CPP_CUDA_WHEEL}" --extra-index-url https://pypi.org/simple "llama-cpp-python>=${LLAMA_CPP_PYTHON_MIN_VERSION}" \
  && python -m pip uninstall -y onnxruntime \
  && python -m pip install onnxruntime-gpu \
- && python -c "from importlib import metadata; from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'llama_cpp_python', metadata.version('llama-cpp-python'), 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
+ && python -c "from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
+
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+ && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release ${LLAMA_CPP_CMAKE_ARGS} \
+ && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
+ && "$TATER_LLAMA_CPP_SERVER_BIN" --version
 
 COPY . .
 

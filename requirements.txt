@@ -48,7 +48,6 @@ speechbrain==1.1.0
 huggingface-hub
 transformers
 accelerate
-llama-cpp-python>=0.3.23
 mlx-lm; platform_system == "Darwin" and platform_machine == "arm64"
 mlx-vlm; platform_system == "Darwin" and platform_machine == "arm64"
 outlines; platform_system == "Darwin" and platform_machine == "arm64"

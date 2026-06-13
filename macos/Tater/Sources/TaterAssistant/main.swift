@@ -1165,7 +1165,7 @@ private final class UpdateManager {
     }
 }
 
-private final class TaterWindowController: NSWindowController {
+private final class TaterWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate {
     private let webView: WKWebView
     private let setupView: NSVisualEffectView
     private let setupLogoView: NSImageView
@@ -1194,6 +1194,9 @@ private final class TaterWindowController: NSWindowController {
         window.backgroundColor = .clear
 
         super.init(window: window)
+
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
 
         let contentView = NSView()
         contentView.translatesAutoresizingMaskIntoConstraints = false
@@ -1267,6 +1270,50 @@ private final class TaterWindowController: NSWindowController {
 
     func load(url: URL) {
         webView.load(URLRequest(url: url))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        if shouldOpenExternally(url) {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
+    private func shouldOpenExternally(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        if scheme != "http" && scheme != "https" {
+            return !["about", "data", "blob"].contains(scheme)
+        }
+        let host = url.host?.lowercased() ?? ""
+        let localHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
+        if localHosts.contains(host), url.port == taterPort || url.port == nil {
+            return false
+        }
+        return true
     }
 
     func setStatus(_ title: String, detail: String = "", webVisible: Bool) {

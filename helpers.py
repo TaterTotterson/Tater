@@ -10,6 +10,7 @@ import functools
 import queue
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -504,6 +505,7 @@ HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
 HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
+HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_model"
 HYDRA_LLAMA_CPP_N_BATCH_KEY = "tater:hydra:llm:llama_cpp_n_batch"
 HYDRA_LLAMA_CPP_N_UBATCH_KEY = "tater:hydra:llm:llama_cpp_n_ubatch"
 HYDRA_LLAMA_CPP_FLASH_ATTN_KEY = "tater:hydra:llm:llama_cpp_flash_attn"
@@ -528,6 +530,7 @@ DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_MTP_ENABLED = False
 DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS = 3
+DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL = ""
 DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
@@ -1136,7 +1139,7 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
         return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
+    if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
         return HYDRA_LLM_PROVIDER_MLX_LM
@@ -1470,6 +1473,13 @@ def _llama_cpp_mtp_draft_tokens() -> int:
     return max(1, min(16, int(value)))
 
 
+def _llama_cpp_mtp_draft_model() -> str:
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY)
+    if raw is None:
+        raw = str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_MODEL") or DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL).strip()
+    return str(raw or "").strip()
+
+
 def _llama_cpp_mtp_spec_type() -> str:
     token = str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or "draft-mtp").strip().lower()
     return token or "draft-mtp"
@@ -1487,35 +1497,56 @@ def _llama_cpp_mtp_load_arg_support(Llama: Any) -> Dict[str, Any]:
         ("speculative_type", "speculative_draft_n_max"),
         ("speculative_type", "draft_n_max"),
     )
+    draft_model_key = ""
+    for candidate in (
+        "draft_model",
+        "draft_model_path",
+        "model_draft",
+        "model_draft_path",
+        "speculative_model",
+        "speculative_model_path",
+        "draft",
+    ):
+        if candidate in explicit:
+            draft_model_key = candidate
+            break
     for type_key, draft_key in candidates:
         if type_key in explicit and draft_key in explicit:
-            return {"supported": True, "type_key": type_key, "draft_key": draft_key}
+            return {
+                "supported": True,
+                "type_key": type_key,
+                "draft_key": draft_key,
+                "draft_model_key": draft_model_key,
+            }
     return {
         "supported": False,
         "type_key": "spec_type",
         "draft_key": "spec_draft_n_max",
+        "draft_model_key": draft_model_key,
         "has_var_kwargs": any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()),
     }
 
 
-def _llama_cpp_mtp_load_kwargs(Llama: Any, *, enabled: bool, spec_type: str, draft_tokens: int) -> Tuple[Dict[str, Any], str]:
+def _llama_cpp_mtp_load_kwargs(
+    Llama: Any,
+    *,
+    enabled: bool,
+    spec_type: str,
+    draft_tokens: int,
+    draft_model_path: str = "",
+    draft_model_requested: bool = False,
+) -> Tuple[Dict[str, Any], str]:
+    _ = Llama, draft_model_requested
     if not enabled:
         return {}, ""
-    support = _llama_cpp_mtp_load_arg_support(Llama)
-    if support.get("supported"):
-        return {
-            str(support["type_key"]): str(spec_type or "draft-mtp"),
-            str(support["draft_key"]): int(draft_tokens),
-        }, ""
-    if _boolish(os.getenv("TATER_LLAMA_CPP_MTP_FORCE_KWARGS"), default=False):
-        return {
-            "spec_type": str(spec_type or "draft-mtp"),
-            "spec_draft_n_max": int(draft_tokens),
-        }, ""
-    return {}, (
-        "MTP is enabled in settings, but this llama-cpp-python build does not expose native "
-        "draft-mtp load arguments yet. Running llama.cpp without MTP."
-    )
+    out = {
+        "spec_type": str(spec_type or "draft-mtp"),
+        "spec_draft_n_max": int(draft_tokens),
+    }
+    draft_model_path = str(draft_model_path or "").strip()
+    if draft_model_path:
+        out["draft_model"] = draft_model_path
+    return out, ""
 
 
 def _llama_cpp_warning_text(*parts: Any) -> str:
@@ -1579,39 +1610,7 @@ def _llama_cpp_context_load_error_message(
 
 def _llama_cpp_patch_partial_model_destructor() -> None:
     global _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED
-    if _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED:
-        return
-    try:
-        import llama_cpp._internals as internals  # type: ignore
-    except Exception:
-        return
-    model_cls = getattr(internals, "LlamaModel", None)
-    if model_cls is None:
-        return
-    if bool(getattr(model_cls, "_tater_partial_model_del_patch", False)):
-        _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = True
-        return
-    original_del = getattr(model_cls, "__del__", None)
-    if not callable(original_del):
-        return
-
-    def _tater_safe_llama_model_del(self):
-        try:
-            if not hasattr(self, "sampler"):
-                return None
-            return original_del(self)
-        except AttributeError as exc:
-            if "sampler" in str(exc):
-                return None
-            raise
-
-    try:
-        setattr(model_cls, "_tater_original_del", original_del)
-        setattr(model_cls, "__del__", _tater_safe_llama_model_del)
-        setattr(model_cls, "_tater_partial_model_del_patch", True)
-        _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = True
-    except Exception:
-        return
+    _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = True
 
 
 def _safe_path_size_bytes(path: Any, *, file_limit: int = 20000) -> int:
@@ -2648,21 +2647,8 @@ def unload_local_llm_models(
 
 
 def _llama_cpp_system_info(llama_cpp_module: Any = None) -> str:
-    try:
-        module = llama_cpp_module
-        if module is None:
-            import llama_cpp as imported_llama_cpp  # type: ignore
-
-            module = imported_llama_cpp
-        info_fn = getattr(module, "llama_print_system_info", None)
-        if not callable(info_fn):
-            return ""
-        info = info_fn()
-        if isinstance(info, bytes):
-            return info.decode("utf-8", "replace").strip()
-        return str(info or "").strip()
-    except Exception:
-        return ""
+    _ = llama_cpp_module
+    return ""
 
 
 def _llama_cpp_gpu_backend(system_info: str) -> str:
@@ -2691,8 +2677,12 @@ def _llama_cpp_gpu_backend(system_info: str) -> str:
 
 
 def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
+    server_bin = _llama_cpp_native_server_bin()
     diagnostics: Dict[str, Any] = {
-        "available": False,
+        "available": bool(server_bin),
+        "runtime": "tater-llama-native",
+        "server_bin": server_bin,
+        "server_candidates": _llama_cpp_native_server_candidates(),
         "n_gpu_layers": _llama_cpp_n_gpu_layers(),
         "n_ctx": _llama_cpp_n_ctx(),
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
@@ -2703,6 +2693,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "mtp_enabled": _llama_cpp_mtp_enabled(),
         "mtp_spec_type": _llama_cpp_mtp_spec_type(),
         "mtp_draft_tokens": _llama_cpp_mtp_draft_tokens(),
+        "mtp_draft_model": _llama_cpp_mtp_draft_model(),
         "env": {
             "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
             "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
@@ -2714,52 +2705,51 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_MTP_ENABLED": str(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED") or ""),
             "TATER_LLAMA_CPP_MTP_DRAFT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS") or ""),
             "TATER_LLAMA_CPP_MTP_SPEC_TYPE": str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or ""),
+            "TATER_LLAMA_CPP_MTP_DRAFT_MODEL": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_MODEL") or ""),
+            "TATER_LLAMA_CPP_SERVER_BIN": str(os.getenv("TATER_LLAMA_CPP_SERVER_BIN") or ""),
+            "TATER_LLAMA_CPP_NATIVE_BIN": str(os.getenv("TATER_LLAMA_CPP_NATIVE_BIN") or ""),
             "CUDA_VISIBLE_DEVICES": str(os.getenv("CUDA_VISIBLE_DEVICES") or ""),
             "NVIDIA_VISIBLE_DEVICES": str(os.getenv("NVIDIA_VISIBLE_DEVICES") or ""),
         },
         "ld_library_path": str(os.getenv("LD_LIBRARY_PATH") or ""),
     }
+    if not server_bin:
+        diagnostics["error"] = "llama-server was not found."
+        diagnostics["warning"] = (
+            "llama.cpp GGUF requires the native llama.cpp engine. Run setup_tater.sh again or set "
+            "TATER_LLAMA_CPP_SERVER_BIN to a llama-server binary."
+        )
+        return diagnostics
     try:
         try:
-            from importlib import metadata
-
-            diagnostics["installed_version"] = metadata.version("llama-cpp-python")
-        except Exception:
-            pass
-        import llama_cpp as llama_cpp_module  # type: ignore
-        from llama_cpp import Llama  # type: ignore
-
-        system_info = _llama_cpp_system_info(llama_cpp_module)
-        gpu_backend = _llama_cpp_gpu_backend(system_info)
-        mtp_support = _llama_cpp_mtp_load_arg_support(Llama)
-        mtp_warning = ""
-        if diagnostics["mtp_enabled"] and not mtp_support.get("supported"):
-            mtp_warning = (
-                "MTP is enabled, but the installed llama-cpp-python high-level API does not expose "
-                "native draft-mtp load arguments yet."
+            version = subprocess.run(
+                [server_bin, "--version"],
+                text=True,
+                capture_output=True,
+                timeout=10.0,
             )
+            system_info = " ".join("\n".join([version.stdout or "", version.stderr or ""]).split())
+        except Exception as exc:
+            system_info = str(exc) or type(exc).__name__
+        gpu_backend = _llama_cpp_gpu_backend(system_info)
         diagnostics.update(
             {
                 "available": True,
-                "module_path": str(getattr(llama_cpp_module, "__file__", "") or ""),
-                "version": str(getattr(llama_cpp_module, "__version__", "") or ""),
+                "module_path": server_bin,
+                "version": system_info,
                 "system_info": system_info,
                 "gpu_backend": gpu_backend,
-                "gpu_enabled": bool(gpu_backend),
-                "mtp_supported": bool(mtp_support.get("supported")),
+                "gpu_enabled": bool(gpu_backend) or diagnostics["n_gpu_layers"] != 0,
+                "mtp_supported": True,
                 "mtp_load_args": {
-                    "type_key": str(mtp_support.get("type_key") or ""),
-                    "draft_key": str(mtp_support.get("draft_key") or ""),
+                    "type_key": "--spec-type",
+                    "draft_key": "--spec-draft-n-max",
+                    "draft_model_key": "--model-draft",
                 },
             }
         )
         if diagnostics["n_gpu_layers"] == 0:
             diagnostics["warning"] = "TATER_LLAMA_CPP_N_GPU_LAYERS is set to CPU-only."
-        elif not gpu_backend:
-            diagnostics["warning"] = "llama-cpp-python is installed, but it does not report a GPU backend."
-        if mtp_warning:
-            diagnostics["mtp_warning"] = mtp_warning
-            diagnostics["warning"] = _llama_cpp_warning_text(diagnostics.get("warning"), mtp_warning)
     except Exception as exc:
         diagnostics["error"] = str(exc) or type(exc).__name__
         if "libcuda.so.1" in str(exc):
@@ -5209,63 +5199,8 @@ def _download_llama_cpp_mmproj(
 
 
 def _llama_cpp_make_vision_chat_handler(model_id: str, mmproj_path: str) -> Tuple[Any, str, str]:
-    path = str(mmproj_path or "").strip()
-    if not path:
-        return None, "", ""
-    try:
-        import llama_cpp.llama_chat_format as chat_format_module  # type: ignore
-    except Exception as exc:
-        return None, "", f"llama-cpp-python vision chat handlers are unavailable: {exc}"
-
-    lowered = str(model_id or "").lower()
-    preferred: List[str] = []
-    if "qwen" in lowered and ("2.5" in lowered or "25" in lowered or "vl" in lowered):
-        preferred.extend(["Qwen25VLChatHandler", "Qwen2VLChatHandler"])
-    if "minicpm" in lowered:
-        preferred.append("MiniCPMv26ChatHandler")
-    if "moondream" in lowered:
-        preferred.append("MoondreamChatHandler")
-    if "nanollava" in lowered:
-        preferred.append("NanollavaChatHandler")
-    if "llava" in lowered and ("1.6" in lowered or "34b" in lowered):
-        preferred.append("Llava16ChatHandler")
-    if "llava" in lowered:
-        preferred.append("Llava15ChatHandler")
-    if "llama-3" in lowered and "vision" in lowered:
-        preferred.append("Llama3VisionAlphaChatHandler")
-    if "gemma" in lowered:
-        preferred.extend(["Gemma3ChatHandler", "GemmaVisionChatHandler", "Llava15ChatHandler"])
-
-    fallback = [
-        "Qwen25VLChatHandler",
-        "MiniCPMv26ChatHandler",
-        "Llava16ChatHandler",
-        "Llava15ChatHandler",
-        "MoondreamChatHandler",
-        "NanollavaChatHandler",
-        "Llama3VisionAlphaChatHandler",
-    ]
-    names: List[str] = []
-    for name in preferred + fallback:
-        if name not in names:
-            names.append(name)
-
-    errors: List[str] = []
-    for name in names:
-        cls = getattr(chat_format_module, name, None)
-        if cls is None:
-            continue
-        for args, kwargs in (
-            ((), {"clip_model_path": path}),
-            ((), {"mmproj_path": path}),
-            ((path,), {}),
-        ):
-            try:
-                return cls(*args, **kwargs), name, ""
-            except Exception as exc:
-                errors.append(f"{name}: {exc}")
-                continue
-    return None, "", "; ".join(errors[-3:]) or "No compatible llama-cpp-python vision chat handler was found."
+    _ = model_id, mmproj_path
+    return None, "", "llama.cpp vision is handled by Tater's native llama-server engine."
 
 
 def _download_llama_cpp_model(
@@ -5732,50 +5667,303 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_mtp_enabled(),
         _llama_cpp_mtp_draft_tokens(),
         _llama_cpp_mtp_spec_type(),
+        _llama_cpp_mtp_draft_model(),
         "" if vision else _llama_cpp_chat_template_cache_token(model_id),
         bool(vision),
     )
 
 
+def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
+    return (
+        str(model_id or "").strip(),
+        str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip(),
+        _llama_cpp_n_ctx(vision=False),
+        _llama_cpp_n_ctx(vision=True),
+        _llama_cpp_n_gpu_layers(),
+        _llama_cpp_n_batch(vision=False),
+        _llama_cpp_n_batch(vision=True),
+        _llama_cpp_n_ubatch(vision=False),
+        _llama_cpp_n_ubatch(vision=True),
+        _llama_cpp_flash_attn_enabled(),
+        _llama_cpp_offload_kqv_enabled(),
+        _llama_cpp_mtp_enabled(),
+        _llama_cpp_mtp_draft_tokens(),
+        _llama_cpp_mtp_spec_type(),
+        _llama_cpp_mtp_draft_model(),
+        _llama_cpp_chat_template_cache_token(model_id),
+    )
+
+
 def _llama_cpp_install_chat_template_override(model: Any, template: str) -> Tuple[str, str]:
-    if not str(template or "").strip():
-        return "", ""
-    try:
-        import llama_cpp.llama_chat_format as chat_format_module  # type: ignore
-    except Exception as exc:
-        return "", f"llama-cpp-python chat template override support is unavailable: {exc}"
-    try:
-        eos_token_id = model.token_eos() if callable(getattr(model, "token_eos", None)) else -1
-        bos_token_id = model.token_bos() if callable(getattr(model, "token_bos", None)) else -1
-        internals_model = getattr(model, "_model", None)
-        eos_token = internals_model.token_get_text(eos_token_id) if internals_model is not None and eos_token_id != -1 else ""
-        bos_token = internals_model.token_get_text(bos_token_id) if internals_model is not None and bos_token_id != -1 else ""
-        if isinstance(eos_token, bytes):
-            eos_token = eos_token.decode("utf-8", errors="replace")
-        if isinstance(bos_token, bytes):
-            bos_token = bos_token.decode("utf-8", errors="replace")
-        handler = chat_format_module.Jinja2ChatFormatter(
-            template=template,
-            eos_token=eos_token,
-            bos_token=bos_token,
-            stop_token_ids=[eos_token_id] if eos_token_id != -1 else [],
-        ).to_chat_handler()
-        handler_name = "tater.chat_template_override"
-        chat_handlers = getattr(model, "_chat_handlers", None)
-        if isinstance(chat_handlers, dict):
-            chat_handlers[handler_name] = handler
-            model.chat_handler = None
-            model.chat_format = handler_name
-        else:
-            model.chat_handler = handler
-        return handler_name, ""
-    except Exception as exc:
-        return "", f"Could not install llama.cpp chat template override: {exc}"
+    _ = model, template
+    return "", "llama.cpp chat templates are installed through the native llama-server engine."
 
 
 _LLAMA_CPP_ENGINE_WORKER_ARG = "--tater-llama-cpp-engine-worker"
 _LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
 _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
+_LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
+
+
+def _llama_cpp_native_server_candidates() -> List[str]:
+    env_candidates = (
+        os.getenv("TATER_LLAMA_CPP_SERVER_BIN"),
+        os.getenv("TATER_LLAMA_CPP_NATIVE_BIN"),
+        os.getenv("LLAMA_CPP_SERVER_BIN"),
+    )
+    candidates: List[str] = [str(item or "").strip() for item in env_candidates if str(item or "").strip()]
+    runtime_root = runtime_dir()
+    candidates.extend(
+        str(path)
+        for path in (
+            runtime_root / "llama.cpp" / "build" / "bin" / "llama-server",
+            runtime_root / "llama.cpp" / "build" / "bin" / "Release" / "llama-server",
+            runtime_root / "llama.cpp" / "build" / "bin" / "llama-server.exe",
+            runtime_root / "llama.cpp" / "bin" / "llama-server",
+            runtime_root / "llama.cpp" / "llama-server",
+            Path("/opt/llama.cpp/build/bin/llama-server"),
+            Path("/usr/local/bin/llama-server"),
+            Path("/opt/homebrew/bin/llama-server"),
+        )
+    )
+    found = shutil.which("llama-server")
+    if found:
+        candidates.append(found)
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _llama_cpp_native_server_bin() -> str:
+    for candidate in _llama_cpp_native_server_candidates():
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(str(path), os.X_OK):
+            return str(path)
+    return ""
+
+
+def _llama_cpp_native_required_server_bin() -> str:
+    binary = _llama_cpp_native_server_bin()
+    if binary:
+        return binary
+    searched = ", ".join(_llama_cpp_native_server_candidates()[:8])
+    raise RuntimeError(
+        "llama.cpp GGUF now uses Tater's native llama.cpp engine, but llama-server was not found. "
+        "Run setup_tater.sh again or set TATER_LLAMA_CPP_SERVER_BIN to a llama-server binary built from llama.cpp. "
+        f"Searched: {searched}"
+    )
+
+
+def _llama_cpp_native_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
+
+
+def _llama_cpp_native_url(base_url: str, endpoint: str) -> str:
+    return f"{str(base_url or '').rstrip('/')}/{str(endpoint or '').lstrip('/')}"
+
+
+def _llama_cpp_native_json_get(base_url: str, endpoint: str, *, timeout: float = 10.0) -> Dict[str, Any]:
+    response = requests.get(_llama_cpp_native_url(base_url, endpoint), timeout=timeout)
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        detail = _tail_text(str(getattr(response, "text", "") or ""), 1200)
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"llama-server GET {endpoint} failed with HTTP {response.status_code}{suffix}") from exc
+    data = response.json()
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _llama_cpp_native_json_post(
+    base_url: str,
+    endpoint: str,
+    payload: Dict[str, Any],
+    *,
+    timeout: float = 600.0,
+) -> Dict[str, Any]:
+    response = requests.post(_llama_cpp_native_url(base_url, endpoint), json=payload, timeout=timeout)
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        detail = _tail_text(str(getattr(response, "text", "") or ""), 1800)
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"llama-server POST {endpoint} failed with HTTP {response.status_code}{suffix}") from exc
+    data = response.json()
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _llama_cpp_native_media_marker() -> str:
+    marker = str(
+        os.getenv("TATER_LLAMA_CPP_MEDIA_MARKER")
+        or os.getenv("LLAMA_MEDIA_MARKER")
+        or _LLAMA_CPP_NATIVE_MEDIA_MARKER
+    ).strip()
+    return marker or _LLAMA_CPP_NATIVE_MEDIA_MARKER
+
+
+def _llama_cpp_native_media_b64_from_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith("data:"):
+        try:
+            _header, encoded = url.split(",", 1)
+            return str(encoded or "").strip()
+        except Exception:
+            return ""
+    if re.fullmatch(r"[A-Za-z0-9+/=\s]+", url) and len(url) > 64:
+        return re.sub(r"\s+", "", url)
+    if url.startswith(("http://", "https://")):
+        try:
+            response = requests.get(url, timeout=20.0)
+            response.raise_for_status()
+            return base64.b64encode(response.content or b"").decode("ascii")
+        except Exception:
+            return ""
+    return ""
+
+
+def _llama_cpp_native_message_text_and_media(content: Any) -> Tuple[str, List[str]]:
+    media_marker = _llama_cpp_native_media_marker()
+    media: List[str] = []
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                text = _coerce_content_to_text(item).strip()
+                if text:
+                    parts.append(text)
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+                continue
+            if item_type in {"image_url", "input_image", "image"}:
+                image_url = item.get("image_url")
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                if not image_url:
+                    image_url = item.get("url") or item.get("base64") or item.get("data")
+                encoded = _llama_cpp_native_media_b64_from_url(image_url)
+                if encoded:
+                    media.append(encoded)
+                    parts.append(media_marker)
+                continue
+            text = _coerce_content_to_text(item).strip()
+            if text:
+                parts.append(text)
+        return "\n".join(part for part in parts if part).strip(), media
+    return _coerce_content_to_text(content).strip(), media
+
+
+def _llama_cpp_native_prepare_messages(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], List[str]]:
+    out: List[Dict[str, str]] = []
+    media: List[str] = []
+    for item in messages if isinstance(messages, list) else []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip() or "user"
+        content, item_media = _llama_cpp_native_message_text_and_media(item.get("content"))
+        media.extend(item_media)
+        out.append({"role": role, "content": content})
+    return out, media
+
+
+def _llama_cpp_native_chat_template_kwargs(chat_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    if _llama_cpp_disable_thinking_enabled():
+        merged.update({"enable_thinking": False, "reasoning_budget": 0})
+    supplied = (chat_kwargs or {}).get("chat_template_kwargs")
+    if isinstance(supplied, dict):
+        merged.update(supplied)
+    return merged
+
+
+def _llama_cpp_native_completion_payload(prompt: Any, chat_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "stream": False,
+        "cache_prompt": True,
+        "return_tokens": False,
+        "return_progress": False,
+    }
+    key_map = {
+        "max_tokens": "n_predict",
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "min_p": "min_p",
+        "typical_p": "typical_p",
+        "repeat_penalty": "repeat_penalty",
+        "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty",
+        "stop": "stop",
+        "seed": "seed",
+    }
+    for source, target in key_map.items():
+        if source in (chat_kwargs or {}) and chat_kwargs.get(source) is not None:
+            payload[target] = chat_kwargs.get(source)
+    if "n_predict" not in payload:
+        payload["n_predict"] = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+    try:
+        payload["n_predict"] = max(1, int(payload.get("n_predict") or 1024))
+    except Exception:
+        payload["n_predict"] = 1024
+    return payload
+
+
+def _llama_cpp_native_completion_result(
+    *,
+    model_token: str,
+    response: Dict[str, Any],
+    generation_elapsed: float,
+) -> Dict[str, Any]:
+    content = _strip_local_thinking_blocks(response.get("content")).strip()
+    timings = response.get("timings") if isinstance(response.get("timings"), dict) else {}
+    prompt_tokens = int(response.get("tokens_evaluated") or timings.get("prompt_n") or 0)
+    completion_tokens = int(timings.get("predicted_n") or 0)
+    if completion_tokens <= 0:
+        tokens = response.get("tokens")
+        if isinstance(tokens, list):
+            completion_tokens = len(tokens)
+    total_tokens = max(0, prompt_tokens) + max(0, completion_tokens)
+    prompt_elapsed = _seconds_from_timing_ms(timings, "prompt_ms", "prompt_time_ms")
+    completion_elapsed = _seconds_from_timing_ms(timings, "predicted_ms", "completion_ms")
+    if completion_elapsed <= 0:
+        completion_elapsed = _perf_nonnegative_float(generation_elapsed)
+    timing = {
+        "prompt_elapsed": prompt_elapsed,
+        "completion_elapsed": completion_elapsed,
+        "total_elapsed": _perf_nonnegative_float(generation_elapsed),
+        "prompt_tokens_per_second": _perf_nonnegative_float(timings.get("prompt_per_second")),
+        "completion_tokens_per_second": _perf_nonnegative_float(timings.get("predicted_per_second")),
+        "speed_basis": "llama_server_native",
+    }
+    return {
+        "model": str(model_token or "").strip(),
+        "message": {"role": "assistant", "content": content},
+        "_usage": {
+            "prompt_tokens": max(0, prompt_tokens),
+            "completion_tokens": max(0, completion_tokens),
+            "total_tokens": max(0, total_tokens),
+        },
+        "_timing": timing,
+    }
 
 
 def _llama_cpp_create_chat_completion_with_fallback(
@@ -5783,42 +5971,8 @@ def _llama_cpp_create_chat_completion_with_fallback(
     messages: List[Dict[str, Any]],
     chat_kwargs: Dict[str, Any],
 ) -> Dict[str, Any]:
-    attempt_kwargs = dict(chat_kwargs)
-    last_exc: Optional[TypeError] = None
-    for _attempt in range(6):
-        try:
-            return model.create_chat_completion(messages=messages, **attempt_kwargs)
-        except TypeError as exc:
-            last_exc = exc
-            retry_kwargs = dict(attempt_kwargs)
-            template_kwargs = retry_kwargs.get("chat_template_kwargs")
-            template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else None
-            changed = False
-
-            if "reasoning_budget" in retry_kwargs:
-                retry_kwargs.pop("reasoning_budget", None)
-                changed = True
-            elif template_kwargs is not None and "reasoning_budget" in template_kwargs:
-                template_kwargs.pop("reasoning_budget", None)
-                retry_kwargs["chat_template_kwargs"] = template_kwargs
-                changed = True
-            elif template_kwargs is not None and "enable_thinking" in template_kwargs:
-                template_kwargs.pop("enable_thinking", None)
-                if template_kwargs:
-                    retry_kwargs["chat_template_kwargs"] = template_kwargs
-                else:
-                    retry_kwargs.pop("chat_template_kwargs", None)
-                changed = True
-            elif "chat_template_kwargs" in retry_kwargs:
-                retry_kwargs.pop("chat_template_kwargs", None)
-                changed = True
-
-            if not changed or retry_kwargs == attempt_kwargs:
-                raise
-            attempt_kwargs = retry_kwargs
-    if last_exc is not None:
-        raise last_exc
-    return model.create_chat_completion(messages=messages, **attempt_kwargs)
+    _ = model, messages, chat_kwargs
+    raise RuntimeError("The direct llama.cpp wrapper path has been removed; use Tater's native llama.cpp engine.")
 
 
 def _llama_cpp_result_from_response(
@@ -5881,6 +6035,8 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "mtp_enabled",
         "mtp_spec_type",
         "mtp_draft_tokens",
+        "mtp_draft_model",
+        "mtp_draft_model_path",
         "mtp_warning",
         "chat_template_override",
         "chat_template_override_hash",
@@ -5892,6 +6048,9 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "vision_chat_handler",
         "vision_warning",
         "llama_cpp_system_info",
+        "runtime",
+        "server_bin",
+        "server_url",
     )
     out: Dict[str, Any] = {}
     for key in keys:
@@ -5901,6 +6060,319 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _llama_cpp_native_drain_stream(stream: Any, tail: List[str], prefix: str) -> None:
+    if stream is None:
+        return
+    for line in stream:
+        text = str(line or "").rstrip()
+        if not text:
+            continue
+        tail.append(text)
+        if len(tail) > 100:
+            del tail[: len(tail) - 100]
+        lowered = text.lower()
+        if any(token in lowered for token in ("error", "failed", "fatal", "assert", "traceback")):
+            logger.warning("[%s] %s", prefix, _tail_text(text, 1600))
+        else:
+            logger.debug("[%s] %s", prefix, text)
+
+
+def _llama_cpp_native_shutdown_state(state: Dict[str, Any]) -> None:
+    proc = state.get("process")
+    if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    temp_dir = state.get("temp_dir")
+    if temp_dir:
+        try:
+            shutil.rmtree(str(temp_dir), ignore_errors=True)
+        except Exception:
+            pass
+    state.clear()
+
+
+def _llama_cpp_native_wait_until_ready(state: Dict[str, Any], *, timeout: float) -> None:
+    base_url = str(state.get("base_url") or "").strip()
+    proc = state.get("process")
+    deadline = time.monotonic() + max(5.0, float(timeout or 900.0))
+    last_error = ""
+    while time.monotonic() < deadline:
+        if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is not None:
+            logs = _tail_text("\n".join(state.get("stderr_tail") or []), 2500)
+            raise RuntimeError(f"llama-server exited while loading (exit {proc.poll()}).{f' Logs: {logs}' if logs else ''}")
+        try:
+            payload = _llama_cpp_native_json_get(base_url, "/health", timeout=2.0)
+            if str(payload.get("status") or "").lower() == "ok":
+                return
+        except Exception as exc:
+            last_error = str(exc) or type(exc).__name__
+        time.sleep(0.25)
+    logs = _tail_text("\n".join(state.get("stderr_tail") or []), 2500)
+    detail = logs or last_error
+    raise TimeoutError(f"llama-server did not become ready within {int(timeout)} seconds.{f' Logs: {detail}' if detail else ''}")
+
+
+def _llama_cpp_native_server_command(
+    *,
+    server_bin: str,
+    model_path: str,
+    mmproj_path: str,
+    temp_dir: str,
+) -> Tuple[List[str], Dict[str, Any]]:
+    n_ctx = max(_llama_cpp_n_ctx(vision=False), _llama_cpp_n_ctx(vision=True) if mmproj_path else 0)
+    n_batch = _llama_cpp_n_batch(vision=bool(mmproj_path))
+    n_ubatch = _llama_cpp_n_ubatch(vision=bool(mmproj_path))
+    n_gpu_layers = _llama_cpp_n_gpu_layers()
+    mtp_requested = _llama_cpp_mtp_enabled()
+    mtp_draft_model = _llama_cpp_mtp_draft_model()
+    mtp_draft_model_path = ""
+    if mtp_requested and mtp_draft_model:
+        mtp_draft_model_path = _download_llama_cpp_model(mtp_draft_model)
+
+    cmd = [
+        server_bin,
+        "--model",
+        model_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(_llama_cpp_native_free_port()),
+        "--ctx-size",
+        str(int(n_ctx)),
+        "--batch-size",
+        str(int(n_batch)),
+        "--n-gpu-layers",
+        "auto" if int(n_gpu_layers) < 0 else str(int(n_gpu_layers)),
+        "--alias",
+        "tater-llama",
+        "--no-ui",
+        "--jinja",
+        "--reasoning",
+        "off",
+        "--reasoning-budget",
+        "0",
+        "--reasoning-format",
+        "none",
+        "--chat-template-kwargs",
+        json.dumps(_llama_cpp_native_chat_template_kwargs({}), separators=(",", ":")),
+    ]
+    if n_ubatch > 0:
+        cmd.extend(["--ubatch-size", str(int(n_ubatch))])
+    if _llama_cpp_flash_attn_enabled():
+        cmd.extend(["--flash-attn", "on"])
+    if not _llama_cpp_offload_kqv_enabled():
+        cmd.append("--no-kv-offload")
+    if _boolish(os.getenv("TATER_LLAMA_CPP_USE_MLOCK"), default=False):
+        cmd.append("--mlock")
+    if mmproj_path:
+        cmd.extend(["--mmproj", mmproj_path])
+    chat_template = _llama_cpp_chat_template_override_text(model_path) or _llama_cpp_chat_template_override_text(os.getenv("TATER_LLAMA_CPP_ACTIVE_MODEL") or "")
+    if chat_template:
+        template_file = Path(temp_dir) / "chat-template.jinja"
+        template_file.write_text(chat_template, encoding="utf-8")
+        cmd.extend(["--chat-template-file", str(template_file)])
+    chat_format = str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip()
+    if chat_format and not chat_template:
+        cmd.extend(["--chat-template", chat_format])
+    if mtp_requested:
+        cmd.extend(
+            [
+                "--spec-type",
+                _llama_cpp_mtp_spec_type(),
+                "--spec-draft-n-max",
+                str(int(_llama_cpp_mtp_draft_tokens())),
+            ]
+        )
+        if mtp_draft_model_path:
+            cmd.extend(["--model-draft", mtp_draft_model_path])
+    metadata = {
+        "n_ctx": int(n_ctx),
+        "n_gpu_layers": int(n_gpu_layers),
+        "n_batch": int(n_batch),
+        "n_ubatch": int(n_ubatch),
+        "flash_attn": bool(_llama_cpp_flash_attn_enabled()),
+        "offload_kqv": bool(_llama_cpp_offload_kqv_enabled()),
+        "mtp_requested": bool(mtp_requested),
+        "mtp_enabled": bool(mtp_requested),
+        "mtp_spec_type": _llama_cpp_mtp_spec_type() if mtp_requested else "",
+        "mtp_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
+        "mtp_draft_model": mtp_draft_model,
+        "mtp_draft_model_path": mtp_draft_model_path,
+        "chat_template_override": bool(chat_template),
+        "chat_template_handler": "llama-server --chat-template-file" if chat_template else "",
+        "chat_template_warning": "",
+    }
+    return cmd, metadata
+
+
+def _llama_cpp_native_worker_load(
+    state: Dict[str, Any],
+    model_token: str,
+    *,
+    vision: bool,
+    timeout: float,
+) -> Dict[str, Any]:
+    _ = vision
+    if str(state.get("model_token") or "") == model_token and state.get("process") is not None:
+        proc = state.get("process")
+        if callable(getattr(proc, "poll", None)) and proc.poll() is None:
+            return dict(state.get("metadata") or {})
+    _llama_cpp_native_shutdown_state(state)
+
+    server_bin = _llama_cpp_native_required_server_bin()
+    model_path = _download_llama_cpp_model(model_token)
+    mmproj_path = ""
+    try:
+        mmproj_path = _download_llama_cpp_mmproj(model_token, model_path=model_path)
+    except Exception as exc:
+        logger.debug("[llama-cpp-native] no mmproj loaded for %s: %s", model_token, exc)
+        mmproj_path = ""
+
+    temp_dir = tempfile.mkdtemp(prefix="tater-llama-native-")
+    previous_active = os.environ.get("TATER_LLAMA_CPP_ACTIVE_MODEL")
+    os.environ["TATER_LLAMA_CPP_ACTIVE_MODEL"] = model_token
+    try:
+        cmd, load_metadata = _llama_cpp_native_server_command(
+            server_bin=server_bin,
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            temp_dir=temp_dir,
+        )
+    finally:
+        if previous_active is None:
+            os.environ.pop("TATER_LLAMA_CPP_ACTIVE_MODEL", None)
+        else:
+            os.environ["TATER_LLAMA_CPP_ACTIVE_MODEL"] = previous_active
+
+    port_index = cmd.index("--port") + 1 if "--port" in cmd else -1
+    port = int(cmd[port_index]) if port_index > 0 else 0
+    base_url = f"http://127.0.0.1:{port}"
+    stdout_tail: List[str] = []
+    stderr_tail: List[str] = []
+    logger.info("[llama-cpp-native] starting llama-server model=%s mmproj=%s mtp=%s", model_token, bool(mmproj_path), load_metadata.get("mtp_enabled"))
+    server_env = dict(os.environ)
+    server_env["LLAMA_MEDIA_MARKER"] = _llama_cpp_native_media_marker()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=server_env,
+    )
+    threading.Thread(
+        target=_llama_cpp_native_drain_stream,
+        args=(proc.stdout, stdout_tail, "llama-server"),
+        daemon=True,
+        name="tater-llama-server-stdout",
+    ).start()
+    threading.Thread(
+        target=_llama_cpp_native_drain_stream,
+        args=(proc.stderr, stderr_tail, "llama-server"),
+        daemon=True,
+        name="tater-llama-server-stderr",
+    ).start()
+
+    state.update(
+        {
+            "process": proc,
+            "base_url": base_url,
+            "model_token": model_token,
+            "temp_dir": temp_dir,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+        }
+    )
+    try:
+        _llama_cpp_native_wait_until_ready(state, timeout=timeout)
+        props: Dict[str, Any] = {}
+        try:
+            props = _llama_cpp_native_json_get(base_url, "/props", timeout=5.0)
+        except Exception:
+            props = {}
+        models_payload: Dict[str, Any] = {}
+        try:
+            models_payload = _llama_cpp_native_json_get(base_url, "/models", timeout=5.0)
+        except Exception:
+            models_payload = {}
+        capabilities = json.dumps(models_payload, default=str).lower()
+        supports_vision = bool(mmproj_path) or "multimodal" in capabilities
+        metadata = {
+            "model_path": model_path,
+            "mmproj_path": mmproj_path,
+            "model_root": _llama_cpp_model_root(),
+            "device": "gpu" if int(load_metadata.get("n_gpu_layers") or 0) != 0 else "cpu",
+            "gpu_backend": "native",
+            "gpu_warning": "",
+            "memory_estimate_bytes": _safe_path_size_bytes(model_path) + _safe_path_size_bytes(mmproj_path),
+            "loaded_ts": time.time(),
+            "runtime": "tater-llama-native",
+            "server_bin": server_bin,
+            "server_url": base_url,
+            "supports_vision": supports_vision,
+            "vision_requested": bool(vision),
+            "vision_projector_path": mmproj_path,
+            "vision_chat_handler": "llama-server mtmd" if supports_vision else "",
+            "vision_warning": "" if supports_vision or not vision else "No matching mmproj vision projector was found for this GGUF.",
+            "llama_cpp_system_info": str(props.get("system_info") or ""),
+            **load_metadata,
+        }
+        state["metadata"] = metadata
+        return metadata
+    except Exception:
+        _llama_cpp_native_shutdown_state(state)
+        raise
+
+
+def _llama_cpp_native_worker_chat(
+    state: Dict[str, Any],
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    chat_kwargs: Dict[str, Any],
+    *,
+    vision: bool,
+    timeout: float,
+) -> Dict[str, Any]:
+    metadata = _llama_cpp_native_worker_load(state, model_token, vision=vision, timeout=max(60.0, timeout or 900.0))
+    if vision and not bool(metadata.get("supports_vision")):
+        raise RuntimeError(str(metadata.get("vision_warning") or "This llama.cpp model was not loaded with a vision projector."))
+    base_url = str(state.get("base_url") or "").strip()
+    prepared_messages, media = _llama_cpp_native_prepare_messages(messages)
+    template_payload = {
+        "messages": prepared_messages,
+    }
+    template_kwargs = _llama_cpp_native_chat_template_kwargs(chat_kwargs)
+    if template_kwargs:
+        template_payload["chat_template_kwargs"] = template_kwargs
+    template_response = _llama_cpp_native_json_post(base_url, "/apply-template", template_payload, timeout=min(60.0, max(5.0, timeout or 60.0)))
+    prompt = str(template_response.get("prompt") or "").strip()
+    if not prompt:
+        prompt = "\n".join(f"{row.get('role', 'user')}: {row.get('content', '')}" for row in prepared_messages).strip()
+        prompt = f"{prompt}\nassistant:"
+    completion_prompt: Any = prompt
+    if media:
+        completion_prompt = {
+            "prompt_string": prompt,
+            "multimodal_data": media,
+        }
+    completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs)
+    generation_started = time.perf_counter()
+    completion_response = _llama_cpp_native_json_post(base_url, "/completion", completion_payload, timeout=max(30.0, timeout or 600.0))
+    generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+    return _llama_cpp_native_completion_result(
+        model_token=model_token,
+        response=completion_response,
+        generation_elapsed=generation_elapsed,
+    )
+
+
 def _llama_cpp_direct_chat_completion(
     model_token: str,
     messages: List[Dict[str, Any]],
@@ -5908,24 +6380,12 @@ def _llama_cpp_direct_chat_completion(
     *,
     vision: bool = False,
 ) -> Dict[str, Any]:
-    bundle = _load_llama_cpp_bundle(model_token, vision=vision)
-    if vision and not bool(bundle.get("supports_vision")):
-        detail = str(bundle.get("vision_warning") or "").strip()
-        if not detail and not str(bundle.get("mmproj_path") or "").strip():
-            detail = "No matching mmproj vision projector was found for this GGUF."
-        raise RuntimeError(detail or f"{model_token} is not loaded as a llama.cpp vision model.")
-    model = bundle["model"]
-    generation_lock = bundle["lock"]
     local_messages = _llama_cpp_disable_thinking_messages(messages)
-    with generation_lock:
-        generation_started = time.perf_counter()
-        response = _llama_cpp_create_chat_completion_with_fallback(model, local_messages, dict(chat_kwargs))
-    generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-    return _llama_cpp_result_from_response(
-        model_token=model_token,
-        model_obj=model,
-        response=response,
-        generation_elapsed=generation_elapsed,
+    return _llama_cpp_engine_chat_completion(
+        model_token,
+        local_messages,
+        dict(chat_kwargs),
+        vision=bool(vision),
     )
 
 
@@ -6100,15 +6560,22 @@ def _load_llama_cpp_engine_bundle(
     model_id: str,
     *,
     progress_callback: Optional[HFProgressCallback] = None,
+    vision: bool = False,
 ) -> Dict[str, Any]:
     model_token = str(model_id or "").strip()
     if not model_token:
         raise RuntimeError("llama.cpp GGUF model id or path is required.")
-    cache_key = _llama_cpp_cache_key(model_token, vision=False)
+    cache_key = _llama_cpp_engine_cache_key(model_token)
     with _LLAMA_CPP_ENGINE_CACHE_LOCK:
         cached = _LLAMA_CPP_ENGINE_CACHE.get(cache_key)
         cached_engine = cached.get("engine") if isinstance(cached, dict) else None
-        if isinstance(cached, dict) and callable(getattr(cached_engine, "alive", None)) and cached_engine.alive():
+        cached_supports_requested_vision = not vision or bool(cached.get("supports_vision")) if isinstance(cached, dict) else False
+        if (
+            isinstance(cached, dict)
+            and callable(getattr(cached_engine, "alive", None))
+            and cached_engine.alive()
+            and cached_supports_requested_vision
+        ):
             _emit_hf_llm_progress(
                 progress_callback,
                 {
@@ -6139,7 +6606,11 @@ def _load_llama_cpp_engine_bundle(
             {
                 "event": "start",
                 "stage": "load",
-                "description": "Starting Tater llama.cpp engine",
+                "description": (
+                    "Starting Tater llama.cpp vision engine"
+                    if vision
+                    else "Starting Tater llama.cpp engine"
+                ),
                 "progress": 0.0,
             },
         )
@@ -6151,7 +6622,7 @@ def _load_llama_cpp_engine_bundle(
         try:
             metadata = engine.request(
                 "load",
-                {"model": model_token},
+                {"model": model_token, "vision": bool(vision)},
                 timeout=load_timeout,
             )
         except Exception:
@@ -6179,7 +6650,11 @@ def _load_llama_cpp_engine_bundle(
             {
                 "event": "complete",
                 "stage": "load",
-                "description": "Tater llama.cpp engine loaded",
+                "description": (
+                    "Tater llama.cpp vision engine loaded"
+                    if vision
+                    else "Tater llama.cpp engine loaded"
+                ),
                 "progress": 100.0,
                 "device": str(bundle.get("device") or ""),
                 "warning": _llama_cpp_warning_text(
@@ -6198,8 +6673,9 @@ def _llama_cpp_engine_chat_completion(
     chat_kwargs: Dict[str, Any],
     *,
     timeout: Any = None,
+    vision: bool = False,
 ) -> Dict[str, Any]:
-    bundle = _load_llama_cpp_engine_bundle(model_token)
+    bundle = _load_llama_cpp_engine_bundle(model_token, vision=bool(vision))
     engine = bundle.get("engine")
     generation_lock = bundle.get("lock")
     if not callable(getattr(engine, "request", None)):
@@ -6213,13 +6689,25 @@ def _llama_cpp_engine_chat_completion(
     if lock_obj is None:
         return engine.request(
             "chat",
-            {"model": model_token, "messages": local_messages, "chat_kwargs": dict(chat_kwargs)},
+            {
+                "model": model_token,
+                "messages": local_messages,
+                "chat_kwargs": dict(chat_kwargs),
+                "vision": bool(vision),
+                "timeout": timeout_seconds,
+            },
             timeout=timeout_seconds,
         )
     with lock_obj:
         return engine.request(
             "chat",
-            {"model": model_token, "messages": local_messages, "chat_kwargs": dict(chat_kwargs)},
+            {
+                "model": model_token,
+                "messages": local_messages,
+                "chat_kwargs": dict(chat_kwargs),
+                "vision": bool(vision),
+                "timeout": timeout_seconds,
+            },
             timeout=timeout_seconds,
         )
 
@@ -6230,218 +6718,11 @@ def _load_llama_cpp_bundle(
     progress_callback: Optional[HFProgressCallback] = None,
     vision: bool = False,
 ) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("llama.cpp GGUF model id or path is required.")
-
-    cache_key = _llama_cpp_cache_key(model_token, vision=vision)
-    with _LLAMA_CPP_MODEL_CACHE_LOCK:
-        cached = _LLAMA_CPP_MODEL_CACHE.get(cache_key)
-        if isinstance(cached, dict):
-            _emit_hf_llm_progress(
-                progress_callback,
-                {
-                    "event": "complete",
-                    "stage": "load",
-                    "description": "GGUF model is already loaded",
-                    "progress": 100.0,
-                    "device": str(cached.get("device") or ""),
-                    "warning": _llama_cpp_warning_text(
-                        cached.get("gpu_warning"),
-                        cached.get("mtp_warning"),
-                        cached.get("vision_warning"),
-                        cached.get("chat_template_warning"),
-                    ),
-                },
-            )
-            return cached
-
-        try:
-            import llama_cpp as llama_cpp_module  # type: ignore
-            from llama_cpp import Llama  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("llama.cpp provider needs llama-cpp-python installed.") from exc
-        _llama_cpp_patch_partial_model_destructor()
-
-        system_info = _llama_cpp_system_info(llama_cpp_module)
-        gpu_backend = _llama_cpp_gpu_backend(system_info)
-        gpu_requested = cache_key[3] != 0
-        n_ubatch = int(cache_key[5] or 0)
-        flash_attn_enabled = bool(cache_key[6])
-        offload_kqv_enabled = bool(cache_key[7])
-        mtp_requested = bool(cache_key[8])
-        mtp_draft_tokens = int(cache_key[9])
-        mtp_spec_type = str(cache_key[10] or "draft-mtp")
-        chat_template_override_hash = str(cache_key[11] or "")
-        vision_requested = bool(cache_key[12])
-        gpu_warning = ""
-        if gpu_requested and system_info and not gpu_backend:
-            gpu_warning = (
-                "llama.cpp GPU offload was requested, but the installed llama-cpp-python build "
-                "does not report a GPU backend. Reinstall the NVIDIA profile or rebuild "
-                "llama-cpp-python with CUDA support."
-            )
-            logger.warning("[llama-cpp] %s system_info=%s", gpu_warning, system_info)
-
-        model_path = _download_llama_cpp_model(model_token, progress_callback=progress_callback)
-        mmproj_path = ""
-        if vision_requested:
-            mmproj_path = _download_llama_cpp_mmproj(
-                model_token,
-                model_path=model_path,
-                progress_callback=progress_callback,
-            )
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "start",
-                "stage": "load",
-                "description": "Loading GGUF model into llama.cpp",
-                "progress": 0.0,
-            },
-        )
-
-        load_kwargs: Dict[str, Any] = {
-            "model_path": model_path,
-            "n_ctx": cache_key[2],
-            "n_gpu_layers": cache_key[3],
-            "n_batch": cache_key[4],
-            "n_threads": _llama_cpp_n_threads(),
-            "verbose": _boolish(os.getenv("TATER_LLAMA_CPP_VERBOSE"), default=False),
-        }
-        if n_ubatch > 0:
-            load_kwargs["n_ubatch"] = n_ubatch
-        load_kwargs["offload_kqv"] = offload_kqv_enabled
-        if flash_attn_enabled:
-            load_kwargs["flash_attn"] = True
-        chat_format = cache_key[1]
-        if chat_format:
-            load_kwargs["chat_format"] = chat_format
-        if _boolish(os.getenv("TATER_LLAMA_CPP_USE_MLOCK"), default=False):
-            load_kwargs["use_mlock"] = True
-
-        vision_warning = ""
-        chat_handler_name = ""
-        if vision_requested and mmproj_path:
-            chat_handler, chat_handler_name, vision_warning = _llama_cpp_make_vision_chat_handler(
-                model_token,
-                mmproj_path,
-            )
-            if chat_handler is not None:
-                load_kwargs["chat_handler"] = chat_handler
-            elif vision_warning:
-                logger.warning("[llama-cpp] %s", vision_warning)
-
-        mtp_kwargs, mtp_warning = _llama_cpp_mtp_load_kwargs(
-            Llama,
-            enabled=mtp_requested,
-            spec_type=mtp_spec_type,
-            draft_tokens=mtp_draft_tokens,
-        )
-        if mtp_kwargs:
-            load_kwargs.update(mtp_kwargs)
-        elif mtp_warning:
-            logger.warning("[llama-cpp] %s", mtp_warning)
-
-        try:
-            model = Llama(**load_kwargs)
-        except TypeError as exc:
-            if not mtp_kwargs or not any(token in str(exc) for token in mtp_kwargs.keys()):
-                raise
-            for key in mtp_kwargs:
-                load_kwargs.pop(key, None)
-            mtp_warning = _llama_cpp_warning_text(
-                mtp_warning,
-                f"llama-cpp-python rejected MTP load arguments ({exc}); running without MTP.",
-            )
-            logger.warning("[llama-cpp] %s", mtp_warning)
-            try:
-                model = Llama(**load_kwargs)
-            except Exception as retry_exc:
-                raise RuntimeError(
-                    _llama_cpp_context_load_error_message(
-                        retry_exc,
-                        model_id=model_token,
-                        n_ctx=cache_key[2],
-                        n_gpu_layers=cache_key[3],
-                        n_batch=cache_key[4],
-                        vision=vision_requested,
-                        mmproj_path=mmproj_path,
-                    )
-                ) from retry_exc
-        except Exception as exc:
-            raise RuntimeError(
-                _llama_cpp_context_load_error_message(
-                    exc,
-                    model_id=model_token,
-                    n_ctx=cache_key[2],
-                    n_gpu_layers=cache_key[3],
-                    n_batch=cache_key[4],
-                    vision=vision_requested,
-                    mmproj_path=mmproj_path,
-                )
-            ) from exc
-        chat_template_override = "" if vision_requested else _llama_cpp_chat_template_override_text(model_token)
-        chat_template_handler_name = ""
-        chat_template_warning = ""
-        if chat_template_override:
-            chat_template_handler_name, chat_template_warning = _llama_cpp_install_chat_template_override(
-                model,
-                chat_template_override,
-            )
-            if chat_template_warning:
-                logger.warning("[llama-cpp] %s", chat_template_warning)
-        device = gpu_backend if gpu_requested and gpu_backend else ("gpu" if gpu_requested and not system_info else "cpu")
-        generation_lock = _LLAMA_CPP_GENERATION_LOCKS.get(cache_key)
-        if generation_lock is None:
-            generation_lock = threading.RLock()
-            _LLAMA_CPP_GENERATION_LOCKS[cache_key] = generation_lock
-        bundle = {
-            "model": model,
-            "model_path": model_path,
-            "mmproj_path": mmproj_path,
-            "model_root": _llama_cpp_model_root(),
-            "lock": generation_lock,
-            "n_gpu_layers": cache_key[3],
-            "n_ctx": cache_key[2],
-            "n_batch": cache_key[4],
-            "n_ubatch": n_ubatch,
-            "flash_attn": flash_attn_enabled,
-            "offload_kqv": offload_kqv_enabled,
-            "device": device,
-            "gpu_backend": gpu_backend,
-            "gpu_warning": gpu_warning,
-            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
-            "loaded_ts": time.time(),
-            "mtp_requested": mtp_requested,
-            "mtp_enabled": bool(mtp_requested and mtp_kwargs and not mtp_warning),
-            "mtp_spec_type": mtp_spec_type,
-            "mtp_draft_tokens": mtp_draft_tokens,
-            "mtp_warning": mtp_warning,
-            "chat_template_override": bool(chat_template_override),
-            "chat_template_override_hash": chat_template_override_hash,
-            "chat_template_handler": chat_template_handler_name,
-            "chat_template_warning": chat_template_warning,
-            "vision_requested": bool(vision_requested),
-            "supports_vision": bool(vision_requested and mmproj_path and chat_handler_name),
-            "vision_projector_path": mmproj_path,
-            "vision_chat_handler": chat_handler_name,
-            "vision_warning": vision_warning,
-            "llama_cpp_system_info": system_info,
-        }
-        _LLAMA_CPP_MODEL_CACHE[cache_key] = bundle
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "load",
-                "description": "GGUF model loaded",
-                "progress": 100.0,
-                "device": device,
-                "warning": _llama_cpp_warning_text(gpu_warning, mtp_warning, chat_template_warning),
-            },
-        )
-        return bundle
+    _ = model_id, progress_callback, vision
+    raise RuntimeError(
+        "The direct llama.cpp wrapper runtime path has been removed. "
+        "llama.cpp GGUF models must load through Tater's native llama.cpp engine."
+    )
 
 
 def preload_llama_cpp_llm_model(
@@ -6450,10 +6731,10 @@ def preload_llama_cpp_llm_model(
     progress_callback: Optional[HFProgressCallback] = None,
     vision: bool = False,
 ) -> Dict[str, Any]:
-    bundle = (
-        _load_llama_cpp_bundle(model_id, progress_callback=progress_callback, vision=True)
-        if vision
-        else _load_llama_cpp_engine_bundle(model_id, progress_callback=progress_callback)
+    bundle = _load_llama_cpp_engine_bundle(
+        model_id,
+        progress_callback=progress_callback,
+        vision=bool(vision),
     )
     return {
         "ok": True,
@@ -6472,10 +6753,12 @@ def preload_llama_cpp_llm_model(
         "mtp_enabled": bool(bundle.get("mtp_enabled")),
         "mtp_spec_type": str(bundle.get("mtp_spec_type") or ""),
         "mtp_draft_tokens": int(bundle.get("mtp_draft_tokens") or 0),
+        "mtp_draft_model": str(bundle.get("mtp_draft_model") or ""),
+        "mtp_draft_model_path": str(bundle.get("mtp_draft_model_path") or ""),
         "mmproj_path": str(bundle.get("mmproj_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
-        "runtime": str(bundle.get("runtime") or ("llama-cpp-python" if vision else "tater-llama-engine")),
+        "runtime": str(bundle.get("runtime") or "tater-llama-engine"),
         "warning": _llama_cpp_warning_text(
             bundle.get("gpu_warning"),
             bundle.get("mtp_warning"),
@@ -9341,18 +9624,12 @@ class LlamaCppLLMClientWrapper:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
-        if vision_requested:
-            return _llama_cpp_direct_chat_completion(
-                self.model,
-                local_messages,
-                chat_kwargs,
-                vision=True,
-            )
         return _llama_cpp_engine_chat_completion(
             self.model,
             local_messages,
             chat_kwargs,
             timeout=timeout,
+            vision=vision_requested,
         )
 
     async def chat(self, messages, **kwargs):
@@ -10034,6 +10311,36 @@ def _describe_image_with_llama_cpp_direct(
     return _llama_cpp_direct_chat_completion(model_token, messages, chat_kwargs, vision=True)
 
 
+def _describe_image_with_llama_cpp_engine(
+    *,
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    timeout: float,
+) -> Dict[str, Any]:
+    _llama_cpp_vision_raise_if_failure_cooling(model_token)
+    chat_kwargs = {
+        "max_tokens": 768,
+        "temperature": 0.2,
+        "stream": False,
+    }
+    if _llama_cpp_disable_thinking_enabled():
+        chat_kwargs["reasoning_budget"] = 0
+        chat_kwargs["chat_template_kwargs"] = {"enable_thinking": False, "reasoning_budget": 0}
+    try:
+        result = _llama_cpp_engine_chat_completion(
+            model_token,
+            messages,
+            chat_kwargs,
+            timeout=timeout,
+            vision=True,
+        )
+        _llama_cpp_vision_clear_failure(model_token)
+        return result
+    except RuntimeError as exc:
+        _llama_cpp_vision_record_failure(model_token, exc)
+        raise
+
+
 def _describe_image_with_llama_cpp_subprocess(
     *,
     model_token: str,
@@ -10088,7 +10395,7 @@ def _describe_image_with_llama_cpp_subprocess(
                     summary = _llama_cpp_vision_error_summary(detail)
                     raise RuntimeError(
                         "llama.cpp vision worker crashed while loading the vision projector. "
-                        "The selected GGUF/mmproj pair or llama-cpp-python build appears incompatible "
+                        "The selected GGUF/mmproj pair or native llama.cpp server build appears incompatible "
                         "with the current GPU path, or the projector could not allocate GPU buffers. "
                         "Changing n_batch will not fix this projector-load failure. "
                         f"Details: {summary}"
@@ -10371,20 +10678,11 @@ def describe_image_with_local_llm(
             client = TransformersLLMClientWrapper(model=model_token)
             result = client._chat_sync(messages, timeout=timeout, max_tokens=768, temperature=0.2)
         elif provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-            if _llama_cpp_vision_worker_enabled():
-                result = _describe_image_with_llama_cpp_subprocess(
-                    model_token=model_token,
-                    image_bytes=image_bytes,
-                    filename=filename,
-                    prompt=prompt,
-                    timeout=timeout,
-                )
-            else:
-                result = _describe_image_with_llama_cpp_direct(
-                    model_token=model_token,
-                    messages=messages,
-                    timeout=timeout,
-                )
+            result = _describe_image_with_llama_cpp_engine(
+                model_token=model_token,
+                messages=messages,
+                timeout=timeout,
+            )
         elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
             def _describe_mlx_local() -> Dict[str, Any]:
                 return _describe_image_with_mlx_engine(
@@ -10930,10 +11228,54 @@ def _llama_cpp_engine_worker_reply(protocol_out: Any, payload: Dict[str, Any]) -
         pass
 
 
+def _llama_cpp_engine_worker_unload_inprocess_models() -> None:
+    with _LLAMA_CPP_MODEL_CACHE_LOCK:
+        bundles = [bundle for bundle in _LLAMA_CPP_MODEL_CACHE.values() if isinstance(bundle, dict)]
+        _LLAMA_CPP_MODEL_CACHE.clear()
+        _LLAMA_CPP_GENERATION_LOCKS.clear()
+    for bundle in bundles:
+        model = bundle.get("model")
+        close = getattr(model, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        try:
+            bundle.clear()
+        except Exception:
+            pass
+    if bundles:
+        _release_local_llm_runtime_memory()
+
+
 def _llama_cpp_engine_worker_main() -> int:
     protocol_out = _llama_cpp_engine_protocol_output()
     current_model = ""
+    current_vision = False
+    native_state: Dict[str, Any] = {}
     return_code = 0
+
+    def _ensure_loaded(model_token: str, *, vision: bool) -> Dict[str, Any]:
+        nonlocal current_model, current_vision
+        desired_vision = bool(vision)
+        if current_model == model_token and native_state.get("process") is not None:
+            proc = native_state.get("process")
+            if callable(getattr(proc, "poll", None)) and proc.poll() is None:
+                metadata = dict(native_state.get("metadata") or {})
+                if not desired_vision or bool(metadata.get("supports_vision")):
+                    return metadata
+        _llama_cpp_native_shutdown_state(native_state)
+        bundle = _llama_cpp_native_worker_load(
+            native_state,
+            model_token,
+            vision=desired_vision,
+            timeout=max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900")),
+        )
+        current_model = model_token
+        current_vision = desired_vision
+        return bundle
+
     for line in sys.stdin:
         request_id = ""
         try:
@@ -10951,8 +11293,8 @@ def _llama_cpp_engine_worker_main() -> int:
                 model_token = str((payload or {}).get("model") or "").strip()
                 if not model_token:
                     raise RuntimeError("llama.cpp engine load needs a model id.")
-                bundle = _load_llama_cpp_bundle(model_token, vision=False)
-                current_model = model_token
+                requested_vision = _boolish((payload or {}).get("vision"), default=False)
+                bundle = _ensure_loaded(model_token, vision=requested_vision)
                 result = _llama_cpp_public_bundle_metadata(bundle)
                 result["runtime"] = "tater-llama-engine"
                 _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
@@ -10971,8 +11313,17 @@ def _llama_cpp_engine_worker_main() -> int:
                 chat_kwargs = (payload or {}).get("chat_kwargs")
                 if not isinstance(chat_kwargs, dict):
                     chat_kwargs = {}
-                result = _llama_cpp_direct_chat_completion(model_token, messages, chat_kwargs, vision=False)
-                current_model = model_token
+                requested_vision = _boolish((payload or {}).get("vision"), default=False)
+                desired_vision = bool(current_vision or requested_vision)
+                _ensure_loaded(model_token, vision=desired_vision)
+                result = _llama_cpp_native_worker_chat(
+                    native_state,
+                    model_token,
+                    messages,
+                    chat_kwargs,
+                    vision=desired_vision,
+                    timeout=float((payload or {}).get("timeout") or 0.0),
+                )
                 _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
                 continue
             raise RuntimeError(f"Unknown llama.cpp engine op: {op or 'missing'}")
@@ -10988,6 +11339,7 @@ def _llama_cpp_engine_worker_main() -> int:
                 )
             else:
                 logger.warning("[llama-cpp-engine] failed handling request: %s", exc, exc_info=True)
+    _llama_cpp_native_shutdown_state(native_state)
     try:
         protocol_out.flush()
         sys.stderr.flush()

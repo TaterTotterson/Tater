@@ -145,7 +145,7 @@ The setup profile only prepares the runtime. Actual voice model choices are mana
 macOS Apple Silicon:
 - The macOS profile writes `PYTORCH_ENABLE_MPS_FALLBACK=1` so PyTorch can fall back to CPU for unsupported MPS operations.
 - It attempts to install `mlx-whisper` and the official PyTorch `kokoro` package.
-- It installs the Metal `llama-cpp-python` wheel on Apple Silicon when available; MLX LM remains the preferred Apple-native local LLM provider.
+- It builds Tater's native llama.cpp engine (`llama-server`) with Metal when available; MLX LM remains the preferred Apple-native local LLM provider.
 - Select **Settings -> Models -> STT Backend -> MLX Whisper** for Apple-native Whisper STT.
 - MLX Whisper defaults to `mlx-community/whisper-base.en-mlx`; set `TATER_MLX_WHISPER_MODEL` to use another MLX Whisper model.
 - Kokoro automatically uses the PyTorch engine on Apple Metal/MPS when available. Set `TATER_KOKORO_ENGINE=onnx` to force the existing ONNX path or `TATER_KOKORO_ENGINE=torch` to force PyTorch.
@@ -153,12 +153,12 @@ macOS Apple Silicon:
 If native macOS dependency builds fail, install these Homebrew packages and rerun setup:
 
 ```bash
-brew install ffmpeg libolm pkg-config
+brew install ffmpeg libolm pkg-config cmake
 ```
 
 NVIDIA desktop/server:
-- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, a CUDA-enabled `llama-cpp-python`, and the GPU ONNX Runtime build.
-- `llama-cpp-python` defaults to the upstream CUDA 12.4 wheel index (`TATER_LLAMA_CPP_CUDA_WHEEL=cu124`) because that index carries current published CUDA wheels; set `TATER_LLAMA_CPP_CUDA_WHEEL=source` to compile locally with `CMAKE_ARGS="-DGGML_CUDA=on"` instead.
+- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and builds Tater's native llama.cpp engine with CUDA.
+- To customize the llama.cpp build, set `TATER_LLAMA_CPP_CMAKE_ARGS` before running setup. The NVIDIA profile defaults to `-DGGML_CUDA=on`.
 - In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
 - Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
 - To override Faster Whisper compute type, use **Settings -> ESPHome -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
@@ -169,14 +169,14 @@ AMD ROCm / Strix Halo:
 - Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
 - Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
-- llama.cpp ROCm/hipBLAS is not installed automatically; build it locally with `TATER_LLAMA_CPP_CMAKE_ARGS="-DGGML_HIPBLAS=on"` if you want GGUF GPU offload on AMD.
+- llama.cpp ROCm/HIP is built by setup with `-DGGML_HIP=on` by default. Override with `TATER_LLAMA_CPP_CMAKE_ARGS` if your ROCm stack needs a different llama.cpp flag.
 - Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
 - Strix Halo may require newer AMD ROCm wheels than the default PyTorch index. Override the PyTorch ROCm wheel source with `TATER_ROCM_PYTORCH_INDEX_URL` before running setup if needed.
 
 Jetson and Thor:
 - The `jetson` and `thor` profiles create a venv with `--system-site-packages` so NVIDIA JetPack-provided Python AI packages can be reused.
 - Setup intentionally avoids replacing JetPack PyTorch with generic pip wheels.
-- Hugging Face Transformers can use JetPack CUDA when the system PyTorch install exposes CUDA. llama.cpp CUDA on Jetson/Thor usually requires a local source build and is not forced by setup.
+- Hugging Face Transformers can use JetPack CUDA when the system PyTorch install exposes CUDA. Setup also attempts a native llama.cpp CUDA build for GGUF offload.
 
 General voice notes:
 - Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
@@ -251,12 +251,12 @@ docker run -d --name tater_webui \
 ### NVIDIA Docker
 
 The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
-The NVIDIA image uses CUDA 12.8 PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and the upstream CUDA `llama-cpp-python` wheel for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, SpeechBrain acceleration, and llama.cpp GGUF offload use the same TaterOS settings described in **Local Voice Acceleration Notes**.
+The NVIDIA image uses CUDA 12.8 PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and a native CUDA llama.cpp engine for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, SpeechBrain acceleration, and llama.cpp GGUF offload use the same TaterOS settings described in **Local Voice Acceleration Notes**.
 
 Host requirements:
 - Install the NVIDIA driver.
 - Install NVIDIA Container Toolkit before starting the compose override.
-- The CUDA llama.cpp wheel needs `libcuda.so.1`, which is supplied by the host driver at container runtime. If diagnostics mention `libcuda.so.1`, the image built correctly but the container was not started with NVIDIA GPU access.
+- The native CUDA llama.cpp engine needs `libcuda.so.1`, which is supplied by the host driver at container runtime. If diagnostics mention `libcuda.so.1`, the image built correctly but the container was not started with NVIDIA GPU access.
 
 Optional NVIDIA GPU build for Faster Whisper STT plus Kokoro TTS:
 
@@ -341,7 +341,7 @@ After Tater is running, open TaterOS and finish the first-run setup:
 1. Configure your base model in **Settings -> Models -> LLM / Vision**:
    - choose `OpenAI-Compatible API` for Ollama, LM Studio, LocalAI, Lemonade, vLLM, or a hosted compatible API
    - choose `Hugging Face Transformers` to load a local model directly inside Tater
-   - choose `llama.cpp GGUF` to load a GGUF model through llama-cpp-python
+   - choose `llama.cpp GGUF` to load a GGUF model through Tater's native llama.cpp engine
    - choose `MLX LM (Apple Silicon)` to load an MLX model directly on an Apple Silicon Mac
    - for built-in local providers, download models from the Hugging Face mini-tab first, then select the downloaded model from the Settings mini-tab
    - for OpenAI-compatible providers, set the endpoint host/port and model name
@@ -359,7 +359,7 @@ Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Bea
   - `llama-cpp` for GGUF models and matching `mmproj*.gguf` vision projectors
   - `mlx` for MLX text and vision models
 - The Hugging Face browser uses the token saved in **Integration Manager -> Hugging Face** for private/gated models and better Hub rate limits.
-- llama.cpp uses GPU offload by default when the installed build supports it. Set `TATER_LLAMA_CPP_N_GPU_LAYERS=0` for CPU-only.
+- llama.cpp uses the native `llama-server` engine built by setup. It uses GPU offload by default when the installed build supports it. Set `TATER_LLAMA_CPP_N_GPU_LAYERS=0` for CPU-only or `TATER_LLAMA_CPP_SERVER_BIN` to point at a custom llama-server binary.
 - MLX is intended for Apple Silicon Macs. Use llama.cpp GGUF on Linux, Raspberry Pi, NVIDIA, AMD/ROCm, Jetson, or other non-Apple-Silicon devices.
 
 ### Vision

@@ -1048,7 +1048,7 @@ function finishActionProgress(tone = "success", statusText = "Completed.") {
 
 function normalizeLocalLlmProviderToken(value) {
   const token = String(value || "").trim().toLowerCase().replace(/[\s.-]+/g, "_");
-  if (["llama", "llamacpp", "llama_cpp", "gguf", "llama_cpp_python"].includes(token)) {
+  if (["llama", "llamacpp", "llama_cpp", "gguf"].includes(token)) {
     return "llama_cpp";
   }
   if (["mlx", "mlx_lm", "apple_mlx", "apple_silicon", "mlxlm"].includes(token)) {
@@ -1466,12 +1466,23 @@ function hfLlmWarmupStatusText(snapshot) {
   const running = Boolean(snapshot?.running);
   const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
   const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const activeKey = String(snapshot?.active_key || "").trim();
+  const uiPhase = String(snapshot?.ui_phase || "").trim().toLowerCase();
+  if (uiPhase === "saving") {
+    return "Saving model settings...";
+  }
+  if (running && activeKey === "__unload_previous__") {
+    return "Unloading the previous local model...";
+  }
+  if (running && activeKey === "__runtime_restart__") {
+    return "Refreshing running cores and portals...";
+  }
   const active = items.find((item) => ["preparing", "downloading", "loading", "working", "cancelling"].includes(String(item?.status || "").toLowerCase()));
   if (running && active) {
     return String(active.message || active.status || "Working").trim();
   }
   if (running) {
-    return "Preparing local model download...";
+    return snapshot?.load_models === false ? "Preparing local model download..." : "Preparing local model load...";
   }
   if (errors.length) {
     return errors[0];
@@ -1480,6 +1491,117 @@ function hfLlmWarmupStatusText(snapshot) {
     return snapshot?.load_models === false ? "Local model downloaded." : "Local model ready.";
   }
   return "No local model download is running.";
+}
+
+function countHfLlmSurfaceRows(value) {
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value).length;
+  }
+  return 0;
+}
+
+function hfLlmWarmupRestartCounts(snapshot = {}) {
+  const restart = snapshot?.runtime_restart && typeof snapshot.runtime_restart === "object" ? snapshot.runtime_restart : {};
+  const activeBefore = restart.active_before && typeof restart.active_before === "object" ? restart.active_before : {};
+  const stopped = restart.stopped && typeof restart.stopped === "object" ? restart.stopped : {};
+  const resumed = restart.resumed && typeof restart.resumed === "object" ? restart.resumed : {};
+  const stoppedCores = stopped.cores && typeof stopped.cores === "object" ? stopped.cores : {};
+  const stoppedPortals = stopped.portals && typeof stopped.portals === "object" ? stopped.portals : {};
+  const resumedCores = resumed.cores && typeof resumed.cores === "object" ? resumed.cores : {};
+  const resumedPortals = resumed.portals && typeof resumed.portals === "object" ? resumed.portals : {};
+  return {
+    running: Boolean(restart.running) || String(snapshot?.active_key || "").trim() === "__runtime_restart__",
+    started: Number(restart.started_ts || 0) > 0,
+    finished: Number(restart.finished_ts || 0) > 0,
+    error: String(restart.error || "").trim(),
+    activeCores: countHfLlmSurfaceRows(activeBefore.cores),
+    activePortals: countHfLlmSurfaceRows(activeBefore.portals),
+    stoppedCoreFailed: countHfLlmSurfaceRows(stoppedCores.failed),
+    stoppedPortalFailed: countHfLlmSurfaceRows(stoppedPortals.failed),
+    resumedCoreFailed: countHfLlmSurfaceRows(resumedCores.failed),
+    resumedPortalFailed: countHfLlmSurfaceRows(resumedPortals.failed),
+  };
+}
+
+function hfLlmWarmupStageRows(snapshot = {}) {
+  const running = Boolean(snapshot?.running);
+  const errors = Array.isArray(snapshot?.errors) ? snapshot.errors.filter(Boolean) : [];
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const activeKey = String(snapshot?.active_key || "").trim();
+  const uiPhase = String(snapshot?.ui_phase || "").trim().toLowerCase();
+  const unloadTargets = Array.isArray(snapshot?.unload_before) ? snapshot.unload_before : [];
+  const unloadResult = snapshot?.unload_result && typeof snapshot.unload_result === "object" ? snapshot.unload_result : {};
+  const restart = hfLlmWarmupRestartCounts(snapshot);
+  const loadedCount = items.filter((item) => ["loaded", "downloaded"].includes(String(item?.status || "").toLowerCase())).length;
+  const errorCount = items.filter((item) => String(item?.status || "").toLowerCase() === "error").length;
+  const cancelledCount = items.filter((item) => ["cancelled", "canceled"].includes(String(item?.status || "").toLowerCase())).length;
+  const activeItem = hfLlmWarmupActiveItem(snapshot);
+  const loadTotal = items.length;
+  const loadDone = loadTotal > 0 && loadedCount + errorCount + cancelledCount >= loadTotal;
+  const unloadFailed = Array.isArray(unloadResult.errors) && unloadResult.errors.length > 0;
+  const restartFailures = restart.stoppedCoreFailed + restart.stoppedPortalFailed + restart.resumedCoreFailed + restart.resumedPortalFailed;
+  const restartHasWork = restart.started || restart.activeCores > 0 || restart.activePortals > 0 || activeKey === "__runtime_restart__";
+
+  const rows = [
+    {
+      id: "save",
+      label: "Save Settings",
+      detail: uiPhase === "saving" ? "Writing provider, model, and runtime options." : "Settings accepted.",
+      state: uiPhase === "saving" ? "active" : "done",
+    },
+    {
+      id: "unload",
+      label: "Unload Previous",
+      detail: unloadTargets.length
+        ? unloadResult.unloaded_count || unloadFailed
+          ? `${Number(unloadResult.unloaded_count || 0)} previous model${Number(unloadResult.unloaded_count || 0) === 1 ? "" : "s"} unloaded.`
+          : "Preparing previous model unload."
+        : "No previous local model needed unloading.",
+      state: activeKey === "__unload_previous__" ? "active" : unloadFailed ? "error" : unloadTargets.length || unloadResult.ok !== undefined ? "done" : uiPhase === "saving" ? "pending" : "done",
+    },
+    {
+      id: "load",
+      label: snapshot?.load_models === false ? "Download Model" : "Load Model",
+      detail: loadTotal
+        ? activeItem
+          ? `${localLlmProviderLabel(activeItem.provider)} • ${String(activeItem.model || "local model").trim()}`
+          : `${loadedCount}/${loadTotal} model${loadTotal === 1 ? "" : "s"} ready.`
+        : uiPhase === "saving"
+          ? "Waiting for selected local models."
+          : "No selected local models to load.",
+      state: errorCount > 0 || errors.length
+        ? "error"
+        : running && activeKey && !activeKey.startsWith("__")
+          ? "active"
+          : loadDone || (!running && loadTotal === 0 && uiPhase !== "saving")
+            ? "done"
+            : "pending",
+    },
+    {
+      id: "restart",
+      label: "Refresh Platforms",
+      detail: restartHasWork
+        ? `${restart.activeCores} core${restart.activeCores === 1 ? "" : "s"} and ${restart.activePortals} portal${restart.activePortals === 1 ? "" : "s"} checked.`
+        : "Runs after the selected local model is ready.",
+      state: restart.error || restartFailures > 0
+        ? "error"
+        : restart.running
+          ? "active"
+          : restart.finished || (!running && loadDone)
+            ? "done"
+            : "pending",
+    },
+    {
+      id: "ready",
+      label: errors.length ? "Needs Attention" : "Ready",
+      detail: errors.length ? "Tater stopped on an error." : "Tater is ready to use the selected model.",
+      state: errors.length ? "error" : !running && (loadDone || loadTotal === 0) && uiPhase !== "saving" ? "done" : "pending",
+    },
+  ];
+  return rows;
 }
 
 function hfLlmWarmupActiveItem(snapshot) {
@@ -1678,6 +1800,48 @@ function renderHfLlmWarmupItem(item) {
   `;
 }
 
+function renderHfLlmWarmupStages(snapshot = {}) {
+  const rows = hfLlmWarmupStageRows(snapshot);
+  return `
+    <div class="hf-llm-stage-list" aria-label="Model load progress">
+      ${rows
+        .map(
+          (row) => `
+            <div class="hf-llm-stage ${escapeHtml(row.state)}">
+              <span class="hf-llm-stage-dot" aria-hidden="true"></span>
+              <div>
+                <strong>${escapeHtml(row.label)}</strong>
+                <span>${escapeHtml(row.detail)}</span>
+              </div>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderHfLlmRuntimeRestartSummary(snapshot = {}) {
+  const counts = hfLlmWarmupRestartCounts(snapshot);
+  if (!counts.started && !counts.running && !counts.finished && !counts.error) {
+    return "";
+  }
+  const failures = counts.stoppedCoreFailed + counts.stoppedPortalFailed + counts.resumedCoreFailed + counts.resumedPortalFailed;
+  const tone = counts.error || failures > 0 ? "error" : counts.running ? "running" : "success";
+  const title = counts.running ? "Refreshing Cores And Portals" : counts.error || failures > 0 ? "Platform Refresh Needs Attention" : "Platform Refresh Complete";
+  const detail = counts.error
+    ? counts.error
+    : failures > 0
+      ? `${failures} refresh step${failures === 1 ? "" : "s"} reported an issue.`
+      : `${counts.activeCores} core${counts.activeCores === 1 ? "" : "s"} and ${counts.activePortals} portal${counts.activePortals === 1 ? "" : "s"} were checked after the model load.`;
+  return `
+    <div class="hf-llm-runtime-summary ${escapeHtml(tone)}">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(detail)}</span>
+    </div>
+  `;
+}
+
 function ensureHfLlmWarmupModal() {
   let modal = document.getElementById("hf-llm-warmup-modal");
   if (modal) {
@@ -1688,16 +1852,35 @@ function ensureHfLlmWarmupModal() {
     "beforeend",
     `
       <div id="hf-llm-warmup-modal" class="cerb-modal" aria-hidden="true">
-        <div class="cerb-modal-dialog card action-progress-dialog hf-llm-progress-dialog" role="dialog" aria-modal="true" aria-label="Local Model Download">
-          <div class="card-head">
-            <h3 class="card-title">Local Model Download</h3>
+        <div class="cerb-modal-dialog card action-progress-dialog hf-llm-progress-dialog" role="dialog" aria-modal="true" aria-label="Local Model Loader">
+          <div class="card-head hf-llm-progress-head">
+            <div>
+              <h3 class="card-title">Tater Model Loader</h3>
+              <p class="small muted">Provider, model, and running platform refresh progress.</p>
+            </div>
             <button type="button" class="inline-btn" id="hf-llm-warmup-close">Close</button>
+          </div>
+          <div class="hf-llm-loader-hero">
+            <div class="hf-llm-spud-loader" aria-hidden="true">
+              <span class="hf-llm-spud-body"></span>
+              <span class="hf-llm-spud-visor"></span>
+              <span class="hf-llm-spud-glow"></span>
+              <span class="hf-llm-spud-spark one"></span>
+              <span class="hf-llm-spud-spark two"></span>
+              <span class="hf-llm-spud-spark three"></span>
+            </div>
+            <div>
+              <strong id="hf-llm-warmup-hero-title">Preparing local model</strong>
+              <span id="hf-llm-warmup-hero-text">Tater is getting the selected provider ready.</span>
+            </div>
           </div>
           <div id="hf-llm-warmup-detail" class="small muted">Preparing...</div>
           <div class="action-progress-track" aria-hidden="true">
             <div id="hf-llm-warmup-fill" class="action-progress-fill"></div>
           </div>
           <div id="hf-llm-warmup-status" class="small action-progress-status">Starting...</div>
+          <div id="hf-llm-warmup-stages" class="hf-llm-progress-stages"></div>
+          <div id="hf-llm-warmup-runtime"></div>
           <div id="hf-llm-warmup-items" class="hf-llm-progress-items"></div>
         </div>
       </div>
@@ -1740,16 +1923,45 @@ function renderHfLlmWarmupModal(snapshot = {}) {
   const percent = hfLlmWarmupPercent(snapshot);
   const tone = errors.length ? "error" : running ? "running" : percent >= 100 ? "success" : "running";
   const detailEl = document.getElementById("hf-llm-warmup-detail");
+  const heroTitleEl = document.getElementById("hf-llm-warmup-hero-title");
+  const heroTextEl = document.getElementById("hf-llm-warmup-hero-text");
   const fillEl = document.getElementById("hf-llm-warmup-fill");
   const statusEl = document.getElementById("hf-llm-warmup-status");
+  const stagesEl = document.getElementById("hf-llm-warmup-stages");
+  const runtimeEl = document.getElementById("hf-llm-warmup-runtime");
   const itemsEl = document.getElementById("hf-llm-warmup-items");
   const closeBtn = document.getElementById("hf-llm-warmup-close");
+  const activeItem = hfLlmWarmupActiveItem(snapshot);
+  const activeModel = String(activeItem?.model || "").trim();
+  const activeProvider = activeItem ? localLlmProviderLabel(activeItem.provider) : "";
 
   modal.dataset.running = running ? "true" : "false";
+  modal.classList.toggle("hf-llm-loading", running && !errors.length);
+  modal.classList.toggle("hf-llm-error", errors.length > 0);
+  if (heroTitleEl) {
+    heroTitleEl.textContent = errors.length
+      ? "Model load needs attention"
+      : running
+        ? activeModel
+          ? `Loading ${activeProvider || "local model"}`
+          : "Preparing local model"
+        : percent >= 100
+          ? "Local model ready"
+          : "Local model status";
+  }
+  if (heroTextEl) {
+    heroTextEl.textContent = activeModel
+      ? activeModel
+      : errors.length
+        ? errors[0]
+        : running
+          ? "Tater is saving settings, loading the model, and refreshing running platforms."
+          : "Tater has finished the latest model load task.";
+  }
   if (detailEl) {
     const loadsModel = snapshot?.load_models !== false;
     detailEl.textContent = running
-      ? "Download continues in the background across refreshes and tab changes."
+      ? "This continues safely in the background across refreshes and tab changes."
       : errors.length
         ? loadsModel
           ? "The download/load task stopped with an error."
@@ -1767,6 +1979,12 @@ function renderHfLlmWarmupModal(snapshot = {}) {
     statusEl.textContent = hfLlmWarmupStatusText(snapshot);
     statusEl.classList.toggle("success", tone === "success");
     statusEl.classList.toggle("error", tone === "error");
+  }
+  if (stagesEl) {
+    stagesEl.innerHTML = renderHfLlmWarmupStages(snapshot);
+  }
+  if (runtimeEl) {
+    runtimeEl.innerHTML = renderHfLlmRuntimeRestartSummary(snapshot);
   }
   if (itemsEl) {
     itemsEl.innerHTML = items.length ? items.map((item) => renderHfLlmWarmupItem(item)).join("") : `<div class="small muted">Waiting for model download state...</div>`;
@@ -3972,11 +4190,6 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
           <h4 class="runtime-breakdown-title">Loaded Runtime Models</h4>
           <div class="small muted">${escapeHtml(summaryParts.join(" • ") || "No loaded runtime models")}</div>
         </div>
-        ${
-          unloadableCount > 0
-            ? `<button type="button" class="inline-btn danger" data-runtime-loaded-model-unload="all">Unload Local LLMs</button>`
-            : ""
-        }
       </div>
       <div class="runtime-memory-meter-grid">
         ${_renderRuntimePercentMeter("CPU Usage", cpu.percent, cpuDetails || "CPU telemetry from psutil.")}
@@ -16953,7 +17166,7 @@ async function loadSettingsView() {
     if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
       return "hf_transformers";
     }
-    if (["llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python"].includes(token)) {
+    if (["llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"].includes(token)) {
       return "llama_cpp";
     }
     if (["mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"].includes(token)) {
@@ -18267,18 +18480,26 @@ async function loadSettingsView() {
                     } />`,
                     "Enable MTP"
                   )}
-                  <div class="small hydra-context-hint">Uses llama.cpp native draft-mtp when the installed binding exposes it.</div>
+                  <div class="small hydra-context-hint">Uses native llama.cpp draft-mtp when enabled.</div>
                 </label>
-                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">MTP Draft Tokens
-                  <div class="hydra-context-control hydra-mtp-control">
-                    <input id="set_hydra_llama_cpp_mtp_draft_tokens_range" type="range" min="1" max="16" step="1" value="${escapeHtml(
-                      settings.hydra_llama_cpp_mtp_draft_tokens || "3"
-                    )}" />
-                    <input id="set_hydra_llama_cpp_mtp_draft_tokens" type="number" min="1" max="16" step="1" value="${escapeHtml(
-                      settings.hydra_llama_cpp_mtp_draft_tokens || "3"
-                    )}" />
-                  </div>
-                </label>
+                <div id="hydra-llama-mtp-extra" class="hydra-mtp-extra" data-hydra-provider-field="llama_cpp" ${
+                  settings.hydra_llama_cpp_mtp_enabled ? "" : "hidden"
+                }>
+                  <label class="hydra-context-field">MTP Draft Model
+                    <select id="set_hydra_llama_cpp_mtp_draft_model"></select>
+                    <div id="hydra-llama-mtp-draft-model-status" class="small hydra-context-hint">Optional assistant GGUF. Save & Load restarts llama.cpp with the selected model pair.</div>
+                  </label>
+                  <label class="hydra-context-field">MTP Draft Tokens
+                    <div class="hydra-context-control hydra-mtp-control">
+                      <input id="set_hydra_llama_cpp_mtp_draft_tokens_range" type="range" min="1" max="16" step="1" value="${escapeHtml(
+                        settings.hydra_llama_cpp_mtp_draft_tokens || "3"
+                      )}" />
+                      <input id="set_hydra_llama_cpp_mtp_draft_tokens" type="number" min="1" max="16" step="1" value="${escapeHtml(
+                        settings.hydra_llama_cpp_mtp_draft_tokens || "3"
+                      )}" />
+                    </div>
+                  </label>
+                </div>
                 <label class="hydra-context-field" data-hydra-provider-field="mlx_lm">Context Length
                   <div class="hydra-context-control" data-hydra-context-control="mlx_lm">
                     <input id="set_hydra_mlx_lm_context_tokens_range" type="range" min="128" max="262144" step="256" value="${escapeHtml(
@@ -18365,8 +18586,8 @@ async function loadSettingsView() {
                   </div>
                 </div>
                 <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-hydra-base-save" class="inline-btn">Save Base</button>
-                  <button type="button" id="settings-hydra-base-save-load" class="inline-btn">Save & Load Base</button>
+                  <button type="button" id="settings-hydra-base-save" class="inline-btn model-save-btn">Save Base</button>
+                  <button type="button" id="settings-hydra-base-save-load" class="inline-btn model-save-btn is-load">Save & Load Base</button>
                   <span class="small">Save updates the Base routing. Save & Load warms selected local Base models.</span>
                 </div>
               </div>
@@ -18392,8 +18613,8 @@ async function loadSettingsView() {
                   <div id="spudex-local-model-status" class="small"></div>
                 </label>
                 <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-spudex-llm-save" class="inline-btn">Save Spudex</button>
-                  <button type="button" id="settings-spudex-llm-save-load" class="inline-btn">Save & Load Spudex</button>
+                  <button type="button" id="settings-spudex-llm-save" class="inline-btn model-save-btn">Save Spudex</button>
+                  <button type="button" id="settings-spudex-llm-save-load" class="inline-btn model-save-btn is-load">Save & Load Spudex</button>
                   <span class="small">Save only affects Spudex LLM settings.</span>
                 </div>
               </div>
@@ -18441,8 +18662,8 @@ async function loadSettingsView() {
                   <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
                 </label>
                 <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-vision-model-save" class="inline-btn">Save Vision</button>
-                  <button type="button" id="settings-vision-model-save-load" class="inline-btn">Save & Load Vision</button>
+                  <button type="button" id="settings-vision-model-save" class="inline-btn model-save-btn">Save Vision</button>
+                  <button type="button" id="settings-vision-model-save-load" class="inline-btn model-save-btn is-load">Save & Load Vision</button>
                   <span class="small">Dedicated local vision uses downloaded models from the Hugging Face tab.</span>
                 </div>
               </div>
@@ -18733,8 +18954,8 @@ async function loadSettingsView() {
                 <div class="small hydra-model-panel-note">Used only in Beast Mode. AI Calls still uses Base model keys.</div>
                 ${hydraRoleSpecs.map((role) => renderHydraRoleRoute(role)).join("")}
                 <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-hydra-beast-save" class="inline-btn">Save Beast</button>
-                  <button type="button" id="settings-hydra-beast-save-load" class="inline-btn">Save & Load Beast</button>
+                  <button type="button" id="settings-hydra-beast-save" class="inline-btn model-save-btn">Save Beast</button>
+                  <button type="button" id="settings-hydra-beast-save-load" class="inline-btn model-save-btn is-load">Save & Load Beast</button>
                   <span class="small">Save & Load warms the selected local Beast head models.</span>
                 </div>
               </div>
@@ -18765,9 +18986,9 @@ async function loadSettingsView() {
                 </div>
               </div>
             </div>
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-hydra-model-save" class="action-btn">Save All Models</button>
-              <button type="button" id="settings-hydra-model-save-load" class="inline-btn">Save & Load All Local LLMs</button>
+            <div class="inline-row model-save-footer" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-hydra-model-save" class="action-btn model-save-btn is-global">Save All Models</button>
+              <button type="button" id="settings-hydra-model-save-load" class="inline-btn model-save-btn is-load">Save & Load All Local LLMs</button>
               <span class="small">Save All does not load local LLMs. Use Save & Load when you want selected local models warmed now.</span>
             </div>
           </div>
@@ -19741,6 +19962,8 @@ async function loadSettingsView() {
   const hydraLocalModelStatusEl = document.getElementById("hydra-local-model-status");
   const llamaChatTemplateEditEl = document.getElementById("settings-llama-chat-template-edit");
   const llamaChatTemplateStatusEl = document.getElementById("settings-llama-chat-template-status");
+  const llamaCppMtpDraftModelSelectEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_model");
+  const llamaCppMtpDraftModelStatusEl = document.getElementById("hydra-llama-mtp-draft-model-status");
   const contextControlConfig = {
     hf_transformers: {
       min: 256,
@@ -19943,6 +20166,15 @@ async function loadSettingsView() {
     });
     config.numberEl?.addEventListener("blur", () => syncHydraContextControl(provider));
   });
+  const llamaCppMtpEnabledEl = document.getElementById("set_hydra_llama_cpp_mtp_enabled");
+  const llamaCppMtpExtraEl = document.getElementById("hydra-llama-mtp-extra");
+  const syncLlamaCppMtpExtra = () => {
+    if (llamaCppMtpExtraEl) {
+      llamaCppMtpExtraEl.hidden = !Boolean(llamaCppMtpEnabledEl?.checked);
+    }
+  };
+  llamaCppMtpEnabledEl?.addEventListener("change", syncLlamaCppMtpExtra);
+  syncLlamaCppMtpExtra();
   const llamaCppMtpDraftRangeEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens_range");
   const llamaCppMtpDraftNumberEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens");
   const syncLlamaCppMtpDraftControl = (sourceEl = null) => {
@@ -20067,6 +20299,34 @@ async function loadSettingsView() {
       syncContext: true,
     });
   };
+  const populateLlamaCppMtpDraftModelSelect = (preferredModel = null) => {
+    if (!llamaCppMtpDraftModelSelectEl) {
+      return;
+    }
+    const rows = localLlmModelsForProvider("llama_cpp");
+    const preferred = String(
+      preferredModel !== null && preferredModel !== undefined
+        ? preferredModel
+        : llamaCppMtpDraftModelSelectEl.value || settings.hydra_llama_cpp_mtp_draft_model || ""
+    ).trim();
+    const resolved = resolveLocalLlmModelValue("llama_cpp", rows, preferred);
+    const preserveMissing = Boolean(preferred && !resolved);
+    llamaCppMtpDraftModelSelectEl.innerHTML = [
+      `<option value="">No draft model</option>`,
+      ...rows.map((row) => `<option value="${escapeHtml(row.model)}">${escapeHtml(row.model)}</option>`),
+      preserveMissing ? `<option value="${escapeHtml(preferred)}">Current: ${escapeHtml(preferred)}</option>` : "",
+    ].join("");
+    llamaCppMtpDraftModelSelectEl.value = resolved || (preserveMissing ? preferred : "");
+    if (llamaCppMtpDraftModelStatusEl) {
+      if (!rows.length) {
+        llamaCppMtpDraftModelStatusEl.textContent = "No downloaded llama.cpp models yet. Download a draft GGUF from the Hugging Face tab.";
+      } else if (preserveMissing) {
+        llamaCppMtpDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available. Current draft model is not in the local list.`;
+      } else {
+        llamaCppMtpDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available for MTP draft selection.`;
+      }
+    }
+  };
   const syncHydraPrimaryModelControl = (provider) => {
     const local = isHydraLocalProvider(provider);
     const spudLink = isHydraSpudLinkProvider(provider);
@@ -20139,6 +20399,7 @@ async function loadSettingsView() {
           });
         }
       });
+      populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       renderLocalModelManager();
     } catch (error) {
       if (hydraLocalModelStatusEl && isHydraLocalProvider(hydraBaseProviderEl?.value || "")) {
@@ -20153,6 +20414,9 @@ async function loadSettingsView() {
         localModelManagerStatusEl.textContent = `Installed model list failed: ${error.message}`;
         localModelManagerStatusEl.classList.add("error");
         localModelManagerStatusEl.classList.remove("success");
+      }
+      if (llamaCppMtpDraftModelStatusEl) {
+        llamaCppMtpDraftModelStatusEl.textContent = `Downloaded llama.cpp model list failed: ${error.message}`;
       }
     }
   };
@@ -20503,6 +20767,7 @@ async function loadSettingsView() {
     });
   });
   syncHydraPrimaryProviderFields();
+  populateLlamaCppMtpDraftModelSelect(settings.hydra_llama_cpp_mtp_draft_model || "");
   if (state.hydraContextEstimateRuntimeListener) {
     document.removeEventListener("tater:runtime-breakdown-updated", state.hydraContextEstimateRuntimeListener);
   }
@@ -20803,6 +21068,15 @@ async function loadSettingsView() {
     }
     return `<div class="hf-model-tags">${list.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
   };
+  const hfModelHubUrl = (repoId) => {
+    const parts = String(repoId || "")
+      .trim()
+      .split("/")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => encodeURIComponent(part));
+    return parts.length ? `https://huggingface.co/${parts.join("/")}` : "https://huggingface.co/models";
+  };
   const renderHfModelCards = (models) => {
     if (!hfModelBrowserResultsEl) {
       return;
@@ -20829,6 +21103,7 @@ async function loadSettingsView() {
         const taterPickNote = String(model?.tater_pick_note || "").trim();
         const isMlxProvider = provider === "mlx_lm";
         const downloadLabel = isMlxProvider ? "Download Repo" : "Download";
+        const hubUrl = hfModelHubUrl(id);
         return `
           <article class="hf-model-card ${compatible ? "" : "is-uncertain"} ${isTaterPick ? "is-tater-pick" : ""}" role="button" tabindex="0" aria-label="Show files for ${escapeHtml(id)}" data-hf-model-card data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">
             <div class="hf-model-card-head">
@@ -20850,6 +21125,7 @@ async function loadSettingsView() {
             ${renderHfModelTags(model?.tags)}
             <div class="hf-model-card-actions">
               <button type="button" class="inline-btn" data-hf-model-action="download" data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(id)}">${escapeHtml(downloadLabel)}</button>
+              <a class="inline-btn hf-model-hub-link" href="${escapeHtml(hubUrl)}" target="_blank" rel="noopener noreferrer" data-hf-model-action="open-hub">Open Hub</a>
             </div>
           </article>
         `;
@@ -20873,6 +21149,7 @@ async function loadSettingsView() {
     const isMlxProvider = provider === "mlx_lm";
     const visibleFiles = (isGgufProvider ? ggufs : files).slice(0, 28);
     const downloadLabel = isGgufProvider ? "Download Selected GGUF" : isMlxProvider ? "Download Repo" : "Download Model";
+    const hubUrl = hfModelHubUrl(repoId);
     hfModelBrowserDetailEl.innerHTML = `
       <div class="hf-model-detail-head">
         <div>
@@ -20882,6 +21159,7 @@ async function loadSettingsView() {
       </div>
       <div class="hf-model-detail-actions">
         <button type="button" class="inline-btn" data-hf-detail-action="download" data-provider="${escapeHtml(provider)}" data-repo-id="${escapeHtml(repoId)}">${escapeHtml(downloadLabel)}</button>
+        <a class="inline-btn hf-model-hub-link" href="${escapeHtml(hubUrl)}" target="_blank" rel="noopener noreferrer" data-hf-detail-action="open-hub">Open Hub</a>
       </div>
       ${
         isGgufProvider && supportsVision
@@ -21119,6 +21397,7 @@ async function loadSettingsView() {
       renderLocalModelManager();
       syncHydraPrimaryProviderFields();
       hydraRouteControls.forEach((control) => syncHydraRouteControl(control));
+      populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       if (localModelManagerStatusEl) {
         localModelManagerStatusEl.textContent = `${modelId} deleted.`;
         localModelManagerStatusEl.classList.add("success");
@@ -22967,6 +23246,7 @@ async function loadSettingsView() {
     const llamaCppContextTokens = String(document.getElementById("set_hydra_llama_cpp_context_tokens")?.value || "").trim();
     const llamaCppMtpEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
     const llamaCppMtpDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
+    const llamaCppMtpDraftModel = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_model")?.value || "").trim();
     const llamaCppNBatch = String(document.getElementById("set_hydra_llama_cpp_n_batch")?.value || "512").trim();
     const llamaCppNUbatch = String(document.getElementById("set_hydra_llama_cpp_n_ubatch")?.value || "0").trim();
     const llamaCppFlashAttn = Boolean(document.getElementById("set_hydra_llama_cpp_flash_attn")?.checked);
@@ -23014,6 +23294,7 @@ async function loadSettingsView() {
         hydra_llama_cpp_context_tokens: llamaCppContextTokens,
         hydra_llama_cpp_mtp_enabled: llamaCppMtpEnabled,
         hydra_llama_cpp_mtp_draft_tokens: llamaCppMtpDraftTokens,
+        hydra_llama_cpp_mtp_draft_model: llamaCppMtpDraftModel,
         hydra_llama_cpp_n_batch: llamaCppNBatch,
         hydra_llama_cpp_n_ubatch: llamaCppNUbatch,
         hydra_llama_cpp_flash_attn: llamaCppFlashAttn,
@@ -23183,6 +23464,29 @@ async function loadSettingsView() {
 
     loadTargets = dedupeLocalLoadTargets(loadTargets);
     payload.hydra_local_model_load_targets = loadLocalModels ? loadTargets : [];
+    if (loadLocalModels && loadTargets.length) {
+      openHfLlmWarmupModal({
+        running: true,
+        started: true,
+        ui_phase: "saving",
+        reason: "settings-save-load",
+        load_models: true,
+        progress: 4,
+        items: loadTargets.map((target) => ({
+          key: `${normalizeLocalLlmProviderToken(target.provider)}:${String(target.model || "").trim()}`,
+          provider: normalizeLocalLlmProviderToken(target.provider),
+          provider_label: localLlmProviderLabel(target.provider),
+          model: String(target.model || "").trim(),
+          status: "pending",
+          progress: 0,
+          message: "Waiting for settings save.",
+        })),
+        errors: [],
+        unload_before: [],
+        unload_result: {},
+        runtime_restart: {},
+      });
+    }
     statusEl.textContent = loadLocalModels
       ? `Saving ${label.toLowerCase()}, loading the selected local model, and refreshing running cores/portals after it is ready...`
       : `Saving ${label.toLowerCase()}...`;
@@ -23208,10 +23512,31 @@ async function loadSettingsView() {
         message = `${label} saved. No selected local LLMs to load.`;
       }
       statusEl.textContent = message;
-      maybeOpenHfLlmWarmupModal(hfWarmup);
+      if (hfWarmup?.started || hfWarmup?.running || hfWarmup?.already_running) {
+        openHfLlmWarmupModal(hfWarmup);
+      } else {
+        maybeOpenHfLlmWarmupModal(hfWarmup);
+      }
       showToast(message);
     } catch (error) {
       statusEl.textContent = `${label} save failed: ${error.message}`;
+      const activeModal = document.getElementById("hf-llm-warmup-modal");
+      if (activeModal?.classList.contains("active")) {
+        renderHfLlmWarmupModal({
+          running: false,
+          progress: 0,
+          load_models: Boolean(loadLocalModels),
+          items: loadTargets.map((target) => ({
+            provider: normalizeLocalLlmProviderToken(target.provider),
+            provider_label: localLlmProviderLabel(target.provider),
+            model: String(target.model || "").trim(),
+            status: "error",
+            progress: 0,
+            message: error.message,
+          })),
+          errors: [String(error.message || "Model settings save failed.")],
+        });
+      }
       showToast(`${label} save failed: ${error.message}`, "error", 3600);
     }
   };
