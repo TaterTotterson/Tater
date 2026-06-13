@@ -9,7 +9,10 @@ RUNTIME_DIR="${TATER_RUNTIME_DIR:-.runtime}"
 PROFILE_FILE="${TATER_SETUP_PROFILE_FILE:-${RUNTIME_DIR}/setup_profile}"
 PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
 REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
-LLAMA_CPP_PYTHON_SPEC="${TATER_LLAMA_CPP_PYTHON_SPEC:-llama-cpp-python>=0.3.23}"
+LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
+LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
+LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/llama-server}"
 
 RED=""
 GREEN=""
@@ -239,22 +242,7 @@ filtered_nvidia_requirements() {
     {
       line = $0
       lower = tolower(line)
-      if (lower ~ /^[[:space:]]*(torch|torchaudio|torchvision|llama-cpp-python)([[:space:]]|[=<>!~]|$)/) {
-        next
-      }
-      print line
-    }
-  ' "${REQUIREMENTS_FILE}" > "${output_file}"
-}
-
-filtered_without_llama_cpp_requirements() {
-  output_file="$1"
-  awk '
-    /^[[:space:]]*($|#)/ { print; next }
-    {
-      line = $0
-      lower = tolower(line)
-      if (lower ~ /^[[:space:]]*llama-cpp-python([[:space:]]|[=<>!~]|$)/) {
+      if (lower ~ /^[[:space:]]*(torch|torchaudio|torchvision)([[:space:]]|[=<>!~]|$)/) {
         next
       }
       print line
@@ -269,7 +257,7 @@ filtered_macos_requirements() {
     {
       line = $0
       lower = tolower(line)
-      if (lower ~ /^[[:space:]]*(llama-cpp-python|pykokoro)([[:space:]]|[=<>!~]|$)/) {
+      if (lower ~ /^[[:space:]]*pykokoro([[:space:]]|[=<>!~]|$)/) {
         next
       }
       print line
@@ -287,34 +275,70 @@ install_cpu() {
   venv_python="$1"
   info "Installing Tater dependencies"
   "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
+  install_llama_cpp_native cpu
 }
 
-check_llama_cpp_backend() {
-  venv_python="$1"
-  backend="$2"
-  "${venv_python}" -c 'import re, sys, llama_cpp; backend = sys.argv[1].strip().lower(); names = {"cuda": ("cuda", "cublas"), "metal": ("metal",), "rocm": ("hip", "hipblas", "rocblas"), "vulkan": ("vulkan",), "sycl": ("sycl",), "opencl": ("opencl", "clblast")}.get(backend, (backend,)); info = llama_cpp.llama_print_system_info(); info = info.decode("utf-8", "replace") if isinstance(info, bytes) else str(info or ""); text = re.sub(r"\s+", " ", info.lower()); print("llama_cpp_system_info=" + " ".join(info.split())); ok = any(re.search(rf"\b{re.escape(name)}\s*:", text) or re.search(rf"\bggml[_-]{re.escape(name)}\s*:", text) or re.search(rf"\b{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text) or re.search(rf"\bggml[_-]{re.escape(name)}\s*[=:]\s*(1|on|true|yes)\b", text) for name in names); sys.exit(0 if ok else 1)' "${backend}"
+check_llama_cpp_native() {
+  server_bin="${1:-${LLAMA_CPP_SERVER_BIN}}"
+  [ -x "${server_bin}" ] || return 1
+  "${server_bin}" --version >/dev/null 2>&1
 }
 
-install_llama_cpp_metal() {
-  venv_python="$1"
-  pyver="$(python_version "${venv_python}")"
-  case "${pyver}" in
-    3.10|3.11|3.12)
-      info "Installing Metal llama-cpp-python wheel"
-      if "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/metal" --extra-index-url https://pypi.org/simple "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_backend "${venv_python}" metal; then
-        return
-      fi
-      warn "Metal llama-cpp-python wheel install failed or did not report Metal; falling back to local Metal build."
-      ;;
-    *)
-      warn "Metal llama-cpp-python wheels support Python 3.10-3.12; Python ${pyver} will build from source."
-      ;;
-  esac
-  if CMAKE_ARGS="${TATER_LLAMA_CPP_CMAKE_ARGS:--DGGML_METAL=on}" FORCE_CMAKE=1 "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_backend "${venv_python}" metal; then
+llama_cpp_native_cmake_args() {
+  profile="$1"
+  if [ "${TATER_LLAMA_CPP_CMAKE_ARGS:-}" ]; then
+    printf '%s' "${TATER_LLAMA_CPP_CMAKE_ARGS}"
     return
   fi
-  warn "Metal llama-cpp-python install failed. Installing the default llama-cpp-python fallback."
-  "${venv_python}" -m pip install --upgrade "${LLAMA_CPP_PYTHON_SPEC}" || warn "Default llama-cpp-python fallback failed."
+  case "${profile}" in
+    macos)
+      if [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ]; then
+        printf '%s' "-DGGML_METAL=on"
+      fi
+      ;;
+    nvidia|jetson|thor)
+      printf '%s' "-DGGML_CUDA=on"
+      ;;
+    rocm)
+      printf '%s' "-DGGML_HIP=on"
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+install_llama_cpp_native() {
+  profile="$1"
+  if [ "${TATER_SETUP_LLAMA_CPP_NATIVE:-1}" = "0" ]; then
+    warn "Skipping native llama.cpp build because TATER_SETUP_LLAMA_CPP_NATIVE=0."
+    return
+  fi
+  if check_llama_cpp_native "${LLAMA_CPP_SERVER_BIN}"; then
+    ok "Using native llama.cpp server at ${LLAMA_CPP_SERVER_BIN}"
+    return
+  fi
+  command -v git >/dev/null 2>&1 || { warn "git was not found; skipping native llama.cpp build."; return; }
+  command -v cmake >/dev/null 2>&1 || { warn "cmake was not found; install cmake and rerun setup for native llama.cpp."; return; }
+  mkdir -p "${RUNTIME_DIR}"
+  if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
+    info "Cloning native llama.cpp runtime"
+    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}" || { warn "Could not clone llama.cpp."; return; }
+  else
+    info "Updating native llama.cpp runtime"
+    git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || warn "Could not fetch llama.cpp ${LLAMA_CPP_REF}; using existing checkout."
+    git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
+  fi
+  cmake_args="$(llama_cpp_native_cmake_args "${profile}")"
+  info "Building native llama-server${cmake_args:+ (${cmake_args})}"
+  # shellcheck disable=SC2086
+  cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} || { warn "llama.cpp configure failed."; return; }
+  cmake --build "${LLAMA_CPP_DIR}/build" --config Release --target llama-server -j "${TATER_LLAMA_CPP_BUILD_JOBS:-4}" || { warn "llama-server build failed."; return; }
+  if check_llama_cpp_native "${LLAMA_CPP_SERVER_BIN}"; then
+    ok "Built native llama.cpp server at ${LLAMA_CPP_SERVER_BIN}"
+  else
+    warn "llama-server build finished, but ${LLAMA_CPP_SERVER_BIN} was not executable."
+  fi
 }
 
 install_mlx_engine_checkout() {
@@ -361,18 +385,14 @@ install_macos() {
       warn "Detected macOS ${arch}. This profile is tuned for Apple Silicon but may still run CPU-first."
     fi
     if ! command -v brew >/dev/null 2>&1; then
-      warn "Homebrew was not found. If installs fail, install Homebrew packages: ffmpeg libolm pkg-config."
+      warn "Homebrew was not found. If installs fail, install Homebrew packages: ffmpeg libolm pkg-config cmake."
     else
-      warn "If native package builds fail, run: brew install ffmpeg libolm pkg-config"
+      warn "If native package builds fail, run: brew install ffmpeg libolm pkg-config cmake"
     fi
   fi
   info "Installing Tater dependencies for macOS"
   "${venv_python}" -m pip install -r "${tmp_req}"
-  if [ "${is_apple_silicon}" = "1" ]; then
-    install_llama_cpp_metal "${venv_python}"
-  else
-    "${venv_python}" -m pip install --upgrade "${LLAMA_CPP_PYTHON_SPEC}" || warn "llama-cpp-python failed to install."
-  fi
+  install_llama_cpp_native macos
   info "Installing Apple-native speech extras"
   if ! "${venv_python}" -m pip install mlx-whisper kokoro; then
     warn "Apple-native speech extras failed to install. Tater will still run with Faster Whisper/Kokoro CPU fallbacks."
@@ -382,47 +402,6 @@ install_macos() {
   fi
   rm -f "${tmp_req}"
   trap - EXIT
-}
-
-check_llama_cpp_cuda() {
-  venv_python="$1"
-  check_llama_cpp_backend "${venv_python}" cuda
-}
-
-install_llama_cpp_cuda() {
-  venv_python="$1"
-  cuda_wheel="${TATER_LLAMA_CPP_CUDA_WHEEL:-cu124}"
-  cuda_wheel="$(printf '%s' "${cuda_wheel}" | tr '[:upper:]' '[:lower:]')"
-  case "${cuda_wheel}" in
-    ""|auto)
-      cuda_wheel="cu124"
-      ;;
-    source|build|compile)
-      cuda_wheel=""
-      ;;
-  esac
-
-  pyver="$(python_version "${venv_python}")"
-  if [ "${cuda_wheel}" ]; then
-    case "${pyver}" in
-      3.10|3.11|3.12)
-        info "Installing CUDA llama-cpp-python wheel (${cuda_wheel})"
-        if "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary --only-binary=llama-cpp-python --index-url "https://abetlen.github.io/llama-cpp-python/whl/${cuda_wheel}" --extra-index-url https://pypi.org/simple "${LLAMA_CPP_PYTHON_SPEC}" && check_llama_cpp_cuda "${venv_python}"; then
-          return
-        fi
-        warn "CUDA llama-cpp-python wheel install failed or did not report CUDA; falling back to local CUDA build."
-        ;;
-      *)
-        warn "CUDA llama-cpp-python wheels support Python 3.10-3.12; Python ${pyver} will build from source."
-        ;;
-    esac
-  fi
-
-  cmake_args="${TATER_LLAMA_CPP_CMAKE_ARGS:--DGGML_CUDA=on}"
-  info "Building llama-cpp-python with CUDA (${cmake_args})"
-  warn "This requires the CUDA toolkit/compiler on the host. Set TATER_LLAMA_CPP_CUDA_WHEEL=cu124 to force the prebuilt wheel path."
-  CMAKE_ARGS="${cmake_args}" FORCE_CMAKE=1 "${venv_python}" -m pip install --upgrade --force-reinstall --no-cache-dir "${LLAMA_CPP_PYTHON_SPEC}"
-  check_llama_cpp_cuda "${venv_python}"
 }
 
 install_nvidia() {
@@ -437,7 +416,7 @@ install_nvidia() {
   "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
   info "Installing Tater dependencies"
   "${venv_python}" -m pip install -r "${tmp_req}"
-  install_llama_cpp_cuda "${venv_python}"
+  install_llama_cpp_native nvidia
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
   "${venv_python}" -m pip install onnxruntime-gpu
@@ -458,6 +437,7 @@ install_rocm() {
   "${venv_python}" -m pip install --index-url "${rocm_index}" torch torchaudio
   info "Installing Tater dependencies"
   "${venv_python}" -m pip install -r "${tmp_req}"
+  install_llama_cpp_native rocm
   info "Installing PyTorch Kokoro runtime"
   if ! "${venv_python}" -m pip install kokoro; then
     warn "Kokoro PyTorch failed to install. Tater will still run with CPU/ONNX TTS fallbacks."
@@ -475,6 +455,7 @@ install_jetson_like() {
   filtered_requirements "${tmp_req}"
   info "Installing Tater dependencies without replacing JetPack PyTorch"
   "${venv_python}" -m pip install -r "${tmp_req}"
+  install_llama_cpp_native "${profile}"
 
   if ! "${venv_python}" -c 'import torch' >/dev/null 2>&1; then
     warn "PyTorch is not importable in ${VENV_DIR}."
@@ -515,6 +496,7 @@ write_profile_env() {
     say "export TATER_SPEECH_ACCELERATION=\"\${TATER_SPEECH_ACCELERATION:-${speech_acceleration}}\""
     say "export TATER_FASTER_WHISPER_COMPUTE_TYPE=\"\${TATER_FASTER_WHISPER_COMPUTE_TYPE:-${compute_type}}\""
     say "export TATER_KOKORO_ENGINE=\"\${TATER_KOKORO_ENGINE:-auto}\""
+    say "export TATER_LLAMA_CPP_SERVER_BIN=\"\${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_SERVER_BIN}}\""
     if [ "${torch_mps_fallback}" ]; then
       say "export PYTORCH_ENABLE_MPS_FALLBACK=\"\${PYTORCH_ENABLE_MPS_FALLBACK:-${torch_mps_fallback}}\""
     fi
@@ -533,7 +515,7 @@ verify_install() {
   venv_python="$1"
   profile="$2"
   info "Checking installed runtime"
-  "${venv_python}" - <<'PY'
+  TATER_LLAMA_CPP_SERVER_BIN="${LLAMA_CPP_SERVER_BIN}" "${venv_python}" - <<'PY'
 import importlib.util
 
 required = ["fastapi", "uvicorn", "redis", "redislite", "aioesphomeapi"]
@@ -567,14 +549,19 @@ try:
 except Exception as exc:
     print(f"onnxruntime unavailable: {exc}")
 
-try:
-    import llama_cpp
-    info = llama_cpp.llama_print_system_info()
-    if isinstance(info, bytes):
-        info = info.decode("utf-8", "replace")
-    print("llama_cpp_system_info=" + " ".join(str(info).split()))
-except Exception as exc:
-    print(f"llama_cpp unavailable: {exc}")
+import os
+import subprocess
+
+server_bin = os.getenv("TATER_LLAMA_CPP_SERVER_BIN", "")
+if server_bin:
+    try:
+        completed = subprocess.run([server_bin, "--version"], text=True, capture_output=True, timeout=10)
+        output = " ".join(((completed.stdout or "") + " " + (completed.stderr or "")).split())
+        print(f"llama_server={server_bin} {output}")
+    except Exception as exc:
+        print(f"llama_server unavailable: {exc}")
+else:
+    print("llama_server unavailable: TATER_LLAMA_CPP_SERVER_BIN is not set")
 
 for name in ("mlx_whisper", "kokoro"):
     try:
