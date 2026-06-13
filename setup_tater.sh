@@ -330,7 +330,19 @@ llama_cpp_cuda_stub_dir() {
   candidates="${candidates} /usr/local/cuda/lib64/stubs /usr/local/cuda/targets/x86_64-linux/lib/stubs /usr/local/cuda/targets/aarch64-linux/lib/stubs"
   for candidate in ${candidates}; do
     if [ -f "${candidate}/libcuda.so" ]; then
-      printf '%s' "${candidate}"
+      if [ -e "${candidate}/libcuda.so.1" ]; then
+        printf '%s' "${candidate}"
+        return
+      fi
+      if [ -w "${candidate}" ] && ln -sf libcuda.so "${candidate}/libcuda.so.1" 2>/dev/null; then
+        printf '%s' "${candidate}"
+        return
+      fi
+      runtime_stub_dir="${RUNTIME_DIR}/cuda-stubs"
+      mkdir -p "${runtime_stub_dir}"
+      ln -sf "${candidate}/libcuda.so" "${runtime_stub_dir}/libcuda.so"
+      ln -sf "${candidate}/libcuda.so" "${runtime_stub_dir}/libcuda.so.1"
+      printf '%s' "${runtime_stub_dir}"
       return
     fi
   done
