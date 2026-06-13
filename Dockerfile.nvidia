@@ -1,5 +1,31 @@
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
+ARG LLAMA_CPP_REF=master
+ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
+ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04
+
+FROM ${LLAMA_CPP_CUDA_BUILDER_IMAGE} AS llama_cpp_builder
+
+ARG LLAMA_CPP_REF
+ARG LLAMA_CPP_CMAKE_ARGS
+
+ENV TATER_LLAMA_CPP_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    cmake \
+    git \
+    libcurl4-openssl-dev \
+    pkg-config \
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+ && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release ${LLAMA_CPP_CMAKE_ARGS} \
+ && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
+ && "$TATER_LLAMA_CPP_SERVER_BIN" --version
+
 FROM python:3.11-slim
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -8,9 +34,6 @@ ENV PIP_NO_CACHE_DIR=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     TATER_LLAMA_CPP_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
-
-ARG LLAMA_CPP_REF=master
-ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
 
 WORKDIR /app
 
@@ -23,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     libgomp1 \
+    libcurl4 \
     libolm-dev \
     libffi-dev \
     cmake \
@@ -41,10 +65,9 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install onnxruntime-gpu \
  && python -c "from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
 
-RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
- && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release ${LLAMA_CPP_CMAKE_ARGS} \
- && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
- && "$TATER_LLAMA_CPP_SERVER_BIN" --version
+COPY --from=llama_cpp_builder /opt/llama.cpp /opt/llama.cpp
+
+RUN "$TATER_LLAMA_CPP_SERVER_BIN" --version
 
 COPY . .
 
