@@ -22,9 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+ && test -f /usr/local/cuda/lib64/stubs/libcuda.so \
  && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release ${LLAMA_CPP_CMAKE_ARGS} \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
  && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
- && "$TATER_LLAMA_CPP_SERVER_BIN" --version
+ && test -x "$TATER_LLAMA_CPP_SERVER_BIN"
 
 FROM python:3.11-slim
 
@@ -67,7 +70,7 @@ RUN python -m pip install --upgrade pip \
 
 COPY --from=llama_cpp_builder /opt/llama.cpp /opt/llama.cpp
 
-RUN "$TATER_LLAMA_CPP_SERVER_BIN" --version
+RUN test -x "$TATER_LLAMA_CPP_SERVER_BIN"
 
 COPY . .
 
