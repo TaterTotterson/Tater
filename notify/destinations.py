@@ -12,6 +12,7 @@ _PLATFORM_ORDER: Tuple[str, ...] = (
     "telegram",
     "meshtastic",
     "macos",
+    "little_spud",
     "homeassistant",
     "ntfy",
     "webui",
@@ -50,6 +51,11 @@ _PLATFORM_META: Dict[str, Dict[str, Any]] = {
         "requires_target": True,
         "fields": ("scope", "device_id"),
     },
+    "little_spud": {
+        "label": "Little Spud",
+        "requires_target": True,
+        "fields": ("node_id", "scope", "device_id", "user", "device_name"),
+    },
     "homeassistant": {
         "label": "Home Assistant",
         "requires_target": False,
@@ -82,6 +88,7 @@ _MAX_RECENT_KEYS = 160
 _ROOM_LABEL_PREFIX = "tater:room_label"
 _ROOM_META_PREFIX = "tater:room_meta"
 _SOURCE_PRIORITY: Dict[str, int] = {
+    "spud_link": 9,
     "room_label": 8,
     "recent_history": 7,
     "default": 6,
@@ -184,6 +191,13 @@ def _candidate_identity_key(platform: str, targets: Dict[str, str]) -> str:
         destination = _to_text(targets.get("destination") or targets.get("node_id") or "broadcast")
         channel = _to_text(targets.get("channel") or "0")
         return f"meshtastic:{channel}:{destination}"
+    if platform == "little_spud":
+        node_id = _to_text(targets.get("node_id"))
+        if node_id:
+            return f"little_spud:node_id:{node_id}"
+        scope = _to_text(targets.get("scope"))
+        if scope:
+            return f"little_spud:scope:{scope}"
     return _targets_key(targets)
 
 
@@ -253,6 +267,16 @@ def _platform_target_label(platform: str, targets: Dict[str, str]) -> str:
         if scope and device:
             return f"{scope} • {device}"
         return scope or device or "macOS target"
+    if platform == "little_spud":
+        user = _to_text(targets.get("user"))
+        device_name = _to_text(targets.get("device_name"))
+        device_id = _to_text(targets.get("device_id"))
+        node_id = _to_text(targets.get("node_id"))
+        if user and device_name:
+            return f"{user} on {device_name}"
+        if user and device_id:
+            return f"{user} on {device_id}"
+        return device_name or device_id or node_id or _to_text(targets.get("scope")) or "Little Spud"
     if platform == "homeassistant":
         target = _to_text(targets.get("device_service"))
         return target or "Home Assistant defaults"
@@ -429,6 +453,60 @@ def _default_targets_for_platform(platform: str, redis_client: Any) -> Dict[str,
     return defaults
 
 
+def _little_spud_targets_from_nodes(redis_client: Any, *, max_items: int) -> List[Dict[str, str]]:
+    if redis_client is None:
+        return []
+    try:
+        raw_nodes = redis_client.hgetall("tater:spudlink:nodes:v1") or {}
+    except Exception:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for node_id, raw_value in raw_nodes.items():
+        text = _to_text(raw_value)
+        if not text:
+            continue
+        try:
+            node = json.loads(text)
+        except Exception:
+            continue
+        if not isinstance(node, dict):
+            continue
+        role = _to_text(node.get("role")).lower().replace("-", "_").replace(" ", "_")
+        if role != "little_spud":
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        user_name = _to_text(metadata.get("user_name") or metadata.get("username") or node.get("user_name"))
+        device_name = _to_text(metadata.get("device_name") or metadata.get("device") or node.get("device_name"))
+        name = _to_text(node.get("name"))
+        if (not user_name or not device_name) and " on " in name:
+            left, right = name.split(" on ", 1)
+            user_name = user_name or _to_text(left)
+            device_name = device_name or _to_text(right)
+        resolved_node_id = _to_text(node.get("id") or node_id)
+        targets: Dict[str, str] = {}
+        if resolved_node_id:
+            targets["node_id"] = resolved_node_id
+        if user_name:
+            targets["user"] = user_name
+        if device_name:
+            targets["device_name"] = device_name
+            targets["device_id"] = device_name
+        if user_name or device_name:
+            targets["scope"] = f"user:{user_name or 'User'}:{device_name or 'Little Spud'}"
+        if targets:
+            rows.append(
+                {
+                    "targets": targets,
+                    "last_seen_at": float(node.get("last_seen_at") or node.get("created_at") or 0),
+                    "label": name,
+                }
+            )
+
+    rows.sort(key=lambda item: (-float(item.get("last_seen_at") or 0), _to_text(item.get("label")).lower()))
+    return [dict(item.get("targets") or {}) for item in rows[: max(1, min(500, int(max_items)))]]
+
+
 def _recent_queue_targets_for_platform(platform: str, redis_client: Any, *, max_items: int) -> List[Dict[str, str]]:
     key = queue_key(platform)
     if not key or redis_client is None:
@@ -602,6 +680,19 @@ def _platform_entry(
             if len(out_rows) >= int(limit):
                 break
 
+    if platform == "little_spud" and len(out_rows) < int(limit):
+        for targets in _little_spud_targets_from_nodes(redis_client, max_items=limit):
+            _append_candidate(
+                platform=platform,
+                targets=targets,
+                source="spud_link",
+                out=out_rows,
+                seen=seen,
+            )
+            source_tokens.add("spud_link")
+            if len(out_rows) >= int(limit):
+                break
+
     if len(out_rows) < int(limit):
         for targets in _room_label_targets_for_platform(platform, redis_client):
             _append_candidate(
@@ -616,7 +707,7 @@ def _platform_entry(
                 break
 
     discovery_sources = sorted(token for token in source_tokens if token)
-    supports_live_discovery = bool({"recent_queue", "recent_history"} & set(discovery_sources))
+    supports_live_discovery = bool({"recent_queue", "recent_history", "spud_link"} & set(discovery_sources))
     destination_groups: List[Dict[str, Any]] = []
     if platform == "discord":
         destination_groups = _discord_destination_groups(out_rows[: int(limit)])

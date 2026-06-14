@@ -667,6 +667,12 @@ _SEND_MESSAGE_PLATFORM_ALIASES: Dict[str, str] = {
     "macos": "macos",
     "mac os": "macos",
     "my mac": "macos",
+    "little_spud": "little_spud",
+    "little spud": "little_spud",
+    "little-spud": "little_spud",
+    "little_spuds": "little_spud",
+    "little spuds": "little_spud",
+    "little-spuds": "little_spud",
 }
 
 

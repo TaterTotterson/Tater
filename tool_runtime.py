@@ -736,6 +736,8 @@ async def run_meta_tool(
             persistent=args.get("persistent"),
             api_notification=args.get("api_notification"),
             chat_id=args.get("chat_id"),
+            device_id=args.get("device_id"),
+            scope=args.get("scope"),
             node_id=args.get("node_id"),
             mesh_destination=args.get("mesh_destination") or args.get("destination"),
         )

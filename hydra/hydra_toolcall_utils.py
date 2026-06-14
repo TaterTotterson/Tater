@@ -94,6 +94,12 @@ _SEND_MESSAGE_PLATFORM_ALIASES = {
     "mac-os": "macos",
     "mac_os": "macos",
     "my mac": "macos",
+    "little spud": "little_spud",
+    "little-spud": "little_spud",
+    "little_spud": "little_spud",
+    "little spuds": "little_spud",
+    "little-spuds": "little_spud",
+    "little_spuds": "little_spud",
 }
 
 
