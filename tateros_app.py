@@ -67,6 +67,8 @@ from hydra import (
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
 from notify import notifier_destination_catalog
+from notify.media import BLOB_PREFIX as NOTIFY_BLOB_PREFIX, load_queue_attachments
+from notify.queue import is_expired as is_notify_expired, queue_key as notify_queue_key
 from helpers import (
     DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
     DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
@@ -5348,6 +5350,130 @@ def _clear_little_spud_active_run(identity: Dict[str, str], run_id: str = "") ->
         pass
 
 
+def _little_spud_notification_target_matches(
+    *,
+    targets: Dict[str, Any],
+    identity: Dict[str, str],
+    node: Dict[str, Any],
+) -> bool:
+    target_map = targets if isinstance(targets, dict) else {}
+    wildcard_tokens = {"*", "all", "any"}
+    checks = (
+        ("node_id", str(node.get("id") or "").strip()),
+        ("scope", str(identity.get("scope") or "").strip()),
+        ("device_id", str(identity.get("device_name") or "").strip()),
+        ("device_name", str(identity.get("device_name") or "").strip()),
+        ("user", str(identity.get("user_name") or "").strip()),
+        ("user_name", str(identity.get("user_name") or "").strip()),
+    )
+    for key, expected in checks:
+        wanted = str(target_map.get(key) or "").strip()
+        if not wanted:
+            continue
+        if wanted.lower() in wildcard_tokens:
+            return True
+        return bool(expected and hmac.compare_digest(wanted, expected))
+    return False
+
+
+def _little_spud_notification_media_url(blob_key: str, mimetype: str) -> str:
+    ref = _b64url_encode(str(blob_key or "").encode("utf-8", errors="ignore"))
+    if not ref:
+        return ""
+    query = urlencode({"mimetype": str(mimetype or "application/octet-stream").strip() or "application/octet-stream"})
+    return f"/api/spudlink/v1/notification-media/{quote(ref)}?{query}"
+
+
+def _little_spud_notification_attachments(item_id: Any) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for item in load_queue_attachments(redis_client, item_id):
+        if not isinstance(item, dict):
+            continue
+        blob_key = str(item.get("blob_key") or "").strip()
+        if not blob_key:
+            continue
+        mimetype = str(item.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream"
+        url = _little_spud_notification_media_url(blob_key, mimetype)
+        if not url:
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except Exception:
+            size = 0
+        out.append(
+            {
+                "id": str(item.get("id") or blob_key.rsplit(":", 1)[-1] or "").strip(),
+                "name": str(item.get("name") or "attachment").strip() or "attachment",
+                "type": str(item.get("type") or _media_type_from_mimetype(mimetype)),
+                "mimetype": mimetype,
+                "size": size,
+                "url": url,
+                "preview_url": url,
+            }
+        )
+    return out
+
+
+def _little_spud_notification_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    origin = item.get("origin") if isinstance(item.get("origin"), dict) else {}
+    title = str(item.get("title") or "").strip()
+    message = str(item.get("message") or "").strip()
+    return {
+        "id": str(item.get("id") or f"lsnotify_{uuid.uuid4().hex[:16]}"),
+        "kind": "notification",
+        "title": title,
+        "message": message,
+        "content": message,
+        "created_at": float(item.get("created_at") or time.time()),
+        "createdAt": int(float(item.get("created_at") or time.time()) * 1000),
+        "priority": str(meta.get("priority") or "normal"),
+        "tags": list(meta.get("tags") or []) if isinstance(meta.get("tags"), list) else [],
+        "origin": origin,
+        "meta": meta,
+        "attachments": _little_spud_notification_attachments(item.get("id")),
+    }
+
+
+def _pop_little_spud_notification(
+    *,
+    identity: Dict[str, str],
+    node: Dict[str, Any],
+    wait_seconds: int,
+    max_scan: int = 200,
+) -> Optional[Dict[str, Any]]:
+    key = notify_queue_key("little_spud") or "notifyq:little_spud"
+    deadline = time.monotonic() + max(0.0, min(25.0, float(wait_seconds or 0)))
+    scan_count = max(1, min(500, int(max_scan or 200)))
+    while True:
+        try:
+            raw_rows = redis_client.lrange(key, 0, scan_count - 1) or []
+        except Exception:
+            raw_rows = []
+        for raw in raw_rows:
+            try:
+                item = json.loads(str(raw or "{}"))
+            except Exception:
+                redis_client.lrem(key, 1, raw)
+                continue
+            if not isinstance(item, dict):
+                redis_client.lrem(key, 1, raw)
+                continue
+            if is_notify_expired(item):
+                redis_client.lrem(key, 1, raw)
+                continue
+            targets = item.get("targets") if isinstance(item.get("targets"), dict) else {}
+            if not _little_spud_notification_target_matches(targets=targets, identity=identity, node=node):
+                continue
+            removed = int(redis_client.lrem(key, 1, raw) or 0)
+            if removed > 0:
+                return item
+
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
 def _spud_link_public_settings_payload() -> Dict[str, Any]:
     settings = _load_spud_link_settings(include_secret=False)
     server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
@@ -5388,6 +5514,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
             "llm": is_server,
             "hydra": is_server,
             "tools": little_spud_tools_enabled,
+            "notifications": is_server,
             "little_spud_clients": is_server and bool(settings.get("allow_little_spuds")),
             "spudlet_clients": is_server and bool(settings.get("allow_spudlets")),
         },
@@ -12303,6 +12430,7 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
             "llm": is_server,
             "hydra": is_server,
             "tools": hydra_tools_enabled,
+            "notifications": is_server,
         },
     }
     return {
@@ -12435,6 +12563,7 @@ def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> 
             "llm": is_server,
             "hydra": is_server,
             "tools": hydra_tools_enabled,
+            "notifications": is_server,
         },
     }
     return {
@@ -12475,6 +12604,65 @@ def spud_link_history(request: Request, limit: int = 80) -> Dict[str, Any]:
             "scope": identity.get("scope"),
         },
     }
+
+
+@app.get("/api/spudlink/v1/notifications/next")
+def spud_link_notification_next(request: Request, wait_seconds: int = 20) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Little Spud notifications require a paired Little Spud client.")
+    identity_payload = type(
+        "SpudLinkNotificationIdentityPayload",
+        (),
+        {
+            "metadata": {},
+            "user_name": request.headers.get("x-spudlink-user"),
+            "device_name": request.headers.get("x-spudlink-device"),
+            "user": request.headers.get("x-spudlink-user"),
+        },
+    )()
+    identity = _spud_link_identity_from_request(identity_payload, request, node)
+    notification = _pop_little_spud_notification(
+        identity=identity,
+        node=node,
+        wait_seconds=max(0, min(25, int(wait_seconds or 0))),
+    )
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "notification": _little_spud_notification_payload(notification) if isinstance(notification, dict) else None,
+        "identity": {
+            "user_name": identity.get("user_name"),
+            "device_name": identity.get("device_name"),
+            "scope": identity.get("scope"),
+        },
+        "server_time": time.time(),
+    }
+
+
+@app.get("/api/spudlink/v1/notification-media/{media_ref}")
+def spud_link_notification_media(media_ref: str, request: Request, mimetype: str = "application/octet-stream") -> Response:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Little Spud notification media requires a paired Little Spud client.")
+    try:
+        blob_key = _b64url_decode(media_ref).decode("utf-8", errors="ignore").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Notification media not found.") from exc
+    if not blob_key or not blob_key.startswith(NOTIFY_BLOB_PREFIX):
+        raise HTTPException(status_code=404, detail="Notification media not found.")
+    raw = redis_blob_client.get(blob_key)
+    if not isinstance(raw, (bytes, bytearray)):
+        raw = redis_blob_client.get(blob_key.encode("utf-8", errors="ignore"))
+    if not isinstance(raw, (bytes, bytearray)):
+        raise HTTPException(status_code=404, detail="Notification media not found.")
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    media_type = str(mimetype or "application/octet-stream").strip() or "application/octet-stream"
+    return Response(content=bytes(raw), media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/spudlink/v1/files/{file_id}")
