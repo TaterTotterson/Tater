@@ -12,6 +12,7 @@ ALLOWED_PLATFORMS = (
     "telegram",
     "meshtastic",
     "macos",
+    "little_spud",
     "webui",
     "display",
 )
@@ -25,6 +26,7 @@ QUEUE_KEYS = {
     "telegram": "notifyq:telegram",
     "meshtastic": "notifyq:meshtastic",
     "macos": "notifyq:macos",
+    "little_spud": "notifyq:little_spud",
 }
 
 _DEFAULT_SETTINGS = {
@@ -81,6 +83,15 @@ _PLATFORM_ALIASES = {
     "current macs": "macos",
     "mac": "macos",
     "macs": "macos",
+    "little spud": "little_spud",
+    "little-spud": "little_spud",
+    "little_spud": "little_spud",
+    "little spuds": "little_spud",
+    "little-spuds": "little_spud",
+    "little_spuds": "little_spud",
+    "spud": "little_spud",
+    "spuds": "little_spud",
+    "pocket tater": "little_spud",
     "web ui": "webui",
     "web-ui": "webui",
     "web_ui": "webui",
@@ -305,6 +316,25 @@ def resolve_targets(
 
         if not (resolved.get("scope") or resolved.get("device_id")):
             return None, "Cannot queue: missing target device/scope"
+
+    elif platform == "little_spud":
+        if not resolved.get("node_id"):
+            if origin.get("platform") == "little_spud" and origin.get("node_id"):
+                resolved["node_id"] = origin.get("node_id")
+
+        if not resolved.get("scope"):
+            if origin.get("platform") == "little_spud":
+                if origin.get("scope"):
+                    resolved["scope"] = origin.get("scope")
+                elif origin.get("session_id"):
+                    resolved["scope"] = origin.get("session_id")
+
+        if not resolved.get("device_id"):
+            if origin.get("platform") == "little_spud" and origin.get("device_id"):
+                resolved["device_id"] = origin.get("device_id")
+
+        if not (resolved.get("node_id") or resolved.get("scope") or resolved.get("device_id")):
+            return None, "Cannot queue: missing target Little Spud"
 
     elif platform == "homeassistant":
         # No required target for persistent notifications

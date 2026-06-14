@@ -1188,7 +1188,7 @@ def _send_message_extract_target_hint(raw: Any) -> str:
             return match.group(0)
     text = re.sub(r"^(?:room|channel|chat)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(
-        r"\s+(?:to|in|on)\s+(?:discord|irc|matrix|telegram|meshtastic|mesh|home\s*assistant|homeassistant|ntfy|web\s*ui|webui)\b.*$",
+        r"\s+(?:to|in|on)\s+(?:discord|irc|matrix|telegram|meshtastic|mesh|home\s*assistant|homeassistant|ntfy|web\s*ui|webui|little\s*spuds?|little[_-]spuds?)\b.*$",
         "",
         text,
         flags=re.IGNORECASE,
@@ -1971,7 +1971,7 @@ def send_message(
             code="missing_destination_platform",
             message="Cannot queue: missing destination platform",
             needs=[
-                "Specify a destination platform such as discord, matrix, telegram, meshtastic, macos, homeassistant, ntfy, irc, or webui.",
+                "Specify a destination platform such as discord, matrix, telegram, meshtastic, macos, little_spud, homeassistant, ntfy, irc, or webui.",
                 "For macOS you can also say 'my mac' or 'mac os'.",
             ],
             say_hint="Explain that a destination platform is required.",

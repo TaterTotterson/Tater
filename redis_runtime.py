@@ -1806,6 +1806,18 @@ class EncryptedRedisClientFacade:
             return rows
         return [self._decode(value) for value in rows]
 
+    def lrem(self, name: Any, count: int, value: Any):
+        removed = self._client.lrem(name, count, self._encode(value, name))
+        if int(removed or 0) > 0 or not self._should_encrypt(name):
+            return removed
+        rows = self._client.lrange(name, 0, -1) or []
+        target = _value_bytes(value)
+        for raw_value in rows:
+            if self._decoded_identity_bytes(raw_value) != target:
+                continue
+            return self._client.lrem(name, count, raw_value)
+        return removed
+
     def rpop(self, name: Any, count: Any = None):
         if count is None:
             return self._decode(self._client.rpop(name))
