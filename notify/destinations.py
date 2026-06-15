@@ -583,6 +583,35 @@ def _recent_history_targets_for_platform(platform: str, redis_client: Any) -> Li
             token = _to_text(token)
             if token:
                 out.append({"destination": token, "node_id": token})
+    elif platform == "little_spud":
+        for key in _scan_keys(redis_client, "tater:little_spud:*:history", max_keys=_MAX_RECENT_KEYS):
+            try:
+                raw_items = redis_client.lrange(key, -20, -1) or []
+            except Exception:
+                raw_items = []
+            for raw in reversed(raw_items):
+                text = _to_text(raw)
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                user_name = _to_text(parsed.get("user") or parsed.get("username") or parsed.get("user_name"))
+                device_name = _to_text(parsed.get("device_name") or parsed.get("device_id") or parsed.get("device"))
+                targets: Dict[str, str] = {}
+                if user_name:
+                    targets["user"] = user_name
+                if device_name:
+                    targets["device_name"] = device_name
+                    targets["device_id"] = device_name
+                if user_name or device_name:
+                    targets["scope"] = f"user:{user_name or 'User'}:{device_name or 'Little Spud'}"
+                if targets:
+                    out.append(targets)
+                    break
     return out
 
 
