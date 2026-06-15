@@ -59,8 +59,6 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 
 ## macOS App Installation
 
-The easiest Mac install is the native **Tater.app** build. It runs the same Tater Python/FastAPI app, but wraps it in a macOS window with a menu bar icon, first-run setup, private runtime storage, and app-only update checks.
-
 <p>
   <a href="https://taterassistant.com">
     <img alt="Download Tater for macOS" src="https://img.shields.io/badge/macOS-Download%20Tater-000000?style=for-the-badge&logo=apple&logoColor=white" />
