@@ -44,12 +44,11 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [microWakeWord Trainer - NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | NVIDIA Docker trainer for creating custom microWakeWord models with GPU acceleration. |
 | [NanoWakeWord Trainer](https://github.com/TaterTotterson/nanoWakeWord-Trainer) | Trainer for custom NanoWakeWord models used by Tater's local or standalone NanoWakeWord server. |
 | [openWakeWord Trainer](https://github.com/TaterTotterson/openWakeWord-Trainer) | Trainer for custom openWakeWord models used by Tater's local or standalone openWakeWord server. |
-| [Tater MacOS](https://github.com/TaterTotterson/Tater-MacOS) | Menu bar companion app and bridge client for desktop chat, quick actions, and uploads. |
+| [Little Spud](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser and macOS client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
 | [Reachy Mini Voice Satellite](https://huggingface.co/spaces/TaterTotterson/tater_voice_sat) | Reachy Mini robot app that turns Reachy Mini into a voice satellite for Tater or Home Assistant. |
 | [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone) | Reachy Mini robot app that can run the full Tater app/stack directly on Reachy. |
 | [Tater NWW Server](https://github.com/TaterTotterson/Tater-NWW-Server) | Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection. |
 | [Tater OWW Server](https://github.com/TaterTotterson/Tater-OWW-Server) | Standalone openWakeWord WebSocket server for Tater satellites that need remote wake detection outside the main Tater app. |
-| [Tater S3Box Display](https://github.com/TaterTotterson/Tater-S3Box-Display) | ESP32-S3-BOX display firmware for Tater voice and dashboard-style device experiences. |
 | [XBMC4Xbox Skin](https://github.com/TaterTotterson/skin.cortana.tater-xbmc) | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
 
 ---
@@ -61,6 +60,12 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 ## macOS App Installation
 
 The easiest Mac install is the native **Tater.app** build. It runs the same Tater Python/FastAPI app, but wraps it in a macOS window with a menu bar icon, first-run setup, private runtime storage, and app-only update checks.
+
+<p>
+  <a href="https://taterassistant.com">
+    <img alt="Download Tater for macOS" src="https://img.shields.io/badge/macOS-Download%20Tater-000000?style=for-the-badge&logo=apple&logoColor=white" />
+  </a>
+</p>
 
 1. **Download the latest macOS installer**
 
@@ -87,6 +92,58 @@ The easiest Mac install is the native **Tater.app** build. It runs the same Tate
 Closing the window keeps Tater running in the menu bar. Use the menu bar item to reopen Tater, open it in a browser, stop, restart, show logs, check for updates, install available updates, or quit.
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
+
+## Unraid Installation
+
+<img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
+
+Tater is available in the **Unraid Community Apps** store.
+
+You can install **Tater** directly from the Unraid App Store with a one-click template.
+
+Unraid note:
+- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares, for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`.
+- Also set `TZ` and map `/etc/localtime` plus `/etc/timezone` if you want local time inside the container.
+
+Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
+
+## Home Assistant Installation
+
+A dedicated Home Assistant add-on repository is available here:
+
+https://github.com/TaterTotterson/hassio-addons-tater
+
+Click the button below to add the repository to Home Assistant:
+
+[![Add Repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](
+https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
+)
+
+Once added, the **Tater AI Assistant** add-on will appear in the Home Assistant Add-on Store.
+
+Install order:
+
+1. Install Tater AI Assistant.
+2. Configure your LLM settings in the Tater add-on.
+3. Start Tater.
+
+Once the add-ons are running, continue to **Post-Install Setup** below.
+
+## Reachy Mini Installation
+
+<p>
+  <a href="https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone">
+    <img alt="Install Tater on Reachy Mini" src="https://img.shields.io/badge/Reachy%20Mini-Install%20Tater-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" />
+  </a>
+</p>
+
+The **Reachy Mini Tater Standalone** app is the easy Reachy Mini install path. It runs the Tater app/stack directly on Reachy Mini and should appear from Reachy's app list when available.
+
+Install path:
+
+1. Open [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone).
+2. Follow the Space instructions for installing or launching it on Reachy Mini.
+3. Continue to **Post-Install Setup** once Tater is running.
 
 ## Local Installation
 
@@ -291,46 +348,6 @@ Once the container is running with host networking, open your browser and naviga
 If you changed `HTMLUI_PORT`, use that port in the URL.
 
 Once the WebUI is up, continue to **Post-Install Setup** below.
-
----
-
-## Unraid Installation
-
-<img width="100" height="44" alt="unraid_logo_black-339076895" src="https://github.com/user-attachments/assets/87351bed-3321-4a43-924f-fecf2e4e700f" />
-
-Tater is available in the **Unraid Community Apps** store.
-
-You can install **Tater** directly from the Unraid App Store with a one-click template.
-
-Unraid note:
-- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares, for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`.
-- Also set `TZ` and map `/etc/localtime` plus `/etc/timezone` if you want local time inside the container.
-
-Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
-
----
-
-## Home Assistant Installation
-
-A dedicated Home Assistant add-on repository is available here:
-
-https://github.com/TaterTotterson/hassio-addons-tater
-
-Click the button below to add the repository to Home Assistant:
-
-[![Add Repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](
-https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/TaterTotterson/hassio-addons-tater
-)
-
-Once added, the **Tater AI Assistant** add-on will appear in the Home Assistant Add-on Store.
-
-Install order:
-
-1. Install Tater AI Assistant.
-2. Configure your LLM settings in the Tater add-on.
-3. Start Tater.
-
-Once the add-ons are running, continue to **Post-Install Setup** below.
 
 ---
 
