@@ -7,7 +7,7 @@
   <a href="https://taterassistant.com">taterassistant.com</a>
 </h3>
 
-**Tater** is a local-first AI platform with built-in LLM, vision, voice, memory, automation, and integration systems. **Hydra** handles reasoning, orchestration, and tool use, while Tater can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to remote providers through OpenAI-compatible APIs. It includes a built-in voice system that talks directly to ESPHome devices like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, a WebUI for setup, configuration, chats, model management, and system monitoring, plus integrations across **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and even the **OG Xbox via XBMC4Xbox**.
+**Tater** is a local-first AI platform for LLMs, vision, voice, memory, automation, and integrations. It can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to OpenAI-compatible APIs, with **Hydra** handling reasoning, orchestration, and tool use. Tater includes a WebUI for setup and system management, voice support for ESPHome devices, and integrations for chat, smart home, messaging, and custom device workflows.
 
 ---
 
