@@ -240,10 +240,11 @@ const VIEW_META = {
   verbas: { title: "Verba", subtitle: "Enable tools and manage Verba settings + shop updates." },
   portals: { title: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
   cores: { title: "Cores", subtitle: "Core runtime controls and full Core Shop manager." },
+  integrations: { title: "Integrations", subtitle: "Service endpoints, credentials, devices, runtime, and integration updates." },
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
-const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "integrations", "esphome", "redis", "spudhub", "misc", "advanced", "logs"];
+const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "esphome", "redis", "spudhub", "misc", "advanced", "logs"];
 
 const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
 const POPUP_EFFECT_CLOSE_MS = {
@@ -2747,10 +2748,13 @@ function bindSettingsIntegrationTabs(root = document) {
       return;
     }
     host.dataset.integrationsSubtabRefreshing = "1";
-    setPreferredSettingsTab("integrations");
     setPreferredIntegrationTab(key);
     try {
-      await loadSettingsView();
+      if (state.view === "integrations") {
+        await loadIntegrationsView();
+      } else {
+        await loadSettingsView();
+      }
     } catch (error) {
       activate(key);
       showToast(`Integration ${key} refresh failed: ${error.message}`, "error", 3600);
@@ -13583,9 +13587,8 @@ function bindShopActions(kind) {
           state.notice = message;
           const refreshed = await refreshShopManagerInPlace(kind, refreshTab);
           if (!refreshed) {
-            setPreferredSettingsTab("integrations");
             setPreferredIntegrationTab("manager");
-            await loadSettingsView();
+            await loadView("integrations");
           }
           setStatus(message);
           showToast(message);
@@ -15317,9 +15320,8 @@ async function openDashboardUpdateTarget(rawTarget) {
     return;
   }
   if (target === "integrations") {
-    setPreferredSettingsTab("integrations");
     setPreferredIntegrationTab("manager");
-    await loadView("settings");
+    await loadView("integrations");
     const managerButton = document.querySelector("#settings-integrations-shell .settings-subtab-btn[data-integrations-tab='manager']");
     if (managerButton instanceof HTMLElement) {
       managerButton.click();
@@ -17135,6 +17137,127 @@ function bindSettingsPeopleActions() {
   });
 }
 
+function renderIntegrationsSettingsPanel(settings = {}, { active = true } = {}) {
+  return `
+    <section class="settings-tab-panel ${active ? "active" : ""}" data-settings-panel="integrations">
+      ${renderSettingsSectionIntro(
+        "Integrations",
+        "Service endpoints and credentials for search and direct Tater integrations.",
+        "API"
+      )}
+      <div id="settings-integrations-shell">
+        <div class="settings-subtabs">
+          <button type="button" class="settings-subtab-btn active" data-integrations-tab="setup">Setup</button>
+          <button type="button" class="settings-subtab-btn" data-integrations-tab="manager">Manager</button>
+          <button type="button" class="settings-subtab-btn" data-integrations-tab="devices">Devices</button>
+          <button type="button" class="settings-subtab-btn" data-integrations-tab="runtime">Live Runtime</button>
+        </div>
+
+        <div class="settings-subpanel active" data-integrations-panel="setup">
+          <div class="form-grid">
+            ${renderSettingsIntegrationSections(settings)}
+
+            <div class="inline-row" style="grid-column: 1 / -1;">
+              <button type="button" id="settings-save-integrations" class="action-btn">Save Integrations</button>
+              <span class="small">Saves integration settings.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-subpanel" data-integrations-panel="manager">
+          ${renderShopTabbedManager("integrations", settings.integration_shop || {}, {
+            runtimeCard: false,
+          })}
+        </div>
+
+        <div class="settings-subpanel" data-integrations-panel="devices">
+          ${renderSettingsIntegrationDevicesShell(settings.integrations)}
+        </div>
+
+        <div class="settings-subpanel" data-integrations-panel="runtime">
+          ${renderSettingsIntegrationRuntime(settings)}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function bindIntegrationsSurface(settings = {}, root = document) {
+  const host = root instanceof HTMLElement ? root : document;
+  const statusEl = host.querySelector("#settings-status") || document.getElementById("settings-status");
+  const integrations = Array.isArray(settings.integrations) ? settings.integrations : [];
+  const saveButton = host.querySelector("#settings-save-integrations");
+
+  host.querySelector("#settings-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+  });
+  saveButton?.addEventListener("click", async () => {
+    if (!integrations.length) {
+      if (statusEl) {
+        statusEl.textContent = "No integrations are registered.";
+      }
+      return;
+    }
+    saveButton.disabled = true;
+    saveButton.textContent = "Saving...";
+    if (statusEl) {
+      statusEl.textContent = "Saving integrations...";
+    }
+    try {
+      for (const integration of integrations) {
+        const id = String(integration?.id || "").trim();
+        if (!id) {
+          continue;
+        }
+        await api(`/api/settings/integrations/${encodeURIComponent(id)}/settings`, {
+          method: "POST",
+          body: JSON.stringify({ settings: collectSettingsIntegrationPayload(integration) }),
+        });
+      }
+      if (statusEl) {
+        statusEl.textContent = "Integrations saved.";
+      }
+      showToast("Integrations saved.");
+    } catch (error) {
+      const message = `Integration save failed: ${error.message}`;
+      if (statusEl) {
+        statusEl.textContent = message;
+      }
+      showToast(message, "error", 3600);
+    } finally {
+      saveButton.disabled = false;
+      saveButton.textContent = "Save Integrations";
+    }
+  });
+
+  bindSettingsIntegrationActions(integrations, statusEl);
+  bindSettingsIntegrationDevices();
+  bindSettingsIntegrationTabs(host);
+  bindSettingsIntegrationRuntime();
+  bindShopTabs("integrations");
+  bindShopActions("integrations");
+}
+
+async function loadIntegrationsView() {
+  const root = document.getElementById("view-root");
+  const settings = await api("/api/settings");
+  root.dataset.view = "settings";
+  root.innerHTML = `${consumeNoticeHtml()}
+    <div class="card">
+      <div class="card-head">
+        <h3 class="card-title">Integrations</h3>
+      </div>
+      <div class="small">Service endpoints, credentials, device discovery, live runtime, and integration updates.</div>
+      <div id="settings-status" class="small" style="margin-top: 6px;"></div>
+
+      <form id="settings-form">
+        ${renderIntegrationsSettingsPanel(settings, { active: true })}
+      </form>
+    </div>
+  `;
+  bindIntegrationsSurface(settings, root);
+}
+
 async function loadSettingsView() {
   const root = document.getElementById("view-root");
   const [redisStatusPayload, redisEncryptionPayload] = await Promise.all([
@@ -18060,7 +18183,7 @@ async function loadSettingsView() {
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Integrations, Voice, Redis, Spud Link, Misc, Advanced, Logs.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Voice, Redis, Spud Link, Misc, Advanced, Logs.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -18068,7 +18191,6 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="people">People</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="models">Models</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="hydra">Hydra</button>
-        <button type="button" class="settings-tab-btn" data-settings-tab="integrations">Integrations</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="esphome">Voice</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="redis">Redis</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Link</button>
@@ -18990,47 +19112,6 @@ async function loadSettingsView() {
               <button type="button" id="settings-hydra-model-save" class="action-btn model-save-btn is-global">Save All Models</button>
               <button type="button" id="settings-hydra-model-save-load" class="inline-btn model-save-btn is-load">Save & Load All Local LLMs</button>
               <span class="small">Save All does not load local LLMs. Use Save & Load when you want selected local models warmed now.</span>
-            </div>
-          </div>
-        </section>
-
-        <section class="settings-tab-panel" data-settings-panel="integrations">
-          ${renderSettingsSectionIntro(
-            "Integrations",
-            "Service endpoints and credentials for search and direct Tater integrations.",
-            "API"
-          )}
-          <div id="settings-integrations-shell">
-            <div class="settings-subtabs">
-              <button type="button" class="settings-subtab-btn active" data-integrations-tab="setup">Setup</button>
-              <button type="button" class="settings-subtab-btn" data-integrations-tab="manager">Manager</button>
-              <button type="button" class="settings-subtab-btn" data-integrations-tab="devices">Devices</button>
-              <button type="button" class="settings-subtab-btn" data-integrations-tab="runtime">Live Runtime</button>
-            </div>
-
-            <div class="settings-subpanel active" data-integrations-panel="setup">
-              <div class="form-grid">
-                ${renderSettingsIntegrationSections(settings)}
-
-                <div class="inline-row" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-save-integrations" class="action-btn">Save Settings</button>
-                  <span class="small">Saves Integrations and non-model settings.</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="settings-subpanel" data-integrations-panel="manager">
-              ${renderShopTabbedManager("integrations", settings.integration_shop || {}, {
-                runtimeCard: false,
-              })}
-            </div>
-
-            <div class="settings-subpanel" data-integrations-panel="devices">
-              ${renderSettingsIntegrationDevicesShell(settings.integrations)}
-            </div>
-
-            <div class="settings-subpanel" data-integrations-panel="runtime">
-              ${renderSettingsIntegrationRuntime(settings)}
             </div>
           </div>
         </section>
@@ -21048,9 +21129,8 @@ async function loadSettingsView() {
   };
   const openHfIntegrationSetup = async () => {
     const targetTab = !hfModelBrowserIntegration.installed || !hfModelBrowserIntegration.enabled ? "manager" : "setup";
-    setPreferredSettingsTab("integrations");
     setPreferredIntegrationTab(targetTab);
-    await loadSettingsView();
+    await loadView("integrations");
     const targetButton = document.querySelector(`#settings-integrations-shell .settings-subtab-btn[data-integrations-tab='${targetTab}']`);
     if (targetButton instanceof HTMLElement) {
       targetButton.click();
@@ -24041,12 +24121,6 @@ async function loadSettingsView() {
     statusEl.textContent = "Default admin tool list loaded. Click Save Settings to apply.";
   });
 
-  bindSettingsIntegrationActions(settings.integrations, statusEl);
-  bindSettingsIntegrationDevices();
-  bindSettingsIntegrationTabs(root);
-  bindSettingsIntegrationRuntime();
-  bindShopTabs("integrations");
-  bindShopActions("integrations");
   bindSettingsPeopleActions();
 
   document.getElementById("settings-form").addEventListener("submit", (event) => {
@@ -24091,12 +24165,6 @@ async function loadSettingsView() {
       ...(esphomeFormEl ? collectCoreManagerValues(esphomeFormEl) : {}),
       ...collectVoiceModelSettings(),
     };
-    const integrationPayloads = (Array.isArray(settings.integrations) ? settings.integrations : [])
-      .map((integration) => ({
-        id: String(integration?.id || "").trim(),
-        settings: collectSettingsIntegrationPayload(integration),
-      }))
-      .filter((item) => item.id);
     const payload = {
       username: document.getElementById("set_username").value,
       max_display: Number(document.getElementById("set_max_display").value || 8),
@@ -24182,15 +24250,6 @@ async function loadSettingsView() {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      if (integrationPayloads.length) {
-        statusEl.textContent = "Saving integrations...";
-        for (const item of integrationPayloads) {
-          await api(`/api/settings/integrations/${encodeURIComponent(item.id)}/settings`, {
-            method: "POST",
-            body: JSON.stringify({ settings: item.settings }),
-          });
-        }
-      }
       applyPopupEffectStyle(payload.popup_effect_style);
       if (webuiPasswordEl) {
         webuiPasswordEl.value = "";
@@ -24382,7 +24441,6 @@ async function loadSettingsView() {
   [
     "settings-save",
     "settings-save-general",
-    "settings-save-integrations",
     "settings-save-esphome",
     "settings-save-spudhub",
     "settings-save-misc",
@@ -26184,6 +26242,10 @@ async function loadView(viewName) {
     }
     if (viewName === "portals" || viewName === "cores") {
       await loadSurfaceView(viewName);
+      return;
+    }
+    if (viewName === "integrations") {
+      await loadIntegrationsView();
       return;
     }
     if (viewName === "settings") {
