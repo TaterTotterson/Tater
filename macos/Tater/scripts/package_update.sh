@@ -30,6 +30,13 @@ DOWNLOAD_URL="${1:-https://raw.githubusercontent.com/TaterTotterson/Tater/main/m
 mkdir -p "${RELEASES_DIR}"
 rm -f "${ZIP_PATH}" "${MANIFEST_PATH}" "${RELEASE_ZIP_PATH}"
 ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
+"${SCRIPT_DIR}/notarize_artifact.sh" "${ZIP_PATH}"
+if [ "${TATER_NOTARIZE:-0}" = "1" ]; then
+  xcrun stapler staple "${APP_DIR}"
+  xcrun stapler validate "${APP_DIR}"
+  rm -f "${ZIP_PATH}"
+  ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
+fi
 cp "${ZIP_PATH}" "${RELEASE_ZIP_PATH}"
 SHA256="$(shasum -a 256 "${ZIP_PATH}" | awk '{print $1}')"
 

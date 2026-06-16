@@ -12,6 +12,7 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 SOURCE_SNAPSHOT_DIR="${RESOURCES_DIR}/TaterSource"
 CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
+CODESIGN_ENTITLEMENTS="${TATER_CODESIGN_ENTITLEMENTS:-${PROJECT_DIR}/Resources/Tater.entitlements}"
 
 swift build -c release --package-path "${PROJECT_DIR}"
 BIN_DIR="$(swift build -c release --package-path "${PROJECT_DIR}" --show-bin-path)"
@@ -49,7 +50,22 @@ rsync -a --delete \
 chmod +x "${MACOS_DIR}/TaterAssistant"
 
 find "${APP_DIR}" -exec xattr -c {} +
-codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+if [ "${CODESIGN_IDENTITY}" = "-" ]; then
+  codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+else
+  if [ ! -f "${CODESIGN_ENTITLEMENTS}" ]; then
+    printf 'Missing codesign entitlements: %s\n' "${CODESIGN_ENTITLEMENTS}" >&2
+    exit 1
+  fi
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --entitlements "${CODESIGN_ENTITLEMENTS}" \
+    --sign "${CODESIGN_IDENTITY}" \
+    "${APP_DIR}"
+fi
 codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
 printf 'Built %s\n' "${APP_DIR}"
