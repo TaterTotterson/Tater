@@ -102,12 +102,47 @@ jobs:
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Tater ${{ steps.meta.outputs.version_label }}
-          prerelease: true
-          generate_release_notes: true
-          files: |
-            ${{ steps.meta.outputs.zip_path }}
-            ${{ steps.meta.outputs.dmg_path }}
-            ${{ steps.meta.outputs.manifest_path }}
+        shell: bash
+        env:
+          VERSION_LABEL: ${{ steps.meta.outputs.version_label }}
+          ZIP_PATH: ${{ steps.meta.outputs.zip_path }}
+          DMG_PATH: ${{ steps.meta.outputs.dmg_path }}
+          MANIFEST_PATH: ${{ steps.meta.outputs.manifest_path }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          tag="${GITHUB_REF_NAME}"
+          release_id="$(gh api "repos/${repo}/releases/tags/${tag}" --jq '.id' 2>/dev/null || true)"
+          if [[ -z "${release_id}" ]]; then
+            release_id="$(gh api \
+              --method POST \
+              "repos/${repo}/releases" \
+              -f "tag_name=${tag}" \
+              -f "name=Tater ${VERSION_LABEL}" \
+              -F "prerelease=true" \
+              -F "generate_release_notes=true" \
+              --jq '.id')"
+          fi
+
+          upload_asset() {
+            local path="$1"
+            local content_type="$2"
+            local name
+            local existing_id
+            name="$(basename "${path}")"
+            existing_id="$(gh api "repos/${repo}/releases/${release_id}/assets" \
+              --jq ".[] | select(.name == \"${name}\") | .id" 2>/dev/null || true)"
+            if [[ -n "${existing_id}" ]]; then
+              gh api --method DELETE "repos/${repo}/releases/assets/${existing_id}" >/dev/null
+            fi
+            gh api \
+              --method POST \
+              -H "Content-Type: ${content_type}" \
+              --input "${path}" \
+              "https://uploads.github.com/repos/${repo}/releases/${release_id}/assets?name=${name}" \
+              --jq '"uploaded " + .name'
+          }
+
+          upload_asset "${ZIP_PATH}" "application/zip"
+          upload_asset "${DMG_PATH}" "application/x-apple-diskimage"
+          upload_asset "${MANIFEST_PATH}" "application/json"
