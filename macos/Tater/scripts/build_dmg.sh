@@ -7,6 +7,7 @@ INFO_PLIST="${PROJECT_DIR}/Resources/Info.plist"
 BACKGROUND_IMAGE="${PROJECT_DIR}/Resources/TaterDmgBackground.png"
 APP_DIR="${PROJECT_DIR}/build/Tater.app"
 RELEASES_DIR="${PROJECT_DIR}/releases"
+CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
 VERSION_TOKEN="$(printf '%s' "${VERSION}" | sed 's/^[vV]//')"
@@ -117,6 +118,17 @@ hdiutil convert "${RW_DMG}" \
   -o "${FINAL_DMG}" >/dev/null
 
 hdiutil verify "${FINAL_DMG}" >/dev/null
+
+if [ "${CODESIGN_IDENTITY}" != "-" ]; then
+  codesign --force --timestamp --sign "${CODESIGN_IDENTITY}" "${FINAL_DMG}"
+  codesign --verify --verbose=2 "${FINAL_DMG}"
+fi
+
+"${SCRIPT_DIR}/notarize_artifact.sh" "${FINAL_DMG}"
+if [ "${TATER_NOTARIZE:-0}" = "1" ]; then
+  xcrun stapler staple "${FINAL_DMG}"
+  xcrun stapler validate "${FINAL_DMG}"
+fi
 
 mkdir -p "${RELEASES_DIR}"
 cp "${FINAL_DMG}" "${RELEASE_DMG}"

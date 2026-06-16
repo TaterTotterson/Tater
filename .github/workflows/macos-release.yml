@@ -19,7 +19,9 @@ jobs:
     runs-on: [self-hosted, macOS]
     timeout-minutes: 60
     env:
-      TATER_CODESIGN_IDENTITY: "-"
+      TATER_CODESIGN_IDENTITY: ${{ vars.TATER_CODESIGN_IDENTITY || 'Developer ID Application: Tater Totterson AI LLC (8BHV7Y2D9D)' }}
+      TATER_NOTARIZE: ${{ vars.TATER_NOTARIZE || '0' }}
+      TATER_NOTARY_PROFILE: ${{ vars.TATER_NOTARY_PROFILE || 'tater-notary' }}
 
     steps:
       - name: Check out repository
