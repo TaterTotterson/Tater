@@ -98,7 +98,14 @@ jobs:
             exit 0
           fi
           git commit -m "Add macOS release ${{ steps.meta.outputs.version_label }}"
-          git push origin HEAD:main
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Generated release commit push failed on attempt ${attempt}; retrying..." >&2
+            sleep 10
+          done
+          echo "::warning::Generated release files were built, but pushing them to main timed out. Continuing so GitHub Release assets can publish."
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
@@ -108,20 +115,38 @@ jobs:
           ZIP_PATH: ${{ steps.meta.outputs.zip_path }}
           DMG_PATH: ${{ steps.meta.outputs.dmg_path }}
           MANIFEST_PATH: ${{ steps.meta.outputs.manifest_path }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
           tag="${GITHUB_REF_NAME}"
-          release_id="$(gh api "repos/${repo}/releases/tags/${tag}" --jq '.id' 2>/dev/null || true)"
+          api_url="https://api.github.com/repos/${repo}"
+          upload_url="https://uploads.github.com/repos/${repo}"
+          auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+          api_headers=(
+            -H "${auth_header}"
+            -H "Accept: application/vnd.github+json"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          json_id() {
+            /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))' 2>/dev/null || true
+          }
+
+          release_id="$(curl -fsS "${api_headers[@]}" "${api_url}/releases/tags/${tag}" | json_id || true)"
           if [[ -z "${release_id}" ]]; then
-            release_id="$(gh api \
-              --method POST \
-              "repos/${repo}/releases" \
-              -f "tag_name=${tag}" \
-              -f "name=Tater ${VERSION_LABEL}" \
-              -F "prerelease=true" \
-              -F "generate_release_notes=true" \
-              --jq '.id')"
+            release_body="$(/usr/bin/python3 -c 'import json, os; print(json.dumps({
+              "tag_name": os.environ["GITHUB_REF_NAME"],
+              "name": "Tater " + os.environ["VERSION_LABEL"],
+              "prerelease": True,
+              "generate_release_notes": True,
+            }))')"
+            release_id="$(curl -fsS \
+              -X POST \
+              "${api_headers[@]}" \
+              -H "Content-Type: application/json" \
+              --data "${release_body}" \
+              "${api_url}/releases" | json_id)"
           fi
 
           upload_asset() {
@@ -130,17 +155,18 @@ jobs:
             local name
             local existing_id
             name="$(basename "${path}")"
-            existing_id="$(gh api "repos/${repo}/releases/${release_id}/assets" \
-              --jq ".[] | select(.name == \"${name}\") | .id" 2>/dev/null || true)"
+            existing_id="$(curl -fsS "${api_headers[@]}" "${api_url}/releases/${release_id}/assets?per_page=100" \
+              | /usr/bin/python3 -c 'import json, sys; target = sys.argv[1]; print(next((str(asset.get("id", "")) for asset in json.load(sys.stdin) if asset.get("name") == target), ""))' "${name}" 2>/dev/null || true)"
             if [[ -n "${existing_id}" ]]; then
-              gh api --method DELETE "repos/${repo}/releases/assets/${existing_id}" >/dev/null
+              curl -fsS -X DELETE "${api_headers[@]}" "${api_url}/releases/assets/${existing_id}" >/dev/null
             fi
-            gh api \
-              --method POST \
+            curl -fsS \
+              -X POST \
+              "${api_headers[@]}" \
               -H "Content-Type: ${content_type}" \
-              --input "${path}" \
-              "https://uploads.github.com/repos/${repo}/releases/${release_id}/assets?name=${name}" \
-              --jq '"uploaded " + .name'
+              --data-binary @"${path}" \
+              "${upload_url}/releases/${release_id}/assets?name=${name}" \
+              | /usr/bin/python3 -c 'import json, sys; print("uploaded " + json.load(sys.stdin).get("name", ""))'
           }
 
           upload_asset "${ZIP_PATH}" "application/zip"
