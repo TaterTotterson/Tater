@@ -208,8 +208,10 @@ macOS Apple Silicon:
 If native macOS dependency builds fail, install these Homebrew packages and rerun setup:
 
 ```bash
-brew install ffmpeg libolm pkg-config cmake
+brew install ffmpeg cmake
 ```
+
+Matrix encryption and embedded Redis are enabled by default. The macOS Apple Silicon setup includes bundled native wheels for `python-olm` and `redislite` so clean app installs do not need to compile those packages during first launch. Source installs on other macOS architectures may still need native build tools plus `libolm` and `pkg-config`.
 
 NVIDIA desktop/server:
 - The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and builds Tater's native llama.cpp engine with CUDA.

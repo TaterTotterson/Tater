@@ -29,19 +29,19 @@ cp "${PROJECT_DIR}/Resources/TaterMenuBarTemplate.png" "${RESOURCES_DIR}/TaterMe
 cp "${PROJECT_DIR}/Resources/TaterAvatar.png" "${RESOURCES_DIR}/TaterAvatar.png"
 cp "${PROJECT_DIR}/Resources/TaterSetupLogo.png" "${RESOURCES_DIR}/TaterSetupLogo.png"
 rsync -a --delete \
-  --exclude='.git/' \
-  --exclude='.github/' \
-  --exclude='.agents/' \
-  --exclude='.codex/' \
-  --exclude='.venv/' \
-  --exclude='.runtime/' \
-  --exclude='agent_lab/' \
-  --exclude='cores/' \
-  --exclude='integrations/' \
-  --exclude='macos/' \
-  --exclude='portals/' \
-  --exclude='verba/' \
-  --exclude='wav2vec2_checkpoints/' \
+  --exclude='/.git/' \
+  --exclude='/.github/' \
+  --exclude='/.agents/' \
+  --exclude='/.codex/' \
+  --exclude='/.venv/' \
+  --exclude='/.runtime/' \
+  --exclude='/agent_lab/' \
+  --exclude='/cores/' \
+  --exclude='/integrations/' \
+  --exclude='/macos/' \
+  --exclude='/portals/' \
+  --exclude='/verba/' \
+  --exclude='/wav2vec2_checkpoints/' \
   --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='.DS_Store' \
