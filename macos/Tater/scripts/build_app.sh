@@ -11,8 +11,14 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 SOURCE_SNAPSHOT_DIR="${RESOURCES_DIR}/TaterSource"
+NATIVE_RESOURCES_DIR="${RESOURCES_DIR}/Native"
 CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
 CODESIGN_ENTITLEMENTS="${TATER_CODESIGN_ENTITLEMENTS:-${PROJECT_DIR}/Resources/Tater.entitlements}"
+LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
+NATIVE_BUILD_DIR="${PROJECT_DIR}/build/native"
+LLAMA_CPP_DIR="${TATER_MACOS_LLAMA_CPP_DIR:-${NATIVE_BUILD_DIR}/llama.cpp}"
+MLX_ENGINE_DIR="${TATER_MACOS_MLX_ENGINE_DIR:-${NATIVE_BUILD_DIR}/mlx-engine}"
 
 swift build -c release --package-path "${PROJECT_DIR}"
 BIN_DIR="$(swift build -c release --package-path "${PROJECT_DIR}" --show-bin-path)"
@@ -104,6 +110,91 @@ PY
 }
 
 sign_bundled_wheel_payloads
+
+prepare_bundled_llama_cpp_runtime() {
+  if [ "${TATER_BUNDLE_LLAMA_CPP:-1}" = "0" ]; then
+    return
+  fi
+  command -v git >/dev/null 2>&1 || { printf 'git is required to prepare bundled llama.cpp runtime.\n' >&2; exit 1; }
+  command -v cmake >/dev/null 2>&1 || { printf 'cmake is required to prepare bundled llama.cpp runtime.\n' >&2; exit 1; }
+
+  mkdir -p "${NATIVE_BUILD_DIR}"
+  if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
+    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}"
+  else
+    git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}"
+    git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
+  fi
+
+  cmake \
+    -S "${LLAMA_CPP_DIR}" \
+    -B "${LLAMA_CPP_DIR}/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_METAL=on \
+    -DLLAMA_OPENSSL=OFF \
+    -DLLAMA_BUILD_UI=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF \
+    -DLLAMA_BUILD_TESTS=OFF
+  cmake --build "${LLAMA_CPP_DIR}/build" --config Release --target llama-server -j "${TATER_LLAMA_CPP_BUILD_JOBS:-4}"
+
+  build_bin="${LLAMA_CPP_DIR}/build/bin"
+  bundled_bin="${NATIVE_RESOURCES_DIR}/llama.cpp/bin"
+  test -x "${build_bin}/llama-server"
+  rm -rf "${NATIVE_RESOURCES_DIR}/llama.cpp"
+  mkdir -p "${bundled_bin}"
+  rsync -a \
+    --include='/llama-server' \
+    --include='/*.dylib' \
+    --exclude='*' \
+    "${build_bin}/" "${bundled_bin}/"
+
+  for mach_o in "${bundled_bin}/llama-server" "${bundled_bin}"/*.dylib; do
+    [ -e "${mach_o}" ] || continue
+    otool -l "${mach_o}" 2>/dev/null | awk '
+      $1 == "path" {
+        print $2
+      }
+    ' | while IFS= read -r rpath; do
+      case "${rpath}" in
+        @executable_path|@loader_path) ;;
+        *) install_name_tool -delete_rpath "${rpath}" "${mach_o}" >/dev/null 2>&1 || true ;;
+      esac
+    done
+    install_name_tool -add_rpath "@executable_path" "${mach_o}" >/dev/null 2>&1 || true
+    install_name_tool -add_rpath "@loader_path" "${mach_o}" >/dev/null 2>&1 || true
+  done
+
+  DYLD_LIBRARY_PATH="${bundled_bin}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" "${bundled_bin}/llama-server" --version >/dev/null
+}
+
+prepare_bundled_mlx_engine_runtime() {
+  if [ "${TATER_BUNDLE_MLX_ENGINE:-1}" = "0" ]; then
+    return
+  fi
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ] || [ "$(uname -m 2>/dev/null || printf unknown)" != "arm64" ]; then
+    return
+  fi
+  command -v git >/dev/null 2>&1 || { printf 'git is required to prepare bundled MLX engine runtime.\n' >&2; exit 1; }
+
+  mkdir -p "${NATIVE_BUILD_DIR}"
+  if [ ! -d "${MLX_ENGINE_DIR}/.git" ]; then
+    git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git "${MLX_ENGINE_DIR}"
+  else
+    git -C "${MLX_ENGINE_DIR}" pull --ff-only
+  fi
+
+  bundled_engine="${NATIVE_RESOURCES_DIR}/mlx-engine"
+  rm -rf "${bundled_engine}"
+  rsync -a \
+    --exclude='/.git/' \
+    --exclude='__pycache__/' \
+    --exclude='*.pyc' \
+    "${MLX_ENGINE_DIR}/" "${bundled_engine}/"
+  test -d "${bundled_engine}/mlx_engine"
+}
+
+prepare_bundled_llama_cpp_runtime
+prepare_bundled_mlx_engine_runtime
 
 chmod +x "${MACOS_DIR}/TaterAssistant"
 

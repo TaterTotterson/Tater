@@ -585,6 +585,9 @@ private final class BackendManager {
            FileManager.default.isExecutableFile(atPath: NSString(string: override).expandingTildeInPath) {
             return true
         }
+        if let bundled = bundledLlamaServerURL(), FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return true
+        }
 
         let candidates = [
             runtimeDir.appendingPathComponent("llama.cpp/build/bin/llama-server"),
@@ -597,8 +600,28 @@ private final class BackendManager {
         let override = ProcessInfo.processInfo.environment["TATER_MLX_ENGINE_PATH"]
         let root = (override?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? URL(fileURLWithPath: NSString(string: override ?? "").expandingTildeInPath, isDirectory: true)
-            : runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true)
+            : (bundledMLXEngineURL() ?? runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true))
         return FileManager.default.fileExists(atPath: root.appendingPathComponent("mlx_engine", isDirectory: true).path)
+    }
+
+    private func bundledLlamaServerURL() -> URL? {
+        guard let resources = Bundle.main.resourceURL else {
+            return nil
+        }
+        return resources
+            .appendingPathComponent("Native", isDirectory: true)
+            .appendingPathComponent("llama.cpp", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("llama-server")
+    }
+
+    private func bundledMLXEngineURL() -> URL? {
+        guard let resources = Bundle.main.resourceURL else {
+            return nil
+        }
+        return resources
+            .appendingPathComponent("Native", isDirectory: true)
+            .appendingPathComponent("mlx-engine", isDirectory: true)
     }
 
     private var isAppleSilicon: Bool {
@@ -743,6 +766,7 @@ private final class BackendManager {
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["TATER_SETUP_REBUILD"] = "1"
+        environment["TATER_SETUP_REQUIRE_LOCAL_LLM"] = "1"
         environment["TATER_VENV_DIR"] = venvDir.path
         environment["TATER_RUNTIME_DIR"] = runtimeDir.path
         environment["TATER_PROFILE_ENV"] = profileEnv.path
@@ -757,6 +781,16 @@ private final class BackendManager {
         environment["TATER_HF_TRANSFORMERS_MODEL_ROOT"] = llmRoot.appendingPathComponent("huggingface", isDirectory: true).path
         environment["TATER_LLAMA_CPP_MODEL_ROOT"] = llmRoot.appendingPathComponent("llama-cpp", isDirectory: true).path
         environment["TATER_MLX_LM_MODEL_ROOT"] = llmRoot.appendingPathComponent("mlx", isDirectory: true).path
+        if environment["TATER_LLAMA_CPP_SERVER_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
+           let bundled = bundledLlamaServerURL(),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            environment["TATER_LLAMA_CPP_SERVER_BIN"] = bundled.path
+        }
+        if environment["TATER_MLX_ENGINE_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
+           let bundled = bundledMLXEngineURL(),
+           FileManager.default.fileExists(atPath: bundled.appendingPathComponent("mlx_engine", isDirectory: true).path) {
+            environment["TATER_MLX_ENGINE_PATH"] = bundled.path
+        }
         environment["HF_HOME"] = agentRoot.appendingPathComponent("models/huggingface-cache", isDirectory: true).path
         environment["TORCH_HOME"] = agentRoot.appendingPathComponent("models/torch-cache", isDirectory: true).path
         environment["HTMLUI_HOST"] = "0.0.0.0"

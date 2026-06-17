@@ -420,6 +420,10 @@ install_mlx_engine_checkout() {
     warn "Skipping MLX engine checkout because TATER_SETUP_MLX_ENGINE=0."
     return
   fi
+  if [ "${TATER_MLX_ENGINE_PATH:-}" ] && [ -d "${TATER_MLX_ENGINE_PATH}/mlx_engine" ]; then
+    ok "Using MLX engine at ${TATER_MLX_ENGINE_PATH}"
+    return
+  fi
   if ! command -v git >/dev/null 2>&1; then
     warn "git was not found; skipping optional MLX engine checkout."
     return
@@ -591,8 +595,16 @@ verify_install() {
   venv_python="$1"
   profile="$2"
   info "Checking installed runtime"
-  TATER_LLAMA_CPP_SERVER_BIN="${LLAMA_CPP_SERVER_BIN}" "${venv_python}" - <<'PY'
+  TATER_LLAMA_CPP_SERVER_BIN="${LLAMA_CPP_SERVER_BIN}" \
+  TATER_SETUP_PROFILE="${profile}" \
+  TATER_SETUP_REQUIRE_LOCAL_LLM="${TATER_SETUP_REQUIRE_LOCAL_LLM:-1}" \
+  TATER_MLX_ENGINE_PATH="${TATER_MLX_ENGINE_PATH:-}" \
+  TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
+  "${venv_python}" - <<'PY'
 import importlib.util
+import os
+import platform
+from pathlib import Path
 
 required = ["fastapi", "uvicorn", "redis", "redislite", "aioesphomeapi"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
@@ -629,15 +641,38 @@ import os
 import subprocess
 
 server_bin = os.getenv("TATER_LLAMA_CPP_SERVER_BIN", "")
+require_raw = str(os.getenv("TATER_SETUP_REQUIRE_LOCAL_LLM") or "1").strip().lower()
+require_local_llm = require_raw not in ("", "0", "false", "no", "off")
 if server_bin:
     try:
         completed = subprocess.run([server_bin, "--version"], text=True, capture_output=True, timeout=10)
         output = " ".join(((completed.stdout or "") + " " + (completed.stderr or "")).split())
         print(f"llama_server={server_bin} {output}")
+        if completed.returncode != 0 and require_local_llm:
+            raise SystemExit(f"llama_server failed: {output}")
     except Exception as exc:
         print(f"llama_server unavailable: {exc}")
+        if require_local_llm:
+            raise
 else:
     print("llama_server unavailable: TATER_LLAMA_CPP_SERVER_BIN is not set")
+    if require_local_llm:
+        raise SystemExit("Missing required llama.cpp server binary")
+
+if require_local_llm:
+    llm_modules = ["transformers", "accelerate"]
+    is_apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+    if is_apple_silicon:
+        llm_modules.extend(["mlx_lm", "mlx_vlm", "outlines"])
+    missing_llm = [name for name in llm_modules if importlib.util.find_spec(name) is None]
+    if missing_llm:
+        raise SystemExit("Missing required local LLM packages: " + ", ".join(missing_llm))
+    print("local_llm_imports ok")
+    if is_apple_silicon:
+        mlx_engine = os.getenv("TATER_MLX_ENGINE_PATH") or str(Path(os.getenv("TATER_RUNTIME_DIR", ".runtime")) / "mlx-engine")
+        if not (Path(mlx_engine) / "mlx_engine").is_dir():
+            raise SystemExit(f"Missing required MLX engine checkout: {mlx_engine}")
+        print(f"mlx_engine={mlx_engine}")
 
 for name in ("mlx_whisper", "kokoro"):
     try:
