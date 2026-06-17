@@ -68,6 +68,7 @@ jobs:
           shasum -a 256 "${zip_path}" "${dmg_path}" "macos/Tater/update-manifest.json"
 
       - name: Upload workflow artifacts
+        if: ${{ vars.TATER_UPLOAD_WORKFLOW_ARTIFACTS == '1' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
