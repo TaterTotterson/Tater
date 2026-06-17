@@ -68,11 +68,7 @@ sign_bundled_wheel_payloads() {
 
     find "${unpack_dir}" -type f | while IFS= read -r payload_path; do
       if file "${payload_path}" | grep -q 'Mach-O'; then
-        if [ "${CODESIGN_IDENTITY}" = "-" ]; then
-          codesign --force --sign "${CODESIGN_IDENTITY}" "${payload_path}"
-        else
-          codesign --force --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${payload_path}"
-        fi
+        sign_mach_o_payload "${payload_path}"
       fi
     done
 
@@ -106,6 +102,26 @@ PY
     rm -f "${wheel_path}"
     (cd "${unpack_dir}" && /usr/bin/zip -qr "${wheel_path}" .)
     rm -rf "${work_dir}"
+  done
+}
+
+sign_mach_o_payload() {
+  payload_path="$1"
+  if [ "${CODESIGN_IDENTITY}" = "-" ]; then
+    codesign --force --sign "${CODESIGN_IDENTITY}" "${payload_path}"
+  else
+    codesign --force --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${payload_path}"
+  fi
+}
+
+sign_native_runtime_payloads() {
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ] || [ ! -d "${NATIVE_RESOURCES_DIR}" ]; then
+    return
+  fi
+  find "${NATIVE_RESOURCES_DIR}" -type f | while IFS= read -r payload_path; do
+    if file "${payload_path}" | grep -q 'Mach-O'; then
+      sign_mach_o_payload "${payload_path}"
+    fi
   done
 }
 
@@ -242,6 +258,7 @@ prepare_bundled_mlx_engine_runtime
 chmod +x "${MACOS_DIR}/TaterAssistant"
 
 find "${APP_DIR}" -exec xattr -c {} +
+sign_native_runtime_payloads
 if [ "${CODESIGN_IDENTITY}" = "-" ]; then
   codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
 else
