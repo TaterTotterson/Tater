@@ -490,11 +490,13 @@ private final class BackendManager {
         let venvReady = FileManager.default.isExecutableFile(atPath: python.path)
         let profileReady = FileManager.default.fileExists(atPath: profile.path)
         let dependenciesReady = venvReady ? pinnedRuntimeDependenciesReady(using: python) : false
-        guard !venvReady || !profileReady || !dependenciesReady else {
+        let localLLMDepsReady = venvReady ? localLLMPythonDependenciesReady(using: python) : false
+        let localLLMRuntimesReady = localLLMRuntimesReady()
+        guard !venvReady || !profileReady || !dependenciesReady || !localLLMDepsReady || !localLLMRuntimesReady else {
             appendLog("Private runtime is ready: \(venvDir.path)\n")
             return
         }
-        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady). Running setup.\n")
+        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady) localLLMDepsReady=\(localLLMDepsReady) localLLMRuntimesReady=\(localLLMRuntimesReady). Running setup.\n")
 
         guard FileManager.default.fileExists(atPath: sourceRoot.appendingPathComponent("setup_tater.sh").path) else {
             throw LauncherError("Could not find setup_tater.sh in \(sourceRoot.path)")
@@ -526,6 +528,85 @@ private final class BackendManager {
         guard process.terminationStatus == 0 else {
             throw LauncherError("macOS setup failed. See \(logsDir.appendingPathComponent("setup.log").path)")
         }
+    }
+
+    private func localLLMPythonDependenciesReady(using python: URL) -> Bool {
+        var modules = ["transformers", "accelerate"]
+        if isAppleSilicon {
+            modules.append(contentsOf: ["mlx_lm", "mlx_vlm", "outlines"])
+        }
+
+        let process = Process()
+        process.executableURL = python
+        process.arguments = [
+            "-c",
+            "import importlib.util, sys\nmissing=[name for name in sys.argv[1:] if importlib.util.find_spec(name) is None]\nprint('\\n'.join(missing))\nsys.exit(1 if missing else 0)"
+        ] + modules
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            appendLog("Private runtime could not inspect local LLM Python dependencies: \(error.localizedDescription)\n")
+            return false
+        }
+
+        guard process.terminationStatus == 0 else {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let missing = String(decoding: data, as: UTF8.self)
+                .split(separator: "\n")
+                .map(String.init)
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            appendLog("Private runtime is missing local LLM Python dependencies: \(missing.isEmpty ? modules.joined(separator: ", ") : missing).\n")
+            return false
+        }
+        return true
+    }
+
+    private func localLLMRuntimesReady() -> Bool {
+        let llamaReady = nativeLlamaServerReady()
+        let mlxReady = !isAppleSilicon || mlxEngineReady()
+        if !llamaReady {
+            appendLog("Private runtime is missing native llama.cpp server under \(runtimeDir.appendingPathComponent("llama.cpp").path).\n")
+        }
+        if !mlxReady {
+            appendLog("Private runtime is missing MLX engine checkout under \(runtimeDir.appendingPathComponent("mlx-engine").path).\n")
+        }
+        return llamaReady && mlxReady
+    }
+
+    private func nativeLlamaServerReady() -> Bool {
+        if let override = ProcessInfo.processInfo.environment["TATER_LLAMA_CPP_SERVER_BIN"],
+           FileManager.default.isExecutableFile(atPath: NSString(string: override).expandingTildeInPath) {
+            return true
+        }
+
+        let candidates = [
+            runtimeDir.appendingPathComponent("llama.cpp/build/bin/llama-server"),
+            runtimeDir.appendingPathComponent("llama.cpp/build/bin/Release/llama-server")
+        ]
+        return candidates.contains { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func mlxEngineReady() -> Bool {
+        let override = ProcessInfo.processInfo.environment["TATER_MLX_ENGINE_PATH"]
+        let root = (override?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? URL(fileURLWithPath: NSString(string: override ?? "").expandingTildeInPath, isDirectory: true)
+            : runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true)
+        return FileManager.default.fileExists(atPath: root.appendingPathComponent("mlx_engine", isDirectory: true).path)
+    }
+
+    private var isAppleSilicon: Bool {
+        #if arch(arm64)
+        return true
+        #else
+        return false
+        #endif
     }
 
     private func pinnedRuntimeDependenciesReady(using python: URL) -> Bool {
