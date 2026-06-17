@@ -169,28 +169,28 @@ jobs:
               done
               echo "Uploading ${name} (attempt ${attempt}/3)..."
               if python3 - "${repo}" "${tag}" "${path}" <<'PY'
-import subprocess
-import sys
+          import subprocess
+          import sys
 
-repo, tag, path = sys.argv[1], sys.argv[2], sys.argv[3]
-cmd = [
-    "gh",
-    "release",
-    "upload",
-    tag,
-    path,
-    "--repo",
-    repo,
-    "--clobber",
-]
-try:
-    subprocess.run(cmd, check=True, timeout=300)
-except subprocess.TimeoutExpired:
-    print(f"Timed out uploading {path}", file=sys.stderr)
-    raise SystemExit(124)
-except subprocess.CalledProcessError as exc:
-    raise SystemExit(exc.returncode)
-PY
+          repo, tag, path = sys.argv[1], sys.argv[2], sys.argv[3]
+          cmd = [
+              "gh",
+              "release",
+              "upload",
+              tag,
+              path,
+              "--repo",
+              repo,
+              "--clobber",
+          ]
+          try:
+              subprocess.run(cmd, check=True, timeout=300)
+          except subprocess.TimeoutExpired:
+              print(f"Timed out uploading {path}", file=sys.stderr)
+              raise SystemExit(124)
+          except subprocess.CalledProcessError as exc:
+              raise SystemExit(exc.returncode)
+          PY
               then
                 return 0
               fi
