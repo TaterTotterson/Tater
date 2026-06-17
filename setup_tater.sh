@@ -265,6 +265,31 @@ filtered_macos_requirements() {
   ' "${REQUIREMENTS_FILE}" > "${output_file}"
 }
 
+install_macos_bundled_native_wheels() {
+  venv_python="$1"
+  wheel_dir="${SCRIPT_DIR}/vendor/wheels/macos"
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ]; then
+    return
+  fi
+  if [ "$(uname -m 2>/dev/null || printf unknown)" != "arm64" ]; then
+    return
+  fi
+  if [ ! -d "${wheel_dir}" ]; then
+    return
+  fi
+  info "Installing bundled macOS native wheels"
+  if "${venv_python}" -m pip install \
+    --find-links "${wheel_dir}" \
+    --only-binary python-olm \
+    --only-binary redislite \
+    "python-olm==3.2.16" \
+    "redislite==6.2.912183"; then
+    ok "Bundled macOS native wheels installed"
+  else
+    warn "Bundled macOS native wheels did not install. Setup will try the normal requirements next."
+  fi
+}
+
 install_base() {
   venv_python="$1"
   info "Upgrading pip tooling"
@@ -434,12 +459,14 @@ install_macos() {
       warn "Detected macOS ${arch}. This profile is tuned for Apple Silicon but may still run CPU-first."
     fi
     if ! command -v brew >/dev/null 2>&1; then
-      warn "Homebrew was not found. If installs fail, install Homebrew packages: ffmpeg libolm pkg-config cmake."
+      warn "Homebrew was not found. If native installs fail, install Homebrew packages: ffmpeg cmake."
     else
-      warn "If native package builds fail, run: brew install ffmpeg libolm pkg-config cmake"
+      warn "If native package builds fail, run: brew install ffmpeg cmake"
+      warn "Matrix encryption and embedded Redis use bundled Apple Silicon wheels; source fallback may still need native build tools."
     fi
   fi
   info "Installing Tater dependencies for macOS"
+  install_macos_bundled_native_wheels "${venv_python}"
   "${venv_python}" -m pip install -r "${tmp_req}"
   install_llama_cpp_native macos
   info "Installing Apple-native speech extras"
