@@ -778,6 +778,9 @@ private final class BackendManager {
         environment["TATER_REDIS_CONFIG_PATH"] = runtimeDir.appendingPathComponent("redis_connection.json").path
         environment["TATER_REDIS_DATA_PATH"] = agentRoot.appendingPathComponent("redis/dump.rdb").path
         environment["TATER_LOCAL_LLM_MODEL_REGISTRY"] = llmRoot.appendingPathComponent("downloaded_models.json").path
+        if let resources = Bundle.main.resourceURL {
+            environment["TATER_APP_RESOURCES_DIR"] = resources.path
+        }
         environment["TATER_HF_TRANSFORMERS_MODEL_ROOT"] = llmRoot.appendingPathComponent("huggingface", isDirectory: true).path
         environment["TATER_LLAMA_CPP_MODEL_ROOT"] = llmRoot.appendingPathComponent("llama-cpp", isDirectory: true).path
         environment["TATER_MLX_LM_MODEL_ROOT"] = llmRoot.appendingPathComponent("mlx", isDirectory: true).path
