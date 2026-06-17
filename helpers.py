@@ -5705,6 +5705,20 @@ _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
 _LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
 
 
+def _macos_bundled_llama_server_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    resources_dir = str(os.getenv("TATER_APP_RESOURCES_DIR") or "").strip()
+    if resources_dir:
+        candidates.append(Path(resources_dir) / "Native" / "llama.cpp" / "bin" / "llama-server")
+    try:
+        source_root = Path(__file__).resolve().parent
+        if source_root.name == "TaterSource":
+            candidates.append(source_root.parent / "Native" / "llama.cpp" / "bin" / "llama-server")
+    except Exception:
+        pass
+    return candidates
+
+
 def _llama_cpp_native_server_candidates() -> List[str]:
     env_candidates = (
         os.getenv("TATER_LLAMA_CPP_SERVER_BIN"),
@@ -5721,6 +5735,7 @@ def _llama_cpp_native_server_candidates() -> List[str]:
             runtime_root / "llama.cpp" / "build" / "bin" / "llama-server.exe",
             runtime_root / "llama.cpp" / "bin" / "llama-server",
             runtime_root / "llama.cpp" / "llama-server",
+            *_macos_bundled_llama_server_candidates(),
             Path("/opt/llama.cpp/build/bin/llama-server"),
             Path("/usr/local/bin/llama-server"),
             Path("/opt/homebrew/bin/llama-server"),
