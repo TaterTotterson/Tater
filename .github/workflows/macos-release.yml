@@ -110,97 +110,50 @@ jobs:
           done
           echo "::warning::Generated release files were built, but pushing them to main timed out. Continuing so GitHub Release assets can publish."
 
-      - name: Ensure GitHub CLI
+      - name: Clean stale GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          set -euo pipefail
-          if command -v gh >/dev/null 2>&1; then
-            exit 0
-          fi
-          for candidate in /opt/homebrew/bin/gh /usr/local/bin/gh; do
-            if [[ -x "${candidate}" ]]; then
-              echo "$(dirname "${candidate}")" >> "${GITHUB_PATH}"
-              exit 0
-            fi
-          done
-          if command -v brew >/dev/null 2>&1; then
-            brew install gh
-            echo "$(brew --prefix)/bin" >> "${GITHUB_PATH}"
-            exit 0
-          fi
-          echo "GitHub CLI (gh) is required to publish release assets." >&2
-          exit 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const names = new Set([
+              '${{ steps.meta.outputs.zip_path }}'.split('/').pop(),
+              '${{ steps.meta.outputs.dmg_path }}'.split('/').pop(),
+              '${{ steps.meta.outputs.manifest_path }}'.split('/').pop(),
+            ]);
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              for (const asset of release.data.assets) {
+                if (!names.has(asset.name)) {
+                  continue;
+                }
+                core.info(`Deleting existing release asset ${asset.name} (${asset.id}, state=${asset.state || 'unknown'})`);
+                await github.rest.repos.deleteReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: asset.id,
+                });
+              }
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`No existing release for ${tag}; nothing to clean.`);
+              } else {
+                throw error;
+              }
+            }
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          VERSION_LABEL: ${{ steps.meta.outputs.version_label }}
-          ZIP_PATH: ${{ steps.meta.outputs.zip_path }}
-          DMG_PATH: ${{ steps.meta.outputs.dmg_path }}
-          MANIFEST_PATH: ${{ steps.meta.outputs.manifest_path }}
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          tag="${GITHUB_REF_NAME}"
-          if ! gh release view "${tag}" --repo "${repo}" >/dev/null 2>&1; then
-            gh release create "${tag}" \
-              --repo "${repo}" \
-              --title "Tater ${VERSION_LABEL}" \
-              --prerelease \
-              --generate-notes
-          fi
-
-          upload_asset() {
-            local path="$1"
-            local name
-            local release_id
-            local asset_ids
-            name="$(basename "${path}")"
-            release_id="$(gh api "repos/${repo}/releases/tags/${tag}" --jq '.id')"
-            for attempt in 1 2 3; do
-              asset_ids="$(gh api "repos/${repo}/releases/${release_id}/assets" --paginate --jq ".[] | select(.name == \"${name}\") | .id" || true)"
-              for asset_id in ${asset_ids}; do
-                echo "Deleting existing release asset ${name} (${asset_id}) before upload..."
-                gh api -X DELETE "repos/${repo}/releases/assets/${asset_id}" >/dev/null
-              done
-              echo "Uploading ${name} (attempt ${attempt}/3)..."
-              if python3 - "${repo}" "${tag}" "${path}" <<'PY'
-          import subprocess
-          import sys
-
-          repo, tag, path = sys.argv[1], sys.argv[2], sys.argv[3]
-          cmd = [
-              "gh",
-              "release",
-              "upload",
-              tag,
-              path,
-              "--repo",
-              repo,
-              "--clobber",
-          ]
-          try:
-              subprocess.run(cmd, check=True, timeout=300)
-          except subprocess.TimeoutExpired:
-              print(f"Timed out uploading {path}", file=sys.stderr)
-              raise SystemExit(124)
-          except subprocess.CalledProcessError as exc:
-              raise SystemExit(exc.returncode)
-          PY
-              then
-                return 0
-              fi
-              echo "Upload failed for ${name}; retrying..." >&2
-              sleep $((attempt * 15))
-            done
-            echo "Failed to upload ${name} after 3 attempts." >&2
-            return 1
-          }
-
-          upload_asset "${ZIP_PATH}"
-          upload_asset "${DMG_PATH}"
-          upload_asset "${MANIFEST_PATH}"
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tater ${{ steps.meta.outputs.version_label }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            ${{ steps.meta.outputs.zip_path }}
+            ${{ steps.meta.outputs.dmg_path }}
+            ${{ steps.meta.outputs.manifest_path }}
