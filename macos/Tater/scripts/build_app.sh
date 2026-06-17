@@ -111,6 +111,49 @@ PY
 
 sign_bundled_wheel_payloads
 
+run_with_retries() {
+  attempts="${TATER_GIT_RETRY_ATTEMPTS:-4}"
+  delay="${TATER_GIT_RETRY_DELAY:-5}"
+  attempt=1
+  while :; do
+    if "$@"; then
+      return 0
+    fi
+    status="$?"
+    if [ "${attempt}" -ge "${attempts}" ]; then
+      return "${status}"
+    fi
+    printf 'Command failed with status %s; retrying in %ss (%s/%s): %s\n' \
+      "${status}" "${delay}" "${attempt}" "${attempts}" "$*" >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
+clone_with_retries() {
+  destination="$1"
+  shift
+  attempts="${TATER_GIT_RETRY_ATTEMPTS:-4}"
+  delay="${TATER_GIT_RETRY_DELAY:-5}"
+  attempt=1
+  while :; do
+    rm -rf "${destination}"
+    if "$@" "${destination}"; then
+      return 0
+    fi
+    status="$?"
+    if [ "${attempt}" -ge "${attempts}" ]; then
+      return "${status}"
+    fi
+    printf 'Clone failed with status %s; retrying in %ss (%s/%s): %s\n' \
+      "${status}" "${delay}" "${attempt}" "${attempts}" "$*" >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 prepare_bundled_llama_cpp_runtime() {
   if [ "${TATER_BUNDLE_LLAMA_CPP:-1}" = "0" ]; then
     return
@@ -120,9 +163,9 @@ prepare_bundled_llama_cpp_runtime() {
 
   mkdir -p "${NATIVE_BUILD_DIR}"
   if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
-    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}"
+    clone_with_retries "${LLAMA_CPP_DIR}" git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}"
   else
-    git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}"
+    run_with_retries git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}"
     git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
   fi
 
@@ -178,9 +221,9 @@ prepare_bundled_mlx_engine_runtime() {
 
   mkdir -p "${NATIVE_BUILD_DIR}"
   if [ ! -d "${MLX_ENGINE_DIR}/.git" ]; then
-    git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git "${MLX_ENGINE_DIR}"
+    clone_with_retries "${MLX_ENGINE_DIR}" git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git
   else
-    git -C "${MLX_ENGINE_DIR}" pull --ff-only
+    run_with_retries git -C "${MLX_ENGINE_DIR}" pull --ff-only
   fi
 
   bundled_engine="${NATIVE_RESOURCES_DIR}/mlx-engine"
