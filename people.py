@@ -466,7 +466,7 @@ def _add_discovered_alias(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict
     key = _alias_key(normalized.get("platform"), normalized.get("external_id"))
     existing = out.get(key) if isinstance(out.get(key), dict) else {}
     row = dict(normalized)
-    for extra_key in ("source", "fact_count", "last_updated", "doc_key"):
+    for extra_key in ("source", "fact_count", "last_updated", "doc_key", "forgettable"):
         if alias.get(extra_key) not in (None, ""):
             row[extra_key] = alias.get(extra_key)
     sources: List[str] = []
@@ -648,6 +648,8 @@ def _discover_portal_history_aliases(out: Dict[str, Dict[str, Any]], linked: Dic
                         continue
                     for alias in _portal_aliases_from_history_row(platform, row, key):
                         alias["source"] = _portal_label(platform)
+                        if platform == "little_spud":
+                            alias["forgettable"] = True
                         _add_discovered_alias(out, linked, alias)
 
 
@@ -752,6 +754,67 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
     }
 
 
+def _identity_is_linked(store: Dict[str, Any], platform: str, external_id: str) -> bool:
+    key = _alias_key(platform, external_id)
+    for person in list(store.get("people") or []):
+        for alias in list(person.get("aliases") or []):
+            if _alias_key(alias.get("platform"), alias.get("external_id")) == key:
+                return True
+    return False
+
+
+def forget_discovered_identity(*, platform: str, external_id: str, redis_client: Any = None) -> Dict[str, Any]:
+    normalized_platform = _platform(platform)
+    wanted_external_id = _text(external_id)
+    if not normalized_platform or not wanted_external_id:
+        raise ValueError("platform and external_id are required")
+    if normalized_platform != "little_spud":
+        raise ValueError("Only Little Spud discovered identities can be forgotten from here.")
+
+    client = _client(redis_client)
+    store = load_store(client)
+    if _identity_is_linked(store, normalized_platform, wanted_external_id):
+        raise ValueError("Unlink this identity before forgetting it.")
+
+    wanted_key = _alias_key(normalized_platform, wanted_external_id)
+    linked_aliases = _linked_alias_index(store)
+    deleted_keys: List[str] = []
+    scanned_keys = 0
+    keys = list(client.scan_iter(match="tater:little_spud:*:history", count=100))
+    for key in keys:
+        if scanned_keys >= DISCOVERY_MAX_KEYS:
+            break
+        scanned_keys += 1
+        key_text = _text(key)
+        if not key_text:
+            continue
+        raw_rows = client.lrange(key, -DISCOVERY_MAX_ROWS_PER_KEY, -1) or []
+        matched = False
+        aliases_in_key: List[Dict[str, Any]] = []
+        for raw in raw_rows:
+            with contextlib.suppress(Exception):
+                row = json.loads(raw)
+                if not isinstance(row, dict):
+                    continue
+                aliases = list(_portal_aliases_from_history_row(normalized_platform, row, key))
+                aliases_in_key.extend(aliases)
+                if any(_alias_key(alias.get("platform"), alias.get("external_id")) == wanted_key for alias in aliases):
+                    matched = True
+        if not matched:
+            continue
+        if any(_alias_key(alias.get("platform"), alias.get("external_id")) in linked_aliases for alias in aliases_in_key):
+            raise ValueError("This Little Spud chat history also contains a linked identity. Unlink it before forgetting the history.")
+        client.delete(key)
+        client.delete(f"{key_text}:active_runs")
+        deleted_keys.append(key_text)
+
+    return {
+        "platform": normalized_platform,
+        "external_id": wanted_external_id,
+        "deleted_keys": len(deleted_keys),
+    }
+
+
 def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None) -> Dict[str, Any]:
     token = _text(action).lower()
     body = payload if isinstance(payload, dict) else {}
@@ -813,6 +876,23 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
             "ok": True,
             "action": token,
             "message": f"Unlinked {alias.get('label') or alias.get('external_id')}.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_identity_forget":
+        result = forget_discovered_identity(
+            platform=_text(body.get("platform") or values.get("platform")),
+            external_id=_text(body.get("external_id") or values.get("external_id")),
+            redis_client=client,
+        )
+        deleted_keys = int(result.get("deleted_keys") or 0)
+        message = "Forgot Little Spud identity."
+        if deleted_keys > 0:
+            message = f"Forgot Little Spud identity and deleted {deleted_keys} chat histor{'y' if deleted_keys == 1 else 'ies'}."
+        return {
+            "ok": True,
+            "action": token,
+            "message": message,
             "people": panel_payload(client),
         }
 

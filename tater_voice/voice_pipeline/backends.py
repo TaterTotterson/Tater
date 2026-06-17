@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import wave
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 
@@ -111,6 +111,9 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
     elif backend == "openai_compatible":
         model = model or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
         voice = voice or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
+    elif backend == "chatterbox":
+        model = ""
+        voice = voice
     elif backend == "piper":
         model = model or vp.DEFAULT_PIPER_MODEL
         voice = ""
@@ -127,6 +130,16 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
         "wyoming_voice": vp._text(merged.get("VOICE_WYOMING_TTS_VOICE")) or vp.DEFAULT_WYOMING_TTS_VOICE,
         "openai_base_url": vp._text(merged.get("VOICE_OPENAI_TTS_BASE_URL")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
         "openai_api_key": vp._text(merged.get("VOICE_OPENAI_TTS_API_KEY")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+        "chatterbox_base_url": vp._text(merged.get("VOICE_CHATTERBOX_TTS_BASE_URL")) or vp.DEFAULT_CHATTERBOX_TTS_BASE_URL,
+        "chatterbox_voice_mode": vp._normalize_chatterbox_voice_mode(merged.get("VOICE_CHATTERBOX_TTS_VOICE_MODE")),
+        "chatterbox_chunk_size": vp._normalize_chatterbox_chunk_size(merged.get("VOICE_CHATTERBOX_TTS_CHUNK_SIZE")),
+        "chatterbox_temperature": merged.get("VOICE_CHATTERBOX_TTS_TEMPERATURE"),
+        "chatterbox_exaggeration": merged.get("VOICE_CHATTERBOX_TTS_EXAGGERATION"),
+        "chatterbox_cfg_weight": merged.get("VOICE_CHATTERBOX_TTS_CFG_WEIGHT"),
+        "chatterbox_seed": merged.get("VOICE_CHATTERBOX_TTS_SEED"),
+        "chatterbox_speed_factor": merged.get("VOICE_CHATTERBOX_TTS_SPEED_FACTOR"),
+        "chatterbox_language": merged.get("VOICE_CHATTERBOX_TTS_LANGUAGE"),
+        "chatterbox_streaming_enabled": vp._as_bool(merged.get("VOICE_CHATTERBOX_TTS_STREAMING_ENABLED"), False),
     }
 
 
@@ -147,6 +160,10 @@ def _tts_backend_available(backend: str) -> Tuple[bool, str]:
         cfg = _tts_config_snapshot()
         base_url = vp._text((cfg.get("openai_compatible") or {}).get("base_url"))
         return bool(base_url), "OpenAI-compatible TTS base URL is not configured."
+    if token == "chatterbox":
+        cfg = _tts_config_snapshot()
+        base_url = vp._text((cfg.get("chatterbox") or {}).get("base_url"))
+        return bool(base_url), "Chatterbox TTS base URL is not configured."
     if token == "kokoro":
         if vp._kokoro_engine() == "torch":
             return (
@@ -385,6 +402,16 @@ def _openai_compatible_tts_timeout_s() -> float:
     return float(vp.DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS)
 
 
+def _chatterbox_tts_timeout_s() -> float:
+    vp = _vp()
+    return vp._get_float_setting(
+        "VOICE_NATIVE_CHATTERBOX_TTS_TIMEOUT_S",
+        vp.DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS,
+        minimum=5.0,
+        maximum=300.0,
+    )
+
+
 def _openai_compatible_tts_endpoint(base_url: Any) -> str:
     vp = _vp()
     base = vp._text(base_url).rstrip("/")
@@ -395,6 +422,27 @@ def _openai_compatible_tts_endpoint(base_url: Any) -> str:
     if base.endswith("/v1"):
         return f"{base}/audio/speech"
     return f"{base}/v1/audio/speech"
+
+
+def _chatterbox_tts_endpoint(base_url: Any) -> str:
+    vp = _vp()
+    base = vp._text(base_url).rstrip("/")
+    if not base:
+        return ""
+    for suffix in (
+        "/tts",
+        "/v1/audio/speech",
+        "/v1/audio/voices",
+        "/v1/models",
+        "/audio/speech",
+        "/audio/voices",
+        "/models",
+        "/v1",
+    ):
+        if base.endswith(suffix):
+            root = base[: -len(suffix)].rstrip("/") or base
+            return f"{root}/tts"
+    return f"{base}/tts"
 
 
 def _looks_like_wav_bytes(payload: bytes) -> bool:
@@ -430,7 +478,7 @@ def _decode_wav_bytes(wav_bytes: bytes) -> Tuple[bytes, Dict[str, Any]]:
     if not raw:
         return b"", {}
     if not _looks_like_wav_bytes(raw):
-        raise RuntimeError("OpenAI-compatible TTS did not return WAV audio.")
+        raise RuntimeError("TTS did not return WAV audio.")
     with wave.open(io.BytesIO(raw), "rb") as wav_file:
         frames = wav_file.readframes(wav_file.getnframes())
         return frames, {
@@ -1030,6 +1078,190 @@ def _native_openai_compatible_synthesize_sync(
     return _decode_wav_bytes(wav_bytes)
 
 
+def _optional_chatterbox_float(value: Any, label: str, *, minimum: float, maximum: float) -> Optional[float]:
+    vp = _vp()
+    raw = vp._text(value)
+    if not raw:
+        return None
+    try:
+        parsed = float(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Chatterbox {label} must be a number.") from exc
+    if parsed < minimum or parsed > maximum:
+        raise RuntimeError(f"Chatterbox {label} must be between {minimum:g} and {maximum:g}.")
+    return parsed
+
+
+def _optional_chatterbox_seed(value: Any) -> Optional[int]:
+    vp = _vp()
+    raw = vp._text(value)
+    if not raw:
+        return None
+    try:
+        parsed = int(float(raw))
+    except Exception as exc:
+        raise RuntimeError("Chatterbox seed must be a non-negative integer.") from exc
+    if parsed < 0:
+        raise RuntimeError("Chatterbox seed must be a non-negative integer.")
+    return parsed
+
+
+def _chatterbox_tts_request(
+    text: str,
+    *,
+    voice: str,
+    base_url: str,
+    voice_mode: str,
+    chunk_size: Any,
+    temperature: Any = None,
+    exaggeration: Any = None,
+    cfg_weight: Any = None,
+    seed: Any = None,
+    speed_factor: Any = None,
+    language: Any = None,
+    stream: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
+    vp = _vp()
+    prompt = vp._text(text)
+    if not prompt:
+        return "", {}
+
+    endpoint = _chatterbox_tts_endpoint(base_url)
+    if not endpoint:
+        raise RuntimeError("Chatterbox TTS base URL is required.")
+
+    selected_voice_mode = vp._normalize_chatterbox_voice_mode(voice_mode)
+    selected_voice = vp._text(voice)
+    payload: Dict[str, Any] = {
+        "text": prompt,
+        "voice_mode": selected_voice_mode,
+        "output_format": "wav",
+        "split_text": True,
+        "chunk_size": vp._normalize_chatterbox_chunk_size(chunk_size),
+        "stream": bool(stream),
+    }
+    if selected_voice:
+        if selected_voice_mode == "clone":
+            payload["reference_audio_filename"] = selected_voice
+        else:
+            payload["predefined_voice_id"] = selected_voice
+
+    optional_values = {
+        "temperature": _optional_chatterbox_float(temperature, "temperature", minimum=0.0, maximum=1.5),
+        "exaggeration": _optional_chatterbox_float(exaggeration, "exaggeration", minimum=0.25, maximum=2.0),
+        "cfg_weight": _optional_chatterbox_float(cfg_weight, "CFG weight", minimum=0.2, maximum=1.0),
+        "seed": _optional_chatterbox_seed(seed),
+        "speed_factor": _optional_chatterbox_float(speed_factor, "speed factor", minimum=0.25, maximum=4.0),
+    }
+    for key, value in optional_values.items():
+        if value is not None:
+            payload[key] = value
+    selected_language = vp._text(language)
+    if selected_language:
+        payload["language"] = selected_language
+    return endpoint, payload
+
+
+def _native_chatterbox_synthesize_sync(
+    text: str,
+    *,
+    voice: str,
+    base_url: str,
+    voice_mode: str,
+    chunk_size: Any,
+    temperature: Any = None,
+    exaggeration: Any = None,
+    cfg_weight: Any = None,
+    seed: Any = None,
+    speed_factor: Any = None,
+    language: Any = None,
+) -> Tuple[bytes, Dict[str, Any]]:
+    vp = _vp()
+    prompt = vp._text(text)
+    if not prompt:
+        return b"", {}
+
+    endpoint, payload = _chatterbox_tts_request(
+        prompt,
+        voice=voice,
+        base_url=base_url,
+        voice_mode=voice_mode,
+        chunk_size=chunk_size,
+        temperature=temperature,
+        exaggeration=exaggeration,
+        cfg_weight=cfg_weight,
+        seed=seed,
+        speed_factor=speed_factor,
+        language=language,
+        stream=False,
+    )
+
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers={"Content-Type": "application/json", "Accept": "audio/wav"},
+        timeout=_chatterbox_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Chatterbox TTS request failed: {_response_error_text(response)}")
+    wav_bytes = bytes(response.content or b"")
+    if not wav_bytes:
+        raise RuntimeError("Chatterbox TTS returned no audio.")
+    return _decode_wav_bytes(wav_bytes)
+
+
+def _open_chatterbox_tts_stream_response(row: Dict[str, Any]) -> requests.Response:
+    vp = _vp()
+    endpoint = vp._text((row or {}).get("endpoint"))
+    payload = (row or {}).get("payload")
+    if not endpoint or not isinstance(payload, dict):
+        raise RuntimeError("Chatterbox streaming TTS request is incomplete.")
+    stream_payload = dict(payload)
+    stream_payload["stream"] = True
+    response = requests.post(
+        endpoint,
+        json=stream_payload,
+        headers={"Content-Type": "application/json", "Accept": "audio/wav"},
+        timeout=_chatterbox_tts_timeout_s(),
+        stream=True,
+    )
+    if response.status_code >= 400:
+        try:
+            detail = _response_error_text(response)
+        finally:
+            with contextlib.suppress(Exception):
+                response.close()
+        raise RuntimeError(f"Chatterbox streaming TTS request failed: {detail}")
+    return response
+
+
+def _iter_chatterbox_tts_stream_response(response: requests.Response, row: Dict[str, Any]) -> Iterator[bytes]:
+    vp = _vp()
+    total_bytes = 0
+    max_bytes = vp._as_int(
+        (row or {}).get("max_bytes"),
+        getattr(vp, "DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES", 64 * 1024 * 1024),
+        minimum=1024 * 1024,
+        maximum=512 * 1024 * 1024,
+    )
+    stream_id = vp._text((row or {}).get("id"))
+    try:
+        for chunk in response.iter_content(chunk_size=16 * 1024):
+            if not chunk:
+                continue
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise RuntimeError(f"Chatterbox streaming TTS exceeded {max_bytes} bytes.")
+            yield bytes(chunk)
+    finally:
+        with contextlib.suppress(Exception):
+            response.close()
+        vp._native_debug(
+            f"chatterbox streaming tts finished stream_id={stream_id} session_id={vp._text((row or {}).get('session_id'))} "
+            f"bytes={total_bytes}"
+        )
+
+
 def _kokoro_output_gain() -> float:
     vp = _vp()
     env_value = os.getenv("TATER_KOKORO_OUTPUT_GAIN")
@@ -1492,6 +1724,26 @@ async def _native_synthesize_text(
                 voice=vp._text(selection.get("voice")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
                 base_url=vp._text(selection.get("openai_base_url")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
                 api_key=vp._text(selection.get("openai_api_key")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+            )
+            return audio_bytes, audio_format, effective_backend, backend_note
+        if effective_backend == "chatterbox":
+            vp._native_debug(
+                f"TTS (chatterbox) remote base={selection.get('chatterbox_base_url')} "
+                f"voice_mode={selection.get('chatterbox_voice_mode')} voice={selection.get('voice')}"
+            )
+            audio_bytes, audio_format = await run_tts(
+                _native_chatterbox_synthesize_sync,
+                prompt,
+                voice=vp._text(selection.get("voice")),
+                base_url=vp._text(selection.get("chatterbox_base_url")) or vp.DEFAULT_CHATTERBOX_TTS_BASE_URL,
+                voice_mode=vp._text(selection.get("chatterbox_voice_mode")) or vp.DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
+                chunk_size=selection.get("chatterbox_chunk_size"),
+                temperature=selection.get("chatterbox_temperature"),
+                exaggeration=selection.get("chatterbox_exaggeration"),
+                cfg_weight=selection.get("chatterbox_cfg_weight"),
+                seed=selection.get("chatterbox_seed"),
+                speed_factor=selection.get("chatterbox_speed_factor"),
+                language=selection.get("chatterbox_language"),
             )
             return audio_bytes, audio_format, effective_backend, backend_note
         audio_bytes, audio_format = await _native_wyoming_synthesize(

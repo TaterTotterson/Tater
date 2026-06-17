@@ -24,6 +24,10 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
+DEFAULT_CHATTERBOX_TTS_BASE_URL = ""
+DEFAULT_CHATTERBOX_TTS_VOICE_MODE = "predefined"
+DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE = 120
+DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED = False
 DEFAULT_SPEECH_ACCELERATION = "auto"
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
@@ -88,12 +92,40 @@ def _as_int(value: Any, default: int) -> int:
     return int(parsed)
 
 
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = _clean(value).lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
 def normalize_tts_output_gain(value: Any, default: float = 1.5) -> float:
     try:
         parsed = float(value)
     except Exception:
         parsed = float(default)
     return min(4.0, max(0.1, parsed))
+
+
+def normalize_chatterbox_voice_mode(value: Any) -> str:
+    token = _clean(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"clone", "cloned", "reference", "reference_audio"}:
+        return "clone"
+    return DEFAULT_CHATTERBOX_TTS_VOICE_MODE
+
+
+def normalize_chatterbox_chunk_size(value: Any, default: int = DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = int(default)
+    return min(500, max(50, parsed))
 
 
 def _normalize_stt_backend(value: Any) -> str:
@@ -119,6 +151,8 @@ def _normalize_tts_backend(value: Any) -> str:
         return "wyoming"
     if token in {"openai_compatible", "openai", "openai_api"}:
         return "openai_compatible"
+    if token in {"chatterbox", "chatterbox_tts"}:
+        return "chatterbox"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -427,6 +461,15 @@ def get_speech_settings() -> Dict[str, Any]:
     has_announcement_wyoming_voice = "announcement_wyoming_tts_voice" in shared
     has_announcement_openai_base_url = "announcement_openai_tts_base_url" in shared
     has_announcement_openai_api_key = "announcement_openai_tts_api_key" in shared
+    has_announcement_chatterbox_base_url = "announcement_chatterbox_tts_base_url" in shared
+    has_announcement_chatterbox_voice_mode = "announcement_chatterbox_tts_voice_mode" in shared
+    has_announcement_chatterbox_chunk_size = "announcement_chatterbox_tts_chunk_size" in shared
+    has_announcement_chatterbox_temperature = "announcement_chatterbox_tts_temperature" in shared
+    has_announcement_chatterbox_exaggeration = "announcement_chatterbox_tts_exaggeration" in shared
+    has_announcement_chatterbox_cfg_weight = "announcement_chatterbox_tts_cfg_weight" in shared
+    has_announcement_chatterbox_seed = "announcement_chatterbox_tts_seed" in shared
+    has_announcement_chatterbox_speed_factor = "announcement_chatterbox_tts_speed_factor" in shared
+    has_announcement_chatterbox_language = "announcement_chatterbox_tts_language" in shared
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
         "acceleration": normalize_speech_acceleration(shared.get("acceleration")),
@@ -448,6 +491,19 @@ def get_speech_settings() -> Dict[str, Any]:
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
         "openai_tts_base_url": _clean(shared.get("openai_tts_base_url")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
         "openai_tts_api_key": _clean(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+        "chatterbox_tts_base_url": _clean(shared.get("chatterbox_tts_base_url")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
+        "chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(shared.get("chatterbox_tts_voice_mode")),
+        "chatterbox_tts_chunk_size": normalize_chatterbox_chunk_size(shared.get("chatterbox_tts_chunk_size")),
+        "chatterbox_tts_temperature": _clean(shared.get("chatterbox_tts_temperature")),
+        "chatterbox_tts_exaggeration": _clean(shared.get("chatterbox_tts_exaggeration")),
+        "chatterbox_tts_cfg_weight": _clean(shared.get("chatterbox_tts_cfg_weight")),
+        "chatterbox_tts_seed": _clean(shared.get("chatterbox_tts_seed")),
+        "chatterbox_tts_speed_factor": _clean(shared.get("chatterbox_tts_speed_factor")),
+        "chatterbox_tts_language": _clean(shared.get("chatterbox_tts_language")),
+        "chatterbox_tts_streaming_enabled": normalize_bool(
+            shared.get("chatterbox_tts_streaming_enabled"),
+            DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED,
+        ),
         "announcement_tts_backend": normalize_announcement_tts_backend(
             shared.get("announcement_tts_backend"),
             default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -480,6 +536,51 @@ def get_speech_settings() -> Dict[str, Any]:
             if has_announcement_openai_api_key
             else _clean(shared.get("openai_tts_api_key"))
         ) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+        "announcement_chatterbox_tts_base_url": (
+            _clean(shared.get("announcement_chatterbox_tts_base_url"))
+            if has_announcement_chatterbox_base_url
+            else _clean(shared.get("chatterbox_tts_base_url"))
+        ) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
+        "announcement_chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(
+            shared.get("announcement_chatterbox_tts_voice_mode")
+            if has_announcement_chatterbox_voice_mode
+            else shared.get("chatterbox_tts_voice_mode")
+        ),
+        "announcement_chatterbox_tts_chunk_size": normalize_chatterbox_chunk_size(
+            shared.get("announcement_chatterbox_tts_chunk_size")
+            if has_announcement_chatterbox_chunk_size
+            else shared.get("chatterbox_tts_chunk_size")
+        ),
+        "announcement_chatterbox_tts_temperature": (
+            _clean(shared.get("announcement_chatterbox_tts_temperature"))
+            if has_announcement_chatterbox_temperature
+            else _clean(shared.get("chatterbox_tts_temperature"))
+        ),
+        "announcement_chatterbox_tts_exaggeration": (
+            _clean(shared.get("announcement_chatterbox_tts_exaggeration"))
+            if has_announcement_chatterbox_exaggeration
+            else _clean(shared.get("chatterbox_tts_exaggeration"))
+        ),
+        "announcement_chatterbox_tts_cfg_weight": (
+            _clean(shared.get("announcement_chatterbox_tts_cfg_weight"))
+            if has_announcement_chatterbox_cfg_weight
+            else _clean(shared.get("chatterbox_tts_cfg_weight"))
+        ),
+        "announcement_chatterbox_tts_seed": (
+            _clean(shared.get("announcement_chatterbox_tts_seed"))
+            if has_announcement_chatterbox_seed
+            else _clean(shared.get("chatterbox_tts_seed"))
+        ),
+        "announcement_chatterbox_tts_speed_factor": (
+            _clean(shared.get("announcement_chatterbox_tts_speed_factor"))
+            if has_announcement_chatterbox_speed_factor
+            else _clean(shared.get("chatterbox_tts_speed_factor"))
+        ),
+        "announcement_chatterbox_tts_language": (
+            _clean(shared.get("announcement_chatterbox_tts_language"))
+            if has_announcement_chatterbox_language
+            else _clean(shared.get("chatterbox_tts_language"))
+        ),
     }
 
 
@@ -499,6 +600,16 @@ def save_speech_settings(
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
+    chatterbox_tts_base_url: Any = DEFAULT_CHATTERBOX_TTS_BASE_URL,
+    chatterbox_tts_voice_mode: Any = DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
+    chatterbox_tts_chunk_size: Any = DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE,
+    chatterbox_tts_temperature: Any = "",
+    chatterbox_tts_exaggeration: Any = "",
+    chatterbox_tts_cfg_weight: Any = "",
+    chatterbox_tts_seed: Any = "",
+    chatterbox_tts_speed_factor: Any = "",
+    chatterbox_tts_language: Any = "",
+    chatterbox_tts_streaming_enabled: Any = DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED,
     kokoro_output_gain: Any = DEFAULT_KOKORO_OUTPUT_GAIN,
     pocket_tts_output_gain: Any = DEFAULT_POCKET_TTS_OUTPUT_GAIN,
     announcement_wyoming_tts_host: Any = None,
@@ -506,6 +617,15 @@ def save_speech_settings(
     announcement_wyoming_tts_voice: Any = None,
     announcement_openai_tts_base_url: Any = None,
     announcement_openai_tts_api_key: Any = None,
+    announcement_chatterbox_tts_base_url: Any = None,
+    announcement_chatterbox_tts_voice_mode: Any = None,
+    announcement_chatterbox_tts_chunk_size: Any = None,
+    announcement_chatterbox_tts_temperature: Any = None,
+    announcement_chatterbox_tts_exaggeration: Any = None,
+    announcement_chatterbox_tts_cfg_weight: Any = None,
+    announcement_chatterbox_tts_seed: Any = None,
+    announcement_chatterbox_tts_speed_factor: Any = None,
+    announcement_chatterbox_tts_language: Any = None,
     acceleration: Any = DEFAULT_SPEECH_ACCELERATION,
 ) -> None:
     direct_tts_backend = _normalize_tts_backend(tts_backend)
@@ -528,6 +648,18 @@ def save_speech_settings(
             "wyoming_tts_voice": _clean(wyoming_tts_voice),
             "openai_tts_base_url": _clean(openai_tts_base_url),
             "openai_tts_api_key": _clean(openai_tts_api_key),
+            "chatterbox_tts_base_url": _clean(chatterbox_tts_base_url),
+            "chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(chatterbox_tts_voice_mode),
+            "chatterbox_tts_chunk_size": str(normalize_chatterbox_chunk_size(chatterbox_tts_chunk_size)),
+            "chatterbox_tts_temperature": _clean(chatterbox_tts_temperature),
+            "chatterbox_tts_exaggeration": _clean(chatterbox_tts_exaggeration),
+            "chatterbox_tts_cfg_weight": _clean(chatterbox_tts_cfg_weight),
+            "chatterbox_tts_seed": _clean(chatterbox_tts_seed),
+            "chatterbox_tts_speed_factor": _clean(chatterbox_tts_speed_factor),
+            "chatterbox_tts_language": _clean(chatterbox_tts_language),
+            "chatterbox_tts_streaming_enabled": "1"
+            if normalize_bool(chatterbox_tts_streaming_enabled, DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED)
+            else "0",
             "announcement_tts_backend": normalize_announcement_tts_backend(
                 announcement_tts_backend,
                 default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -559,6 +691,53 @@ def save_speech_settings(
                 _clean(announcement_openai_tts_api_key)
                 if announcement_openai_tts_api_key is not None
                 else _clean(openai_tts_api_key)
+            ),
+            "announcement_chatterbox_tts_base_url": (
+                _clean(announcement_chatterbox_tts_base_url)
+                if announcement_chatterbox_tts_base_url is not None
+                else _clean(chatterbox_tts_base_url)
+            ),
+            "announcement_chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(
+                announcement_chatterbox_tts_voice_mode
+                if announcement_chatterbox_tts_voice_mode is not None
+                else chatterbox_tts_voice_mode
+            ),
+            "announcement_chatterbox_tts_chunk_size": str(
+                normalize_chatterbox_chunk_size(
+                    announcement_chatterbox_tts_chunk_size
+                    if announcement_chatterbox_tts_chunk_size is not None
+                    else chatterbox_tts_chunk_size
+                )
+            ),
+            "announcement_chatterbox_tts_temperature": (
+                _clean(announcement_chatterbox_tts_temperature)
+                if announcement_chatterbox_tts_temperature is not None
+                else _clean(chatterbox_tts_temperature)
+            ),
+            "announcement_chatterbox_tts_exaggeration": (
+                _clean(announcement_chatterbox_tts_exaggeration)
+                if announcement_chatterbox_tts_exaggeration is not None
+                else _clean(chatterbox_tts_exaggeration)
+            ),
+            "announcement_chatterbox_tts_cfg_weight": (
+                _clean(announcement_chatterbox_tts_cfg_weight)
+                if announcement_chatterbox_tts_cfg_weight is not None
+                else _clean(chatterbox_tts_cfg_weight)
+            ),
+            "announcement_chatterbox_tts_seed": (
+                _clean(announcement_chatterbox_tts_seed)
+                if announcement_chatterbox_tts_seed is not None
+                else _clean(chatterbox_tts_seed)
+            ),
+            "announcement_chatterbox_tts_speed_factor": (
+                _clean(announcement_chatterbox_tts_speed_factor)
+                if announcement_chatterbox_tts_speed_factor is not None
+                else _clean(chatterbox_tts_speed_factor)
+            ),
+            "announcement_chatterbox_tts_language": (
+                _clean(announcement_chatterbox_tts_language)
+                if announcement_chatterbox_tts_language is not None
+                else _clean(chatterbox_tts_language)
             ),
         },
     )
@@ -622,12 +801,14 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         "tts_backend_options": [
             {"value": "wyoming", "label": "Wyoming"},
             {"value": "openai_compatible", "label": "OpenAI-Compatible"},
+            {"value": "chatterbox", "label": "Chatterbox"},
             {"value": "kokoro", "label": "Kokoro"},
             {"value": "pocket_tts", "label": "Pocket TTS"},
             {"value": "piper", "label": "Piper"},
         ],
         "tts_model_options_by_backend": {
             "openai_compatible": [],
+            "chatterbox": [],
             "kokoro": kokoro_model_rows,
             "pocket_tts": pocket_model_rows,
             "piper": piper_model_rows,

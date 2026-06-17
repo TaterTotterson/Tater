@@ -765,6 +765,7 @@ private final class BackendManager {
         }
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
         environment["TATER_SETUP_REBUILD"] = "1"
         environment["TATER_SETUP_REQUIRE_LOCAL_LLM"] = "1"
         environment["TATER_VENV_DIR"] = venvDir.path

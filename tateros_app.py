@@ -84,6 +84,7 @@ from helpers import (
     DEFAULT_LLAMA_CPP_N_BATCH,
     DEFAULT_LLAMA_CPP_N_UBATCH,
     DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
+    DEFAULT_LLAMA_CPP_SLOT_COUNT,
     DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
     DEFAULT_MLX_LM_LAZY_LOAD,
     DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
@@ -108,6 +109,9 @@ from helpers import (
     HYDRA_LLAMA_CPP_N_BATCH_KEY,
     HYDRA_LLAMA_CPP_N_UBATCH_KEY,
     HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
+    HYDRA_LLAMA_CPP_BASE_SLOT_KEY,
+    HYDRA_LLAMA_CPP_SLOT_COUNT_KEY,
+    HYDRA_LLAMA_CPP_VISION_SLOT_KEY,
     HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
     HYDRA_MLX_ENGINE_KV_BITS_KEY,
     HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
@@ -169,6 +173,7 @@ from speech_settings import (
 )
 from speech_tts import (
     clear_tts_model_caches as clear_announcement_tts_model_caches,
+    fetch_chatterbox_tts_voice_options,
     fetch_openai_compatible_tts_model_options,
     fetch_openai_compatible_tts_voice_options,
     fetch_wyoming_tts_voice_options,
@@ -3601,6 +3606,8 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             return "skipped remote Wyoming TTS"
         if token == "openai_compatible":
             return "skipped remote OpenAI-compatible TTS"
+        if token == "chatterbox":
+            return "skipped remote Chatterbox TTS"
         if token == "kokoro":
             voice_pipeline._load_kokoro_pipeline(model or voice_pipeline.DEFAULT_KOKORO_MODEL)
         elif token == "piper":
@@ -4895,11 +4902,24 @@ def _spud_link_pairing_payload(
         supported_roles.append(SPUD_LINK_MODE_SPUDLET)
     if supported_roles and role not in supported_roles:
         role = supported_roles[0]
-    server_url = _spud_link_server_url(settings, request=request)
+    request_url = _spud_link_external_request_base_url(request)
+    configured_home_url = str(settings.get("home_url") or "").strip().rstrip("/")
+    public_url = str(settings.get("public_url") or "").strip().rstrip("/")
+    server_url = public_url or request_url
+    home_url = configured_home_url or (request_url if request_url and request_url != public_url else "")
+    away_url = public_url
     payload = {
         "schema": "tater.spudlink.pair.v1",
         "hub_url": server_url,
         "pair_url": f"{server_url}/api/spudlink/pair" if server_url else "",
+        "home_url": home_url,
+        "local_url": home_url,
+        "away_url": away_url,
+        "remote_url": away_url,
+        "route_urls": {
+            "home": home_url,
+            "away": away_url,
+        },
         "pairing_code": code,
         "role": role,
         "supported_roles": supported_roles,
@@ -4972,6 +4992,7 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
         "mode": mode,
         "enabled": mode != SPUD_LINK_MODE_DISABLED,
         "node_name": str(raw.get("node_name") or _spud_link_local_node_name()).strip() or "Tater",
+        "home_url": str(raw.get("home_url") or "").strip(),
         "public_url": str(raw.get("public_url") or "").strip(),
         "pairing_enabled": _as_bool_flag(raw.get("pairing_enabled"), default=False),
         "allow_spudlets": _as_bool_flag(raw.get("allow_spudlets"), default=True),
@@ -4997,6 +5018,7 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
     keys = {
         "spud_link_mode",
         "spud_link_node_name",
+        "spud_link_home_url",
         "spud_link_public_url",
         "spud_link_pairing_enabled",
         "spud_link_allow_spudlets",
@@ -5015,6 +5037,8 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         mapping["mode"] = _normalize_spud_link_tater_mode(updates.get("spud_link_mode"))
     if "spud_link_node_name" in updates:
         mapping["node_name"] = str(updates.get("spud_link_node_name") or "").strip()[:120]
+    if "spud_link_home_url" in updates:
+        mapping["home_url"] = str(updates.get("spud_link_home_url") or "").strip()[:500]
     if "spud_link_public_url" in updates:
         mapping["public_url"] = str(updates.get("spud_link_public_url") or "").strip()[:500]
     if "spud_link_pairing_enabled" in updates:
@@ -5382,6 +5406,65 @@ def _little_spud_notification_media_url(blob_key: str, mimetype: str) -> str:
         return ""
     query = urlencode({"mimetype": str(mimetype or "application/octet-stream").strip() or "application/octet-stream"})
     return f"/api/spudlink/v1/notification-media/{quote(ref)}?{query}"
+
+
+def _spud_link_media_bytes_response(
+    content: bytes,
+    media_type: str,
+    request: Request,
+    *,
+    cache_control: str = "private, max-age=3600",
+) -> Response:
+    raw = bytes(content or b"")
+    total = len(raw)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": cache_control,
+        "Content-Length": str(total),
+    }
+    range_header = str(request.headers.get("range") or "").strip()
+    if not range_header.lower().startswith("bytes="):
+        return Response(content=raw, media_type=media_type, headers=headers)
+
+    range_spec = range_header.split("=", 1)[1].split(",", 1)[0].strip()
+    try:
+        start_raw, end_raw = range_spec.split("-", 1)
+        if start_raw:
+            start = int(start_raw)
+            end = int(end_raw) if end_raw else total - 1
+        else:
+            suffix = int(end_raw)
+            if suffix <= 0:
+                raise ValueError("invalid byte suffix")
+            start = max(total - suffix, 0)
+            end = total - 1
+        if total <= 0 or start < 0 or end < start or start >= total:
+            raise ValueError("byte range outside content")
+        end = min(end, total - 1)
+    except Exception:
+        return Response(
+            status_code=416,
+            media_type=media_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Cache-Control": cache_control,
+                "Content-Range": f"bytes */{total}",
+                "Content-Length": "0",
+            },
+        )
+
+    chunk = raw[start : end + 1]
+    return Response(
+        content=chunk,
+        status_code=206,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": cache_control,
+            "Content-Range": f"bytes {start}-{end}/{total}",
+            "Content-Length": str(len(chunk)),
+        },
+    )
 
 
 def _little_spud_notification_attachments(item_id: Any) -> List[Dict[str, Any]]:
@@ -7744,6 +7827,13 @@ class SpudLinkPairRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SpudLinkPairingCodeRequest(BaseModel):
+    home_url: Optional[str] = None
+    public_url: Optional[str] = None
+    spud_link_home_url: Optional[str] = None
+    spud_link_public_url: Optional[str] = None
+
+
 class SpudLinkConnectRequest(BaseModel):
     hub_url: str = Field(min_length=1)
     pairing_code: str = Field(min_length=1)
@@ -7934,6 +8024,15 @@ class AppSettingsRequest(BaseModel):
     speech_wyoming_tts_voice: Optional[str] = None
     speech_openai_tts_base_url: Optional[str] = None
     speech_openai_tts_api_key: Optional[str] = None
+    speech_chatterbox_tts_base_url: Optional[str] = None
+    speech_chatterbox_tts_voice_mode: Optional[str] = None
+    speech_chatterbox_tts_chunk_size: Optional[Any] = None
+    speech_chatterbox_tts_temperature: Optional[Any] = None
+    speech_chatterbox_tts_exaggeration: Optional[Any] = None
+    speech_chatterbox_tts_cfg_weight: Optional[Any] = None
+    speech_chatterbox_tts_seed: Optional[Any] = None
+    speech_chatterbox_tts_speed_factor: Optional[Any] = None
+    speech_chatterbox_tts_language: Optional[str] = None
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
@@ -7942,6 +8041,15 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_wyoming_tts_voice: Optional[str] = None
     speech_announcement_openai_tts_base_url: Optional[str] = None
     speech_announcement_openai_tts_api_key: Optional[str] = None
+    speech_announcement_chatterbox_tts_base_url: Optional[str] = None
+    speech_announcement_chatterbox_tts_voice_mode: Optional[str] = None
+    speech_announcement_chatterbox_tts_chunk_size: Optional[Any] = None
+    speech_announcement_chatterbox_tts_temperature: Optional[Any] = None
+    speech_announcement_chatterbox_tts_exaggeration: Optional[Any] = None
+    speech_announcement_chatterbox_tts_cfg_weight: Optional[Any] = None
+    speech_announcement_chatterbox_tts_seed: Optional[Any] = None
+    speech_announcement_chatterbox_tts_speed_factor: Optional[Any] = None
+    speech_announcement_chatterbox_tts_language: Optional[str] = None
     esphome_settings: Optional[Dict[str, Any]] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
@@ -7970,6 +8078,9 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_n_ubatch: Optional[Any] = None
     hydra_llama_cpp_flash_attn: Optional[bool] = None
     hydra_llama_cpp_offload_kqv: Optional[bool] = None
+    hydra_llama_cpp_slot_count: Optional[Any] = None
+    hydra_llama_cpp_base_slot: Optional[Any] = None
+    hydra_llama_cpp_vision_slot: Optional[Any] = None
     hydra_mlx_lm_context_tokens: Optional[Any] = None
     hydra_mlx_lm_trust_remote_code: Optional[bool] = None
     hydra_mlx_lm_lazy_load: Optional[bool] = None
@@ -7988,26 +8099,31 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_chat_port: Optional[str] = None
     hydra_llm_chat_model: Optional[str] = None
     hydra_llm_chat_api_key: Optional[str] = None
+    hydra_llm_chat_llama_cpp_slot: Optional[Any] = None
     hydra_llm_astraeus_provider: Optional[str] = None
     hydra_llm_astraeus_host: Optional[str] = None
     hydra_llm_astraeus_port: Optional[str] = None
     hydra_llm_astraeus_model: Optional[str] = None
     hydra_llm_astraeus_api_key: Optional[str] = None
+    hydra_llm_astraeus_llama_cpp_slot: Optional[Any] = None
     hydra_llm_thanatos_provider: Optional[str] = None
     hydra_llm_thanatos_host: Optional[str] = None
     hydra_llm_thanatos_port: Optional[str] = None
     hydra_llm_thanatos_model: Optional[str] = None
     hydra_llm_thanatos_api_key: Optional[str] = None
+    hydra_llm_thanatos_llama_cpp_slot: Optional[Any] = None
     hydra_llm_minos_provider: Optional[str] = None
     hydra_llm_minos_host: Optional[str] = None
     hydra_llm_minos_port: Optional[str] = None
     hydra_llm_minos_model: Optional[str] = None
     hydra_llm_minos_api_key: Optional[str] = None
+    hydra_llm_minos_llama_cpp_slot: Optional[Any] = None
     hydra_llm_hermes_provider: Optional[str] = None
     hydra_llm_hermes_host: Optional[str] = None
     hydra_llm_hermes_port: Optional[str] = None
     hydra_llm_hermes_model: Optional[str] = None
     hydra_llm_hermes_api_key: Optional[str] = None
+    hydra_llm_hermes_llama_cpp_slot: Optional[Any] = None
     hydra_max_ledger_items: Optional[int] = None
     hydra_astraeus_plan_review_enabled: Optional[bool] = None
     hydra_auto_continue_incomplete_final_enabled: Optional[bool] = None
@@ -8020,6 +8136,7 @@ class AppSettingsRequest(BaseModel):
     tater_api_hydra_tools_enabled: Optional[bool] = None
     spud_link_mode: Optional[str] = None
     spud_link_node_name: Optional[str] = None
+    spud_link_home_url: Optional[str] = None
     spud_link_public_url: Optional[str] = None
     spud_link_pairing_enabled: Optional[bool] = None
     spud_link_allow_spudlets: Optional[bool] = None
@@ -8067,6 +8184,15 @@ class SpeechTtsPreviewRequest(BaseModel):
     wyoming_voice: Optional[str] = None
     openai_base_url: Optional[str] = None
     openai_api_key: Optional[str] = None
+    chatterbox_base_url: Optional[str] = None
+    chatterbox_voice_mode: Optional[str] = None
+    chatterbox_chunk_size: Optional[Any] = None
+    chatterbox_temperature: Optional[Any] = None
+    chatterbox_exaggeration: Optional[Any] = None
+    chatterbox_cfg_weight: Optional[Any] = None
+    chatterbox_seed: Optional[Any] = None
+    chatterbox_speed_factor: Optional[Any] = None
+    chatterbox_language: Optional[str] = None
     text: Optional[str] = None
 
 
@@ -8084,6 +8210,11 @@ class OpenAiCompatibleTtsVoicesRequest(BaseModel):
 class OpenAiCompatibleTtsModelsRequest(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
+
+
+class ChatterboxTtsVoicesRequest(BaseModel):
+    base_url: Optional[str] = None
+    voice_mode: Optional[str] = None
 
 
 class RedisSetupRequest(BaseModel):
@@ -8972,7 +9103,7 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
 
 
 def _runtime_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str, Any]:
-    llm_payload = get_local_llm_loaded_models_snapshot(include_models=True)
+    llm_payload = get_local_llm_loaded_models_snapshot(include_models=True, include_vram_probe=include_models)
     llm_rows = [dict(row) for row in list(llm_payload.get("models") or []) if isinstance(row, dict)]
     for row in llm_rows:
         row.setdefault("category", "llm")
@@ -12350,7 +12481,19 @@ def spud_link_status() -> Dict[str, Any]:
 
 
 @app.post("/api/spudlink/pairing-code")
-def create_spud_link_pairing_code(request: Request) -> Dict[str, Any]:
+def create_spud_link_pairing_code(request: Request, payload: Optional[SpudLinkPairingCodeRequest] = None) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+    if payload is not None:
+        if payload.home_url is not None or payload.spud_link_home_url is not None:
+            updates["spud_link_home_url"] = (
+                payload.home_url if payload.home_url is not None else payload.spud_link_home_url
+            )
+        if payload.public_url is not None or payload.spud_link_public_url is not None:
+            updates["spud_link_public_url"] = (
+                payload.public_url if payload.public_url is not None else payload.spud_link_public_url
+            )
+    if updates:
+        _save_spud_link_settings_from_updates(updates)
     settings = _require_spud_link_server_enabled()
     if not bool(settings.get("pairing_enabled")):
         raise HTTPException(status_code=400, detail="Enable Spud Link pairing before creating a pairing code.")
@@ -12662,7 +12805,7 @@ def spud_link_notification_media(media_ref: str, request: Request, mimetype: str
     _spud_link_touch_node_from_request(node, request)
     _spud_link_store_node(node)
     media_type = str(mimetype or "application/octet-stream").strip() or "application/octet-stream"
-    return Response(content=bytes(raw), media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+    return _spud_link_media_bytes_response(bytes(raw), media_type, request)
 
 
 @app.get("/api/spudlink/v1/files/{file_id}")
@@ -12674,7 +12817,7 @@ def spud_link_file(file_id: str, request: Request, mimetype: str = "application/
     if blob is None:
         raise HTTPException(status_code=404, detail="Attachment not found or expired.")
     media_type = str(mimetype or "application/octet-stream").strip() or "application/octet-stream"
-    return Response(content=blob, media_type=media_type)
+    return _spud_link_media_bytes_response(blob, media_type, request)
 
 
 @app.post("/api/spudlink/v1/tater/chat")
@@ -12830,6 +12973,15 @@ async def spud_link_tts_speech(payload: SpudLinkTtsRequest, request: Request) ->
             wyoming_voice=str(current_speech.get("wyoming_tts_voice") or "").strip(),
             openai_base_url=str(current_speech.get("openai_tts_base_url") or "").strip(),
             openai_api_key=str(current_speech.get("openai_tts_api_key") or "").strip(),
+            chatterbox_base_url=str(current_speech.get("chatterbox_tts_base_url") or "").strip(),
+            chatterbox_voice_mode=str(current_speech.get("chatterbox_tts_voice_mode") or "").strip(),
+            chatterbox_chunk_size=current_speech.get("chatterbox_tts_chunk_size"),
+            chatterbox_temperature=current_speech.get("chatterbox_tts_temperature"),
+            chatterbox_exaggeration=current_speech.get("chatterbox_tts_exaggeration"),
+            chatterbox_cfg_weight=current_speech.get("chatterbox_tts_cfg_weight"),
+            chatterbox_seed=current_speech.get("chatterbox_tts_seed"),
+            chatterbox_speed_factor=current_speech.get("chatterbox_tts_speed_factor"),
+            chatterbox_language=str(current_speech.get("chatterbox_tts_language") or "").strip(),
         )
     except HTTPException:
         raise
@@ -15266,11 +15418,19 @@ def get_settings() -> Dict[str, Any]:
         role_port = str(redis_client.get(_hydra_role_llm_key(role, "port")) or "").strip()
         role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
         role_api_key = str(redis_client.get(_hydra_role_llm_key(role, "api_key")) or "").strip()
+        role_llama_cpp_slot = _read_optional_int_setting(
+            _hydra_role_llm_key(role, "llama_cpp_slot"),
+            (),
+            minimum=0,
+            maximum=31,
+            allow_zero=True,
+        )
         hydra_role_model_values[f"hydra_llm_{role}_provider"] = role_provider
         hydra_role_model_values[f"hydra_llm_{role}_host"] = role_host
         hydra_role_model_values[f"hydra_llm_{role}_port"] = role_port
         hydra_role_model_values[f"hydra_llm_{role}_model"] = role_model
         hydra_role_model_values[f"hydra_llm_{role}_api_key"] = role_api_key
+        hydra_role_model_values[f"hydra_llm_{role}_llama_cpp_slot"] = role_llama_cpp_slot
 
     hydra_defaults = {
         "hydra_llm_provider": HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
@@ -15293,6 +15453,9 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_n_ubatch": "",
         "hydra_llama_cpp_flash_attn": bool(DEFAULT_LLAMA_CPP_FLASH_ATTN),
         "hydra_llama_cpp_offload_kqv": bool(DEFAULT_LLAMA_CPP_OFFLOAD_KQV),
+        "hydra_llama_cpp_slot_count": str(DEFAULT_LLAMA_CPP_SLOT_COUNT),
+        "hydra_llama_cpp_base_slot": "",
+        "hydra_llama_cpp_vision_slot": "",
         "hydra_mlx_lm_context_tokens": "",
         "hydra_mlx_lm_trust_remote_code": bool(DEFAULT_MLX_LM_TRUST_REMOTE_CODE),
         "hydra_mlx_lm_lazy_load": bool(DEFAULT_MLX_LM_LAZY_LOAD),
@@ -15375,6 +15538,19 @@ def get_settings() -> Dict[str, Any]:
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
         "speech_openai_tts_base_url": str(speech_settings.get("openai_tts_base_url") or ""),
         "speech_openai_tts_api_key": str(speech_settings.get("openai_tts_api_key") or ""),
+        "speech_chatterbox_tts_base_url": str(speech_settings.get("chatterbox_tts_base_url") or ""),
+        "speech_chatterbox_tts_voice_mode": str(speech_settings.get("chatterbox_tts_voice_mode") or ""),
+        "speech_chatterbox_tts_chunk_size": str(speech_settings.get("chatterbox_tts_chunk_size") or ""),
+        "speech_chatterbox_tts_temperature": str(speech_settings.get("chatterbox_tts_temperature") or ""),
+        "speech_chatterbox_tts_exaggeration": str(speech_settings.get("chatterbox_tts_exaggeration") or ""),
+        "speech_chatterbox_tts_cfg_weight": str(speech_settings.get("chatterbox_tts_cfg_weight") or ""),
+        "speech_chatterbox_tts_seed": str(speech_settings.get("chatterbox_tts_seed") or ""),
+        "speech_chatterbox_tts_speed_factor": str(speech_settings.get("chatterbox_tts_speed_factor") or ""),
+        "speech_chatterbox_tts_language": str(speech_settings.get("chatterbox_tts_language") or ""),
+        "speech_chatterbox_tts_streaming_enabled": _as_bool_flag(
+            speech_settings.get("chatterbox_tts_streaming_enabled"),
+            default=False,
+        ),
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
@@ -15383,6 +15559,15 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_wyoming_tts_voice": str(speech_settings.get("announcement_wyoming_tts_voice") or ""),
         "speech_announcement_openai_tts_base_url": str(speech_settings.get("announcement_openai_tts_base_url") or ""),
         "speech_announcement_openai_tts_api_key": str(speech_settings.get("announcement_openai_tts_api_key") or ""),
+        "speech_announcement_chatterbox_tts_base_url": str(speech_settings.get("announcement_chatterbox_tts_base_url") or ""),
+        "speech_announcement_chatterbox_tts_voice_mode": str(speech_settings.get("announcement_chatterbox_tts_voice_mode") or ""),
+        "speech_announcement_chatterbox_tts_chunk_size": str(speech_settings.get("announcement_chatterbox_tts_chunk_size") or ""),
+        "speech_announcement_chatterbox_tts_temperature": str(speech_settings.get("announcement_chatterbox_tts_temperature") or ""),
+        "speech_announcement_chatterbox_tts_exaggeration": str(speech_settings.get("announcement_chatterbox_tts_exaggeration") or ""),
+        "speech_announcement_chatterbox_tts_cfg_weight": str(speech_settings.get("announcement_chatterbox_tts_cfg_weight") or ""),
+        "speech_announcement_chatterbox_tts_seed": str(speech_settings.get("announcement_chatterbox_tts_seed") or ""),
+        "speech_announcement_chatterbox_tts_speed_factor": str(speech_settings.get("announcement_chatterbox_tts_speed_factor") or ""),
+        "speech_announcement_chatterbox_tts_language": str(speech_settings.get("announcement_chatterbox_tts_language") or ""),
         "speech_model_warmup": _speech_model_warmup_snapshot(),
         "hf_llm_warmup": _hf_llm_warmup_snapshot(),
         "hydra_llm_recovery_notice": str(redis_client.get(HYDRA_LLM_RECOVERY_NOTICE_KEY) or ""),
@@ -15488,6 +15673,27 @@ def get_settings() -> Dict[str, Any]:
             ("TATER_LLAMA_CPP_OFFLOAD_KQV",),
             DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
         ),
+        "hydra_llama_cpp_slot_count": _read_bounded_int_setting(
+            HYDRA_LLAMA_CPP_SLOT_COUNT_KEY,
+            ("TATER_LLAMA_CPP_SLOT_COUNT",),
+            DEFAULT_LLAMA_CPP_SLOT_COUNT,
+            minimum=1,
+            maximum=32,
+        ),
+        "hydra_llama_cpp_base_slot": _read_optional_int_setting(
+            HYDRA_LLAMA_CPP_BASE_SLOT_KEY,
+            ("TATER_LLAMA_CPP_BASE_SLOT",),
+            minimum=0,
+            maximum=31,
+            allow_zero=True,
+        ),
+        "hydra_llama_cpp_vision_slot": _read_optional_int_setting(
+            HYDRA_LLAMA_CPP_VISION_SLOT_KEY,
+            ("TATER_LLAMA_CPP_VISION_SLOT",),
+            minimum=0,
+            maximum=31,
+            allow_zero=True,
+        ),
         "hydra_mlx_lm_context_tokens": _read_local_llm_context_setting(
             HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
             ("TATER_MLX_LM_MAX_KV_SIZE",),
@@ -15555,6 +15761,7 @@ def get_settings() -> Dict[str, Any]:
         "spud_link": spud_link_settings,
         "spud_link_mode": _normalize_spud_link_mode(spud_link_settings.get("mode")),
         "spud_link_node_name": str(spud_link_settings.get("node_name") or ""),
+        "spud_link_home_url": str(spud_link_settings.get("home_url") or ""),
         "spud_link_public_url": str(spud_link_settings.get("public_url") or ""),
         "spud_link_pairing_enabled": bool(spud_link_settings.get("pairing_enabled")),
         "spud_link_allow_spudlets": bool(spud_link_settings.get("allow_spudlets")),
@@ -15601,6 +15808,51 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
                 str(payload.openai_api_key).strip()
                 if payload.openai_api_key is not None
                 else str(current_speech.get("openai_tts_api_key") or "").strip()
+            ),
+            chatterbox_base_url=(
+                str(payload.chatterbox_base_url).strip()
+                if payload.chatterbox_base_url is not None
+                else str(current_speech.get("chatterbox_tts_base_url") or "").strip()
+            ),
+            chatterbox_voice_mode=(
+                str(payload.chatterbox_voice_mode).strip()
+                if payload.chatterbox_voice_mode is not None
+                else str(current_speech.get("chatterbox_tts_voice_mode") or "").strip()
+            ),
+            chatterbox_chunk_size=(
+                payload.chatterbox_chunk_size
+                if payload.chatterbox_chunk_size is not None
+                else current_speech.get("chatterbox_tts_chunk_size")
+            ),
+            chatterbox_temperature=(
+                payload.chatterbox_temperature
+                if payload.chatterbox_temperature is not None
+                else current_speech.get("chatterbox_tts_temperature")
+            ),
+            chatterbox_exaggeration=(
+                payload.chatterbox_exaggeration
+                if payload.chatterbox_exaggeration is not None
+                else current_speech.get("chatterbox_tts_exaggeration")
+            ),
+            chatterbox_cfg_weight=(
+                payload.chatterbox_cfg_weight
+                if payload.chatterbox_cfg_weight is not None
+                else current_speech.get("chatterbox_tts_cfg_weight")
+            ),
+            chatterbox_seed=(
+                payload.chatterbox_seed
+                if payload.chatterbox_seed is not None
+                else current_speech.get("chatterbox_tts_seed")
+            ),
+            chatterbox_speed_factor=(
+                payload.chatterbox_speed_factor
+                if payload.chatterbox_speed_factor is not None
+                else current_speech.get("chatterbox_tts_speed_factor")
+            ),
+            chatterbox_language=(
+                str(payload.chatterbox_language).strip()
+                if payload.chatterbox_language is not None
+                else str(current_speech.get("chatterbox_tts_language") or "").strip()
             ),
         )
     except HTTPException:
@@ -16297,6 +16549,28 @@ async def get_speech_openai_compatible_tts_voices(payload: OpenAiCompatibleTtsVo
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch OpenAI-compatible TTS voices.") from exc
 
 
+@app.post("/api/settings/speech/chatterbox-tts-voices")
+async def get_speech_chatterbox_tts_voices(payload: ChatterboxTtsVoicesRequest) -> Dict[str, Any]:
+    current_speech = get_shared_speech_settings()
+    try:
+        return await fetch_chatterbox_tts_voice_options(
+            base_url=(
+                str(payload.base_url).strip()
+                if payload.base_url is not None
+                else str(current_speech.get("chatterbox_tts_base_url") or "").strip()
+            ),
+            voice_mode=(
+                str(payload.voice_mode).strip()
+                if payload.voice_mode is not None
+                else str(current_speech.get("chatterbox_tts_voice_mode") or "").strip()
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Chatterbox TTS voices.") from exc
+
+
 @app.post("/api/settings/speech/openai-compatible-tts-models")
 async def get_speech_openai_compatible_tts_models(payload: OpenAiCompatibleTtsModelsRequest) -> Dict[str, Any]:
     current_speech = get_shared_speech_settings()
@@ -16890,6 +17164,30 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             )
         redis_client.set(redis_key, str(int(parsed)))
 
+    def _llama_cpp_slot_count_from_updates() -> int:
+        raw = updates.get("hydra_llama_cpp_slot_count", redis_client.get(HYDRA_LLAMA_CPP_SLOT_COUNT_KEY) or DEFAULT_LLAMA_CPP_SLOT_COUNT)
+        return _bounded_int(raw, default=DEFAULT_LLAMA_CPP_SLOT_COUNT, min_value=1, max_value=32)
+
+    def _save_llama_cpp_slot_setting(payload_key: str, redis_key: str) -> None:
+        if payload_key not in updates:
+            return
+        update_value = updates.get(payload_key)
+        raw = "" if update_value is None else str(update_value).strip()
+        if not raw:
+            redis_client.delete(redis_key)
+            return
+        try:
+            parsed = int(float(raw))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"{payload_key} must be a whole number or blank for auto.") from exc
+        slot_count = _llama_cpp_slot_count_from_updates()
+        if parsed < 0 or parsed >= slot_count:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{payload_key} must be blank or between 0 and {slot_count - 1}.",
+            )
+        redis_client.set(redis_key, str(int(parsed)))
+
     _save_tater_api_settings_from_updates(updates)
     _save_spud_link_settings_from_updates(updates)
 
@@ -16992,6 +17290,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_n_ubatch",
         "hydra_llama_cpp_flash_attn",
         "hydra_llama_cpp_offload_kqv",
+        "hydra_llama_cpp_slot_count",
+        "hydra_llama_cpp_base_slot",
         "hydra_mlx_lm_context_tokens",
         "hydra_mlx_lm_trust_remote_code",
         "hydra_mlx_lm_lazy_load",
@@ -17008,6 +17308,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "vision_api_base",
         "vision_api_key",
         "hydra_llama_cpp_vision_context_tokens",
+        "hydra_llama_cpp_vision_slot",
     }
 
     def _single_local_model_target(provider: Any, model: Any) -> List[Dict[str, str]]:
@@ -17063,7 +17364,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     if "hydra_beast_mode_enabled" in updates or any(
         f"hydra_llm_{role_id}_{field}" in updates
         for role_id in HYDRA_BEAST_CONFIG_ROLE_IDS
-        for field in ("provider", "host", "port", "model", "api_key")
+        for field in ("provider", "host", "port", "model", "api_key", "llama_cpp_slot")
     ):
         touched_local_model_scopes.add("beast")
 
@@ -17167,6 +17468,15 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
         default=DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
     )
+    _save_bounded_int_setting(
+        "hydra_llama_cpp_slot_count",
+        HYDRA_LLAMA_CPP_SLOT_COUNT_KEY,
+        default=DEFAULT_LLAMA_CPP_SLOT_COUNT,
+        min_value=1,
+        max_value=32,
+    )
+    _save_llama_cpp_slot_setting("hydra_llama_cpp_base_slot", HYDRA_LLAMA_CPP_BASE_SLOT_KEY)
+    _save_llama_cpp_slot_setting("hydra_llama_cpp_vision_slot", HYDRA_LLAMA_CPP_VISION_SLOT_KEY)
     _save_local_llm_context_setting(
         "hydra_mlx_lm_context_tokens",
         HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
@@ -17395,6 +17705,16 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_wyoming_tts_voice",
         "speech_openai_tts_base_url",
         "speech_openai_tts_api_key",
+        "speech_chatterbox_tts_base_url",
+        "speech_chatterbox_tts_voice_mode",
+        "speech_chatterbox_tts_chunk_size",
+        "speech_chatterbox_tts_temperature",
+        "speech_chatterbox_tts_exaggeration",
+        "speech_chatterbox_tts_cfg_weight",
+        "speech_chatterbox_tts_seed",
+        "speech_chatterbox_tts_speed_factor",
+        "speech_chatterbox_tts_language",
+        "speech_chatterbox_tts_streaming_enabled",
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
@@ -17403,6 +17723,15 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_wyoming_tts_voice",
         "speech_announcement_openai_tts_base_url",
         "speech_announcement_openai_tts_api_key",
+        "speech_announcement_chatterbox_tts_base_url",
+        "speech_announcement_chatterbox_tts_voice_mode",
+        "speech_announcement_chatterbox_tts_chunk_size",
+        "speech_announcement_chatterbox_tts_temperature",
+        "speech_announcement_chatterbox_tts_exaggeration",
+        "speech_announcement_chatterbox_tts_cfg_weight",
+        "speech_announcement_chatterbox_tts_seed",
+        "speech_announcement_chatterbox_tts_speed_factor",
+        "speech_announcement_chatterbox_tts_language",
     }
     tts_reload_keys = {
         "speech_acceleration",
@@ -17416,6 +17745,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     speech_warmup_keys = set(speech_keys) - {
         "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
+        "speech_chatterbox_tts_streaming_enabled",
     }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
@@ -17451,6 +17781,40 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             openai_tts_api_key=str(
                 updates.get("speech_openai_tts_api_key", current_speech.get("openai_tts_api_key") or "")
             ).strip(),
+            chatterbox_tts_base_url=str(
+                updates.get("speech_chatterbox_tts_base_url", current_speech.get("chatterbox_tts_base_url") or "")
+            ).strip(),
+            chatterbox_tts_voice_mode=str(
+                updates.get("speech_chatterbox_tts_voice_mode", current_speech.get("chatterbox_tts_voice_mode") or "")
+            ).strip(),
+            chatterbox_tts_chunk_size=updates.get(
+                "speech_chatterbox_tts_chunk_size",
+                current_speech.get("chatterbox_tts_chunk_size"),
+            ),
+            chatterbox_tts_temperature=updates.get(
+                "speech_chatterbox_tts_temperature",
+                current_speech.get("chatterbox_tts_temperature"),
+            ),
+            chatterbox_tts_exaggeration=updates.get(
+                "speech_chatterbox_tts_exaggeration",
+                current_speech.get("chatterbox_tts_exaggeration"),
+            ),
+            chatterbox_tts_cfg_weight=updates.get(
+                "speech_chatterbox_tts_cfg_weight",
+                current_speech.get("chatterbox_tts_cfg_weight"),
+            ),
+            chatterbox_tts_seed=updates.get("speech_chatterbox_tts_seed", current_speech.get("chatterbox_tts_seed")),
+            chatterbox_tts_speed_factor=updates.get(
+                "speech_chatterbox_tts_speed_factor",
+                current_speech.get("chatterbox_tts_speed_factor"),
+            ),
+            chatterbox_tts_language=str(
+                updates.get("speech_chatterbox_tts_language", current_speech.get("chatterbox_tts_language") or "")
+            ).strip(),
+            chatterbox_tts_streaming_enabled=updates.get(
+                "speech_chatterbox_tts_streaming_enabled",
+                current_speech.get("chatterbox_tts_streaming_enabled"),
+            ),
             announcement_tts_backend=str(
                 updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
             ).strip(),
@@ -17488,6 +17852,48 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 updates.get(
                     "speech_announcement_openai_tts_api_key",
                     current_speech.get("announcement_openai_tts_api_key") or "",
+                )
+            ).strip(),
+            announcement_chatterbox_tts_base_url=str(
+                updates.get(
+                    "speech_announcement_chatterbox_tts_base_url",
+                    current_speech.get("announcement_chatterbox_tts_base_url") or "",
+                )
+            ).strip(),
+            announcement_chatterbox_tts_voice_mode=str(
+                updates.get(
+                    "speech_announcement_chatterbox_tts_voice_mode",
+                    current_speech.get("announcement_chatterbox_tts_voice_mode") or "",
+                )
+            ).strip(),
+            announcement_chatterbox_tts_chunk_size=updates.get(
+                "speech_announcement_chatterbox_tts_chunk_size",
+                current_speech.get("announcement_chatterbox_tts_chunk_size"),
+            ),
+            announcement_chatterbox_tts_temperature=updates.get(
+                "speech_announcement_chatterbox_tts_temperature",
+                current_speech.get("announcement_chatterbox_tts_temperature"),
+            ),
+            announcement_chatterbox_tts_exaggeration=updates.get(
+                "speech_announcement_chatterbox_tts_exaggeration",
+                current_speech.get("announcement_chatterbox_tts_exaggeration"),
+            ),
+            announcement_chatterbox_tts_cfg_weight=updates.get(
+                "speech_announcement_chatterbox_tts_cfg_weight",
+                current_speech.get("announcement_chatterbox_tts_cfg_weight"),
+            ),
+            announcement_chatterbox_tts_seed=updates.get(
+                "speech_announcement_chatterbox_tts_seed",
+                current_speech.get("announcement_chatterbox_tts_seed"),
+            ),
+            announcement_chatterbox_tts_speed_factor=updates.get(
+                "speech_announcement_chatterbox_tts_speed_factor",
+                current_speech.get("announcement_chatterbox_tts_speed_factor"),
+            ),
+            announcement_chatterbox_tts_language=str(
+                updates.get(
+                    "speech_announcement_chatterbox_tts_language",
+                    current_speech.get("announcement_chatterbox_tts_language") or "",
                 )
             ).strip(),
         )
@@ -17718,11 +18124,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
-        role_payload_keys = {f"hydra_llm_{role}_{field}" for field in ("provider", "host", "port", "model", "api_key")}
+        role_payload_keys = {f"hydra_llm_{role}_{field}" for field in ("provider", "host", "port", "model", "api_key", "llama_cpp_slot")}
         if not any(key in updates for key in role_payload_keys):
             continue
 
         provider_payload_key = f"hydra_llm_{role}_provider"
+        slot_payload_key = f"hydra_llm_{role}_llama_cpp_slot"
         raw_provider = updates.get(provider_payload_key, redis_client.get(_hydra_role_llm_key(role, "provider")) or "")
         role_provider = _normalize_hydra_llm_provider(raw_provider)
         role_host = str(updates.get(f"hydra_llm_{role}_host", redis_client.get(_hydra_role_llm_key(role, "host")) or "") or "").strip()
@@ -17762,6 +18169,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 redis_client.set(redis_key, raw_value)
             else:
                 redis_client.delete(redis_key)
+        _save_llama_cpp_slot_setting(slot_payload_key, _hydra_role_llm_key(role, "llama_cpp_slot"))
 
     if explicit_local_model_load_targets and local_model_load_targets:
         hf_llm_warmup_result = _start_hf_llm_warmup(

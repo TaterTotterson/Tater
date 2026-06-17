@@ -81,12 +81,15 @@ from .conversation import (
 from .backends import (
     _build_experimental_tts_chunks,
     clear_tts_model_caches,
+    _chatterbox_tts_request,
+    _iter_chatterbox_tts_stream_response,
     _load_faster_whisper_model,
     _load_kokoro_pipeline,
     _load_piper_voice_model,
     _load_pocket_tts_model,
     _load_vosk_model,
     _native_local_partial_stt_task,
+    _open_chatterbox_tts_stream_response,
     _native_synthesize_text,
     _native_transcribe_local_audio_bytes,
     _native_transcribe_session_audio,
@@ -292,6 +295,7 @@ DEFAULT_WYOMING_STT_QUEUE_DROP_LIMIT = 3
 DEFAULT_LOCAL_STT_TIMEOUT_SECONDS = 35.0
 DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S = 90.0
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
+DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_STT_BACKEND = "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
@@ -334,6 +338,9 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
+DEFAULT_CHATTERBOX_TTS_BASE_URL = ""
+DEFAULT_CHATTERBOX_TTS_VOICE_MODE = "predefined"
+DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE = 120
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
@@ -372,6 +379,7 @@ DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.45
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
 DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
+DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_WAKE_ARBITRATION_ENABLED = True
 DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 900
 DEFAULT_WAKE_ARBITRATION_SCOPE = "same_area"
@@ -742,6 +750,11 @@ def _experimental_tts_early_start_enabled() -> bool:
         "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
         DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
     )
+
+
+def _chatterbox_tts_streaming_enabled(selection: Optional[Dict[str, Any]] = None) -> bool:
+    row = selection if isinstance(selection, dict) else _tts_selection_from_values()
+    return _as_bool(row.get("chatterbox_streaming_enabled"), False)
 
 
 def _continued_chat_followup_cue(response_text: str) -> str:
@@ -1847,6 +1860,16 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
         "VOICE_OPENAI_TTS_BASE_URL": shared.get("openai_tts_base_url"),
         "VOICE_OPENAI_TTS_API_KEY": shared.get("openai_tts_api_key"),
+        "VOICE_CHATTERBOX_TTS_BASE_URL": shared.get("chatterbox_tts_base_url"),
+        "VOICE_CHATTERBOX_TTS_VOICE_MODE": shared.get("chatterbox_tts_voice_mode"),
+        "VOICE_CHATTERBOX_TTS_CHUNK_SIZE": shared.get("chatterbox_tts_chunk_size"),
+        "VOICE_CHATTERBOX_TTS_TEMPERATURE": shared.get("chatterbox_tts_temperature"),
+        "VOICE_CHATTERBOX_TTS_EXAGGERATION": shared.get("chatterbox_tts_exaggeration"),
+        "VOICE_CHATTERBOX_TTS_CFG_WEIGHT": shared.get("chatterbox_tts_cfg_weight"),
+        "VOICE_CHATTERBOX_TTS_SEED": shared.get("chatterbox_tts_seed"),
+        "VOICE_CHATTERBOX_TTS_SPEED_FACTOR": shared.get("chatterbox_tts_speed_factor"),
+        "VOICE_CHATTERBOX_TTS_LANGUAGE": shared.get("chatterbox_tts_language"),
+        "VOICE_CHATTERBOX_TTS_STREAMING_ENABLED": shared.get("chatterbox_tts_streaming_enabled"),
     }
 
 
@@ -2151,6 +2174,8 @@ def _normalize_tts_backend(value: Any) -> str:
         return "wyoming"
     if token in {"openai_compatible", "openai", "openai_api"}:
         return "openai_compatible"
+    if token in {"chatterbox", "chatterbox_tts"}:
+        return "chatterbox"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -2158,6 +2183,17 @@ def _normalize_tts_backend(value: Any) -> str:
     if token == "piper":
         return "piper"
     return DEFAULT_TTS_BACKEND
+
+
+def _normalize_chatterbox_voice_mode(value: Any) -> str:
+    token = _lower(value).replace("-", "_").replace(" ", "_")
+    if token in {"clone", "cloned", "reference", "reference_audio"}:
+        return "clone"
+    return DEFAULT_CHATTERBOX_TTS_VOICE_MODE
+
+
+def _normalize_chatterbox_chunk_size(value: Any) -> int:
+    return _as_int(value, DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE, minimum=50, maximum=500)
 
 
 def _tts_model_root() -> str:
@@ -2179,6 +2215,7 @@ def _tts_backend_model_root(backend: str) -> str:
         "pocket_tts": "pocket-tts",
         "piper": "piper",
         "openai_compatible": "openai-compatible",
+        "chatterbox": "chatterbox",
         "wyoming": "wyoming",
     }
     dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
@@ -2573,6 +2610,8 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                     if tts_backend == "pocket_tts"
                     else DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
                     if tts_backend == "openai_compatible"
+                    else _text(settings.get("VOICE_TTS_VOICE"))
+                    if tts_backend == "chatterbox"
                     else ""
                 )
             ),
@@ -2581,6 +2620,19 @@ def _voice_config_snapshot() -> Dict[str, Any]:
                 "api_key_set": bool(_text(settings.get("VOICE_OPENAI_TTS_API_KEY"))),
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+            },
+            "chatterbox": {
+                "base_url": _text(settings.get("VOICE_CHATTERBOX_TTS_BASE_URL")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
+                "voice_mode": _normalize_chatterbox_voice_mode(settings.get("VOICE_CHATTERBOX_TTS_VOICE_MODE")),
+                "voice": _text(settings.get("VOICE_TTS_VOICE")),
+                "chunk_size": _normalize_chatterbox_chunk_size(settings.get("VOICE_CHATTERBOX_TTS_CHUNK_SIZE")),
+                "temperature": _text(settings.get("VOICE_CHATTERBOX_TTS_TEMPERATURE")),
+                "exaggeration": _text(settings.get("VOICE_CHATTERBOX_TTS_EXAGGERATION")),
+                "cfg_weight": _text(settings.get("VOICE_CHATTERBOX_TTS_CFG_WEIGHT")),
+                "seed": _text(settings.get("VOICE_CHATTERBOX_TTS_SEED")),
+                "speed_factor": _text(settings.get("VOICE_CHATTERBOX_TTS_SPEED_FACTOR")),
+                "language": _text(settings.get("VOICE_CHATTERBOX_TTS_LANGUAGE")),
+                "streaming_enabled": _as_bool(settings.get("VOICE_CHATTERBOX_TTS_STREAMING_ENABLED"), False),
             },
             "kokoro": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
@@ -3802,6 +3854,9 @@ async def _start_experimental_streamed_tts_response(
     response_text: str,
     transcript: str,
 ) -> Optional[Dict[str, Any]]:
+    selection = _tts_selection_from_values()
+    if _normalize_tts_backend(_text(session.tts_backend_effective)) == "chatterbox" and _chatterbox_tts_streaming_enabled(selection):
+        return None
     if not _experimental_tts_early_start_enabled():
         return None
     chunks = _build_experimental_tts_chunks(response_text)
@@ -3880,6 +3935,81 @@ async def _start_experimental_streamed_tts_response(
         "tts_mode": "segmented_url",
         "run_end_mode": "announcement_streamed",
         "segment_count": len(chunks),
+    }
+
+
+async def _start_chatterbox_streamed_tts_response(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session: VoiceSessionRuntime,
+    runtime: Dict[str, Any],
+    response_text: str,
+    transcript: str,
+) -> Optional[Dict[str, Any]]:
+    selection = _tts_selection_from_values()
+    if not _chatterbox_tts_streaming_enabled(selection):
+        return None
+    effective_backend = _normalize_tts_backend(_text(session.tts_backend_effective))
+    if effective_backend != "chatterbox":
+        return None
+    prompt = _text(response_text)
+    if not prompt:
+        return None
+
+    tts_started = time.monotonic()
+    try:
+        stream_url = _store_chatterbox_tts_stream_url(selector, session.session_id, prompt, selection)
+    except Exception as exc:
+        logger.warning(
+            "[native-voice] Chatterbox streaming TTS URL preparation failed selector=%s session_id=%s error=%s",
+            selector,
+            session.session_id,
+            _text(exc),
+        )
+        _native_debug(
+            f"chatterbox streaming tts url failed selector={selector} session_id={session.session_id} error={exc}"
+        )
+        return None
+    if not stream_url:
+        return None
+
+    session.tts_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
+    _voice_metrics_record_tts(selector, effective_backend or session.tts_backend, session.tts_latency_ms)
+
+    timeout_s = _run_end_timeout_for_text_s(prompt)
+    lock = runtime.get("lock")
+    async with lock:
+        _clear_streamed_tts_state(runtime)
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session.session_id),
+            kind="response_chatterbox_stream",
+            future=None,
+            timeout_s=timeout_s,
+        )
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
+    if not bool(session.intent_active):
+        await _ensure_voice_intent_active(client, module, session=session)
+    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": prompt})
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": stream_url})
+    _native_debug(
+        f"chatterbox streaming tts started selector={selector} session_id={session.session_id} "
+        f"timeout_s={timeout_s:.2f} url={stream_url}"
+    )
+    return {
+        "first_url": stream_url,
+        "backend_used": effective_backend,
+        "backend_note": "",
+        "tts_bytes": 0,
+        "tts_mode": "chatterbox_stream_url",
+        "run_end_mode": "announcement_streamed",
+        "segment_count": 1,
     }
 
 
@@ -4010,6 +4140,58 @@ def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_for
     return url
 
 
+def _store_chatterbox_tts_stream_url(
+    selector: str,
+    session_id: str,
+    text: str,
+    selection: Dict[str, Any],
+) -> str:
+    prompt = _text(text)
+    if not prompt:
+        return ""
+
+    endpoint, payload = _chatterbox_tts_request(
+        prompt,
+        voice=_text((selection or {}).get("voice")),
+        base_url=_text((selection or {}).get("chatterbox_base_url")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
+        voice_mode=_text((selection or {}).get("chatterbox_voice_mode")) or DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
+        chunk_size=(selection or {}).get("chatterbox_chunk_size"),
+        temperature=(selection or {}).get("chatterbox_temperature"),
+        exaggeration=(selection or {}).get("chatterbox_exaggeration"),
+        cfg_weight=(selection or {}).get("chatterbox_cfg_weight"),
+        seed=(selection or {}).get("chatterbox_seed"),
+        speed_factor=(selection or {}).get("chatterbox_speed_factor"),
+        language=(selection or {}).get("chatterbox_language"),
+        stream=True,
+    )
+    if not endpoint or not payload:
+        return ""
+
+    stream_id = uuid.uuid4().hex
+    expires_ts = _now() + _tts_url_ttl_s()
+    with _tts_url_store_lock:
+        _tts_url_prune_locked()
+        _tts_url_store[stream_id] = {
+            "id": stream_id,
+            "selector": _text(selector),
+            "session_id": _text(session_id),
+            "created_ts": _now(),
+            "expires_ts": expires_ts,
+            "stream_kind": "chatterbox",
+            "endpoint": endpoint,
+            "payload": dict(payload),
+            "max_bytes": DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES,
+        }
+
+    host = _service_host_for_peer(_selector_host(selector))
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
+    _native_debug(
+        f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
+        f"stream_id={stream_id} url={url}"
+    )
+    return url
+
+
 def _fetch_tts_url(stream_id: str) -> Optional[Dict[str, Any]]:
     token = _text(stream_id)
     if not token:
@@ -4108,6 +4290,20 @@ def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> floa
         min(
             float(DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S),
             _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75,
+        ),
+    )
+
+
+def _run_end_timeout_for_text_s(text: str) -> float:
+    prompt = _text(text)
+    word_count = len(re.findall(r"[a-z0-9']+", prompt.lower()))
+    char_estimate_s = len(prompt) / 12.0 if prompt else 0.0
+    word_estimate_s = word_count / 2.35 if word_count else 0.0
+    return max(
+        8.0,
+        min(
+            float(DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S),
+            max(char_estimate_s, word_estimate_s) + 8.0,
         ),
     )
 
@@ -5377,7 +5573,7 @@ async def _finalize_session(
 
         streamed_tts = None
         if reply_playback_on_device and not continue_conversation and not bool(session.live_tool_progress_played):
-            streamed_tts = await _start_experimental_streamed_tts_response(
+            streamed_tts = await _start_chatterbox_streamed_tts_response(
                 token,
                 client,
                 module,
@@ -5386,6 +5582,16 @@ async def _finalize_session(
                 response_text=spoken_response_text,
                 transcript=transcript,
             )
+            if not streamed_tts:
+                streamed_tts = await _start_experimental_streamed_tts_response(
+                    token,
+                    client,
+                    module,
+                    session=session,
+                    runtime=runtime,
+                    response_text=spoken_response_text,
+                    transcript=transcript,
+                )
 
         if streamed_tts:
             tts_backend_used = _text(streamed_tts.get("backend_used"))
