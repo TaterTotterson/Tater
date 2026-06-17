@@ -110,6 +110,28 @@ jobs:
           done
           echo "::warning::Generated release files were built, but pushing them to main timed out. Continuing so GitHub Release assets can publish."
 
+      - name: Ensure GitHub CLI
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+          for candidate in /opt/homebrew/bin/gh /usr/local/bin/gh; do
+            if [[ -x "${candidate}" ]]; then
+              echo "$(dirname "${candidate}")" >> "${GITHUB_PATH}"
+              exit 0
+            fi
+          done
+          if command -v brew >/dev/null 2>&1; then
+            brew install gh
+            echo "$(brew --prefix)/bin" >> "${GITHUB_PATH}"
+            exit 0
+          fi
+          echo "GitHub CLI (gh) is required to publish release assets." >&2
+          exit 1
+
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
