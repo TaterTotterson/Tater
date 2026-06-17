@@ -510,6 +510,9 @@ HYDRA_LLAMA_CPP_N_BATCH_KEY = "tater:hydra:llm:llama_cpp_n_batch"
 HYDRA_LLAMA_CPP_N_UBATCH_KEY = "tater:hydra:llm:llama_cpp_n_ubatch"
 HYDRA_LLAMA_CPP_FLASH_ATTN_KEY = "tater:hydra:llm:llama_cpp_flash_attn"
 HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY = "tater:hydra:llm:llama_cpp_offload_kqv"
+HYDRA_LLAMA_CPP_SLOT_COUNT_KEY = "tater:hydra:llm:llama_cpp_slot_count"
+HYDRA_LLAMA_CPP_BASE_SLOT_KEY = "tater:hydra:llm:llama_cpp_base_slot"
+HYDRA_LLAMA_CPP_VISION_SLOT_KEY = "tater:hydra:llm:llama_cpp_vision_slot"
 HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:hf_transformers_chat_template_overrides"
 HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
 HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
@@ -535,6 +538,8 @@ DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
+DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
+DEFAULT_LLAMA_CPP_SLOT_ID = -1
 DEFAULT_MLX_LM_TRUST_REMOTE_CODE = False
 DEFAULT_MLX_LM_LAZY_LOAD = False
 DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE = 2048
@@ -1414,6 +1419,43 @@ def _llama_cpp_n_ubatch(*, vision: bool = False) -> int:
     return max(16 if vision else 32, min(8192, value))
 
 
+def _llama_cpp_slot_count() -> int:
+    raw = str(
+        _safe_redis_text_get(HYDRA_LLAMA_CPP_SLOT_COUNT_KEY)
+        or os.getenv("TATER_LLAMA_CPP_SLOT_COUNT")
+        or DEFAULT_LLAMA_CPP_SLOT_COUNT
+    ).strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = DEFAULT_LLAMA_CPP_SLOT_COUNT
+    return max(1, min(32, int(value)))
+
+
+def _llama_cpp_slot_id(scope: str = "base", value: Any = None) -> int:
+    if value is None:
+        token = str(scope or "base").strip().lower().replace("-", "_")
+        if token == "vision":
+            raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_VISION_SLOT_KEY) or os.getenv("TATER_LLAMA_CPP_VISION_SLOT")
+        else:
+            raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_BASE_SLOT_KEY) or os.getenv("TATER_LLAMA_CPP_BASE_SLOT")
+    else:
+        raw = value
+    raw_text = "" if raw is None else str(raw).strip().lower()
+    if not raw_text or raw_text in {"auto", "default", "none"}:
+        return DEFAULT_LLAMA_CPP_SLOT_ID
+    try:
+        parsed = int(float(raw_text))
+    except Exception:
+        return DEFAULT_LLAMA_CPP_SLOT_ID
+    if parsed < 0:
+        return DEFAULT_LLAMA_CPP_SLOT_ID
+    slot_count = _llama_cpp_slot_count()
+    if parsed >= slot_count:
+        return DEFAULT_LLAMA_CPP_SLOT_ID
+    return int(parsed)
+
+
 def _llama_cpp_n_threads() -> int:
     raw = str(os.getenv("TATER_LLAMA_CPP_N_THREADS") or "").strip()
     if raw:
@@ -2226,7 +2268,11 @@ def _apple_metal_vram_snapshot() -> Optional[Dict[str, Any]]:
     used_candidates: List[int] = []
     total_candidates: List[int] = []
     detail_parts: List[str] = []
-    ioreg_snapshot = _apple_ioreg_metal_snapshot()
+    ioreg_snapshot = (
+        _apple_ioreg_metal_snapshot()
+        if _boolish(os.getenv("TATER_APPLE_IOREG_GPU_PROBE_ENABLED"), default=False)
+        else None
+    )
     if ioreg_snapshot:
         detail_parts.append("IORegistry")
         used_candidates.append(max(0, int(ioreg_snapshot.get("used_bytes") or 0)))
@@ -2412,6 +2458,10 @@ def _system_vram_snapshot() -> Dict[str, Any]:
     if torch_snapshot:
         return torch_snapshot
 
+    return _empty_system_vram_snapshot()
+
+
+def _empty_system_vram_snapshot() -> Dict[str, Any]:
     return {
         "available": False,
         "backend": "",
@@ -2486,7 +2536,7 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
     }
 
 
-def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str, Any]:
+def get_local_llm_loaded_models_snapshot(*, include_models: bool = True, include_vram_probe: bool = True) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
@@ -2531,7 +2581,7 @@ def get_local_llm_loaded_models_snapshot(*, include_models: bool = True) -> Dict
     system = {
         "cpu": _system_cpu_snapshot(),
         "ram": _system_ram_snapshot(),
-        "vram": _system_vram_snapshot(),
+        "vram": _system_vram_snapshot() if include_vram_probe else _empty_system_vram_snapshot(),
         "unified_memory": bool(_mlx_lm_is_apple_silicon()),
     }
     payload = {
@@ -2688,6 +2738,9 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
         "n_batch": _llama_cpp_n_batch(),
         "n_ubatch": _llama_cpp_n_ubatch(),
+        "slot_count": _llama_cpp_slot_count(),
+        "base_slot": _llama_cpp_slot_id("base"),
+        "vision_slot": _llama_cpp_slot_id("vision"),
         "flash_attn": _llama_cpp_flash_attn_enabled(),
         "offload_kqv": _llama_cpp_offload_kqv_enabled(),
         "mtp_enabled": _llama_cpp_mtp_enabled(),
@@ -2700,6 +2753,9 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_N_UBATCH": str(os.getenv("TATER_LLAMA_CPP_N_UBATCH") or ""),
             "TATER_LLAMA_CPP_FLASH_ATTN": str(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN") or ""),
             "TATER_LLAMA_CPP_OFFLOAD_KQV": str(os.getenv("TATER_LLAMA_CPP_OFFLOAD_KQV") or ""),
+            "TATER_LLAMA_CPP_SLOT_COUNT": str(os.getenv("TATER_LLAMA_CPP_SLOT_COUNT") or ""),
+            "TATER_LLAMA_CPP_BASE_SLOT": str(os.getenv("TATER_LLAMA_CPP_BASE_SLOT") or ""),
+            "TATER_LLAMA_CPP_VISION_SLOT": str(os.getenv("TATER_LLAMA_CPP_VISION_SLOT") or ""),
             "TATER_LLAMA_CPP_VISION_N_CTX": str(os.getenv("TATER_LLAMA_CPP_VISION_N_CTX") or ""),
             "TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_VISION_CONTEXT_TOKENS") or ""),
             "TATER_LLAMA_CPP_MTP_ENABLED": str(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED") or ""),
@@ -5662,6 +5718,7 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_n_gpu_layers(),
         _llama_cpp_n_batch(vision=vision),
         _llama_cpp_n_ubatch(vision=vision),
+        _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
         _llama_cpp_mtp_enabled(),
@@ -5684,6 +5741,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_n_batch(vision=True),
         _llama_cpp_n_ubatch(vision=False),
         _llama_cpp_n_ubatch(vision=True),
+        _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
         _llama_cpp_mtp_enabled(),
@@ -5909,7 +5967,12 @@ def _llama_cpp_native_chat_template_kwargs(chat_kwargs: Dict[str, Any]) -> Dict[
     return merged
 
 
-def _llama_cpp_native_completion_payload(prompt: Any, chat_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def _llama_cpp_native_completion_payload(
+    prompt: Any,
+    chat_kwargs: Dict[str, Any],
+    *,
+    slot_id: Any = None,
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "prompt": prompt,
         "stream": False,
@@ -5917,6 +5980,9 @@ def _llama_cpp_native_completion_payload(prompt: Any, chat_kwargs: Dict[str, Any
         "return_tokens": False,
         "return_progress": False,
     }
+    normalized_slot = _llama_cpp_slot_id(value=slot_id) if slot_id is not None else DEFAULT_LLAMA_CPP_SLOT_ID
+    if normalized_slot >= 0:
+        payload["id_slot"] = int(normalized_slot)
     key_map = {
         "max_tokens": "n_predict",
         "temperature": "temperature",
@@ -6039,6 +6105,9 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "n_ctx",
         "n_batch",
         "n_ubatch",
+        "slot_count",
+        "base_slot",
+        "vision_slot",
         "flash_attn",
         "offload_kqv",
         "device",
@@ -6144,6 +6213,7 @@ def _llama_cpp_native_server_command(
     n_batch = _llama_cpp_n_batch(vision=bool(mmproj_path))
     n_ubatch = _llama_cpp_n_ubatch(vision=bool(mmproj_path))
     n_gpu_layers = _llama_cpp_n_gpu_layers()
+    slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
     mtp_draft_model = _llama_cpp_mtp_draft_model()
     mtp_draft_model_path = ""
@@ -6177,6 +6247,8 @@ def _llama_cpp_native_server_command(
         "--chat-template-kwargs",
         json.dumps(_llama_cpp_native_chat_template_kwargs({}), separators=(",", ":")),
     ]
+    if slot_count > 1:
+        cmd.extend(["--parallel", str(int(slot_count))])
     if n_ubatch > 0:
         cmd.extend(["--ubatch-size", str(int(n_ubatch))])
     if _llama_cpp_flash_attn_enabled():
@@ -6211,6 +6283,9 @@ def _llama_cpp_native_server_command(
         "n_gpu_layers": int(n_gpu_layers),
         "n_batch": int(n_batch),
         "n_ubatch": int(n_ubatch),
+        "slot_count": int(slot_count),
+        "base_slot": int(_llama_cpp_slot_id("base")),
+        "vision_slot": int(_llama_cpp_slot_id("vision")),
         "flash_attn": bool(_llama_cpp_flash_attn_enabled()),
         "offload_kqv": bool(_llama_cpp_offload_kqv_enabled()),
         "mtp_requested": bool(mtp_requested),
@@ -6353,6 +6428,7 @@ def _llama_cpp_native_worker_chat(
     chat_kwargs: Dict[str, Any],
     *,
     vision: bool,
+    slot_id: Any = None,
     timeout: float,
 ) -> Dict[str, Any]:
     metadata = _llama_cpp_native_worker_load(state, model_token, vision=vision, timeout=max(60.0, timeout or 900.0))
@@ -6377,7 +6453,7 @@ def _llama_cpp_native_worker_chat(
             "prompt_string": prompt,
             "multimodal_data": media,
         }
-    completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs)
+    completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=slot_id)
     generation_started = time.perf_counter()
     completion_response = _llama_cpp_native_json_post(base_url, "/completion", completion_payload, timeout=max(30.0, timeout or 600.0))
     generation_elapsed = max(0.0, time.perf_counter() - generation_started)
@@ -6689,6 +6765,7 @@ def _llama_cpp_engine_chat_completion(
     *,
     timeout: Any = None,
     vision: bool = False,
+    slot_id: Any = None,
 ) -> Dict[str, Any]:
     bundle = _load_llama_cpp_engine_bundle(model_token, vision=bool(vision))
     engine = bundle.get("engine")
@@ -6709,6 +6786,7 @@ def _llama_cpp_engine_chat_completion(
                 "messages": local_messages,
                 "chat_kwargs": dict(chat_kwargs),
                 "vision": bool(vision),
+                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
                 "timeout": timeout_seconds,
             },
             timeout=timeout_seconds,
@@ -6721,6 +6799,7 @@ def _llama_cpp_engine_chat_completion(
                 "messages": local_messages,
                 "chat_kwargs": dict(chat_kwargs),
                 "vision": bool(vision),
+                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
                 "timeout": timeout_seconds,
             },
             timeout=timeout_seconds,
@@ -8222,10 +8301,11 @@ def _make_llm_client_for_provider(
     **kwargs,
 ) -> Any:
     selected_provider = _normalize_hydra_llm_provider(provider)
+    llama_cpp_slot = kwargs.pop("llama_cpp_slot", None)
     if selected_provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
         return TransformersLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        return LlamaCppLLMClientWrapper(model=model, **kwargs)
+        return LlamaCppLLMClientWrapper(model=model, llama_cpp_slot=llama_cpp_slot, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_MLX_LM:
         return MlxLmLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
@@ -9536,6 +9616,7 @@ class LlamaCppLLMClientWrapper:
         self.model = resolved_model
         self.provider = HYDRA_LLM_PROVIDER_LLAMA_CPP
         self.vision = _boolish(vision, default=False)
+        self.llama_cpp_slot = _llama_cpp_slot_id("vision" if self.vision else "base", kwargs.pop("llama_cpp_slot", None))
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
@@ -9639,12 +9720,16 @@ class LlamaCppLLMClientWrapper:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
+        request_slot = self.llama_cpp_slot
+        if vision_requested and not self.vision:
+            request_slot = _llama_cpp_slot_id("vision")
         return _llama_cpp_engine_chat_completion(
             self.model,
             local_messages,
             chat_kwargs,
             timeout=timeout,
             vision=vision_requested,
+            slot_id=request_slot,
         )
 
     async def chat(self, messages, **kwargs):
@@ -9687,6 +9772,9 @@ class LlamaCppLLMClientWrapper:
         call_error: Optional[Exception] = None
         final_model = str(self.model or "").strip()
         started_at = asyncio.get_running_loop().time()
+        debug_slot = self.llama_cpp_slot
+        if _vision_payload_has_image_url(messages) and not self.vision:
+            debug_slot = _llama_cpp_slot_id("vision")
         try:
             _append_llm_debug_event(
                 phase="prompt",
@@ -9696,7 +9784,7 @@ class LlamaCppLLMClientWrapper:
                 provider=HYDRA_LLM_PROVIDER_LLAMA_CPP,
                 host=self.host,
                 model=str(self.model or "").strip(),
-                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+                detail=f"messages={len(messages) if isinstance(messages, list) else 0} slot={debug_slot if debug_slot >= 0 else 'auto'}",
             )
             result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
@@ -10348,6 +10436,7 @@ def _describe_image_with_llama_cpp_engine(
             chat_kwargs,
             timeout=timeout,
             vision=True,
+            slot_id=_llama_cpp_slot_id("vision"),
         )
         _llama_cpp_vision_clear_failure(model_token)
         return result
@@ -11329,6 +11418,7 @@ def _llama_cpp_engine_worker_main() -> int:
                 if not isinstance(chat_kwargs, dict):
                     chat_kwargs = {}
                 requested_vision = _boolish((payload or {}).get("vision"), default=False)
+                slot_id = (payload or {}).get("slot_id")
                 desired_vision = bool(current_vision or requested_vision)
                 _ensure_loaded(model_token, vision=desired_vision)
                 result = _llama_cpp_native_worker_chat(
@@ -11337,6 +11427,7 @@ def _llama_cpp_engine_worker_main() -> int:
                     messages,
                     chat_kwargs,
                     vision=desired_vision,
+                    slot_id=slot_id,
                     timeout=float((payload or {}).get("timeout") or 0.0),
                 )
                 _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})

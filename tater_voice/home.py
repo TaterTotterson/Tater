@@ -385,6 +385,24 @@ def _identify_satellite(selector: str, *, redis_client: Any = None) -> Dict[str,
             or esphome_runtime.text(speech_settings.get("openai_tts_base_url")),
             openai_api_key=esphome_runtime.text(speech_settings.get("announcement_openai_tts_api_key"))
             or esphome_runtime.text(speech_settings.get("openai_tts_api_key")),
+            chatterbox_base_url=esphome_runtime.text(speech_settings.get("announcement_chatterbox_tts_base_url"))
+            or esphome_runtime.text(speech_settings.get("chatterbox_tts_base_url")),
+            chatterbox_voice_mode=esphome_runtime.text(speech_settings.get("announcement_chatterbox_tts_voice_mode"))
+            or esphome_runtime.text(speech_settings.get("chatterbox_tts_voice_mode")),
+            chatterbox_chunk_size=speech_settings.get("announcement_chatterbox_tts_chunk_size")
+            or speech_settings.get("chatterbox_tts_chunk_size"),
+            chatterbox_temperature=speech_settings.get("announcement_chatterbox_tts_temperature")
+            or speech_settings.get("chatterbox_tts_temperature"),
+            chatterbox_exaggeration=speech_settings.get("announcement_chatterbox_tts_exaggeration")
+            or speech_settings.get("chatterbox_tts_exaggeration"),
+            chatterbox_cfg_weight=speech_settings.get("announcement_chatterbox_tts_cfg_weight")
+            or speech_settings.get("chatterbox_tts_cfg_weight"),
+            chatterbox_seed=speech_settings.get("announcement_chatterbox_tts_seed")
+            or speech_settings.get("chatterbox_tts_seed"),
+            chatterbox_speed_factor=speech_settings.get("announcement_chatterbox_tts_speed_factor")
+            or speech_settings.get("chatterbox_tts_speed_factor"),
+            chatterbox_language=esphome_runtime.text(speech_settings.get("announcement_chatterbox_tts_language"))
+            or esphome_runtime.text(speech_settings.get("chatterbox_tts_language")),
             default_backend=backend,
             tts_kind="identify",
         ),

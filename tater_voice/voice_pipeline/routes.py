@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from .conversation import VoiceSessionRuntime
 
@@ -154,10 +155,11 @@ async def startup() -> None:
         vp._kokoro_provider(),
     )
     vp.logger.info(
-        "[native-voice] tts backend selected=%s effective=%s openai_compatible=%s kokoro=%s kokoro_torch=%s pocket_tts=%s piper=%s wyoming=%s",
+        "[native-voice] tts backend selected=%s effective=%s openai_compatible=%s chatterbox=%s kokoro=%s kokoro_torch=%s pocket_tts=%s piper=%s wyoming=%s",
         selected_tts_backend,
         effective_tts_backend,
         "configured" if vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url"))) else "missing",
+        "configured" if vp._text(((vp._tts_config_snapshot().get("chatterbox") or {}).get("base_url"))) else "missing",
         "available" if vp.build_kokoro_pipeline is not None else "missing",
         "available" if vp.KokoroTorchPipeline is not None else "missing",
         "available" if vp.PocketTTSModel is not None else "missing",
@@ -603,6 +605,25 @@ async def esphome_tts_stream(stream_id: str) -> Response:
     if not isinstance(row, dict):
         raise HTTPException(status_code=404, detail="TTS stream not found or expired")
 
+    headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    if vp._text(row.get("stream_kind")) == "chatterbox":
+        try:
+            upstream_response = await asyncio.to_thread(vp._open_chatterbox_tts_stream_response, row)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=vp._text(exc) or "Chatterbox TTS stream failed") from exc
+        vp._native_debug(
+            f"esphome chatterbox tts stream fetch stream_id={vp._text(stream_id)} "
+            f"session_id={vp._text(row.get('session_id'))} selector={vp._text(row.get('selector'))}"
+        )
+        return StreamingResponse(
+            vp._iter_chatterbox_tts_stream_response(upstream_response, row),
+            media_type="audio/wav",
+            headers=headers,
+        )
+
     wav_bytes = row.get("wav_bytes") if isinstance(row.get("wav_bytes"), (bytes, bytearray)) else b""
     if not wav_bytes:
         raise HTTPException(status_code=404, detail="TTS stream has no audio data")
@@ -611,11 +632,6 @@ async def esphome_tts_stream(stream_id: str) -> Response:
         f"esphome tts url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
         f"selector={vp._text(row.get('selector'))} bytes={len(wav_bytes)}"
     )
-
-    headers = {
-        "Cache-Control": "no-store, max-age=0",
-        "Pragma": "no-cache",
-    }
     return Response(content=bytes(wav_bytes), media_type="audio/wav", headers=headers)
 
 

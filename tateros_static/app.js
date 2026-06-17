@@ -16960,7 +16960,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
         <div class="core-data-table-wrap">
           <table class="core-data-table">
             <thead>
-              <tr><th>Platform</th><th>Identity</th><th>Linked Person</th><th>Attach</th></tr>
+              <tr><th>Platform</th><th>Identity</th><th>Linked Person</th><th>Actions</th></tr>
             </thead>
             <tbody>
               ${identities
@@ -16975,6 +16975,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
                   const factCount = Number.isFinite(factCountRaw) ? Math.max(0, Math.floor(factCountRaw)) : 0;
                   const personId = String(identity?.person_id || "").trim();
                   const personName = String(identity?.person_name || "").trim();
+                  const forgettable = boolFromAny(identity?.forgettable, false) && !personId;
                   const metaParts = [kind, source, factCount > 0 ? `${factCount} facts` : ""].filter(Boolean);
                   return `
                     <tr
@@ -16997,6 +16998,11 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
                             ${renderPeoplePersonOptions(people, personId)}
                           </select>
                           <button type="button" class="inline-btn people-identity-attach" ${people.length ? "" : "disabled"}>Link</button>
+                          ${
+                            forgettable
+                              ? `<button type="button" class="inline-btn danger people-identity-forget">Forget</button>`
+                              : ""
+                          }
                         </div>
                       </td>
                     </tr>
@@ -17133,6 +17139,20 @@ function bindSettingsPeopleActions() {
         },
         "Identity linked."
       );
+    });
+  });
+
+  document.querySelectorAll(".people-identity-forget").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const row = event.currentTarget?.closest?.(".people-identity-row");
+      const platform = String(row?.dataset?.platform || "").trim();
+      const externalId = String(row?.dataset?.externalId || "").trim();
+      const label = String(row?.dataset?.label || externalId || "this identity").trim() || "this identity";
+      const portalLabel = hydraPlatformLabel(platform) || platform || "identity";
+      if (!externalId || !window.confirm(`Forget ${portalLabel}: ${label}? This deletes its Little Spud chat history.`)) {
+        return;
+      }
+      await runPeopleAction(row, "people_identity_forget", { platform, external_id: externalId }, "Identity forgotten.");
     });
   });
 }
@@ -17584,6 +17604,12 @@ async function loadSettingsView() {
             settings[`hydra_llm_${role.id}_api_key`] || ""
           )}" />
         </label>
+        <label data-hydra-provider-field="llama_cpp" style="grid-column: 1 / -1;">${escapeHtml(role.title)} llama.cpp Slot
+          <input id="set_hydra_llm_${escapeHtml(role.id)}_llama_cpp_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
+            settings[`hydra_llm_${role.id}_llama_cpp_slot`] || ""
+          )}" />
+          <div class="small">Blank lets llama.cpp choose an idle slot.</div>
+        </label>
       </div>
     `;
   };
@@ -17750,6 +17776,7 @@ async function loadSettingsView() {
     const hubName = shortSpudLinkText(spudLinkPairedHub.hub_name || "Spud Hub", "Spud Hub");
     const hubUrl = shortSpudLinkText(spudLinkPairedHub.hub_url || settings.spud_link_hub_url || spudLink.hub_url || "");
     const nodeName = shortSpudLinkText(spudLinkPairedHub.node_name || settings.spud_link_node_name || spudLink.node_name || "");
+    const homeUrl = shortSpudLinkText(settings.spud_link_home_url || spudLink.home_url || "");
     const publicUrl = shortSpudLinkText(spudLinkPairedHub.public_url || settings.spud_link_public_url || spudLink.public_url || "");
     const connectedAt = Number(spudLinkPairedHub.connected_at || 0);
     const connectedText = connectedAt > 0 ? new Date(connectedAt * 1000).toLocaleString() : "";
@@ -17759,7 +17786,8 @@ async function loadSettingsView() {
     const detailItems = [
       hubUrl !== "-" ? `Hub URL: ${hubUrl}` : "",
       nodeName !== "-" ? `This Spudlet: ${nodeName}` : "",
-      publicUrl !== "-" ? `Callback URL: ${publicUrl}` : "",
+      homeUrl !== "-" ? `Home URL: ${homeUrl}` : "",
+      publicUrl !== "-" ? `Away URL: ${publicUrl}` : "",
       connectedText ? `Paired: ${connectedText}` : "",
       tokenSet ? "Token: saved automatically" : "Token: not paired",
       providerText ? `Model route: ${providerText} / ${modelText}` : "",
@@ -17803,9 +17831,19 @@ async function loadSettingsView() {
           <div class="spud-link-pairing-head">
             <div>
               <div class="small core-inline-section-title">Pair Little Spuds</div>
-              <p class="spud-link-pairing-copy">Create a short-lived code, then scan the QR or paste the manual code into a Little Spud client.</p>
+              <p class="spud-link-pairing-copy">Enter the routes Little Spud should use, then create a short-lived code to scan or paste into the app.</p>
             </div>
             <button type="button" id="settings-spud-link-generate-pairing" class="inline-btn">Create Pairing Code</button>
+          </div>
+          <div class="form-grid two-col">
+            <label>Home / LAN URL
+              <input id="set_spud_link_home_url" type="text" value="${escapeHtml(settings.spud_link_home_url || spudLink.home_url || "")}" placeholder="http://tater.local:8501" />
+              <div class="small">Local address Little Spud should try first when you are home.</div>
+            </label>
+            <label>Away / Tater Tunnel URL
+              <input id="set_spud_link_public_url" type="text" value="${escapeHtml(settings.spud_link_public_url || spudLink.public_url || "")}" placeholder="https://your-tater-tunnel.example" />
+              <div class="small">External address Little Spud should use away from home.</div>
+            </label>
           </div>
           <span id="settings-spud-link-pairing-status" class="small spud-link-pairing-status">${
             spudLink.pairing_code_active ? "A pairing code is active." : "No active pairing code."
@@ -17842,10 +17880,6 @@ async function loadSettingsView() {
             </label>
             <label>Node Name
               <input id="set_spud_link_node_name" type="text" value="${escapeHtml(settings.spud_link_node_name || spudLink.node_name || "Tater")}" />
-            </label>
-            <label style="grid-column: 1 / -1;">Public / LAN URL
-              <input id="set_spud_link_public_url" type="text" value="${escapeHtml(settings.spud_link_public_url || spudLink.public_url || "")}" placeholder="http://tater.local:8501" />
-              <div class="small">Optional address other linked Tater instances can call back.</div>
             </label>
           </div>
         </section>
@@ -18555,6 +18589,18 @@ async function loadSettingsView() {
                   <div id="hydra-llama-context-hint" class="small hydra-context-hint"></div>
                   <div id="hydra-llama-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="llama_cpp"></div>
                 </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Managed Slots
+                  <input id="set_hydra_llama_cpp_slot_count" type="number" min="1" max="32" step="1" value="${escapeHtml(
+                    settings.hydra_llama_cpp_slot_count || "1"
+                  )}" />
+                  <div class="small hydra-context-hint">Number of llama.cpp server slots Tater starts for each loaded GGUF.</div>
+                </label>
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Base Slot
+                  <input id="set_hydra_llama_cpp_base_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
+                    settings.hydra_llama_cpp_base_slot || ""
+                  )}" />
+                  <div class="small hydra-context-hint">Blank lets llama.cpp choose an idle slot. Slots are zero-based.</div>
+                </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Eval Batch Size
                   <div class="hydra-context-control hydra-llama-perf-control">
                     <input id="set_hydra_llama_cpp_n_batch_range" type="range" min="32" max="8192" step="32" value="${escapeHtml(
@@ -18763,6 +18809,12 @@ async function loadSettingsView() {
                   </div>
                   <div id="vision-llama-context-hint" class="small hydra-context-hint">Used only for llama.cpp image calls. Text chat keeps its own context length.</div>
                 </label>
+                <label id="vision-llama-slot-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Vision Slot
+                  <input id="set_hydra_llama_cpp_vision_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
+                    settings.hydra_llama_cpp_vision_slot || ""
+                  )}" />
+                  <div class="small hydra-context-hint">Blank lets llama.cpp choose an idle slot. Use a dedicated slot to preserve image prompt cache.</div>
+                </label>
                 <label id="vision-provider-wrap" style="grid-column: 1 / -1;">Dedicated Vision Provider
                   <select id="set_vision_provider">
                     ${renderHydraVisionProviderOptions(settings.vision_provider || "hf_transformers")}
@@ -18858,6 +18910,83 @@ async function loadSettingsView() {
                     settings.speech_openai_tts_api_key || ""
                   )}" />
                 </label>
+                <label id="speech-chatterbox-tts-base-url-wrap" style="grid-column: 1 / -1;">Chatterbox Base URL
+                  <input id="set_speech_chatterbox_tts_base_url" type="text" value="${escapeHtml(
+                    settings.speech_chatterbox_tts_base_url || ""
+                  )}" placeholder="http://127.0.0.1:8004" />
+                </label>
+                <label id="speech-chatterbox-tts-streaming-enabled-wrap" style="grid-column: 1 / -1;">Chatterbox Satellite Streaming
+                  ${renderToggleRow(
+                    `<input id="set_speech_chatterbox_tts_streaming_enabled" class="toggle-input" type="checkbox" ${
+                      settings.speech_chatterbox_tts_streaming_enabled ? "checked" : ""
+                    } />`,
+                    "Stream direct voice replies"
+                  )}
+                </label>
+                <label id="speech-chatterbox-tts-voice-mode-wrap">Chatterbox Voice Mode
+                  <select id="set_speech_chatterbox_tts_voice_mode">
+                    <option value="predefined" ${String(settings.speech_chatterbox_tts_voice_mode || "predefined") === "clone" ? "" : "selected"}>Predefined</option>
+                    <option value="clone" ${String(settings.speech_chatterbox_tts_voice_mode || "") === "clone" ? "selected" : ""}>Clone</option>
+                  </select>
+                </label>
+                <label id="speech-chatterbox-tts-voice-wrap">Chatterbox Voice / Reference
+                  <select id="set_speech_chatterbox_tts_voice">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_tts_voice
+                        ? [{ value: settings.speech_tts_voice, label: `${settings.speech_tts_voice} (saved)` }]
+                        : [],
+                      settings.speech_tts_voice || "",
+                      { blankLabel: "Load Chatterbox voices" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-chatterbox-tts-manual-voice-wrap">Manual Voice / Reference Override (optional)
+                  <input id="set_speech_chatterbox_tts_manual_voice" type="text" value="" placeholder="Type a custom voice or reference file" />
+                </label>
+                <div id="speech-chatterbox-tts-voices-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-chatterbox-tts-load-voices" class="inline-btn">Load Chatterbox Voices / References</button>
+                  <span id="speech-chatterbox-tts-voice-status" class="small"></span>
+                </div>
+                <details id="speech-chatterbox-tts-advanced-wrap" class="settings-dropdown" style="grid-column: 1 / -1;">
+                  <summary class="settings-summary">Advanced Chatterbox Settings</summary>
+                  <div class="form-grid">
+                    <label id="speech-chatterbox-tts-chunk-size-wrap">Chatterbox Chunk Size
+                      <input id="set_speech_chatterbox_tts_chunk_size" type="number" min="50" max="500" step="10" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_chunk_size || "120"
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-temperature-wrap">Temperature
+                      <input id="set_speech_chatterbox_tts_temperature" type="number" min="0" max="1.5" step="0.05" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_temperature || ""
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-exaggeration-wrap">Exaggeration
+                      <input id="set_speech_chatterbox_tts_exaggeration" type="number" min="0.25" max="2" step="0.05" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_exaggeration || ""
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-cfg-weight-wrap">CFG Weight
+                      <input id="set_speech_chatterbox_tts_cfg_weight" type="number" min="0.2" max="1" step="0.05" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_cfg_weight || ""
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-seed-wrap">Seed
+                      <input id="set_speech_chatterbox_tts_seed" type="number" min="0" step="1" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_seed || ""
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-speed-factor-wrap">Speed Factor
+                      <input id="set_speech_chatterbox_tts_speed_factor" type="number" min="0.25" max="4" step="0.05" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_speed_factor || ""
+                      )}" />
+                    </label>
+                    <label id="speech-chatterbox-tts-language-wrap">Language
+                      <input id="set_speech_chatterbox_tts_language" type="text" value="${escapeHtml(
+                        settings.speech_chatterbox_tts_language || ""
+                      )}" placeholder="en" />
+                    </label>
+                  </div>
+                </details>
                 <div id="speech-openai-tts-models-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
                   <button type="button" id="settings-speech-openai-tts-load-models" class="inline-btn">Load Remote Models</button>
                   <span id="speech-openai-tts-model-status" class="small"></span>
@@ -18969,6 +19098,80 @@ async function loadSettingsView() {
                     settings.speech_announcement_openai_tts_api_key || ""
                   )}" />
                 </label>
+                <label id="speech-announcement-chatterbox-tts-base-url-wrap" style="grid-column: 1 / -1;">Chatterbox Base URL
+                  <input id="set_speech_announcement_chatterbox_tts_base_url" type="text" value="${escapeHtml(
+                    settings.speech_announcement_chatterbox_tts_base_url || ""
+                  )}" placeholder="http://127.0.0.1:8004" />
+                </label>
+                <label id="speech-announcement-chatterbox-tts-voice-mode-wrap">Chatterbox Voice Mode
+                  <select id="set_speech_announcement_chatterbox_tts_voice_mode">
+                    <option value="predefined" ${String(settings.speech_announcement_chatterbox_tts_voice_mode || "predefined") === "clone" ? "" : "selected"}>Predefined</option>
+                    <option value="clone" ${String(settings.speech_announcement_chatterbox_tts_voice_mode || "") === "clone" ? "selected" : ""}>Clone</option>
+                  </select>
+                </label>
+                <label id="speech-announcement-chatterbox-tts-voice-wrap">Chatterbox Voice / Reference
+                  <select id="set_speech_announcement_chatterbox_tts_voice">
+                    ${renderSettingsSelectOptions(
+                      settings.speech_announcement_tts_voice
+                        ? [
+                            {
+                              value: settings.speech_announcement_tts_voice,
+                              label: `${settings.speech_announcement_tts_voice} (saved)`,
+                            },
+                          ]
+                        : [],
+                      settings.speech_announcement_tts_voice || "",
+                      { blankLabel: "Load Chatterbox voices" }
+                    )}
+                  </select>
+                </label>
+                <label id="speech-announcement-chatterbox-tts-manual-voice-wrap">Manual Voice / Reference Override (optional)
+                  <input id="set_speech_announcement_chatterbox_tts_manual_voice" type="text" value="" placeholder="Type a custom voice or reference file" />
+                </label>
+                <div id="speech-announcement-chatterbox-tts-voices-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
+                  <button type="button" id="settings-speech-announcement-chatterbox-tts-load-voices" class="inline-btn">Load Chatterbox Voices / References</button>
+                  <span id="speech-announcement-chatterbox-tts-voice-status" class="small"></span>
+                </div>
+                <details id="speech-announcement-chatterbox-tts-advanced-wrap" class="settings-dropdown" style="grid-column: 1 / -1;">
+                  <summary class="settings-summary">Advanced Chatterbox Settings</summary>
+                  <div class="form-grid">
+                    <label id="speech-announcement-chatterbox-tts-chunk-size-wrap">Chatterbox Chunk Size
+                      <input id="set_speech_announcement_chatterbox_tts_chunk_size" type="number" min="50" max="500" step="10" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_chunk_size || "120"
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-temperature-wrap">Temperature
+                      <input id="set_speech_announcement_chatterbox_tts_temperature" type="number" min="0" max="1.5" step="0.05" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_temperature || ""
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-exaggeration-wrap">Exaggeration
+                      <input id="set_speech_announcement_chatterbox_tts_exaggeration" type="number" min="0.25" max="2" step="0.05" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_exaggeration || ""
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-cfg-weight-wrap">CFG Weight
+                      <input id="set_speech_announcement_chatterbox_tts_cfg_weight" type="number" min="0.2" max="1" step="0.05" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_cfg_weight || ""
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-seed-wrap">Seed
+                      <input id="set_speech_announcement_chatterbox_tts_seed" type="number" min="0" step="1" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_seed || ""
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-speed-factor-wrap">Speed Factor
+                      <input id="set_speech_announcement_chatterbox_tts_speed_factor" type="number" min="0.25" max="4" step="0.05" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_speed_factor || ""
+                      )}" />
+                    </label>
+                    <label id="speech-announcement-chatterbox-tts-language-wrap">Language
+                      <input id="set_speech_announcement_chatterbox_tts_language" type="text" value="${escapeHtml(
+                        settings.speech_announcement_chatterbox_tts_language || ""
+                      )}" placeholder="en" />
+                    </label>
+                  </div>
+                </details>
                 <div id="speech-announcement-openai-tts-models-tools-wrap" class="inline-row" style="grid-column: 1 / -1;">
                   <button type="button" id="settings-speech-announcement-openai-tts-load-models" class="inline-btn">Load Remote Models</button>
                   <span id="speech-announcement-openai-tts-model-status" class="small"></span>
@@ -20249,6 +20452,8 @@ async function loadSettingsView() {
   });
   const llamaCppMtpEnabledEl = document.getElementById("set_hydra_llama_cpp_mtp_enabled");
   const llamaCppMtpExtraEl = document.getElementById("hydra-llama-mtp-extra");
+  const llamaCppSlotCountEl = document.getElementById("set_hydra_llama_cpp_slot_count");
+  const llamaCppBaseSlotEl = document.getElementById("set_hydra_llama_cpp_base_slot");
   const syncLlamaCppMtpExtra = () => {
     if (llamaCppMtpExtraEl) {
       llamaCppMtpExtraEl.hidden = !Boolean(llamaCppMtpEnabledEl?.checked);
@@ -20307,6 +20512,33 @@ async function loadSettingsView() {
     max: 8192,
     step: 32,
   });
+  const syncLlamaCppSlotInputLimits = () => {
+    const rawCount = Number(llamaCppSlotCountEl?.value || settings.hydra_llama_cpp_slot_count || 1);
+    const slotCount = Math.max(1, Math.min(32, Number.isFinite(rawCount) ? Math.round(rawCount) : 1));
+    if (llamaCppSlotCountEl) {
+      llamaCppSlotCountEl.value = String(slotCount);
+    }
+    const maxSlot = Math.max(0, slotCount - 1);
+    const slotInputs = [
+      llamaCppBaseSlotEl,
+      document.getElementById("set_hydra_llama_cpp_vision_slot"),
+      ...hydraRoleIds.map((role) => document.getElementById(`set_hydra_llm_${role}_llama_cpp_slot`)),
+    ].filter(Boolean);
+    slotInputs.forEach((inputEl) => {
+      inputEl.max = String(maxSlot);
+      const rawValue = String(inputEl.value || "").trim();
+      if (!rawValue) {
+        return;
+      }
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > maxSlot) {
+        inputEl.value = "";
+      }
+    });
+  };
+  llamaCppSlotCountEl?.addEventListener("input", syncLlamaCppSlotInputLimits);
+  llamaCppSlotCountEl?.addEventListener("blur", syncLlamaCppSlotInputLimits);
+  syncLlamaCppSlotInputLimits();
   const normalizeHydraBaseRowInput = (row) => ({
     provider: normalizeHydraBaseProvider(row?.provider || ""),
     host: String(row?.host || "").trim(),
@@ -20610,6 +20842,7 @@ async function loadSettingsView() {
   const visionLlamaContextRangeEl = document.getElementById("set_hydra_llama_cpp_vision_context_tokens_range");
   const visionLlamaContextNumberEl = document.getElementById("set_hydra_llama_cpp_vision_context_tokens");
   const visionLlamaContextHintEl = document.getElementById("vision-llama-context-hint");
+  const visionLlamaSlotWrapEl = document.getElementById("vision-llama-slot-wrap");
   const visionRouteControl = registerHydraRouteControl({
     scope: "vision",
     rootEl: document.getElementById("set_vision_mode")?.closest(".hydra-model-panel"),
@@ -20641,6 +20874,12 @@ async function loadSettingsView() {
     if (visionLlamaContextWrapEl) {
       visionLlamaContextWrapEl.style.display = show ? "" : "none";
       visionLlamaContextWrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = !show;
+      });
+    }
+    if (visionLlamaSlotWrapEl) {
+      visionLlamaSlotWrapEl.style.display = show ? "" : "none";
+      visionLlamaSlotWrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
         fieldEl.disabled = !show;
       });
     }
@@ -21938,6 +22177,34 @@ async function loadSettingsView() {
   const speechOpenAiTtsVoiceEl = document.getElementById("set_speech_openai_tts_voice");
   const speechOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-openai-tts-manual-voice-wrap");
   const speechOpenAiTtsManualVoiceEl = document.getElementById("set_speech_openai_tts_manual_voice");
+  const speechChatterboxTtsBaseUrlWrapEl = document.getElementById("speech-chatterbox-tts-base-url-wrap");
+  const speechChatterboxTtsBaseUrlEl = document.getElementById("set_speech_chatterbox_tts_base_url");
+  const speechChatterboxTtsStreamingEnabledWrapEl = document.getElementById("speech-chatterbox-tts-streaming-enabled-wrap");
+  const speechChatterboxTtsStreamingEnabledEl = document.getElementById("set_speech_chatterbox_tts_streaming_enabled");
+  const speechChatterboxTtsVoiceModeWrapEl = document.getElementById("speech-chatterbox-tts-voice-mode-wrap");
+  const speechChatterboxTtsVoiceModeEl = document.getElementById("set_speech_chatterbox_tts_voice_mode");
+  const speechChatterboxTtsVoiceWrapEl = document.getElementById("speech-chatterbox-tts-voice-wrap");
+  const speechChatterboxTtsVoiceEl = document.getElementById("set_speech_chatterbox_tts_voice");
+  const speechChatterboxTtsManualVoiceWrapEl = document.getElementById("speech-chatterbox-tts-manual-voice-wrap");
+  const speechChatterboxTtsManualVoiceEl = document.getElementById("set_speech_chatterbox_tts_manual_voice");
+  const speechChatterboxTtsVoicesToolsWrapEl = document.getElementById("speech-chatterbox-tts-voices-tools-wrap");
+  const speechChatterboxTtsVoiceRefreshBtnEl = document.getElementById("settings-speech-chatterbox-tts-load-voices");
+  const speechChatterboxTtsVoiceStatusEl = document.getElementById("speech-chatterbox-tts-voice-status");
+  const speechChatterboxTtsAdvancedWrapEl = document.getElementById("speech-chatterbox-tts-advanced-wrap");
+  const speechChatterboxTtsChunkSizeWrapEl = document.getElementById("speech-chatterbox-tts-chunk-size-wrap");
+  const speechChatterboxTtsChunkSizeEl = document.getElementById("set_speech_chatterbox_tts_chunk_size");
+  const speechChatterboxTtsTemperatureWrapEl = document.getElementById("speech-chatterbox-tts-temperature-wrap");
+  const speechChatterboxTtsTemperatureEl = document.getElementById("set_speech_chatterbox_tts_temperature");
+  const speechChatterboxTtsExaggerationWrapEl = document.getElementById("speech-chatterbox-tts-exaggeration-wrap");
+  const speechChatterboxTtsExaggerationEl = document.getElementById("set_speech_chatterbox_tts_exaggeration");
+  const speechChatterboxTtsCfgWeightWrapEl = document.getElementById("speech-chatterbox-tts-cfg-weight-wrap");
+  const speechChatterboxTtsCfgWeightEl = document.getElementById("set_speech_chatterbox_tts_cfg_weight");
+  const speechChatterboxTtsSeedWrapEl = document.getElementById("speech-chatterbox-tts-seed-wrap");
+  const speechChatterboxTtsSeedEl = document.getElementById("set_speech_chatterbox_tts_seed");
+  const speechChatterboxTtsSpeedFactorWrapEl = document.getElementById("speech-chatterbox-tts-speed-factor-wrap");
+  const speechChatterboxTtsSpeedFactorEl = document.getElementById("set_speech_chatterbox_tts_speed_factor");
+  const speechChatterboxTtsLanguageWrapEl = document.getElementById("speech-chatterbox-tts-language-wrap");
+  const speechChatterboxTtsLanguageEl = document.getElementById("set_speech_chatterbox_tts_language");
   const announcementTtsBackendEl = document.getElementById("set_speech_announcement_tts_backend");
   const announcementOpenAiTtsBaseUrlWrapEl = document.getElementById("speech-announcement-openai-tts-base-url-wrap");
   const announcementOpenAiTtsBaseUrlEl = document.getElementById("set_speech_announcement_openai_tts_base_url");
@@ -21965,6 +22232,38 @@ async function loadSettingsView() {
   const announcementOpenAiTtsVoiceEl = document.getElementById("set_speech_announcement_openai_tts_voice");
   const announcementOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-announcement-openai-tts-manual-voice-wrap");
   const announcementOpenAiTtsManualVoiceEl = document.getElementById("set_speech_announcement_openai_tts_manual_voice");
+  const announcementChatterboxTtsBaseUrlWrapEl = document.getElementById("speech-announcement-chatterbox-tts-base-url-wrap");
+  const announcementChatterboxTtsBaseUrlEl = document.getElementById("set_speech_announcement_chatterbox_tts_base_url");
+  const announcementChatterboxTtsVoiceModeWrapEl = document.getElementById("speech-announcement-chatterbox-tts-voice-mode-wrap");
+  const announcementChatterboxTtsVoiceModeEl = document.getElementById("set_speech_announcement_chatterbox_tts_voice_mode");
+  const announcementChatterboxTtsVoiceWrapEl = document.getElementById("speech-announcement-chatterbox-tts-voice-wrap");
+  const announcementChatterboxTtsVoiceEl = document.getElementById("set_speech_announcement_chatterbox_tts_voice");
+  const announcementChatterboxTtsManualVoiceWrapEl = document.getElementById(
+    "speech-announcement-chatterbox-tts-manual-voice-wrap"
+  );
+  const announcementChatterboxTtsManualVoiceEl = document.getElementById(
+    "set_speech_announcement_chatterbox_tts_manual_voice"
+  );
+  const announcementChatterboxTtsVoicesToolsWrapEl = document.getElementById("speech-announcement-chatterbox-tts-voices-tools-wrap");
+  const announcementChatterboxTtsVoiceRefreshBtnEl = document.getElementById(
+    "settings-speech-announcement-chatterbox-tts-load-voices"
+  );
+  const announcementChatterboxTtsVoiceStatusEl = document.getElementById("speech-announcement-chatterbox-tts-voice-status");
+  const announcementChatterboxTtsAdvancedWrapEl = document.getElementById("speech-announcement-chatterbox-tts-advanced-wrap");
+  const announcementChatterboxTtsChunkSizeWrapEl = document.getElementById("speech-announcement-chatterbox-tts-chunk-size-wrap");
+  const announcementChatterboxTtsChunkSizeEl = document.getElementById("set_speech_announcement_chatterbox_tts_chunk_size");
+  const announcementChatterboxTtsTemperatureWrapEl = document.getElementById("speech-announcement-chatterbox-tts-temperature-wrap");
+  const announcementChatterboxTtsTemperatureEl = document.getElementById("set_speech_announcement_chatterbox_tts_temperature");
+  const announcementChatterboxTtsExaggerationWrapEl = document.getElementById("speech-announcement-chatterbox-tts-exaggeration-wrap");
+  const announcementChatterboxTtsExaggerationEl = document.getElementById("set_speech_announcement_chatterbox_tts_exaggeration");
+  const announcementChatterboxTtsCfgWeightWrapEl = document.getElementById("speech-announcement-chatterbox-tts-cfg-weight-wrap");
+  const announcementChatterboxTtsCfgWeightEl = document.getElementById("set_speech_announcement_chatterbox_tts_cfg_weight");
+  const announcementChatterboxTtsSeedWrapEl = document.getElementById("speech-announcement-chatterbox-tts-seed-wrap");
+  const announcementChatterboxTtsSeedEl = document.getElementById("set_speech_announcement_chatterbox_tts_seed");
+  const announcementChatterboxTtsSpeedFactorWrapEl = document.getElementById("speech-announcement-chatterbox-tts-speed-factor-wrap");
+  const announcementChatterboxTtsSpeedFactorEl = document.getElementById("set_speech_announcement_chatterbox_tts_speed_factor");
+  const announcementChatterboxTtsLanguageWrapEl = document.getElementById("speech-announcement-chatterbox-tts-language-wrap");
+  const announcementChatterboxTtsLanguageEl = document.getElementById("set_speech_announcement_chatterbox_tts_language");
   const announcementWyomingTtsHostWrapEl = document.getElementById("speech-announcement-wyoming-tts-host-wrap");
   const announcementWyomingTtsHostEl = document.getElementById("set_speech_announcement_wyoming_tts_host");
   const announcementWyomingTtsPortWrapEl = document.getElementById("speech-announcement-wyoming-tts-port-wrap");
@@ -22011,6 +22310,10 @@ async function loadSettingsView() {
   let announcementOpenAiTtsModelRows = [];
   let announcementOpenAiTtsVoiceRows = [];
   let announcementOpenAiTtsVoicesByModel = {};
+  let speechChatterboxTtsRefreshSeq = 0;
+  let speechChatterboxTtsRefreshTimer = 0;
+  let announcementChatterboxTtsRefreshSeq = 0;
+  let announcementChatterboxTtsRefreshTimer = 0;
 
   const setElementVisible = (element, visible) => {
     if (!element) {
@@ -22020,6 +22323,10 @@ async function loadSettingsView() {
   };
 
   const isOpenAiCompatibleTtsBackend = (value) => String(value || "").trim() === "openai_compatible";
+  const isChatterboxTtsBackend = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    return ["chatterbox", "chatterbox_tts", "chatterbox-tts"].includes(normalized);
+  };
 
   const isAnnouncementOpenAiTtsScope = (scope) => String(scope || "").trim() === "announcement";
 
@@ -22036,6 +22343,30 @@ async function loadSettingsView() {
         ? announcementOpenAiTtsApiKeyEl?.value || ""
         : speechOpenAiTtsApiKeyEl?.value || ""
     ).trim();
+
+  const getChatterboxTtsValue = (key, scope = "direct") => {
+    const isAnnouncement = isAnnouncementOpenAiTtsScope(scope);
+    if (key === "voice") {
+      const manualVoiceEl = isAnnouncement ? announcementChatterboxTtsManualVoiceEl : speechChatterboxTtsManualVoiceEl;
+      const manualVoice = String(manualVoiceEl?.value || "").trim();
+      if (manualVoice) {
+        return manualVoice;
+      }
+    }
+    const elementMap = {
+      base_url: isAnnouncement ? announcementChatterboxTtsBaseUrlEl : speechChatterboxTtsBaseUrlEl,
+      voice_mode: isAnnouncement ? announcementChatterboxTtsVoiceModeEl : speechChatterboxTtsVoiceModeEl,
+      voice: isAnnouncement ? announcementChatterboxTtsVoiceEl : speechChatterboxTtsVoiceEl,
+      chunk_size: isAnnouncement ? announcementChatterboxTtsChunkSizeEl : speechChatterboxTtsChunkSizeEl,
+      temperature: isAnnouncement ? announcementChatterboxTtsTemperatureEl : speechChatterboxTtsTemperatureEl,
+      exaggeration: isAnnouncement ? announcementChatterboxTtsExaggerationEl : speechChatterboxTtsExaggerationEl,
+      cfg_weight: isAnnouncement ? announcementChatterboxTtsCfgWeightEl : speechChatterboxTtsCfgWeightEl,
+      seed: isAnnouncement ? announcementChatterboxTtsSeedEl : speechChatterboxTtsSeedEl,
+      speed_factor: isAnnouncement ? announcementChatterboxTtsSpeedFactorEl : speechChatterboxTtsSpeedFactorEl,
+      language: isAnnouncement ? announcementChatterboxTtsLanguageEl : speechChatterboxTtsLanguageEl,
+    };
+    return String(elementMap[key]?.value || "").trim();
+  };
 
   const setOpenAiTtsModelStatus = (scope = "direct", message = "") => {
     const text = String(message || "");
@@ -22071,23 +22402,54 @@ async function loadSettingsView() {
     }
   };
 
+  const chatterboxTtsVoiceInputForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementChatterboxTtsVoiceEl : speechChatterboxTtsVoiceEl;
+
+  const chatterboxTtsManualVoiceInputForScope = (scope = "direct") =>
+    isAnnouncementOpenAiTtsScope(scope) ? announcementChatterboxTtsManualVoiceEl : speechChatterboxTtsManualVoiceEl;
+
+  const setChatterboxTtsVoiceStatus = (scope = "direct", message = "") => {
+    const text = String(message || "");
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementChatterboxTtsVoiceStatusEl) {
+      announcementChatterboxTtsVoiceStatusEl.textContent = text;
+    } else if (speechChatterboxTtsVoiceStatusEl) {
+      speechChatterboxTtsVoiceStatusEl.textContent = text;
+    }
+  };
+
+  const setChatterboxTtsVoiceRefreshDisabled = (scope = "direct", disabled) => {
+    if (isAnnouncementOpenAiTtsScope(scope) && announcementChatterboxTtsVoiceRefreshBtnEl) {
+      announcementChatterboxTtsVoiceRefreshBtnEl.disabled = Boolean(disabled);
+    } else if (speechChatterboxTtsVoiceRefreshBtnEl) {
+      speechChatterboxTtsVoiceRefreshBtnEl.disabled = Boolean(disabled);
+    }
+  };
+
   const getSpeechTtsModelValue = () =>
-    isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
+    isChatterboxTtsBackend(speechTtsBackendEl?.value)
+      ? ""
+      : isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
       ? String(speechOpenAiTtsManualModelEl?.value || "").trim() || String(speechOpenAiTtsModelEl?.value || "").trim()
       : String(speechTtsModelEl?.value || "").trim();
 
   const getSpeechTtsVoiceValue = () =>
-    isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
+    isChatterboxTtsBackend(speechTtsBackendEl?.value)
+      ? getChatterboxTtsValue("voice")
+      : isOpenAiCompatibleTtsBackend(speechTtsBackendEl?.value)
       ? String(speechOpenAiTtsManualVoiceEl?.value || "").trim() || String(speechOpenAiTtsVoiceEl?.value || "").trim()
       : String(speechTtsVoiceEl?.value || "").trim();
 
   const getAnnouncementTtsModelValue = () =>
-    isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
+    isChatterboxTtsBackend(announcementTtsBackendEl?.value)
+      ? ""
+      : isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
       ? String(announcementOpenAiTtsManualModelEl?.value || "").trim() || String(announcementOpenAiTtsModelEl?.value || "").trim()
       : String(announcementTtsModelEl?.value || "").trim();
 
   const getAnnouncementTtsVoiceValue = () =>
-    isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
+    isChatterboxTtsBackend(announcementTtsBackendEl?.value)
+      ? getChatterboxTtsValue("voice", "announcement")
+      : isOpenAiCompatibleTtsBackend(announcementTtsBackendEl?.value)
       ? String(announcementOpenAiTtsManualVoiceEl?.value || "").trim() || String(announcementOpenAiTtsVoiceEl?.value || "").trim()
       : String(announcementTtsVoiceEl?.value || "").trim();
 
@@ -22198,6 +22560,7 @@ async function loadSettingsView() {
     const showsLocalModel = ["kokoro", "pocket_tts", "piper"].includes(ttsBackend);
     const showsVoiceSelect = ["kokoro", "pocket_tts"].includes(ttsBackend);
     const showsOpenAiCompatible = isOpenAiCompatibleTtsBackend(ttsBackend);
+    const showsChatterbox = isChatterboxTtsBackend(ttsBackend);
     const showsWyoming = ttsBackend === "wyoming";
     const showsSharedOpenAiConfig = showsOpenAiCompatible || isOpenAiCompatibleTtsBackend(announcementTtsBackend);
     const showsKokoroOutputGain = ttsBackend === "kokoro" || announcementTtsBackend === "kokoro";
@@ -22221,6 +22584,20 @@ async function loadSettingsView() {
     setElementVisible(speechOpenAiTtsApiKeyWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsModelsToolsWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsVoicesToolsWrapEl, showsOpenAiCompatible);
+    setElementVisible(speechChatterboxTtsBaseUrlWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsStreamingEnabledWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsVoiceModeWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsVoiceWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsManualVoiceWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsVoicesToolsWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsAdvancedWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsChunkSizeWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsTemperatureWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsExaggerationWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsCfgWeightWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsSeedWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsSpeedFactorWrapEl, showsChatterbox);
+    setElementVisible(speechChatterboxTtsLanguageWrapEl, showsChatterbox);
     if (showsWyoming) {
       queueRefreshSpeechWyomingTtsVoices();
     } else if (speechWyomingTtsVoiceStatusEl) {
@@ -22241,10 +22618,16 @@ async function loadSettingsView() {
       setOpenAiTtsVoiceStatus("announcement", "");
       setOpenAiTtsModelStatus("announcement", "");
     }
+    if (showsChatterbox) {
+      queueRefreshSpeechChatterboxTtsVoices();
+    } else {
+      setChatterboxTtsVoiceStatus("direct", "");
+    }
 
     const showsAnnouncementLocalModel = ["kokoro", "pocket_tts", "piper"].includes(announcementTtsBackend);
     const showsAnnouncementVoiceSelect = ["kokoro", "pocket_tts"].includes(announcementTtsBackend);
     const showsAnnouncementOpenAiCompatible = isOpenAiCompatibleTtsBackend(announcementTtsBackend);
+    const showsAnnouncementChatterbox = isChatterboxTtsBackend(announcementTtsBackend);
     const showsAnnouncementWyoming = announcementTtsBackend === "wyoming";
 
     syncAnnouncementTtsModelOptions({ forceReset: resetTtsSelection });
@@ -22260,6 +22643,19 @@ async function loadSettingsView() {
     setElementVisible(announcementOpenAiTtsManualModelWrapEl, showsAnnouncementOpenAiCompatible);
     setElementVisible(announcementOpenAiTtsVoiceWrapEl, showsAnnouncementOpenAiCompatible);
     setElementVisible(announcementOpenAiTtsManualVoiceWrapEl, showsAnnouncementOpenAiCompatible);
+    setElementVisible(announcementChatterboxTtsBaseUrlWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsVoiceModeWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsVoiceWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsManualVoiceWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsVoicesToolsWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsAdvancedWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsChunkSizeWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsTemperatureWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsExaggerationWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsCfgWeightWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsSeedWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsSpeedFactorWrapEl, showsAnnouncementChatterbox);
+    setElementVisible(announcementChatterboxTtsLanguageWrapEl, showsAnnouncementChatterbox);
     setElementVisible(announcementWyomingTtsHostWrapEl, showsAnnouncementWyoming);
     setElementVisible(announcementWyomingTtsPortWrapEl, showsAnnouncementWyoming);
     setElementVisible(announcementWyomingTtsVoiceWrapEl, showsAnnouncementWyoming);
@@ -22267,6 +22663,11 @@ async function loadSettingsView() {
       queueRefreshAnnouncementWyomingTtsVoices();
     } else if (announcementWyomingTtsVoiceStatusEl) {
       announcementWyomingTtsVoiceStatusEl.textContent = "";
+    }
+    if (showsAnnouncementChatterbox) {
+      queueRefreshAnnouncementChatterboxTtsVoices();
+    } else {
+      setChatterboxTtsVoiceStatus("announcement", "");
     }
   };
 
@@ -22753,6 +23154,124 @@ async function loadSettingsView() {
     }, 300);
   };
 
+  const renderChatterboxTtsVoiceOptions = (scope = "direct", rows = [], { forceReset = false } = {}) => {
+    const voiceEl = chatterboxTtsVoiceInputForScope(scope);
+    if (!voiceEl) {
+      return;
+    }
+    const seen = new Set();
+    const options = [];
+    const appendOption = (value, label = "") => {
+      const nextValue = String(value || "").trim();
+      const nextLabel = String(label || nextValue).trim();
+      if (!nextValue || seen.has(nextValue)) {
+        return;
+      }
+      seen.add(nextValue);
+      options.push({ value: nextValue, label: nextLabel || nextValue });
+    };
+    const inputRows = Array.isArray(rows) ? rows : [];
+    inputRows.forEach((row) => appendOption(row?.value, row?.label));
+    const saved = String(
+      isAnnouncementOpenAiTtsScope(scope) ? settings.speech_announcement_tts_voice || "" : settings.speech_tts_voice || ""
+    ).trim();
+    const current = forceReset ? "" : String(voiceEl.value || saved || "").trim();
+    if (current && !seen.has(current)) {
+      appendOption(current, `${current} (current)`);
+    }
+    const voiceMode = getChatterboxTtsValue("voice_mode", scope) || "predefined";
+    const noun = String(voiceMode || "").trim() === "clone" ? "reference" : "voice";
+    voiceEl.innerHTML = renderSettingsSelectOptions(options, current, {
+      blankLabel: inputRows.length ? `Select a Chatterbox ${noun}` : `Load Chatterbox ${noun}s`,
+    });
+    voiceEl.value = current;
+  };
+
+  const refreshChatterboxTtsVoices = async (scope = "direct") => {
+    const backendEl = isAnnouncementOpenAiTtsScope(scope) ? announcementTtsBackendEl : speechTtsBackendEl;
+    if (!isChatterboxTtsBackend(backendEl?.value)) {
+      return;
+    }
+    const baseUrl = getChatterboxTtsValue("base_url", scope);
+    const voiceMode = getChatterboxTtsValue("voice_mode", scope) || "predefined";
+    if (!baseUrl) {
+      renderChatterboxTtsVoiceOptions(scope, []);
+      setChatterboxTtsVoiceStatus(scope, "Enter a Chatterbox base URL to load voices.");
+      return;
+    }
+
+    const requestId = isAnnouncementOpenAiTtsScope(scope)
+      ? ++announcementChatterboxTtsRefreshSeq
+      : ++speechChatterboxTtsRefreshSeq;
+    setChatterboxTtsVoiceStatus(scope, "Loading Chatterbox voices...");
+    setChatterboxTtsVoiceRefreshDisabled(scope, true);
+    try {
+      const result = await api("/api/settings/speech/chatterbox-tts-voices", {
+        method: "POST",
+        body: JSON.stringify({
+          base_url: baseUrl,
+          voice_mode: voiceMode,
+        }),
+        _timeoutMs: 15000,
+      });
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementChatterboxTtsRefreshSeq
+        : speechChatterboxTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      const voices = Array.isArray(result?.voices) ? result.voices : [];
+      renderChatterboxTtsVoiceOptions(scope, voices);
+      const count = Math.max(0, Number(result?.count || 0));
+      const modeLabel = String(result?.voice_mode || voiceMode) === "clone" ? "reference file" : "voice";
+      setChatterboxTtsVoiceStatus(
+        scope,
+        count
+          ? `Loaded ${count} Chatterbox ${modeLabel}${count === 1 ? "" : "s"}.`
+          : `No Chatterbox ${modeLabel}s reported by server.`
+      );
+    } catch (error) {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementChatterboxTtsRefreshSeq
+        : speechChatterboxTtsRefreshSeq;
+      if (requestId !== activeRequestId) {
+        return;
+      }
+      renderChatterboxTtsVoiceOptions(scope, []);
+      setChatterboxTtsVoiceStatus(scope, error?.message || "Failed to load Chatterbox voices.");
+    } finally {
+      const activeRequestId = isAnnouncementOpenAiTtsScope(scope)
+        ? announcementChatterboxTtsRefreshSeq
+        : speechChatterboxTtsRefreshSeq;
+      if (requestId === activeRequestId) {
+        setChatterboxTtsVoiceRefreshDisabled(scope, false);
+      }
+    }
+  };
+
+  const refreshSpeechChatterboxTtsVoices = () => refreshChatterboxTtsVoices("direct");
+  const refreshAnnouncementChatterboxTtsVoices = () => refreshChatterboxTtsVoices("announcement");
+
+  const queueRefreshSpeechChatterboxTtsVoices = () => {
+    if (speechChatterboxTtsRefreshTimer) {
+      window.clearTimeout(speechChatterboxTtsRefreshTimer);
+    }
+    speechChatterboxTtsRefreshTimer = window.setTimeout(() => {
+      speechChatterboxTtsRefreshTimer = 0;
+      refreshSpeechChatterboxTtsVoices();
+    }, 300);
+  };
+
+  const queueRefreshAnnouncementChatterboxTtsVoices = () => {
+    if (announcementChatterboxTtsRefreshTimer) {
+      window.clearTimeout(announcementChatterboxTtsRefreshTimer);
+    }
+    announcementChatterboxTtsRefreshTimer = window.setTimeout(() => {
+      announcementChatterboxTtsRefreshTimer = 0;
+      refreshAnnouncementChatterboxTtsVoices();
+    }, 300);
+  };
+
   const stopSpeechTtsPreviewPlayback = () => {
     if (speechTtsPreviewUrl) {
       try {
@@ -22779,6 +23298,15 @@ async function loadSettingsView() {
     return Number.isFinite(parsed) ? parsed : null;
   };
 
+  const readOptionalNumberValue = (element) => {
+    const raw = String(element?.value || "").trim();
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
   const buildSpeechTtsPreviewPayload = () => ({
     backend: String(speechTtsBackendEl?.value || "").trim(),
     model: getSpeechTtsModelValue(),
@@ -22791,6 +23319,15 @@ async function loadSettingsView() {
     wyoming_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
     openai_base_url: getOpenAiTtsBaseUrlValue(),
     openai_api_key: getOpenAiTtsApiKeyValue(),
+    chatterbox_base_url: getChatterboxTtsValue("base_url"),
+    chatterbox_voice_mode: getChatterboxTtsValue("voice_mode"),
+    chatterbox_chunk_size: readOptionalNumberValue(speechChatterboxTtsChunkSizeEl),
+    chatterbox_temperature: readOptionalNumberValue(speechChatterboxTtsTemperatureEl),
+    chatterbox_exaggeration: readOptionalNumberValue(speechChatterboxTtsExaggerationEl),
+    chatterbox_cfg_weight: readOptionalNumberValue(speechChatterboxTtsCfgWeightEl),
+    chatterbox_seed: readOptionalNumberValue(speechChatterboxTtsSeedEl),
+    chatterbox_speed_factor: readOptionalNumberValue(speechChatterboxTtsSpeedFactorEl),
+    chatterbox_language: getChatterboxTtsValue("language"),
     text: String(speechTtsSampleTextEl?.value || "").trim() || "Hello from Tater. This is a voice preview.",
   });
 
@@ -22921,6 +23458,57 @@ async function loadSettingsView() {
     queueRefreshSpeechOpenAiTtsVoices();
   };
 
+  const handleChatterboxTtsConfigInput = (scope = "direct", { resetVoice = false } = {}) => {
+    clearSpeechTtsPreviewCache();
+    if (resetVoice) {
+      const voiceEl = chatterboxTtsVoiceInputForScope(scope);
+      const manualVoiceEl = chatterboxTtsManualVoiceInputForScope(scope);
+      if (voiceEl) {
+        voiceEl.value = "";
+      }
+      if (manualVoiceEl) {
+        manualVoiceEl.value = "";
+      }
+    }
+    renderChatterboxTtsVoiceOptions(scope, [], { forceReset: resetVoice });
+    setChatterboxTtsVoiceStatus(scope, "");
+    if (isAnnouncementOpenAiTtsScope(scope)) {
+      queueRefreshAnnouncementChatterboxTtsVoices();
+    } else {
+      queueRefreshSpeechChatterboxTtsVoices();
+    }
+  };
+
+  const chatterboxTtsControls = [
+    speechChatterboxTtsBaseUrlEl,
+    speechChatterboxTtsStreamingEnabledEl,
+    speechChatterboxTtsVoiceModeEl,
+    speechChatterboxTtsVoiceEl,
+    speechChatterboxTtsManualVoiceEl,
+    speechChatterboxTtsChunkSizeEl,
+    speechChatterboxTtsTemperatureEl,
+    speechChatterboxTtsExaggerationEl,
+    speechChatterboxTtsCfgWeightEl,
+    speechChatterboxTtsSeedEl,
+    speechChatterboxTtsSpeedFactorEl,
+    speechChatterboxTtsLanguageEl,
+    announcementChatterboxTtsBaseUrlEl,
+    announcementChatterboxTtsVoiceModeEl,
+    announcementChatterboxTtsVoiceEl,
+    announcementChatterboxTtsManualVoiceEl,
+    announcementChatterboxTtsChunkSizeEl,
+    announcementChatterboxTtsTemperatureEl,
+    announcementChatterboxTtsExaggerationEl,
+    announcementChatterboxTtsCfgWeightEl,
+    announcementChatterboxTtsSeedEl,
+    announcementChatterboxTtsSpeedFactorEl,
+    announcementChatterboxTtsLanguageEl,
+  ];
+  chatterboxTtsControls.forEach((element) => {
+    element?.addEventListener("input", clearSpeechTtsPreviewCache);
+    element?.addEventListener("change", clearSpeechTtsPreviewCache);
+  });
+
   speechSttBackendEl?.addEventListener("change", applySpeechSettingsVisibility);
   speechAccelerationEl?.addEventListener("change", () => {
     clearSpeechTtsPreviewCache();
@@ -23012,10 +23600,34 @@ async function loadSettingsView() {
   announcementOpenAiTtsApiKeyEl?.addEventListener("input", () =>
     handleOpenAiTtsConfigInput(announcementOpenAiTtsApiKeyEl)
   );
+  speechChatterboxTtsBaseUrlEl?.addEventListener("input", () => handleChatterboxTtsConfigInput("direct"));
+  speechChatterboxTtsVoiceModeEl?.addEventListener("change", () =>
+    handleChatterboxTtsConfigInput("direct", { resetVoice: true })
+  );
+  speechChatterboxTtsVoiceEl?.addEventListener("change", () => {
+    if (speechChatterboxTtsManualVoiceEl) {
+      speechChatterboxTtsManualVoiceEl.value = "";
+    }
+    clearSpeechTtsPreviewCache();
+  });
+  speechChatterboxTtsManualVoiceEl?.addEventListener("input", clearSpeechTtsPreviewCache);
+  announcementChatterboxTtsBaseUrlEl?.addEventListener("input", () => handleChatterboxTtsConfigInput("announcement"));
+  announcementChatterboxTtsVoiceModeEl?.addEventListener("change", () =>
+    handleChatterboxTtsConfigInput("announcement", { resetVoice: true })
+  );
+  announcementChatterboxTtsVoiceEl?.addEventListener("change", () => {
+    if (announcementChatterboxTtsManualVoiceEl) {
+      announcementChatterboxTtsManualVoiceEl.value = "";
+    }
+    clearSpeechTtsPreviewCache();
+  });
+  announcementChatterboxTtsManualVoiceEl?.addEventListener("input", clearSpeechTtsPreviewCache);
   speechOpenAiTtsModelRefreshBtnEl?.addEventListener("click", refreshSpeechOpenAiTtsModels);
   speechOpenAiTtsVoiceRefreshBtnEl?.addEventListener("click", refreshSpeechOpenAiTtsVoices);
   announcementOpenAiTtsModelRefreshBtnEl?.addEventListener("click", refreshAnnouncementOpenAiTtsModels);
   announcementOpenAiTtsVoiceRefreshBtnEl?.addEventListener("click", refreshAnnouncementOpenAiTtsVoices);
+  speechChatterboxTtsVoiceRefreshBtnEl?.addEventListener("click", refreshSpeechChatterboxTtsVoices);
+  announcementChatterboxTtsVoiceRefreshBtnEl?.addEventListener("click", refreshAnnouncementChatterboxTtsVoices);
   speechTtsPreviewBtnEl?.addEventListener("click", previewSpeechTts);
   speechTtsDownloadBtnEl?.addEventListener("click", downloadSpeechTtsSample);
   setSpeechTtsDownloadEnabled(false);
@@ -23311,6 +23923,14 @@ async function loadSettingsView() {
       .map((row) => localLoadTargetForModel(row?.provider, row?.model))
       .filter(Boolean)
   );
+  const readLlamaCppSlotValue = (element) => {
+    const raw = String(element?.value || "").trim();
+    if (!raw) {
+      return "";
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? String(Math.round(parsed)) : "";
+  };
   const readBaseModelSettingsPayload = () => {
     const baseProvider = normalizeHydraBaseProvider(document.getElementById("set_hydra_llm_provider")?.value || "");
     const baseHost = String(document.getElementById("set_hydra_llm_host")?.value || "").trim();
@@ -23331,6 +23951,8 @@ async function loadSettingsView() {
     const llamaCppNUbatch = String(document.getElementById("set_hydra_llama_cpp_n_ubatch")?.value || "0").trim();
     const llamaCppFlashAttn = Boolean(document.getElementById("set_hydra_llama_cpp_flash_attn")?.checked);
     const llamaCppOffloadKqv = Boolean(document.getElementById("set_hydra_llama_cpp_offload_kqv")?.checked);
+    const llamaCppSlotCount = String(document.getElementById("set_hydra_llama_cpp_slot_count")?.value || "1").trim();
+    const llamaCppBaseSlot = readLlamaCppSlotValue(document.getElementById("set_hydra_llama_cpp_base_slot"));
     const mlxLmContextTokens = String(document.getElementById("set_hydra_mlx_lm_context_tokens")?.value || "").trim();
     const mlxLmTrustRemoteCode = Boolean(document.getElementById("set_hydra_mlx_lm_trust_remote_code")?.checked);
     const mlxLmLazyLoad = Boolean(document.getElementById("set_hydra_mlx_lm_lazy_load")?.checked);
@@ -23379,6 +24001,8 @@ async function loadSettingsView() {
         hydra_llama_cpp_n_ubatch: llamaCppNUbatch,
         hydra_llama_cpp_flash_attn: llamaCppFlashAttn,
         hydra_llama_cpp_offload_kqv: llamaCppOffloadKqv,
+        hydra_llama_cpp_slot_count: llamaCppSlotCount,
+        hydra_llama_cpp_base_slot: llamaCppBaseSlot,
         hydra_mlx_lm_context_tokens: mlxLmContextTokens,
         hydra_mlx_lm_trust_remote_code: mlxLmTrustRemoteCode,
         hydra_mlx_lm_lazy_load: mlxLmLazyLoad,
@@ -23409,6 +24033,7 @@ async function loadSettingsView() {
       ? getHydraRouteModelValue(visionRouteControl)
       : String(document.getElementById("set_vision_model")?.value || "").trim();
     const llamaCppVisionContextTokens = String(document.getElementById("set_hydra_llama_cpp_vision_context_tokens")?.value || "").trim();
+    const llamaCppVisionSlot = readLlamaCppSlotValue(document.getElementById("set_hydra_llama_cpp_vision_slot"));
     const loadTargets = mode === "dedicated" ? dedupeLocalLoadTargets([localLoadTargetForModel(provider, model)]) : [];
     return {
       mode,
@@ -23422,6 +24047,7 @@ async function loadSettingsView() {
         vision_model: model,
         vision_api_key: String(document.getElementById("set_vision_api_key")?.value || "").trim(),
         hydra_llama_cpp_vision_context_tokens: llamaCppVisionContextTokens,
+        hydra_llama_cpp_vision_slot: llamaCppVisionSlot,
       },
     };
   };
@@ -23436,6 +24062,7 @@ async function loadSettingsView() {
       const hostEl = document.getElementById(`set_hydra_llm_${role}_host`);
       const portEl = document.getElementById(`set_hydra_llm_${role}_port`);
       const apiKeyEl = document.getElementById(`set_hydra_llm_${role}_api_key`);
+      const llamaCppSlotEl = document.getElementById(`set_hydra_llm_${role}_llama_cpp_slot`);
       const provider = normalizeHydraBaseProvider(providerEl ? providerEl.value : "");
       const model = getHydraRouteModelValue(control);
       if (beastModeEnabled && isHydraLocalProvider(provider) && !model && !missingRole) {
@@ -23450,6 +24077,7 @@ async function loadSettingsView() {
       payload[`hydra_llm_${role}_port`] = portEl ? String(portEl.value || "").trim() : "";
       payload[`hydra_llm_${role}_model`] = model;
       payload[`hydra_llm_${role}_api_key`] = apiKeyEl ? String(apiKeyEl.value || "").trim() : "";
+      payload[`hydra_llm_${role}_llama_cpp_slot`] = readLlamaCppSlotValue(llamaCppSlotEl);
     });
     return { beastModeEnabled, missingRole, loadTargets: dedupeLocalLoadTargets(loadTargets), payload };
   };
@@ -23468,6 +24096,16 @@ async function loadSettingsView() {
     speech_wyoming_tts_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
     speech_openai_tts_base_url: getOpenAiTtsBaseUrlValue(),
     speech_openai_tts_api_key: getOpenAiTtsApiKeyValue(),
+    speech_chatterbox_tts_base_url: getChatterboxTtsValue("base_url"),
+    speech_chatterbox_tts_voice_mode: getChatterboxTtsValue("voice_mode"),
+    speech_chatterbox_tts_chunk_size: readOptionalNumberValue(speechChatterboxTtsChunkSizeEl),
+    speech_chatterbox_tts_temperature: readOptionalNumberValue(speechChatterboxTtsTemperatureEl),
+    speech_chatterbox_tts_exaggeration: readOptionalNumberValue(speechChatterboxTtsExaggerationEl),
+    speech_chatterbox_tts_cfg_weight: readOptionalNumberValue(speechChatterboxTtsCfgWeightEl),
+    speech_chatterbox_tts_seed: readOptionalNumberValue(speechChatterboxTtsSeedEl),
+    speech_chatterbox_tts_speed_factor: readOptionalNumberValue(speechChatterboxTtsSpeedFactorEl),
+    speech_chatterbox_tts_language: getChatterboxTtsValue("language"),
+    speech_chatterbox_tts_streaming_enabled: Boolean(speechChatterboxTtsStreamingEnabledEl?.checked),
     speech_announcement_tts_backend: String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim(),
     speech_announcement_tts_model: getAnnouncementTtsModelValue(),
     speech_announcement_tts_voice: getAnnouncementTtsVoiceValue(),
@@ -23476,6 +24114,15 @@ async function loadSettingsView() {
     speech_announcement_wyoming_tts_voice: String(announcementWyomingTtsVoiceEl?.value || "").trim(),
     speech_announcement_openai_tts_base_url: getOpenAiTtsBaseUrlValue("announcement"),
     speech_announcement_openai_tts_api_key: getOpenAiTtsApiKeyValue("announcement"),
+    speech_announcement_chatterbox_tts_base_url: getChatterboxTtsValue("base_url", "announcement"),
+    speech_announcement_chatterbox_tts_voice_mode: getChatterboxTtsValue("voice_mode", "announcement"),
+    speech_announcement_chatterbox_tts_chunk_size: readOptionalNumberValue(announcementChatterboxTtsChunkSizeEl),
+    speech_announcement_chatterbox_tts_temperature: readOptionalNumberValue(announcementChatterboxTtsTemperatureEl),
+    speech_announcement_chatterbox_tts_exaggeration: readOptionalNumberValue(announcementChatterboxTtsExaggerationEl),
+    speech_announcement_chatterbox_tts_cfg_weight: readOptionalNumberValue(announcementChatterboxTtsCfgWeightEl),
+    speech_announcement_chatterbox_tts_seed: readOptionalNumberValue(announcementChatterboxTtsSeedEl),
+    speech_announcement_chatterbox_tts_speed_factor: readOptionalNumberValue(announcementChatterboxTtsSpeedFactorEl),
+    speech_announcement_chatterbox_tts_language: getChatterboxTtsValue("language", "announcement"),
     esphome_settings: collectVoiceModelSettings(),
   });
   const saveModelSettings = async (scope = "all", { loadLocalModels = false } = {}) => {
@@ -24204,6 +24851,7 @@ async function loadSettingsView() {
       tater_api_hydra_tools_enabled: Boolean(document.getElementById("set_tater_api_hydra_tools_enabled")?.checked),
       spud_link_mode: document.getElementById("set_spud_link_mode")?.value || "disabled",
       spud_link_node_name: String(document.getElementById("set_spud_link_node_name")?.value || "").trim(),
+      spud_link_home_url: String(document.getElementById("set_spud_link_home_url")?.value || "").trim(),
       spud_link_public_url: String(document.getElementById("set_spud_link_public_url")?.value || "").trim(),
       spud_link_pairing_enabled: Boolean(document.getElementById("set_spud_link_pairing_enabled")?.checked),
       spud_link_allow_spudlets: Boolean(document.getElementById("set_spud_link_allow_spudlets")?.checked),
@@ -24341,11 +24989,19 @@ async function loadSettingsView() {
       showToast(message, "error", 3600);
       return;
     }
-    if (pairingStatusEl) pairingStatusEl.textContent = "Saving Hub settings...";
+    if (pairingStatusEl) pairingStatusEl.textContent = "Saving Spud Link routes...";
     try {
+      const homeUrl = String(document.getElementById("set_spud_link_home_url")?.value || "").trim();
+      const publicUrl = String(document.getElementById("set_spud_link_public_url")?.value || "").trim();
       await runSettingsSave();
       if (pairingStatusEl) pairingStatusEl.textContent = "Creating pairing code...";
-      const result = await api("/api/spudlink/pairing-code", { method: "POST" });
+      const result = await api("/api/spudlink/pairing-code", {
+        method: "POST",
+        body: JSON.stringify({
+          home_url: homeUrl,
+          public_url: publicUrl,
+        }),
+      });
       const code = String(result?.pairing_code || "").trim();
       const pairingUri = String(result?.pairing_uri || "").trim();
       const pairingPayloadText = String(result?.pairing_payload_text || pairingUri || "").trim();
