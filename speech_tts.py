@@ -16,7 +16,7 @@ import uuid
 import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -442,11 +442,15 @@ def _service_base_url_for_peer(peer_base: Any = "") -> str:
     return f"http://127.0.0.1:{_main_app_port()}"
 
 
-def build_runtime_tts_asset_url(asset_id: Any, *, peer_base: Any = "") -> str:
+def build_runtime_tts_asset_url(asset_id: Any, *, peer_base: Any = "", filename: Any = "") -> str:
     token = _text(asset_id)
     if not token:
         raise RuntimeError("Runtime TTS asset id is required.")
-    return f"{_service_base_url_for_peer(peer_base).rstrip('/')}/api/speech/tts/runtime/{token}.wav"
+    base = _service_base_url_for_peer(peer_base).rstrip("/")
+    safe_filename = Path(_text(filename)).name
+    if safe_filename:
+        return f"{base}/api/speech/tts/runtime/{token}/{quote(safe_filename)}"
+    return f"{base}/api/speech/tts/runtime/{token}.wav"
 
 
 def _schedule_homeassistant_media_cleanup(
@@ -2342,6 +2346,7 @@ def _voice_core_play_media_sync(
         "media_type": _text(media_type) or "audio/wav",
         "filename": _text(filename) or "tts.wav",
         "timeout_s": _as_float(timeout_s, DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS, minimum=30.0),
+        "respect_reply_playback": False,
     }
     if _text(tts_kind):
         payload_template["tts_kind"] = _text(tts_kind)
@@ -2417,18 +2422,37 @@ def _homeassistant_play_media_sync(
     )
     for player in clean_players:
         try:
-            ha_call_service_sync(
-                clean_base,
-                bearer,
-                domain="media_player",
-                service="play_media",
-                service_data={
-                    "entity_id": player,
-                    "media_content_id": _text(media_content_id),
-                    "media_content_type": "music",
-                },
-                timeout_s=30.0,
-            )
+            service_data = {
+                "entity_id": player,
+                "media_content_id": _text(media_content_id),
+                "media_content_type": "music",
+                "announce": True,
+            }
+            try:
+                ha_call_service_sync(
+                    clean_base,
+                    bearer,
+                    domain="media_player",
+                    service="play_media",
+                    service_data=service_data,
+                    timeout_s=30.0,
+                )
+            except Exception as announce_exc:
+                fallback_data = dict(service_data)
+                fallback_data.pop("announce", None)
+                logger.info(
+                    "[speech_tts] HA play_media announce retry without announce player=%s error=%s",
+                    player,
+                    announce_exc,
+                )
+                ha_call_service_sync(
+                    clean_base,
+                    bearer,
+                    domain="media_player",
+                    service="play_media",
+                    service_data=fallback_data,
+                    timeout_s=30.0,
+                )
             logger.info("[speech_tts] HA play_media accepted player=%s", player)
             sent_count += 1
         except Exception as exc:
@@ -2664,9 +2688,14 @@ async def play_announcement_audio_targets(
     tts_kind: str = "",
     continue_conversation: bool = False,
     conversation_id: str = "",
+    media_type: str = "audio/wav",
+    filename: str = "",
 ) -> Dict[str, Any]:
     prompt = _text(text)
     audio = bytes(wav_bytes or b"")
+    clean_media_type = _text(media_type).split(";", 1)[0].strip().lower() or "audio/wav"
+    default_ext = "mp3" if clean_media_type in {"audio/mpeg", "audio/mp3"} else "wav" if clean_media_type == "audio/wav" else "bin"
+    safe_filename = Path(_text(filename)).name or f"audio.{default_ext}"
     raw_targets = list(targets or [])
     grouped = split_announcement_targets(targets)
     homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
@@ -2712,9 +2741,9 @@ async def play_announcement_audio_targets(
                     _text(ha_base),
                     _text(token),
                     target_media_content_id=HOMEASSISTANT_MEDIA_SOURCE_TARGET,
-                    filename=f"tater-reply-{uuid.uuid4().hex}.wav",
+                    filename=f"tater-reply-{uuid.uuid4().hex}-{safe_filename}",
                     content=audio,
-                    content_type="audio/wav",
+                    content_type=clean_media_type,
                     timeout_s=60.0,
                 )
                 result["homeassistant_media_content_id"] = media_content_id
@@ -2745,8 +2774,8 @@ async def play_announcement_audio_targets(
             source_url="",
             audio_bytes=audio,
             text=prompt,
-            media_type="audio/wav",
-            filename=f"tts-{selected_backend}.wav",
+            media_type=clean_media_type,
+            filename=safe_filename,
             timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
             tts_kind=tts_kind,
             continue_conversation=continue_conversation,
@@ -2760,13 +2789,13 @@ async def play_announcement_audio_targets(
 
     if sonos_speakers:
         try:
-            asset_id = store_runtime_tts_wav(audio)
+            asset_id = store_runtime_tts_wav(audio, content_type=clean_media_type)
             if not asset_id:
                 raise RuntimeError("failed to store Sonos reply audio")
             if _text(public_base_url):
-                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}.wav"
+                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}/{quote(safe_filename)}"
             else:
-                sonos_source_url = build_runtime_tts_asset_url(asset_id)
+                sonos_source_url = build_runtime_tts_asset_url(asset_id, filename=safe_filename)
             result["sonos_source_url"] = sonos_source_url
             sonos_result = await run_background(
                 sonos_play_media_sync,

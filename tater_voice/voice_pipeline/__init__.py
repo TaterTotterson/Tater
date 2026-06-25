@@ -4430,6 +4430,8 @@ _esphome_bootstrap_reconnect = _esphome_device_runtime.bootstrap_reconnect
 _esphome_status = _esphome_device_runtime.status
 _esphome_entities_for_selector = _esphome_device_runtime.entities_for_selector
 _esphome_command_entity = _esphome_device_runtime.command_entity
+_esphome_media_player_entity_snapshot = _esphome_device_runtime.media_player_entity_snapshot
+_esphome_play_media_announcement = _esphome_device_runtime.play_media_announcement
 _esphome_client_row_snapshot_sync = _esphome_device_runtime.client_row_snapshot_sync
 
 
@@ -4582,24 +4584,57 @@ async def _send_streamed_tts_segment(
         ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
         {"text": _text(segment.get("text")) or "Continuing response."},
     )
-    async with lock:
-        _set_awaiting_announcement_state(
-            runtime,
-            session_id=_text(session_id),
-            kind="response_streamed",
-            future=None,
-            timeout_s=timeout_s,
+    segment_url = _text(segment.get("url"))
+    direct_queued = False
+    if segment_url.startswith(("http://", "https://")):
+        try:
+            direct_result = await _esphome_play_media_announcement(token, segment_url)
+        except Exception as exc:
+            _native_debug(
+                f"streamed tts media player announcement unavailable selector={token} "
+                f"session_id={session_id} error={_text(exc) or exc.__class__.__name__}"
+            )
+        else:
+            entity_key = _text(direct_result.get("entity_key")) if isinstance(direct_result, dict) else ""
+            if entity_key:
+                async with lock:
+                    _set_awaiting_announcement_state(
+                        runtime,
+                        session_id=_text(session_id),
+                        kind="response_streamed",
+                        future=None,
+                        timeout_s=timeout_s,
+                    )
+                    _cancel_announcement_wait(runtime)
+                    _schedule_media_player_announcement_monitor(
+                        token,
+                        client,
+                        module,
+                        entity_key=entity_key,
+                        timeout_s=timeout_s,
+                    )
+                direct_queued = True
+
+    if not direct_queued:
+        async with lock:
+            _set_awaiting_announcement_state(
+                runtime,
+                session_id=_text(session_id),
+                kind="response_streamed",
+                future=None,
+                timeout_s=timeout_s,
+            )
+            _cancel_announcement_wait(runtime)
+            _schedule_announcement_timeout(token, client, module, timeout_s)
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
+            {"url": segment_url},
         )
-        _cancel_announcement_wait(runtime)
-        _schedule_announcement_timeout(token, client, module, timeout_s)
-    await _esphome_send_event(
-        client,
-        module,
-        ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
-        {"url": _text(segment.get("url"))},
-    )
     _native_debug(
-        f"streamed tts segment queued selector={token} session_id={session_id} timeout_s={timeout_s:.2f} url={_text(segment.get('url'))}"
+        f"streamed tts segment queued selector={token} session_id={session_id} timeout_s={timeout_s:.2f} "
+        f"mode={'media_player_announcement' if direct_queued else 'voice_event'} url={segment_url}"
     )
 
 
@@ -4785,6 +4820,11 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
             f"esphome tool progress finalize selector={token} session_id={session_id} reason={reason} next_visual=tool_until_response"
         )
         return True
+    if kind == "media_player_direct":
+        _native_debug(
+            f"esphome media player announcement finalize selector={token} session_id={session_id} reason={reason}"
+        )
+        return True
 
     await _send_voice_run_end(
         client,
@@ -4797,6 +4837,64 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
     )
     _native_debug(f"esphome announcement finalize selector={token} session_id={session_id} reason={reason}")
     return True
+
+
+def _media_player_snapshot_is_announcing(snapshot: Dict[str, Any]) -> bool:
+    row = snapshot if isinstance(snapshot, dict) else {}
+    attrs = row.get("attrs") if isinstance(row.get("attrs"), dict) else {}
+    state = _lower(attrs.get("state") or row.get("raw"))
+    return "announc" in state or state == "4"
+
+
+def _schedule_media_player_announcement_monitor(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    entity_key: str,
+    timeout_s: float,
+) -> None:
+    token = _text(selector)
+    if not token:
+        return
+
+    runtime = _selector_runtime(token)
+    key_text = _text(entity_key)
+
+    async def _timer() -> None:
+        started = False
+        try:
+            deadline = _now() + max(0.5, float(timeout_s or 0.0))
+            while _now() < deadline:
+                snapshot = _esphome_media_player_entity_snapshot(token, entity_key=key_text)
+                announcing = _media_player_snapshot_is_announcing(snapshot)
+                if announcing:
+                    started = True
+                elif started:
+                    completed = await _finalize_after_announcement(
+                        token,
+                        client,
+                        module,
+                        reason="announcement_finished",
+                    )
+                    if completed:
+                        logger.info("[native-voice] media player announcement finished selector=%s", token)
+                    return
+                await asyncio.sleep(0.2)
+
+            completed = await _finalize_after_announcement(token, client, module, reason="announcement_timeout")
+            if completed:
+                logger.info(
+                    "[native-voice] media player announcement timeout finalize selector=%s timeout_s=%.2f",
+                    token,
+                    float(timeout_s),
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _native_debug(f"media player announcement monitor failed selector={token} error={exc}")
+
+    runtime["announcement_task"] = asyncio.create_task(_timer())
 
 
 def _schedule_announcement_timeout(selector: str, client: Any, module: Any, timeout_s: float) -> None:
@@ -4856,6 +4954,61 @@ async def _queue_selector_audio_url(
     timeout = max(5.0, min(float(timeout_s or 0.0), 900.0))
     continue_flag = bool(continue_conversation)
     conversation_token = _text(conversation_id) or playback_id
+
+    async with lock:
+        active_session = runtime.get("session")
+        if isinstance(active_session, VoiceSessionRuntime):
+            raise RuntimeError(f"Satellite {token} is busy with an active voice session")
+        _clear_streamed_tts_state(runtime)
+        _cancel_announcement_wait(runtime)
+
+    if not continue_flag:
+        direct_error = ""
+        try:
+            direct_result = await _esphome_play_media_announcement(token, target_url)
+        except Exception as exc:
+            direct_result = {}
+            direct_error = _text(exc) or exc.__class__.__name__
+        if isinstance(direct_result, dict) and direct_result.get("entity_key"):
+            entity_key = _text(direct_result.get("entity_key"))
+            async with lock:
+                _set_awaiting_announcement_state(
+                    runtime,
+                    session_id=playback_id,
+                    kind="media_player_direct",
+                    future=None,
+                    timeout_s=timeout,
+                )
+                _cancel_announcement_wait(runtime)
+                _schedule_media_player_announcement_monitor(
+                    token,
+                    client,
+                    module,
+                    entity_key=entity_key,
+                    timeout_s=timeout,
+                )
+            logger.info(
+                "[native-voice] media player announcement queued selector=%s playback_id=%s entity_key=%s timeout_s=%.2f url=%s",
+                token,
+                playback_id,
+                entity_key,
+                timeout,
+                target_url,
+            )
+            return {
+                "selector": token,
+                "playback_id": playback_id,
+                "timeout_s": timeout,
+                "url": target_url,
+                "continue_conversation": False,
+                "conversation_id": "",
+                "dispatch_mode": "media_player_announcement",
+                "entity_key": entity_key,
+            }
+        if direct_error:
+            _native_debug(
+                f"media player announcement unavailable selector={token} error={direct_error}; falling back to voice event playback"
+            )
 
     async with lock:
         active_session = runtime.get("session")
@@ -5201,6 +5354,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             f"speaker id error selector={session.selector} session_id={session.session_id} error={exc}"
         )
 
+    session.speaker_match_reason = _text(speaker_match.get("reason"))
     if bool(speaker_match.get("matched")):
         session.speaker_id = _text(speaker_match.get("speaker_id"))
         session.speaker_name = _text(speaker_match.get("speaker_name"))
@@ -5725,25 +5879,58 @@ async def _finalize_session(
                     tts_url = "voice-assistant://stream"
 
                 wait_for_announcement = tts_url.startswith(("http://", "https://"))
+                direct_queued = False
                 if wait_for_announcement:
                     timeout_s = _run_end_timeout_s(tts_audio, tts_format)
-                    async with lock:
-                        _set_awaiting_announcement_state(
-                            runtime,
-                            session_id=_text(session.session_id),
-                            kind="response",
-                            future=None,
-                            timeout_s=timeout_s,
+                    if not continue_conversation:
+                        try:
+                            direct_result = await _esphome_play_media_announcement(token, tts_url)
+                        except Exception as exc:
+                            _native_debug(
+                                f"response media player announcement unavailable selector={token} "
+                                f"session_id={session.session_id} error={_text(exc) or exc.__class__.__name__}"
+                            )
+                        else:
+                            entity_key = _text(direct_result.get("entity_key")) if isinstance(direct_result, dict) else ""
+                            if entity_key:
+                                async with lock:
+                                    _set_awaiting_announcement_state(
+                                        runtime,
+                                        session_id=_text(session.session_id),
+                                        kind="response",
+                                        future=None,
+                                        timeout_s=timeout_s,
+                                    )
+                                    _cancel_announcement_wait(runtime)
+                                    _schedule_media_player_announcement_monitor(
+                                        token,
+                                        client,
+                                        module,
+                                        entity_key=entity_key,
+                                        timeout_s=timeout_s,
+                                    )
+                                direct_queued = True
+                                tts_mode = "media_player_url"
+                                run_end_mode = "announcement"
+                    if not direct_queued:
+                        async with lock:
+                            _set_awaiting_announcement_state(
+                                runtime,
+                                session_id=_text(session.session_id),
+                                kind="response",
+                                future=None,
+                                timeout_s=timeout_s,
+                            )
+                            _cancel_announcement_wait(runtime)
+                            _schedule_announcement_timeout(token, client, module, timeout_s)
+                        _native_debug(
+                            f"esphome awaiting announcement_finished selector={token} session_id={session.session_id} timeout_s={timeout_s:.2f}"
                         )
-                        _cancel_announcement_wait(runtime)
-                        _schedule_announcement_timeout(token, client, module, timeout_s)
-                    _native_debug(
-                        f"esphome awaiting announcement_finished selector={token} session_id={session.session_id} timeout_s={timeout_s:.2f}"
-                    )
-                    tts_mode = "url"
-                    run_end_mode = "announcement"
+                        tts_mode = "url"
+                        run_end_mode = "announcement"
 
-                await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
+                if not direct_queued:
+                    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": tts_url})
 
                 if not wait_for_announcement:
                     await _send_voice_run_end(

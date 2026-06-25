@@ -552,12 +552,14 @@ HYDRA_LLM_SETUP_ERROR = (
 HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
 HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
+HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE = "llama_cpp_remote"
 HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
 HYDRA_LLM_PROVIDER_SPUD_LINK = "spud_link"
 HYDRA_LLM_PROVIDER_CHOICES = {
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
+    HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_SPUD_LINK,
 }
@@ -1144,6 +1146,16 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
         return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {
+        "llama_cpp_remote",
+        "llama.cpp_remote",
+        "llamacpp_remote",
+        "llama_remote",
+        "remote_llama_cpp",
+        "remote_llamacpp",
+        "gguf_remote",
+    }:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
@@ -1158,6 +1170,13 @@ def _is_local_hydra_llm_provider(provider: Any) -> bool:
         HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
         HYDRA_LLM_PROVIDER_LLAMA_CPP,
         HYDRA_LLM_PROVIDER_MLX_LM,
+    }
+
+
+def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     }
 
 
@@ -1914,6 +1933,7 @@ def _nvidia_smi_vram_snapshot() -> Optional[Dict[str, Any]]:
             text=True,
             timeout=1.2,
             check=False,
+            **_macos_posix_spawn_kwargs(),
         )
     except Exception:
         return None
@@ -1990,7 +2010,14 @@ def _rocm_smi_vram_snapshot() -> Optional[Dict[str, Any]]:
     payload: Optional[Any] = None
     for command in commands:
         try:
-            proc = subprocess.run(command, capture_output=True, text=True, timeout=1.8, check=False)
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=1.8,
+                check=False,
+                **_macos_posix_spawn_kwargs(),
+            )
         except Exception:
             continue
         if proc.returncode != 0:
@@ -2137,7 +2164,14 @@ def _jetson_tegrastats_snapshot() -> Optional[Dict[str, Any]]:
     commands = ([exe, "--interval", "200", "--count", "1"], [exe, "--interval", "200"])
     for command in commands:
         try:
-            proc = subprocess.run(command, capture_output=True, text=True, timeout=1.2, check=False)
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=1.2,
+                check=False,
+                **_macos_posix_spawn_kwargs(),
+            )
             output = str(proc.stdout or proc.stderr or "").strip()
         except subprocess.TimeoutExpired as exc:
             raw_output = exc.stdout or exc.stderr or ""
@@ -2212,6 +2246,7 @@ def _apple_ioreg_metal_snapshot() -> Optional[Dict[str, Any]]:
                 text=True,
                 timeout=1.0,
                 check=False,
+                **_macos_posix_spawn_kwargs(),
             )
         except Exception:
             continue
@@ -2783,6 +2818,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
                 text=True,
                 capture_output=True,
                 timeout=10.0,
+                **_macos_posix_spawn_kwargs(),
             )
             system_info = " ".join("\n".join([version.stdout or "", version.stderr or ""]).split())
         except Exception as exc:
@@ -4330,7 +4366,11 @@ except Exception as exc:
         text=True,
         bufsize=1,
         env=env,
-        start_new_session=(os.name != "nt"),
+        **(
+            _macos_posix_spawn_kwargs()
+            if sys.platform == "darwin"
+            else {"start_new_session": (os.name != "nt")}
+        ),
     )
     line_queue: "queue.Queue[str]" = queue.Queue()
     reader_thread = threading.Thread(
@@ -4471,7 +4511,11 @@ def _hf_hub_download_with_progress_worker(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=env,
-        start_new_session=(os.name != "nt"),
+        **(
+            _macos_posix_spawn_kwargs()
+            if sys.platform == "darwin"
+            else {"start_new_session": (os.name != "nt")}
+        ),
     )
     path = ""
     heartbeat_id = f"worker:{repo_id}:{filename}"
@@ -5844,8 +5888,28 @@ def _llama_cpp_native_url(base_url: str, endpoint: str) -> str:
     return f"{str(base_url or '').rstrip('/')}/{str(endpoint or '').lstrip('/')}"
 
 
-def _llama_cpp_native_json_get(base_url: str, endpoint: str, *, timeout: float = 10.0) -> Dict[str, Any]:
-    response = requests.get(_llama_cpp_native_url(base_url, endpoint), timeout=timeout)
+def _llama_cpp_native_auth_headers(api_key: Any = "") -> Dict[str, str]:
+    token = str(api_key or "").strip()
+    if not token:
+        return {}
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Api-Key": token,
+    }
+
+
+def _llama_cpp_native_json_get(
+    base_url: str,
+    endpoint: str,
+    *,
+    timeout: float = 10.0,
+    api_key: Any = "",
+) -> Dict[str, Any]:
+    response = requests.get(
+        _llama_cpp_native_url(base_url, endpoint),
+        headers=_llama_cpp_native_auth_headers(api_key),
+        timeout=timeout,
+    )
     try:
         response.raise_for_status()
     except Exception as exc:
@@ -5862,8 +5926,14 @@ def _llama_cpp_native_json_post(
     payload: Dict[str, Any],
     *,
     timeout: float = 600.0,
+    api_key: Any = "",
 ) -> Dict[str, Any]:
-    response = requests.post(_llama_cpp_native_url(base_url, endpoint), json=payload, timeout=timeout)
+    response = requests.post(
+        _llama_cpp_native_url(base_url, endpoint),
+        json=payload,
+        headers=_llama_cpp_native_auth_headers(api_key),
+        timeout=timeout,
+    )
     try:
         response.raise_for_status()
     except Exception as exc:
@@ -6044,6 +6114,94 @@ def _llama_cpp_native_completion_result(
             "total_tokens": max(0, total_tokens),
         },
         "_timing": timing,
+    }
+
+
+def _llama_cpp_model_rows_from_payload(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_rows = payload.get("data")
+    if not isinstance(raw_rows, list):
+        raw_rows = payload.get("models")
+    if not isinstance(raw_rows, list):
+        return []
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_rows:
+        if isinstance(item, str):
+            model_id = item.strip()
+            raw_item: Dict[str, Any] = {"id": model_id}
+        elif isinstance(item, dict):
+            raw_item = item
+            model_id = str(
+                raw_item.get("id")
+                or raw_item.get("name")
+                or raw_item.get("model")
+                or raw_item.get("alias")
+                or ""
+            ).strip()
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        architecture = raw_item.get("architecture") if isinstance(raw_item.get("architecture"), dict) else {}
+        modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
+        if not isinstance(modalities, list):
+            modalities = []
+        status = raw_item.get("status") if isinstance(raw_item.get("status"), dict) else {}
+        rows.append(
+            {
+                "id": model_id,
+                "model": model_id,
+                "name": str(raw_item.get("name") or model_id).strip(),
+                "loaded": bool(
+                    raw_item.get("loaded")
+                    or str(status.get("value") or "").strip().lower() in {"loaded", "ready", "ok"}
+                ),
+                "supports_vision": any(str(value or "").strip().lower() in {"image", "vision"} for value in modalities),
+            }
+        )
+    return rows
+
+
+def get_llama_cpp_remote_models(host: Any, port: Any = "", api_key: Any = "") -> Dict[str, Any]:
+    endpoint = _build_hydra_llm_endpoint(str(host or "").strip(), str(port or "").strip())
+    if not endpoint:
+        raise RuntimeError("Remote llama.cpp host is required.")
+
+    health = _llama_cpp_native_json_get(endpoint, "/health", timeout=5.0, api_key=api_key)
+    props: Dict[str, Any] = {}
+    props_error = ""
+    try:
+        props = _llama_cpp_native_json_get(endpoint, "/props", timeout=5.0, api_key=api_key)
+    except Exception as exc:
+        props_error = str(exc)
+
+    role = str(props.get("role") or "").strip().lower()
+    mode = "router" if role == "router" else "single"
+    models_payload: Dict[str, Any] = {}
+    models_error = ""
+    for models_endpoint in ("/models?reload=1", "/models"):
+        try:
+            models_payload = _llama_cpp_native_json_get(endpoint, models_endpoint, timeout=8.0, api_key=api_key)
+            models_error = ""
+            break
+        except Exception as exc:
+            models_error = str(exc)
+            models_payload = {}
+
+    models = _llama_cpp_model_rows_from_payload(models_payload)
+    return {
+        "ok": True,
+        "endpoint": endpoint,
+        "mode": mode,
+        "role": role or ("router" if mode == "router" else "single"),
+        "health": health,
+        "props": props,
+        "models": models,
+        "models_error": models_error,
+        "props_error": props_error,
     }
 
 
@@ -6354,8 +6512,8 @@ def _llama_cpp_native_worker_load(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        cwd=os.path.dirname(os.path.abspath(__file__)),
         env=server_env,
+        **_macos_posix_spawn_kwargs(),
     )
     threading.Thread(
         target=_llama_cpp_native_drain_stream,
@@ -6508,8 +6666,8 @@ class _TaterLlamaCppEngineProcess:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
             env=env,
+            **_macos_posix_spawn_kwargs(),
         )
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
@@ -7285,6 +7443,11 @@ def _resolve_hydra_llm_defaults(*, redis_conn: Any = None) -> tuple[str, str]:
     return endpoint, model
 
 
+def _normalize_hydra_base_server_llama_cpp_slot(value: Any) -> str:
+    slot_id = _llama_cpp_slot_id(value=value)
+    return str(slot_id) if slot_id >= 0 else ""
+
+
 def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
     if not isinstance(row, dict):
         return None
@@ -7306,6 +7469,11 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
             "port": "",
             "model": raw_model,
             "api_key": "",
+            "llama_cpp_slot": (
+                _normalize_hydra_base_server_llama_cpp_slot(row.get("llama_cpp_slot"))
+                if _is_llama_cpp_hydra_llm_provider(provider)
+                else ""
+            ),
             "endpoint": (
                 "hf://transformers"
                 if provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
@@ -7334,6 +7502,11 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
         "port": canonical_port,
         "model": raw_model,
         "api_key": raw_api_key,
+        "llama_cpp_slot": (
+            _normalize_hydra_base_server_llama_cpp_slot(row.get("llama_cpp_slot"))
+            if _is_llama_cpp_hydra_llm_provider(provider)
+            else ""
+        ),
         "endpoint": endpoint,
     }
 
@@ -7375,6 +7548,7 @@ def _resolve_spud_link_base_server(*, redis_conn: Any = None) -> Optional[Dict[s
         "port": "",
         "model": "tater/base",
         "api_key": node_token,
+        "llama_cpp_slot": "",
         "endpoint": endpoint,
     }
 
@@ -7382,7 +7556,7 @@ def _resolve_spud_link_base_server(*, redis_conn: Any = None) -> Optional[Dict[s
 def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
     client = redis_conn or redis_client
     rows: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str, str, str]] = set()
+    seen: set[Tuple[str, str, str, str, str]] = set()
 
     spud_link_row = _resolve_spud_link_base_server(redis_conn=client)
     if spud_link_row:
@@ -7391,6 +7565,7 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
             spud_link_row["endpoint"],
             spud_link_row["model"],
             spud_link_row.get("api_key", ""),
+            "",
         )
         seen.add(signature)
         rows.append(spud_link_row)
@@ -7414,6 +7589,9 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
                 normalized["endpoint"],
                 normalized["model"],
                 normalized.get("api_key", ""),
+                normalized.get("llama_cpp_slot", "")
+                if _is_llama_cpp_hydra_llm_provider(normalized.get("provider"))
+                else "",
             )
             if signature in seen:
                 continue
@@ -7436,6 +7614,9 @@ def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool =
             legacy_row["endpoint"],
             legacy_row["model"],
             legacy_row.get("api_key", ""),
+            legacy_row.get("llama_cpp_slot", "")
+            if _is_llama_cpp_hydra_llm_provider(legacy_row.get("provider"))
+            else "",
         )
         if signature not in seen:
             rows.append(legacy_row)
@@ -8306,6 +8487,8 @@ def _make_llm_client_for_provider(
         return TransformersLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         return LlamaCppLLMClientWrapper(model=model, llama_cpp_slot=llama_cpp_slot, **kwargs)
+    if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE:
+        return LlamaCppRemoteLLMClientWrapper(host=host, model=model, api_key=api_key, llama_cpp_slot=llama_cpp_slot, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_MLX_LM:
         return MlxLmLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
@@ -8336,6 +8519,11 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     default_host = str(base_servers[0]["endpoint"]).strip() if base_servers else ""
     default_model = str(base_servers[0]["model"]).strip() if base_servers else ""
     default_api_key = str(base_servers[0].get("api_key") or "").strip() if base_servers else ""
+    default_llama_cpp_slot = (
+        _normalize_hydra_base_server_llama_cpp_slot(base_servers[0].get("llama_cpp_slot"))
+        if base_servers and _is_llama_cpp_hydra_llm_provider(default_provider)
+        else ""
+    )
     if not default_host or not default_model:
         fallback_host, fallback_model = _resolve_hydra_llm_defaults(redis_conn=redis_conn)
         if not default_provider:
@@ -8360,25 +8548,42 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     if not explicit_host and not explicit_model and len(base_servers) > 1:
         clients: List[Any] = []
         signature_parts: List[str] = []
-        for row in base_servers:
+        for row_index, row in enumerate(base_servers):
             row_provider = _normalize_hydra_llm_provider(row.get("provider"))
             endpoint = str(row.get("endpoint") or "").strip()
             row_model = str(row.get("model") or "").strip()
             row_api_key = str(row.get("api_key") or "").strip()
+            row_llama_cpp_slot = (
+                _normalize_hydra_base_server_llama_cpp_slot(row.get("llama_cpp_slot"))
+                if _is_llama_cpp_hydra_llm_provider(row_provider)
+                else ""
+            )
             if not row_model:
                 continue
             if not _is_local_hydra_llm_provider(row_provider) and not endpoint:
                 continue
+            client_kwargs = dict(kwargs)
+            signature_llama_cpp_slot = ""
+            if _is_llama_cpp_hydra_llm_provider(row_provider):
+                effective_slot: Any = row_llama_cpp_slot
+                if not effective_slot:
+                    if row_index == 0:
+                        base_slot_id = _llama_cpp_slot_id("base")
+                        effective_slot = str(base_slot_id) if base_slot_id >= 0 else DEFAULT_LLAMA_CPP_SLOT_ID
+                    else:
+                        effective_slot = DEFAULT_LLAMA_CPP_SLOT_ID
+                client_kwargs["llama_cpp_slot"] = effective_slot
+                signature_llama_cpp_slot = str(effective_slot)
             clients.append(
                 _make_llm_client_for_provider(
                     provider=row_provider,
                     host=endpoint,
                     model=row_model,
                     api_key=row_api_key,
-                    **kwargs,
+                    **client_kwargs,
                 )
             )
-            signature_parts.append(f"{row_provider}|{endpoint}|{row_model}|{row_api_key}")
+            signature_parts.append(f"{row_provider}|{endpoint}|{row_model}|{row_api_key}|{signature_llama_cpp_slot}")
         if len(clients) > 1:
             pool_key = "||".join(signature_parts)
             return RoundRobinLLMClientWrapper(clients=clients, pool_key=pool_key)
@@ -8389,12 +8594,22 @@ def get_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = N
     if not resolved_api_key and not api_key_arg_provided and not explicit_host and not explicit_model:
         resolved_api_key = default_api_key
 
+    final_kwargs = dict(kwargs)
+    if (
+        _is_llama_cpp_hydra_llm_provider(resolved_provider)
+        and default_llama_cpp_slot
+        and not explicit_host
+        and not explicit_model
+        and "llama_cpp_slot" not in final_kwargs
+    ):
+        final_kwargs["llama_cpp_slot"] = default_llama_cpp_slot
+
     return _make_llm_client_for_provider(
         provider=resolved_provider,
         host=resolved_host,
         model=resolved_model,
         api_key=resolved_api_key,
-        **kwargs,
+        **final_kwargs,
     )
 
 def primary_hydra_llm_client_kwargs(*, redis_conn: Any = None) -> Dict[str, Any]:
@@ -8416,6 +8631,14 @@ def primary_hydra_llm_client_kwargs(*, redis_conn: Any = None) -> Dict[str, Any]
         api_key = str(primary.get("api_key") or "").strip()
         if api_key:
             out["api_key"] = api_key
+        if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE:
+            llama_cpp_slot = _normalize_hydra_base_server_llama_cpp_slot(primary.get("llama_cpp_slot"))
+            if llama_cpp_slot:
+                out["llama_cpp_slot"] = llama_cpp_slot
+    elif provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        llama_cpp_slot = _normalize_hydra_base_server_llama_cpp_slot(primary.get("llama_cpp_slot"))
+        if llama_cpp_slot:
+            out["llama_cpp_slot"] = llama_cpp_slot
     return out
 
 def get_primary_llm_client_from_env(host: Optional[str] = None, model: Optional[str] = None, **kwargs) -> Any:
@@ -9776,12 +9999,13 @@ class LlamaCppLLMClientWrapper:
         if _vision_payload_has_image_url(messages) and not self.vision:
             debug_slot = _llama_cpp_slot_id("vision")
         try:
+            provider_label = "Remote" if self.provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE else "Local"
             _append_llm_debug_event(
                 phase="prompt",
                 level="info",
-                message="Local prompt submitted",
+                message=f"{provider_label} prompt submitted",
                 call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                provider=self.provider,
                 host=self.host,
                 model=str(self.model or "").strip(),
                 detail=f"messages={len(messages) if isinstance(messages, list) else 0} slot={debug_slot if debug_slot >= 0 else 'auto'}",
@@ -9806,7 +10030,7 @@ class LlamaCppLLMClientWrapper:
             final_model = self._llm_model_last
             _append_llm_debug_result(
                 call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                provider=self.provider,
                 host=self.host,
                 model=final_model,
                 result=result,
@@ -9828,6 +10052,86 @@ class LlamaCppLLMClientWrapper:
                 error=call_error,
                 response_model=final_model,
             )
+
+
+class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
+    def __init__(self, host=None, model=None, api_key="", **kwargs):
+        endpoint = _build_hydra_llm_endpoint(str(host or "").strip(), "")
+        if not endpoint:
+            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
+        self.api_key = str(api_key or "").strip()
+        self._remote_mode = ""
+        self._remote_mode_checked = False
+        super().__init__(model=model, **kwargs)
+        self.host = endpoint
+        self.provider = HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
+
+    def _ensure_remote_mode(self) -> str:
+        if self._remote_mode_checked and self._remote_mode:
+            return self._remote_mode
+        _llama_cpp_native_json_get(self.host, "/health", timeout=5.0, api_key=self.api_key)
+        mode = "single"
+        try:
+            props = _llama_cpp_native_json_get(self.host, "/props", timeout=5.0, api_key=self.api_key)
+            if str(props.get("role") or "").strip().lower() == "router":
+                mode = "router"
+        except Exception as exc:
+            logger.debug("[llama-cpp-remote] /props probe failed for %s: %s", self.host, exc)
+        self._remote_mode = mode
+        self._remote_mode_checked = True
+        return mode
+
+    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
+        vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
+        chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
+        local_messages = _llama_cpp_disable_thinking_messages(messages)
+        prepared_messages, media = _llama_cpp_native_prepare_messages(local_messages)
+        remote_mode = self._ensure_remote_mode()
+        template_payload: Dict[str, Any] = {
+            "messages": prepared_messages,
+        }
+        if remote_mode == "router":
+            template_payload["model"] = self.model
+        template_kwargs = _llama_cpp_native_chat_template_kwargs(chat_kwargs)
+        if template_kwargs:
+            template_payload["chat_template_kwargs"] = template_kwargs
+        template_response = _llama_cpp_native_json_post(
+            self.host,
+            "/apply-template",
+            template_payload,
+            timeout=min(60.0, max(5.0, timeout or 60.0)),
+            api_key=self.api_key,
+        )
+        prompt = str(template_response.get("prompt") or "").strip()
+        if not prompt:
+            prompt = "\n".join(f"{row.get('role', 'user')}: {row.get('content', '')}" for row in prepared_messages).strip()
+            prompt = f"{prompt}\nassistant:"
+        completion_prompt: Any = prompt
+        if media:
+            completion_prompt = {
+                "prompt_string": prompt,
+                "multimodal_data": media,
+            }
+        request_slot = self.llama_cpp_slot
+        if vision_requested and not self.vision:
+            request_slot = _llama_cpp_slot_id("vision")
+        completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=request_slot)
+        if remote_mode == "router":
+            completion_payload["model"] = self.model
+        generation_started = time.perf_counter()
+        completion_response = _llama_cpp_native_json_post(
+            self.host,
+            "/completion",
+            completion_payload,
+            timeout=max(30.0, timeout or 600.0),
+            api_key=self.api_key,
+        )
+        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
+        return _llama_cpp_native_completion_result(
+            model_token=self.model,
+            response=completion_response,
+            generation_elapsed=generation_elapsed,
+        )
 
 
 def _mlx_lm_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -10397,6 +10701,12 @@ def _subprocess_returncode_label(code: Any) -> str:
     return str(value)
 
 
+def _macos_posix_spawn_kwargs() -> Dict[str, Any]:
+    if sys.platform == "darwin":
+        return {"close_fds": False}
+    return {}
+
+
 def _describe_image_with_llama_cpp_direct(
     *,
     model_token: str,
@@ -10482,8 +10792,8 @@ def _describe_image_with_llama_cpp_subprocess(
                 text=True,
                 capture_output=True,
                 timeout=worker_timeout,
-                cwd=os.path.dirname(os.path.abspath(__file__)),
                 env=run_env,
+                **_macos_posix_spawn_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             combined = "\n".join([_tail_text(exc.stdout), _tail_text(exc.stderr)]).strip()

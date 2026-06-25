@@ -57,6 +57,7 @@ private final class BackendManager {
     private var logHandle: FileHandle?
     private var outputPipe: Pipe?
     private var selectedPythonPath: String?
+    private var externalBackendPID: pid_t?
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -105,37 +106,48 @@ private final class BackendManager {
     }
 
     func restart() {
-        stop()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.start()
+        appendLauncherLog("Restart requested.\n")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            self.stop(waitForExit: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.start()
+            }
         }
     }
 
     func stop(waitForExit: Bool = false) {
-        guard let process else {
+        if let process, process.isRunning {
+            let pid = process.processIdentifier
+            appendLauncherLog("Stop requested for managed backend pid \(pid).\n")
+            process.terminate()
+            if waitForExit {
+                waitForManagedProcessExit(process, timeout: 12)
+            } else {
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    self?.waitForManagedProcessExit(process, timeout: 12)
+                }
+            }
+            closeLogHandle()
+            self.process = nil
+            externalBackendPID = nil
             state = .stopped
             return
         }
 
-        if process.isRunning {
-            process.terminate()
-            if waitForExit {
-                let deadline = Date().addingTimeInterval(12)
-                while process.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-                if process.isRunning {
-                    Darwin.kill(process.processIdentifier, SIGKILL)
-                }
-                process.waitUntilExit()
-            } else {
-                DispatchQueue.global(qos: .utility).async {
-                    process.waitUntilExit()
-                }
-            }
+        if let pid = backendProcessPIDOnPort() {
+            appendLauncherLog("Stop requested for discovered backend pid \(pid).\n")
+            terminateBackendProcess(pid: pid, waitForExit: waitForExit)
+            closeLogHandle()
+            process = nil
+            externalBackendPID = nil
+            state = .stopped
+            return
         }
+
         closeLogHandle()
-        self.process = nil
+        process = nil
+        externalBackendPID = nil
         state = .stopped
     }
 
@@ -869,8 +881,159 @@ private final class BackendManager {
     }
 
     private func isManagedProcessRunning() -> Bool {
-        guard let process else { return false }
-        return process.isRunning
+        if let process, process.isRunning {
+            return true
+        }
+        if let pid = externalBackendPID, isTaterBackendProcess(pid) {
+            return true
+        }
+        if let pid = backendProcessPIDOnPort() {
+            externalBackendPID = pid
+            return true
+        }
+        externalBackendPID = nil
+        return false
+    }
+
+    private func waitForManagedProcessExit(_ process: Process, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if process.isRunning {
+            appendLauncherLog("Managed backend pid \(process.processIdentifier) did not exit; sending SIGKILL.\n")
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+        process.waitUntilExit()
+    }
+
+    private func terminateBackendProcess(pid: pid_t, waitForExit: Bool) {
+        if waitForExit {
+            terminateBackendProcessNow(pid: pid)
+        } else {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.terminateBackendProcessNow(pid: pid)
+            }
+        }
+    }
+
+    private func terminateBackendProcessNow(pid: pid_t) {
+        let descendants = descendantProcessIDs(of: pid)
+        if processExists(pid) {
+            Darwin.kill(pid, SIGTERM)
+        }
+        if !waitForProcessExit(pid, timeout: 12) {
+            appendLauncherLog("Discovered backend pid \(pid) did not exit; sending SIGKILL.\n")
+            Darwin.kill(pid, SIGKILL)
+            _ = waitForProcessExit(pid, timeout: 2)
+        }
+        terminateCapturedDescendants(descendants)
+    }
+
+    private func terminateCapturedDescendants(_ pids: [pid_t]) {
+        let remaining = pids.filter { processExists($0) }
+        guard !remaining.isEmpty else { return }
+        for pid in remaining {
+            Darwin.kill(pid, SIGTERM)
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+        for pid in remaining where processExists(pid) {
+            Darwin.kill(pid, SIGKILL)
+        }
+    }
+
+    private func waitForProcessExit(_ pid: pid_t, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while processExists(pid) && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return !processExists(pid)
+    }
+
+    private func processExists(_ pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        if Darwin.kill(pid, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
+    }
+
+    private func backendProcessPIDOnPort() -> pid_t? {
+        guard let output = runProcessCapture(
+            executable: "/usr/sbin/lsof",
+            arguments: ["-nP", "-tiTCP:\(taterPort)", "-sTCP:LISTEN"]
+        ) else {
+            return nil
+        }
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let pid = pid_t(String(line).trimmingCharacters(in: .whitespacesAndNewlines)),
+                  pid != getpid(),
+                  isTaterBackendProcess(pid) else {
+                continue
+            }
+            return pid
+        }
+        return nil
+    }
+
+    private func isTaterBackendProcess(_ pid: pid_t) -> Bool {
+        guard processExists(pid),
+              let command = processCommandLine(pid) else {
+            return false
+        }
+        return command.contains("uvicorn")
+            && command.contains("tateros_app:app")
+            && command.contains("--port \(taterPort)")
+    }
+
+    private func processCommandLine(_ pid: pid_t) -> String? {
+        runProcessCapture(executable: "/bin/ps", arguments: ["-p", "\(pid)", "-ww", "-o", "command="])
+    }
+
+    private func descendantProcessIDs(of rootPID: pid_t) -> [pid_t] {
+        guard let output = runProcessCapture(executable: "/bin/ps", arguments: ["-axo", "pid=,ppid="]) else {
+            return []
+        }
+        var childrenByParent: [pid_t: [pid_t]] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.count >= 2,
+                  let pid = pid_t(parts[0]),
+                  let parent = pid_t(parts[1]),
+                  pid != getpid() else {
+                continue
+            }
+            childrenByParent[parent, default: []].append(pid)
+        }
+
+        var descendants: [pid_t] = []
+        var stack = childrenByParent[rootPID] ?? []
+        while let pid = stack.popLast() {
+            descendants.append(pid)
+            stack.append(contentsOf: childrenByParent[pid] ?? [])
+        }
+        return descendants
+    }
+
+    private func runProcessCapture(executable: String, arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? nil : output
     }
 
     private func waitForWebReady(timeout: TimeInterval) -> Bool {
@@ -1418,6 +1581,105 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
             NSWorkspace.shared.open(url)
         }
         return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Tater"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        presentJavaScriptAlert(alert, webView: webView) { _ in
+            completionHandler()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        if #available(macOS 10.13.4, *) {
+            panel.canChooseDirectories = parameters.allowsDirectories
+        } else {
+            panel.canChooseDirectories = false
+        }
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canCreateDirectories = false
+        panel.resolvesAliases = true
+        panel.message = parameters.allowsMultipleSelection
+            ? "Choose files to attach to Tater."
+            : "Choose a file to attach to Tater."
+
+        if let window = webView.window ?? self.window {
+            panel.beginSheetModal(for: window) { response in
+                completionHandler(response == .OK ? panel.urls : nil)
+            }
+        } else {
+            let response = panel.runModal()
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Tater"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        presentJavaScriptAlert(alert, webView: webView) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        input.stringValue = defaultText ?? ""
+
+        let alert = NSAlert()
+        alert.messageText = "Tater"
+        alert.informativeText = prompt
+        alert.alertStyle = .informational
+        alert.accessoryView = input
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        presentJavaScriptAlert(alert, webView: webView) { response in
+            completionHandler(response == .alertFirstButtonReturn ? input.stringValue : nil)
+        }
+    }
+
+    private func presentJavaScriptAlert(
+        _ alert: NSAlert,
+        webView: WKWebView,
+        completion: @escaping (NSApplication.ModalResponse) -> Void
+    ) {
+        if let window = webView.window ?? self.window {
+            alert.beginSheetModal(for: window) { response in
+                completion(response)
+            }
+        } else {
+            completion(alert.runModal())
+        }
     }
 
     private func shouldOpenExternally(_ url: URL) -> Bool {

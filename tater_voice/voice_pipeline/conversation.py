@@ -101,6 +101,7 @@ class VoiceSessionRuntime:
     speaker_id: str = ""
     speaker_name: str = ""
     speaker_score: float = 0.0
+    speaker_match_reason: str = ""
     voice_emotion: str = ""
     voice_emotion_score: float = 0.0
     voice_emotion_prompt_hint: str = ""
@@ -221,8 +222,32 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     if session_context:
         context.update(session_context)
     if not session_has_speaker:
-        for key in ("speaker_id", "speaker_name", "speaker_score"):
-            context.pop(key, None)
+        prior_speaker_id = vp._text(context.get("speaker_id"))
+        prior_speaker_name = vp._text(context.get("speaker_name"))
+        reuse_prior_speaker = (
+            bool(getattr(session, "continued_chat_reopen", False))
+            and vp._text(getattr(session, "speaker_match_reason", "")) == "too_short"
+            and bool(prior_speaker_id or prior_speaker_name)
+        )
+        if reuse_prior_speaker:
+            session.speaker_id = prior_speaker_id
+            session.speaker_name = prior_speaker_name
+            with contextlib.suppress(Exception):
+                session.speaker_score = float(context.get("speaker_score") or 0.0)
+            if isinstance(session.context, dict):
+                if prior_speaker_id:
+                    session.context["speaker_id"] = prior_speaker_id
+                if prior_speaker_name:
+                    session.context["speaker_name"] = prior_speaker_name
+                if context.get("speaker_score") not in (None, ""):
+                    session.context["speaker_score"] = context.get("speaker_score")
+            vp._native_debug(
+                f"speaker id reused for short continued-chat reply selector={session.selector} "
+                f"session_id={session.session_id} speaker={prior_speaker_name or prior_speaker_id!r}"
+            )
+        else:
+            for key in ("speaker_id", "speaker_name", "speaker_score"):
+                context.pop(key, None)
     if not session_has_emotion:
         for key in ("voice_emotion", "voice_emotion_score", "voice_emotion_prompt_hint"):
             context.pop(key, None)

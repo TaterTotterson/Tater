@@ -14,6 +14,27 @@ PEOPLE_STORE_KEY = "tater:people:v1"
 DISCOVERY_MAX_KEYS = 200
 DISCOVERY_MAX_ROWS_PER_KEY = 200
 PERSON_INSTRUCTIONS_MAX_CHARS = 2000
+PORTAL_HISTORY_PATTERNS_BY_PLATFORM = {
+    "discord": (
+        "tater:channel:*:history",
+        "tater:discord:*:history",
+    ),
+    "telegram": ("tater:telegram:*:history",),
+    "matrix": ("tater:matrix:*:history",),
+    "irc": ("tater:irc:*:history",),
+    "meshtastic": ("tater:meshtastic:*:history",),
+    "homekit": ("tater:homekit:session:*:history",),
+    "xbmc": ("tater:xbmc:session:*:history",),
+    "macos": ("tater:macos:session:*:history",),
+    "little_spud": ("tater:little_spud:*:history",),
+}
+
+
+def _portal_history_patterns() -> Tuple[str, ...]:
+    patterns: List[str] = []
+    for group in PORTAL_HISTORY_PATTERNS_BY_PLATFORM.values():
+        patterns.extend(group)
+    return tuple(patterns)
 
 
 def _text(value: Any) -> str:
@@ -42,6 +63,27 @@ def _platform(value: Any) -> str:
 
 def _alias_key(platform: Any, external_id: Any) -> str:
     return f"{_platform(platform)}:{_text(external_id)}"
+
+
+def _little_spud_alias_from_origin(origin: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    source = origin if isinstance(origin, dict) else {}
+    user_name = _text(source.get("user") or source.get("user_name"))
+    device_name = _text(source.get("device_name") or source.get("device") or source.get("device_id"))
+    external_id = _text(source.get("user_id") or source.get("alias_id") or source.get("external_id"))
+    if not external_id and (user_name or device_name):
+        external_id = f"{user_name or 'User'}:{device_name or 'Little Spud'}"
+    if not external_id:
+        return None
+
+    label = _text(source.get("display_name") or source.get("username"))
+    if not label and user_name and device_name:
+        label = f"{user_name} on {device_name}"
+    return {
+        "platform": "little_spud",
+        "external_id": external_id,
+        "label": label or external_id,
+        "kind": "portal_user",
+    }
 
 
 def _default_store() -> Dict[str, Any]:
@@ -206,6 +248,17 @@ def alias_candidates_from_origin(platform: str, origin: Optional[Dict[str, Any]]
 
     if normalized_platform in {"homeassistant", "voice_core"} and speaker_id:
         add("voice_core", speaker_id, source.get("speaker_name") or speaker_id, "speaker_id")
+
+    if normalized_platform == "little_spud":
+        little_spud_alias = _little_spud_alias_from_origin(source)
+        if little_spud_alias:
+            add(
+                little_spud_alias.get("platform", "little_spud"),
+                little_spud_alias.get("external_id"),
+                little_spud_alias.get("label"),
+                little_spud_alias.get("kind") or "portal_user",
+            )
+        return out
 
     key_groups = {
         "discord": ("user_id", "author_id", "sender_id", "dm_user_id"),
@@ -489,6 +542,8 @@ def _add_discovered_alias(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict
         row["label"] = old_label
     if existing.get("fact_count") not in (None, "") and row.get("fact_count") in (None, ""):
         row["fact_count"] = existing.get("fact_count")
+    if _as_bool(existing.get("forgettable"), False) or _as_bool(alias.get("forgettable"), False):
+        row["forgettable"] = True
 
     row.update(linked.get(key) or {})
     out[key] = row
@@ -504,7 +559,17 @@ def _discover_webui_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Di
             if isinstance(row, dict) and _text(row.get("role")) == "user":
                 username = _text(row.get("username"))
                 if username:
-                    _add_discovered_alias(out, linked, {"platform": "webui", "external_id": username, "label": username})
+                    _add_discovered_alias(
+                        out,
+                        linked,
+                        {
+                            "platform": "webui",
+                            "external_id": username,
+                            "label": username,
+                            "source": "WebUI",
+                            "forgettable": True,
+                        },
+                    )
 
 
 def _discover_voice_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict[str, str]]) -> None:
@@ -614,20 +679,8 @@ def _portal_aliases_from_history_row(platform: str, row: Dict[str, Any], history
 
 
 def _discover_portal_history_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict[str, str]], redis_client: Any) -> None:
-    patterns = (
-        "tater:channel:*:history",
-        "tater:discord:*:history",
-        "tater:telegram:*:history",
-        "tater:matrix:*:history",
-        "tater:irc:*:history",
-        "tater:meshtastic:*:history",
-        "tater:homekit:session:*:history",
-        "tater:xbmc:session:*:history",
-        "tater:macos:session:*:history",
-        "tater:little_spud:*:history",
-    )
     seen_keys = 0
-    for pattern in patterns:
+    for pattern in _portal_history_patterns():
         keys = []
         with contextlib.suppress(Exception):
             keys = list(redis_client.scan_iter(match=pattern, count=100))
@@ -648,8 +701,7 @@ def _discover_portal_history_aliases(out: Dict[str, Dict[str, Any]], linked: Dic
                         continue
                     for alias in _portal_aliases_from_history_row(platform, row, key):
                         alias["source"] = _portal_label(platform)
-                        if platform == "little_spud":
-                            alias["forgettable"] = True
+                        alias["forgettable"] = True
                         _add_discovered_alias(out, linked, alias)
 
 
@@ -704,6 +756,7 @@ def _discover_memory_core_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[s
                 "fact_count": len(facts),
                 "last_updated": doc.get("last_updated"),
                 "doc_key": key,
+                "forgettable": True,
             },
         )
 
@@ -763,13 +816,202 @@ def _identity_is_linked(store: Dict[str, Any], platform: str, external_id: str) 
     return False
 
 
+def _history_patterns_for_platform(platform: str) -> Tuple[str, ...]:
+    return tuple(PORTAL_HISTORY_PATTERNS_BY_PLATFORM.get(_platform(platform), ()))
+
+
+def _json_history_row(raw: Any) -> Optional[Dict[str, Any]]:
+    with contextlib.suppress(Exception):
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _row_role(row: Dict[str, Any]) -> str:
+    return _text(row.get("role")).lower()
+
+
+def _filter_history_rows_for_identity(
+    *,
+    platform: str,
+    history_key: Any,
+    raw_rows: List[Any],
+    wanted_key: str,
+    linked_aliases: Dict[str, Dict[str, str]],
+) -> Tuple[bool, List[Any], int, bool]:
+    kept_rows: List[Any] = []
+    removed_rows = 0
+    matched = False
+    blocked = False
+    remove_response_tail = False
+
+    for raw in raw_rows:
+        row = _json_history_row(raw)
+        if not isinstance(row, dict):
+            kept_rows.append(raw)
+            remove_response_tail = False
+            continue
+
+        aliases = list(_portal_aliases_from_history_row(platform, row, history_key))
+        alias_keys = {_alias_key(alias.get("platform"), alias.get("external_id")) for alias in aliases}
+        row_matches = wanted_key in alias_keys
+        role = _row_role(row)
+
+        if row_matches:
+            matched = True
+            remove_response_tail = True
+            removed_rows += 1
+            if any(alias_key in linked_aliases for alias_key in alias_keys if alias_key != wanted_key):
+                blocked = True
+            continue
+
+        if remove_response_tail and role != "user":
+            if aliases and role not in {"assistant", "system", "tool"}:
+                remove_response_tail = False
+                kept_rows.append(raw)
+                continue
+            removed_rows += 1
+            continue
+
+        if role == "user":
+            remove_response_tail = False
+        kept_rows.append(raw)
+
+    return matched, kept_rows, removed_rows, blocked
+
+
+def _forget_portal_history_identity(
+    *,
+    client: Any,
+    platform: str,
+    wanted_key: str,
+    linked_aliases: Dict[str, Dict[str, str]],
+) -> Dict[str, int]:
+    deleted_keys = 0
+    rewritten_keys = 0
+    removed_rows = 0
+    scanned_keys = 0
+    patterns = _history_patterns_for_platform(platform)
+    if not patterns:
+        return {"deleted_keys": 0, "rewritten_keys": 0, "removed_rows": 0}
+
+    for pattern in patterns:
+        keys = []
+        with contextlib.suppress(Exception):
+            keys = list(client.scan_iter(match=pattern, count=100))
+        for key in keys:
+            if scanned_keys >= DISCOVERY_MAX_KEYS:
+                return {
+                    "deleted_keys": deleted_keys,
+                    "rewritten_keys": rewritten_keys,
+                    "removed_rows": removed_rows,
+                }
+            scanned_keys += 1
+            key_text = _text(key)
+            if not key_text:
+                continue
+            raw_rows = list(client.lrange(key, 0, -1) or [])
+            if _platform(platform) == "little_spud":
+                matched = False
+                aliases_in_key: List[Dict[str, Any]] = []
+                for raw in raw_rows:
+                    row = _json_history_row(raw)
+                    if not isinstance(row, dict):
+                        continue
+                    aliases = list(_portal_aliases_from_history_row(platform, row, key))
+                    aliases_in_key.extend(aliases)
+                    if any(_alias_key(alias.get("platform"), alias.get("external_id")) == wanted_key for alias in aliases):
+                        matched = True
+                if not matched:
+                    continue
+                if any(_alias_key(alias.get("platform"), alias.get("external_id")) in linked_aliases for alias in aliases_in_key):
+                    raise ValueError("This chat history also contains a linked identity. Unlink it before forgetting the history.")
+                client.delete(key)
+                client.delete(f"{key_text}:active_runs")
+                deleted_keys += 1
+                removed_rows += len(raw_rows)
+                continue
+
+            matched, kept_rows, removed_count, blocked = _filter_history_rows_for_identity(
+                platform=platform,
+                history_key=key,
+                raw_rows=raw_rows,
+                wanted_key=wanted_key,
+                linked_aliases=linked_aliases,
+            )
+            if not matched:
+                continue
+            if blocked:
+                raise ValueError("A matching chat row also contains a linked identity. Unlink it before forgetting the history.")
+            client.delete(key)
+            if kept_rows:
+                client.rpush(key, *kept_rows)
+                rewritten_keys += 1
+            else:
+                client.delete(f"{key_text}:active_runs")
+                deleted_keys += 1
+            removed_rows += removed_count
+
+    return {
+        "deleted_keys": deleted_keys,
+        "rewritten_keys": rewritten_keys,
+        "removed_rows": removed_rows,
+    }
+
+
+def _forget_webui_identity(
+    *,
+    client: Any,
+    wanted_key: str,
+    linked_aliases: Dict[str, Dict[str, str]],
+) -> Dict[str, int]:
+    key = "webui:chat_history"
+    raw_rows = []
+    with contextlib.suppress(Exception):
+        raw_rows = list(client.lrange(key, 0, -1) or [])
+    if not raw_rows:
+        return {"deleted_keys": 0, "rewritten_keys": 0, "removed_rows": 0}
+
+    matched, kept_rows, removed_rows, blocked = _filter_history_rows_for_identity(
+        platform="webui",
+        history_key=key,
+        raw_rows=raw_rows,
+        wanted_key=wanted_key,
+        linked_aliases=linked_aliases,
+    )
+    if not matched:
+        return {"deleted_keys": 0, "rewritten_keys": 0, "removed_rows": 0}
+    if blocked:
+        raise ValueError("A matching WebUI chat row also contains a linked identity. Unlink it before forgetting the history.")
+
+    client.delete(key)
+    if kept_rows:
+        client.rpush(key, *kept_rows)
+        return {"deleted_keys": 0, "rewritten_keys": 1, "removed_rows": removed_rows}
+    return {"deleted_keys": 1, "rewritten_keys": 0, "removed_rows": removed_rows}
+
+
+def _forget_memory_identity(*, client: Any, platform: str, external_id: str) -> Dict[str, int]:
+    doc_key = f"mem:user:{_platform(platform)}:{_text(external_id)}"
+    label_key = f"tater:user_label:{_platform(platform)}:{_text(external_id)}"
+    deleted_docs = 0
+    deleted_labels = 0
+    with contextlib.suppress(Exception):
+        deleted_docs = int(client.delete(doc_key) or 0)
+    with contextlib.suppress(Exception):
+        deleted_labels = int(client.delete(label_key) or 0)
+    return {
+        "deleted_memory_docs": max(0, deleted_docs),
+        "deleted_memory_labels": max(0, deleted_labels),
+    }
+
+
 def forget_discovered_identity(*, platform: str, external_id: str, redis_client: Any = None) -> Dict[str, Any]:
     normalized_platform = _platform(platform)
     wanted_external_id = _text(external_id)
     if not normalized_platform or not wanted_external_id:
         raise ValueError("platform and external_id are required")
-    if normalized_platform != "little_spud":
-        raise ValueError("Only Little Spud discovered identities can be forgotten from here.")
 
     client = _client(redis_client)
     store = load_store(client)
@@ -778,40 +1020,31 @@ def forget_discovered_identity(*, platform: str, external_id: str, redis_client:
 
     wanted_key = _alias_key(normalized_platform, wanted_external_id)
     linked_aliases = _linked_alias_index(store)
-    deleted_keys: List[str] = []
-    scanned_keys = 0
-    keys = list(client.scan_iter(match="tater:little_spud:*:history", count=100))
-    for key in keys:
-        if scanned_keys >= DISCOVERY_MAX_KEYS:
-            break
-        scanned_keys += 1
-        key_text = _text(key)
-        if not key_text:
-            continue
-        raw_rows = client.lrange(key, -DISCOVERY_MAX_ROWS_PER_KEY, -1) or []
-        matched = False
-        aliases_in_key: List[Dict[str, Any]] = []
-        for raw in raw_rows:
-            with contextlib.suppress(Exception):
-                row = json.loads(raw)
-                if not isinstance(row, dict):
-                    continue
-                aliases = list(_portal_aliases_from_history_row(normalized_platform, row, key))
-                aliases_in_key.extend(aliases)
-                if any(_alias_key(alias.get("platform"), alias.get("external_id")) == wanted_key for alias in aliases):
-                    matched = True
-        if not matched:
-            continue
-        if any(_alias_key(alias.get("platform"), alias.get("external_id")) in linked_aliases for alias in aliases_in_key):
-            raise ValueError("This Little Spud chat history also contains a linked identity. Unlink it before forgetting the history.")
-        client.delete(key)
-        client.delete(f"{key_text}:active_runs")
-        deleted_keys.append(key_text)
+    if normalized_platform == "webui":
+        cleanup = _forget_webui_identity(client=client, wanted_key=wanted_key, linked_aliases=linked_aliases)
+    else:
+        cleanup = _forget_portal_history_identity(
+            client=client,
+            platform=normalized_platform,
+            wanted_key=wanted_key,
+            linked_aliases=linked_aliases,
+        )
+    memory_cleanup = _forget_memory_identity(client=client, platform=normalized_platform, external_id=wanted_external_id)
+
+    total_removed = sum(int(cleanup.get(key) or 0) for key in ("deleted_keys", "rewritten_keys", "removed_rows")) + sum(
+        int(memory_cleanup.get(key) or 0) for key in ("deleted_memory_docs", "deleted_memory_labels")
+    )
+    if total_removed <= 0:
+        raise ValueError("No cleanup data was found for this identity.")
 
     return {
         "platform": normalized_platform,
         "external_id": wanted_external_id,
-        "deleted_keys": len(deleted_keys),
+        "deleted_keys": int(cleanup.get("deleted_keys") or 0),
+        "rewritten_keys": int(cleanup.get("rewritten_keys") or 0),
+        "removed_rows": int(cleanup.get("removed_rows") or 0),
+        "deleted_memory_docs": int(memory_cleanup.get("deleted_memory_docs") or 0),
+        "deleted_memory_labels": int(memory_cleanup.get("deleted_memory_labels") or 0),
     }
 
 
@@ -886,9 +1119,25 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
             redis_client=client,
         )
         deleted_keys = int(result.get("deleted_keys") or 0)
-        message = "Forgot Little Spud identity."
-        if deleted_keys > 0:
-            message = f"Forgot Little Spud identity and deleted {deleted_keys} chat histor{'y' if deleted_keys == 1 else 'ies'}."
+        rewritten_keys = int(result.get("rewritten_keys") or 0)
+        removed_rows = int(result.get("removed_rows") or 0)
+        deleted_memory_docs = int(result.get("deleted_memory_docs") or 0)
+        deleted_memory_labels = int(result.get("deleted_memory_labels") or 0)
+        platform_label = _portal_label(result.get("platform"))
+        cleanup_parts: List[str] = []
+        if deleted_keys:
+            cleanup_parts.append(f"deleted {deleted_keys} chat histor{'y' if deleted_keys == 1 else 'ies'}")
+        if rewritten_keys:
+            cleanup_parts.append(f"updated {rewritten_keys} chat histor{'y' if rewritten_keys == 1 else 'ies'}")
+        if removed_rows:
+            cleanup_parts.append(f"removed {removed_rows} chat row{'s' if removed_rows != 1 else ''}")
+        if deleted_memory_docs:
+            cleanup_parts.append(f"deleted {deleted_memory_docs} memory record{'s' if deleted_memory_docs != 1 else ''}")
+        if deleted_memory_labels:
+            cleanup_parts.append(f"deleted {deleted_memory_labels} memory label{'s' if deleted_memory_labels != 1 else ''}")
+        message = f"Forgot {platform_label} identity."
+        if cleanup_parts:
+            message = f"Forgot {platform_label} identity and {', '.join(cleanup_parts)}."
         return {
             "ok": True,
             "action": token,
