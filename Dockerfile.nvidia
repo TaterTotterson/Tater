@@ -66,7 +66,7 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
  && python -m pip install -r /tmp/requirements.nvidia.txt \
  && python -m pip uninstall -y onnxruntime \
- && python -m pip install onnxruntime-gpu \
+ && python -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27" \
  && python -c "from google.protobuf import runtime_version; import aioesphomeapi, torch, torchaudio, transformers, webrtcvad, openwakeword, nanowakeword; assert getattr(aioesphomeapi, 'APIClient', None); print('protobuf_runtime', runtime_version.__name__, 'aioesphomeapi', getattr(aioesphomeapi, '__version__', 'unknown'), 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__, 'openwakeword', getattr(openwakeword, '__name__', 'openwakeword'), 'nanowakeword', getattr(nanowakeword, '__name__', 'nanowakeword'))"
 
 COPY --from=llama_cpp_builder /opt/llama.cpp /opt/llama.cpp
