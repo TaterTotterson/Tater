@@ -298,9 +298,17 @@ install_base() {
 
 install_cpu() {
   venv_python="$1"
+  tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-cpu.XXXXXX")"
+  trap 'rm -f "${tmp_req}"' EXIT
+  filtered_requirements "${tmp_req}"
+
+  info "Installing CPU PyTorch wheels"
+  "${venv_python}" -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${REQUIREMENTS_FILE}"
+  "${venv_python}" -m pip install -r "${tmp_req}"
   install_llama_cpp_native cpu
+  rm -f "${tmp_req}"
+  trap - EXIT
 }
 
 check_llama_cpp_native() {
@@ -644,16 +652,29 @@ server_bin = os.getenv("TATER_LLAMA_CPP_SERVER_BIN", "")
 require_raw = str(os.getenv("TATER_SETUP_REQUIRE_LOCAL_LLM") or "1").strip().lower()
 require_local_llm = require_raw not in ("", "0", "false", "no", "off")
 if server_bin:
-    try:
-        completed = subprocess.run([server_bin, "--version"], text=True, capture_output=True, timeout=10)
-        output = " ".join(((completed.stdout or "") + " " + (completed.stderr or "")).split())
-        print(f"llama_server={server_bin} {output}")
-        if completed.returncode != 0 and require_local_llm:
-            raise SystemExit(f"llama_server failed: {output}")
-    except Exception as exc:
-        print(f"llama_server unavailable: {exc}")
+    server_path = Path(server_bin)
+    server_available = server_path.is_file() and os.access(server_bin, os.X_OK)
+    if not server_available:
+        message = (
+            f"Missing required llama.cpp server binary: {server_bin}. "
+            "Install git and cmake, then rerun setup, or set "
+            "TATER_SETUP_LLAMA_CPP_NATIVE=0 TATER_SETUP_REQUIRE_LOCAL_LLM=0 "
+            "to skip Tater's built-in local LLM runtime."
+        )
+        print(f"llama_server unavailable: {message}")
         if require_local_llm:
-            raise
+            raise SystemExit(message)
+    if server_available:
+        try:
+            completed = subprocess.run([server_bin, "--version"], text=True, capture_output=True, timeout=10)
+            output = " ".join(((completed.stdout or "") + " " + (completed.stderr or "")).split())
+            print(f"llama_server={server_bin} {output}")
+            if completed.returncode != 0 and require_local_llm:
+                raise SystemExit(f"llama_server failed: {output}")
+        except Exception as exc:
+            print(f"llama_server unavailable: {exc}")
+            if require_local_llm:
+                raise
 else:
     print("llama_server unavailable: TATER_LLAMA_CPP_SERVER_BIN is not set")
     if require_local_llm:
