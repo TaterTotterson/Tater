@@ -131,6 +131,7 @@ HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
 HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
+HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE = "llama_cpp_remote"
 HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
 CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
@@ -384,6 +385,16 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
         return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {
+        "llama_cpp_remote",
+        "llama.cpp_remote",
+        "llamacpp_remote",
+        "llama_remote",
+        "remote_llama_cpp",
+        "remote_llamacpp",
+        "gguf_remote",
+    }:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
@@ -396,6 +407,13 @@ def _is_local_hydra_llm_provider(provider: Any) -> bool:
         HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
         HYDRA_LLM_PROVIDER_LLAMA_CPP,
         HYDRA_LLM_PROVIDER_MLX_LM,
+    }
+
+
+def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     }
 
 
@@ -463,7 +481,7 @@ async def _build_hydra_llm_client_pool(
     base_client_api_key = str(getattr(base_llm_client, "api_key", "") or "").strip()
     base_client_provider = _normalize_hydra_llm_provider(getattr(base_llm_client, "provider", ""))
     base_client_llama_cpp_slot = _normalize_llama_cpp_slot(getattr(base_llm_client, "llama_cpp_slot", -1))
-    shared_clients: Dict[tuple[str, str, str, str], Any] = {}
+    shared_clients: Dict[tuple, Any] = {}
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         raw_provider = _safe_get_text(_hydra_role_llm_key(role, "provider"))
@@ -481,7 +499,7 @@ async def _build_hydra_llm_client_pool(
             if (
                 base_client_provider == role_provider
                 and raw_model == base_client_model
-                and (role_provider != HYDRA_LLM_PROVIDER_LLAMA_CPP or role_llama_cpp_slot == base_client_llama_cpp_slot)
+                and (not _is_llama_cpp_hydra_llm_provider(role_provider) or role_llama_cpp_slot == base_client_llama_cpp_slot)
             ):
                 role_clients[role] = base_llm_client
                 continue
@@ -490,7 +508,7 @@ async def _build_hydra_llm_client_pool(
                 role_provider,
                 "",
                 str(raw_model).strip(),
-                str(role_llama_cpp_slot) if role_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP else "",
+                str(role_llama_cpp_slot) if _is_llama_cpp_hydra_llm_provider(role_provider) else "",
             )
             existing = shared_clients.get(signature)
             if existing is not None:
@@ -499,7 +517,7 @@ async def _build_hydra_llm_client_pool(
 
             try:
                 client_kwargs = {"provider": role_provider, "host": "", "model": raw_model}
-                if role_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+                if _is_llama_cpp_hydra_llm_provider(role_provider):
                     client_kwargs["llama_cpp_slot"] = role_llama_cpp_slot
                 client = get_llm_client_from_env(**client_kwargs)
             except Exception:
@@ -523,18 +541,28 @@ async def _build_hydra_llm_client_pool(
             and raw_model == base_client_model
             and (not raw_api_key or raw_api_key == base_client_api_key)
             and endpoint_key in {base_client_host, base_host_no_v1}
+            and (not _is_llama_cpp_hydra_llm_provider(role_provider) or role_llama_cpp_slot == base_client_llama_cpp_slot)
         ):
             role_clients[role] = base_llm_client
             continue
 
-        signature = (role_provider, endpoint_key, str(raw_model).strip(), raw_api_key)
+        signature = (
+            role_provider,
+            endpoint_key,
+            str(raw_model).strip(),
+            raw_api_key,
+            str(role_llama_cpp_slot) if _is_llama_cpp_hydra_llm_provider(role_provider) else "",
+        )
         existing = shared_clients.get(signature)
         if existing is not None:
             role_clients[role] = existing
             continue
 
         try:
-            client = get_llm_client_from_env(provider=role_provider, host=endpoint, model=raw_model, api_key=raw_api_key)
+            client_kwargs = {"provider": role_provider, "host": endpoint, "model": raw_model, "api_key": raw_api_key}
+            if _is_llama_cpp_hydra_llm_provider(role_provider):
+                client_kwargs["llama_cpp_slot"] = role_llama_cpp_slot
+            client = get_llm_client_from_env(**client_kwargs)
         except Exception:
             missing_or_invalid_roles.append(role)
             continue

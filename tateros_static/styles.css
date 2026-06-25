@@ -1138,6 +1138,175 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   overflow: hidden;
 }
 
+.surface-view-header {
+  --surface-accent: rgba(240, 131, 69, 0.78);
+  --surface-accent-soft: rgba(240, 131, 69, 0.1);
+  --surface-companion: rgba(138, 132, 124, 0.075);
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, var(--surface-accent-soft), rgba(255, 255, 255, 0.028) 48%, var(--surface-companion)),
+    linear-gradient(180deg, rgba(31, 33, 36, 0.92), rgba(17, 18, 20, 0.97));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 12px 26px rgba(0, 0, 0, 0.2);
+  animation: reveal-up 320ms ease both;
+}
+
+.surface-view-header::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--surface-accent), rgba(158, 150, 140, 0.3));
+}
+
+.surface-view-header::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent 0, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, transparent 0, rgba(255, 255, 255, 0.026) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(90deg, transparent, #000 22%, #000 74%, transparent);
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.surface-view-header > * {
+  position: relative;
+  z-index: 1;
+}
+
+.surface-view-header-verba {
+  --surface-accent: rgba(255, 145, 78, 0.84);
+  --surface-accent-soft: rgba(255, 145, 78, 0.12);
+  --surface-companion: rgba(138, 132, 124, 0.07);
+}
+
+.surface-view-header-portal {
+  --surface-accent: rgba(224, 128, 66, 0.8);
+  --surface-accent-soft: rgba(224, 128, 66, 0.11);
+  --surface-companion: rgba(128, 124, 118, 0.075);
+}
+
+.surface-view-header-core {
+  --surface-accent: rgba(208, 142, 82, 0.78);
+  --surface-accent-soft: rgba(208, 142, 82, 0.1);
+  --surface-companion: rgba(138, 132, 124, 0.075);
+}
+
+.surface-view-header-integration {
+  --surface-accent: rgba(240, 131, 69, 0.84);
+  --surface-accent-soft: rgba(240, 131, 69, 0.12);
+  --surface-companion: rgba(138, 132, 124, 0.075);
+}
+
+.surface-view-header-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(240, 131, 69, 0.46);
+  border-color: color-mix(in srgb, var(--surface-accent) 68%, transparent);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--surface-accent) 22%, transparent), rgba(0, 0, 0, 0.2));
+  color: #fff0e8;
+  font-size: 0.7rem;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.surface-view-header-copy {
+  min-width: 0;
+}
+
+.surface-view-kicker {
+  width: fit-content;
+  margin-bottom: 3px;
+  padding: 2px 6px;
+  border: 1px solid rgba(240, 131, 69, 0.34);
+  border-color: color-mix(in srgb, var(--surface-accent) 42%, transparent);
+  border-radius: 7px;
+  color: #ffb680;
+  background: rgba(0, 0, 0, 0.16);
+  font-size: 0.62rem;
+  font-weight: 850;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+.surface-view-header h3 {
+  margin: 0;
+  color: #f8f0e8;
+  font-size: 1.08rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.12;
+}
+
+.surface-view-header p {
+  max-width: 72ch;
+  margin: 3px 0 0;
+  color: #beb5aa;
+  font-size: 0.8rem;
+  line-height: 1.32;
+}
+
+.surface-view-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 430px;
+  min-width: 0;
+}
+
+.surface-view-stat {
+  display: grid;
+  gap: 1px;
+  min-width: 72px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.surface-view-stat span {
+  color: #bdb4aa;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+.surface-view-stat strong {
+  color: #f8efe6;
+  font-size: 0.88rem;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+
+.surface-status-line:not(:empty) {
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(240, 131, 69, 0.24);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
 .card {
   position: relative;
   overflow: hidden;
@@ -1321,6 +1490,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .shop-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
 }
 
 .settings-dropdown {
@@ -1370,14 +1540,17 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   gap: 8px;
   margin-top: 10px;
   padding: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 16px;
-  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.12)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
 }
 
 .shop-tab-btn {
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 8px 13px;
   background: transparent;
   color: var(--text);
@@ -1406,6 +1579,68 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .shop-tab-panel.active {
   display: block;
+  animation: reveal-up 220ms ease-out both;
+}
+
+.shop-manager-root > .card {
+  border-color: rgba(255, 255, 255, 0.078);
+  background:
+    linear-gradient(180deg, rgba(34, 36, 39, 0.9), rgba(17, 18, 20, 0.96)),
+    linear-gradient(135deg, rgba(240, 131, 69, 0.06), rgba(138, 132, 124, 0.035));
+}
+
+.shop-grid > .card,
+.integration-runtime-card {
+  min-width: 0;
+  border-radius: 12px;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.shop-grid > .card::before,
+.integration-runtime-card::before {
+  background: linear-gradient(90deg, rgba(240, 131, 69, 0.36), rgba(164, 152, 138, 0.2), transparent);
+}
+
+.shop-grid > .card:hover,
+.integration-runtime-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(240, 131, 69, 0.28);
+  background:
+    linear-gradient(180deg, rgba(39, 41, 44, 0.96), rgba(20, 21, 24, 0.98)),
+    linear-gradient(135deg, rgba(240, 131, 69, 0.08), rgba(138, 132, 124, 0.045));
+  box-shadow:
+    var(--shadow-lift),
+    0 0 0 1px rgba(240, 131, 69, 0.065);
+}
+
+.integration-runtime-card .card-head {
+  align-items: flex-start;
+}
+
+.integration-runtime-card .card-title {
+  min-width: 0;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.integration-runtime-status {
+  margin-top: 6px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.integrations-surface-panel {
+  margin-top: 0;
+}
+
+.integration-modal-actions {
+  margin-top: 0;
 }
 
 .shop-repo-section {
@@ -2338,7 +2573,14 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 .hydra-base-server-block {
   grid-column: 1 / -1;
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.hydra-base-server-block-title {
+  margin-bottom: 0;
 }
 
 .hydra-section-actions {
@@ -2354,7 +2596,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .hydra-base-server-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .llm-vision-mini-tabs {
@@ -3745,16 +3987,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   }
 }
 
-.hydra-base-server-row {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
-  gap: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  padding: 8px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
+.hydra-base-server-row,
 .hydra-route-row {
   display: grid;
   grid-column: 1 / -1;
@@ -3767,6 +4000,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .hydra-base-server-actions {
+  grid-column: 1 / -1;
   display: flex;
   align-items: end;
   justify-content: flex-end;
@@ -5720,6 +5954,24 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   background: linear-gradient(135deg, rgba(214, 90, 31, 0.28), rgba(214, 90, 31, 0.1));
   color: var(--accent-soft);
   box-shadow: var(--accent-glow);
+}
+
+.settings-subtabs,
+.core-top-tabs,
+.core-manager-tabs,
+.core-manager-subtabs {
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.12)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
+}
+
+.settings-subtab-btn,
+.core-top-tab-btn,
+.core-manager-tab-btn,
+.core-manager-subtab-btn {
+  border-radius: 8px;
 }
 
 .core-manager-subtab-panel {
@@ -7818,29 +8070,6 @@ label {
   grid-row: auto;
 }
 
-.view-root[data-view="settings"] .hydra-base-server-row label {
-  grid-template-columns: 1fr;
-  gap: 5px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.view-root[data-view="settings"] .hydra-base-server-row label:hover {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-}
-
-.view-root[data-view="settings"] .hydra-base-server-row label > input,
-.view-root[data-view="settings"] .hydra-base-server-row label > select,
-.view-root[data-view="settings"] .hydra-base-server-row label > .small {
-  grid-column: 1;
-  grid-row: auto;
-}
-
 input,
 select,
 textarea {
@@ -9562,6 +9791,23 @@ body[data-popup-effect="melt"] .toast-item.flame-out::after {
 
   .form-grid.two-col {
     grid-template-columns: 1fr;
+  }
+
+  .surface-view-header {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .surface-view-stats {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .surface-view-stat {
+    flex: 1 1 98px;
   }
 
   .view-root[data-view="settings"] label {

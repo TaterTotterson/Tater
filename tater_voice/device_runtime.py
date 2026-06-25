@@ -595,6 +595,7 @@ _ESPHOME_STATE_ATTR_NAMES: Tuple[str, ...] = (
     "oscillating",
     "muted",
     "active",
+    "media_url",
     "media_title",
     "media_artist",
     "effect",
@@ -608,6 +609,77 @@ _ESPHOME_STATE_ATTR_NAMES: Tuple[str, ...] = (
     "color_brightness",
 )
 
+
+
+def _esphome_is_media_player_kind(kind: Any) -> bool:
+    token = _lower(kind)
+    return "media" in token and "player" in token
+
+
+def _esphome_media_player_entity_score(info: Dict[str, Any]) -> Tuple[int, str, str]:
+    row = info if isinstance(info, dict) else {}
+    name = _lower(row.get("name"))
+    object_id = _lower(row.get("object_id"))
+    haystack = f"{name} {object_id}"
+    score = 0
+    if "external" in haystack:
+        score += 30
+    if "speaker_source" in haystack or "speaker source" in haystack:
+        score += 20
+    if "media player" in haystack or "mediaplayer" in haystack:
+        score += 10
+    if "announcement" in haystack or "announce" in haystack:
+        score += 5
+    return (-score, name, object_id)
+
+
+def _esphome_media_player_info_for_selector(
+    selector: str,
+    *,
+    entity_key: Any = None,
+) -> Dict[str, Any]:
+    token = _text(selector)
+    row = _native_clients.get(token)
+    if not isinstance(row, dict):
+        return {}
+    entity_infos = row.get("entity_infos") if isinstance(row.get("entity_infos"), dict) else {}
+    key_text = _text(entity_key)
+    if key_text:
+        info = entity_infos.get(key_text) if isinstance(entity_infos.get(key_text), dict) else {}
+        if info and _esphome_is_media_player_kind(info.get("kind")):
+            return dict(info)
+        return {}
+
+    candidates = [
+        dict(info)
+        for info in entity_infos.values()
+        if isinstance(info, dict) and _esphome_is_media_player_kind(info.get("kind"))
+    ]
+    if not candidates:
+        return {}
+    candidates.sort(key=_esphome_media_player_entity_score)
+    return candidates[0]
+
+
+def media_player_entity_snapshot(selector: str, *, entity_key: Any = None) -> Dict[str, Any]:
+    token = _text(selector)
+    info = _esphome_media_player_info_for_selector(token, entity_key=entity_key)
+    if not info:
+        return {}
+    row = _native_clients.get(token)
+    state_map = row.get("entity_states") if isinstance(row, dict) and isinstance(row.get("entity_states"), dict) else {}
+    key_text = _text(info.get("key"))
+    state = state_map.get(key_text) if isinstance(state_map.get(key_text), dict) else {}
+    return {
+        "selector": token,
+        "key": key_text,
+        "kind": _text(info.get("kind")),
+        "name": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key_text}",
+        "object_id": _text(info.get("object_id")),
+        "raw": state.get("raw") if isinstance(state, dict) else None,
+        "attrs": dict(state.get("attrs") or {}) if isinstance(state, dict) else {},
+        "updated_ts": _as_float(state.get("updated_ts"), 0.0) if isinstance(state, dict) else 0.0,
+    }
 
 
 def _esphome_kind_label(kind: Any) -> str:
@@ -1986,6 +2058,62 @@ def _store_entity_state_override(selector: str, key: str, kind: str, raw: Any, a
     row["entity_state_updated_ts"] = _now()
 
 
+async def play_media_announcement(
+    selector: str,
+    media_url: str,
+    *,
+    entity_key: Any = None,
+) -> Dict[str, Any]:
+    _remember_native_loop()
+    token = _text(selector)
+    target_url = _text(media_url).strip()
+    if not token:
+        raise ValueError("selector is required")
+    if not target_url:
+        raise ValueError("media_url is required")
+
+    async with _native_lock:
+        client_row = dict(_native_clients.get(token) or {})
+    client = client_row.get("client")
+    if not bool(client_row.get("connected")) or client is None:
+        raise RuntimeError(f"Satellite {token} is not connected")
+
+    info = _esphome_media_player_info_for_selector(token, entity_key=entity_key)
+    if not info:
+        raise RuntimeError(f"Satellite {token} does not expose a media player entity")
+
+    key_text = _text(info.get("key"))
+    key_num = _as_int(key_text, 0, minimum=0)
+    if key_num <= 0:
+        raise RuntimeError(f"Media player entity {key_text or '-'} has an invalid key")
+
+    await esphome_client_call(
+        client,
+        "media_player_command",
+        key_num,
+        media_url=target_url,
+        announcement=True,
+    )
+    _store_entity_state_override(
+        token,
+        key_text,
+        _text(info.get("kind")),
+        "ANNOUNCING",
+        {
+            "state": "ANNOUNCING",
+            "media_url": target_url,
+            "announcement": True,
+        },
+    )
+    return {
+        "selector": token,
+        "entity_key": key_text,
+        "name": _text(info.get("name")) or _text(info.get("object_id")) or f"Entity {key_text}",
+        "media_url": target_url,
+        "announcement": True,
+    }
+
+
 
 def _hex_to_rgb(color_value: Any) -> Tuple[float, float, float]:
     token = _text(color_value).lstrip("#")
@@ -2115,6 +2243,72 @@ async def command_entity(
         state = _text(value)
         await esphome_client_call(client, "text_command", key_num, state)
         _store_entity_state_override(token, key_text, _text(info.get("kind")), state, {"state": state})
+    elif action in {
+        "media_announce",
+        "announce_media",
+        "media_play_url",
+        "play_media",
+        "media_set_volume",
+        "set_volume",
+        "media_play",
+        "media_pause",
+        "media_stop",
+        "media_toggle",
+        "media_mute",
+        "media_unmute",
+        "media_volume_up",
+        "media_volume_down",
+    }:
+        if not _esphome_is_media_player_kind(kind):
+            raise RuntimeError(f"Entity {key_text} is not a media player")
+        module, _import_error = esphome_import()
+        command_enum = esphome_module_attr(module, "MediaPlayerCommand")
+        command_names = {
+            "media_play": "PLAY",
+            "media_pause": "PAUSE",
+            "media_stop": "STOP",
+            "media_toggle": "TOGGLE",
+            "media_mute": "MUTE",
+            "media_unmute": "UNMUTE",
+            "media_volume_up": "VOLUME_UP",
+            "media_volume_down": "VOLUME_DOWN",
+        }
+        if action in {"media_announce", "announce_media", "media_play_url", "play_media"}:
+            media_url = _text(payload.get("media_url") or payload.get("url") or value).strip()
+            if not media_url:
+                raise RuntimeError(f"{command} requires a media_url")
+            announcement = _as_bool(
+                payload.get("announcement", payload.get("announce")),
+                action in {"media_announce", "announce_media"},
+            )
+            await esphome_client_call(
+                client,
+                "media_player_command",
+                key_num,
+                media_url=media_url,
+                announcement=announcement,
+            )
+            _store_entity_state_override(
+                token,
+                key_text,
+                _text(info.get("kind")),
+                "ANNOUNCING" if announcement else "PLAYING",
+                {
+                    "state": "ANNOUNCING" if announcement else "PLAYING",
+                    "media_url": media_url,
+                    "announcement": announcement,
+                },
+            )
+        elif action in {"media_set_volume", "set_volume"}:
+            volume = _as_float(payload.get("volume", value), 1.0, minimum=0.0, maximum=1.0)
+            await esphome_client_call(client, "media_player_command", key_num, volume=volume)
+            _store_entity_state_override(token, key_text, _text(info.get("kind")), None, {"volume": volume})
+        else:
+            enum_name = command_names.get(action)
+            enum_value = getattr(command_enum, enum_name, None) if command_enum is not None and enum_name else None
+            if enum_value is None:
+                raise RuntimeError(f"Media player command {enum_name or command} is not available")
+            await esphome_client_call(client, "media_player_command", key_num, command=enum_value)
     else:
         raise RuntimeError(f"Unsupported command: {command}")
 

@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import sys
+import subprocess
 import threading
 import time
 import urllib.error
@@ -29,6 +30,40 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import dotenv
+
+def _install_macos_subprocess_spawn_guard() -> None:
+    if sys.platform != "darwin":
+        return
+    original_init = subprocess.Popen.__init__
+    if getattr(original_init, "_tater_macos_spawn_guard", False):
+        return
+
+    def guarded_init(self: Any, *popen_args: Any, **kwargs: Any) -> None:
+        try:
+            if (
+                kwargs.get("preexec_fn") is None
+                and not kwargs.get("pass_fds")
+                and not kwargs.get("start_new_session")
+            ):
+                kwargs["close_fds"] = False
+                if kwargs.get("cwd") is None and kwargs.get("executable") is None and not kwargs.get("shell"):
+                    command = popen_args[0] if popen_args else kwargs.get("args")
+                    first_arg = ""
+                    if isinstance(command, (list, tuple)) and command:
+                        first_arg = os.fspath(command[0])
+                    if first_arg and not os.path.dirname(first_arg):
+                        resolved = shutil.which(first_arg)
+                        if resolved:
+                            kwargs["executable"] = resolved
+        except Exception:
+            pass
+        original_init(self, *popen_args, **kwargs)
+
+    setattr(guarded_init, "_tater_macos_spawn_guard", True)
+    subprocess.Popen.__init__ = guarded_init
+
+
+_install_macos_subprocess_spawn_guard()
 
 dotenv.load_dotenv()
 
@@ -98,6 +133,7 @@ from helpers import (
     HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_KEY,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
+    HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     HYDRA_LLM_PROVIDER_SPUD_LINK,
@@ -128,6 +164,7 @@ from helpers import (
     encrypt_current_redis_snapshot,
     ensure_redis_encryption_key,
     get_llama_cpp_runtime_diagnostics,
+    get_llama_cpp_remote_models,
     get_llama_cpp_chat_template_info,
     get_local_llm_chat_template_info,
     get_local_llm_loaded_models_snapshot,
@@ -3843,6 +3880,16 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
         return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    if token in {
+        "llama_cpp_remote",
+        "llama.cpp_remote",
+        "llamacpp_remote",
+        "llama_remote",
+        "remote_llama_cpp",
+        "remote_llamacpp",
+        "gguf_remote",
+    }:
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
     if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
@@ -3860,12 +3907,21 @@ def _is_local_hydra_llm_provider(provider: Any) -> bool:
     }
 
 
+def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
+    return _normalize_hydra_llm_provider(provider) in {
+        HYDRA_LLM_PROVIDER_LLAMA_CPP,
+        HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
+    }
+
+
 def _hydra_llm_provider_label(provider: Any) -> str:
     token = _normalize_hydra_llm_provider(provider)
     if token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
         return "Hugging Face Transformers"
     if token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        return "llama.cpp GGUF"
+        return "llama.cpp Local"
+    if token == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE:
+        return "llama.cpp Remote"
     if token == HYDRA_LLM_PROVIDER_MLX_LM:
         return "MLX LM"
     if token == HYDRA_LLM_PROVIDER_SPUD_LINK:
@@ -3873,14 +3929,37 @@ def _hydra_llm_provider_label(provider: Any) -> str:
     return "OpenAI-Compatible API"
 
 
-def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
+def _normalize_hydra_base_server_rows(rows: Any, *, llama_cpp_slot_count: Optional[int] = None) -> List[Dict[str, str]]:
     if rows is None:
         return []
     if not isinstance(rows, list):
         raise HTTPException(status_code=400, detail="hydra_base_servers must be a list")
 
     normalized: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str, str, str]] = set()
+    seen: set[Tuple[str, str, str, str, str]] = set()
+    try:
+        resolved_slot_count = int(float(llama_cpp_slot_count or DEFAULT_LLAMA_CPP_SLOT_COUNT))
+    except Exception:
+        resolved_slot_count = DEFAULT_LLAMA_CPP_SLOT_COUNT
+    resolved_slot_count = max(1, min(32, resolved_slot_count))
+
+    def _normalize_row_llama_cpp_slot(value: Any, idx: int) -> str:
+        raw = "" if value is None else str(value).strip()
+        if not raw:
+            return ""
+        try:
+            parsed = int(float(raw))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"hydra_base_servers[{idx}].llama_cpp_slot must be a whole number or blank for auto.",
+            ) from exc
+        if parsed < 0 or parsed >= resolved_slot_count:
+            raise HTTPException(
+                status_code=400,
+                detail=f"hydra_base_servers[{idx}].llama_cpp_slot must be blank or between 0 and {resolved_slot_count - 1}.",
+            )
+        return str(parsed)
 
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -3899,7 +3978,12 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         if _is_local_hydra_llm_provider(provider):
             if not model:
                 raise HTTPException(status_code=400, detail=f"hydra_base_servers[{idx}].model is required")
-            signature = (provider, "", model, "")
+            llama_cpp_slot = (
+                _normalize_row_llama_cpp_slot(row.get("llama_cpp_slot"), idx)
+                if _is_llama_cpp_hydra_llm_provider(provider)
+                else ""
+            )
+            signature = (provider, "", model, "", llama_cpp_slot)
             if signature in seen:
                 continue
             seen.add(signature)
@@ -3910,6 +3994,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
                     "port": "",
                     "model": model,
                     "api_key": "",
+                    "llama_cpp_slot": llama_cpp_slot,
                 }
             )
             continue
@@ -3930,7 +4015,12 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
         host_with_scheme = host.startswith(("http://", "https://"))
         canonical_host = f"{parsed.scheme}://{hostname}" if host_with_scheme else hostname
         canonical_port = str(parsed.port) if parsed.port is not None else ""
-        signature = (provider, endpoint, model, api_key)
+        llama_cpp_slot = (
+            _normalize_row_llama_cpp_slot(row.get("llama_cpp_slot"), idx)
+            if _is_llama_cpp_hydra_llm_provider(provider)
+            else ""
+        )
+        signature = (provider, endpoint, model, api_key, llama_cpp_slot)
         if signature in seen:
             continue
         seen.add(signature)
@@ -3941,6 +4031,7 @@ def _normalize_hydra_base_server_rows(rows: Any) -> List[Dict[str, str]]:
                 "port": canonical_port,
                 "model": model,
                 "api_key": api_key,
+                "llama_cpp_slot": llama_cpp_slot,
             }
         )
 
@@ -4517,6 +4608,135 @@ def _normalize_chat_attachment_payloads(attachments_raw: Any) -> Tuple[List[Dict
     return attachment_messages, input_artifacts
 
 
+def _data_url_mimetype(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text.lower().startswith("data:"):
+        return ""
+    comma = text.find(",")
+    if comma <= 5:
+        return ""
+    header = text[5:comma].split(";", 1)[0].strip().lower()
+    return header if "/" in header else ""
+
+
+def _spud_link_attachment_mimetype(item: Dict[str, Any], data_url: Any = None) -> str:
+    for key in ("mimetype", "mime_type", "content_type"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    type_value = str(item.get("type") or "").strip()
+    if "/" in type_value:
+        return type_value
+    data_mimetype = _data_url_mimetype(data_url)
+    if data_mimetype:
+        return data_mimetype
+    name = str(item.get("name") or item.get("filename") or "").strip()
+    guessed = str(mimetypes.guess_type(name)[0] or "").strip()
+    return guessed or "application/octet-stream"
+
+
+def _spud_link_image_url_value(block: Dict[str, Any]) -> str:
+    image_url = block.get("image_url")
+    if isinstance(image_url, dict):
+        for key in ("url", "data_url", "dataUrl", "data"):
+            value = str(image_url.get(key) or "").strip()
+            if value:
+                return value
+    elif isinstance(image_url, str):
+        return image_url.strip()
+    for key in ("url", "data_url", "dataUrl", "src"):
+        value = str(block.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _spud_link_attachment_payloads_from_request(
+    message: Any,
+    attachments_raw: Any,
+) -> List[Dict[str, Any]]:
+    metadata: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = []
+
+    if isinstance(attachments_raw, list):
+        for item in attachments_raw:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            metadata.append(row)
+            data_url = row.get("data_url")
+            if data_url is None:
+                data_url = row.get("dataUrl")
+            data_b64 = row.get("data_b64")
+            if data_b64 is None:
+                data_b64 = row.get("dataB64")
+            if data_url is None and data_b64 is None:
+                continue
+            payload = {
+                "name": str(row.get("name") or row.get("filename") or "attachment").strip() or "attachment",
+                "mimetype": _spud_link_attachment_mimetype(row, data_url),
+            }
+            if data_url is not None:
+                payload["data_url"] = str(data_url or "").strip()
+            else:
+                payload["data_b64"] = str(data_b64 or "").strip()
+            out.append(payload)
+
+    if isinstance(message, list):
+        image_index = 0
+        for block in message:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip().lower()
+            if block_type not in {"image", "image_url", "input_image"} and "image_url" not in block:
+                continue
+            data_url = _spud_link_image_url_value(block)
+            if not data_url.lower().startswith("data:"):
+                continue
+            meta = metadata[image_index] if image_index < len(metadata) else {}
+            image_index += 1
+            payload = {
+                "name": str(
+                    block.get("name")
+                    or block.get("filename")
+                    or meta.get("name")
+                    or meta.get("filename")
+                    or f"little-spud-image-{image_index}.jpg"
+                ).strip()
+                or f"little-spud-image-{image_index}.jpg",
+                "mimetype": _spud_link_attachment_mimetype({**block, **meta}, data_url),
+                "data_url": data_url,
+            }
+            out.append(payload)
+
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in out:
+        payload_value = str(item.get("data_url") or item.get("data_b64") or "").strip()
+        if not payload_value:
+            continue
+        digest = hashlib.sha256(payload_value.encode("utf-8", errors="ignore")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        deduped.append(item)
+    return deduped
+
+
+def _spud_link_history_attachments(attachment_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for item in attachment_messages:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        file_id = str(row.get("id") or row.get("file_id") or "").strip()
+        mimetype = str(row.get("mimetype") or "application/octet-stream").strip() or "application/octet-stream"
+        if file_id and not str(row.get("url") or "").strip():
+            row["url"] = f"/api/spudlink/v1/files/{file_id}?mimetype={quote(mimetype)}"
+        out.append(row)
+    return out
+
+
 def _guess_image_mimetype(raw: bytes) -> str:
     if raw.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -4974,6 +5194,10 @@ def _spud_link_local_node_name() -> str:
     return node or "Tater"
 
 
+def _tater_assistant_first_name() -> str:
+    return str(redis_client.get("tater:first_name") or "Tater").strip() or "Tater"
+
+
 def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
     raw = redis_client.hgetall(SPUD_LINK_SETTINGS_KEY) or {}
     mode = _normalize_spud_link_tater_mode(raw.get("mode"))
@@ -5077,21 +5301,143 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         redis_client.hset(SPUD_LINK_SETTINGS_KEY, mapping=mapping)
 
 
+def _spud_link_dedupe_token(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _spud_link_node_score(node: Dict[str, Any]) -> float:
+    push = node.get("push") if isinstance(node.get("push"), dict) else {}
+    score = 0.0
+    for value in (
+        push.get("updated_at"),
+        push.get("registered_at"),
+        node.get("last_seen_at"),
+        node.get("created_at"),
+    ):
+        with contextlib.suppress(Exception):
+            score = max(score, float(value or 0))
+    return score
+
+
+def _spud_link_node_fingerprint(node: Dict[str, Any]) -> str:
+    source = node if isinstance(node, dict) else {}
+    role = _normalize_spud_link_mode(source.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        return ""
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    stable_keys = (
+        "app_instance_id",
+        "app_install_id",
+        "installation_id",
+        "install_id",
+        "client_id",
+        "client_device_id",
+        "device_uuid",
+        "device_id",
+    )
+    for key in stable_keys:
+        value = str(metadata.get(key) or source.get(key) or "").strip()
+        if value:
+            return f"little_spud:stable:{key}:{_spud_link_dedupe_token(value)}"
+    identity = _spud_link_identity_from_node(source)
+    user_name = _spud_link_dedupe_token(identity.get("user_name"))
+    device_name = _spud_link_dedupe_token(identity.get("device_name"))
+    if user_name or device_name:
+        return f"little_spud:user_device:{user_name or 'user'}:{device_name or 'little_spud'}"
+    return ""
+
+
+def _spud_link_parse_node_row(node_id: Any, raw_value: Any) -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        row = json.loads(str(raw_value or "{}"))
+        if isinstance(row, dict):
+            row["id"] = str(row.get("id") or node_id or "").strip()
+            row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+            return row
+    return {}
+
+
+def _spud_link_duplicate_node_ids(raw_nodes: Dict[Any, Any]) -> List[str]:
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for node_id, raw_value in (raw_nodes or {}).items():
+        row = _spud_link_parse_node_row(node_id, raw_value)
+        if not row:
+            continue
+        fingerprint = _spud_link_node_fingerprint(row)
+        if not fingerprint:
+            continue
+        groups.setdefault(fingerprint, []).append(row)
+
+    remove_ids: List[str] = []
+    for rows in groups.values():
+        if len(rows) <= 1:
+            continue
+        rows.sort(
+            key=lambda item: (
+                _spud_link_node_score(item),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        remove_ids.extend(str(item.get("id") or "").strip() for item in rows[1:] if str(item.get("id") or "").strip())
+    return sorted(set(remove_ids))
+
+
+def _spud_link_prune_duplicate_nodes(raw_nodes: Optional[Dict[Any, Any]] = None) -> Dict[Any, Any]:
+    raw = raw_nodes if isinstance(raw_nodes, dict) else redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    remove_ids = _spud_link_duplicate_node_ids(raw)
+    if remove_ids:
+        with contextlib.suppress(Exception):
+            redis_client.hdel(SPUD_LINK_NODES_KEY, *remove_ids)
+        raw = {node_id: raw_value for node_id, raw_value in raw.items() if str(node_id or "").strip() not in remove_ids}
+    return raw
+
+
+def _spud_link_reuse_duplicate_node_slot(node: Dict[str, Any]) -> Dict[str, Any]:
+    fingerprint = _spud_link_node_fingerprint(node)
+    if not fingerprint:
+        return node
+    raw_nodes = redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    candidates: List[Dict[str, Any]] = []
+    for node_id, raw_value in raw_nodes.items():
+        row = _spud_link_parse_node_row(node_id, raw_value)
+        if row and _spud_link_node_fingerprint(row) == fingerprint:
+            candidates.append(row)
+    if not candidates:
+        return node
+    candidates.sort(
+        key=lambda item: (
+            _spud_link_node_score(item),
+            str(item.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    keep = candidates[0]
+    keep_id = str(keep.get("id") or "").strip()
+    if keep_id:
+        node["id"] = keep_id
+    if keep.get("created_at") not in (None, ""):
+        node["created_at"] = keep.get("created_at")
+    for key in ("first_remote_addr",):
+        if keep.get(key) and not node.get(key):
+            node[key] = keep.get(key)
+    if isinstance(keep.get("push"), dict) and not isinstance(node.get("push"), dict):
+        node["push"] = dict(keep.get("push") or {})
+    remove_ids = [str(item.get("id") or "").strip() for item in candidates[1:] if str(item.get("id") or "").strip()]
+    if remove_ids:
+        with contextlib.suppress(Exception):
+            redis_client.hdel(SPUD_LINK_NODES_KEY, *remove_ids)
+    return node
+
+
 def _spud_link_load_nodes() -> List[Dict[str, Any]]:
-    raw = redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    raw = _spud_link_prune_duplicate_nodes(redis_client.hgetall(SPUD_LINK_NODES_KEY) or {})
     nodes: List[Dict[str, Any]] = []
     for node_id, raw_value in raw.items():
-        try:
-            row = json.loads(str(raw_value or "{}"))
-        except Exception:
+        row = _spud_link_parse_node_row(node_id, raw_value)
+        if not row:
             continue
-        if not isinstance(row, dict):
-            continue
-        row["id"] = str(row.get("id") or node_id or "").strip()
-        row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
-        row["token_set"] = bool(str(row.get("token_hash") or "").strip())
-        row.pop("token_hash", None)
-        nodes.append(row)
+        nodes.append(_spud_link_node_response(row))
     nodes.sort(key=lambda row: (-float(row.get("last_seen_at") or row.get("created_at") or 0), str(row.get("name") or row.get("id") or "")))
     return nodes
 
@@ -5102,10 +5448,41 @@ def _spud_link_store_node(node: Dict[str, Any]) -> Dict[str, Any]:
         node_id = f"spud_{uuid.uuid4().hex[:16]}"
         node["id"] = node_id
     redis_client.hset(SPUD_LINK_NODES_KEY, node_id, json.dumps(node, separators=(",", ":"), ensure_ascii=False))
-    redacted = dict(node)
-    redacted["token_set"] = bool(str(redacted.get("token_hash") or "").strip())
-    redacted.pop("token_hash", None)
-    return redacted
+    return _spud_link_node_response(node)
+
+
+def _spud_link_disable_duplicate_push_registrations(active_node_id: str, push_device_id: str) -> None:
+    active = str(active_node_id or "").strip()
+    device_id = str(push_device_id or "").strip()
+    if not active or not device_id:
+        return
+    try:
+        raw_nodes = redis_client.hgetall(SPUD_LINK_NODES_KEY) or {}
+    except Exception:
+        logger.exception("[spudlink] failed loading duplicate push registrations")
+        return
+
+    for node_id, raw_value in raw_nodes.items():
+        other_node_id = str(node_id or "").strip()
+        if not other_node_id or other_node_id == active:
+            continue
+        try:
+            row = json.loads(str(raw_value or "{}"))
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        push = row.get("push") if isinstance(row.get("push"), dict) else {}
+        if str(push.get("push_device_id") or "").strip() != device_id:
+            continue
+        if not _as_bool_flag(push.get("enabled"), default=False):
+            continue
+        disabled = dict(push)
+        disabled["enabled"] = False
+        disabled["disabled_reason"] = "superseded_by_current_registration"
+        disabled["updated_at"] = time.time()
+        row["push"] = disabled
+        redis_client.hset(SPUD_LINK_NODES_KEY, other_node_id, json.dumps(row, separators=(",", ":"), ensure_ascii=False))
 
 
 def _spud_link_request_network_info(request: Request) -> Dict[str, str]:
@@ -5224,6 +5601,60 @@ def _spud_link_identity_from_request(
         "display_name": display_name,
         "scope": f"user:{alias_id}",
         "history_key": _spud_link_history_key({"user_name": user_name, "device_name": device_name}),
+    }
+
+
+def _spud_link_identity_from_node(node: Dict[str, Any]) -> Dict[str, str]:
+    source = node if isinstance(node, dict) else {}
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    user_name = _spud_link_identity_text(
+        metadata.get("user_name")
+        or metadata.get("username")
+        or metadata.get("user")
+        or source.get("user_name")
+        or source.get("user"),
+        default="User",
+    )
+    device_name = _spud_link_identity_text(
+        metadata.get("device_name")
+        or metadata.get("device")
+        or source.get("device_name")
+        or source.get("device")
+        or source.get("name"),
+        default="Little Spud",
+    )
+    node_name = _spud_link_identity_text(source.get("name"), default="", limit=120)
+    if node_name and " on " in node_name and (user_name == "User" or device_name in {"Little Spud", node_name}):
+        left, right = node_name.split(" on ", 1)
+        if user_name == "User":
+            user_name = _spud_link_identity_text(left, default=user_name)
+        if device_name in {"Little Spud", node_name}:
+            device_name = _spud_link_identity_text(right, default=device_name)
+    alias_id = f"{user_name}:{device_name}"
+    return {
+        "user_name": user_name,
+        "device_name": device_name,
+        "alias_id": alias_id,
+        "display_name": f"{user_name} on {device_name}",
+        "scope": f"user:{alias_id}",
+        "history_key": _spud_link_history_key({"user_name": user_name, "device_name": device_name}),
+    }
+
+
+def _spud_link_forget_node_history(node: Dict[str, Any]) -> Dict[str, int]:
+    identity = _spud_link_identity_from_node(node)
+    history_key = str(identity.get("history_key") or "").strip()
+    deleted_history = 0
+    deleted_active_runs = 0
+    if history_key:
+        with contextlib.suppress(Exception):
+            deleted_history = int(redis_client.delete(history_key) or 0)
+        active_key = f"{history_key}:active_runs"
+        with contextlib.suppress(Exception):
+            deleted_active_runs = int(redis_client.delete(active_key) or 0)
+    return {
+        "deleted_history": max(0, deleted_history),
+        "deleted_active_runs": max(0, deleted_active_runs),
     }
 
 
@@ -5557,11 +5988,44 @@ def _pop_little_spud_notification(
         time.sleep(0.5)
 
 
+def _forget_little_spud_pending_notifications(identity: Dict[str, str], node: Dict[str, Any]) -> int:
+    key = notify_queue_key("little_spud") or "notifyq:little_spud"
+    try:
+        raw_rows = redis_client.lrange(key, 0, -1) or []
+    except Exception:
+        return 0
+
+    deleted = 0
+    for raw in raw_rows:
+        try:
+            item = json.loads(str(raw or "{}"))
+        except Exception:
+            continue
+        if not isinstance(item, dict):
+            continue
+        targets = item.get("targets") if isinstance(item.get("targets"), dict) else {}
+        if not _little_spud_notification_target_matches(targets=targets, identity=identity, node=node):
+            continue
+        try:
+            deleted += max(0, int(redis_client.lrem(key, 1, raw) or 0))
+        except Exception:
+            pass
+    return deleted
+
+
+def _spud_link_forget_little_spud_node(node: Dict[str, Any]) -> Dict[str, int]:
+    cleanup = _spud_link_forget_node_history(node)
+    identity = _spud_link_identity_from_node(node)
+    cleanup["deleted_notifications"] = _forget_little_spud_pending_notifications(identity, node)
+    return cleanup
+
+
 def _spud_link_public_settings_payload() -> Dict[str, Any]:
     settings = _load_spud_link_settings(include_secret=False)
     server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
     is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
     little_spud_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    assistant_name = _tater_assistant_first_name()
     hub_url = str(settings.get("hub_url") or "").strip()
     node_token_set = bool(settings.get("node_token_set"))
     paired_hub = {
@@ -5589,9 +6053,11 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
         },
         "local_status": {
             "node_name": settings.get("node_name") or _spud_link_local_node_name(),
+            "assistant_name": assistant_name,
             "mode": server_mode,
             "time": time.time(),
         },
+        "assistant_name": assistant_name,
         "capabilities": {
             "server": is_server,
             "llm": is_server,
@@ -6040,6 +6506,9 @@ async def _run_spud_link_native_hydra_completion(
     }
     if isinstance(context_extra, dict):
         context_payload.update(context_extra)
+    input_artifacts = context_payload.get("input_artifacts") if isinstance(context_payload.get("input_artifacts"), list) else []
+    if input_artifacts:
+        origin["input_artifacts"] = [dict(item) for item in input_artifacts if isinstance(item, dict)]
 
     verba_registry_module.ensure_verbas_loaded()
     registry = dict(verba_registry_module.get_verba_registry() or {}) if tools_enabled else {}
@@ -6185,6 +6654,12 @@ def _spud_link_node_response(node: Dict[str, Any]) -> Dict[str, Any]:
     row["role"] = _normalize_spud_link_mode(row.get("role"), default=SPUD_LINK_MODE_SPUDLET)
     row["token_set"] = bool(str(row.get("token_hash") or "").strip())
     row.pop("token_hash", None)
+    push = row.get("push") if isinstance(row.get("push"), dict) else None
+    if push is not None:
+        push_row = dict(push)
+        push_row["secret_set"] = bool(str(push_row.get("push_secret") or "").strip())
+        push_row.pop("push_secret", None)
+        row["push"] = push_row
     return row
 
 
@@ -7851,6 +8326,19 @@ class SpudLinkHeartbeatRequest(BaseModel):
     activity: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SpudLinkPushRegistrationRequest(BaseModel):
+    enabled: Optional[bool] = True
+    provider: Optional[str] = None
+    app: Optional[str] = None
+    environment: Optional[str] = None
+    push_device_id: Optional[str] = None
+    push_secret: Optional[str] = None
+    gateway_url: Optional[str] = None
+    relay_url: Optional[str] = None
+    registered_at: Optional[float] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class SpudLinkTtsRequest(BaseModel):
     text: Optional[str] = None
 
@@ -7960,6 +8448,12 @@ class LlamaCppChatTemplateRequest(BaseModel):
     model: Optional[str] = None
     template: Optional[str] = None
     reset: Optional[bool] = None
+
+
+class LlamaCppRemoteModelsRequest(BaseModel):
+    host: Optional[str] = None
+    port: Optional[str] = None
+    api_key: Optional[str] = None
 
 
 class HfLlmWarmupCancelRequest(BaseModel):
@@ -12559,6 +13053,7 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
         "stats": {},
         "activity": {},
     }
+    node = _spud_link_reuse_duplicate_node_slot(node)
     _spud_link_touch_node_from_request(node, request)
     stored = _spud_link_store_node(node)
     redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "pairing_code_hash", "pairing_expires_at")
@@ -12567,6 +13062,7 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
     hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
     server_payload = {
         "name": settings.get("node_name") or _spud_link_local_node_name(),
+        "assistant_name": _tater_assistant_first_name(),
         "mode": server_mode,
         "tools_enabled": hydra_tools_enabled,
         "capabilities": {
@@ -12668,12 +13164,24 @@ def revoke_spud_link_node(payload: SpudLinkRevokeNodeRequest) -> Dict[str, Any]:
     node_id = str(payload.node_id or "").strip()
     if not node_id:
         raise HTTPException(status_code=400, detail="Spud Link node id is required.")
+    raw_node = redis_client.hget(SPUD_LINK_NODES_KEY, node_id)
+    node: Dict[str, Any] = {}
+    if raw_node:
+        with contextlib.suppress(Exception):
+            parsed = json.loads(str(raw_node or "{}"))
+            if isinstance(parsed, dict):
+                node = parsed
+                node["id"] = str(node.get("id") or node_id or "").strip()
     removed = int(redis_client.hdel(SPUD_LINK_NODES_KEY, node_id) or 0)
     if removed <= 0:
         raise HTTPException(status_code=404, detail="Linked Spud was not found.")
+    cleanup = {"deleted_history": 0, "deleted_active_runs": 0}
+    if node and _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET) == SPUD_LINK_MODE_LITTLE_SPUD:
+        cleanup = _spud_link_forget_little_spud_node(node)
     return {
         "ok": True,
         "node_id": node_id,
+        "cleanup": cleanup,
         "linked_nodes": _spud_link_load_nodes(),
     }
 
@@ -12698,6 +13206,7 @@ def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> 
     hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
     server_payload = {
         "name": settings.get("node_name") or _spud_link_local_node_name(),
+        "assistant_name": _tater_assistant_first_name(),
         "mode": server_mode,
         "telemetry_enabled": bool(settings.get("telemetry_enabled")),
         "request_previews_enabled": bool(settings.get("request_previews_enabled")),
@@ -12717,9 +13226,87 @@ def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> 
     }
 
 
+@app.post("/api/spudlink/v1/forget")
+def spud_link_forget_pairing(request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Only paired Little Spud clients can forget themselves.")
+
+    node_id = str(node.get("id") or "").strip()
+    cleanup = _spud_link_forget_little_spud_node(node)
+    removed = int(redis_client.hdel(SPUD_LINK_NODES_KEY, node_id) or 0) if node_id else 0
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "revoked": removed > 0,
+        "cleanup": cleanup,
+    }
+
+
+@app.post("/api/spudlink/v1/push-registration")
+def spud_link_push_registration(payload: SpudLinkPushRegistrationRequest, request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Push registration requires a paired Little Spud client.")
+
+    enabled = _as_bool_flag(payload.enabled, default=True)
+    if not enabled:
+        existing = node.get("push") if isinstance(node.get("push"), dict) else {}
+        disabled = dict(existing)
+        disabled["enabled"] = False
+        disabled["updated_at"] = time.time()
+        node["push"] = disabled
+        _spud_link_touch_node_from_request(node, request)
+        return {"ok": True, "push_registered": False, "node": _spud_link_store_node(node)}
+
+    provider = str(payload.provider or "fcm").strip().lower()
+    if provider == "firebase":
+        provider = "fcm"
+    if provider != "fcm":
+        raise HTTPException(status_code=400, detail="Only FCM push gateway registration is supported.")
+    push_device_id = str(payload.push_device_id or "").strip()
+    push_secret = str(payload.push_secret or "").strip()
+    if not push_device_id or not push_secret:
+        raise HTTPException(status_code=400, detail="Push relay registration is missing.")
+
+    environment = str(payload.environment or "").strip().lower()
+    if environment not in {"development", "production"}:
+        environment = "production"
+    registered_at = payload.registered_at
+    try:
+        registered_at_value = float(registered_at) if registered_at is not None else time.time()
+    except Exception:
+        registered_at_value = time.time()
+
+    metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    node["push"] = {
+        "enabled": True,
+        "provider": "fcm",
+        "app": str(payload.app or "little_spud_ios").strip()[:80] or "little_spud_ios",
+        "environment": environment,
+        "push_device_id": push_device_id[:240],
+        "push_secret": push_secret[:500],
+        "gateway_url": str(payload.gateway_url or payload.relay_url or "").strip()[:500],
+        "relay_url": str(payload.relay_url or "").strip()[:500],
+        "registered_at": registered_at_value,
+        "updated_at": time.time(),
+        "metadata": {str(k)[:80]: v for k, v in metadata.items() if v is None or isinstance(v, (bool, int, float, str))},
+    }
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_disable_duplicate_push_registrations(str(node.get("id") or ""), push_device_id[:240])
+    stored = _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "push_registered": True,
+        "node": stored,
+    }
+
+
 @app.get("/api/spudlink/v1/history")
 def spud_link_history(request: Request, limit: int = 80) -> Dict[str, Any]:
-    _settings, node = _require_spud_link_node_request(request)
+    settings, node = _require_spud_link_node_request(request)
     identity_payload = type(
         "SpudLinkHistoryIdentityPayload",
         (),
@@ -12736,11 +13323,23 @@ def spud_link_history(request: Request, limit: int = 80) -> Dict[str, Any]:
     active_run = active_runs[0] if active_runs else None
     _spud_link_touch_node_from_request(node, request)
     _spud_link_store_node(node)
+    server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
+    is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
+    hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    server_payload = {
+        "name": settings.get("node_name") or _spud_link_local_node_name(),
+        "assistant_name": _tater_assistant_first_name(),
+        "mode": server_mode,
+        "tools_enabled": hydra_tools_enabled,
+    }
     return {
         "ok": True,
         "messages": rows,
         "active_run": active_run,
         "active_runs": active_runs,
+        "assistant_name": server_payload["assistant_name"],
+        "hub": server_payload,
+        "server": server_payload,
         "identity": {
             "user_name": identity.get("user_name"),
             "device_name": identity.get("device_name"),
@@ -12831,6 +13430,15 @@ async def spud_link_tater_chat(
     if server_mode not in SPUD_LINK_SERVER_MODE_CHOICES or role != SPUD_LINK_MODE_LITTLE_SPUD:
         raise HTTPException(status_code=403, detail="Native Spud Link chat requires a paired Little Spud client.")
 
+    raw_attachments = _spud_link_attachment_payloads_from_request(payload.message, payload.attachments)
+    try:
+        attachment_messages, input_artifacts = _normalize_chat_attachment_payloads(raw_attachments)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for item in input_artifacts:
+        if isinstance(item, dict):
+            item["source"] = "little_spud_attachment"
+
     messages = _normalize_spud_link_tater_chat_messages(payload)
     user_text, _history_messages = _openai_user_text_and_history(messages)
     little_spud_identity = _spud_link_identity_from_request(payload, request, node)
@@ -12851,7 +13459,12 @@ async def spud_link_tater_chat(
     _spud_link_store_node(node)
 
     if user_text:
-        _save_little_spud_history(little_spud_identity, role="user", content=user_text)
+        _save_little_spud_history(
+            little_spud_identity,
+            role="user",
+            content=user_text,
+            attachments=_spud_link_history_attachments(attachment_messages),
+        )
 
     origin_override = {
         "platform": "little_spud",
@@ -12874,6 +13487,7 @@ async def spud_link_tater_chat(
         "little_spud_device": little_spud_identity.get("device_name"),
         "native_spud_link": True,
         "attachments": [dict(item) for item in payload.attachments if isinstance(item, dict)],
+        "input_artifacts": [dict(item) for item in input_artifacts if isinstance(item, dict)],
     }
     openai_payload = OpenAIChatCompletionRequest(
         model="tater/hydra",
@@ -15393,6 +16007,9 @@ def get_settings() -> Dict[str, Any]:
                 "port": str(row.get("port") or "").strip(),
                 "model": str(row.get("model") or "").strip(),
                 "api_key": "" if provider == HYDRA_LLM_PROVIDER_SPUD_LINK else str(row.get("api_key") or "").strip(),
+                "llama_cpp_slot": str(row.get("llama_cpp_slot") or "").strip()
+                if _is_llama_cpp_hydra_llm_provider(provider)
+                else "",
             }
         )
     first_hydra_base = hydra_base_servers[0] if hydra_base_servers else {}
@@ -16501,8 +17118,7 @@ def nanowakeword_reset() -> Dict[str, Any]:
     return esphome_nanowakeword_module.status()
 
 
-@app.get("/api/speech/tts/runtime/{asset_id}.wav")
-async def get_runtime_tts_asset(asset_id: str) -> Response:
+def _runtime_tts_asset_response(asset_id: str) -> Response:
     row = get_runtime_tts_wav(asset_id)
     if not isinstance(row, dict):
         raise HTTPException(status_code=404, detail="TTS audio not found or expired.")
@@ -16510,6 +17126,16 @@ async def get_runtime_tts_asset(asset_id: str) -> Response:
     if not wav_bytes:
         raise HTTPException(status_code=404, detail="TTS audio is empty or expired.")
     return Response(content=wav_bytes, media_type=str(row.get("content_type") or "audio/wav"))
+
+
+@app.get("/api/speech/tts/runtime/{asset_id}.wav")
+async def get_runtime_tts_asset(asset_id: str) -> Response:
+    return _runtime_tts_asset_response(asset_id)
+
+
+@app.get("/api/speech/tts/runtime/{asset_id}/{filename:path}")
+async def get_runtime_tts_named_asset(asset_id: str, filename: str) -> Response:
+    return _runtime_tts_asset_response(asset_id)
 
 
 @app.post("/api/settings/speech/wyoming-tts-voices")
@@ -16660,6 +17286,18 @@ def delete_local_llm_model(request: LocalLlmModelDeleteRequest) -> Dict[str, Any
 @app.get("/api/settings/llama-cpp/diagnostics")
 def get_llama_cpp_diagnostics() -> Dict[str, Any]:
     return get_llama_cpp_runtime_diagnostics()
+
+
+@app.post("/api/settings/llama-cpp/remote-models")
+def get_llama_cpp_remote_model_options(request: LlamaCppRemoteModelsRequest) -> Dict[str, Any]:
+    try:
+        return get_llama_cpp_remote_models(
+            host=request.host or "",
+            port=request.port or "",
+            api_key=request.api_key or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/settings/llama-cpp/chat-template")
@@ -17168,14 +17806,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         raw = updates.get("hydra_llama_cpp_slot_count", redis_client.get(HYDRA_LLAMA_CPP_SLOT_COUNT_KEY) or DEFAULT_LLAMA_CPP_SLOT_COUNT)
         return _bounded_int(raw, default=DEFAULT_LLAMA_CPP_SLOT_COUNT, min_value=1, max_value=32)
 
-    def _save_llama_cpp_slot_setting(payload_key: str, redis_key: str) -> None:
-        if payload_key not in updates:
-            return
-        update_value = updates.get(payload_key)
-        raw = "" if update_value is None else str(update_value).strip()
+    def _normalize_llama_cpp_slot_payload_value(payload_key: str, value: Any) -> str:
+        raw = "" if value is None else str(value).strip()
         if not raw:
-            redis_client.delete(redis_key)
-            return
+            return ""
         try:
             parsed = int(float(raw))
         except Exception as exc:
@@ -17186,7 +17820,16 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 status_code=400,
                 detail=f"{payload_key} must be blank or between 0 and {slot_count - 1}.",
             )
-        redis_client.set(redis_key, str(int(parsed)))
+        return str(int(parsed))
+
+    def _save_llama_cpp_slot_setting(payload_key: str, redis_key: str) -> None:
+        if payload_key not in updates:
+            return
+        normalized_slot = _normalize_llama_cpp_slot_payload_value(payload_key, updates.get(payload_key))
+        if not normalized_slot:
+            redis_client.delete(redis_key)
+            return
+        redis_client.set(redis_key, normalized_slot)
 
     _save_tater_api_settings_from_updates(updates)
     _save_spud_link_settings_from_updates(updates)
@@ -18066,7 +18709,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     if any(key in updates for key in base_settings_keys):
         normalized_base_rows: List[Dict[str, str]] = []
         if "hydra_base_servers" in updates:
-            normalized_base_rows = _normalize_hydra_base_server_rows(updates.get("hydra_base_servers"))
+            normalized_base_rows = _normalize_hydra_base_server_rows(
+                updates.get("hydra_base_servers"),
+                llama_cpp_slot_count=_llama_cpp_slot_count_from_updates(),
+            )
         elif _is_local_hydra_llm_provider(current_llm_provider) and current_llm_model:
             normalized_base_rows = [
                 {
@@ -18075,6 +18721,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     "port": "",
                     "model": current_llm_model,
                     "api_key": "",
+                    "llama_cpp_slot": (
+                        _normalize_llama_cpp_slot_payload_value(
+                            "hydra_llama_cpp_base_slot",
+                            updates.get(
+                                "hydra_llama_cpp_base_slot",
+                                redis_client.get(HYDRA_LLAMA_CPP_BASE_SLOT_KEY),
+                            ),
+                        )
+                        if current_llm_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP
+                        else ""
+                    ),
                 }
             ]
         elif current_llm_host and current_llm_model:
@@ -18091,6 +18748,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                             "port": str(parsed.port) if parsed.port is not None else "",
                             "model": current_llm_model,
                             "api_key": current_llm_api_key,
+                            "llama_cpp_slot": (
+                                _normalize_llama_cpp_slot_payload_value(
+                                    "hydra_llama_cpp_base_slot",
+                                    updates.get(
+                                        "hydra_llama_cpp_base_slot",
+                                        redis_client.get(HYDRA_LLAMA_CPP_BASE_SLOT_KEY),
+                                    ),
+                                )
+                                if current_llm_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
+                                else ""
+                            ),
                         }
                     ]
 

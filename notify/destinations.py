@@ -192,12 +192,16 @@ def _candidate_identity_key(platform: str, targets: Dict[str, str]) -> str:
         channel = _to_text(targets.get("channel") or "0")
         return f"meshtastic:{channel}:{destination}"
     if platform == "little_spud":
-        node_id = _to_text(targets.get("node_id"))
-        if node_id:
-            return f"little_spud:node_id:{node_id}"
         scope = _to_text(targets.get("scope"))
         if scope:
             return f"little_spud:scope:{scope}"
+        user = _to_text(targets.get("user"))
+        device_name = _to_text(targets.get("device_name") or targets.get("device_id"))
+        if user or device_name:
+            return f"little_spud:scope:user:{user or 'User'}:{device_name or 'Little Spud'}"
+        node_id = _to_text(targets.get("node_id"))
+        if node_id:
+            return f"little_spud:node_id:{node_id}"
     return _targets_key(targets)
 
 
@@ -507,6 +511,29 @@ def _little_spud_targets_from_nodes(redis_client: Any, *, max_items: int) -> Lis
     return [dict(item.get("targets") or {}) for item in rows[: max(1, min(500, int(max_items)))]]
 
 
+def _little_spud_target_keys(targets: Dict[str, str]) -> set[str]:
+    clean = _normalize_targets_for_platform("little_spud", targets)
+    if not clean:
+        return set()
+    keys = {_candidate_identity_key("little_spud", clean)}
+    scoped = dict(clean)
+    scoped.pop("node_id", None)
+    if scoped:
+        keys.add(_candidate_identity_key("little_spud", scoped))
+    return {key for key in keys if key}
+
+
+def _active_little_spud_target_keys(redis_client: Any) -> set[str]:
+    out: set[str] = set()
+    for targets in _little_spud_targets_from_nodes(redis_client, max_items=500):
+        out.update(_little_spud_target_keys(targets))
+    return out
+
+
+def _little_spud_targets_are_active(targets: Dict[str, str], active_keys: set[str]) -> bool:
+    return bool(active_keys and (_little_spud_target_keys(targets) & active_keys))
+
+
 def _recent_queue_targets_for_platform(platform: str, redis_client: Any, *, max_items: int) -> List[Dict[str, str]]:
     key = queue_key(platform)
     if not key or redis_client is None:
@@ -517,6 +544,7 @@ def _recent_queue_targets_for_platform(platform: str, redis_client: Any, *, max_
     except Exception:
         return []
     out: List[Dict[str, str]] = []
+    active_little_spud_keys = _active_little_spud_target_keys(redis_client) if platform == "little_spud" else set()
     for raw in reversed(raw_rows):
         text = _to_text(raw)
         if not text:
@@ -529,6 +557,8 @@ def _recent_queue_targets_for_platform(platform: str, redis_client: Any, *, max_
             continue
         targets = _normalize_targets_for_platform(platform, parsed.get("targets"))
         if targets:
+            if platform == "little_spud" and not _little_spud_targets_are_active(targets, active_little_spud_keys):
+                continue
             out.append(targets)
     return out
 
@@ -584,6 +614,9 @@ def _recent_history_targets_for_platform(platform: str, redis_client: Any) -> Li
             if token:
                 out.append({"destination": token, "node_id": token})
     elif platform == "little_spud":
+        active_little_spud_keys = _active_little_spud_target_keys(redis_client)
+        if not active_little_spud_keys:
+            return out
         for key in _scan_keys(redis_client, "tater:little_spud:*:history", max_keys=_MAX_RECENT_KEYS):
             try:
                 raw_items = redis_client.lrange(key, -20, -1) or []
@@ -610,6 +643,8 @@ def _recent_history_targets_for_platform(platform: str, redis_client: Any) -> Li
                 if user_name or device_name:
                     targets["scope"] = f"user:{user_name or 'User'}:{device_name or 'Little Spud'}"
                 if targets:
+                    if not _little_spud_targets_are_active(targets, active_little_spud_keys):
+                        continue
                     out.append(targets)
                     break
     return out

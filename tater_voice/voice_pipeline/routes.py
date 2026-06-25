@@ -490,6 +490,7 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
     announce_text = vp._text(payload.get("text"))
     tts_kind = vp._text(payload.get("tts_kind"))
     continue_conversation = vp._as_bool(payload.get("continue_conversation"), False)
+    respect_reply_playback = vp._as_bool(payload.get("respect_reply_playback"), True)
     conversation_id = vp._text(payload.get("conversation_id"))
     filename = vp._text(payload.get("filename")) or "audio.bin"
     requested_media_type = vp._text(payload.get("media_type")).split(";", 1)[0].strip().lower()
@@ -516,6 +517,71 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
             raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
 
     media_type = requested_media_type or fetched_media_type or "application/octet-stream"
+
+    reply_playback_target = vp.reply_playback.REPLY_PLAYBACK_DEVICE
+    if respect_reply_playback:
+        try:
+            satellite_row = vp._satellite_lookup(selector)
+            client_row: Dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                client_row = vp._esphome_client_row_snapshot_sync(selector)
+            reply_playback_target = vp.reply_playback.resolve_reply_playback_target(
+                satellite_row,
+                client_row=client_row,
+            )
+        except Exception as exc:
+            vp.logger.warning(
+                "[voice_core] failed resolving reply playback target selector=%s error=%s",
+                selector,
+                exc,
+            )
+            reply_playback_target = vp.reply_playback.REPLY_PLAYBACK_DEVICE
+
+    if respect_reply_playback and reply_playback_target == vp.reply_playback.REPLY_PLAYBACK_SILENT:
+        return {
+            "ok": True,
+            "selector": selector,
+            "source_url": source_url,
+            "media_type": media_type,
+            "playback_mode": "silent",
+            "reply_playback_target": reply_playback_target,
+        }
+
+    if respect_reply_playback and reply_playback_target != vp.reply_playback.REPLY_PLAYBACK_DEVICE:
+        try:
+            ha_config = vp.load_homeassistant_config(required=False)
+        except Exception:
+            ha_config = {"base": "", "token": ""}
+        from speech_tts import play_announcement_audio_targets
+
+        result = await play_announcement_audio_targets(
+            text=announce_text or "Playing audio.",
+            wav_bytes=media_bytes,
+            ha_base=vp._text(ha_config.get("base")),
+            token=vp._text(ha_config.get("token")),
+            targets=[reply_playback_target],
+            public_base_url=vp._text(vp.os.getenv("VOICE_CORE_PUBLIC_BASE_URL")),
+            backend="",
+            tts_kind=tts_kind,
+            continue_conversation=continue_conversation,
+            conversation_id=conversation_id,
+            media_type=media_type,
+            filename=filename,
+        )
+        external_ok = bool(result.get("ok")) if isinstance(result, dict) else False
+        if not external_ok:
+            detail = vp._text(result.get("error") if isinstance(result, dict) else "") or "External reply playback failed."
+            raise HTTPException(status_code=409, detail=detail)
+        return {
+            "ok": True,
+            "selector": selector,
+            "source_url": source_url,
+            "media_type": media_type,
+            "playback_mode": "reply_playback_external",
+            "reply_playback_target": reply_playback_target,
+            **result,
+        }
+
     playback_id = uuid.uuid4().hex
     playback_url = vp._store_media_url(
         selector,
@@ -546,6 +612,9 @@ async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = H
         "source_url": source_url,
         "playback_url": playback_url,
         "media_type": media_type,
+        "playback_mode": "device",
+        "reply_playback_target": reply_playback_target,
+        "respect_reply_playback": respect_reply_playback,
         **result,
     }
 

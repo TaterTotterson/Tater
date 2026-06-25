@@ -74,7 +74,7 @@ const state = {
   view: "dashboard",
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   settingsTab: safeStorageGet("tater_tateros_settings_tab", "") || "general",
-  integrationSubtab: safeStorageGet("tater_tateros_integration_tab", "") || "setup",
+  integrationSubtab: safeStorageGet("tater_tateros_integration_tab", "") || "manager",
   dashboardPayload: null,
   dashboardShowStatusTiles: String(safeStorageGet("tater_dashboard_show_status_tiles", "true")).trim().toLowerCase() !== "false",
   dashboardShowMetrics: String(safeStorageGet("tater_dashboard_show_metrics", "true")).trim().toLowerCase() !== "false",
@@ -147,6 +147,7 @@ const state = {
     verbas: {},
     portals: {},
     cores: {},
+    integrations: {},
   },
   popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "flame")).trim().toLowerCase() || "flame",
   sending: false,
@@ -2138,7 +2139,7 @@ function setPreferredSettingsTab(tabKey) {
 
 function setPreferredIntegrationTab(tabKey) {
   const token = String(tabKey || "").trim().toLowerCase();
-  const normalized = ["setup", "manager", "devices", "runtime"].includes(token) ? token : "setup";
+  const normalized = ["manager", "devices", "runtime"].includes(token) ? token : "manager";
   state.integrationSubtab = normalized;
   safeStorageSet("tater_tateros_integration_tab", normalized);
   return normalized;
@@ -2341,10 +2342,10 @@ function integrationRuntimeNameFromId(integrationId) {
   const known = {
     aladdin: "Aladdin",
     brave_search: "Brave Search",
-    ecobee_homekit: "Ecobee",
+    ecobee_homekit: "Ecobee (HomeKit)",
     google_search: "Google Search",
     homeassistant: "Home Assistant",
-    homekit: "HomeKit",
+    homekit: "Ecobee (HomeKit)",
     hue: "Philips Hue",
     searxng_search: "SearXNG Search",
     serper_search: "Serper Search",
@@ -2378,6 +2379,11 @@ function integrationRuntimeProviderIds(runtime) {
 
 function integrationRuntimeStatusPrefix(integrationId) {
   return integrationId === "homekit" ? "ecobee_homekit" : integrationId;
+}
+
+function canonicalIntegrationId(integrationId) {
+  const token = String(integrationId || "").trim();
+  return token === "ecobee_homekit" ? "homekit" : token;
 }
 
 function integrationRuntimeProviderIsEnabled(provider, enabledIds) {
@@ -2727,8 +2733,7 @@ function bindSettingsIntegrationTabs(root = document) {
     return;
   }
   const activate = (tabKey) => {
-    const key = String(tabKey || "setup").trim() || "setup";
-    setPreferredIntegrationTab(key);
+    const key = setPreferredIntegrationTab(tabKey);
     host.dataset.integrationsActiveTab = key;
     buttons.forEach((button) => {
       button.classList.toggle("active", button.dataset.integrationsTab === key);
@@ -2743,12 +2748,11 @@ function bindSettingsIntegrationTabs(root = document) {
     }
   };
   const refreshIntegrationSubtab = async (tabKey) => {
-    const key = String(tabKey || "setup").trim() || "setup";
+    const key = setPreferredIntegrationTab(tabKey);
     if (host.dataset.integrationsSubtabRefreshing === "1") {
       return;
     }
     host.dataset.integrationsSubtabRefreshing = "1";
-    setPreferredIntegrationTab(key);
     try {
       if (state.view === "integrations") {
         await loadIntegrationsView();
@@ -2770,15 +2774,15 @@ function bindSettingsIntegrationTabs(root = document) {
     }
     button.dataset.integrationsTabBound = "1";
     button.addEventListener("click", () => {
-      const key = String(button.dataset.integrationsTab || "setup").trim() || "setup";
-      if (key === "setup" || key === "devices") {
+      const key = setPreferredIntegrationTab(button.dataset.integrationsTab);
+      if (key === "devices") {
         refreshIntegrationSubtab(key);
         return;
       }
       activate(key);
     });
   });
-  activate(String(host.dataset.integrationsActiveTab || state.integrationSubtab || "setup").trim() || "setup");
+  activate(host.dataset.integrationsActiveTab || state.integrationSubtab || "manager");
 }
 
 function collectSettingsIntegrationPayload(integration) {
@@ -2889,6 +2893,318 @@ function bindSettingsIntegrationActions(integrations, statusEl) {
       });
     });
   });
+}
+
+function integrationRuntimeModalFields(integration) {
+  const fields = Array.isArray(integration?.fields) ? integration.fields : [];
+  return fields
+    .map((field) => {
+      if (!field || typeof field !== "object") {
+        return null;
+      }
+      const key = String(field.key || "").trim();
+      if (!key) {
+        return null;
+      }
+      return {
+        ...field,
+        value: settingsIntegrationValue(integration, field),
+      };
+    })
+    .filter(Boolean);
+}
+
+function applyIntegrationModalResult(fieldsEl, result) {
+  if (!(fieldsEl instanceof HTMLElement) || !result || typeof result !== "object") {
+    return;
+  }
+  const values = {
+    ...result,
+    ...(result.values && typeof result.values === "object" ? result.values : {}),
+  };
+  fieldsEl.querySelectorAll("[data-setting-key]").forEach((input) => {
+    const key = String(input?.dataset?.settingKey || "").trim();
+    if (!key || !Object.prototype.hasOwnProperty.call(values, key)) {
+      return;
+    }
+    const type = String(input?.dataset?.settingType || input?.type || "").trim().toLowerCase();
+    if (type === "checkbox") {
+      input.checked = boolFromAny(values[key], false);
+    } else {
+      input.value = String(values[key] ?? "");
+    }
+  });
+}
+
+function integrationActionLabel(action) {
+  const actionId = String(action?.id || "").trim();
+  return String(action?.label || actionId || "Run").trim() || "Run";
+}
+
+function openIntegrationSettingsModal(integration, statusEl = null) {
+  const integrationId = String(integration?.id || "").trim();
+  if (!integrationId) {
+    return;
+  }
+  const name = String(integration?.name || integrationId).trim() || integrationId;
+  const fields = integrationRuntimeModalFields(integration);
+  const actions = (Array.isArray(integration?.actions) ? integration.actions : []).filter((action) =>
+    String(action?.id || "").trim()
+  );
+
+  openRuntimeSettingsModal({
+    title: formatRuntimeSettingsTitle(name),
+    meta: integrationId,
+    fields,
+    onSave: fields.length
+      ? async (values) => {
+          await api(`/api/settings/integrations/${encodeURIComponent(integrationId)}/settings`, {
+            method: "POST",
+            body: JSON.stringify({ settings: values }),
+          });
+          const message = `Saved settings for ${integrationId}.`;
+          setShopStatus("integrations", message);
+          if (statusEl) {
+            statusEl.textContent = message;
+          }
+          state.notice = message;
+          await refreshShopManagerInPlace("integrations", getActiveShopTab("integrations") || "installed");
+          return { message };
+        }
+      : null,
+    onOpen: ({ fieldsEl, statusEl: modalStatusEl }) => {
+      if (!(fieldsEl instanceof HTMLElement) || !actions.length) {
+        return;
+      }
+      const actionPanel = document.createElement("section");
+      actionPanel.className = "core-inline-section integration-modal-actions";
+      actionPanel.style.gridColumn = "1 / -1";
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "small core-inline-section-title";
+      titleEl.textContent = "Actions";
+      actionPanel.appendChild(titleEl);
+
+      const rowEl = document.createElement("div");
+      rowEl.className = "inline-row";
+      actionPanel.appendChild(rowEl);
+
+      actions.forEach((action) => {
+        const actionId = String(action?.id || "").trim();
+        if (!actionId) {
+          return;
+        }
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "inline-btn integration-modal-action";
+        button.textContent = integrationActionLabel(action);
+        rowEl.appendChild(button);
+
+        button.addEventListener("click", async () => {
+          const originalText = button.textContent || integrationActionLabel(action);
+          const pending = String(action?.status || `Running ${originalText}...`).trim();
+          const form = document.getElementById("runtime-settings-form");
+          button.disabled = true;
+          button.textContent = "Working...";
+          if (modalStatusEl instanceof HTMLElement) {
+            modalStatusEl.textContent = pending;
+          }
+          if (statusEl) {
+            statusEl.textContent = pending;
+          }
+          try {
+            const values = form ? await collectFormValues(form) : {};
+            const result = await api(
+              `/api/settings/integrations/${encodeURIComponent(integrationId)}/actions/${encodeURIComponent(actionId)}`,
+              {
+                method: "POST",
+                body: JSON.stringify({ payload: values }),
+              }
+            );
+            applyIntegrationModalResult(fieldsEl, result);
+            const message = String(
+              result?.message || (result?.ok === false ? `${originalText} failed.` : `${originalText} complete.`)
+            );
+            if (modalStatusEl instanceof HTMLElement) {
+              modalStatusEl.textContent = message;
+            }
+            if (statusEl) {
+              statusEl.textContent = message;
+            }
+            showToast(message, result?.ok === false ? "error" : "success", result?.ok === false ? 4200 : 2800);
+          } catch (error) {
+            const message = `${originalText} failed: ${String(error?.message || "unknown error")}`;
+            if (modalStatusEl instanceof HTMLElement) {
+              modalStatusEl.textContent = message;
+            }
+            if (statusEl) {
+              statusEl.textContent = message;
+            }
+            showToast(message, "error", 5200);
+          } finally {
+            button.disabled = false;
+            button.textContent = originalText;
+          }
+        });
+      });
+
+      fieldsEl.appendChild(actionPanel);
+    },
+  });
+}
+
+function bindIntegrationRuntimeActions(root = document) {
+  const host = root instanceof HTMLElement ? root : document;
+  const statusEl = host.querySelector("#settings-status") || document.getElementById("settings-status");
+  host.querySelectorAll(".open-runtime-settings[data-runtime-kind='integrations']").forEach((button) => {
+    if (button.dataset.runtimeSettingsBound === "1") {
+      return;
+    }
+    button.dataset.runtimeSettingsBound = "1";
+    button.addEventListener("click", (event) => {
+      const trigger = event.currentTarget;
+      const integrationId = String(trigger?.dataset?.runtimeKey || "").trim();
+      const entry = getRuntimeSettingsEntry("integrations", integrationId);
+      const integration = entry?.integration || null;
+      if (!integrationId || !integration) {
+        return;
+      }
+      openIntegrationSettingsModal(integration, statusEl);
+    });
+  });
+}
+
+function buildIntegrationRuntimeHtml(settings = {}, shopData = null) {
+  const integrations = Array.isArray(settings?.integrations) ? settings.integrations : [];
+  const shop = shopData && typeof shopData === "object" ? shopData : settings?.integration_shop || {};
+  const installedShopItems = Array.isArray(shop?.installed) ? shop.installed : [];
+  const integrationById = new Map();
+  const installedIds = new Set();
+  const rows = [];
+
+  resetRuntimeSettingsCatalog("integrations");
+
+  integrations.forEach((integration) => {
+    const integrationId = String(integration?.id || "").trim();
+    if (!integrationId) {
+      return;
+    }
+    const canonicalId = canonicalIntegrationId(integrationId);
+    integrationById.set(integrationId, integration);
+    if (!integrationById.has(canonicalId)) {
+      integrationById.set(canonicalId, integration);
+    }
+  });
+
+  installedShopItems.forEach((entry) => {
+    const shopId = String(entry?.id || entry?.module_key || entry?.key || "").trim();
+    if (!shopId) {
+      return;
+    }
+    const canonicalId = canonicalIntegrationId(shopId);
+    if (installedIds.has(shopId) || installedIds.has(canonicalId)) {
+      return;
+    }
+    const integration = integrationById.get(shopId) || integrationById.get(canonicalId) || null;
+    const integrationId = String(integration?.id || shopId).trim() || shopId;
+    installedIds.add(shopId);
+    installedIds.add(canonicalId);
+    installedIds.add(integrationId);
+    rows.push({
+      id: integrationId,
+      shopId,
+      shopEntry: entry,
+      integration,
+    });
+  });
+
+  integrations.forEach((integration) => {
+    const integrationId = String(integration?.id || "").trim();
+    const canonicalId = canonicalIntegrationId(integrationId);
+    if (!integrationId || installedIds.has(integrationId) || installedIds.has(canonicalId)) {
+      return;
+    }
+    rows.push({
+      id: integrationId,
+      shopId: "",
+      shopEntry: null,
+      integration,
+    });
+  });
+
+  if (!rows.length) {
+    return renderNotice("No installed integrations found.");
+  }
+
+  rows.sort((left, right) => {
+    const leftName = String(left.integration?.name || left.shopEntry?.name || left.id).trim() || left.id;
+    const rightName = String(right.integration?.name || right.shopEntry?.name || right.id).trim() || right.id;
+    return compareShopNames(leftName, rightName, left.id, right.id);
+  });
+
+  return rows
+    .map((row) => {
+      const integration = row.integration || {};
+      const shopEntry = row.shopEntry || {};
+      const integrationId = row.id;
+      const shopId = String(row.shopId || integrationId).trim() || integrationId;
+      const name = String(integration.name || shopEntry.name || integrationId).trim() || integrationId;
+      const description = String(integration.description || shopEntry.description || "").trim();
+      const fields = Array.isArray(integration.fields) ? integration.fields : [];
+      const actions = Array.isArray(integration.actions) ? integration.actions : [];
+      const hasSettings = Boolean(fields.length || actions.length);
+      const status = integration?.status && typeof integration.status === "object" ? integration.status : {};
+      const statusMessage = String(status.message || status.error || "").trim();
+      const enabled = Object.prototype.hasOwnProperty.call(shopEntry, "enabled") ? Boolean(shopEntry.enabled) : Boolean(row.integration);
+      const required = Boolean(shopEntry.required);
+      const installedVer = String(shopEntry.installed_ver || "0.0.0").trim() || "0.0.0";
+      const storeVer = String(shopEntry.store_ver || "-").trim() || "-";
+      const sourceLabel = String(shopEntry.source_label || "local").trim() || "local";
+      const capabilities = Array.isArray(integration.capabilities) ? integration.capabilities : [];
+
+      if (hasSettings && row.integration) {
+        registerRuntimeSettings("integrations", integrationId, {
+          label: name,
+          endpoint: "/api/settings/integrations",
+          settings: integrationRuntimeModalFields(integration),
+          actions,
+          integration,
+        });
+      }
+
+      const enableButton = row.shopEntry
+        ? enabled
+          ? required
+            ? `<button class="inline-btn" disabled>Required</button>`
+            : `<button class="inline-btn shop-action" data-kind="integrations" data-action="disable" data-id="${escapeHtml(shopId)}">Disable</button>`
+          : `<button class="action-btn shop-action" data-kind="integrations" data-action="enable" data-id="${escapeHtml(shopId)}">Enable</button>`
+        : "";
+      const settingsButton = hasSettings && row.integration
+        ? `<button class="inline-btn open-runtime-settings" data-runtime-kind="integrations" data-runtime-key="${escapeHtml(integrationId)}">Settings</button>`
+        : `<span class="small">No configurable settings.</span>`;
+      const statusTone = enabled ? "running" : "stopped";
+      const statusText = enabled ? "Enabled" : "Disabled";
+
+      return `
+        <article class="card integration-runtime-card" data-integration-id="${escapeHtml(integrationId)}">
+          <div class="card-head">
+            <h3 class="card-title">${escapeHtml(name)}</h3>
+            <div class="inline-row">
+              <span class="status-chip ${statusTone}">${escapeHtml(statusText)}</span>
+              ${enableButton}
+            </div>
+          </div>
+          <div class="small">installed: ${escapeHtml(installedVer)} • store: ${escapeHtml(storeVer)} • source: ${escapeHtml(sourceLabel)}</div>
+          ${description ? `<div class="muted">${escapeHtml(description)}</div>` : ""}
+          ${capabilities.length ? `<div class="small">Capabilities: ${escapeHtml(capabilities.join(", "))}</div>` : ""}
+          ${statusMessage ? `<div class="small integration-runtime-status">${escapeHtml(statusMessage)}</div>` : ""}
+          <div class="inline-row" style="margin-top:8px;">
+            ${settingsButton}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function renderSimpleDataTable(columns, rows, emptyMessage = "No rows.") {
@@ -3191,7 +3507,7 @@ async function collectFormValues(formElement) {
 
 function _normalizeRuntimeSettingsKind(kind) {
   const token = String(kind || "").trim().toLowerCase();
-  if (token === "verbas" || token === "portals" || token === "cores") {
+  if (token === "verbas" || token === "portals" || token === "cores" || token === "integrations") {
     return token;
   }
   return "";
@@ -3217,6 +3533,8 @@ function registerRuntimeSettings(kind, key, payload) {
     kind: token,
     endpoint: String(payload.endpoint || "").trim(),
     settings: Array.isArray(payload.settings) ? payload.settings : [],
+    actions: Array.isArray(payload.actions) ? payload.actions : [],
+    integration: payload.integration && typeof payload.integration === "object" ? payload.integration : null,
   };
 }
 
@@ -5149,6 +5467,78 @@ function shopLabel(kind) {
   return "Portal";
 }
 
+function surfaceHeaderMeta(kind) {
+  const token = String(kind || "").trim().toLowerCase();
+  const rows = {
+    verbas: {
+      title: "Verba",
+      badge: "VB",
+      subtitle: "Installed tools, enablement, runtime settings, and shop updates.",
+      accent: "verba",
+    },
+    portals: {
+      title: "Portals",
+      badge: "PT",
+      subtitle: "Connected surfaces Tater can speak through, manage, and monitor.",
+      accent: "portal",
+    },
+    cores: {
+      title: "Cores",
+      badge: "CR",
+      subtitle: "System services, runtime controls, and core-specific control panels.",
+      accent: "core",
+    },
+    integrations: {
+      title: "Integrations",
+      badge: "IN",
+      subtitle: "Provider packages, credentials, devices, live streams, and updates.",
+      accent: "integration",
+    },
+  };
+  return rows[token] || {
+    title: shopLabel(token) || "Tater",
+    badge: "TT",
+    subtitle: "Installed modules and runtime controls.",
+    accent: "default",
+  };
+}
+
+function renderSurfaceViewHeader(kind, metrics = []) {
+  const meta = surfaceHeaderMeta(kind);
+  const metricRows = (Array.isArray(metrics) ? metrics : [])
+    .map((metric) => ({
+      label: String(metric?.label || "").trim(),
+      value: String(metric?.value ?? "-").trim() || "-",
+    }))
+    .filter((metric) => metric.label);
+  return `
+    <section class="surface-view-header surface-view-header-${escapeHtml(meta.accent)}" aria-label="${escapeHtml(meta.title)} overview">
+      <div class="surface-view-header-mark" aria-hidden="true">${escapeHtml(meta.badge)}</div>
+      <div class="surface-view-header-copy">
+        <div class="surface-view-kicker">TaterOS</div>
+        <h3>${escapeHtml(meta.title)}</h3>
+        <p>${escapeHtml(meta.subtitle)}</p>
+      </div>
+      ${
+        metricRows.length
+          ? `<div class="surface-view-stats">
+              ${metricRows
+                .map(
+                  (metric) => `
+                    <div class="surface-view-stat">
+                      <span>${escapeHtml(metric.label)}</span>
+                      <strong>${escapeHtml(metric.value)}</strong>
+                    </div>
+                  `
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
 function setShopStatus(kind, text) {
   const statusEl = document.getElementById(`shop-status-${kind}`);
   if (statusEl) {
@@ -5369,7 +5759,7 @@ function renderShopTabbedManager(kind, data, options = {}) {
   const runtimeCard = options.runtimeCard !== false;
   const showInstalledTab = Object.prototype.hasOwnProperty.call(options, "showInstalledTab")
     ? Boolean(options.showInstalledTab)
-    : kind !== "integrations";
+    : true;
   const defaultTab = showInstalledTab ? "installed" : "store";
 
   const warningsHtml = errors.map((entry) => renderNotice(`${noun} shop: ${entry}`)).join("");
@@ -5789,13 +6179,18 @@ async function refreshShopManagerInPlace(kind, preferredTab = "") {
   }
 
   if (kind === "integrations") {
-    const shopData = await api("/api/shop/integrations");
+    const settings = await api("/api/settings");
+    const shopData = settings?.integration_shop || {};
     const managerHtml = renderShopTabbedManager("integrations", shopData, {
+      runtimeHtml: buildIntegrationRuntimeHtml(settings, shopData),
+      runtimeTitle: "Integration Runtime",
       runtimeCard: false,
+      showInstalledTab: true,
     });
     if (!replaceShopManagerInPlace("integrations", managerHtml)) {
       return false;
     }
+    bindIntegrationRuntimeActions(document.getElementById("view-root"));
     bindShopTabs("integrations");
     bindShopActions("integrations");
     activateShopTab("integrations", targetTab);
@@ -16160,8 +16555,16 @@ async function loadVerbasView() {
     api("/api/shop/verbas"),
   ]);
   const runtimeHtml = buildVerbaRuntimeHtml(runtimeData, shopData);
+  const verbaItems = Array.isArray(runtimeData?.items) ? runtimeData.items : [];
+  const verbaInstalled = Array.isArray(shopData?.installed) ? shopData.installed : [];
+  const headerHtml = renderSurfaceViewHeader("verbas", [
+    { label: "Installed", value: verbaInstalled.length || verbaItems.length },
+    { label: "Enabled", value: verbaItems.filter((item) => Boolean(item?.enabled)).length },
+    { label: "Updates", value: Number(shopData?.updates_available || 0) },
+  ]);
 
   root.innerHTML = `${consumeNoticeHtml()}
+    ${headerHtml}
     ${renderShopTabbedManager("verbas", shopData, {
       runtimeHtml,
       runtimeTitle: "Verba Runtime",
@@ -16187,9 +16590,22 @@ async function loadSurfaceView(kind) {
 
   const root = document.getElementById("view-root");
   const runtimeHtml = buildSurfaceRuntimeHtml(kind, runtimeData, shopData);
+  const surfaceItems = Array.isArray(runtimeData?.items) ? runtimeData.items : [];
+  const installedItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
+  const headerMetrics = [
+    { label: "Installed", value: installedItems.length || surfaceItems.length },
+    { label: "Running", value: surfaceItems.filter((item) => Boolean(item?.running)).length },
+    { label: "Updates", value: Number(shopData?.updates_available || 0) },
+  ];
+  if (kind === "cores") {
+    const dynamicTabs = Array.isArray(coreTabsData?.tabs) ? coreTabsData.tabs : [];
+    headerMetrics.push({ label: "Panels", value: dynamicTabs.length });
+  }
+  const headerHtml = renderSurfaceViewHeader(kind, headerMetrics);
 
   if (kind === "portals") {
     root.innerHTML = `${consumeNoticeHtml()}
+      ${headerHtml}
       ${renderShopTabbedManager("portals", shopData, {
         runtimeHtml,
         runtimeTitle: "Portal Runtime",
@@ -16218,6 +16634,7 @@ async function loadSurfaceView(kind) {
     state.coreTabLoadPromises = {};
     const manageLabel = String(coreTabsData?.manage_label || "Manage");
     root.innerHTML = `${consumeNoticeHtml()}
+      ${headerHtml}
       ${renderCoreTopTabs(dynamicTabs, manageHtml, manageLabel)}
     `;
   }
@@ -17079,122 +17496,151 @@ function bindSettingsPeopleActions() {
     }
   };
 
-  document.getElementById("people-create-person")?.addEventListener("click", async (event) => {
-    const host = event.currentTarget?.closest?.(".core-inline-section");
-    const displayName = String(document.getElementById("people_create_display_name")?.value || "").trim();
-    await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
-  });
-
-  document.querySelectorAll(".people-person-save").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const card = event.currentTarget?.closest?.(".people-person-card");
-      const personId = String(card?.dataset?.personId || "").trim();
-      const values = {};
-      card?.querySelectorAll?.("[data-people-field]").forEach((input) => {
-        const key = String(input?.dataset?.peopleField || "").trim();
-        if (key) {
-          values[key] = input.type === "checkbox" ? Boolean(input.checked) : input.value;
-        }
-      });
-      await runPeopleAction(card, "people_save", { person_id: personId, values }, "Person saved.");
-    });
-  });
-
-  document.querySelectorAll(".people-person-delete").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const card = event.currentTarget?.closest?.(".people-person-card");
-      const personId = String(card?.dataset?.personId || "").trim();
-      const title = String(card?.querySelector?.(".card-title")?.textContent || "this person").trim() || "this person";
-      if (!personId || !window.confirm(`Delete ${title}? Identity links will be removed.`)) {
+  const bindPeopleButton = (selector, handler) => {
+    document.querySelectorAll(selector).forEach((button) => {
+      if (button.dataset.peopleActionBound === "1") {
         return;
       }
-      await runPeopleAction(card, "people_delete", { person_id: personId }, "Person deleted.");
+      button.dataset.peopleActionBound = "1";
+      button.addEventListener("click", handler);
     });
+  };
+
+  const createButton = document.getElementById("people-create-person");
+  if (createButton && createButton.dataset.peopleActionBound !== "1") {
+    createButton.dataset.peopleActionBound = "1";
+    createButton.addEventListener("click", async (event) => {
+      const host = event.currentTarget?.closest?.(".core-inline-section");
+      const displayName = String(document.getElementById("people_create_display_name")?.value || "").trim();
+      await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
+    });
+  }
+
+  bindPeopleButton(".people-person-save", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-person-card");
+    const personId = String(card?.dataset?.personId || "").trim();
+    const values = {};
+    card?.querySelectorAll?.("[data-people-field]").forEach((input) => {
+      const key = String(input?.dataset?.peopleField || "").trim();
+      if (key) {
+        values[key] = input.type === "checkbox" ? Boolean(input.checked) : input.value;
+      }
+    });
+    await runPeopleAction(card, "people_save", { person_id: personId, values }, "Person saved.");
   });
 
-  document.querySelectorAll(".people-alias-detach").forEach((button) => {
+  bindPeopleButton(".people-person-delete", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-person-card");
+    const personId = String(card?.dataset?.personId || "").trim();
+    const title = String(card?.querySelector?.(".card-title")?.textContent || "this person").trim() || "this person";
+    if (!personId || !window.confirm(`Delete ${title}? Identity links will be removed.`)) {
+      return;
+    }
+    await runPeopleAction(card, "people_delete", { person_id: personId }, "Person deleted.");
+  });
+
+  bindPeopleButton(".people-alias-detach", async (event) => {
+    const buttonEl = event.currentTarget;
+    const personId = String(buttonEl?.dataset?.personId || "").trim();
+    const platform = String(buttonEl?.dataset?.platform || "").trim();
+    const externalId = String(buttonEl?.dataset?.externalId || "").trim();
+    const host = buttonEl?.closest?.(".people-person-card");
+    await runPeopleAction(host, "people_alias_detach", { person_id: personId, platform, external_id: externalId }, "Identity unlinked.");
+  });
+
+  bindPeopleButton(".people-identity-attach", async (event) => {
+    const row = event.currentTarget?.closest?.(".people-identity-row");
+    const personId = String(row?.querySelector?.(".people-identity-person-select")?.value || "").trim();
+    await runPeopleAction(
+      row,
+      "people_alias_attach",
+      {
+        person_id: personId,
+        platform: String(row?.dataset?.platform || "").trim(),
+        external_id: String(row?.dataset?.externalId || "").trim(),
+        label: String(row?.dataset?.label || "").trim(),
+        kind: String(row?.dataset?.kind || "user").trim() || "user",
+      },
+      "Identity linked."
+    );
+  });
+
+  bindPeopleButton(".people-identity-forget", async (event) => {
+    const row = event.currentTarget?.closest?.(".people-identity-row");
+    const platform = String(row?.dataset?.platform || "").trim();
+    const externalId = String(row?.dataset?.externalId || "").trim();
+    const label = String(row?.dataset?.label || externalId || "this identity").trim() || "this identity";
+    const portalLabel = hydraPlatformLabel(platform) || platform || "identity";
+    if (
+      !externalId ||
+      !window.confirm(`Forget ${portalLabel}: ${label}? This removes matching discovered chat or memory so it can start clean.`)
+    ) {
+      return;
+    }
+    await runPeopleAction(row, "people_identity_forget", { platform, external_id: externalId }, "Identity forgotten.");
+  });
+}
+
+function bindSpudLinkRevokeActions(root = document) {
+  const host = root instanceof HTMLElement ? root : document;
+  host.querySelectorAll("[data-spud-link-revoke-node]").forEach((button) => {
+    if (button.dataset.spudLinkRevokeBound === "1") {
+      return;
+    }
+    button.dataset.spudLinkRevokeBound = "1";
     button.addEventListener("click", async (event) => {
       const buttonEl = event.currentTarget;
-      const personId = String(buttonEl?.dataset?.personId || "").trim();
-      const platform = String(buttonEl?.dataset?.platform || "").trim();
-      const externalId = String(buttonEl?.dataset?.externalId || "").trim();
-      const host = buttonEl?.closest?.(".people-person-card");
-      await runPeopleAction(host, "people_alias_detach", { person_id: personId, platform, external_id: externalId }, "Identity unlinked.");
-    });
-  });
-
-  document.querySelectorAll(".people-identity-attach").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const row = event.currentTarget?.closest?.(".people-identity-row");
-      const personId = String(row?.querySelector?.(".people-identity-person-select")?.value || "").trim();
-      await runPeopleAction(
-        row,
-        "people_alias_attach",
-        {
-          person_id: personId,
-          platform: String(row?.dataset?.platform || "").trim(),
-          external_id: String(row?.dataset?.externalId || "").trim(),
-          label: String(row?.dataset?.label || "").trim(),
-          kind: String(row?.dataset?.kind || "user").trim() || "user",
-        },
-        "Identity linked."
-      );
-    });
-  });
-
-  document.querySelectorAll(".people-identity-forget").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const row = event.currentTarget?.closest?.(".people-identity-row");
-      const platform = String(row?.dataset?.platform || "").trim();
-      const externalId = String(row?.dataset?.externalId || "").trim();
-      const label = String(row?.dataset?.label || externalId || "this identity").trim() || "this identity";
-      const portalLabel = hydraPlatformLabel(platform) || platform || "identity";
-      if (!externalId || !window.confirm(`Forget ${portalLabel}: ${label}? This deletes its Little Spud chat history.`)) {
+      const nodeId = String(buttonEl?.getAttribute("data-spud-link-revoke-node") || "").trim();
+      const row = buttonEl?.closest?.(".spud-link-node-row");
+      const nodeName = String(row?.querySelector(".spud-link-node-main strong")?.textContent || "this linked Spud").trim();
+      if (!nodeId) return;
+      if (!window.confirm(`Revoke ${nodeName}? This device will need to pair again before it can use Spud Link.`)) {
         return;
       }
-      await runPeopleAction(row, "people_identity_forget", { platform, external_id: externalId }, "Identity forgotten.");
+      buttonEl.disabled = true;
+      buttonEl.textContent = "Revoking...";
+      try {
+        await api("/api/spudlink/revoke-node", {
+          method: "POST",
+          body: JSON.stringify({ node_id: nodeId }),
+        });
+        showToast(`${nodeName} revoked.`);
+        await loadSettingsView();
+      } catch (error) {
+        buttonEl.disabled = false;
+        buttonEl.textContent = "Revoke";
+        showToast(`Revoke failed: ${error.message}`, "error", 4200);
+      }
     });
   });
 }
 
 function renderIntegrationsSettingsPanel(settings = {}, { active = true } = {}) {
+  const activeTab = setPreferredIntegrationTab(state.integrationSubtab || "manager");
+  const managerHtml = renderShopTabbedManager("integrations", settings.integration_shop || {}, {
+    runtimeHtml: buildIntegrationRuntimeHtml(settings, settings.integration_shop || {}),
+    runtimeTitle: "Integration Runtime",
+    runtimeCard: false,
+    showInstalledTab: true,
+  });
   return `
-    <section class="settings-tab-panel ${active ? "active" : ""}" data-settings-panel="integrations">
-      ${renderSettingsSectionIntro(
-        "Integrations",
-        "Service endpoints and credentials for search and direct Tater integrations.",
-        "API"
-      )}
-      <div id="settings-integrations-shell">
+    <section class="settings-tab-panel integrations-surface-panel ${active ? "active" : ""}" data-settings-panel="integrations">
+      <div id="settings-integrations-shell" data-integrations-active-tab="${escapeHtml(activeTab)}">
         <div class="settings-subtabs">
-          <button type="button" class="settings-subtab-btn active" data-integrations-tab="setup">Setup</button>
-          <button type="button" class="settings-subtab-btn" data-integrations-tab="manager">Manager</button>
-          <button type="button" class="settings-subtab-btn" data-integrations-tab="devices">Devices</button>
-          <button type="button" class="settings-subtab-btn" data-integrations-tab="runtime">Live Runtime</button>
+          <button type="button" class="settings-subtab-btn ${activeTab === "manager" ? "active" : ""}" data-integrations-tab="manager">Manager</button>
+          <button type="button" class="settings-subtab-btn ${activeTab === "devices" ? "active" : ""}" data-integrations-tab="devices">Devices</button>
+          <button type="button" class="settings-subtab-btn ${activeTab === "runtime" ? "active" : ""}" data-integrations-tab="runtime">Live Runtime</button>
         </div>
 
-        <div class="settings-subpanel active" data-integrations-panel="setup">
-          <div class="form-grid">
-            ${renderSettingsIntegrationSections(settings)}
-
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-save-integrations" class="action-btn">Save Integrations</button>
-              <span class="small">Saves integration settings.</span>
-            </div>
-          </div>
+        <div class="settings-subpanel ${activeTab === "manager" ? "active" : ""}" data-integrations-panel="manager">
+          ${managerHtml}
         </div>
 
-        <div class="settings-subpanel" data-integrations-panel="manager">
-          ${renderShopTabbedManager("integrations", settings.integration_shop || {}, {
-            runtimeCard: false,
-          })}
-        </div>
-
-        <div class="settings-subpanel" data-integrations-panel="devices">
+        <div class="settings-subpanel ${activeTab === "devices" ? "active" : ""}" data-integrations-panel="devices">
           ${renderSettingsIntegrationDevicesShell(settings.integrations)}
         </div>
 
-        <div class="settings-subpanel" data-integrations-panel="runtime">
+        <div class="settings-subpanel ${activeTab === "runtime" ? "active" : ""}" data-integrations-panel="runtime">
           ${renderSettingsIntegrationRuntime(settings)}
         </div>
       </div>
@@ -17251,6 +17697,7 @@ function bindIntegrationsSurface(settings = {}, root = document) {
   });
 
   bindSettingsIntegrationActions(integrations, statusEl);
+  bindIntegrationRuntimeActions(host);
   bindSettingsIntegrationDevices();
   bindSettingsIntegrationTabs(host);
   bindSettingsIntegrationRuntime();
@@ -17261,19 +17708,19 @@ function bindIntegrationsSurface(settings = {}, root = document) {
 async function loadIntegrationsView() {
   const root = document.getElementById("view-root");
   const settings = await api("/api/settings");
-  root.dataset.view = "settings";
+  const shopData = settings?.integration_shop || {};
+  const installedItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
+  const registeredIntegrations = Array.isArray(settings?.integrations) ? settings.integrations : [];
+  const headerHtml = renderSurfaceViewHeader("integrations", [
+    { label: "Installed", value: installedItems.length || registeredIntegrations.length },
+    { label: "Enabled", value: installedItems.filter((item) => Boolean(item?.enabled)).length || registeredIntegrations.length },
+    { label: "Registered", value: registeredIntegrations.length },
+    { label: "Updates", value: Number(shopData?.updates_available || 0) },
+  ]);
   root.innerHTML = `${consumeNoticeHtml()}
-    <div class="card">
-      <div class="card-head">
-        <h3 class="card-title">Integrations</h3>
-      </div>
-      <div class="small">Service endpoints, credentials, device discovery, live runtime, and integration updates.</div>
-      <div id="settings-status" class="small" style="margin-top: 6px;"></div>
-
-      <form id="settings-form">
-        ${renderIntegrationsSettingsPanel(settings, { active: true })}
-      </form>
-    </div>
+    ${headerHtml}
+    <div id="settings-status" class="surface-status-line small"></div>
+    ${renderIntegrationsSettingsPanel(settings, { active: true })}
   `;
   bindIntegrationsSurface(settings, root);
 }
@@ -17309,6 +17756,9 @@ async function loadSettingsView() {
     if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
       return "hf_transformers";
     }
+    if (["llama_cpp_remote", "llama.cpp_remote", "llamacpp_remote", "llama_remote", "remote_llama_cpp", "remote_llamacpp", "gguf_remote"].includes(token)) {
+      return "llama_cpp_remote";
+    }
     if (["llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"].includes(token)) {
       return "llama_cpp";
     }
@@ -17321,17 +17771,21 @@ async function loadSettingsView() {
     return "openai_compatible";
   };
   const isHydraLocalProvider = (value) => ["hf_transformers", "llama_cpp", "mlx_lm"].includes(normalizeHydraBaseProvider(value));
+  const isHydraRemoteLlamaProvider = (value) => normalizeHydraBaseProvider(value) === "llama_cpp_remote";
+  const isHydraLlamaCppProvider = (value) => ["llama_cpp", "llama_cpp_remote"].includes(normalizeHydraBaseProvider(value));
   const isHydraSpudLinkProvider = (value) => normalizeHydraBaseProvider(value) === "spud_link";
   const hydraProviderOptions = [
     { value: "openai_compatible", label: "OpenAI-Compatible API" },
     { value: "hf_transformers", label: "Hugging Face Transformers" },
-    { value: "llama_cpp", label: "llama.cpp GGUF" },
+    { value: "llama_cpp", label: "llama.cpp Local" },
+    { value: "llama_cpp_remote", label: "llama.cpp Remote" },
     { value: "mlx_lm", label: "MLX LM (Apple Silicon)" },
     { value: "spud_link", label: "Spudlet via Spud Hub" },
   ];
   const hydraOpenAiModelPlaceholder = "Model served by your API";
   const hydraHfModelPlaceholder = "Qwen/Qwen2.5-0.5B-Instruct";
   const hydraLlamaCppModelPlaceholder = "bartowski/Qwen2.5-1.5B-Instruct-GGUF::Qwen2.5-1.5B-Instruct-Q4_K_M.gguf";
+  const hydraLlamaCppRemoteModelPlaceholder = "Remote model id or alias";
   const hydraMlxLmModelPlaceholder = "mlx-community/Llama-3.2-3B-Instruct-4bit";
   const hydraModelPlaceholderForProvider = (value) => {
     const provider = normalizeHydraBaseProvider(value);
@@ -17340,6 +17794,9 @@ async function loadSettingsView() {
     }
     if (provider === "llama_cpp") {
       return hydraLlamaCppModelPlaceholder;
+    }
+    if (provider === "llama_cpp_remote") {
+      return hydraLlamaCppRemoteModelPlaceholder;
     }
     if (provider === "mlx_lm") {
       return hydraMlxLmModelPlaceholder;
@@ -17356,6 +17813,9 @@ async function loadSettingsView() {
     }
     if (provider === "llama_cpp") {
       return "Downloaded GGUF Model";
+    }
+    if (provider === "llama_cpp_remote") {
+      return "Remote llama.cpp Model";
     }
     if (provider === "mlx_lm") {
       return "Downloaded MLX Model";
@@ -17418,6 +17878,31 @@ async function loadSettingsView() {
       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
       .join("");
   };
+  const normalizeSpudexLlmMode = (value) => {
+    const token = String(value || "base").trim().toLowerCase().replaceAll("_", "-");
+    if (["custom", "override", "dedicated"].includes(token)) {
+      return "custom";
+    }
+    if (["base", "same-as-base", "same-base"].includes(token)) {
+      return "base";
+    }
+    return "base";
+  };
+  const spudexLlmModeFromSettings = () => (
+    String(settings.spudex_llm_host || "").trim() || String(settings.spudex_llm_model || "").trim()
+      ? "custom"
+      : "base"
+  );
+  const renderSpudexLlmModeOptions = (currentValue) => {
+    const selected = normalizeSpudexLlmMode(currentValue);
+    const options = [
+      { value: "base", label: "Same as Base" },
+      { value: "custom", label: "Custom Spudex Model" },
+    ];
+    return options
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
   let localLlmModelsPayload =
     settings?.local_llm_models && typeof settings.local_llm_models === "object"
       ? settings.local_llm_models
@@ -17463,13 +17948,25 @@ async function loadSettingsView() {
     }
     return "";
   };
-  const normalizeHydraBaseRow = (row) => ({
-    provider: normalizeHydraBaseProvider(row?.provider || settings?.hydra_llm_provider || ""),
-    host: String(row?.host || "").trim(),
-    port: String(row?.port || "").trim(),
-    model: String(row?.model || "").trim(),
-    api_key: String(row?.api_key || "").trim(),
-  });
+  const normalizeLlamaCppSlotValue = (value) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) {
+      return "";
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? String(Math.round(parsed)) : "";
+  };
+  const normalizeHydraBaseRow = (row) => {
+    const provider = normalizeHydraBaseProvider(row?.provider || settings?.hydra_llm_provider || "");
+    return {
+      provider,
+      host: String(row?.host || "").trim(),
+      port: String(row?.port || "").trim(),
+      model: String(row?.model || "").trim(),
+      api_key: String(row?.api_key || "").trim(),
+      llama_cpp_slot: isHydraLlamaCppProvider(provider) ? normalizeLlamaCppSlotValue(row?.llama_cpp_slot ?? row?.llamaCppSlot) : "",
+    };
+  };
   const configuredHydraBaseRows = Array.isArray(settings?.hydra_base_servers)
     ? settings.hydra_base_servers.map((row) => normalizeHydraBaseRow(row))
     : [];
@@ -17491,7 +17988,7 @@ async function loadSettingsView() {
     if (!normalized.model) {
       return;
     }
-    const signature = `${normalized.provider}|${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}`;
+    const signature = `${normalized.provider}|${normalized.host}|${normalized.port}|${normalized.model}|${normalized.api_key}|${isHydraLlamaCppProvider(normalized.provider) ? normalized.llama_cpp_slot : ""}`;
     if (normalizedHydraBaseSeen.has(signature)) {
       return;
     }
@@ -17533,34 +18030,43 @@ async function loadSettingsView() {
   }
   const hydraPrimaryBaseRow = normalizedHydraBaseRows[0] || normalizeHydraBaseRow({});
   const hydraAdditionalBaseRows = normalizedHydraBaseRows.slice(1);
+  const initialHydraLlamaCppSlotMax = String(
+    Math.max(0, Math.min(32, Math.max(1, Math.round(Number(settings?.hydra_llama_cpp_slot_count || 1) || 1))) - 1)
+  );
+  const renderHydraAdditionalBaseRow = (row, index, maxSlot) => `
+    <div class="hydra-base-server-row" data-hydra-base-index="${index}">
+      <div class="hydra-role-title">Additional Base Server ${index + 1}</div>
+      <label style="grid-column: 1 / -1;">Provider
+        <select data-hydra-base-field="provider">
+          ${renderHydraProviderOptions(row.provider)}
+        </select>
+      </label>
+      <label data-hydra-provider-field="openai_compatible">Host / IP
+        <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
+      </label>
+      <label data-hydra-provider-field="openai_compatible">Port
+        <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
+      </label>
+      <label style="grid-column: 1 / -1;"><span data-hydra-model-label>Model</span>
+        <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(row.provider))}" />
+        <select data-hydra-base-field="model_select" style="display:none;"></select>
+        <div class="small" data-hydra-base-local-model-status style="display:none;"></div>
+      </label>
+      <label data-hydra-provider-field="llama_cpp llama_cpp_remote" style="grid-column: 1 / -1;">llama.cpp Slot
+        <input type="number" min="0" max="${escapeHtml(maxSlot)}" step="1" placeholder="Auto" data-hydra-base-field="llama_cpp_slot" value="${escapeHtml(row.llama_cpp_slot)}" />
+        <div class="small">Blank lets llama.cpp choose an idle slot.</div>
+      </label>
+      <label data-hydra-provider-field="openai_compatible" style="grid-column: 1 / -1;">API Key (optional)
+        <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
+      </label>
+      <div class="hydra-base-server-actions inline-row hydra-section-actions">
+        <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove Server</button>
+      </div>
+    </div>
+  `;
   const hydraAdditionalBaseRowsHtml = hydraAdditionalBaseRows.length
     ? hydraAdditionalBaseRows
-        .map(
-          (row, index) => `
-            <div class="hydra-base-server-row" data-hydra-base-index="${index}">
-              <label>Provider
-                <select data-hydra-base-field="provider">
-                  ${renderHydraProviderOptions(row.provider)}
-                </select>
-              </label>
-              <label data-hydra-provider-field="openai_compatible">Host / IP
-                <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
-              </label>
-              <label data-hydra-provider-field="openai_compatible">Port
-                <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
-              </label>
-              <label><span data-hydra-model-label>Model</span>
-                <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(row.provider))}" />
-              </label>
-              <label data-hydra-provider-field="openai_compatible">API Key (optional)
-                <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
-              </label>
-              <div class="hydra-base-server-actions">
-                <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
-              </div>
-            </div>
-          `
-        )
+        .map((row, index) => renderHydraAdditionalBaseRow(row, index, initialHydraLlamaCppSlotMax))
         .join("")
     : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
   const hydraRoleSpecs = [
@@ -17604,7 +18110,7 @@ async function loadSettingsView() {
             settings[`hydra_llm_${role.id}_api_key`] || ""
           )}" />
         </label>
-        <label data-hydra-provider-field="llama_cpp" style="grid-column: 1 / -1;">${escapeHtml(role.title)} llama.cpp Slot
+        <label data-hydra-provider-field="llama_cpp llama_cpp_remote" style="grid-column: 1 / -1;">${escapeHtml(role.title)} llama.cpp Slot
           <input id="set_hydra_llm_${escapeHtml(role.id)}_llama_cpp_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
             settings[`hydra_llm_${role.id}_llama_cpp_slot`] || ""
           )}" />
@@ -18595,7 +19101,7 @@ async function loadSettingsView() {
                   )}" />
                   <div class="small hydra-context-hint">Number of llama.cpp server slots Tater starts for each loaded GGUF.</div>
                 </label>
-                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Base Slot
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp llama_cpp_remote">Base Slot
                   <input id="set_hydra_llama_cpp_base_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
                     settings.hydra_llama_cpp_base_slot || ""
                   )}" />
@@ -18746,7 +19252,7 @@ async function loadSettingsView() {
                   )}" />
                 </label>
                 <div class="hydra-base-server-block">
-                  <div class="hydra-role-title">Additional Base Servers</div>
+                  <div class="hydra-model-panel-title hydra-base-server-block-title">Additional Base Servers</div>
                   <div class="small hydra-model-panel-note">Add more base servers to alternate regular AI calls across them.</div>
                   <div id="settings-hydra-base-servers" class="hydra-base-server-list">${hydraAdditionalBaseRowsHtml}</div>
                   <div class="inline-row">
@@ -18762,18 +19268,24 @@ async function loadSettingsView() {
 
               <div class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Spudex LLM</div>
-                <div class="small hydra-model-panel-note">Optional override for Spudex direct chat and Hydra-triggered Spudex tasks. Blank uses the base model.</div>
-                <label style="grid-column: 1 / -1;">Spudex Provider
+                <div class="small hydra-model-panel-note">Spudex can use the current Base model or its own override for direct chat and Hydra-triggered Spudex tasks.</div>
+                <label style="grid-column: 1 / -1;">Spudex Model Mode
+                  <select id="set_spudex_llm_mode">
+                    ${renderSpudexLlmModeOptions(settings.spudex_llm_mode || spudexLlmModeFromSettings())}
+                  </select>
+                </label>
+                <div id="spudex-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">Spudex will use the current Base model.</div>
+                <label id="spudex-provider-wrap" style="grid-column: 1 / -1;">Spudex Provider
                   <select id="set_spudex_llm_provider">
                     ${renderHydraProviderOptions(settings.spudex_llm_provider || "openai_compatible")}
                   </select>
                 </label>
-                <label data-hydra-provider-field="openai_compatible">Spudex LLM Endpoint
+                <label id="spudex-host-wrap" data-hydra-provider-field="openai_compatible">Spudex LLM Endpoint
                   <input id="set_spudex_llm_host" type="text" value="${escapeHtml(
                     settings.spudex_llm_host || ""
-                  )}" placeholder="Blank uses base endpoint" />
+                  )}" placeholder="http://127.0.0.1:11434" />
                 </label>
-                <label style="grid-column: 1 / -1;"><span id="spudex-llm-model-label">Spudex LLM Model</span>
+                <label id="spudex-model-wrap" style="grid-column: 1 / -1;"><span id="spudex-llm-model-label">Spudex LLM Model</span>
                   <input id="set_spudex_llm_model" type="text" value="${escapeHtml(
                     settings.spudex_llm_model || ""
                   )}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(settings.spudex_llm_provider || ""))}" />
@@ -20093,6 +20605,8 @@ async function loadSettingsView() {
     button.addEventListener("click", () => activateTab(button.dataset.settingsTab));
   });
   activateTab(initialSettingsTab);
+  bindSettingsPeopleActions();
+  bindSpudLinkRevokeActions(root);
 
   bindSettingsRedisSection({
     statusTargetEl: statusEl,
@@ -20240,6 +20754,9 @@ async function loadSettingsView() {
   const hydraBaseServersEl = document.getElementById("settings-hydra-base-servers");
   const hydraBaseServerAddEl = document.getElementById("settings-hydra-base-server-add");
   const hydraBaseProviderEl = document.getElementById("set_hydra_llm_provider");
+  const hydraBaseHostEl = document.getElementById("set_hydra_llm_host");
+  const hydraBasePortEl = document.getElementById("set_hydra_llm_port");
+  const hydraBaseApiKeyEl = document.getElementById("set_hydra_llm_api_key");
   const hydraBaseModelEl = document.getElementById("set_hydra_llm_model");
   const hydraBaseModelSelectEl = document.getElementById("set_hydra_llm_model_select");
   const hydraBaseModelLabelEl = document.getElementById("hydra-base-model-label");
@@ -20523,6 +21040,7 @@ async function loadSettingsView() {
       llamaCppBaseSlotEl,
       document.getElementById("set_hydra_llama_cpp_vision_slot"),
       ...hydraRoleIds.map((role) => document.getElementById(`set_hydra_llm_${role}_llama_cpp_slot`)),
+      ...Array.from(hydraBaseServersEl?.querySelectorAll('[data-hydra-base-field="llama_cpp_slot"]') || []),
     ].filter(Boolean);
     slotInputs.forEach((inputEl) => {
       inputEl.max = String(maxSlot);
@@ -20539,13 +21057,17 @@ async function loadSettingsView() {
   llamaCppSlotCountEl?.addEventListener("input", syncLlamaCppSlotInputLimits);
   llamaCppSlotCountEl?.addEventListener("blur", syncLlamaCppSlotInputLimits);
   syncLlamaCppSlotInputLimits();
-  const normalizeHydraBaseRowInput = (row) => ({
-    provider: normalizeHydraBaseProvider(row?.provider || ""),
-    host: String(row?.host || "").trim(),
-    port: String(row?.port || "").trim(),
-    model: String(row?.model || "").trim(),
-    api_key: String(row?.api_key || "").trim(),
-  });
+  const normalizeHydraBaseRowInput = (row) => {
+    const provider = normalizeHydraBaseProvider(row?.provider || "");
+    return {
+      provider,
+      host: String(row?.host || "").trim(),
+      port: String(row?.port || "").trim(),
+      model: String(row?.model || "").trim(),
+      api_key: String(row?.api_key || "").trim(),
+      llama_cpp_slot: isHydraLlamaCppProvider(provider) ? normalizeLlamaCppSlotValue(row?.llama_cpp_slot ?? row?.llamaCppSlot) : "",
+    };
+  };
   const syncHydraModelInputForProvider = (inputEl, labelEl, provider, remoteLabel = "Base Model") => {
     if (labelEl) {
       labelEl.textContent = hydraModelLabelForProvider(provider, remoteLabel);
@@ -20602,6 +21124,107 @@ async function loadSettingsView() {
       syncHydraContextControl(normalized);
     }
   };
+  const llamaCppRemoteModelsCache = new Map();
+  const llamaCppRemoteKey = ({ host = "", port = "", apiKey = "" } = {}) =>
+    `${String(host || "").trim()}|${String(port || "").trim()}|${String(apiKey || "").trim()}`;
+  const remoteLlamaEndpointValues = ({ hostEl = null, portEl = null, apiKeyEl = null } = {}) => ({
+    host: String(hostEl?.value || "").trim(),
+    port: String(portEl?.value || "").trim(),
+    api_key: String(apiKeyEl?.value || "").trim(),
+  });
+  const fetchLlamaCppRemoteModels = async ({ host = "", port = "", api_key: apiKey = "" } = {}) => {
+    const key = llamaCppRemoteKey({ host, port, apiKey });
+    if (llamaCppRemoteModelsCache.has(key)) {
+      return llamaCppRemoteModelsCache.get(key);
+    }
+    const payload = await api("/api/settings/llama-cpp/remote-models", {
+      method: "POST",
+      body: JSON.stringify({ host, port, api_key: apiKey }),
+      _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+    });
+    llamaCppRemoteModelsCache.set(key, payload);
+    return payload;
+  };
+  const populateHydraRemoteModelSelectFor = async ({
+    selectEl,
+    inputEl = null,
+    statusEl = null,
+    hostEl = null,
+    portEl = null,
+    apiKeyEl = null,
+    preferredModel = "",
+  } = {}) => {
+    if (!selectEl) {
+      return;
+    }
+    const endpoint = remoteLlamaEndpointValues({ hostEl, portEl, apiKeyEl });
+    const key = llamaCppRemoteKey({ host: endpoint.host, port: endpoint.port, apiKey: endpoint.api_key });
+    selectEl.dataset.llamaCppRemoteKey = key;
+    const preferred = String(preferredModel || selectEl.value || inputEl?.value || "").trim();
+    if (!endpoint.host) {
+      selectEl.innerHTML = `<option value="">Enter a remote llama.cpp URL</option>`;
+      selectEl.value = "";
+      selectEl.disabled = true;
+      if (statusEl) {
+        statusEl.textContent = "Enter a remote llama.cpp URL to load models.";
+      }
+      return;
+    }
+    selectEl.disabled = false;
+    selectEl.innerHTML = `<option value="">Checking remote llama.cpp server...</option>`;
+    if (statusEl) {
+      statusEl.textContent = "Checking remote llama.cpp server...";
+    }
+    try {
+      const payload = await fetchLlamaCppRemoteModels(endpoint);
+      if (selectEl.dataset.llamaCppRemoteKey !== key) {
+        return;
+      }
+      const rows = Array.isArray(payload?.models) ? payload.models : [];
+      const models = rows
+        .map((row) => String(row?.id || row?.model || row?.name || "").trim())
+        .filter(Boolean)
+        .filter((value, index, array) => array.indexOf(value) === index);
+      const mode = String(payload?.mode || "").trim().toLowerCase();
+      const effectivePreferred = preferred || (mode !== "router" && models.length === 1 ? models[0] : "");
+      const preserveMissing = Boolean(effectivePreferred && !models.includes(effectivePreferred));
+      selectEl.innerHTML = [
+        `<option value="">${models.length ? "Select a remote model" : "Type model manually"}</option>`,
+        ...models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`),
+        preserveMissing ? `<option value="${escapeHtml(effectivePreferred)}">Current: ${escapeHtml(effectivePreferred)}</option>` : "",
+      ].join("");
+      if (models.includes(effectivePreferred) || preserveMissing) {
+        selectEl.value = effectivePreferred;
+      } else {
+        selectEl.value = "";
+      }
+      if (inputEl && selectEl.value) {
+        inputEl.value = selectEl.value;
+      }
+      if (statusEl) {
+        if (mode === "router") {
+          statusEl.textContent = models.length
+            ? `Router mode: ${models.length} model${models.length === 1 ? "" : "s"} available.`
+            : "Router mode detected. Type a model id or load models on the server.";
+        } else {
+          statusEl.textContent = models.length
+            ? `Single-model server: ${models[0]}. Selection is optional and will not switch the loaded model.`
+            : "Single-model server. Type a model alias manually.";
+        }
+      }
+    } catch (error) {
+      if (selectEl.dataset.llamaCppRemoteKey !== key) {
+        return;
+      }
+      selectEl.innerHTML = preferred
+        ? `<option value="${escapeHtml(preferred)}">Current: ${escapeHtml(preferred)}</option>`
+        : `<option value="">Type model manually</option>`;
+      selectEl.value = preferred;
+      if (statusEl) {
+        statusEl.textContent = `Remote llama.cpp discovery failed: ${error.message}. Type manually.`;
+      }
+    }
+  };
   const populateHydraLocalModelSelect = (provider, preferredModel = "") => {
     populateHydraLocalModelSelectFor({
       provider,
@@ -20642,6 +21265,7 @@ async function loadSettingsView() {
   };
   const syncHydraPrimaryModelControl = (provider) => {
     const local = isHydraLocalProvider(provider);
+    const remoteLlama = isHydraRemoteLlamaProvider(provider);
     const spudLink = isHydraSpudLinkProvider(provider);
     if (hydraBaseModelEl) {
       hydraBaseModelEl.style.display = local ? "none" : "";
@@ -20651,19 +21275,29 @@ async function loadSettingsView() {
       }
     }
     if (hydraBaseModelSelectEl) {
-      hydraBaseModelSelectEl.style.display = local ? "" : "none";
-      hydraBaseModelSelectEl.disabled = !local;
+      hydraBaseModelSelectEl.style.display = local || remoteLlama ? "" : "none";
+      hydraBaseModelSelectEl.disabled = !(local || remoteLlama);
     }
     if (hydraLocalModelStatusEl) {
-      hydraLocalModelStatusEl.style.display = local || spudLink ? "" : "none";
+      hydraLocalModelStatusEl.style.display = local || remoteLlama || spudLink ? "" : "none";
       if (spudLink) {
         hydraLocalModelStatusEl.textContent = "Spudlet mode uses the paired Spud Hub. Configure pairing in Settings > Spud Link.";
-      } else if (!local) {
+      } else if (!local && !remoteLlama) {
         hydraLocalModelStatusEl.textContent = "";
       }
     }
     if (local) {
       populateHydraLocalModelSelect(provider);
+    } else if (remoteLlama) {
+      void populateHydraRemoteModelSelectFor({
+        selectEl: hydraBaseModelSelectEl,
+        inputEl: hydraBaseModelEl,
+        statusEl: hydraLocalModelStatusEl,
+        hostEl: hydraBaseHostEl,
+        portEl: hydraBasePortEl,
+        apiKeyEl: hydraBaseApiKeyEl,
+        preferredModel: hydraBaseModelSelectEl?.value || hydraBaseModelEl?.value || "",
+      });
     }
   };
   const getHydraBaseModelValue = () => {
@@ -20673,6 +21307,9 @@ async function loadSettingsView() {
     }
     if (isHydraLocalProvider(provider)) {
       return String(hydraBaseModelSelectEl?.value || "").trim();
+    }
+    if (isHydraRemoteLlamaProvider(provider)) {
+      return String(hydraBaseModelSelectEl?.value || hydraBaseModelEl?.value || "").trim();
     }
     return String(hydraBaseModelEl?.value || "").trim();
   };
@@ -20712,6 +21349,7 @@ async function loadSettingsView() {
           });
         }
       });
+      syncHydraAdditionalBaseRowsProviders();
       populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       renderLocalModelManager();
     } catch (error) {
@@ -20722,6 +21360,9 @@ async function loadSettingsView() {
         if (control?.statusEl && isHydraLocalProvider(control?.providerEl?.value || "")) {
           control.statusEl.textContent = `Downloaded model list failed: ${error.message}`;
         }
+      });
+      hydraBaseServersEl?.querySelectorAll("[data-hydra-base-local-model-status]").forEach((statusEl) => {
+        statusEl.textContent = `Downloaded model list failed: ${error.message}`;
       });
       if (localModelManagerStatusEl) {
         localModelManagerStatusEl.textContent = `Installed model list failed: ${error.message}`;
@@ -20767,6 +21408,7 @@ async function loadSettingsView() {
     }
     const provider = normalizeHydraBaseProvider(control.providerEl.value || "");
     const local = isHydraLocalProvider(provider);
+    const remoteLlama = isHydraRemoteLlamaProvider(provider);
     syncHydraProviderScopedFields(control.rootEl, provider);
     syncHydraModelInputForProvider(control.modelInputEl, control.modelLabelEl, provider, control.remoteLabel || "Model");
     if (control.modelInputEl) {
@@ -20774,12 +21416,12 @@ async function loadSettingsView() {
       control.modelInputEl.disabled = local;
     }
     if (control.modelSelectEl) {
-      control.modelSelectEl.style.display = local ? "" : "none";
-      control.modelSelectEl.disabled = !local;
+      control.modelSelectEl.style.display = local || remoteLlama ? "" : "none";
+      control.modelSelectEl.disabled = !(local || remoteLlama);
     }
     if (control.statusEl) {
-      control.statusEl.style.display = local ? "" : "none";
-      if (!local) {
+      control.statusEl.style.display = local || remoteLlama ? "" : "none";
+      if (!local && !remoteLlama) {
         control.statusEl.textContent = "";
       }
     }
@@ -20792,6 +21434,16 @@ async function loadSettingsView() {
         preferredModel,
         visionOnly: Boolean(control.visionOnly),
       });
+    } else if (remoteLlama) {
+      void populateHydraRemoteModelSelectFor({
+        selectEl: control.modelSelectEl,
+        inputEl: control.modelInputEl,
+        statusEl: control.statusEl,
+        hostEl: control.hostEl,
+        portEl: control.portEl,
+        apiKeyEl: control.apiKeyEl,
+        preferredModel: preferredModel || control.modelSelectEl?.value || control.modelInputEl?.value || "",
+      });
     }
   };
   const registerHydraRouteControl = (control) => {
@@ -20800,9 +21452,18 @@ async function loadSettingsView() {
     }
     hydraRouteControls.push(control);
     control.providerEl.addEventListener("change", () => syncHydraRouteControl(control));
+    [control.hostEl, control.portEl, control.apiKeyEl].forEach((fieldEl) => {
+      fieldEl?.addEventListener("change", () => syncHydraRouteControl(control, control.modelInputEl?.value || control.modelSelectEl?.value || ""));
+      fieldEl?.addEventListener("blur", () => syncHydraRouteControl(control, control.modelInputEl?.value || control.modelSelectEl?.value || ""));
+    });
     control.modelSelectEl?.addEventListener("change", () => {
       if (control.modelInputEl) {
         control.modelInputEl.value = String(control.modelSelectEl?.value || "");
+      }
+    });
+    control.modelInputEl?.addEventListener("input", () => {
+      if (isHydraRemoteLlamaProvider(control.providerEl?.value || "") && control.modelSelectEl) {
+        control.modelSelectEl.value = "";
       }
     });
     syncHydraRouteControl(control, control.modelInputEl?.value || control.modelSelectEl?.value || "");
@@ -20816,18 +21477,62 @@ async function loadSettingsView() {
     if (isHydraLocalProvider(provider)) {
       return String(control.modelSelectEl?.value || "").trim();
     }
+    if (isHydraRemoteLlamaProvider(provider)) {
+      return String(control.modelSelectEl?.value || control.modelInputEl?.value || "").trim();
+    }
     return String(control.modelInputEl?.value || "").trim();
   };
   const spudexRouteControl = registerHydraRouteControl({
     scope: "spudex",
     rootEl: document.getElementById("set_spudex_llm_provider")?.closest(".hydra-model-panel"),
     providerEl: document.getElementById("set_spudex_llm_provider"),
+    hostEl: document.getElementById("set_spudex_llm_host"),
     modelInputEl: document.getElementById("set_spudex_llm_model"),
     modelSelectEl: document.getElementById("set_spudex_llm_model_select"),
     modelLabelEl: document.getElementById("spudex-llm-model-label"),
     statusEl: document.getElementById("spudex-local-model-status"),
     remoteLabel: "Spudex LLM Model",
   });
+  const spudexModeEl = document.getElementById("set_spudex_llm_mode");
+  const spudexProviderWrapEl = document.getElementById("spudex-provider-wrap");
+  const spudexHostWrapEl = document.getElementById("spudex-host-wrap");
+  const spudexModelWrapEl = document.getElementById("spudex-model-wrap");
+  const spudexBaseNoteEl = document.getElementById("spudex-base-note");
+  const syncSpudexLlmModeFields = () => {
+    const sameAsBase = normalizeSpudexLlmMode(spudexModeEl?.value || "") === "base";
+    const setWrapHidden = (el, hidden) => {
+      if (!el) {
+        return;
+      }
+      el.style.display = hidden ? "none" : "";
+      el.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
+        fieldEl.disabled = hidden;
+      });
+    };
+    if (spudexBaseNoteEl) {
+      spudexBaseNoteEl.style.display = sameAsBase ? "" : "none";
+    }
+    if (sameAsBase) {
+      setWrapHidden(spudexProviderWrapEl, true);
+      setWrapHidden(spudexHostWrapEl, true);
+      setWrapHidden(spudexModelWrapEl, true);
+      if (spudexRouteControl?.statusEl) {
+        spudexRouteControl.statusEl.style.display = "none";
+      }
+      return;
+    }
+    setWrapHidden(spudexProviderWrapEl, false);
+    setWrapHidden(spudexHostWrapEl, false);
+    setWrapHidden(spudexModelWrapEl, false);
+    syncHydraRouteControl(spudexRouteControl, spudexRouteControl?.modelInputEl?.value || spudexRouteControl?.modelSelectEl?.value || "");
+  };
+  spudexModeEl?.addEventListener("change", syncSpudexLlmModeFields);
+  spudexRouteControl?.providerEl?.addEventListener("change", syncSpudexLlmModeFields);
+  [spudexRouteControl?.hostEl, spudexRouteControl?.portEl, spudexRouteControl?.apiKeyEl].forEach((fieldEl) => {
+    fieldEl?.addEventListener("change", syncSpudexLlmModeFields);
+    fieldEl?.addEventListener("blur", syncSpudexLlmModeFields);
+  });
+  syncSpudexLlmModeFields();
   const visionModeEl = document.getElementById("set_vision_mode");
   const visionProviderEl = document.getElementById("set_vision_provider");
   const visionModelEl = document.getElementById("set_vision_model");
@@ -20962,6 +21667,9 @@ async function loadSettingsView() {
       scope: role,
       rootEl: document.querySelector(`[data-hydra-route-scope="${role}"]`),
       providerEl: document.getElementById(`set_hydra_llm_${role}_provider`),
+      hostEl: document.getElementById(`set_hydra_llm_${role}_host`),
+      portEl: document.getElementById(`set_hydra_llm_${role}_port`),
+      apiKeyEl: document.getElementById(`set_hydra_llm_${role}_api_key`),
       modelInputEl: document.getElementById(`set_hydra_llm_${role}_model`),
       modelSelectEl: document.getElementById(`set_hydra_llm_${role}_model_select`),
       modelLabelEl: document.getElementById(`hydra-${role}-model-label`),
@@ -20975,12 +21683,51 @@ async function loadSettingsView() {
     }
     const providerEl = rowEl.querySelector('[data-hydra-base-field="provider"]');
     const provider = normalizeHydraBaseProvider(providerEl ? providerEl.value : "");
+    const local = isHydraLocalProvider(provider);
+    const remoteLlama = isHydraRemoteLlamaProvider(provider);
+    const modelInputEl = rowEl.querySelector('[data-hydra-base-field="model"]');
+    const modelSelectEl = rowEl.querySelector('[data-hydra-base-field="model_select"]');
+    const statusEl = rowEl.querySelector("[data-hydra-base-local-model-status]");
     syncHydraProviderScopedFields(rowEl, provider);
     syncHydraModelInputForProvider(
-      rowEl.querySelector('[data-hydra-base-field="model"]'),
+      modelInputEl,
       rowEl.querySelector("[data-hydra-model-label]"),
       provider
     );
+    if (modelInputEl) {
+      modelInputEl.style.display = local ? "none" : "";
+      modelInputEl.disabled = local;
+    }
+    if (modelSelectEl) {
+      modelSelectEl.style.display = local || remoteLlama ? "" : "none";
+      modelSelectEl.disabled = !(local || remoteLlama);
+    }
+    if (statusEl) {
+      statusEl.style.display = local || remoteLlama ? "" : "none";
+      if (!local && !remoteLlama) {
+        statusEl.textContent = "";
+      }
+    }
+    if (local) {
+      populateHydraLocalModelSelectFor({
+        provider,
+        selectEl: modelSelectEl,
+        inputEl: modelInputEl,
+        statusEl,
+        preferredModel: modelSelectEl?.value || modelInputEl?.value || "",
+      });
+    } else if (remoteLlama) {
+      void populateHydraRemoteModelSelectFor({
+        selectEl: modelSelectEl,
+        inputEl: modelInputEl,
+        statusEl,
+        hostEl: rowEl.querySelector('[data-hydra-base-field="host"]'),
+        portEl: rowEl.querySelector('[data-hydra-base-field="port"]'),
+        apiKeyEl: rowEl.querySelector('[data-hydra-base-field="api_key"]'),
+        preferredModel: modelSelectEl?.value || modelInputEl?.value || "",
+      });
+    }
+    syncLlamaCppSlotInputLimits();
   };
   const syncHydraAdditionalBaseRowsProviders = () => {
     if (!hydraBaseServersEl) {
@@ -20999,13 +21746,19 @@ async function loadSettingsView() {
       const hostEl = rowEl.querySelector('[data-hydra-base-field="host"]');
       const portEl = rowEl.querySelector('[data-hydra-base-field="port"]');
       const modelEl = rowEl.querySelector('[data-hydra-base-field="model"]');
+      const modelSelectEl = rowEl.querySelector('[data-hydra-base-field="model_select"]');
       const apiKeyEl = rowEl.querySelector('[data-hydra-base-field="api_key"]');
+      const slotEl = rowEl.querySelector('[data-hydra-base-field="llama_cpp_slot"]');
+      const provider = normalizeHydraBaseProvider(providerEl ? providerEl.value : "");
       return normalizeHydraBaseRowInput({
-        provider: providerEl ? providerEl.value : "",
+        provider,
         host: hostEl ? hostEl.value : "",
         port: portEl ? portEl.value : "",
-        model: modelEl ? modelEl.value : "",
+        model: (isHydraLocalProvider(provider) || isHydraRemoteLlamaProvider(provider)) && modelSelectEl
+          ? modelSelectEl.value || modelEl?.value || ""
+          : modelEl ? modelEl.value : "",
         api_key: apiKeyEl ? apiKeyEl.value : "",
+        llama_cpp_slot: slotEl ? slotEl.value : "",
       });
     });
   };
@@ -21018,33 +21771,10 @@ async function loadSettingsView() {
       hydraBaseServersEl.innerHTML = `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
       return;
     }
+    const rawSlotCount = Number(llamaCppSlotCountEl?.value || settings.hydra_llama_cpp_slot_count || 1);
+    const maxSlot = Math.max(0, Math.min(32, Number.isFinite(rawSlotCount) ? Math.round(rawSlotCount) : 1) - 1);
     hydraBaseServersEl.innerHTML = safeRows
-      .map(
-        (row, index) => `
-          <div class="hydra-base-server-row" data-hydra-base-index="${index}">
-            <label>Provider
-              <select data-hydra-base-field="provider">
-                ${renderHydraProviderOptions(row.provider)}
-              </select>
-            </label>
-            <label data-hydra-provider-field="openai_compatible">Host / IP
-              <input type="text" data-hydra-base-field="host" value="${escapeHtml(row.host)}" />
-            </label>
-            <label data-hydra-provider-field="openai_compatible">Port
-              <input type="number" min="1" max="65535" data-hydra-base-field="port" value="${escapeHtml(row.port)}" />
-            </label>
-            <label><span data-hydra-model-label>Model</span>
-              <input type="text" data-hydra-base-field="model" value="${escapeHtml(row.model)}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(row.provider))}" />
-            </label>
-            <label data-hydra-provider-field="openai_compatible">API Key (optional)
-              <input type="password" autocomplete="new-password" data-hydra-base-field="api_key" value="${escapeHtml(row.api_key)}" />
-            </label>
-            <div class="hydra-base-server-actions">
-              <button type="button" class="inline-btn danger" data-hydra-base-remove="${index}">Remove</button>
-            </div>
-          </div>
-        `
-      )
+      .map((row, index) => renderHydraAdditionalBaseRow(row, index, String(maxSlot)))
       .join("");
     syncHydraAdditionalBaseRowsProviders();
   };
@@ -21055,6 +21785,10 @@ async function loadSettingsView() {
   hydraBaseProviderEl?.addEventListener("change", () => {
     syncHydraPrimaryProviderFields();
     syncVisionModeFields();
+  });
+  [hydraBaseHostEl, hydraBasePortEl, hydraBaseApiKeyEl].forEach((fieldEl) => {
+    fieldEl?.addEventListener("change", () => syncHydraPrimaryModelControl(hydraBaseProviderEl?.value || ""));
+    fieldEl?.addEventListener("blur", () => syncHydraPrimaryModelControl(hydraBaseProviderEl?.value || ""));
   });
   document.getElementById("set_spud_link_mode")?.addEventListener("change", (event) => {
     const mode = String(event.currentTarget?.value || "").trim().toLowerCase();
@@ -21075,6 +21809,11 @@ async function loadSettingsView() {
     renderHydraContextEstimateCards();
     syncVisionLlamaContextControl();
     syncLlamaChatTemplateTools();
+  });
+  hydraBaseModelEl?.addEventListener("input", () => {
+    if (isHydraRemoteLlamaProvider(hydraBaseProviderEl?.value || "") && hydraBaseModelSelectEl) {
+      hydraBaseModelSelectEl.value = "";
+    }
   });
   llamaChatTemplateEditEl?.addEventListener("click", () => {
     const provider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
@@ -21099,15 +21838,53 @@ async function loadSettingsView() {
   void refreshHydraContextEstimateCards();
   hydraBaseServerAddEl?.addEventListener("click", () => {
     hydraAdditionalBaseRowsState = readHydraAdditionalBaseRows();
-    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ provider: "openai_compatible", host: "", port: "", model: "", api_key: "" }));
+    hydraAdditionalBaseRowsState.push(normalizeHydraBaseRowInput({ provider: "openai_compatible", host: "", port: "", model: "", api_key: "", llama_cpp_slot: "" }));
     renderHydraAdditionalBaseRows(hydraAdditionalBaseRowsState);
   });
   hydraBaseServersEl?.addEventListener("change", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    if (!target || target.getAttribute("data-hydra-base-field") !== "provider") {
+    if (!target) {
       return;
     }
-    syncHydraAdditionalBaseRowProvider(target.closest(".hydra-base-server-row"));
+    const field = target.getAttribute("data-hydra-base-field");
+    const rowEl = target.closest(".hydra-base-server-row");
+    if (field === "provider") {
+      syncHydraAdditionalBaseRowProvider(rowEl);
+      const provider = normalizeHydraBaseProvider(target.value || "");
+      if (isHydraLocalProvider(provider)) {
+        void refreshLocalLlmModels({ provider });
+      }
+      return;
+    }
+    if (["host", "port", "api_key"].includes(field)) {
+      syncHydraAdditionalBaseRowProvider(rowEl);
+      return;
+    }
+    if (field === "model_select") {
+      const modelInputEl = rowEl?.querySelector('[data-hydra-base-field="model"]');
+      if (modelInputEl) {
+        modelInputEl.value = String(target.value || "").trim();
+      }
+      return;
+    }
+    if (field === "llama_cpp_slot") {
+      target.value = normalizeLlamaCppSlotValue(target.value);
+    }
+  });
+  hydraBaseServersEl?.addEventListener("input", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.getAttribute("data-hydra-base-field") !== "model") {
+      return;
+    }
+    const rowEl = target.closest(".hydra-base-server-row");
+    const providerEl = rowEl?.querySelector('[data-hydra-base-field="provider"]');
+    if (!isHydraRemoteLlamaProvider(providerEl?.value || "")) {
+      return;
+    }
+    const modelSelectEl = rowEl?.querySelector('[data-hydra-base-field="model_select"]');
+    if (modelSelectEl) {
+      modelSelectEl.value = "";
+    }
   });
   hydraBaseServersEl?.addEventListener("click", (event) => {
     const button = event.target instanceof Element ? event.target.closest("[data-hydra-base-remove]") : null;
@@ -21716,6 +22493,7 @@ async function loadSettingsView() {
       renderLocalModelManager();
       syncHydraPrimaryProviderFields();
       hydraRouteControls.forEach((control) => syncHydraRouteControl(control));
+      syncSpudexLlmModeFields();
       populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       if (localModelManagerStatusEl) {
         localModelManagerStatusEl.textContent = `${modelId} deleted.`;
@@ -23924,12 +24702,7 @@ async function loadSettingsView() {
       .filter(Boolean)
   );
   const readLlamaCppSlotValue = (element) => {
-    const raw = String(element?.value || "").trim();
-    if (!raw) {
-      return "";
-    }
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed >= 0 ? String(Math.round(parsed)) : "";
+    return normalizeLlamaCppSlotValue(element?.value);
   };
   const readBaseModelSettingsPayload = () => {
     const baseProvider = normalizeHydraBaseProvider(document.getElementById("set_hydra_llm_provider")?.value || "");
@@ -23973,7 +24746,14 @@ async function loadSettingsView() {
     }
     const additionalBaseRows = readHydraAdditionalBaseRows();
     const hydraBaseServersPayload = [
-      normalizeHydraBaseRowInput({ provider: baseProvider, host: baseHost, port: basePort, model: baseModel, api_key: baseApiKey }),
+      normalizeHydraBaseRowInput({
+        provider: baseProvider,
+        host: baseHost,
+        port: basePort,
+        model: baseModel,
+        api_key: baseApiKey,
+        llama_cpp_slot: llamaCppBaseSlot,
+      }),
     ];
     additionalBaseRows.forEach((row) => hydraBaseServersPayload.push(normalizeHydraBaseRowInput(row)));
     return {
@@ -24015,6 +24795,17 @@ async function loadSettingsView() {
     };
   };
   const readSpudexModelSettingsPayload = () => {
+    const mode = normalizeSpudexLlmMode(document.getElementById("set_spudex_llm_mode")?.value || "");
+    if (mode === "base") {
+      return {
+        loadTargets: [],
+        payload: {
+          spudex_llm_provider: "",
+          spudex_llm_host: "",
+          spudex_llm_model: "",
+        },
+      };
+    }
     const provider = normalizeHydraBaseProvider(document.getElementById("set_spudex_llm_provider")?.value || "");
     const model = getHydraRouteModelValue(spudexRouteControl);
     return {
@@ -25068,31 +25859,7 @@ async function loadSettingsView() {
     }
   });
 
-  document.querySelectorAll("[data-spud-link-revoke-node]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const nodeId = String(button.getAttribute("data-spud-link-revoke-node") || "").trim();
-      const row = button.closest(".spud-link-node-row");
-      const nodeName = String(row?.querySelector(".spud-link-node-main strong")?.textContent || "this linked Spud").trim();
-      if (!nodeId) return;
-      if (!window.confirm(`Revoke ${nodeName}? This device will need to pair again before it can use Spud Link.`)) {
-        return;
-      }
-      button.disabled = true;
-      button.textContent = "Revoking...";
-      try {
-        await api("/api/spudlink/revoke-node", {
-          method: "POST",
-          body: JSON.stringify({ node_id: nodeId }),
-        });
-        showToast(`${nodeName} revoked.`);
-        await loadSettingsView();
-      } catch (error) {
-        button.disabled = false;
-        button.textContent = "Revoke";
-        showToast(`Revoke failed: ${error.message}`, "error", 4200);
-      }
-    });
-  });
+  bindSpudLinkRevokeActions(root);
 
   [
     "settings-save",

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -47,6 +48,8 @@ _URL_PATTERN = re.compile(r"https?://\S+")
 _BARE_URL_PATTERN = re.compile(r"(?<!\()(?<!\])\bhttps?://\S+\b")
 _WEBUI_CHAT_HISTORY_KEY = "webui:chat_history"
 _WEBUI_DEFAULT_MAX_STORE = 20
+_SPUD_LINK_NODES_KEY = "tater:spudlink:nodes:v1"
+_LITTLE_SPUD_PUSH_GATEWAY_URL = "https://push.taterassistant.com/little-spud/send"
 HOMEASSISTANT_DEFAULT_BASE_URL = "http://homeassistant.local:8123"
 
 
@@ -88,6 +91,190 @@ def _coerce_attachments(attachments: Any) -> List[Dict[str, Any]]:
         if isinstance(item, dict):
             out.append(dict(item))
     return out
+
+
+def _little_spud_text(value: Any, *, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[: max(1, int(limit or 500))]
+
+
+def _little_spud_push_identity(node: Dict[str, Any]) -> Dict[str, str]:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    user_name = _little_spud_text(metadata.get("user_name") or metadata.get("username") or metadata.get("user"), limit=80)
+    device_name = _little_spud_text(
+        metadata.get("device_name") or metadata.get("device") or node.get("name"),
+        limit=80,
+    )
+    scope = f"user:{user_name}:{device_name}" if user_name and device_name else ""
+    return {
+        "user_name": user_name,
+        "device_name": device_name,
+        "scope": scope,
+    }
+
+
+def _little_spud_push_identity_key(node: Dict[str, Any]) -> str:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    stable_keys = (
+        "app_instance_id",
+        "app_install_id",
+        "installation_id",
+        "install_id",
+        "client_id",
+        "client_device_id",
+        "device_uuid",
+        "device_id",
+    )
+    for key in stable_keys:
+        value = _little_spud_text(metadata.get(key) or node.get(key), limit=240).casefold()
+        if value:
+            return f"stable:{key}:{value}"
+
+    identity = _little_spud_push_identity(node)
+    scope = _little_spud_text(identity.get("scope"), limit=240).casefold()
+    if scope:
+        return f"scope:{scope}"
+    return ""
+
+
+def _little_spud_push_target_matches(targets: Dict[str, Any], node: Dict[str, Any]) -> bool:
+    target_map = targets if isinstance(targets, dict) else {}
+    wildcard_tokens = {"*", "all", "any", "broadcast"}
+    identity = _little_spud_push_identity(node)
+    node_id = _little_spud_text(node.get("id"), limit=120)
+    checks = (
+        ("node_id", node_id),
+        ("destination", node_id),
+        ("scope", identity.get("scope") or ""),
+        ("device_id", identity.get("device_name") or ""),
+        ("device_name", identity.get("device_name") or ""),
+        ("user", identity.get("user_name") or ""),
+        ("user_name", identity.get("user_name") or ""),
+    )
+    for key, expected in checks:
+        wanted = _little_spud_text(target_map.get(key), limit=240)
+        if not wanted:
+            continue
+        if wanted.lower() in wildcard_tokens:
+            return True
+        return bool(expected and wanted == expected)
+    return False
+
+
+def _little_spud_push_node_score(node: Dict[str, Any]) -> float:
+    push = node.get("push") if isinstance(node.get("push"), dict) else {}
+    score = 0.0
+    for value in (
+        push.get("updated_at"),
+        push.get("registered_at"),
+        node.get("last_seen_at"),
+        node.get("created_at"),
+    ):
+        try:
+            score = max(score, float(value or 0))
+        except Exception:
+            continue
+    return score
+
+
+def _little_spud_push_nodes_for_targets(targets: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        raw_nodes = redis_client.hgetall(_SPUD_LINK_NODES_KEY) or {}
+    except Exception:
+        logger.exception("[notify] failed loading Little Spud push registrations")
+        return []
+
+    by_push_device: Dict[str, Dict[str, Any]] = {}
+    for node_id, raw_value in raw_nodes.items():
+        try:
+            node = json.loads(str(raw_value or "{}"))
+        except Exception:
+            continue
+        if not isinstance(node, dict):
+            continue
+        role = str(node.get("role") or "").strip().lower()
+        if role != "little_spud":
+            continue
+        node["id"] = str(node.get("id") or node_id or "").strip()
+        push = node.get("push") if isinstance(node.get("push"), dict) else {}
+        if not _boolish(push.get("enabled"), default=False):
+            continue
+        provider = str(push.get("provider") or "").strip().lower()
+        if provider not in {"fcm", "firebase"}:
+            continue
+        push_device_id = str(push.get("push_device_id") or "").strip()
+        if not push_device_id or not str(push.get("push_secret") or "").strip():
+            continue
+        if _little_spud_push_target_matches(targets, node):
+            existing = by_push_device.get(push_device_id)
+            if existing is None or _little_spud_push_node_score(node) >= _little_spud_push_node_score(existing):
+                by_push_device[push_device_id] = node
+
+    by_identity: Dict[str, Dict[str, Any]] = {}
+    for node in by_push_device.values():
+        push = node.get("push") if isinstance(node.get("push"), dict) else {}
+        identity_key = _little_spud_push_identity_key(node) or f"push:{str(push.get('push_device_id') or '').strip()}"
+        existing = by_identity.get(identity_key)
+        if existing is None or _little_spud_push_node_score(node) >= _little_spud_push_node_score(existing):
+            by_identity[identity_key] = node
+    return list(by_identity.values())
+
+
+def _little_spud_push_body(item: Dict[str, Any]) -> Tuple[str, str]:
+    del item
+    return "Little Spud", "New Little Spud notification"
+
+
+def _little_spud_push_gateway_url(push: Dict[str, Any]) -> str:
+    configured = _little_spud_text(os.getenv("TATER_LITTLE_SPUD_PUSH_GATEWAY_URL"), limit=500)
+    if configured:
+        return configured
+    stored = _little_spud_text(push.get("gateway_url") or push.get("relay_url"), limit=500)
+    return stored or _LITTLE_SPUD_PUSH_GATEWAY_URL
+
+
+def _dispatch_little_spud_push(item: Dict[str, Any]) -> None:
+    targets = item.get("targets") if isinstance(item.get("targets"), dict) else {}
+    nodes = _little_spud_push_nodes_for_targets(targets)
+    if not nodes:
+        return
+    title, body = _little_spud_push_body(item)
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    event_id = _little_spud_text(item.get("id"), limit=120)
+    for node in nodes:
+        push = node.get("push") if isinstance(node.get("push"), dict) else {}
+        url = _little_spud_push_gateway_url(push)
+        if not url:
+            continue
+        payload = {
+            "push_device_id": str(push.get("push_device_id") or "").strip(),
+            "push_secret": str(push.get("push_secret") or "").strip(),
+            "event_id": event_id,
+            "title": title,
+            "body": body,
+            "content_mode": "generic",
+            "priority": str(meta.get("priority") or "normal"),
+            "platform": "little_spud",
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=5)
+            if response.status_code >= 400:
+                logger.warning("[notify] Little Spud push gateway failed (%s): %s", response.status_code, response.text[:300])
+        except Exception as exc:
+            logger.warning("[notify] Little Spud push gateway failed: %s", exc)
+
+
+def _schedule_little_spud_push(item: Dict[str, Any]) -> None:
+    payload = dict(item)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        thread = threading.Thread(target=_dispatch_little_spud_push, args=(payload,), daemon=True)
+        thread.start()
+        return
+    loop.create_task(run_background(_dispatch_little_spud_push, payload))
 
 
 def _coerce_webui_data_b64(value: Any) -> str:
@@ -324,6 +511,8 @@ def _enqueue_queue_notification(
         return "Cannot queue: missing destination queue"
 
     redis_client.rpush(key, json.dumps(item))
+    if platform == "little_spud":
+        _schedule_little_spud_push(item)
     return f"Queued notification for {platform}"
 
 

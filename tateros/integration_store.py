@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import hashlib
 import importlib
 import json
@@ -77,6 +78,8 @@ KNOWN_INTEGRATION_REDIS_KEYS = {
         "strings": ["tater:web_search:serper_api_key"],
     },
 }
+
+_INTEGRATION_MODULE_SIGNATURES = {}
 
 
 def _redis_text(value) -> str:
@@ -203,6 +206,48 @@ def _integration_file_paths(integration_id: str) -> list[str]:
             seen.add(token)
             out.append(path)
     return out
+
+
+def _integration_module_name(integration_id: str) -> str:
+    return f"integrations.{_normalize_integration_id(integration_id)}"
+
+
+def _integration_file_signature(integration_id: str) -> tuple[str, int, int] | None:
+    for path in _integration_file_paths(integration_id):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        return (os.path.abspath(path), int(stat.st_mtime_ns), int(stat.st_size))
+    return None
+
+
+def _clear_integration_module_cache(integration_id: str) -> None:
+    normalized_id = _normalize_integration_id(integration_id)
+    if not normalized_id:
+        return
+    module_name = _integration_module_name(normalized_id)
+    sys.modules.pop(module_name, None)
+    _INTEGRATION_MODULE_SIGNATURES.pop(module_name, None)
+    package = sys.modules.get("integrations")
+    if package is not None and hasattr(package, normalized_id):
+        with contextlib.suppress(Exception):
+            delattr(package, normalized_id)
+
+
+def _import_integration_module(integration_id: str):
+    normalized_id = _normalize_integration_id(integration_id)
+    module_name = _integration_module_name(normalized_id)
+    signature = _integration_file_signature(normalized_id)
+    cached = sys.modules.get(module_name)
+    if cached is not None and _INTEGRATION_MODULE_SIGNATURES.get(module_name) == signature:
+        return cached
+    if cached is not None:
+        _clear_integration_module_cache(normalized_id)
+    importlib.invalidate_caches()
+    module = importlib.import_module(module_name)
+    _INTEGRATION_MODULE_SIGNATURES[module_name] = _integration_file_signature(normalized_id)
+    return module
 
 
 def _boolish(value, default: bool = False) -> bool:
@@ -515,6 +560,7 @@ def install_integration_from_shop_item(item: dict, manifest_url: str | None = No
             file_obj.write(text)
 
         importlib.invalidate_caches()
+        _clear_integration_module_cache(integration_id)
         return True, f"Installed {integration_id}"
     except Exception as exc:
         return False, f"Install failed: {exc}"
@@ -669,8 +715,7 @@ def integration_module(
         return None
     ensure_integration_import_context()
     try:
-        importlib.invalidate_caches()
-        return importlib.import_module(f"integrations.{normalized_id}")
+        return _import_integration_module(normalized_id)
     except Exception as exc:
         logger.warning("[integrations] failed to import %s: %s", normalized_id, exc)
         return None

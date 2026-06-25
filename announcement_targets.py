@@ -43,6 +43,14 @@ def sonos_target_id(value: Any) -> str:
     return token
 
 
+def resolve_sonos_target(value: Any) -> Dict[str, Any]:
+    fn = _integration_function("sonos", "resolve_sonos_target")
+    if fn:
+        row = fn(value)
+        return dict(row) if isinstance(row, dict) else {}
+    return {}
+
+
 def list_unifi_cameras(*args, **kwargs):
     fn = _integration_function("unifi_protect", "list_unifi_cameras")
     return fn(*args, **kwargs) if fn else []
@@ -344,14 +352,20 @@ def fetch_homeassistant_media_player_target_options(
 
 
 def _sonos_speaker_label(row: Dict[str, Any], speaker_id: str) -> str:
-    name = _text(row.get("name")) or speaker_id
+    explicit = _text(row.get("label"))
+    if explicit:
+        return explicit if explicit.lower().startswith("sonos:") else f"Sonos: {explicit}"
+    name = _text(row.get("display_name")) or _text(row.get("name")) or speaker_id
     details = []
-    host = _text(row.get("host"))
+    try:
+        member_count = int(float(row.get("member_count") or 0))
+    except Exception:
+        member_count = 0
     model = _text(row.get("model"))
-    if model and model.lower() != name.lower():
+    if member_count > 1:
+        details.append(f"{member_count} speakers")
+    elif model and model.lower() != name.lower():
         details.append(model)
-    if host and host.lower() != name.lower():
-        details.append(host)
     suffix = " • ".join(part for part in details if part)
     return f"Sonos: {name} ({suffix})" if suffix else f"Sonos: {name}"
 
@@ -378,7 +392,17 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
         speaker_ref = sonos_target_id(value)
         if not speaker_ref:
             continue
-        rows.append({"value": value, "label": f"Sonos: {speaker_ref} (saved)"})
+        resolved = resolve_sonos_target(speaker_ref)
+        if resolved:
+            resolved_id = sonos_target_id(resolved.get("id") or resolved.get("udn") or resolved.get("root_url"))
+            resolved_value = f"{SONOS_TARGET_PREFIX}{resolved_id}" if resolved_id else ""
+            label = _sonos_speaker_label(resolved, resolved_id or speaker_ref)
+            if resolved_value == value:
+                rows.append({"value": value, "label": f"{label} (saved)"})
+            else:
+                rows.append({"value": value, "label": f"{label} (saved paired member)"})
+        else:
+            rows.append({"value": value, "label": f"Sonos: {speaker_ref} (saved)"})
         seen.add(value)
 
     rows.sort(key=lambda row: _text(row.get("label")).lower())
