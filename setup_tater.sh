@@ -499,7 +499,7 @@ install_nvidia() {
   install_llama_cpp_native nvidia
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
-  "${venv_python}" -m pip install onnxruntime-gpu
+  "${venv_python}" -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27"
   rm -f "${tmp_req}"
   trap - EXIT
 }
