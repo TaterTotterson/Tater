@@ -3957,7 +3957,10 @@ def _normalize_hydra_base_server_rows(rows: Any, *, llama_cpp_slot_count: Option
         if parsed < 0 or parsed >= resolved_slot_count:
             raise HTTPException(
                 status_code=400,
-                detail=f"hydra_base_servers[{idx}].llama_cpp_slot must be blank or between 0 and {resolved_slot_count - 1}.",
+                detail=(
+                    f"hydra_base_servers[{idx}].llama_cpp_slot must be blank or between 0 and {resolved_slot_count - 1}. "
+                    "Increase hydra_llama_cpp_slot_count if your llama.cpp server exposes more slots."
+                ),
             )
         return str(parsed)
 
@@ -17818,7 +17821,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         if parsed < 0 or parsed >= slot_count:
             raise HTTPException(
                 status_code=400,
-                detail=f"{payload_key} must be blank or between 0 and {slot_count - 1}.",
+                detail=(
+                    f"{payload_key} must be blank or between 0 and {slot_count - 1}. "
+                    "Increase hydra_llama_cpp_slot_count if your llama.cpp server exposes more slots."
+                ),
             )
         return str(int(parsed))
 

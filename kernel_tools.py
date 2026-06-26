@@ -29,8 +29,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from helpers import (
+    HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     describe_image_with_local_llm,
+    finish_active_vision_call,
+    get_llm_client_from_env,
+    register_active_vision_call,
     redis_blob_client,
     redis_client,
     resolve_hydra_base_servers,
@@ -2633,17 +2637,10 @@ def _image_describe_call_openai_vision_api(
         return None, None, "Vision settings are incomplete. Configure API base and model in Settings."
 
     url = f"{api_base}/v1/chat/completions"
+    messages = _image_describe_vision_messages(image_bytes=image_bytes, filename=filename, prompt=prompt)
     payload = {
         "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _as_text(prompt).strip() or VISION_DEFAULT_PROMPT},
-                    {"type": "image_url", "image_url": {"url": _image_describe_to_data_url(image_bytes, filename)}},
-                ],
-            }
-        ],
+        "messages": messages,
         "temperature": 0.2,
     }
 
@@ -2691,6 +2688,23 @@ def _image_describe_call_openai_vision_api(
     return description, model, None
 
 
+def _image_describe_vision_messages(
+    *,
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _as_text(prompt).strip() or VISION_DEFAULT_PROMPT},
+                {"type": "image_url", "image_url": {"url": _image_describe_to_data_url(image_bytes, filename)}},
+            ],
+        }
+    ]
+
+
 def _image_describe_call_local_vision(
     *,
     provider: str,
@@ -2711,6 +2725,59 @@ def _image_describe_call_local_vision(
     except Exception as exc:
         return None, model, f"Local vision request failed: {exc}"
     return _as_text(result.get("description")).strip(), _as_text(result.get("model") or model).strip(), None
+
+
+def _image_describe_call_remote_llama_cpp_vision(
+    *,
+    base_row: Dict[str, Any],
+    image_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    endpoint = _as_text(base_row.get("endpoint")).strip().rstrip("/")
+    model = _as_text(base_row.get("model")).strip()
+    api_key = _as_text(base_row.get("api_key")).strip()
+    if not endpoint or not model:
+        return None, model, "Remote llama.cpp base settings are incomplete."
+
+    call_id = ""
+    response_model = model
+    call_error: Optional[str] = None
+    try:
+        call_id = register_active_vision_call(
+            api_base=endpoint,
+            model=model,
+            source="llama_cpp_remote_vision",
+        )
+        client = get_llm_client_from_env(
+            provider=HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
+            host=endpoint,
+            model=model,
+            api_key=api_key,
+            vision=True,
+        )
+        chat_sync = getattr(client, "_chat_sync", None)
+        if not callable(chat_sync):
+            call_error = "Remote llama.cpp vision client is unavailable."
+            return None, model, "Remote llama.cpp vision client is unavailable."
+        result = chat_sync(
+            _image_describe_vision_messages(image_bytes=image_bytes, filename=filename, prompt=prompt),
+            timeout=90.0,
+            max_tokens=768,
+            temperature=0.2,
+        )
+        response_model = _as_text((result or {}).get("model") or model).strip() or model
+        content = _as_text(((result or {}).get("message") or {}).get("content")).strip()
+        if not content:
+            call_error = "Remote llama.cpp vision model returned an empty description."
+            return None, response_model, "Remote llama.cpp vision model returned an empty description."
+        return content, response_model, None
+    except Exception as exc:
+        call_error = str(exc) or exc.__class__.__name__
+        return None, model, f"Remote llama.cpp vision request failed: {call_error}"
+    finally:
+        if call_id:
+            finish_active_vision_call(call_id, error=call_error, response_model=response_model)
 
 
 def _image_describe_call_vision_api(
@@ -2758,8 +2825,19 @@ def _image_describe_call_vision_api(
                 return description, used_model, None
             if mode == "base":
                 return None, base_model, local_error or "Base model is not vision-capable."
+        elif base_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE and base_model:
+            description, used_model, remote_error = _image_describe_call_remote_llama_cpp_vision(
+                base_row=base_row,
+                image_bytes=image_bytes,
+                filename=filename,
+                prompt=prompt,
+            )
+            if description and not remote_error:
+                return description, used_model, None
+            if mode == "base":
+                return None, base_model, remote_error or "Remote llama.cpp base model is not vision-capable."
         elif mode == "base":
-            return None, base_model or model, "Base model is not a local vision-capable provider."
+            return None, base_model or model, "Base model is not a vision-capable provider."
 
     return _image_describe_call_openai_vision_api(
         image_bytes=image_bytes,
