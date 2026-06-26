@@ -19095,11 +19095,11 @@ async function loadSettingsView() {
                   <div id="hydra-llama-context-hint" class="small hydra-context-hint"></div>
                   <div id="hydra-llama-context-estimate" class="hydra-context-estimate" data-hydra-context-estimate="llama_cpp"></div>
                 </label>
-                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Managed Slots
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp llama_cpp_remote">Slot Count
                   <input id="set_hydra_llama_cpp_slot_count" type="number" min="1" max="32" step="1" value="${escapeHtml(
                     settings.hydra_llama_cpp_slot_count || "1"
                   )}" />
-                  <div class="small hydra-context-hint">Number of llama.cpp server slots Tater starts for each loaded GGUF.</div>
+                  <div class="small hydra-context-hint">For local llama.cpp, Tater starts this many slots. For remote llama.cpp, match the remote server slot count.</div>
                 </label>
                 <label class="hydra-context-field" data-hydra-provider-field="llama_cpp llama_cpp_remote">Base Slot
                   <input id="set_hydra_llama_cpp_base_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
@@ -19308,7 +19308,7 @@ async function loadSettingsView() {
                   </select>
                 </label>
                 <div id="vision-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-                  Auto reuses the loaded Base model when it can process images, then falls back to the dedicated/API vision settings.
+                  Auto reuses the Base model when it can process images, including llama.cpp Remote servers, then falls back to the dedicated/API vision settings.
                 </div>
                 <label id="vision-llama-context-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Vision Context
                   <div class="hydra-context-control">
@@ -21574,18 +21574,21 @@ async function loadSettingsView() {
   const syncVisionLlamaContextControl = (sourceEl = null) => {
     const mode = normalizeVisionMode(visionModeEl?.value || "");
     const dedicatedLlama = mode === "dedicated" && normalizeHydraBaseProvider(visionProviderEl?.value || "") === "llama_cpp";
-    const baseLlama = (mode === "auto" || mode === "base") && normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "") === "llama_cpp";
-    const show = dedicatedLlama || baseLlama;
+    const baseProvider = normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "");
+    const baseLocalLlama = (mode === "auto" || mode === "base") && baseProvider === "llama_cpp";
+    const baseRemoteLlama = (mode === "auto" || mode === "base") && baseProvider === "llama_cpp_remote";
+    const showContext = dedicatedLlama || baseLocalLlama;
+    const showSlot = showContext || baseRemoteLlama;
     if (visionLlamaContextWrapEl) {
-      visionLlamaContextWrapEl.style.display = show ? "" : "none";
+      visionLlamaContextWrapEl.style.display = showContext ? "" : "none";
       visionLlamaContextWrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
-        fieldEl.disabled = !show;
+        fieldEl.disabled = !showContext;
       });
     }
     if (visionLlamaSlotWrapEl) {
-      visionLlamaSlotWrapEl.style.display = show ? "" : "none";
+      visionLlamaSlotWrapEl.style.display = showSlot ? "" : "none";
       visionLlamaSlotWrapEl.querySelectorAll("input, select, textarea").forEach((fieldEl) => {
-        fieldEl.disabled = !show;
+        fieldEl.disabled = !showSlot;
       });
     }
     if (!visionLlamaContextRangeEl || !visionLlamaContextNumberEl) {
@@ -21610,7 +21613,7 @@ async function loadSettingsView() {
       const cap = detectedMax > 0
         ? `Max ${contextTokenLabel(max)} from ${row?.context_source === "gguf" ? "GGUF metadata" : "model config"}.`
         : `Model max unknown; slider uses a safe ${contextTokenLabel(max)} cap.`;
-      visionLlamaContextHintEl.textContent = show
+      visionLlamaContextHintEl.textContent = showContext
         ? `${source}: ${contextTokenLabel(value)} tokens. ${cap} Text chat keeps its own context length.`
         : "Used only for llama.cpp image calls. Text chat keeps its own context length.";
     }
