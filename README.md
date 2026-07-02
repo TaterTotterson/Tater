@@ -13,7 +13,7 @@
 
 ## Little Spud Companion App
 
-Little Spud is the App Store companion app for Tater. It connects to a paired Tater Spud Hub so you can chat with Tater from your Apple devices and use the companion experience alongside your local Tater setup.
+Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your Apple devices.
 
 <p>
   <a href="https://apps.apple.com/app/little-spud/id6781400718">
