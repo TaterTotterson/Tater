@@ -159,7 +159,8 @@ def _little_spud_push_target_matches(targets: Dict[str, Any], node: Dict[str, An
             continue
         if wanted.lower() in wildcard_tokens:
             return True
-        return bool(expected and wanted == expected)
+        if expected and wanted == expected:
+            return True
     return False
 
 

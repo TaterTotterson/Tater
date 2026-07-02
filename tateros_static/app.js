@@ -75,6 +75,7 @@ const state = {
   sessionId: safeStorageGet("tater_tateros_session_id", "") || createSessionId(),
   settingsTab: safeStorageGet("tater_tateros_settings_tab", "") || "general",
   integrationSubtab: safeStorageGet("tater_tateros_integration_tab", "") || "manager",
+  integrationDeviceCategory: safeStorageGet("tater_tateros_integration_device_category", "") || "light",
   dashboardPayload: null,
   dashboardShowStatusTiles: String(safeStorageGet("tater_dashboard_show_status_tiles", "true")).trim().toLowerCase() !== "false",
   dashboardShowMetrics: String(safeStorageGet("tater_dashboard_show_metrics", "true")).trim().toLowerCase() !== "false",
@@ -2139,7 +2140,7 @@ function setPreferredSettingsTab(tabKey) {
 
 function setPreferredIntegrationTab(tabKey) {
   const token = String(tabKey || "").trim().toLowerCase();
-  const normalized = ["manager", "devices", "runtime"].includes(token) ? token : "manager";
+  const normalized = ["manager", "devices", "rooms", "runtime"].includes(token) ? token : "manager";
   state.integrationSubtab = normalized;
   safeStorageSet("tater_tateros_integration_tab", normalized);
   return normalized;
@@ -2445,41 +2446,258 @@ function renderSettingsIntegrationRuntimeSummary(runtime) {
   `;
 }
 
-function renderSettingsIntegrationRuntimeStates(payload) {
-  const states = Array.isArray(payload?.states) ? payload.states : [];
-  if (!states.length) {
-    return `<div class="small">No live device states have been seen yet.</div>`;
+const INTEGRATION_RUNTIME_RECENT_SECONDS = 60 * 60;
+const INTEGRATION_RUNTIME_CHANGE_LIMIT = 32;
+const INTEGRATION_RUNTIME_INTERNAL_TYPES = new Set([
+  "behavior_instance",
+  "behavior_script",
+  "bridge",
+  "bridge_home",
+  "device_power",
+  "device_software_update",
+  "entertainment",
+  "homekit",
+  "motion_area_candidate",
+  "poll",
+  "poll_snapshot",
+  "scene",
+  "zigbee_connectivity",
+]);
+const INTEGRATION_RUNTIME_META_TYPES = new Set(["event", "poll", "poll_snapshot", "snapshot", "state_changed", "update"]);
+
+function integrationRuntimeFirstText(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) {
+      return text;
+    }
   }
+  return "";
+}
+
+function integrationRuntimeNestedPayload(payload = {}) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  for (const key of ["device", "entity", "sensor", "thermostat", "camera", "light", "resource", "client"]) {
+    const value = source[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value;
+    }
+  }
+  return {};
+}
+
+function integrationRuntimeIdentifier(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const nested = integrationRuntimeNestedPayload(payload);
+  return integrationRuntimeFirstText(
+    payload.entity_id,
+    payload.ref,
+    payload.device_ref,
+    payload.resource_ref,
+    payload.id,
+    payload.device_id,
+    nested.entity_id,
+    nested.ref,
+    nested.device_ref,
+    nested.resource_ref,
+    nested.id,
+    nested.device_id,
+    row.id,
+    row.key
+  );
+}
+
+function integrationRuntimeHumanizeToken(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text
+    .replace(/^[a-z0-9_]+:/i, "")
+    .replace(/[._:-]+/g, " ")
+    .replace(/\b[a-f0-9]{8,}\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function integrationRuntimeResourceType(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const nested = integrationRuntimeNestedPayload(payload);
+  const explicit = integrationRuntimeFirstText(
+    payload.resource_type,
+    payload.device_type,
+    payload.entity_type,
+    payload.category,
+    payload.capability,
+    payload.type,
+    nested.resource_type,
+    nested.device_type,
+    nested.entity_type,
+    nested.category,
+    nested.capability,
+    nested.type
+  ).toLowerCase();
+  if (explicit && !INTEGRATION_RUNTIME_META_TYPES.has(explicit)) {
+    return explicit;
+  }
+  const id = integrationRuntimeIdentifier(row);
+  const first = String(id || "").split(":")[0].trim().toLowerCase();
+  return first && first !== String(row?.provider || "").trim().toLowerCase() ? first : "";
+}
+
+function integrationRuntimeIsInternalChange(row = {}) {
+  const kind = String(row?.kind || row?.type || "").trim().toLowerCase();
+  const provider = String(row?.provider || "").trim().toLowerCase();
+  const id = integrationRuntimeIdentifier(row).toLowerCase();
+  const resourceType = integrationRuntimeResourceType(row).toLowerCase();
+  const firstIdPart = String(id || "").split(":")[0].trim().toLowerCase();
+  if (kind.includes("snapshot") || kind === "heartbeat" || kind === "runtime_status") {
+    return true;
+  }
+  if (INTEGRATION_RUNTIME_INTERNAL_TYPES.has(resourceType) || INTEGRATION_RUNTIME_INTERNAL_TYPES.has(firstIdPart)) {
+    return true;
+  }
+  if (provider === "hue" && (resourceType === "device" || firstIdPart === "device")) {
+    return true;
+  }
+  return ["behavior_instance:", "behavior_script:", "bridge_home:", "zigbee_connectivity:"].some((needle) => id.includes(needle));
+}
+
+function integrationRuntimeChangeName(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const nested = integrationRuntimeNestedPayload(payload);
+  return (
+    integrationRuntimeFirstText(
+      payload.name,
+      payload.display_name,
+      payload.friendly_name,
+      payload.device_name,
+      payload.entity_name,
+      payload.label,
+      nested.name,
+      nested.display_name,
+      nested.friendly_name,
+      nested.device_name,
+      nested.entity_name,
+      nested.label
+    ) ||
+    integrationRuntimeHumanizeToken(integrationRuntimeIdentifier(row)) ||
+    "Device"
+  );
+}
+
+function integrationRuntimeChangeStateText(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const nested = integrationRuntimeNestedPayload(payload);
+  const state = integrationRuntimeFirstText(
+    payload.state,
+    payload.value,
+    payload.status,
+    payload.current_state,
+    nested.state,
+    nested.value,
+    nested.status,
+    nested.current_state
+  );
+  const unit = integrationRuntimeFirstText(payload.unit, payload.unit_of_measurement, nested.unit, nested.unit_of_measurement);
+  if (state) {
+    return unit && !state.includes(unit) ? `${state} ${unit}` : state;
+  }
+  const tempF = integrationRuntimeFirstText(payload.current_temperature_f, nested.current_temperature_f);
+  if (tempF) {
+    return `${tempF} F`;
+  }
+  const tempC = integrationRuntimeFirstText(payload.current_temperature_c, nested.current_temperature_c);
+  if (tempC) {
+    return `${tempC} C`;
+  }
+  const online = payload.online ?? nested.online;
+  if (typeof online === "boolean") {
+    return online ? "online" : "offline";
+  }
+  return integrationRuntimeHumanizeToken(row?.kind || row?.type || "changed") || "changed";
+}
+
+function integrationRuntimeChangeMeta(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const nested = integrationRuntimeNestedPayload(payload);
+  const typeText = integrationRuntimeHumanizeToken(integrationRuntimeResourceType(row));
+  const roomText = integrationRuntimeFirstText(payload.room, payload.area, payload.room_name, nested.room, nested.area, nested.room_name);
+  const idText = integrationRuntimeIdentifier(row);
+  return [typeText, roomText, idText].filter(Boolean).join(" / ");
+}
+
+function integrationRuntimeRecentChangeRows(eventsPayload = {}) {
+  const now = Date.now() / 1000;
+  const events = Array.isArray(eventsPayload?.events) ? eventsPayload.events : [];
+  const normalized = events
+    .filter((event) => event && typeof event === "object")
+    .map((event) => ({
+      provider: String(event.provider || "").trim(),
+      kind: String(event.kind || event.type || "state_changed").trim(),
+      ts: Number(event.ts || event.updated_at || 0),
+      payload: event.payload && typeof event.payload === "object" ? event.payload : {},
+      seq: Number(event.seq || 0),
+    }))
+    .filter((event) => event.provider && event.ts > 0 && integrationRuntimeIdentifier(event));
+  const recent = normalized.filter((event) => now - event.ts <= INTEGRATION_RUNTIME_RECENT_SECONDS);
+  const visible = recent
+    .filter((event) => !integrationRuntimeIsInternalChange(event))
+    .sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0) || Number(b.seq || 0) - Number(a.seq || 0));
+  return {
+    rows: visible.slice(0, INTEGRATION_RUNTIME_CHANGE_LIMIT),
+    recent_count: recent.length,
+    hidden_internal_count: recent.length - visible.length,
+    hidden_old_count: normalized.length - recent.length,
+    total_count: normalized.length,
+    limit: INTEGRATION_RUNTIME_CHANGE_LIMIT,
+  };
+}
+
+function renderIntegrationRuntimeChangeRow(row) {
+  const provider = integrationRuntimeNameFromId(row?.provider);
+  const name = integrationRuntimeChangeName(row);
+  const meta = integrationRuntimeChangeMeta(row);
+  const stateText = integrationRuntimeChangeStateText(row);
   return `
-    <div class="core-data-table-wrap">
-      <table class="core-data-table">
-        <thead>
-          <tr>
-            <th>Provider</th>
-            <th>Device / Sensor</th>
-            <th>State</th>
-            <th>Updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${states
-            .slice(0, 80)
-            .map((row) => {
-              const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
-              const provider = String(row?.provider || "").replace(/_/g, " ");
-              const stateText = String(payload.state ?? payload.event_type ?? payload.id ?? "").trim() || "-";
-              return `
-                <tr>
-                  <td>${escapeHtml(provider || "-")}</td>
-                  <td>${escapeHtml(String(row?.id || row?.key || "-"))}</td>
-                  <td>${escapeHtml(stateText)}</td>
-                  <td>${escapeHtml(integrationRuntimeTimeLabel(row?.updated_at))}</td>
-                </tr>
-              `;
-            })
-            .join("")}
-        </tbody>
-      </table>
+    <article class="integration-runtime-change-row">
+      <div class="integration-runtime-change-main">
+        <span class="integration-runtime-provider-pill">${escapeHtml(provider)}</span>
+        <strong>${escapeHtml(name)}</strong>
+        ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+      </div>
+      <span class="integration-runtime-state-pill">${escapeHtml(stateText)}</span>
+      <span class="integration-runtime-time">${escapeHtml(integrationRuntimeTimeLabel(row?.ts))}</span>
+    </article>
+  `;
+}
+
+function renderSettingsIntegrationRuntimeStates(statesPayload = {}, eventsPayload = {}) {
+  const changes = integrationRuntimeRecentChangeRows(eventsPayload);
+  const trackedStates = Number(statesPayload?.count || (Array.isArray(statesPayload?.states) ? statesPayload.states.length : 0));
+  const hiddenParts = [
+    changes.hidden_internal_count ? `${changes.hidden_internal_count} internal hidden` : "",
+    changes.hidden_old_count ? `${changes.hidden_old_count} older hidden` : "",
+  ].filter(Boolean);
+  return `
+    <div class="integration-runtime-activity">
+      <div class="integration-runtime-activity-head">
+        <div>
+          <div class="small core-inline-section-title">Recent Device Changes</div>
+          <div class="small">Device-level changes from the last hour. Internal integration records are hidden.</div>
+        </div>
+        <div class="integration-category-counts">
+          <span>${escapeHtml(String(changes.rows.length))} shown</span>
+          <span>${escapeHtml(String(trackedStates))} tracked</span>
+        </div>
+      </div>
+      ${
+        changes.rows.length
+          ? `<div class="integration-runtime-change-list">${changes.rows.map((row) => renderIntegrationRuntimeChangeRow(row)).join("")}</div>`
+          : `<div class="notice">No recent device changes in the last hour.</div>`
+      }
+      ${hiddenParts.length ? `<div class="small integration-runtime-hidden-note">${escapeHtml(hiddenParts.join(" / "))}</div>` : ""}
     </div>
   `;
 }
@@ -2489,8 +2707,8 @@ function renderSettingsIntegrationRuntime(settings) {
     <section class="core-inline-section" id="settings-integration-runtime">
       <div class="inline-row" style="justify-content: space-between; align-items: center;">
         <div>
-          <div class="small core-inline-section-title">Live Runtime</div>
-          <div class="small">Shared integration streams, pollers, and live device state.</div>
+          <div class="small core-inline-section-title">Activity</div>
+          <div class="small">Connection health and recent device changes from enabled integrations.</div>
         </div>
         <button type="button" id="settings-integration-runtime-refresh" class="action-btn">Refresh</button>
       </div>
@@ -2498,7 +2716,7 @@ function renderSettingsIntegrationRuntime(settings) {
         ${renderSettingsIntegrationRuntimeSummary(settings?.integration_runtime || {})}
       </div>
       <div id="settings-integration-runtime-states" style="margin-top: 10px;">
-        <div class="small">Loading live device states...</div>
+        <div class="small">Loading recent device changes...</div>
       </div>
     </section>
   `;
@@ -2538,141 +2756,545 @@ function integrationDeviceDetailsHtml(details) {
     .join("");
 }
 
-function renderSettingsIntegrationDeviceGroup(group) {
-  const devices = Array.isArray(group?.devices) ? group.devices : [];
-  const name = String(group?.name || group?.id || "Integration").trim();
-  const message = String(group?.error || group?.message || "").trim();
+function normalizeIntegrationDeviceRegistry(payload = {}) {
+  const registry = payload && typeof payload === "object" ? payload : {};
+  const roomMediaPlayerOptions = (Array.isArray(registry.room_media_player_options) ? registry.room_media_player_options : [])
+    .filter((option) => option && typeof option === "object")
+    .map((option) => ({
+      value: String(option.value || "").trim(),
+      label: String(option.label || option.value || "").trim(),
+    }))
+    .filter((option) => option.value);
+  const categories = (Array.isArray(registry.categories) ? registry.categories : [])
+    .filter((category) => category && typeof category === "object")
+    .map((category) => ({
+      ...category,
+      id: String(category.id || "").trim(),
+      name: String(category.name || category.id || "Category").trim(),
+      device_count: Number(category.device_count || 0),
+      room_count: Number(category.room_count || 0),
+      rooms: Array.isArray(category.rooms) ? category.rooms : [],
+      devices: Array.isArray(category.devices) ? category.devices : [],
+      integrations: Array.isArray(category.integrations) ? category.integrations : [],
+    }))
+    .filter((category) => category.id);
+  const devices = Array.isArray(registry.devices) ? registry.devices : [];
+  const rooms = Array.isArray(registry.rooms) ? registry.rooms : [];
+  return {
+    ...registry,
+    categories,
+    devices,
+    rooms,
+    room_media_player_options: roomMediaPlayerOptions,
+    total: Number(registry.total || devices.length || 0),
+    errors: Array.isArray(registry.errors) ? registry.errors : [],
+  };
+}
+
+function integrationDeviceCategoryRows(registry) {
+  return normalizeIntegrationDeviceRegistry(registry).categories.filter((category) => Number(category.device_count || 0) > 0);
+}
+
+function preferredIntegrationDeviceCategory(registry) {
+  const rows = integrationDeviceCategoryRows(registry);
+  const current = String(state.integrationDeviceCategory || "").trim();
+  if (current && rows.some((category) => category.id === current)) {
+    return current;
+  }
+  const first = rows[0]?.id || "";
+  if (first) {
+    state.integrationDeviceCategory = first;
+  }
+  return first;
+}
+
+function setPreferredIntegrationDeviceCategory(categoryId) {
+  const normalized = String(categoryId || "").trim();
+  state.integrationDeviceCategory = normalized;
+  safeStorageSet("tater_tateros_integration_device_category", normalized);
+  return normalized;
+}
+
+function renderIntegrationDeviceCategoryButton(category, activeId) {
+  const count = Number(category?.device_count || 0);
+  const roomCount = Number(category?.room_count || 0);
+  const active = String(category?.id || "") === String(activeId || "");
   return `
-    <section class="core-inline-section" data-integration-devices="${escapeHtml(String(group?.id || ""))}">
-      <div class="inline-row" style="justify-content: space-between; align-items: center;">
-        <div>
-          <div class="small core-inline-section-title">${escapeHtml(name)}</div>
-          ${message ? `<div class="small">${escapeHtml(message)}</div>` : ""}
-        </div>
-        <span class="small">${escapeHtml(String(devices.length))} device${devices.length === 1 ? "" : "s"}</span>
+    <button
+      type="button"
+      class="integration-category-btn${active ? " active" : ""}"
+      data-integration-device-category="${escapeHtml(String(category?.id || ""))}"
+    >
+      <span>${escapeHtml(String(category?.name || category?.id || "Category"))}</span>
+      <small>${escapeHtml(String(count))} device${count === 1 ? "" : "s"}${roomCount ? ` / ${roomCount} room${roomCount === 1 ? "" : "s"}` : ""}</small>
+    </button>
+  `;
+}
+
+function renderIntegrationDeviceTags(values, limit = 6) {
+  const tags = (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (!tags.length) {
+    return "";
+  }
+  const shown = tags.slice(0, limit);
+  const suffix = tags.length > limit ? `<span class="integration-device-tag muted">+${escapeHtml(String(tags.length - limit))}</span>` : "";
+  return `
+    <div class="integration-device-tags">
+      ${shown.map((tag) => `<span class="integration-device-tag">${escapeHtml(tag.replaceAll("_", " "))}</span>`).join("")}
+      ${suffix}
+    </div>
+  `;
+}
+
+function renderIntegrationDeviceRow(device) {
+  const row = device && typeof device === "object" ? device : {};
+  const name = String(row.name || row.id || "Device").trim();
+  const reportedName = String(row.reported_name || row.reported_device_name || "").trim();
+  const nameSource = String(row.device_name_source || "integration").trim();
+  const provider = String(row.integration_name || row.integration_id || "").trim();
+  const stateText = String(row.state || row.status || "").trim() || "unknown";
+  const typeText = String(row.type || "device").trim();
+  const idText = String(row.ref || row.id || "").trim();
+  const roomText = String(row.room || row.area || "Unassigned").trim() || "Unassigned";
+  const roomSource = String(row.room_source || "integration").trim();
+  const reportedRoom = String(row.reported_room || "").trim();
+  const roomLabel =
+    roomSource && roomSource !== "integration" && reportedRoom && reportedRoom !== roomText
+      ? `${roomText} from Tater`
+      : roomText;
+  const featureValues = [
+    ...(Array.isArray(row.features) ? row.features : []),
+    ...(Array.isArray(row.actions) ? row.actions : []),
+  ];
+  const capabilityValues = Array.isArray(row.capabilities) ? row.capabilities : [];
+  const nameMeta =
+    nameSource === "tater_override" && reportedName && reportedName !== name
+      ? `Tater name / reported ${reportedName}`
+      : "";
+  return `
+    <article class="integration-device-row">
+      <div class="integration-device-main">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml([provider, typeText, idText].filter(Boolean).join(" / "))}</span>
+        ${nameMeta ? `<small>${escapeHtml(nameMeta)}</small>` : ""}
       </div>
-      ${
-        devices.length
-          ? `<div class="core-data-table-wrap" style="margin-top: 10px;">
-              <table class="core-data-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Type</th>
-                    <th>Current</th>
-                    <th>Area</th>
-                    <th>Info</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${devices
-                    .map((device) => {
-                      const current = String(device?.state || device?.status || "").trim() || "-";
-                      return `
-                        <tr>
-                          <td>${escapeHtml(String(device?.name || device?.id || "Device"))}</td>
-                          <td>${escapeHtml(String(device?.type || "device"))}</td>
-                          <td>${escapeHtml(current)}</td>
-                          <td>${escapeHtml(String(device?.area || "-"))}</td>
-                          <td>${integrationDeviceDetailsHtml(device?.details)}</td>
-                        </tr>
-                      `;
-                    })
-                    .join("")}
-                </tbody>
-              </table>
-            </div>`
-          : `<div class="small" style="margin-top: 8px;">No devices returned from this integration.</div>`
-      }
+      <div class="integration-device-state">
+        <span>${escapeHtml(stateText)}</span>
+        <small>${escapeHtml(roomLabel)}</small>
+      </div>
+      ${renderIntegrationDeviceTags(featureValues.length ? featureValues : capabilityValues)}
+    </article>
+  `;
+}
+
+function renderIntegrationRoomGroup(room) {
+  const devices = Array.isArray(room?.devices) ? room.devices : [];
+  const name = String(room?.name || "Unassigned").trim() || "Unassigned";
+  return `
+    <section class="integration-room-group">
+      <div class="integration-room-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(String(devices.length))} device${devices.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="integration-device-list">
+        ${devices.length ? devices.map((device) => renderIntegrationDeviceRow(device)).join("") : `<div class="small">No devices in this room.</div>`}
+      </div>
     </section>
   `;
 }
 
-function renderSettingsIntegrationDevices(payload) {
-  const groups = Array.isArray(payload?.groups) ? payload.groups : [];
-  if (!groups.length) {
-    return renderNotice("No integrations are registered.");
+function renderIntegrationCategoryDetails(registryPayload, activeId) {
+  const registry = normalizeIntegrationDeviceRegistry(registryPayload);
+  const category = registry.categories.find((item) => item.id === activeId) || integrationDeviceCategoryRows(registry)[0] || null;
+  if (!category) {
+    return renderNotice("No devices are available from enabled integrations yet.");
   }
-  return groups.map((group) => renderSettingsIntegrationDeviceGroup(group)).join("");
+  const integrations = (Array.isArray(category.integrations) ? category.integrations : [])
+    .map((item) => `${String(item?.name || item?.id || "").trim()} (${Number(item?.device_count || 0)})`)
+    .filter(Boolean);
+  const rooms = Array.isArray(category.rooms) ? category.rooms : [];
+  return `
+    <div class="integration-category-detail">
+      <div class="integration-category-summary">
+        <div>
+          <div class="small core-inline-section-title">${escapeHtml(category.name)}</div>
+          <div class="small">${escapeHtml(String(category.description || "Devices grouped by room and integration."))}</div>
+        </div>
+        <div class="integration-category-counts">
+          <span>${escapeHtml(String(category.device_count || 0))} devices</span>
+          <span>${escapeHtml(String(category.room_count || rooms.length || 0))} rooms</span>
+        </div>
+      </div>
+      ${integrations.length ? `<div class="integration-provider-strip">${integrations.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>` : ""}
+      <div class="integration-room-list">
+        ${rooms.length ? rooms.map((room) => renderIntegrationRoomGroup(room)).join("") : `<div class="small">No rooms reported for this category.</div>`}
+      </div>
+    </div>
+  `;
 }
 
-function renderSettingsIntegrationDeviceTabs(integrations) {
-  const rows = (Array.isArray(integrations) ? integrations : [])
-    .map((integration) => ({
-      id: String(integration?.id || "").trim(),
-      name: String(integration?.name || integration?.id || "Integration").trim(),
-      badge: String(integration?.badge || "").trim(),
-    }))
-    .filter((integration) => integration.id);
+function renderSettingsIntegrationDevices(registryPayload) {
+  const registry = normalizeIntegrationDeviceRegistry(registryPayload);
+  const rows = integrationDeviceCategoryRows(registry);
+  const activeId = preferredIntegrationDeviceCategory(registry);
   if (!rows.length) {
-    return `<div class="small">No integrations are registered.</div>`;
+    return renderNotice("No devices are available from enabled integrations yet.");
   }
   return `
-    <div class="settings-subtabs settings-integration-device-tabs">
-      ${rows
-        .map(
-          (integration, index) => `
-            <button
-              type="button"
-              class="settings-subtab-btn${index === 0 ? " active" : ""}"
-              data-integration-device-tab="${escapeHtml(integration.id)}"
-            >
-              ${integration.badge ? `<span>${escapeHtml(integration.badge)}</span> ` : ""}${escapeHtml(integration.name || integration.id)}
-            </button>
-          `
-        )
+    <div class="integration-device-browser">
+      <aside class="integration-category-list" aria-label="Device categories">
+        ${rows.map((category) => renderIntegrationDeviceCategoryButton(category, activeId)).join("")}
+      </aside>
+      <div class="integration-category-content">
+        ${renderIntegrationCategoryDetails(registry, activeId)}
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsIntegrationDevicesShell(settings = {}) {
+  const registry = normalizeIntegrationDeviceRegistry(settings?.integration_device_registry || {});
+  const total = Number(registry.total || 0);
+  const categoryCount = integrationDeviceCategoryRows(registry).length;
+  const roomCount = Array.isArray(registry.rooms) ? registry.rooms.length : 0;
+  return `
+    <section class="core-inline-section" id="settings-integration-devices">
+      <div class="inline-row integration-device-toolbar">
+        <div>
+          <div class="small core-inline-section-title">Devices</div>
+          <div class="small">Current devices grouped by category, room, and provider.</div>
+        </div>
+        <div class="inline-row">
+          <span class="small" id="settings-integration-devices-counts">${escapeHtml(String(total))} devices / ${escapeHtml(String(categoryCount))} categories / ${escapeHtml(String(roomCount))} rooms</span>
+          <button type="button" id="settings-integration-devices-refresh" class="action-btn">Refresh</button>
+        </div>
+      </div>
+      <div id="settings-integration-devices-content" style="margin-top: 10px;">
+        ${total ? renderSettingsIntegrationDevices(registry) : `<div class="small">Open or refresh this tab to load device categories.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function integrationRoomRows(registryPayload) {
+  const registry = normalizeIntegrationDeviceRegistry(registryPayload || {});
+  const roomOverrides = registry.room_overrides && typeof registry.room_overrides === "object" ? registry.room_overrides : {};
+  const roomMediaPlayers = roomOverrides.room_media_players && typeof roomOverrides.room_media_players === "object" ? roomOverrides.room_media_players : {};
+  const preferredPlayerForRoom = (roomId, fallback = "") => {
+    const raw = roomMediaPlayers[String(roomId || "").trim()] || fallback;
+    if (raw && typeof raw === "object") {
+      return String(raw.target || "").trim();
+    }
+    return String(raw || "").trim();
+  };
+  const rows = (Array.isArray(registry.rooms) ? registry.rooms : [])
+    .filter((room) => room && typeof room === "object")
+    .map((room) => ({
+      ...room,
+      id: String(room.id || "unassigned").trim() || "unassigned",
+      name: String(room.name || room.id || "Unassigned").trim() || "Unassigned",
+      source: String(room.source || "integration").trim() || "integration",
+      device_count: Number(room.device_count || 0),
+      devices: Array.isArray(room.devices) ? room.devices : [],
+      categories: Array.isArray(room.categories) ? room.categories : [],
+      preferred_media_player: preferredPlayerForRoom(room.id, room.preferred_media_player),
+    }));
+  const existingIds = new Set(rows.map((room) => room.id));
+  (Array.isArray(roomOverrides.rooms) ? roomOverrides.rooms : []).forEach((room) => {
+    const id = String(room?.id || "").trim();
+    if (!id || existingIds.has(id)) {
+      return;
+    }
+    existingIds.add(id);
+    rows.push({
+      id,
+      name: String(room?.name || id).trim() || id,
+      source: "tater",
+      device_count: 0,
+      devices: [],
+      categories: [],
+      preferred_media_player: preferredPlayerForRoom(id),
+    });
+  });
+  rows.sort((a, b) => {
+    const aUnassigned = a.id === "unassigned" || a.name.toLowerCase() === "unassigned";
+    const bUnassigned = b.id === "unassigned" || b.name.toLowerCase() === "unassigned";
+    if (aUnassigned !== bUnassigned) {
+      return aUnassigned ? 1 : -1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  return rows;
+}
+
+function renderIntegrationRoomOptions(rooms, activeId) {
+  const rows = Array.isArray(rooms) ? rooms : [];
+  return rows
+    .map((room) => {
+      const id = String(room?.id || "unassigned").trim() || "unassigned";
+      const selected = id === String(activeId || "");
+      return `<option value="${escapeHtml(id)}"${selected ? " selected" : ""}>${escapeHtml(String(room?.name || id))}</option>`;
+    })
+    .join("");
+}
+
+function renderIntegrationRoomCategorySummary(room) {
+  const categories = Array.isArray(room?.categories) ? room.categories : [];
+  if (!categories.length) {
+    return "";
+  }
+  return `
+    <div class="integration-room-category-strip">
+      ${categories
+        .map((category) => {
+          const count = Number(category?.device_count || 0);
+          return `<span>${escapeHtml(String(category?.name || category?.id || "Device"))} ${escapeHtml(String(count))}</span>`;
+        })
         .join("")}
     </div>
   `;
 }
 
-function renderSettingsIntegrationDevicesShell(integrations = []) {
-  const rows = (Array.isArray(integrations) ? integrations : []).filter((integration) =>
-    String(integration?.id || "").trim()
-  );
-  const firstId = String(rows[0]?.id || "").trim();
+function renderIntegrationRoomMediaPlayerOptions(options, activeValue) {
+  const active = String(activeValue || "").trim();
+  const rows = Array.isArray(options) ? options : [];
+  const seen = new Set();
+  const rendered = rows
+    .map((option) => {
+      const value = String(option?.value || "").trim();
+      if (!value || seen.has(value)) {
+        return "";
+      }
+      seen.add(value);
+      const label = String(option?.label || value).trim();
+      return `<option value="${escapeHtml(value)}"${value === active ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .filter(Boolean)
+    .join("");
+  const savedOption = active && !seen.has(active)
+    ? `<option value="${escapeHtml(active)}" selected>${escapeHtml(active)} (saved)</option>`
+    : "";
+  return `<option value=""${active ? "" : " selected"}>Auto</option>${savedOption}${rendered}`;
+}
+
+function renderIntegrationRoomPreferredPlayer(room, options) {
+  const row = room && typeof room === "object" ? room : {};
+  const id = String(row.id || "unassigned").trim() || "unassigned";
+  const name = String(row.name || id || "Unassigned").trim() || "Unassigned";
+  const locked = id === "unassigned";
+  const preferredPlayer = String(row.preferred_media_player || "").trim();
   return `
-    <section class="core-inline-section" id="settings-integration-devices" data-active-device-integration="${escapeHtml(firstId)}">
-      <div class="inline-row" style="justify-content: space-between; align-items: center;">
-        <div>
-          <div class="small core-inline-section-title">Devices</div>
-          <div class="small">Current devices and entities by integration.</div>
-        </div>
-        <button type="button" id="settings-integration-devices-refresh" class="action-btn"${firstId ? "" : " disabled"}>Refresh</button>
+    <div class="integration-room-preferred-player">
+      <label>
+        <span>Preferred player</span>
+        <select
+          data-integration-room-media-player="${escapeHtml(id)}"
+          data-integration-room-media-player-name="${escapeHtml(name)}"
+          ${locked ? "disabled" : ""}
+        >
+          ${renderIntegrationRoomMediaPlayerOptions(options, preferredPlayer)}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
+function renderIntegrationRoomManagedDevice(device, rooms) {
+  const row = device && typeof device === "object" ? device : {};
+  const name = String(row.name || row.id || "Device").trim();
+  const reportedName = String(row.reported_name || row.reported_device_name || "").trim();
+  const nameSource = String(row.device_name_source || "integration").trim() || "integration";
+  const provider = String(row.integration_name || row.integration_id || "").trim();
+  const typeText = String(row.type || "device").trim();
+  const idText = String(row.ref || row.id || "").trim();
+  const integrationId = String(row.integration_id || "").trim();
+  const deviceId = String(row.id || row.ref || "").trim();
+  const roomId = String(row.room_id || "unassigned").trim() || "unassigned";
+  const reportedRoom = String(row.reported_room || row.room || "Unassigned").trim() || "Unassigned";
+  const roomSource = String(row.room_source || "integration").trim() || "integration";
+  const sourceLabel = roomSource === "device_override" ? "Tater" : roomSource === "room_alias" ? "Tater alias" : "Integration";
+  const roomMeta = `${sourceLabel} room${reportedRoom ? ` / reported ${reportedRoom}` : ""}`;
+  const nameMeta =
+    nameSource === "tater_override" && reportedName && reportedName !== name
+      ? `Tater name / reported ${reportedName}`
+      : "";
+  const details = [provider, typeText, idText].filter(Boolean).join(" / ");
+  const disabled = !integrationId || !deviceId;
+  return `
+    <article class="integration-room-device-row">
+      <div class="integration-device-main">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(details)}</span>
+        <small>${escapeHtml(roomMeta)}</small>
+        ${nameMeta ? `<small>${escapeHtml(nameMeta)}</small>` : ""}
       </div>
-      ${renderSettingsIntegrationDeviceTabs(rows)}
-      <div id="settings-integration-devices-content" style="margin-top: 10px;">
-        <div class="small">${firstId ? "Open or refresh this tab to load devices." : "No integrations are registered."}</div>
+      <div class="integration-room-device-controls">
+        <div class="integration-room-device-control-line">
+          <select
+            data-integration-room-select
+            data-integration-id="${escapeHtml(integrationId)}"
+            data-device-id="${escapeHtml(deviceId)}"
+            ${disabled ? "disabled" : ""}
+          >
+            ${renderIntegrationRoomOptions(rooms, roomId)}
+          </select>
+          <button
+            type="button"
+            class="action-btn"
+            data-integration-room-clear
+            data-integration-id="${escapeHtml(integrationId)}"
+            data-device-id="${escapeHtml(deviceId)}"
+            ${disabled || roomSource === "integration" ? "disabled" : ""}
+          >Use Integration</button>
+        </div>
+        <div class="integration-room-device-control-line integration-room-device-name-line">
+          <input
+            type="text"
+            value="${escapeHtml(name)}"
+            data-integration-device-name
+            data-integration-id="${escapeHtml(integrationId)}"
+            data-device-id="${escapeHtml(deviceId)}"
+            ${disabled ? "disabled" : ""}
+          />
+          <button
+            type="button"
+            class="action-btn"
+            data-integration-device-rename
+            data-integration-id="${escapeHtml(integrationId)}"
+            data-device-id="${escapeHtml(deviceId)}"
+            ${disabled ? "disabled" : ""}
+          >Rename</button>
+          <button
+            type="button"
+            class="action-btn"
+            data-integration-device-name-clear
+            data-integration-id="${escapeHtml(integrationId)}"
+            data-device-id="${escapeHtml(deviceId)}"
+            ${disabled || nameSource !== "tater_override" ? "disabled" : ""}
+          >Use Integration</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderIntegrationManagedRoom(room, rooms, mediaPlayerOptions) {
+  const row = room && typeof room === "object" ? room : {};
+  const id = String(row.id || "unassigned").trim() || "unassigned";
+  const name = String(row.name || id || "Unassigned").trim() || "Unassigned";
+  const devices = Array.isArray(row.devices) ? row.devices : [];
+  const locked = id === "unassigned";
+  return `
+    <section class="integration-master-room-card" data-integration-room-id="${escapeHtml(id)}">
+      <div class="integration-room-head integration-master-room-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(String(devices.length))} device${devices.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="integration-room-editor">
+        <input
+          type="text"
+          value="${escapeHtml(name)}"
+          data-integration-room-name="${escapeHtml(id)}"
+          ${locked ? "disabled" : ""}
+        />
+        <button
+          type="button"
+          class="action-btn"
+          data-integration-room-rename="${escapeHtml(id)}"
+          ${locked ? "disabled" : ""}
+        >Rename</button>
+      </div>
+      ${renderIntegrationRoomPreferredPlayer(row, mediaPlayerOptions)}
+      ${renderIntegrationRoomCategorySummary(row)}
+      <div class="integration-room-device-list">
+        ${devices.length ? devices.map((device) => renderIntegrationRoomManagedDevice(device, rooms)).join("") : `<div class="small">No devices assigned.</div>`}
       </div>
     </section>
   `;
 }
 
-function bindSettingsIntegrationDevices() {
+function renderSettingsIntegrationRooms(registryPayload) {
+  const registry = normalizeIntegrationDeviceRegistry(registryPayload || {});
+  const rooms = integrationRoomRows(registry);
+  const mediaPlayerOptions = Array.isArray(registry.room_media_player_options) ? registry.room_media_player_options : [];
+  const total = Number(registry.total || 0);
+  return `
+    <div class="integration-room-manager">
+      <div class="integration-room-create">
+        <input id="settings-integration-room-new-name" type="text" placeholder="New room name" autocomplete="off" />
+        <button type="button" id="settings-integration-room-create" class="action-btn">Create Room</button>
+      </div>
+      <div class="integration-room-manager-grid">
+        ${rooms.length ? rooms.map((room) => renderIntegrationManagedRoom(room, rooms, mediaPlayerOptions)).join("") : renderNotice(total ? "No rooms are available yet." : "No devices are available from enabled integrations yet.")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsIntegrationRoomsShell(settings = {}) {
+  const registry = normalizeIntegrationDeviceRegistry(settings?.integration_device_registry || {});
+  const total = Number(registry.total || 0);
+  const roomCount = integrationRoomRows(registry).length;
+  return `
+    <section class="core-inline-section" id="settings-integration-rooms">
+      <div class="inline-row integration-device-toolbar">
+        <div>
+          <div class="small core-inline-section-title">Organize</div>
+          <div class="small">Organize rooms, device names, and preferred playback targets.</div>
+        </div>
+        <div class="inline-row">
+          <span class="small" id="settings-integration-rooms-counts">${escapeHtml(String(total))} devices / ${escapeHtml(String(roomCount))} rooms</span>
+          <button type="button" id="settings-integration-rooms-refresh" class="action-btn">Refresh</button>
+        </div>
+      </div>
+      <div id="settings-integration-rooms-status" class="small" style="margin-top: 8px;"></div>
+      <div id="settings-integration-rooms-content" style="margin-top: 10px;">
+        ${total || roomCount ? renderSettingsIntegrationRooms(registry) : `<div class="small">Open or refresh this tab to load organization tools.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function bindSettingsIntegrationDevices(initialRegistryPayload = {}) {
   const host = document.getElementById("settings-integration-devices");
   const contentEl = document.getElementById("settings-integration-devices-content");
   const button = document.getElementById("settings-integration-devices-refresh");
-  const tabButtons = Array.from(document.querySelectorAll("[data-integration-device-tab]"));
+  const countsEl = document.getElementById("settings-integration-devices-counts");
   if (!host || !contentEl || !button) {
     return;
   }
+  host._integrationDeviceRegistry = normalizeIntegrationDeviceRegistry(initialRegistryPayload || {});
 
-  const loadIntegrationDevices = async (integrationIdRaw) => {
-    const integrationId = String(integrationIdRaw || host.dataset.activeDeviceIntegration || "").trim();
-    if (!integrationId) {
-      contentEl.innerHTML = `<div class="small">Choose an integration to load devices.</div>`;
+  const renderRegistry = (payload) => {
+    const registry = normalizeIntegrationDeviceRegistry(payload || {});
+    host._integrationDeviceRegistry = registry;
+    if (countsEl) {
+      const total = Number(registry.total || 0);
+      const categoryCount = integrationDeviceCategoryRows(registry).length;
+      const roomCount = Array.isArray(registry.rooms) ? registry.rooms.length : 0;
+      countsEl.textContent = `${total} devices / ${categoryCount} categories / ${roomCount} rooms`;
+    }
+    contentEl.innerHTML = renderSettingsIntegrationDevices(registry);
+  };
+
+  host.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-integration-device-category]") : null;
+    if (!target) {
       return;
     }
-    host.dataset.activeDeviceIntegration = integrationId;
-    tabButtons.forEach((tabButton) => {
-      tabButton.classList.toggle("active", tabButton.dataset.integrationDeviceTab === integrationId);
-    });
+    setPreferredIntegrationDeviceCategory(target.getAttribute("data-integration-device-category"));
+      const registry = host._integrationDeviceRegistry || normalizeIntegrationDeviceRegistry(initialRegistryPayload || {});
+    contentEl.innerHTML = renderSettingsIntegrationDevices(registry);
+  });
+
+  const refresh = async () => {
     button.disabled = true;
     button.textContent = "Refreshing...";
-    contentEl.innerHTML = `<div class="small">Loading devices...</div>`;
     try {
-      const payload = await api(`/api/settings/integrations/${encodeURIComponent(integrationId)}/devices`);
-      contentEl.innerHTML = renderSettingsIntegrationDeviceGroup(payload?.group || {});
+      const payload = await api("/api/settings/integrations/device-registry?refresh=true");
+      renderRegistry(payload || {});
     } catch (error) {
       contentEl.innerHTML = `<div class="notice error">Device refresh failed: ${escapeHtml(error.message)}</div>`;
     } finally {
@@ -2681,10 +3303,223 @@ function bindSettingsIntegrationDevices() {
     }
   };
 
-  tabButtons.forEach((tabButton) => {
-    tabButton.addEventListener("click", () => loadIntegrationDevices(tabButton.dataset.integrationDeviceTab));
+  button.addEventListener("click", refresh);
+}
+
+function bindSettingsIntegrationRooms(initialRegistryPayload = {}) {
+  const host = document.getElementById("settings-integration-rooms");
+  const contentEl = document.getElementById("settings-integration-rooms-content");
+  const button = document.getElementById("settings-integration-rooms-refresh");
+  const countsEl = document.getElementById("settings-integration-rooms-counts");
+  const statusEl = document.getElementById("settings-integration-rooms-status");
+  if (!host || !contentEl || !button) {
+    return;
+  }
+  host._integrationRoomRegistry = normalizeIntegrationDeviceRegistry(initialRegistryPayload || {});
+
+  const setStatus = (message, kind = "") => {
+    if (!statusEl) {
+      return;
+    }
+    statusEl.textContent = message || "";
+    statusEl.classList.toggle("error", kind === "error");
+  };
+
+  const renderRegistry = (payload) => {
+    const registry = normalizeIntegrationDeviceRegistry(payload || {});
+    host._integrationRoomRegistry = registry;
+    const deviceHost = document.getElementById("settings-integration-devices");
+    if (deviceHost) {
+      deviceHost._integrationDeviceRegistry = registry;
+    }
+    if (countsEl) {
+      const total = Number(registry.total || 0);
+      const roomCount = integrationRoomRows(registry).length;
+      countsEl.textContent = `${total} devices / ${roomCount} rooms`;
+    }
+    contentEl.innerHTML = renderSettingsIntegrationRooms(registry);
+  };
+
+  const roomAction = async (action, payload = {}, busyElement = null) => {
+    const buttonLike = busyElement instanceof HTMLButtonElement || busyElement instanceof HTMLSelectElement ? busyElement : null;
+    const originalText = buttonLike instanceof HTMLButtonElement ? buttonLike.textContent : "";
+    if (buttonLike) {
+      buttonLike.disabled = true;
+      if (buttonLike instanceof HTMLButtonElement) {
+        buttonLike.textContent = "Saving...";
+      }
+    }
+    setStatus("Saving integration changes...");
+    try {
+      const result = await api("/api/settings/integrations/rooms", {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      });
+      const registry = result?.registry || result;
+      renderRegistry(registry || {});
+      setStatus("Integration changes saved.");
+      showToast("Integration changes saved.");
+      return result;
+    } catch (error) {
+      const message = `Integration update failed: ${error.message}`;
+      setStatus(message, "error");
+      showToast(message, "error", 3600);
+      throw error;
+    } finally {
+      if (buttonLike && document.body.contains(buttonLike)) {
+        buttonLike.disabled = false;
+        if (buttonLike instanceof HTMLButtonElement) {
+          buttonLike.textContent = originalText || "Save";
+        }
+      }
+    }
+  };
+
+  const refresh = async () => {
+    button.disabled = true;
+    button.textContent = "Refreshing...";
+    setStatus("");
+    try {
+      const payload = await api("/api/settings/integrations/rooms?refresh=true");
+      renderRegistry(payload?.registry || payload || {});
+    } catch (error) {
+      contentEl.innerHTML = `<div class="notice error">Room refresh failed: ${escapeHtml(error.message)}</div>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Refresh";
+    }
+  };
+
+  host.addEventListener("click", async (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    const createButton = target.closest("#settings-integration-room-create");
+    if (createButton) {
+      const input = host.querySelector("#settings-integration-room-new-name");
+      const name = input instanceof HTMLInputElement ? input.value.trim() : "";
+      if (!name) {
+        setStatus("Room name is required.", "error");
+        return;
+      }
+      await roomAction("create_room", { name }, createButton);
+      return;
+    }
+
+    const renameButton = target.closest("[data-integration-room-rename]");
+    if (renameButton) {
+      const roomId = renameButton.getAttribute("data-integration-room-rename") || "";
+      const input = Array.from(host.querySelectorAll("[data-integration-room-name]")).find(
+        (row) => row.getAttribute("data-integration-room-name") === roomId
+      );
+      const name = input instanceof HTMLInputElement ? input.value.trim() : "";
+      if (!roomId || !name) {
+        setStatus("Room name is required.", "error");
+        return;
+      }
+      await roomAction("rename_room", { room_id: roomId, name }, renameButton);
+      return;
+    }
+
+    const clearButton = target.closest("[data-integration-room-clear]");
+    if (clearButton) {
+      const integrationId = clearButton.getAttribute("data-integration-id") || "";
+      const deviceId = clearButton.getAttribute("data-device-id") || "";
+      if (!integrationId || !deviceId) {
+        setStatus("Device id is missing.", "error");
+        return;
+      }
+      await roomAction("clear_device_room", { integration_id: integrationId, device_id: deviceId }, clearButton);
+      return;
+    }
+
+    const renameDeviceButton = target.closest("[data-integration-device-rename]");
+    if (renameDeviceButton) {
+      const row = renameDeviceButton.closest(".integration-room-device-row");
+      const input = row ? row.querySelector("[data-integration-device-name]") : null;
+      const integrationId = renameDeviceButton.getAttribute("data-integration-id") || "";
+      const deviceId = renameDeviceButton.getAttribute("data-device-id") || "";
+      const name = input instanceof HTMLInputElement ? input.value.trim() : "";
+      if (!integrationId || !deviceId) {
+        setStatus("Device id is missing.", "error");
+        return;
+      }
+      if (!name) {
+        setStatus("Device name is required.", "error");
+        return;
+      }
+      await roomAction("rename_device", { integration_id: integrationId, device_id: deviceId, name }, renameDeviceButton);
+      return;
+    }
+
+    const clearDeviceNameButton = target.closest("[data-integration-device-name-clear]");
+    if (clearDeviceNameButton) {
+      const integrationId = clearDeviceNameButton.getAttribute("data-integration-id") || "";
+      const deviceId = clearDeviceNameButton.getAttribute("data-device-id") || "";
+      if (!integrationId || !deviceId) {
+        setStatus("Device id is missing.", "error");
+        return;
+      }
+      await roomAction("clear_device_name", { integration_id: integrationId, device_id: deviceId }, clearDeviceNameButton);
+      return;
+    }
   });
-  button.addEventListener("click", () => loadIntegrationDevices(host.dataset.activeDeviceIntegration));
+
+  host.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    const input = event.target instanceof Element ? event.target.closest("[data-integration-device-name]") : null;
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    event.preventDefault();
+    const row = input.closest(".integration-room-device-row");
+    const button = row ? row.querySelector("[data-integration-device-rename]") : null;
+    if (button instanceof HTMLButtonElement && !button.disabled) {
+      button.click();
+    }
+  });
+
+  host.addEventListener("change", async (event) => {
+    const mediaPlayerSelect = event.target instanceof Element ? event.target.closest("[data-integration-room-media-player]") : null;
+    if (mediaPlayerSelect instanceof HTMLSelectElement) {
+      const roomId = mediaPlayerSelect.getAttribute("data-integration-room-media-player") || "";
+      const roomName = mediaPlayerSelect.getAttribute("data-integration-room-media-player-name") || "";
+      const target = mediaPlayerSelect.value || "";
+      if (!roomId || roomId === "unassigned") {
+        setStatus("Choose a named room.", "error");
+        return;
+      }
+      if (!target) {
+        await roomAction("clear_room_preferred_media_player", { room_id: roomId }, mediaPlayerSelect);
+        return;
+      }
+      await roomAction("set_room_preferred_media_player", { room_id: roomId, room_name: roomName, target }, mediaPlayerSelect);
+      return;
+    }
+
+    const select = event.target instanceof Element ? event.target.closest("[data-integration-room-select]") : null;
+    if (!(select instanceof HTMLSelectElement)) {
+      return;
+    }
+    const integrationId = select.getAttribute("data-integration-id") || "";
+    const deviceId = select.getAttribute("data-device-id") || "";
+    const roomId = select.value || "";
+    if (!integrationId || !deviceId) {
+      setStatus("Device id is missing.", "error");
+      return;
+    }
+    if (!roomId || roomId === "unassigned") {
+      await roomAction("clear_device_room", { integration_id: integrationId, device_id: deviceId }, select);
+      return;
+    }
+    const roomName = String(select.options[select.selectedIndex]?.textContent || "").trim();
+    await roomAction("assign_device_room", { integration_id: integrationId, device_id: deviceId, room_id: roomId, room_name: roomName }, select);
+  });
+
+  button.addEventListener("click", refresh);
 }
 
 function bindSettingsIntegrationRuntime() {
@@ -2700,12 +3535,13 @@ function bindSettingsIntegrationRuntime() {
       button.textContent = "Refreshing...";
     }
     try {
-      const [runtimePayload, statesPayload] = await Promise.all([
+      const [runtimePayload, statesPayload, eventsPayload] = await Promise.all([
         api("/api/settings/integrations/runtime"),
         api("/api/settings/integrations/runtime/states"),
+        api("/api/settings/integrations/runtime/events?limit=1000"),
       ]);
       summaryEl.innerHTML = renderSettingsIntegrationRuntimeSummary(runtimePayload?.runtime || {});
-      statesEl.innerHTML = renderSettingsIntegrationRuntimeStates(statesPayload || {});
+      statesEl.innerHTML = renderSettingsIntegrationRuntimeStates(statesPayload || {}, eventsPayload || {});
     } catch (error) {
       statesEl.innerHTML = `<div class="notice error">Runtime refresh failed: ${escapeHtml(error.message)}</div>`;
     } finally {
@@ -2745,6 +3581,8 @@ function bindSettingsIntegrationTabs(root = document) {
       document.getElementById("settings-integration-runtime-refresh")?.click();
     } else if (key === "devices") {
       document.getElementById("settings-integration-devices-refresh")?.click();
+    } else if (key === "rooms") {
+      document.getElementById("settings-integration-rooms-refresh")?.click();
     }
   };
   const refreshIntegrationSubtab = async (tabKey) => {
@@ -2775,7 +3613,7 @@ function bindSettingsIntegrationTabs(root = document) {
     button.dataset.integrationsTabBound = "1";
     button.addEventListener("click", () => {
       const key = setPreferredIntegrationTab(button.dataset.integrationsTab);
-      if (key === "devices") {
+      if (key === "devices" || key === "rooms") {
         refreshIntegrationSubtab(key);
         return;
       }
@@ -17629,7 +18467,8 @@ function renderIntegrationsSettingsPanel(settings = {}, { active = true } = {}) 
         <div class="settings-subtabs">
           <button type="button" class="settings-subtab-btn ${activeTab === "manager" ? "active" : ""}" data-integrations-tab="manager">Manager</button>
           <button type="button" class="settings-subtab-btn ${activeTab === "devices" ? "active" : ""}" data-integrations-tab="devices">Devices</button>
-          <button type="button" class="settings-subtab-btn ${activeTab === "runtime" ? "active" : ""}" data-integrations-tab="runtime">Live Runtime</button>
+          <button type="button" class="settings-subtab-btn ${activeTab === "rooms" ? "active" : ""}" data-integrations-tab="rooms">Organize</button>
+          <button type="button" class="settings-subtab-btn ${activeTab === "runtime" ? "active" : ""}" data-integrations-tab="runtime">Activity</button>
         </div>
 
         <div class="settings-subpanel ${activeTab === "manager" ? "active" : ""}" data-integrations-panel="manager">
@@ -17637,7 +18476,11 @@ function renderIntegrationsSettingsPanel(settings = {}, { active = true } = {}) 
         </div>
 
         <div class="settings-subpanel ${activeTab === "devices" ? "active" : ""}" data-integrations-panel="devices">
-          ${renderSettingsIntegrationDevicesShell(settings.integrations)}
+          ${renderSettingsIntegrationDevicesShell(settings)}
+        </div>
+
+        <div class="settings-subpanel ${activeTab === "rooms" ? "active" : ""}" data-integrations-panel="rooms">
+          ${renderSettingsIntegrationRoomsShell(settings)}
         </div>
 
         <div class="settings-subpanel ${activeTab === "runtime" ? "active" : ""}" data-integrations-panel="runtime">
@@ -17698,11 +18541,17 @@ function bindIntegrationsSurface(settings = {}, root = document) {
 
   bindSettingsIntegrationActions(integrations, statusEl);
   bindIntegrationRuntimeActions(host);
-  bindSettingsIntegrationDevices();
+  bindSettingsIntegrationDevices(settings?.integration_device_registry || {});
+  bindSettingsIntegrationRooms(settings?.integration_device_registry || {});
   bindSettingsIntegrationTabs(host);
   bindSettingsIntegrationRuntime();
   bindShopTabs("integrations");
   bindShopActions("integrations");
+  if (state.integrationSubtab === "devices") {
+    document.getElementById("settings-integration-devices-refresh")?.click();
+  } else if (state.integrationSubtab === "rooms") {
+    document.getElementById("settings-integration-rooms-refresh")?.click();
+  }
 }
 
 async function loadIntegrationsView() {

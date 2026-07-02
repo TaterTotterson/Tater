@@ -218,12 +218,22 @@ from speech_tts import (
     synthesize_preview_wav,
 )
 from integration_registry import (
+    assign_integration_device_room,
+    clear_integration_device_name,
+    clear_integration_device_room,
+    clear_integration_room_preferred_media_player,
+    create_integration_room,
     get_integration_catalog,
     get_integration_device_group,
+    get_integration_device_registry,
     get_integration_devices,
     get_integration_devices_by_capability,
+    get_integration_room_overrides,
+    rename_integration_device,
+    rename_integration_room,
     run_integration_action as run_registered_integration_action,
     save_integration_settings as save_registered_integration_settings,
+    set_integration_room_preferred_media_player,
 )
 from integration_runtime import (
     bind_integration_runtime_loop,
@@ -5818,6 +5828,7 @@ def _little_spud_notification_target_matches(
     wildcard_tokens = {"*", "all", "any"}
     checks = (
         ("node_id", str(node.get("id") or "").strip()),
+        ("destination", str(node.get("id") or "").strip()),
         ("scope", str(identity.get("scope") or "").strip()),
         ("device_id", str(identity.get("device_name") or "").strip()),
         ("device_name", str(identity.get("device_name") or "").strip()),
@@ -5830,7 +5841,8 @@ def _little_spud_notification_target_matches(
             continue
         if wanted.lower() in wildcard_tokens:
             return True
-        return bool(expected and hmac.compare_digest(wanted, expected))
+        if expected and hmac.compare_digest(wanted, expected):
+            return True
     return False
 
 
@@ -5958,6 +5970,7 @@ def _pop_little_spud_notification(
     node: Dict[str, Any],
     wait_seconds: int,
     max_scan: int = 200,
+    consume: bool = True,
 ) -> Optional[Dict[str, Any]]:
     key = notify_queue_key("little_spud") or "notifyq:little_spud"
     deadline = time.monotonic() + max(0.0, min(25.0, float(wait_seconds or 0)))
@@ -5982,6 +5995,8 @@ def _pop_little_spud_notification(
             targets = item.get("targets") if isinstance(item.get("targets"), dict) else {}
             if not _little_spud_notification_target_matches(targets=targets, identity=identity, node=node):
                 continue
+            if not consume:
+                return item
             removed = int(redis_client.lrem(key, 1, raw) or 0)
             if removed > 0:
                 return item
@@ -5989,6 +6004,55 @@ def _pop_little_spud_notification(
         if time.monotonic() >= deadline:
             return None
         time.sleep(0.5)
+
+
+def _pop_little_spud_notification_by_id(
+    *,
+    event_id: str,
+    identity: Dict[str, str],
+    node: Dict[str, Any],
+    wait_seconds: int,
+    max_scan: int = 1000,
+    consume: bool = True,
+) -> Optional[Dict[str, Any]]:
+    wanted_id = str(event_id or "").strip()
+    if not wanted_id:
+        return None
+
+    key = notify_queue_key("little_spud") or "notifyq:little_spud"
+    deadline = time.monotonic() + max(0.0, min(8.0, float(wait_seconds or 0)))
+    scan_count = max(1, min(2000, int(max_scan or 1000)))
+    while True:
+        try:
+            raw_rows = redis_client.lrange(key, 0, scan_count - 1) or []
+        except Exception:
+            raw_rows = []
+        for raw in raw_rows:
+            try:
+                item = json.loads(str(raw or "{}"))
+            except Exception:
+                redis_client.lrem(key, 1, raw)
+                continue
+            if not isinstance(item, dict):
+                redis_client.lrem(key, 1, raw)
+                continue
+            if is_notify_expired(item):
+                redis_client.lrem(key, 1, raw)
+                continue
+            if str(item.get("id") or "").strip() != wanted_id:
+                continue
+            targets = item.get("targets") if isinstance(item.get("targets"), dict) else {}
+            if not _little_spud_notification_target_matches(targets=targets, identity=identity, node=node):
+                return None
+            if not consume:
+                return item
+            removed = int(redis_client.lrem(key, 1, raw) or 0)
+            if removed > 0:
+                return item
+
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
 
 
 def _forget_little_spud_pending_notifications(identity: Dict[str, str], node: Dict[str, Any]) -> int:
@@ -8666,6 +8730,11 @@ class IntegrationSettingsRequest(BaseModel):
 
 
 class IntegrationActionRequest(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationRoomActionRequest(BaseModel):
+    action: str = Field(min_length=1)
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -13352,7 +13421,12 @@ def spud_link_history(request: Request, limit: int = 80) -> Dict[str, Any]:
 
 
 @app.get("/api/spudlink/v1/notifications/next")
-def spud_link_notification_next(request: Request, wait_seconds: int = 20) -> Dict[str, Any]:
+def spud_link_notification_next(
+    request: Request,
+    wait_seconds: int = 20,
+    event_id: str = "",
+    consume: bool = True,
+) -> Dict[str, Any]:
     _settings, node = _require_spud_link_node_request(request)
     role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
     if role != SPUD_LINK_MODE_LITTLE_SPUD:
@@ -13368,11 +13442,24 @@ def spud_link_notification_next(request: Request, wait_seconds: int = 20) -> Dic
         },
     )()
     identity = _spud_link_identity_from_request(identity_payload, request, node)
-    notification = _pop_little_spud_notification(
-        identity=identity,
-        node=node,
-        wait_seconds=max(0, min(25, int(wait_seconds or 0))),
-    )
+    wait_value = max(0, min(25, int(wait_seconds or 0)))
+    clean_event_id = str(event_id or "").strip()
+    notification = None
+    if clean_event_id:
+        notification = _pop_little_spud_notification_by_id(
+            event_id=clean_event_id,
+            identity=identity,
+            node=node,
+            wait_seconds=wait_value,
+            consume=bool(consume),
+        )
+    if notification is None and not clean_event_id:
+        notification = _pop_little_spud_notification(
+            identity=identity,
+            node=node,
+            wait_seconds=wait_value,
+            consume=bool(consume),
+        )
     _spud_link_touch_node_from_request(node, request)
     _spud_link_store_node(node)
     return {
@@ -13383,6 +13470,41 @@ def spud_link_notification_next(request: Request, wait_seconds: int = 20) -> Dic
             "device_name": identity.get("device_name"),
             "scope": identity.get("scope"),
         },
+        "consumed": bool(notification is not None and consume),
+        "server_time": time.time(),
+    }
+
+
+@app.post("/api/spudlink/v1/notifications/{event_id}/ack")
+def spud_link_notification_ack(event_id: str, request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Little Spud notifications require a paired Little Spud client.")
+    identity_payload = type(
+        "SpudLinkNotificationIdentityPayload",
+        (),
+        {
+            "metadata": {},
+            "user_name": request.headers.get("x-spudlink-user"),
+            "device_name": request.headers.get("x-spudlink-device"),
+            "user": request.headers.get("x-spudlink-user"),
+        },
+    )()
+    identity = _spud_link_identity_from_request(identity_payload, request, node)
+    notification = _pop_little_spud_notification_by_id(
+        event_id=str(event_id or "").strip(),
+        identity=identity,
+        node=node,
+        wait_seconds=0,
+        consume=True,
+    )
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "acked": isinstance(notification, dict),
+        "event_id": str(event_id or "").strip(),
         "server_time": time.time(),
     }
 
@@ -17589,13 +17711,133 @@ def get_settings_integrations_runtime_states() -> Dict[str, Any]:
 
 
 @app.get("/api/settings/integrations/devices")
-def get_settings_integrations_devices(capability: str = "") -> Dict[str, Any]:
+def get_settings_integrations_devices(capability: str = "", refresh: bool = False) -> Dict[str, Any]:
     if str(capability or "").strip():
         return {
             "capability": str(capability or "").strip(),
-            "devices": get_integration_devices_by_capability(capability),
+            "devices": get_integration_devices_by_capability(capability, redis_client, refresh=refresh),
         }
-    return get_integration_devices()
+    return get_integration_devices(redis_client, refresh=refresh)
+
+
+@app.get("/api/settings/integrations/device-registry")
+def get_settings_integrations_device_registry(refresh: bool = False) -> Dict[str, Any]:
+    return get_integration_device_registry(redis_client, refresh=refresh)
+
+
+def _room_media_player_current_values(registry: Dict[str, Any]) -> List[str]:
+    room_overrides = registry.get("room_overrides") if isinstance(registry.get("room_overrides"), dict) else {}
+    room_media_players = (
+        room_overrides.get("room_media_players")
+        if isinstance(room_overrides.get("room_media_players"), dict)
+        else {}
+    )
+    values: List[str] = []
+    for raw in room_media_players.values():
+        target = raw.get("target") if isinstance(raw, dict) else raw
+        target_text = str(target or "").strip()
+        if target_text:
+            values.append(target_text)
+    return values
+
+
+def _room_media_player_options(registry: Dict[str, Any]) -> List[Dict[str, str]]:
+    try:
+        from announcement_targets import build_announcement_target_options
+
+        homeassistant_module = _integration_module("homeassistant", auto_restore=False)
+        homeassistant_config = (
+            homeassistant_module.load_homeassistant_config(required=False)
+            if homeassistant_module is not None
+            else {}
+        )
+        return build_announcement_target_options(
+            homeassistant_base_url=homeassistant_config.get("base"),
+            homeassistant_token=homeassistant_config.get("token"),
+            include_homeassistant=False,
+            include_sonos=True,
+            include_voice_core=True,
+            include_integrations=True,
+            current_values=_room_media_player_current_values(registry),
+        )
+    except Exception as exc:
+        logger.warning("Failed to build room media player options: %s", exc)
+        return []
+
+
+def _settings_integration_rooms_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(registry or {})
+    payload["room_media_player_options"] = _room_media_player_options(payload)
+    return payload
+
+
+def _settings_integration_room_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(result or {})
+    registry = payload.get("registry") if isinstance(payload.get("registry"), dict) else {}
+    if registry:
+        payload["registry"] = _settings_integration_rooms_registry(registry)
+    return payload
+
+
+@app.get("/api/settings/integrations/rooms")
+def get_settings_integrations_rooms(refresh: bool = False) -> Dict[str, Any]:
+    registry = _settings_integration_rooms_registry(get_integration_device_registry(redis_client, refresh=refresh))
+    return {
+        "room_overrides": get_integration_room_overrides(redis_client),
+        "registry": registry,
+    }
+
+
+@app.post("/api/settings/integrations/rooms")
+def update_settings_integrations_rooms(payload: IntegrationRoomActionRequest) -> Dict[str, Any]:
+    action = str(payload.action or "").strip().lower()
+    data = payload.payload if isinstance(payload.payload, dict) else {}
+    try:
+        if action == "create_room":
+            return _settings_integration_room_result(create_integration_room(data.get("name"), redis_client))
+        if action in {"rename_room", "merge_room"}:
+            return _settings_integration_room_result(rename_integration_room(data.get("room_id"), data.get("name"), redis_client))
+        if action in {"set_room_preferred_media_player", "set_preferred_media_player"}:
+            return _settings_integration_room_result(
+                set_integration_room_preferred_media_player(
+                    data.get("room_id"),
+                    data.get("target") or data.get("preferred_media_player"),
+                    redis_client,
+                    room_name=data.get("room_name") or data.get("name") or "",
+                )
+            )
+        if action in {"clear_room_preferred_media_player", "clear_preferred_media_player"}:
+            return _settings_integration_room_result(
+                clear_integration_room_preferred_media_player(data.get("room_id"), redis_client)
+            )
+        if action in {"assign_device_room", "move_device"}:
+            return _settings_integration_room_result(
+                assign_integration_device_room(
+                    data.get("integration_id"),
+                    data.get("device_id"),
+                    room_id=data.get("room_id") or "",
+                    room_name=data.get("room_name") or data.get("name") or "",
+                    client=redis_client,
+                )
+            )
+        if action in {"clear_device_room", "use_integration_room"}:
+            return _settings_integration_room_result(clear_integration_device_room(data.get("integration_id"), data.get("device_id"), redis_client))
+        if action in {"rename_device", "rename_integration_device"}:
+            return _settings_integration_room_result(
+                rename_integration_device(
+                    data.get("integration_id"),
+                    data.get("device_id"),
+                    data.get("name"),
+                    redis_client,
+                )
+            )
+        if action in {"clear_device_name", "use_integration_device_name"}:
+            return _settings_integration_room_result(clear_integration_device_name(data.get("integration_id"), data.get("device_id"), redis_client))
+        raise ValueError("Unknown room action.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Integration room update failed.") from exc
 
 
 @app.get("/api/settings/integrations/{integration_id}/devices")

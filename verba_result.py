@@ -245,10 +245,12 @@ def result_for_llm(result: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(item, dict):
                 continue
             compact = {
+                "artifact_id": item.get("artifact_id"),
                 "type": item.get("type"),
                 "name": item.get("name"),
                 "mimetype": item.get("mimetype"),
                 "size": item.get("size"),
+                "source": item.get("source"),
             }
             compact_artifacts.append(compact)
         safe["artifacts"] = compact_artifacts

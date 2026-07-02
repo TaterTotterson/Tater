@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, List
+from urllib.parse import quote, unquote
 
 from helpers import redis_client
 from tateros import integration_store as integration_store_module
@@ -11,6 +12,7 @@ HOMEASSISTANT_TARGET_PREFIX = "ha:"
 VOICE_CORE_TARGET_PREFIX = "voice_core:"
 UNIFI_PROTECT_TARGET_PREFIX = "unifi:"
 SONOS_TARGET_PREFIX = "sonos:"
+INTEGRATION_TARGET_PREFIX = "integration:"
 
 
 def _text(value: Any) -> str:
@@ -19,6 +21,61 @@ def _text(value: Any) -> str:
 
 def _integration_function(integration_id: str, function_name: str):
     return integration_store_module.integration_function(integration_id, function_name)
+
+
+def _integration_registry_devices(capability: str, *, integration_id: str = "") -> List[Dict[str, Any]]:
+    try:
+        from integration_registry import get_integration_devices_by_capability
+
+        devices = get_integration_devices_by_capability(capability, redis_client)
+    except Exception:
+        return []
+    wanted = _text(integration_id).lower()
+    rows: List[Dict[str, Any]] = []
+    for row in devices:
+        if not isinstance(row, dict):
+            continue
+        if wanted and _text(row.get("integration_id")).lower() != wanted:
+            continue
+        rows.append(dict(row))
+    return rows
+
+
+def _device_details(row: Dict[str, Any]) -> Dict[str, Any]:
+    return row.get("details") if isinstance(row.get("details"), dict) else {}
+
+
+def _device_tokens(row: Dict[str, Any], *keys: str) -> str:
+    details = _device_details(row)
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return _text(value)
+        value = details.get(key)
+        if value not in (None, ""):
+            return _text(value)
+    return ""
+
+
+def integration_target_value(integration_id: Any, device_id: Any) -> str:
+    integration = _text(integration_id).lower()
+    device = _text(device_id)
+    if not integration or not device:
+        return ""
+    return f"{INTEGRATION_TARGET_PREFIX}{integration}:{quote(device, safe='')}"
+
+
+def parse_integration_target(value: Any) -> Dict[str, str]:
+    token = _text(value)
+    if not token.lower().startswith(INTEGRATION_TARGET_PREFIX):
+        return {}
+    body = token[len(INTEGRATION_TARGET_PREFIX) :]
+    integration, sep, encoded_device = body.partition(":")
+    integration = _text(integration).lower()
+    device = _text(unquote(encoded_device)) if sep else ""
+    if not integration or not device:
+        return {}
+    return {"integration_id": integration, "device_id": device}
 
 
 def entity_registry_list_sync(*args, **kwargs):
@@ -117,6 +174,9 @@ def _normalize_voice_target(raw: Any) -> str:
     if lower.startswith(SONOS_TARGET_PREFIX):
         speaker_ref = sonos_target_id(token)
         return f"{SONOS_TARGET_PREFIX}{speaker_ref}" if speaker_ref else ""
+    if lower.startswith(INTEGRATION_TARGET_PREFIX):
+        parsed = parse_integration_target(token)
+        return integration_target_value(parsed.get("integration_id"), parsed.get("device_id")) if parsed else ""
     if lower.startswith("media_player."):
         return f"{HOMEASSISTANT_TARGET_PREFIX}{token}"
     return f"{VOICE_CORE_TARGET_PREFIX}{token}"
@@ -156,6 +216,7 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
     voice_core_selectors: List[str] = []
     unifi_protect_cameras: List[str] = []
     sonos_speakers: List[str] = []
+    integration_devices: List[Dict[str, str]] = []
 
     for target in normalize_announcement_targets(value):
         lower = target.lower()
@@ -174,6 +235,11 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
             if speaker_ref:
                 sonos_speakers.append(speaker_ref)
             continue
+        if lower.startswith(INTEGRATION_TARGET_PREFIX):
+            parsed = parse_integration_target(target)
+            if parsed:
+                integration_devices.append(parsed)
+            continue
         selector = target
         if lower.startswith(VOICE_CORE_TARGET_PREFIX):
             selector = _text(target[len(VOICE_CORE_TARGET_PREFIX):])
@@ -185,6 +251,7 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
         "voice_core_selectors": voice_core_selectors,
         "unifi_protect_cameras": unifi_protect_cameras,
         "sonos_speakers": sonos_speakers,
+        "integration_devices": integration_devices,
     }
 
 
@@ -318,7 +385,16 @@ def fetch_homeassistant_media_player_target_options(
         seen.add(prefixed)
         rows.append({"value": prefixed, "label": _text(label) or entity_id})
 
-    if base and bearer:
+    registry_rows = _integration_registry_devices("media_player", integration_id="homeassistant")
+    for item in registry_rows:
+        entity_id = _text(item.get("ref") or item.get("id"))
+        if not entity_id.lower().startswith("media_player."):
+            continue
+        name = _text(item.get("name")) or entity_id
+        label = f"Home Assistant: {name} ({entity_id})" if name != entity_id else f"Home Assistant: {entity_id}"
+        add_row(entity_id, label)
+
+    if not registry_rows and base and bearer:
         try:
             payload = entity_registry_list_sync(base, bearer, timeout_s=30.0)
         except Exception:
@@ -374,10 +450,12 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
     rows: List[Dict[str, str]] = []
     seen = set()
 
-    for item in discover_sonos_speakers():
+    registry_rows = _integration_registry_devices("media_player", integration_id="sonos")
+    source_rows = registry_rows if registry_rows else discover_sonos_speakers()
+    for item in source_rows:
         if not isinstance(item, dict):
             continue
-        speaker_id = sonos_target_id(item.get("id") or item.get("udn") or item.get("root_url"))
+        speaker_id = sonos_target_id(item.get("id") or _device_tokens(item, "udn", "root_url"))
         if not speaker_id:
             continue
         value = f"{SONOS_TARGET_PREFIX}{speaker_id}"
@@ -423,7 +501,18 @@ def fetch_unifi_protect_camera_target_options(*, current_values: Any = None) -> 
         seen.add(value)
         rows.append({"value": value, "label": _text(label) or f"UniFi Protect: {camera_id}"})
 
-    if unifi_protect_configured():
+    registry_rows = _integration_registry_devices("camera", integration_id="unifi_protect")
+    for item in registry_rows:
+        features = {_text(value).lower() for value in item.get("features") or [] if _text(value)}
+        capabilities = {_text(value).lower() for value in item.get("capabilities") or [] if _text(value)}
+        details_text = json.dumps(_device_details(item), default=str).lower()
+        if not ({"speaker", "announcement"} & (features | capabilities) or "speaker" in details_text):
+            continue
+        camera_ref = _text(item.get("ref") or item.get("id"))
+        name = _text(item.get("name")) or camera_ref
+        add_row(camera_ref, f"UniFi Protect: {name} (speaker, {camera_ref})")
+
+    if not registry_rows and unifi_protect_configured():
         try:
             payload = list_unifi_cameras()
         except Exception:
@@ -452,6 +541,62 @@ def fetch_unifi_protect_camera_target_options(*, current_values: Any = None) -> 
     return rows
 
 
+def _integration_device_playback_action(row: Dict[str, Any]) -> str:
+    actions = {_text(value).lower() for value in row.get("actions") or [] if _text(value)}
+    features = {_text(value).lower() for value in row.get("features") or [] if _text(value)}
+    capabilities = {_text(value).lower() for value in row.get("capabilities") or [] if _text(value)}
+    supported = actions | features
+    if "announce" in supported:
+        return "announce"
+    if "play_url" in supported:
+        return "play_url"
+    if "announcement_target" in capabilities and "play_media" in supported:
+        return "play_media"
+    return ""
+
+
+def fetch_integration_playback_target_options(*, current_values: Any = None) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    handled_integrations = {"homeassistant", "sonos", "unifi_protect"}
+
+    for item in _integration_registry_devices("media_player"):
+        if not isinstance(item, dict):
+            continue
+        integration_id = _text(item.get("integration_id")).lower()
+        if not integration_id or integration_id in handled_integrations:
+            continue
+        if not _integration_device_playback_action(item):
+            continue
+        device_id = _text(item.get("id") or item.get("ref"))
+        value = integration_target_value(integration_id, device_id)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        integration_name = _text(item.get("integration_name")) or integration_id.replace("_", " ").title()
+        name = _text(item.get("name")) or device_id
+        room = _text(item.get("room") or item.get("area"))
+        suffix = f" • {room}" if room and room.lower() != name.lower() else ""
+        rows.append({"value": value, "label": f"{integration_name}: {name}{suffix}"})
+
+    for value in normalize_announcement_targets(current_values):
+        if not value.startswith(INTEGRATION_TARGET_PREFIX) or value in seen:
+            continue
+        parsed = parse_integration_target(value)
+        if not parsed:
+            continue
+        rows.append(
+            {
+                "value": value,
+                "label": f"{parsed.get('integration_id')}: {parsed.get('device_id')} (saved)",
+            }
+        )
+        seen.add(value)
+
+    rows.sort(key=lambda row: _text(row.get("label")).lower())
+    return rows
+
+
 def build_announcement_target_options(
     *,
     homeassistant_base_url: Any,
@@ -461,6 +606,7 @@ def build_announcement_target_options(
     include_sonos: bool = True,
     include_unifi_protect: bool = False,
     include_voice_core: bool = True,
+    include_integrations: bool = False,
     current_values: Any = None,
 ) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
@@ -479,4 +625,6 @@ def build_announcement_target_options(
         rows.extend(fetch_sonos_speaker_target_options(current_values=current_values))
     if include_unifi_protect:
         rows.extend(fetch_unifi_protect_camera_target_options(current_values=current_values))
+    if include_integrations:
+        rows.extend(fetch_integration_playback_target_options(current_values=current_values))
     return rows

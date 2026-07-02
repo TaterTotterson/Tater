@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
+from integration_registry import refresh_integration_device_registry_cache
 from helpers import redis_client as shared_redis_client
 from runtime_executors import run_background
 from tateros import integration_store as integration_store_module
@@ -24,6 +25,7 @@ _DEFAULT_EVENT_MAX = 1000
 _DEFAULT_RECONNECT_SECONDS = 5
 _DEFAULT_ECOBEE_HOMEKIT_POLL_SECONDS = 30
 _DEFAULT_UNIFI_NETWORK_POLL_SECONDS = 30
+_DEFAULT_DEVICE_REGISTRY_REFRESH_SECONDS = 60
 HUE_DEFAULT_TIMEOUT_SECONDS = 10
 _TASKS: List[asyncio.Task] = []
 _STOP_EVENT: Optional[asyncio.Event] = None
@@ -480,6 +482,52 @@ async def _generic_integration_poll_loop(stop_event: asyncio.Event, client: Any)
         await _sleep(stop_event, max(1.0, min(30.0, next_wake - time.time())))
 
 
+async def _device_registry_cache_loop(stop_event: asyncio.Event, client: Any) -> None:
+    redis_obj = _runtime_client(client)
+    first_refresh = True
+    while not stop_event.is_set():
+        refresh_seconds = _as_int(
+            os.getenv("TATER_INTEGRATION_DEVICE_REGISTRY_REFRESH_SECONDS"),
+            _DEFAULT_DEVICE_REGISTRY_REFRESH_SECONDS,
+            minimum=10,
+            maximum=3600,
+        )
+        try:
+            _status_set(
+                redis_obj,
+                device_registry_cache_refresh_seconds=refresh_seconds,
+                device_registry_cache_refreshing=True,
+            )
+            registry = await run_background(
+                refresh_integration_device_registry_cache,
+                redis_obj,
+                source="runtime-startup" if first_refresh else "runtime",
+            )
+            _status_set(
+                redis_obj,
+                device_registry_cache_connected=True,
+                device_registry_cache_refreshing=False,
+                device_registry_cache_last_refresh_ts=time.time(),
+                device_registry_cache_device_count=int(registry.get("total") or 0),
+                device_registry_cache_category_count=len(registry.get("categories") or []),
+                device_registry_cache_last_error="",
+            )
+            first_refresh = False
+            await _sleep(stop_event, refresh_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _status_set(
+                redis_obj,
+                device_registry_cache_connected=False,
+                device_registry_cache_refreshing=False,
+                device_registry_cache_last_error=str(exc),
+                last_error=str(exc),
+            )
+            logger.warning("[integrations] device registry cache refresh error: %s", exc)
+            await _sleep(stop_event, refresh_seconds)
+
+
 async def _sleep(stop_event: asyncio.Event, seconds: float) -> None:
     deadline = time.monotonic() + max(0.1, float(seconds or 0.1))
     while not stop_event.is_set() and time.monotonic() < deadline:
@@ -827,7 +875,14 @@ def _unifi_network_detail_map(row: Dict[str, Any], category: str) -> Dict[str, A
             "uplinkDeviceName",
             "uplinkDeviceId",
         ]
-    return {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+    details = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+    if category == "client":
+        details["network_role"] = "client"
+    else:
+        raw_type = _first_text(row, "type", "deviceType", "device_type", "model")
+        if raw_type:
+            details["network_role"] = raw_type
+    return details
 
 
 def _unifi_network_state_payload(row: Dict[str, Any], category: str, site_name: str) -> Dict[str, Any]:
@@ -836,7 +891,11 @@ def _unifi_network_state_payload(row: Dict[str, Any], category: str, site_name: 
     return {
         "id": row_id,
         "name": _unifi_network_name(row, category, row_id),
-        "category": category,
+        "type": "network_device",
+        "category": "network_device",
+        "category_ids": ["network_device"],
+        "capabilities": ["network_device"],
+        "network_role": category,
         "state": state,
         "status": state,
         "area": site_name,
@@ -1557,6 +1616,7 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         asyncio.create_task(_hue_eventstream_loop(_STOP_EVENT, redis_obj), name="integration-runtime-hue"),
         asyncio.create_task(_ecobee_homekit_loop(_STOP_EVENT, redis_obj), name="integration-runtime-ecobee-homekit"),
         asyncio.create_task(_generic_integration_poll_loop(_STOP_EVENT, redis_obj), name="integration-runtime-generic-poll"),
+        asyncio.create_task(_device_registry_cache_loop(_STOP_EVENT, redis_obj), name="integration-runtime-device-registry-cache"),
     ]
     _status_set(
         redis_obj,
@@ -1574,6 +1634,8 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         ecobee_homekit_connected=False,
         ecobee_homekit_ws_connected=False,
         ecobee_homekit_poll_connected=False,
+        device_registry_cache_connected=False,
+        device_registry_cache_refreshing=False,
         last_error="",
     )
     logger.info("[integrations] runtime started")
@@ -1614,6 +1676,8 @@ async def _stop_integration_runtime_on_loop() -> Dict[str, Any]:
         ecobee_homekit_connected=False,
         ecobee_homekit_ws_connected=False,
         ecobee_homekit_poll_connected=False,
+        device_registry_cache_connected=False,
+        device_registry_cache_refreshing=False,
     )
     logger.info("[integrations] runtime stopped")
     return integration_runtime_status(redis_obj)

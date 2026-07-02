@@ -25,6 +25,7 @@ from kernel_tools import (
     send_message,
 )
 from verba_result import action_failure, action_success, normalize_verba_result
+from verba_supersession import is_verba_superseded
 from web_research import research_web
 from helpers import redis_client as default_redis
 from admin_gate import (
@@ -319,6 +320,8 @@ def list_tools(
         if not vid or verba is None:
             continue
         if not enabled_check(vid):
+            continue
+        if is_verba_superseded(vid, verba, registry, enabled_check):
             continue
         if not verba_supports_platform(verba, normalized_platform):
             continue
