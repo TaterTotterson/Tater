@@ -2467,6 +2467,112 @@ def _homeassistant_play_media_sync(
     return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Home Assistant playback failed."}
 
 
+def _integration_device_playback_action(integration_id: str, device_id: str) -> str:
+    try:
+        from integration_registry import get_integration_devices_by_capability
+
+        devices = get_integration_devices_by_capability("media_player", redis_client)
+    except Exception:
+        devices = []
+    wanted_integration = _text(integration_id).lower()
+    wanted_device = _text(device_id)
+    for row in devices if isinstance(devices, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if _text(row.get("integration_id")).lower() != wanted_integration:
+            continue
+        ids = {
+            _text(row.get("id")),
+            _text(row.get("ref")),
+            _text(row.get("device_id")),
+        }
+        if wanted_device not in ids:
+            continue
+        actions = {_text(value).lower() for value in row.get("actions") or [] if _text(value)}
+        features = {_text(value).lower() for value in row.get("features") or [] if _text(value)}
+        capabilities = {_text(value).lower() for value in row.get("capabilities") or [] if _text(value)}
+        supported = actions | features
+        if "announce" in supported:
+            return "announce"
+        if "play_url" in supported:
+            return "play_url"
+        if "announcement_target" in capabilities and "play_media" in supported:
+            return "play_media"
+    return ""
+
+
+def _runtime_audio_source_url(
+    audio: bytes,
+    *,
+    content_type: str,
+    filename: str,
+    public_base_url: str = "",
+) -> str:
+    asset_id = store_runtime_tts_wav(audio, content_type=content_type)
+    if not asset_id:
+        raise RuntimeError("failed to store reply audio")
+    if _text(public_base_url):
+        return f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}/{quote(filename)}"
+    return build_runtime_tts_asset_url(asset_id, filename=filename)
+
+
+def _integration_playback_sync(
+    *,
+    targets: list[Dict[str, str]],
+    source_url: str,
+    media_type: str,
+    timeout_s: float = SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    clean_targets = [
+        {"integration_id": _text(item.get("integration_id")).lower(), "device_id": _text(item.get("device_id"))}
+        for item in list(targets or [])
+        if isinstance(item, dict) and _text(item.get("integration_id")) and _text(item.get("device_id"))
+    ]
+    if not clean_targets:
+        return {"ok": False, "sent_count": 0, "error": "No integration playback targets selected."}
+    if not _text(source_url):
+        return {"ok": False, "sent_count": 0, "error": "Integration playback URL is missing."}
+
+    from integration_registry import run_integration_device_action
+
+    sent_count = 0
+    failures: list[str] = []
+    for target in clean_targets:
+        integration_id = target["integration_id"]
+        device_id = target["device_id"]
+        action = _integration_device_playback_action(integration_id, device_id)
+        if not action:
+            failures.append(f"{integration_id}:{device_id} (no playback action)")
+            continue
+        try:
+            result = run_integration_device_action(
+                integration_id,
+                action,
+                device_id,
+                {
+                    "source_url": source_url,
+                    "url": source_url,
+                    "media_url": source_url,
+                    "media_content_id": source_url,
+                    "media_content_type": _text(media_type) or "audio/wav",
+                    "timeout_s": timeout_s,
+                },
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                failures.append(f"{integration_id}:{device_id} ({_text(result.get('error')) or 'failed'})")
+                continue
+            sent_count += 1
+        except Exception as exc:
+            failures.append(f"{integration_id}:{device_id} ({exc})")
+
+    if sent_count:
+        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        if failures:
+            result["warnings"] = failures
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Integration playback failed."}
+
+
 async def speak_announcement_targets(
     *,
     text: str,
@@ -2510,15 +2616,23 @@ async def speak_announcement_targets(
     voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
     unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
     sonos_speakers = list(grouped.get("sonos_speakers") or [])
-    target_count = len(homeassistant_players) + len(voice_core_selectors) + len(unifi_protect_cameras) + len(sonos_speakers)
+    integration_devices = [item for item in list(grouped.get("integration_devices") or []) if isinstance(item, dict)]
+    target_count = (
+        len(homeassistant_players)
+        + len(voice_core_selectors)
+        + len(unifi_protect_cameras)
+        + len(sonos_speakers)
+        + len(integration_devices)
+    )
     logger.info(
-        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
+        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
         normalize_announcement_tts_backend(backend, default=default_backend),
         raw_targets,
         homeassistant_players,
         voice_core_selectors,
         unifi_protect_cameras,
         sonos_speakers,
+        integration_devices,
     )
     if target_count <= 0:
         return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
@@ -2533,6 +2647,7 @@ async def speak_announcement_targets(
         "voice_core_target_count": len(voice_core_selectors),
         "unifi_protect_target_count": len(unifi_protect_cameras),
         "sonos_target_count": len(sonos_speakers),
+        "integration_target_count": len(integration_devices),
     }
 
     wav_bytes = await synthesize_tts_wav(
@@ -2557,13 +2672,14 @@ async def speak_announcement_targets(
     )
     result["bytes"] = len(wav_bytes or b"")
     logger.info(
-        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
+        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
         selected_backend,
         len(wav_bytes or b""),
         homeassistant_players,
         voice_core_selectors,
         unifi_protect_cameras,
         sonos_speakers,
+        integration_devices,
     )
 
     if homeassistant_players:
@@ -2662,6 +2778,30 @@ async def speak_announcement_targets(
         if not unifi_result.get("ok") and _text(unifi_result.get("error")):
             warnings.append(_text(unifi_result.get("error")))
 
+    if integration_devices:
+        try:
+            integration_source_url = _runtime_audio_source_url(
+                wav_bytes,
+                content_type="audio/wav",
+                filename=f"tts-{selected_backend}.wav",
+                public_base_url=public_base_url,
+            )
+            result["integration_source_url"] = integration_source_url
+            integration_result = await run_background(
+                _integration_playback_sync,
+                targets=integration_devices,
+                source_url=integration_source_url,
+                media_type="audio/wav",
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["integration_sent_count"] = int(integration_result.get("sent_count") or 0)
+            sent_count += int(integration_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(integration_result.get("warnings") or []) if _text(item)])
+            if not integration_result.get("ok") and _text(integration_result.get("error")):
+                warnings.append(_text(integration_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Integration playback failed: {exc}")
+
     result["sent_count"] = sent_count
     if sent_count > 0:
         result["ok"] = True
@@ -2702,10 +2842,17 @@ async def play_announcement_audio_targets(
     voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
     unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
     sonos_speakers = list(grouped.get("sonos_speakers") or [])
-    target_count = len(homeassistant_players) + len(voice_core_selectors) + len(unifi_protect_cameras) + len(sonos_speakers)
+    integration_devices = [item for item in list(grouped.get("integration_devices") or []) if isinstance(item, dict)]
+    target_count = (
+        len(homeassistant_players)
+        + len(voice_core_selectors)
+        + len(unifi_protect_cameras)
+        + len(sonos_speakers)
+        + len(integration_devices)
+    )
     selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
     logger.info(
-        "[speech_tts] play_announcement_audio_targets backend=%s raw_targets=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s",
+        "[speech_tts] play_announcement_audio_targets backend=%s raw_targets=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
         selected_backend,
         raw_targets,
         len(audio),
@@ -2713,6 +2860,7 @@ async def play_announcement_audio_targets(
         voice_core_selectors,
         unifi_protect_cameras,
         sonos_speakers,
+        integration_devices,
     )
     if target_count <= 0:
         return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
@@ -2729,6 +2877,7 @@ async def play_announcement_audio_targets(
         "voice_core_target_count": len(voice_core_selectors),
         "unifi_protect_target_count": len(unifi_protect_cameras),
         "sonos_target_count": len(sonos_speakers),
+        "integration_target_count": len(integration_devices),
     }
 
     if homeassistant_players:
@@ -2789,13 +2938,12 @@ async def play_announcement_audio_targets(
 
     if sonos_speakers:
         try:
-            asset_id = store_runtime_tts_wav(audio, content_type=clean_media_type)
-            if not asset_id:
-                raise RuntimeError("failed to store Sonos reply audio")
-            if _text(public_base_url):
-                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}/{quote(safe_filename)}"
-            else:
-                sonos_source_url = build_runtime_tts_asset_url(asset_id, filename=safe_filename)
+            sonos_source_url = _runtime_audio_source_url(
+                audio,
+                content_type=clean_media_type,
+                filename=safe_filename,
+                public_base_url=public_base_url,
+            )
             result["sonos_source_url"] = sonos_source_url
             sonos_result = await run_background(
                 sonos_play_media_sync,
@@ -2823,6 +2971,30 @@ async def play_announcement_audio_targets(
         warnings.extend([_text(item) for item in list(unifi_result.get("warnings") or []) if _text(item)])
         if not unifi_result.get("ok") and _text(unifi_result.get("error")):
             warnings.append(_text(unifi_result.get("error")))
+
+    if integration_devices:
+        try:
+            integration_source_url = _runtime_audio_source_url(
+                audio,
+                content_type=clean_media_type,
+                filename=safe_filename,
+                public_base_url=public_base_url,
+            )
+            result["integration_source_url"] = integration_source_url
+            integration_result = await run_background(
+                _integration_playback_sync,
+                targets=integration_devices,
+                source_url=integration_source_url,
+                media_type=clean_media_type,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["integration_sent_count"] = int(integration_result.get("sent_count") or 0)
+            sent_count += int(integration_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(integration_result.get("warnings") or []) if _text(item)])
+            if not integration_result.get("ok") and _text(integration_result.get("error")):
+                warnings.append(_text(integration_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Integration playback failed: {exc}")
 
     result["sent_count"] = sent_count
     if sent_count > 0:

@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re as _re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
@@ -214,10 +214,34 @@ def save_additional_shop_manifest_urls(urls: list[str]) -> None:
     save_additional_shop_manifest_repos([{"name": "", "url": url} for url in urls])
 
 
-def fetch_shop_manifest(url: str) -> dict:
-    r = requests.get(url, timeout=15)
+def _local_path_from_url(url: str) -> str | None:
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme == "file":
+        return unquote(parsed.path)
+    if not parsed.scheme:
+        path = str(url or "").strip()
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _read_url_bytes(url: str, *, timeout: int = 30) -> bytes:
+    local_path = _local_path_from_url(url)
+    if local_path is not None:
+        with open(local_path, "rb") as f:
+            return f.read()
+    r = requests.get(url, timeout=timeout)
     r.raise_for_status()
-    return r.json()
+    return r.content
+
+
+def fetch_shop_manifest(url: str) -> dict:
+    data = _read_url_bytes(url, timeout=15)
+    text = data.decode("utf-8")
+    manifest = json.loads(text)
+    if not isinstance(manifest, dict):
+        raise ValueError("Manifest format unexpected.")
+    return manifest
 
 
 def _manifest_items(manifest: dict) -> list[dict]:
@@ -299,6 +323,23 @@ def _sha256_bytes(data: bytes) -> str:
     return h.hexdigest()
 
 
+def _download_verba_file(source_manifest_url: str, entry: str, expected_sha: str = "") -> tuple[bool, str, str]:
+    clean_entry = str(entry or "").strip().lstrip("/")
+    if not clean_entry:
+        return False, "", "missing entry"
+    full_url = urljoin(source_manifest_url, clean_entry)
+    data = _read_url_bytes(full_url, timeout=30)
+    if expected_sha:
+        got = _sha256_bytes(data)
+        if got.lower() != expected_sha.lower():
+            return False, "", f"SHA256 mismatch. expected={expected_sha} got={got}"
+    try:
+        text = data.decode("utf-8")
+    except Exception:
+        return False, "", "downloaded file is not valid UTF-8 text"
+    return True, text, ""
+
+
 def install_verba_from_shop_item(item: dict, manifest_url: str | None = None) -> tuple[bool, str]:
     """
     Downloads a plugin .py from the shop manifest entry, verifies sha256 if provided,
@@ -318,26 +359,12 @@ def install_verba_from_shop_item(item: dict, manifest_url: str | None = None) ->
         if not source_manifest_url:
             return False, f"{plugin_id}: manifest source URL is missing."
 
-        # Resolve relative paths against the manifest URL.
-        entry = entry.lstrip("/")
-        full_url = urljoin(source_manifest_url, entry)
-
         path = _safe_verba_file_path(plugin_id)
         os.makedirs(VERBA_DIR, exist_ok=True)
 
-        r = requests.get(full_url, timeout=30)
-        r.raise_for_status()
-        data = r.content
-
-        if expected_sha:
-            got = _sha256_bytes(data)
-            if got.lower() != expected_sha:
-                return False, f"SHA256 mismatch for {plugin_id}. expected={expected_sha} got={got}"
-
-        try:
-            text = data.decode("utf-8")
-        except Exception:
-            return False, f"{plugin_id}: downloaded file is not valid UTF-8 text."
+        ok, text, error = _download_verba_file(source_manifest_url, entry, expected_sha)
+        if not ok:
+            return False, f"{plugin_id}: {error}"
 
         if "class " not in text and "def " not in text:
             return False, f"{plugin_id}: file does not look like a python plugin."

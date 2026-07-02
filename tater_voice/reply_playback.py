@@ -108,6 +108,7 @@ def build_reply_playback_options(current_value: Any = None) -> List[Dict[str, st
                 include_sonos=True,
                 include_unifi_protect=True,
                 include_voice_core=True,
+                include_integrations=True,
                 current_values=current_external,
             )
         )
