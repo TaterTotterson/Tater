@@ -9,8 +9,8 @@ import sys
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response, WebSocket
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from .conversation import VoiceSessionRuntime
 
@@ -101,7 +101,7 @@ async def startup() -> None:
     eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
     selected_vad_backend = vp._normalize_vad_backend(eou_cfg.get("backend"))
     vp.logger.info(
-        "[voice_core] startup version=%s backend=tater_native_satellite legacy_api=false",
+        "[voice_core] startup version=%s backend=native_voice_pipeline esphome_native=true",
         vp.__version__,
     )
     vp.logger.info(
@@ -180,7 +180,7 @@ async def startup() -> None:
                 with vp.contextlib.suppress(Exception):
                     for row in vp._load_satellite_registry():
                         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                        if not vp._as_bool(meta.get("native_selected"), False):
+                        if not vp._as_bool(meta.get("esphome_selected"), False):
                             continue
                         selector = vp._text(row.get("selector"))
                         if selector:
@@ -206,18 +206,16 @@ async def startup() -> None:
         except Exception as exc:
             vp.logger.warning("[native-voice] webrtc VAD dependency unavailable: %s", exc)
 
-    vp.logger.info("[native-voice] satellite transport active=native_websocket legacy_satellite_api=disabled")
-    from .. import native_timers
-
-    native_timers.start_scheduler()
+    if "esphome_bootstrap" not in vp._background_tasks or vp._background_tasks["esphome_bootstrap"].done():
+        vp._background_tasks["esphome_bootstrap"] = asyncio.create_task(vp._esphome_bootstrap_reconnect())
+    if "discovery" not in vp._background_tasks or vp._background_tasks["discovery"].done():
+        vp._background_tasks["discovery"] = asyncio.create_task(vp._discovery_loop())
+    if "esphome" not in vp._background_tasks or vp._background_tasks["esphome"].done():
+        vp._background_tasks["esphome"] = asyncio.create_task(vp._esphome_loop())
 
 
 async def shutdown() -> None:
     vp = _vp()
-    with contextlib.suppress(Exception):
-        from .. import native_timers
-
-        await native_timers.stop_scheduler()
     tasks = [task for task in list(vp._background_tasks.values()) if isinstance(task, asyncio.Task)]
     for task in tasks:
         if not task.done():
@@ -225,6 +223,9 @@ async def shutdown() -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     vp._background_tasks.clear()
+
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await vp._esphome_disconnect_all("portal_shutdown")
 
 
 @router.get("/tater-ha/v1/health")
@@ -275,12 +276,6 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
             }
         )
 
-    native_satellite_status: Dict[str, Any] = {}
-    with contextlib.suppress(Exception):
-        from .. import native_satellite
-
-        native_satellite_status = await native_satellite.status()
-
     return {
         "ok": True,
         "version": vp.__version__,
@@ -317,173 +312,9 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "wyoming_error": vp._text(vp.WYOMING_IMPORT_ERROR),
         "openai_compatible_available": bool(vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url")))),
         "selectors": selectors,
-        "legacy_satellite_api": {
-            "enabled": False,
-            "available": False,
-            "message": "Legacy satellite API support has been removed. Use Tater Native satellite firmware.",
-        },
-        "native_satellites": native_satellite_status,
+        "discovery": dict(vp._esphome_device_runtime.discovery_stats()),
+        "esphome": vp._esphome_status(),
     }
-
-
-@router.websocket("/api/tater/satellite/v1/ws")
-async def native_satellite_ws(websocket: WebSocket) -> None:
-    from .. import native_satellite
-
-    await native_satellite.handle_websocket(websocket)
-
-
-@router.get("/api/tater/satellite/v1/status")
-async def native_satellite_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_satellite
-
-    return await native_satellite.status()
-
-
-@router.get("/api/tater/satellite/v1/firmware/{artifact_id}/{relative_path:path}")
-async def native_satellite_firmware_artifact(artifact_id: str, relative_path: str) -> FileResponse:
-    from .. import firmware as firmware_module
-
-    try:
-        path = firmware_module.native_ota_artifact_path(artifact_id, relative_path)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return FileResponse(path, media_type="application/octet-stream")
-
-
-@router.get("/api/tater/satellite/v1/settings")
-async def native_satellite_settings(selector: str = "", x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_satellite
-
-    return await native_satellite.live_settings(selector=selector)
-
-
-@router.post("/api/tater/satellite/v1/settings")
-async def native_satellite_settings_save(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_satellite
-
-    body = payload if isinstance(payload, dict) else {}
-    selector = vp._text(body.get("selector"))
-    values = body.get("settings") if isinstance(body.get("settings"), dict) else body
-    try:
-        return await native_satellite.save_live_settings(values, selector=selector)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.get("/api/tater/satellite/v1/logs")
-async def native_satellite_logs(
-    selector: str,
-    after_seq: int = 0,
-    limit: int = 100,
-    x_tater_token: Optional[str] = Header(None),
-) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_satellite
-
-    return await native_satellite.logs(selector, after_seq=after_seq, limit=limit)
-
-
-@router.post("/api/tater/satellite/v1/command")
-async def native_satellite_command(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_satellite
-
-    selector = vp._text((payload or {}).get("selector"))
-    message_type = vp._text((payload or {}).get("type") or (payload or {}).get("message_type"))
-    message_payload = (payload or {}).get("payload")
-    if not isinstance(message_payload, dict):
-        message_payload = {}
-    try:
-        return await native_satellite.send_command(selector, message_type, message_payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.get("/api/tater/satellite/v1/timers")
-async def native_satellite_timers(
-    selector: str = "",
-    timer_id: str = "",
-    room: str = "",
-    x_tater_token: Optional[str] = Header(None),
-) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_timers
-
-    return await native_timers.status(selector=selector, timer_id=timer_id, room=room)
-
-
-@router.post("/api/tater/satellite/v1/timers")
-async def native_satellite_timer_create(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_timers
-
-    body = payload if isinstance(payload, dict) else {}
-    selector = vp._text(body.get("selector"))
-    duration_s = vp._as_int(body.get("duration_s") or body.get("seconds"), 0, minimum=0)
-    if not selector:
-        raise HTTPException(status_code=400, detail="selector is required")
-    if duration_s <= 0:
-        raise HTTPException(status_code=400, detail="duration_s is required")
-    result = await native_timers.create_timer(
-        selector,
-        duration_s,
-        label=vp._text(body.get("label")),
-        room=vp._text(body.get("room") or body.get("area_name")),
-        source="api",
-    )
-    if not bool(result.get("ok")) and vp._text(result.get("code")) == "already_running":
-        raise HTTPException(status_code=409, detail=result)
-    if not bool(result.get("ok")):
-        raise HTTPException(status_code=400, detail=result)
-    return result
-
-
-@router.post("/api/tater/satellite/v1/timers/cancel")
-async def native_satellite_timer_cancel(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_timers
-
-    body = payload if isinstance(payload, dict) else {}
-    return await native_timers.cancel_timer(
-        timer_id=vp._text(body.get("timer_id") or body.get("id")),
-        selector=vp._text(body.get("selector")),
-        room=vp._text(body.get("room") or body.get("area_name")),
-        source="api",
-    )
-
-
-@router.post("/api/tater/satellite/v1/timers/snooze")
-async def native_satellite_timer_snooze(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_timers
-
-    body = payload if isinstance(payload, dict) else {}
-    duration_s = vp._as_int(body.get("duration_s") or body.get("seconds"), 300, minimum=1)
-    return await native_timers.snooze_timer(
-        timer_id=vp._text(body.get("timer_id") or body.get("id")),
-        selector=vp._text(body.get("selector")),
-        duration_s=duration_s,
-        source="api",
-    )
 
 
 @router.get("/tater-ha/v1/display/feed")
@@ -547,6 +378,52 @@ async def display_snapshot(snapshot_id: str, x_tater_token: Optional[str] = Head
     return _display_snapshot_response(snapshot_id)
 
 
+@router.get("/tater-ha/v1/voice/esphome/status")
+async def esphome_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    return vp._esphome_status()
+
+
+@router.post("/tater-ha/v1/voice/esphome/entities")
+async def esphome_entities(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    selector = vp._text((payload or {}).get("selector"))
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    try:
+        result = vp._esphome_entities_for_selector(selector)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.post("/tater-ha/v1/voice/esphome/entities/command")
+async def esphome_entities_command(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    selector = vp._text((payload or {}).get("selector"))
+    entity_key = vp._text((payload or {}).get("entity_key") or (payload or {}).get("key"))
+    command = vp._text((payload or {}).get("command"))
+    value = (payload or {}).get("value")
+    try:
+        result = await vp._esphome_command_entity(
+            selector,
+            entity_key=entity_key,
+            command=command,
+            value=value,
+            options=payload if isinstance(payload, dict) else {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
 @router.get("/tater-ha/v1/voice/satellites")
 async def satellites(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -564,7 +441,26 @@ async def satellites_select(payload: Dict[str, Any], x_tater_token: Optional[str
     if not selector:
         raise HTTPException(status_code=400, detail="selector is required")
     vp._set_satellite_selected(selector, selected)
-    return {"ok": True, "selector": selector, "selected": selected}
+    return {"ok": True, "selector": selector, "selected": selected, "status": vp._esphome_status()}
+
+
+@router.post("/tater-ha/v1/voice/esphome/reconcile")
+async def esphome_reconcile(payload: Optional[Dict[str, Any]] = None, x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    force = vp._as_bool((payload or {}).get("force"), True)
+    return await vp._esphome_reconcile_once(force=force)
+
+
+@router.post("/tater-ha/v1/voice/esphome/disconnect")
+async def esphome_disconnect(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    selector = vp._text((payload or {}).get("selector"))
+    if not selector:
+        raise HTTPException(status_code=400, detail="selector is required")
+    await vp._esphome_disconnect_selector(selector, reason="manual_endpoint")
+    return {"ok": True, "selector": selector, "status": vp._esphome_status()}
 
 
 @router.get("/tater-ha/v1/voice/wyoming/tts/voices")
@@ -583,8 +479,8 @@ async def wyoming_tts_voices_refresh(x_tater_token: Optional[str] = Header(None)
     return {"ok": True, **result}
 
 
-@router.post("/api/tater/satellite/v1/play")
-async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+@router.post("/tater-ha/v1/voice/esphome/play")
+async def esphome_play(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
     vp._require_api_auth(x_tater_token)
 
@@ -697,22 +593,18 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     if not playback_url:
         raise HTTPException(status_code=500, detail="Failed to store media for playback")
 
-    if selector.startswith("native:"):
-        try:
-            from .. import native_satellite
-
-            command_payload: Dict[str, Any] = {"url": playback_url}
-            if tts_kind:
-                command_payload["tts_kind"] = tts_kind
-            if continue_conversation:
-                command_payload["continue_conversation"] = True
-            if conversation_id:
-                command_payload["conversation_id"] = conversation_id
-            result = await native_satellite.send_command(selector, "play.url", command_payload)
-        except Exception as exc:
-            raise HTTPException(status_code=409, detail=f"Failed to queue native satellite playback: {exc}") from exc
-    else:
-        raise HTTPException(status_code=410, detail="Legacy satellite playback has been removed. Use a native satellite selector.")
+    try:
+        result = await vp._queue_selector_audio_url(
+            selector,
+            playback_url,
+            text=announce_text,
+            timeout_s=timeout_s,
+            tts_kind=tts_kind,
+            continue_conversation=continue_conversation,
+            conversation_id=conversation_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Failed to queue selector playback: {exc}") from exc
 
     return {
         "ok": True,
@@ -727,7 +619,6 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     }
 
 
-@router.get("/api/tater/satellite/v1/intercom/targets")
 @router.get("/tater-ha/v1/voice/intercom/targets")
 async def intercom_targets(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -738,7 +629,6 @@ async def intercom_targets(x_tater_token: Optional[str] = Header(None)) -> Dict[
     return {"ok": True, "targets": rows, "count": len(rows)}
 
 
-@router.get("/api/tater/satellite/v1/intercom/status")
 @router.get("/tater-ha/v1/voice/intercom/status")
 async def intercom_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -748,7 +638,6 @@ async def intercom_status(x_tater_token: Optional[str] = Header(None)) -> Dict[s
     return await intercom.status()
 
 
-@router.post("/api/tater/satellite/v1/intercom/start")
 @router.post("/tater-ha/v1/voice/intercom/start")
 async def intercom_start(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -766,7 +655,6 @@ async def intercom_start(payload: Dict[str, Any], x_tater_token: Optional[str] =
     return result
 
 
-@router.post("/api/tater/satellite/v1/intercom/cancel")
 @router.post("/tater-ha/v1/voice/intercom/cancel")
 async def intercom_cancel(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -779,8 +667,8 @@ async def intercom_cancel(payload: Dict[str, Any], x_tater_token: Optional[str] 
     return await intercom.cancel_for_selector(selector)
 
 
-@router.get("/api/tater/satellite/v1/tts/{stream_id}.wav")
-async def native_tts_stream(stream_id: str) -> Response:
+@router.get("/tater-ha/v1/voice/esphome/tts/{stream_id}.wav")
+async def esphome_tts_stream(stream_id: str) -> Response:
     vp = _vp()
     row = vp._fetch_tts_url(stream_id)
     if not isinstance(row, dict):
@@ -796,7 +684,7 @@ async def native_tts_stream(stream_id: str) -> Response:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=vp._text(exc) or "Chatterbox TTS stream failed") from exc
         vp._native_debug(
-            f"native chatterbox tts stream fetch stream_id={vp._text(stream_id)} "
+            f"esphome chatterbox tts stream fetch stream_id={vp._text(stream_id)} "
             f"session_id={vp._text(row.get('session_id'))} selector={vp._text(row.get('selector'))}"
         )
         return StreamingResponse(
@@ -810,14 +698,14 @@ async def native_tts_stream(stream_id: str) -> Response:
         raise HTTPException(status_code=404, detail="TTS stream has no audio data")
 
     vp._native_debug(
-        f"native tts url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
+        f"esphome tts url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
         f"selector={vp._text(row.get('selector'))} bytes={len(wav_bytes)}"
     )
     return Response(content=bytes(wav_bytes), media_type="audio/wav", headers=headers)
 
 
-@router.get("/api/tater/satellite/v1/media/{stream_id}")
-async def native_media_stream(stream_id: str) -> Response:
+@router.get("/tater-ha/v1/voice/esphome/media/{stream_id}")
+async def esphome_media_stream(stream_id: str) -> Response:
     vp = _vp()
     row = vp._fetch_tts_url(stream_id)
     if not isinstance(row, dict):
@@ -829,7 +717,7 @@ async def native_media_stream(stream_id: str) -> Response:
 
     media_type = vp._text(row.get("media_type")).split(";", 1)[0].strip().lower() or "application/octet-stream"
     vp._native_debug(
-        f"native media url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
+        f"esphome media url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
         f"selector={vp._text(row.get('selector'))} bytes={len(body_bytes)} media_type={media_type}"
     )
 

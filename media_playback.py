@@ -115,7 +115,7 @@ def _voice_core_play_media_sync(
         payload["selector"] = selector
         try:
             response = requests.post(
-                f"{base_url}/api/tater/satellite/v1/play",
+                f"{base_url}/tater-ha/v1/voice/esphome/play",
                 json=payload,
                 headers=headers,
                 timeout=90,

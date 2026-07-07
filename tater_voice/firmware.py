@@ -76,46 +76,6 @@ _PREBUILT_FIRMWARE_RAW_BASE_URL = (
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}"
 )
 _PREBUILT_FIRMWARE_LATEST_URL = f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/prebuilt_firmware/latest.json"
-_NATIVE_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
-_NATIVE_FIRMWARE_GITHUB_REPO = "Tater-Native-Firmware"
-_NATIVE_FIRMWARE_GITHUB_REF = "main"
-_NATIVE_FIRMWARE_RAW_BASE_URL = str(
-    os.getenv(
-        "TATER_NATIVE_FIRMWARE_RAW_BASE_URL",
-        f"https://raw.githubusercontent.com/{_NATIVE_FIRMWARE_GITHUB_OWNER}/{_NATIVE_FIRMWARE_GITHUB_REPO}/{_NATIVE_FIRMWARE_GITHUB_REF}",
-    )
-    or ""
-).strip().rstrip("/")
-_NATIVE_FIRMWARE_LATEST_URL = str(
-    os.getenv(
-        "TATER_NATIVE_FIRMWARE_LATEST_URL",
-        f"https://github.com/{_NATIVE_FIRMWARE_GITHUB_OWNER}/{_NATIVE_FIRMWARE_GITHUB_REPO}/releases/latest/download/latest.json",
-    )
-    or ""
-).strip()
-_SOURCE_ROOT = Path(__file__).resolve().parents[1]
-_NATIVE_FIRMWARE_LOCAL_ROOTS = tuple(
-    root
-    for root in (
-        Path(os.getenv("TATER_NATIVE_FIRMWARE_LOCAL_ROOT", "")).expanduser()
-        if os.getenv("TATER_NATIVE_FIRMWARE_LOCAL_ROOT")
-        else None,
-        _SOURCE_ROOT.parent / "Tater-Native-Firmware",
-        Path.home() / "Scripts" / "Tater-Native-Firmware",
-        Path.home() / "Tater-Native-Firmware",
-    )
-    if isinstance(root, Path)
-)
-_NATIVE_FIRMWARE_LOCAL_LATEST = next(
-    (
-        root / "prebuilt_firmware" / "latest.json"
-        for root in _NATIVE_FIRMWARE_LOCAL_ROOTS
-        if (root / "prebuilt_firmware" / "latest.json").is_file()
-    ),
-    (_NATIVE_FIRMWARE_LOCAL_ROOTS[0] / "prebuilt_firmware" / "latest.json")
-    if _NATIVE_FIRMWARE_LOCAL_ROOTS
-    else _SOURCE_ROOT / "prebuilt_firmware" / "latest.json",
-)
 _PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
 _PREBUILT_OTA_PORT = 3232
 _PREBUILT_OTA_BLOCK_SIZE = 8192
@@ -213,7 +173,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
         "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "voicepe",
-            "voice-pe",
             "voice pe",
             "tatervpe",
             "vpe",
@@ -845,7 +804,7 @@ def _semver_tuple(value: Any) -> tuple[int, int, int]:
         return (0, 0, 0)
     if token.startswith("v"):
         token = token[1:].strip()
-    match = re.search(r"([0-9]+(\.[0-9]+){0,2})", token)
+    match = re.match(r"^([0-9]+(\.[0-9]+){0,2})", token)
     core = match.group(1) if match else "0.0.0"
     parts = (core.split(".") + ["0", "0", "0"])[:3]
     try:
@@ -1016,15 +975,6 @@ def _remote_json(url: str, *, force_refresh: bool = False) -> Any:
     return payload
 
 
-def _local_json(path: Path) -> Any:
-    if not path.is_file():
-        raise RuntimeError(f"Local JSON file was not found: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"Local JSON file did not parse: {path}") from exc
-
-
 def _prebuilt_firmware_raw_url(path_or_url: Any) -> str:
     token = _text(path_or_url).strip()
     if not token:
@@ -1035,143 +985,6 @@ def _prebuilt_firmware_raw_url(path_or_url: Any) -> str:
     clean = token.lstrip("/")
     quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
     return f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/{quoted}"
-
-
-def _native_firmware_raw_url(path_or_url: Any) -> str:
-    token = _text(path_or_url).strip()
-    if not token:
-        return ""
-    parsed = urllib_parse.urlparse(token)
-    if parsed.scheme and parsed.netloc:
-        return token
-    clean = token.lstrip("/")
-    quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
-    return f"{_NATIVE_FIRMWARE_RAW_BASE_URL}/{quoted}"
-
-
-def _native_firmware_local_path(path_or_url: Any) -> Optional[Path]:
-    token = _text(path_or_url).strip()
-    if not token:
-        return None
-    parsed = urllib_parse.urlparse(token)
-    if parsed.scheme and parsed.netloc:
-        return None
-    clean = token.lstrip("/")
-    if clean.startswith("firmware/native_satellite/"):
-        clean = clean[len("firmware/native_satellite/") :]
-    for root in _NATIVE_FIRMWARE_LOCAL_ROOTS:
-        path = root / clean
-        if path.is_file():
-            return path
-    return (_NATIVE_FIRMWARE_LOCAL_ROOTS[0] / clean) if _NATIVE_FIRMWARE_LOCAL_ROOTS else _SOURCE_ROOT / clean
-
-
-def _load_native_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
-    latest_payload: Any
-    latest_url = _NATIVE_FIRMWARE_LATEST_URL
-    try:
-        latest_payload = _remote_json(latest_url, force_refresh=force_refresh)
-        latest_source = "remote"
-    except Exception:
-        latest_payload = _local_json(_NATIVE_FIRMWARE_LOCAL_LATEST)
-        latest_source = "local"
-        latest_url = str(_NATIVE_FIRMWARE_LOCAL_LATEST)
-
-    if not isinstance(latest_payload, dict):
-        raise RuntimeError("Native firmware latest.json did not parse into an object.")
-
-    manifest_ref = _text(latest_payload.get("manifest"))
-    if not manifest_ref:
-        raise RuntimeError("Native firmware latest.json is missing a manifest path.")
-
-    manifest_url = _native_firmware_raw_url(manifest_ref)
-    try:
-        manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh) if latest_source == "remote" else None
-    except Exception:
-        manifest_payload = None
-    if not isinstance(manifest_payload, dict):
-        local_manifest_path = _native_firmware_local_path(manifest_ref)
-        if not isinstance(local_manifest_path, Path):
-            raise RuntimeError("Native firmware manifest is unavailable.")
-        manifest_payload = _local_json(local_manifest_path)
-        manifest_url = str(local_manifest_path)
-
-    if not isinstance(manifest_payload, dict):
-        raise RuntimeError("Native firmware manifest did not parse into an object.")
-    devices = manifest_payload.get("devices")
-    if not isinstance(devices, list):
-        raise RuntimeError("Native firmware manifest is missing its devices list.")
-
-    version = _text(manifest_payload.get("version")) or _text(latest_payload.get("version"))
-    payload = copy.deepcopy(manifest_payload)
-    payload["version"] = version
-    payload["latest_url"] = latest_url
-    payload["manifest_url"] = manifest_url
-    payload["manifest_path"] = manifest_ref
-    payload["devices_by_key"] = {
-        _lower(row.get("key")): dict(row)
-        for row in devices
-        if isinstance(row, dict) and _text(row.get("key"))
-    }
-    return payload
-
-
-def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> Dict[str, Any]:
-    key = _lower(template_key)
-    try:
-        manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
-    except Exception as exc:
-        return {
-            "available": False,
-            "template_key": key,
-            "reason": "manifest_unavailable",
-            "error": _text(exc) or exc.__class__.__name__,
-        }
-
-    devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
-    device = devices_by_key.get(key) if isinstance(devices_by_key.get(key), dict) else None
-    if not isinstance(device, dict):
-        return {
-            "available": False,
-            "template_key": key,
-            "reason": "missing_device",
-            "version": _text(manifest.get("version")),
-            "manifest_url": _text(manifest.get("manifest_url")),
-        }
-
-    artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
-    return {
-        "available": bool(artifacts.get("ota") or artifacts.get("factory")),
-        "template_key": key,
-        "version": _text(device.get("firmware_version")) or _text(manifest.get("version")),
-        "display_version": _text(device.get("display_version")) or _text(manifest.get("display_version")),
-        "manifest_url": _text(manifest.get("manifest_url")),
-        "latest_url": _text(manifest.get("latest_url")),
-        "device": copy.deepcopy(device),
-        "artifacts": copy.deepcopy(artifacts),
-        "native": True,
-    }
-
-
-def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
-    try:
-        manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
-    except Exception:
-        return set()
-
-    devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
-    keys: set[str] = set()
-    for raw_key, raw_device in devices_by_key.items():
-        key = _lower(raw_key)
-        device = raw_device if isinstance(raw_device, dict) else {}
-        artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
-        has_artifact = any(
-            isinstance(artifacts.get(kind), dict) and bool(_text(artifacts[kind].get("path")))
-            for kind in ("ota", "factory")
-        )
-        if key and has_artifact:
-            keys.add(key)
-    return keys
 
 
 def _load_prebuilt_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
@@ -1208,10 +1021,6 @@ def _load_prebuilt_firmware_manifest(*, force_refresh: bool = False) -> Dict[str
 
 def _prebuilt_firmware_info(template_key: Any, *, force_refresh: bool = False) -> Dict[str, Any]:
     key = _lower(template_key)
-    if key == "voicepe":
-        native = _native_firmware_info(key, force_refresh=force_refresh)
-        if bool(native.get("available")) or _text(native.get("error")):
-            return native
     if key not in _PREBUILT_FIRMWARE_TEMPLATE_KEYS:
         return {"available": False, "template_key": key, "reason": "not_prebuilt"}
     try:
@@ -1300,37 +1109,31 @@ def _download_prebuilt_firmware_binary(
 ) -> Dict[str, Any]:
     artifact = _prebuilt_artifact_meta(context, kind)
     target_path = _prebuilt_cache_path(context, artifact)
-    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
-    native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
     if not force_refresh and _prebuilt_binary_is_valid(target_path, artifact):
         return {
             "path": target_path,
             "artifact": artifact,
-            "url": _native_firmware_raw_url(artifact.get("path")) if native_firmware else _prebuilt_firmware_raw_url(artifact.get("path")),
+            "url": _prebuilt_firmware_raw_url(artifact.get("path")),
             "cached": True,
         }
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    url = _native_firmware_raw_url(artifact.get("path")) if native_firmware else _prebuilt_firmware_raw_url(artifact.get("path"))
-    local_path = _native_firmware_local_path(artifact.get("path")) if native_firmware else None
+    url = _prebuilt_firmware_raw_url(artifact.get("path"))
     if not url:
         raise RuntimeError("Prebuilt firmware URL is missing.")
+    req = urllib_request.Request(
+        url,
+        headers={
+            "User-Agent": "Tater/1.0",
+            "Accept": "application/octet-stream, */*",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
     tmp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        if isinstance(local_path, Path) and local_path.is_file():
-            shutil.copy2(local_path, tmp_path)
-        else:
-            req = urllib_request.Request(
-                url,
-                headers={
-                    "User-Agent": "Tater/1.0",
-                    "Accept": "application/octet-stream, */*",
-                    "Cache-Control": "no-cache",
-                    "Pragma": "no-cache",
-                },
-            )
-            with urllib_request.urlopen(req, timeout=_PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
-                tmp_path.write_bytes(response.read())
+        with urllib_request.urlopen(req, timeout=_PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            tmp_path.write_bytes(response.read())
         if not _prebuilt_binary_is_valid(tmp_path, artifact):
             raise RuntimeError(f"Downloaded prebuilt firmware failed verification: {target_path.name}.")
         tmp_path.replace(target_path)
@@ -1353,16 +1156,12 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
         "version": _text(prebuilt.get("version")),
         "manifest_url": _text(prebuilt.get("manifest_url")),
         "error": _text(prebuilt.get("error")),
-        "native": bool(prebuilt.get("native")),
         "artifacts": {
             kind: {
                 "kind": _text(row.get("kind") or kind),
                 "path": _text(row.get("path")),
                 "size_bytes": _as_int(row.get("size_bytes"), 0, minimum=0),
                 "sha256": _text(row.get("sha256")),
-                "flash_size": _text(row.get("flash_size")),
-                "flash_mode": _text(row.get("flash_mode")),
-                "flash_freq": _text(row.get("flash_freq")),
             }
             for kind, row in artifacts.items()
             if isinstance(row, dict)
@@ -1372,30 +1171,23 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
 
 def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str, Any]:
     try:
-        native_manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
+        manifest = _load_prebuilt_firmware_manifest(force_refresh=force_refresh)
     except Exception as exc:
         return {
             "available": False,
             "version": "",
             "device_count": 0,
             "manifest_url": "",
-            "latest_url": _NATIVE_FIRMWARE_LATEST_URL,
             "error": _text(exc) or exc.__class__.__name__,
-            "native": True,
         }
-    native_keys = _native_firmware_device_keys(force_refresh=force_refresh)
-    devices = native_manifest.get("devices") if isinstance(native_manifest.get("devices"), list) else []
-    available_devices = [
-        row for row in devices if isinstance(row, dict) and _lower(row.get("key")) in native_keys
-    ]
+    devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
     return {
-        "available": bool(available_devices),
-        "version": _text(native_manifest.get("version")),
-        "device_count": len(available_devices),
-        "manifest_url": _text(native_manifest.get("manifest_url")),
-        "latest_url": _text(native_manifest.get("latest_url")),
+        "available": True,
+        "version": _text(manifest.get("version")),
+        "device_count": len([row for row in devices if isinstance(row, dict)]),
+        "manifest_url": _text(manifest.get("manifest_url")),
+        "latest_url": _text(manifest.get("latest_url")),
         "error": "",
-        "native": True,
     }
 
 
@@ -2128,23 +1920,6 @@ def _template_spec_by_key(template_key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _native_template_specs(*, force_refresh: bool = False) -> List[Dict[str, Any]]:
-    native_keys = _native_firmware_device_keys(force_refresh=force_refresh)
-    if not native_keys:
-        return []
-    return [dict(spec) for spec in _TEMPLATE_SPECS if _lower(spec.get("key")) in native_keys]
-
-
-def _native_template_spec_by_key(template_key: Any, *, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
-    token = _lower(template_key)
-    if not token:
-        return None
-    for spec in _native_template_specs(force_refresh=force_refresh):
-        if _lower(spec.get("key")) == token:
-            return dict(spec)
-    return None
-
-
 def _is_usb_recovery_selector(selector: Any) -> bool:
     return _text(selector) == _FIRMWARE_USB_RECOVERY_SELECTOR
 
@@ -2158,7 +1933,7 @@ def _usb_recovery_client_row(template_spec: Dict[str, Any]) -> Dict[str, Any]:
         "connected": False,
         "selected": True,
         "firmware_usb_recovery": True,
-        "source": "tater_native",
+        "source": "usb_recovery",
         "device_info": {
             "name": _lower(template_spec.get("key")) or "usb_recovery",
             "friendly_name": f"{template_label} Browser USB Recovery",
@@ -2173,40 +1948,6 @@ def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) ->
     if _is_usb_recovery_selector(selector_token):
         return _usb_recovery_client_row(template_spec)
 
-    if selector_token.startswith("native:"):
-        with contextlib.suppress(Exception):
-            from . import native_satellite
-
-            native_status = esphome_runtime.run_async_blocking(native_satellite.status(), timeout=3.0)
-            native_clients = native_status.get("clients") if isinstance(native_status, dict) and isinstance(native_status.get("clients"), dict) else {}
-            native_row = native_clients.get(selector_token)
-            if isinstance(native_row, dict):
-                capabilities = native_row.get("capabilities") if isinstance(native_row.get("capabilities"), dict) else {}
-                return {
-                    "selector": selector_token,
-                    "host": _text(native_row.get("host")),
-                    "port": 0,
-                    "connected": bool(native_row.get("connected")),
-                    "selected": True,
-                    "source": "tater_native",
-                    "device_info": {
-                        "name": _text(native_row.get("device_id")) or selector_token,
-                        "friendly_name": _text(native_row.get("device_name")) or selector_token,
-                        "manufacturer": "Tater",
-                        "model": _text(native_row.get("board")) or "native",
-                        "project_name": "tater.native_satellite",
-                        "project_version": _text(native_row.get("firmware_version")),
-                    },
-                    "metadata": {
-                        "native_selected": True,
-                        "native_connected": bool(native_row.get("connected")),
-                        "native_protocol": 1,
-                        "native_transport": "websocket",
-                        "board": _text(native_row.get("board")),
-                        "capabilities": capabilities,
-                    },
-                }
-
     client_row = esphome_runtime.client_row_snapshot_sync(selector_token)
     if not isinstance(client_row, dict):
         client_row = {}
@@ -2215,13 +1956,13 @@ def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) ->
 
     registry_row = esphome_runtime.satellite_lookup(selector_token)
     registry_meta = registry_row.get("metadata") if isinstance(registry_row.get("metadata"), dict) else {}
-    registry_selected = bool(registry_meta.get("native_selected"))
+    registry_selected = bool(registry_meta.get("esphome_selected"))
 
     if not client_row and isinstance(registry_row, dict) and registry_row:
         client_row = {
             "selector": selector_token,
             "host": _text(registry_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token),
-            "port": _as_int(registry_meta.get("native_port") or registry_row.get("port"), 0),
+            "port": _as_int(registry_meta.get("esphome_port") or registry_row.get("port"), 0),
             "connected": False,
             "selected": registry_selected,
             "source": _text(registry_row.get("source")) or "satellite_registry",
@@ -2744,36 +2485,22 @@ def _build_device_context(
         return None
 
     template_key = _text(template_spec.get("key"))
-    selector_token = _text(selector)
-    native_firmware = selector_token.startswith("native:") or _text(client_row.get("source")) in {"tater_native", "native_satellite"}
     prebuilt_firmware = _prebuilt_firmware_info(template_key, force_refresh=force_remote_refresh)
-    if native_firmware:
-        prebuilt_device = prebuilt_firmware.get("device") if isinstance(prebuilt_firmware.get("device"), dict) else {}
+    try:
+        template_ctx = _load_template_context(template_spec, force_remote_refresh=force_remote_refresh)
+    except Exception:
+        if not bool(prebuilt_firmware.get("available")):
+            raise
         template_ctx = {
             "substitutions": {},
             "sections": {},
-            "firmware_version": _text(prebuilt_device.get("firmware_version")) or _text(prebuilt_firmware.get("version")),
-            "firmware_project": _text(prebuilt_device.get("project")) or "tater.native_satellite",
-            "template_doc": {"esp32": {"flash_size": _text(prebuilt_device.get("flash_size")) or "16MB"}},
-            "source_kind": "native",
-            "source_label": _text(prebuilt_firmware.get("manifest_url")),
+            "firmware_version": "",
+            "firmware_project": "",
         }
-    else:
-        try:
-            template_ctx = _load_template_context(template_spec, force_remote_refresh=force_remote_refresh)
-        except Exception:
-            if not bool(prebuilt_firmware.get("available")):
-                raise
-            template_ctx = {
-                "substitutions": {},
-                "sections": {},
-                "firmware_version": "",
-                "firmware_project": "",
-                "template_doc": {},
-            }
     substitutions = template_ctx["substitutions"]
     field_order = [key for key in substitutions.keys() if _text(key)]
 
+    selector_token = _text(selector)
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
     display_base_url = _tater_display_base_url_for_peer(host)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
@@ -3145,19 +2872,12 @@ def _build_device_context(
     cli_status = {
         "available": False,
         "label": "Prebuilt only",
-        "detail": "Firmware flashing uses official Tater Native OTA and USB images; local builds are not required.",
+        "detail": "Firmware flashing uses prebuilt OTA and USB images; ESPHome CLI builds are not used.",
     }
-    links = (
-        [
-            {"label": "Native Firmware Manifest", "href": _text(prebuilt_firmware.get("manifest_url"))},
-            {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
-        ]
-        if native_firmware
-        else [
-            {"label": "Template YAML", "href": _text((template_spec.get("source_urls") or [""])[0])},
-            {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
-        ]
-    )
+    links = [
+        {"label": "Template YAML", "href": _text((template_spec.get("source_urls") or [""])[0])},
+        {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
+    ]
 
     model = _text(device_info.get("model"))
     project_name = _text(device_info.get("project_name"))
@@ -3215,7 +2935,6 @@ def _build_device_context(
         "host": host,
         "display_base_url": display_base_url,
         "display_target": _text(fields_meta.get("display_target", {}).get("resolved_value")),
-        "native_firmware": native_firmware,
     }
 
     return {
@@ -3230,7 +2949,6 @@ def _build_device_context(
         "template_spec": template_spec,
         "template_ctx": template_ctx,
         "prebuilt_firmware": prebuilt_firmware,
-        "native_firmware": native_firmware,
         "profile": profile,
         "field_order": field_order,
         "fields_meta": fields_meta,
@@ -3456,16 +3174,12 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     cli_status = {
         "available": False,
         "label": "Prebuilt only",
-        "detail": "Firmware flashing uses official Tater Native OTA and USB images; local builds are not required.",
+        "detail": "Firmware flashing uses prebuilt OTA and USB images; ESPHome CLI builds are not used.",
     }
-
-    native_template_specs = _native_template_specs()
-    if not native_template_specs:
-        native_template_specs = _native_template_specs(force_refresh=True)
 
     template_options = [
         {"value": _text(spec.get("key")), "label": _text(spec.get("label")) or _text(spec.get("key"))}
-        for spec in native_template_specs
+        for spec in _TEMPLATE_SPECS
         if _text(spec.get("key"))
     ]
     devices: List[Dict[str, Any]] = []
@@ -3511,11 +3225,11 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             continue
         candidate_specs: List[Dict[str, Any]] = []
         if matched_template_key:
-            spec = _native_template_spec_by_key(matched_template_key)
+            spec = _template_spec_by_key(matched_template_key)
             if isinstance(spec, dict):
                 candidate_specs.append(spec)
         else:
-            candidate_specs = [dict(spec) for spec in native_template_specs]
+            candidate_specs = [dict(spec) for spec in _TEMPLATE_SPECS]
 
         for spec in candidate_specs:
             template_key = _text(spec.get("key"))
@@ -3546,7 +3260,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
 
     usb_recovery_option = _firmware_device_option(_FIRMWARE_USB_RECOVERY_SELECTOR, {"firmware_usb_recovery": True})
     if isinstance(usb_recovery_option, dict):
-        for spec in native_template_specs:
+        for spec in _TEMPLATE_SPECS:
             template_key = _text(spec.get("key"))
             if not template_key:
                 continue
@@ -3595,11 +3309,11 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     if not active_selector:
         active_selector = _text((devices[0] or {}).get("value")) if devices else ""
 
-    empty_message = "No Tater Native firmware targets are available."
+    empty_message = "No ESPHome firmware targets are available."
     if warnings and not any(bool(rows) for rows in variants.values()):
         empty_message = warnings[0]
     elif not devices:
-        empty_message = "No Tater Native firmware targets are available."
+        empty_message = "No ESPHome firmware targets are available."
 
     firmware_updates: List[Dict[str, Any]] = []
     firmware_flash_targets: List[Dict[str, Any]] = []
@@ -3657,10 +3371,10 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         "active_template_key": active_template_key,
         "empty_message": empty_message,
         "wifi_note": (
-            "Official native firmware is selected from the matched satellite family; no local compile step is used."
+            "Prebuilt firmware is selected from the matched satellite family; no local ESPHome compile step is used."
         ),
         "browser_flash_note": (
-            "Browser USB flash writes the native factory image from this browser. After flashing, use the Tater setup Wi-Fi network to provision the satellite. "
+            "Browser USB flash writes the prebuilt factory image from this browser, then can set up Wi-Fi over Improv Serial. "
             "Plug the device into this computer and use Chrome or Edge on a secure context."
         ),
     }
@@ -3923,10 +3637,6 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     template_ctx = context.get("template_ctx") if isinstance(context.get("template_ctx"), dict) else {}
     template_doc = template_ctx.get("template_doc") if isinstance(template_ctx.get("template_doc"), dict) else {}
     esp32_block = template_doc.get("esp32") if isinstance(template_doc.get("esp32"), dict) else {}
-    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
-    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
-    factory_artifact = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
-    native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
     base_url = f"/api/settings/esphome/firmware-web/{artifact_id}"
     return {
         "artifact_id": artifact_id,
@@ -3938,11 +3648,9 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
         "source_binary": str(binary_path),
         "binary_size": int(target_binary_path.stat().st_size),
         "erase_all": True,
-        "flash_size": _text(factory_artifact.get("flash_size")) or _text(esp32_block.get("flash_size")) or ("16MB" if native_firmware else "4MB"),
-        "flash_mode": _text(factory_artifact.get("flash_mode")) or "dio",
-        "flash_freq": _text(factory_artifact.get("flash_freq")) or "40m",
-        "native_firmware": native_firmware,
-        "native_setup_ap": bool(native_firmware),
+        "flash_size": _text(esp32_block.get("flash_size")) or "4MB",
+        "flash_mode": "dio",
+        "flash_freq": "40m",
     }
 
 
@@ -4150,34 +3858,6 @@ def browser_flash_artifact_path(artifact_id: str, relative_path: str) -> Path:
     return target
 
 
-def native_ota_artifact_path(artifact_id: str, relative_path: str) -> Path:
-    return browser_flash_artifact_path(artifact_id, relative_path)
-
-
-def _create_native_ota_artifact(context: Dict[str, Any], binary_path: Path) -> Dict[str, Any]:
-    artifact_id = _browser_flash_artifact_id(context)
-    artifact_dir = FIRMWARE_WEB_FLASH_ROOT / artifact_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    target_binary_name = "firmware.bin"
-    target_binary_path = artifact_dir / target_binary_name
-    shutil.copy2(binary_path, target_binary_path)
-
-    base_url = _text(context.get("display_base_url")) or _tater_display_base_url_for_peer(context.get("host"))
-    if not base_url:
-        raise RuntimeError("Tater could not determine a local URL for the satellite to download firmware.")
-    return {
-        "artifact_id": artifact_id,
-        "ota_url": f"{base_url}/api/tater/satellite/v1/firmware/{artifact_id}/{target_binary_name}",
-        "binary_name": target_binary_name,
-        "selector": _text(context.get("selector")),
-        "template_key": _text(context.get("template_key")),
-        "firmware_version": _text(context.get("firmware_version")),
-        "source_binary": str(binary_path),
-        "binary_size": int(target_binary_path.stat().st_size),
-    }
-
-
 def _runner_env(status: Dict[str, Any]) -> Dict[str, str]:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
@@ -4255,84 +3935,6 @@ def _append_session_passthrough_locked(session: Dict[str, Any], entry: Dict[str,
         source=source,
         display=_text(entry.get("display") or entry.get("message")),
     )
-
-
-def _is_native_selector(selector: Any) -> bool:
-    return _text(selector).startswith("native:")
-
-
-def _native_log_entries(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        seq = int(row.get("seq") or 0)
-        ts_value = float(row.get("ts") or 0.0)
-        level = _text(row.get("level")) or "info"
-        message = _text(row.get("message"))
-        if not message:
-            continue
-        timestamp = "-"
-        with contextlib.suppress(Exception):
-            if ts_value > 0:
-                timestamp = time.strftime("%H:%M:%S", time.localtime(ts_value))
-        entries.append(
-            {
-                "seq": seq,
-                "ts": ts_value,
-                "time": timestamp,
-                "level": level,
-                "message": message,
-                "display": f"[{timestamp}] [{level}] {message}",
-                "payload": row.get("payload") if isinstance(row.get("payload"), dict) else {},
-                "type": _text(row.get("type")),
-            }
-        )
-    return entries
-
-
-def _native_logs_fetch(selector: str, *, after_seq: int = 0, start: bool = False) -> Dict[str, Any]:
-    from . import native_satellite
-
-    result = esphome_runtime.run_async_blocking(native_satellite.logs(selector, after_seq=after_seq, limit=200), timeout=5.0)
-    if not isinstance(result, dict):
-        result = {}
-    rows = list(result.get("logs") or []) if isinstance(result.get("logs"), list) else []
-    entries = _native_log_entries(rows)
-    cursor = after_seq
-    for entry in entries:
-        cursor = max(cursor, int(entry.get("seq") or 0))
-    if start:
-        entries.insert(
-            0,
-            {
-                "seq": 0,
-                "level": "info",
-                "message": "Native satellite firmware log feed opened.",
-                "display": "Native satellite firmware log feed opened.",
-            },
-        )
-    return {
-        "ok": True,
-        "selector": selector,
-        "active": True,
-        "connected": True,
-        "cursor": cursor,
-        "entries": entries,
-    }
-
-
-def _native_ota_terminal_status(entries: List[Dict[str, Any]]) -> str:
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-        status = _lower(payload.get("status"))
-        if status in {"rebooting", "complete", "completed"}:
-            return "completed"
-        if status == "error" or _lower(entry.get("level")) == "error":
-            return "failed"
-    return ""
 
 
 def _phase_status_text(phase: str, display_name: str = "") -> str:
@@ -4691,10 +4293,7 @@ def _pump_session_device_logs(session_id: str) -> None:
 
     if should_start:
         try:
-            if _is_native_selector(start_selector):
-                result = _native_logs_fetch(start_selector, start=True)
-            else:
-                result = esphome_runtime.logs_start(start_selector, timeout=20.0)
+            result = esphome_runtime.logs_start(start_selector, timeout=20.0)
         except Exception as exc:
             with _FIRMWARE_SESSION_LOCK:
                 session = _FIRMWARE_SESSIONS.get(session_id)
@@ -4708,7 +4307,6 @@ def _pump_session_device_logs(session_id: str) -> None:
             with _FIRMWARE_SESSION_LOCK:
                 session = _FIRMWARE_SESSIONS.get(session_id)
                 if isinstance(session, dict):
-                    entries = [entry for entry in list(result.get("entries") or []) if isinstance(entry, dict)]
                     session["device_logs_started"] = True
                     session["device_log_cursor"] = int(result.get("cursor") or 0)
                     session["device_log_error"] = ""
@@ -4720,40 +4318,16 @@ def _pump_session_device_logs(session_id: str) -> None:
                         message="Connected to device logs. Streaming live output below.",
                         source="session",
                     )
-                    for entry in entries:
-                        _append_session_passthrough_locked(session, entry, source="device")
-                    terminal_status = (
-                        _native_ota_terminal_status(entries)
-                        if _lower(session.get("operation")) == "native_tater_ota"
-                        else ""
-                    )
-                    if terminal_status == "completed":
-                        session["active"] = False
-                        session["returncode"] = 0
-                        session["message"] = "Native OTA accepted. Device is rebooting into updated firmware."
-                        _set_session_phase_locked(session, "completed")
-                        _save_recorded_firmware_version(
-                            session.get("selector"),
-                            session.get("template_key"),
-                            session.get("firmware_version"),
-                            display_name=session.get("display_name"),
-                            source="native_tater_ota",
-                        )
-                    elif terminal_status == "failed":
-                        session["active"] = False
-                        session["returncode"] = 1
-                        session["message"] = "Native OTA failed."
-                        _set_session_phase_locked(session, "failed")
+                    for entry in list(result.get("entries") or []):
+                        if isinstance(entry, dict):
+                            _append_session_passthrough_locked(session, entry, source="device")
             return
 
     if not should_poll:
         return
 
     try:
-        if _is_native_selector(start_selector):
-            result = _native_logs_fetch(start_selector, after_seq=start_after_seq)
-        else:
-            result = esphome_runtime.logs_poll(start_selector, after_seq=start_after_seq, timeout=5.0)
+        result = esphome_runtime.logs_poll(start_selector, after_seq=start_after_seq, timeout=5.0)
     except Exception as exc:
         with _FIRMWARE_SESSION_LOCK:
             session = _FIRMWARE_SESSIONS.get(session_id)
@@ -4779,106 +4353,9 @@ def _pump_session_device_logs(session_id: str) -> None:
             return
         _set_session_phase_locked(session, "live_logs")
         session["device_log_error"] = ""
-        entries = [entry for entry in list(result.get("entries") or []) if isinstance(entry, dict)]
-        for entry in entries:
-            _append_session_passthrough_locked(session, entry, source="device")
-        terminal_status = (
-            _native_ota_terminal_status(entries)
-            if _lower(session.get("operation")) == "native_tater_ota"
-            else ""
-        )
-        if terminal_status == "completed":
-            session["active"] = False
-            session["returncode"] = 0
-            session["message"] = "Native OTA accepted. Device is rebooting into updated firmware."
-            _set_session_phase_locked(session, "completed")
-            _save_recorded_firmware_version(
-                session.get("selector"),
-                session.get("template_key"),
-                session.get("firmware_version"),
-                display_name=session.get("display_name"),
-                source="native_tater_ota",
-            )
-        elif terminal_status == "failed":
-            session["active"] = False
-            session["returncode"] = 1
-            session["message"] = "Native OTA failed."
-            _set_session_phase_locked(session, "failed")
-
-
-def _native_tater_ota_session_worker(session_id: str) -> None:
-    with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(session, dict):
-            return
-        selector = _text(session.get("selector"))
-        ota_url = _text(session.get("ota_url"))
-        display_name = _text(session.get("display_name")) or selector or "device"
-        _set_session_phase_locked(session, "uploading")
-        _append_session_entry_locked(
-            session,
-            level="info",
-            message=f"Sending native OTA command to {display_name}.",
-            source="session",
-        )
-
-    if not selector or not ota_url:
-        with _FIRMWARE_SESSION_LOCK:
-            session = _FIRMWARE_SESSIONS.get(session_id)
-            if isinstance(session, dict):
-                session["active"] = False
-                session["returncode"] = 1
-                session["error"] = "Native OTA selector or URL is missing."
-                session["message"] = "Native OTA failed."
-                _set_session_phase_locked(session, "failed")
-        return
-
-    try:
-        from . import native_satellite
-
-        result = esphome_runtime.run_async_blocking(
-            native_satellite.send_command(selector, "ota.url", {"url": ota_url}),
-            timeout=5.0,
-        )
-        if not isinstance(result, dict) or not bool(result.get("ok")):
-            raise RuntimeError(_text((result or {}).get("error")) or "Native OTA command was not accepted.")
-    except Exception as exc:
-        with _FIRMWARE_SESSION_LOCK:
-            session = _FIRMWARE_SESSIONS.get(session_id)
-            if isinstance(session, dict):
-                session["active"] = False
-                session["returncode"] = 1
-                session["error"] = _text(exc) or exc.__class__.__name__
-                session["message"] = "Native OTA failed."
-                _set_session_phase_locked(session, "failed")
-                _append_session_entry_locked(
-                    session,
-                    level="error",
-                    message=f"Native OTA command failed: {_text(exc) or exc.__class__.__name__}.",
-                    source="session",
-                )
-        return
-
-    with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(session, dict):
-            return
-        if bool(session.get("stop_requested")):
-            session["active"] = False
-            session["message"] = "Firmware flash stopped."
-            _set_session_phase_locked(session, "cancelled")
-            return
-        _append_session_entry_locked(
-            session,
-            level="info",
-            message="Native OTA command sent. The satellite will download firmware from Tater and report progress.",
-            source="session",
-        )
-        session["returncode"] = 0
-        session["message"] = "Native OTA command sent. Waiting for device OTA progress."
-        session["device_log_next_retry_ts"] = time.time()
-        session["device_log_retry_count"] = 0
-        _set_session_phase_locked(session, "awaiting_device_logs")
+        for entry in list(result.get("entries") or []):
+            if isinstance(entry, dict):
+                _append_session_passthrough_locked(session, entry, source="device")
 
 
 def _prebuilt_ota_session_worker(session_id: str) -> None:
@@ -5016,22 +4493,12 @@ def _start_flash_session(
     if not prebuilt_upload:
         raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
     config_path: Optional[Path] = None
-    native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
-    if not host and not native_firmware:
+    if not host:
         raise RuntimeError("OTA target host is missing.")
     prebuilt_binary = _download_prebuilt_firmware_binary(context, "ota")
-    ota_artifact = _create_native_ota_artifact(context, Path(prebuilt_binary["path"])) if native_firmware else {}
-    command = (
-        ["native_tater_ota", selector, _text(ota_artifact.get("ota_url"))]
-        if native_firmware
-        else ["native_ota", host, str(prebuilt_binary["path"])]
-    )
-    operation = "native_tater_ota" if native_firmware else "prebuilt_ota_upload"
-    command_display = (
-        f"Tater Native OTA --selector {selector} --url {_text(ota_artifact.get('ota_url'))}"
-        if native_firmware
-        else f"Native ESPHome OTA upload --device {host} --file {Path(prebuilt_binary['path']).name}"
-    )
+    command = ["native_ota", host, str(prebuilt_binary["path"])]
+    operation = "prebuilt_ota_upload"
+    command_display = f"Native ESPHome OTA upload --device {host} --file {Path(prebuilt_binary['path']).name}"
     session_id = f"fw_{uuid.uuid4().hex}"
     target_label = _text(context.get("display_name")) or selector
     session = {
@@ -5046,11 +4513,6 @@ def _start_flash_session(
         "config_path": str(config_path) if config_path else "",
         "command": command,
         "source_binary": str(prebuilt_binary.get("path") or ""),
-        "ota_url": _text(ota_artifact.get("ota_url")),
-        "artifact_id": _text(ota_artifact.get("artifact_id")),
-        "binary_url": _text(ota_artifact.get("ota_url")),
-        "binary_name": _text(ota_artifact.get("binary_name")),
-        "binary_size": int(ota_artifact.get("binary_size") or Path(prebuilt_binary["path"]).stat().st_size),
         "cwd": _text(cli_status.get("cwd")),
         "env": _runner_env(cli_status),
         "created_ts": time.time(),
@@ -5062,9 +4524,7 @@ def _start_flash_session(
         "active": True,
         "error": "",
         "message": (
-            f"Streaming native OTA progress for {target_label}."
-            if native_firmware
-            else f"Streaming prebuilt upload and live device logs for {target_label}."
+            f"Streaming prebuilt upload and live device logs for {target_label}."
             if follow_logs
             else f"Streaming prebuilt upload logs for {target_label}."
         ),
@@ -5085,7 +4545,7 @@ def _start_flash_session(
             level="info",
             message=(
                 f"Preparing prebuilt {_text(context.get('template_label')) or 'firmware'} "
-                f"{_text(context.get('firmware_version')) or ''} for {target_label} via {'native Tater OTA' if native_firmware else 'OTA'}."
+                f"{_text(context.get('firmware_version')) or ''} for {target_label} via OTA."
             ),
             source="session",
         )
@@ -5097,13 +4557,6 @@ def _start_flash_session(
                 message=f"OTA image {cached_text}: {Path(prebuilt_binary['path']).name}.",
                 source="session",
             )
-            if native_firmware and _text(ota_artifact.get("ota_url")):
-                _append_session_entry_locked(
-                    session,
-                    level="debug",
-                    message=f"Device download URL: {_text(ota_artifact.get('ota_url'))}",
-                    source="session",
-                )
         if config_path is not None:
             _append_session_entry_locked(
                 session,
@@ -5118,8 +4571,7 @@ def _start_flash_session(
             source="session",
         )
 
-    worker_target = _native_tater_ota_session_worker if native_firmware else _prebuilt_ota_session_worker
-    worker = threading.Thread(target=worker_target, args=(session_id,), daemon=True)
+    worker = threading.Thread(target=_prebuilt_ota_session_worker, args=(session_id,), daemon=True)
     with _FIRMWARE_SESSION_LOCK:
         live_session = _FIRMWARE_SESSIONS.get(session_id)
         if isinstance(live_session, dict):
@@ -5284,13 +4736,13 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     if not template_key:
         raise ValueError("template_key is required")
 
-    template_spec = _native_template_spec_by_key(template_key, force_refresh=True)
+    template_spec = _template_spec_by_key(template_key)
     if not isinstance(template_spec, dict):
-        raise RuntimeError(f"Firmware template {template_key} is not available in the Tater Native firmware manifest.")
+        raise RuntimeError(f"Firmware template {template_key} is not supported.")
 
     client_row = _firmware_action_client_row(selector, template_spec)
     if not isinstance(client_row, dict):
-        raise RuntimeError(f"Tater Native satellite {selector} is not available for firmware actions.")
+        raise RuntimeError(f"ESPHome device {selector} is not available for firmware actions.")
     if not _is_usb_recovery_selector(selector):
         matched_template_key = _matched_template_key(selector, client_row)
         if matched_template_key and _lower(matched_template_key) != _lower(template_key):
@@ -5305,7 +4757,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         action_name in {"voice_firmware_flash", "voice_firmware_flash_start"}
         and not bool(client_row.get("connected"))
     ):
-        raise RuntimeError(f"Tater Native satellite {selector} is offline. Use Browser USB Flash to recover it from this browser.")
+        raise RuntimeError(f"ESPHome device {selector} is offline. Use Browser USB Flash to recover it from this browser.")
 
     context = _build_device_context(
         selector,
@@ -5314,7 +4766,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         force_remote_refresh=True,
     )
     if not isinstance(context, dict):
-        raise RuntimeError(f"Connected Tater Native satellite {selector} is not available for firmware actions.")
+        raise RuntimeError(f"Connected ESPHome device {selector} is not available for firmware actions.")
 
     if action_name == "voice_firmware_flash_start":
         if not _prebuilt_artifact_available(context, "ota"):
@@ -5338,35 +4790,17 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
     host = _text(context.get("host"))
     if not _prebuilt_artifact_available(context, "ota"):
         raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
-    native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
-    if not host and not native_firmware:
+    if not host:
         raise RuntimeError("OTA target host is missing.")
     prebuilt_binary = _download_prebuilt_firmware_binary(context, "ota")
-    if native_firmware:
-        ota_artifact = _create_native_ota_artifact(context, Path(prebuilt_binary["path"]))
-        command = ["native_tater_ota", selector, _text(ota_artifact.get("ota_url"))]
-        try:
-            from . import native_satellite
-
-            esphome_runtime.run_async_blocking(
-                native_satellite.send_command(selector, "ota.url", {"url": _text(ota_artifact.get("ota_url"))}),
-                timeout=5.0,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Tater native OTA failed for {context.get('display_name') or selector}.\n\n"
-                f"{_text(exc) or exc.__class__.__name__}"
-            ) from exc
-        prebuilt_upload_result = "native OTA command sent"
-    else:
-        command = ["native_ota", host, str(prebuilt_binary["path"])]
-        try:
-            prebuilt_upload_result = _native_ota_upload(host, Path(prebuilt_binary["path"]))
-        except Exception as exc:
-            raise RuntimeError(
-                f"ESPHome prebuilt OTA failed for {context.get('display_name') or selector}.\n\n"
-                f"{_text(exc) or exc.__class__.__name__}"
-            ) from exc
+    command = ["native_ota", host, str(prebuilt_binary["path"])]
+    try:
+        prebuilt_upload_result = _native_ota_upload(host, Path(prebuilt_binary["path"]))
+    except Exception as exc:
+        raise RuntimeError(
+            f"ESPHome prebuilt OTA failed for {context.get('display_name') or selector}.\n\n"
+            f"{_text(exc) or exc.__class__.__name__}"
+        ) from exc
 
     summary = f"Prebuilt OTA upload completed{f' to {prebuilt_upload_result}' if prebuilt_upload_result else ''}."
     _save_recorded_firmware_version(
@@ -5374,7 +4808,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         context.get("template_key"),
         context.get("firmware_version"),
         display_name=context.get("display_name"),
-        source="native_tater_ota" if native_firmware else "prebuilt_ota_flash",
+        source="prebuilt_ota_flash",
     )
     return {
         "ok": True,

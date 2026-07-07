@@ -1,14 +1,14 @@
 """
 Tater Native Voice Pipeline
 
-Native satellite backend pipeline:
-- Tater Native voice session handling
+Clean ESPHome-compatible backend pipeline:
+- ESPHome voice_assistant session handling
 - Server-side EOU strategy
 - Silero VAD backend
 - Wyoming STT/TTS orchestration
 - Hydra turn execution
 - URL-based TTS playback lifecycle (announcement_finished aware)
-- Native WebSocket satellite transport
+- mDNS discovery + selected-satellite reconcile
 
 This package is intentionally split across focused modules:
 - conversation.py: session history and Hydra turn orchestration
@@ -17,7 +17,7 @@ This package is intentionally split across focused modules:
 - routes.py: FastAPI router plus startup/shutdown lifecycle
 
 This file now keeps the remaining shared constants, config helpers, audio/VAD
-logic, native bridge helpers, and session finalization flow while
+logic, ESPHome runtime bridge helpers, and session finalization flow while
 re-exporting package-level compatibility symbols.
 """
 
@@ -351,7 +351,10 @@ DEFAULT_VOICE_SAMPLE_WIDTH = 2
 DEFAULT_VOICE_CHANNELS = 1
 DEFAULT_MAX_AUDIO_BYTES = 4 * 1024 * 1024
 
-DEFAULT_DISCOVERY_ENABLED = False
+DEFAULT_ESPHOME_API_PORT = 6053
+DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
+DEFAULT_ESPHOME_RETRY_SECONDS = 12
+DEFAULT_DISCOVERY_ENABLED = True
 DEFAULT_DISCOVERY_SCAN_SECONDS = 45
 DEFAULT_DISCOVERY_MDNS_TIMEOUT_S = 3.0
 DEFAULT_CONTINUED_CHAT_ENABLED = False
@@ -387,7 +390,6 @@ DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
-DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "silero"
@@ -2665,9 +2667,12 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "port": _get_int_setting("VOICE_WYOMING_TTS_PORT", DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
             "voice": _text(settings.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE,
         },
-        "native_satellite": {
-            "transport": "websocket",
-            "legacy_satellite_api": False,
+        "esphome": {
+            "api_port": _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT, minimum=1, maximum=65535),
+            "connect_timeout_s": _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", DEFAULT_ESPHOME_CONNECT_TIMEOUT_S, minimum=2.0, maximum=60.0),
+            "retry_seconds": _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS, minimum=2, maximum=300),
+            "password_set": bool(_text(settings.get("VOICE_ESPHOME_PASSWORD"))),
+            "noise_psk_set": bool(_text(settings.get("VOICE_ESPHOME_NOISE_PSK"))),
         },
         "discovery": {
             "enabled": _get_bool_setting("VOICE_DISCOVERY_ENABLED", DEFAULT_DISCOVERY_ENABLED),
@@ -2711,7 +2716,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         },
         "limits": {
             "max_audio_bytes": _get_int_setting("VOICE_NATIVE_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES, minimum=4096, maximum=16 * 1024 * 1024),
-            "tts_url_ttl_s": _get_float_setting("VOICE_NATIVE_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
+            "tts_url_ttl_s": _get_float_setting("VOICE_ESPHOME_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
             "session_ttl_s": _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS, minimum=300, maximum=24 * 60 * 60),
             "history_store": _get_int_setting("MAX_STORE", DEFAULT_HISTORY_MAX_STORE, minimum=4, maximum=200),
             "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
@@ -3735,34 +3740,6 @@ async def _send_voice_no_text_recognized(
     )
 
 
-async def _send_tool_call_visual(
-    client: Any,
-    module: Any,
-    *,
-    session: "VoiceSessionRuntime",
-    wait_text: str = "",
-    wait_payload: Optional[Dict[str, Any]] = None,
-) -> None:
-    if bool(getattr(session, "tool_visual_sent", False)):
-        return
-    payload = wait_payload if isinstance(wait_payload, dict) else {}
-    tool_name = _text(payload.get("tool") or payload.get("tool_name") or payload.get("name") or payload.get("func_name"))
-    text = _sanitize_tool_progress_spoken_text(wait_text or _text(payload.get("text")))
-    event_payload: Dict[str, Any] = {}
-    if text:
-        event_payload["text"] = text
-    if tool_name:
-        event_payload["tool"] = tool_name
-    ok = await _esphome_send_event(
-        client,
-        module,
-        ("VOICE_ASSISTANT_TOOL_CALL_START", "TOOL_CALL_START"),
-        event_payload,
-    )
-    if ok:
-        session.tool_visual_sent = True
-
-
 async def _play_live_tool_progress_for_session(
     client: Any,
     module: Any,
@@ -3772,15 +3749,7 @@ async def _play_live_tool_progress_for_session(
     session: "VoiceSessionRuntime",
     transcript: str,
     wait_text: str,
-    wait_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
-    await _send_tool_call_visual(
-        client,
-        module,
-        session=session,
-        wait_text=wait_text,
-        wait_payload=wait_payload,
-    )
     if not _experimental_live_tool_progress_enabled():
         return
     spoken = _sanitize_tool_progress_spoken_text(wait_text)
@@ -3863,12 +3832,7 @@ async def _play_live_tool_progress_for_session(
             _cancel_announcement_wait(runtime)
             _schedule_announcement_timeout(selector, client, module, timeout_s)
 
-        await _esphome_send_event(
-            client,
-            module,
-            ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
-            {"url": url, "tts_kind": "tool", "state_after": "tool_call"},
-        )
+        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": url})
         _native_debug(
             f"live tool progress queued selector={selector} session_id={session.session_id} timeout_s={timeout_s:.2f} text={spoken!r}"
         )
@@ -4169,9 +4133,9 @@ def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_for
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
     _native_debug(
-        f"native tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
+        f"esphome tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
     )
     return url
 
@@ -4220,7 +4184,7 @@ def _store_chatterbox_tts_stream_url(
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
     _native_debug(
         f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"stream_id={stream_id} url={url}"
@@ -4269,9 +4233,9 @@ def _store_media_url(
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/media/{stream_id}"
+    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/media/{stream_id}"
     _native_debug(
-        f"native media url prepared selector={_text(selector)} session_id={_text(session_id)} "
+        f"esphome media url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"bytes={len(data)} media_type={mime} url={url}"
     )
     return url
@@ -4319,15 +4283,13 @@ def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, sec
 
 
 def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
-    # Leave enough headroom for device-side HTTP fetch, WAV parsing/resampling,
-    # and scheduling jitter so a late `announcement_finished` doesn't force an
-    # early RUN_END while the satellite is still speaking.
-    fetch_headroom_s = (len(audio_bytes or b"") / DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S) + 8.0
+    # Leave a little extra headroom for media-player startup and network jitter so
+    # a late `announcement_finished` doesn't force an early RUN_END.
     return max(
-        5.0,
+        2.25,
         min(
             float(DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S),
-            _estimate_pcm_duration_s(audio_bytes, audio_format) + max(12.0, fetch_headroom_s),
+            _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75,
         ),
     )
 
@@ -5651,9 +5613,8 @@ async def _finalize_session(
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
                 with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": ""})
-                if _text(session.wake_word):
-                    with contextlib.suppress(Exception):
-                        await _send_voice_no_text_recognized(client, module)
+                with contextlib.suppress(Exception):
+                    await _send_voice_no_text_recognized(client, module)
                 with contextlib.suppress(Exception):
                     await _send_voice_run_end(
                         client,
@@ -5683,7 +5644,6 @@ async def _finalize_session(
                 session=session,
                 transcript=_text(session.stt_transcript),
                 wait_text=wait_text,
-                wait_payload=_wait_payload,
             )
 
         session.live_tool_progress_callback = _live_tool_progress
@@ -5698,9 +5658,8 @@ async def _finalize_session(
             outcome = _classify_no_op_outcome(session, reason=no_op_reason, transcript=transcript)
             session.turn_outcome = outcome
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
-            if _text(session.wake_word):
-                with contextlib.suppress(Exception):
-                    await _send_voice_no_text_recognized(client, module)
+            with contextlib.suppress(Exception):
+                await _send_voice_no_text_recognized(client, module)
             logger.info(
                 "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f speech_s=%.2f",
                 token,

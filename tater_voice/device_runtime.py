@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import inspect
 import logging
 import re
@@ -10,9 +11,10 @@ import time
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from runtime_executors import run_background
+
 logger = logging.getLogger("voice_core")
 
-ESPHOME_SUPPORT_REMOVED = "Legacy satellite API support has been removed. Use Tater Native satellite firmware."
 _ESPHOME_LOG_BUFFER_LIMIT = 500
 _ESPHOME_LOG_IDLE_SECONDS = 120.0
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -200,6 +202,18 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
     )
 
 
+def _default_port() -> int:
+    return int(getattr(_vp(), "DEFAULT_ESPHOME_API_PORT", 6053))
+
+
+def _connect_timeout_s() -> float:
+    return float(getattr(_vp(), "DEFAULT_ESPHOME_CONNECT_TIMEOUT_S", 10.0))
+
+
+def _retry_seconds() -> int:
+    return int(getattr(_vp(), "DEFAULT_ESPHOME_RETRY_SECONDS", 10))
+
+
 def _discovery_timeout_s() -> float:
     return float(getattr(_vp(), "DEFAULT_DISCOVERY_MDNS_TIMEOUT_S", 2.0))
 
@@ -218,7 +232,16 @@ def _format_ts_label(ts_value: Any) -> str:
 
 
 def target_map() -> Dict[str, str]:
-    return {}
+    out: Dict[str, str] = {}
+    for row in _load_satellite_registry():
+        selector = _text(row.get("selector"))
+        host = _lower(row.get("host"))
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if not selector or not host:
+            continue
+        if bool(meta.get("esphome_selected")):
+            out[selector] = host
+    return out
 
 
 def discovery_stats() -> Dict[str, Any]:
@@ -360,12 +383,10 @@ def _discover_mdns_sync(scan_seconds: float) -> List[Dict[str, Any]]:
 
 async def discover_mdns_once() -> List[Dict[str, Any]]:
     _remember_native_loop()
-    _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
-    _discovery_stats["last_run_ts"] = _now()
-    _discovery_stats["last_success_ts"] = _now()
-    _discovery_stats["last_error"] = ""
-    _discovery_stats["last_counts"] = {"native_pairing": 0}
-    return []
+    cfg = _voice_config_snapshot()
+    discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
+    timeout_s = float(discovery.get("mdns_timeout_s") or _discovery_timeout_s())
+    return await run_background(_discover_mdns_sync, timeout_s)
 
 
 async def discovery_loop() -> None:
@@ -376,7 +397,13 @@ async def discovery_loop() -> None:
             discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
             enabled = bool(discovery.get("enabled"))
 
-            _discovery_stats["last_counts"] = {"native_pairing": 0}
+            if enabled:
+                rows = await discover_mdns_once()
+                for row in rows:
+                    _upsert_satellite(row)
+                _discovery_stats["last_counts"] = {"mdns_esphome": len(rows)}
+            else:
+                _discovery_stats["last_counts"] = {"mdns_esphome": 0}
 
             _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
             _discovery_stats["last_run_ts"] = _now()
@@ -395,7 +422,11 @@ async def discovery_loop() -> None:
 
 # -------------------- ESPHome Native API --------------------
 def esphome_import() -> Tuple[Optional[Any], str]:
-    return None, ESPHOME_SUPPORT_REMOVED
+    try:
+        module = importlib.import_module("aioesphomeapi")
+        return module, ""
+    except Exception as exc:
+        return None, str(exc)
 
 
 
@@ -409,6 +440,11 @@ def esphome_module_attr(module: Any, name: str) -> Any:
             value = getattr(sub_model, name, None)
             if value is not None:
                 return value
+    with contextlib.suppress(Exception):
+        model_module = importlib.import_module("aioesphomeapi.model")
+        value = getattr(model_module, name, None)
+        if value is not None:
+            return value
     return None
 
 
@@ -1223,7 +1259,7 @@ async def logs_start(selector: str) -> Dict[str, Any]:
         raise RuntimeError("selector is required")
     module, import_error = esphome_import()
     if module is None:
-        raise RuntimeError(import_error or ESPHOME_SUPPORT_REMOVED)
+        raise RuntimeError(f"aioesphomeapi unavailable: {import_error or 'unknown error'}")
 
     async with _native_lock:
         row = _native_clients.get(token)
@@ -1296,7 +1332,7 @@ async def logs_start(selector: str) -> Dict[str, Any]:
         _esphome_append_log_entry(
             row,
             level="info",
-            message=f"Starting log output from {host or token} using the legacy satellite API.",
+            message=f"Starting log output from {host or token} using ESPHome API.",
             ts_value=_now(),
         )
         _esphome_append_log_entry(
@@ -1485,7 +1521,29 @@ def voice_feature_snapshot(info: Any, client: Any, module: Any) -> Dict[str, Any
 
 
 async def build_client(module: Any, *, host: str, port: int) -> Any:
-    raise RuntimeError(ESPHOME_SUPPORT_REMOVED)
+    APIClient = getattr(module, "APIClient", None)
+    if APIClient is None:
+        raise RuntimeError("aioesphomeapi.APIClient is unavailable")
+
+    settings = _voice_settings()
+    password = _text(settings.get("VOICE_ESPHOME_PASSWORD"))
+    noise_psk = _text(settings.get("VOICE_ESPHOME_NOISE_PSK"))
+
+    if noise_psk:
+        try:
+            return APIClient(
+                address=host,
+                port=int(port),
+                password=password or None,
+                noise_psk=noise_psk,
+            )
+        except TypeError:
+            pass
+
+    try:
+        return APIClient(address=host, port=int(port), password=password or None)
+    except TypeError:
+        return APIClient(host, int(port), password or None)
 
 
 async def disconnect_selector(selector: str, *, reason: str) -> None:
@@ -1563,23 +1621,204 @@ async def connect_selector(selector: str, *, host: str, port: Optional[int] = No
     host_token = _lower(host)
     if not token or not host_token:
         raise RuntimeError("selector and host are required")
-    msg = ESPHOME_SUPPORT_REMOVED
+
+    module, import_error = esphome_import()
+    if module is None:
+        msg = f"aioesphomeapi unavailable: {import_error or 'unknown error'}"
+        async with _native_lock:
+            row = _native_clients.get(token) or {}
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", _default_port())),
+                    "connected": False,
+                    "last_attempt_ts": _now(),
+                    "last_error": msg,
+                    "source": source,
+                }
+            )
+            _native_clients[token] = row
+        _voice_metrics_record_connection_event(token, event="error")
+        raise RuntimeError(msg)
+
+    timeout = _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", _connect_timeout_s(), minimum=2.0, maximum=60.0)
+    connect_port = int(port or _get_int_setting("VOICE_ESPHOME_API_PORT", _default_port()))
+
+    _native_debug(f"esphome connect attempt selector={token} host={host_token} port={connect_port} source={source}")
+
     async with _native_lock:
         row = _native_clients.get(token) or {}
         row.update(
             {
                 "selector": token,
                 "host": host_token,
-                "port": int(port or 0),
+                "port": connect_port,
                 "connected": False,
                 "last_attempt_ts": _now(),
-                "last_error": msg,
                 "source": source,
             }
         )
         _native_clients[token] = row
-    _voice_metrics_record_connection_event(token, event="error")
-    raise RuntimeError(msg)
+
+    try:
+        client = await build_client(module, host=host_token, port=connect_port)
+        connect_fn = getattr(client, "connect", None)
+        if not callable(connect_fn):
+            raise RuntimeError("aioesphomeapi client has no connect()")
+
+        kwargs: Dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            sig = inspect.signature(connect_fn)
+            if "login" in sig.parameters:
+                kwargs["login"] = True
+            if "on_stop" in sig.parameters:
+
+                async def _on_stop(expected_disconnect: bool) -> None:
+                    await disconnect_selector(token, reason="expected_disconnect" if expected_disconnect else "connection_lost")
+
+                kwargs["on_stop"] = _on_stop
+
+        result = connect_fn(**kwargs) if kwargs else connect_fn()
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=timeout)
+
+        await asyncio.sleep(0.2)
+        verified, verify_reason = await verify_connection(client, timeout=max(1.0, timeout))
+        _native_debug(f"esphome connect verification selector={token} verified={verified} details={verify_reason}")
+        if not verified:
+            raise RuntimeError(f"ESPHome API connection could not be verified. Details: {verify_reason}")
+
+        device_name = token
+        device_info_snapshot: Dict[str, Any] = {}
+        entity_infos: Dict[str, Dict[str, Any]] = {}
+        voice_features = {
+            "flags": 0,
+            "api_audio_bit": 0,
+            "speaker_bit": 0,
+            "api_audio_known": False,
+            "speaker_known": False,
+            "api_audio_supported": True,
+            "speaker_supported": True,
+        }
+
+        with contextlib.suppress(Exception):
+            info = await esphome_client_call(client, "device_info")
+            device_info_snapshot = _esphome_device_info_snapshot(info)
+            for candidate in (getattr(info, "friendly_name", None), getattr(info, "name", None)):
+                label = _text(candidate)
+                if label:
+                    device_name = label
+                    break
+            voice_features = voice_feature_snapshot(info, client, module)
+
+        with contextlib.suppress(Exception):
+            entity_infos = await list_entity_catalog(client)
+
+        voice_unsubscribe = await _esphome_subscribe_voice_assistant(
+            token,
+            client,
+            module,
+            api_audio_supported=bool(voice_features.get("api_audio_supported")),
+        )
+        state_unsubscribe = await subscribe_states(token, client)
+        unsubscribe = _combine_unsubscribes(voice_unsubscribe, state_unsubscribe)
+
+        logger.info(
+            "[native-voice] esphome voice features selector=%s flags=%s flags_known=%s api_audio_supported=%s speaker_supported=%s",
+            token,
+            int(voice_features.get("flags") or 0),
+            bool(voice_features.get("api_audio_known")) or bool(voice_features.get("speaker_known")),
+            bool(voice_features.get("api_audio_supported")),
+            bool(voice_features.get("speaker_supported")),
+        )
+
+        _upsert_satellite(
+            {
+                "selector": token,
+                "host": host_token,
+                "name": device_name,
+                "source": "esphome_native",
+                "metadata": {
+                    "esphome_selected": True,
+                    "esphome_port": connect_port,
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                },
+            }
+        )
+
+        async with _native_lock:
+            row = _native_clients.get(token) or {}
+            reconnect = bool(_as_float(row.get("last_success_ts"), 0.0) > 0.0 or _as_float(row.get("last_disconnect_ts"), 0.0) > 0.0)
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": connect_port,
+                    "client": client,
+                    "unsubscribe": unsubscribe,
+                    "connected": True,
+                    "device_info": dict(device_info_snapshot),
+                    "entity_infos": dict(entity_infos),
+                    "entity_catalog_updated_ts": _now(),
+                    "entity_states": row.get("entity_states") if isinstance(row.get("entity_states"), dict) else {},
+                    "entity_state_updated_ts": _as_float(row.get("entity_state_updated_ts"), _now()),
+                    "voice_feature_flags": int(voice_features.get("flags") or 0),
+                    "voice_api_audio_supported": bool(voice_features.get("api_audio_supported")),
+                    "voice_speaker_supported": bool(voice_features.get("speaker_supported")),
+                    "last_success_ts": _now(),
+                    "last_error": "",
+                    "source": source,
+                }
+            )
+            _native_clients[token] = row
+            if reconnect:
+                _voice_metrics_record_connection_event(token, event="reconnect")
+            logger.info(
+                "[native-voice] esphome connected selector=%s host=%s port=%s source=%s api_audio_supported=%s speaker_supported=%s",
+                token,
+                host_token,
+                connect_port,
+                source,
+                bool(row.get("voice_api_audio_supported")),
+                bool(row.get("voice_speaker_supported")),
+            )
+            return dict(row)
+
+    except Exception as exc:
+        unsubscribe_cb = locals().get("unsubscribe")
+        if callable(unsubscribe_cb):
+            with contextlib.suppress(Exception):
+                unsubscribe_cb()
+
+        client_obj = locals().get("client")
+        disconnect_fn = getattr(client_obj, "disconnect", None)
+        if callable(disconnect_fn):
+            with contextlib.suppress(Exception):
+                result = disconnect_fn()
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=max(1.0, timeout))
+
+        msg = _text(exc)
+        _native_debug(f"esphome connect failed selector={token} host={host_token} error={msg}")
+
+        async with _native_lock:
+            row = _native_clients.get(token) or {}
+            row.update(
+                {
+                    "selector": token,
+                    "host": host_token,
+                    "port": connect_port,
+                    "connected": False,
+                    "last_error": msg,
+                    "source": source,
+                }
+            )
+            _native_clients[token] = row
+        _voice_metrics_record_connection_event(token, event="error")
+        raise
 
 
 async def reconcile_once(*, force: bool = False) -> Dict[str, Any]:
@@ -1587,14 +1826,46 @@ async def reconcile_once(*, force: bool = False) -> Dict[str, Any]:
     async with _reconcile_lock:
         _native_stats["runs"] = int(_native_stats.get("runs") or 0) + 1
         _native_stats["last_run_ts"] = _now()
+
+        targets = target_map()
+        retry_seconds = _get_int_setting(
+            "VOICE_ESPHOME_RETRY_SECONDS",
+            _retry_seconds(),
+            minimum=2,
+            maximum=300,
+        )
+
         async with _native_lock:
-            for row in _native_clients.values():
-                if isinstance(row, dict):
-                    row["connected"] = False
-                    row["client"] = None
-                    row["last_error"] = ESPHOME_SUPPORT_REMOVED
-        _native_stats["last_success_ts"] = _now()
-        _native_stats["last_error"] = ""
+            snapshot = {k: dict(v) for k, v in _native_clients.items()}
+
+        for selector, row in snapshot.items():
+            if selector not in targets:
+                await disconnect_selector(selector, reason="not_targeted")
+                continue
+            client = row.get("client")
+            connected_row = bool(row.get("connected", False))
+            if connected_row and not esphome_client_connected(client, fallback=connected_row):
+                await disconnect_selector(selector, reason="connection_lost")
+
+        for selector, host in targets.items():
+            row = snapshot.get(selector) or {}
+            if bool(row.get("connected", False)) and esphome_client_connected(row.get("client"), fallback=True):
+                if force:
+                    try:
+                        await refresh_entity_catalog(selector, timeout=8.0)
+                    except Exception as exc:
+                        _native_stats["last_error"] = _text(exc)
+                        _native_debug(f"esphome entity catalog refresh failed selector={selector} error={exc}")
+                continue
+            last_attempt = _as_float(row.get("last_attempt_ts"), 0.0)
+            if (not force) and ((_now() - last_attempt) < retry_seconds):
+                continue
+            try:
+                await connect_selector(selector, host=host, source="reconcile")
+                _native_stats["last_success_ts"] = _now()
+                _native_stats["last_error"] = ""
+            except Exception as exc:
+                _native_stats["last_error"] = _text(exc)
 
         return status()
 
@@ -1603,24 +1874,58 @@ async def esphome_loop() -> None:
     _remember_native_loop()
     while True:
         try:
-            await asyncio.sleep(3600.0)
+            await reconcile_once(force=False)
+            await logs_cleanup_idle()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _native_stats["last_error"] = _text(exc)
             _native_stats["last_run_ts"] = _now()
             logger.warning("[native-voice] esphome reconcile loop error: %s", exc)
-        await asyncio.sleep(3600.0)
+        await asyncio.sleep(float(max(2, _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", _retry_seconds()))))
 
 
 async def bootstrap_reconnect() -> None:
     _remember_native_loop()
-    await reconcile_once(force=True)
-    logger.info("[native-voice] legacy ESPHome reconcile disabled; native satellites connect over WebSocket")
+    try:
+        current = await reconcile_once(force=True)
+        logger.info(
+            "[native-voice] startup esphome reconcile selected=%s connected=%s",
+            len(current.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (current.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except Exception as exc:
+        logger.warning("[native-voice] startup esphome reconcile failed: %s", exc)
+
+    try:
+        await asyncio.sleep(2.0)
+        current = await reconcile_once(force=True)
+        logger.info(
+            "[native-voice] delayed esphome reconcile selected=%s connected=%s",
+            len(current.get("targets") or {}),
+            len(
+                [
+                    row
+                    for row in (current.get("clients") or {}).values()
+                    if isinstance(row, dict) and bool(row.get("connected"))
+                ]
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("[native-voice] delayed esphome reconcile failed: %s", exc)
 
 
 
 def status() -> Dict[str, Any]:
+    module, import_error = esphome_import()
     targets = target_map()
     metrics_snapshot = _voice_metrics_snapshot()
     device_metrics = metrics_snapshot.get("devices") if isinstance(metrics_snapshot.get("devices"), dict) else {}
@@ -1639,8 +1944,8 @@ def status() -> Dict[str, Any]:
         clients[selector] = {
             "selector": _text(row.get("selector") or selector),
             "host": _text(row.get("host")),
-            "port": int(row.get("port") or 0),
-            "connected": False,
+            "port": int(row.get("port") or _get_int_setting("VOICE_ESPHOME_API_PORT", _default_port())),
+            "connected": bool(row.get("connected", False)),
             "selected": selector in targets,
             "voice_subscribed": bool(row.get("unsubscribe")),
             "active_session_id": _text(getattr(session, "session_id", "")) if _is_voice_session(session) else "",
@@ -1668,9 +1973,9 @@ def status() -> Dict[str, Any]:
         }
 
     return {
-        "enabled": False,
-        "available": False,
-        "import_error": ESPHOME_SUPPORT_REMOVED,
+        "enabled": True,
+        "available": module is not None,
+        "import_error": "" if module is not None else _text(import_error),
         "targets": targets,
         "clients": clients,
         "stats": dict(_native_stats),

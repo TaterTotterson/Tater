@@ -130,7 +130,7 @@ def _set_satellite_selected(selector: str, selected: bool) -> None:
             continue
         updated = dict(row)
         meta = dict(updated.get("metadata") or {})
-        meta["native_selected"] = bool(selected)
+        meta["esphome_selected"] = bool(selected)
         updated["metadata"] = meta
         updated["last_seen_ts"] = vp._now()
         next_rows.append(updated)
@@ -141,8 +141,8 @@ def _set_satellite_selected(selector: str, selected: bool) -> None:
                 "selector": token,
                 "host": vp._lower(token.split(":", 1)[1]) if token.startswith("host:") else "",
                 "name": "",
-                "source": "tater_native",
-                "metadata": {"native_selected": bool(selected)},
+                "source": "manual",
+                "metadata": {"esphome_selected": bool(selected)},
                 "last_seen_ts": vp._now(),
             }
         )

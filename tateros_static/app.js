@@ -4187,342 +4187,11 @@ async function copyTextToClipboard(value) {
   }
 }
 
-function clearNativeLedPreview() {
-  if (typeof state.nativeLedPreviewCleanup === "function") {
-    try {
-      state.nativeLedPreviewCleanup();
-    } catch (_error) {
-      // Ignore preview cleanup errors.
-    }
-  }
-  state.nativeLedPreviewCleanup = null;
-}
-
-function nativeLedPreviewMarkup(field) {
-  const states = Array.isArray(field?.states) && field.states.length
-    ? field.states
-    : [
-        { label: "Listening", animation_key: "led_listening_animation" },
-        { label: "Thinking", animation_key: "led_thinking_animation" },
-        { label: "Tool Call", animation_key: "led_tool_call_animation" },
-        { label: "Replying", animation_key: "led_replying_animation" },
-      ];
-  const rings = states
-    .map((row) => {
-      const label = String(row?.label || "").trim() || "LED";
-      const animationKey = String(row?.animation_key || "").trim();
-      const dots = Array.from({ length: 12 }, (_item, idx) => `<span class="native-led-dot" data-led-index="${idx}" style="--i:${idx};"></span>`).join("");
-      return `
-        <div class="native-led-preview-card" data-led-preview-ring="${escapeHtml(animationKey)}">
-          <div class="native-led-ring" aria-hidden="true">${dots}</div>
-          <div class="native-led-preview-label">${escapeHtml(label)}</div>
-          <div class="native-led-preview-mode small"></div>
-        </div>
-      `;
-    })
-    .join("");
-  const desc = field?.description ? `<div class="small">${escapeHtml(field.description)}</div>` : "";
-  return `
-    <section class="native-led-preview" data-native-led-preview="1">
-      <div class="runtime-settings-section-title">${escapeHtml(field?.label || "LED Preview")}</div>
-      ${desc}
-      <div class="native-led-preview-grid">${rings}</div>
-    </section>
-  `;
-}
-
-function normalizeNativeLedColor(value) {
-  let token = String(value || "").trim().toLowerCase();
-  if (!token) {
-    token = "#ff5a1f";
-  }
-  if (token[0] !== "#") {
-    token = `#${token}`;
-  }
-  if (/^#[0-9a-f]{3}$/.test(token)) {
-    token = `#${token[1]}${token[1]}${token[2]}${token[2]}${token[3]}${token[3]}`;
-  }
-  return /^#[0-9a-f]{6}$/.test(token) ? token : "#ff5a1f";
-}
-
-function nativeLedHexToRgb(hex) {
-  const token = normalizeNativeLedColor(hex).slice(1);
-  return {
-    r: parseInt(token.slice(0, 2), 16),
-    g: parseInt(token.slice(2, 4), 16),
-    b: parseInt(token.slice(4, 6), 16),
-  };
-}
-
-function nativeLedRingDistance(a, b) {
-  const raw = Math.abs(a - b);
-  return raw > 6 ? 12 - raw : raw;
-}
-
-function nativeLedTriWave(tick, period) {
-  const safePeriod = Math.max(2, Number(period) || 2);
-  let step = tick % safePeriod;
-  const half = safePeriod / 2;
-  if (step > half) {
-    step = safePeriod - step;
-  }
-  return Math.max(0, Math.min(1, step / half));
-}
-
-function nativeLedCometLevel(idx, head, dual = false) {
-  const distanceBehind = (target) => (target - idx + 12) % 12;
-  const levelForDist = (dist) => (dist === 0 ? 1 : dist === 1 ? 0.68 : dist === 2 ? 0.4 : dist === 3 ? 0.2 : dist === 4 ? 0.09 : 0.015);
-  let level = levelForDist(distanceBehind(head));
-  if (dual) {
-    level = Math.max(level, levelForDist(distanceBehind((head + 6) % 12)));
-  }
-  return level;
-}
-
-function nativeLedAnimationLevel(animation, idx, tick) {
-  const mode = String(animation || "").trim() || "pulse";
-  if (mode === "directional") {
-    const center = 6 + Math.sin(tick * 0.16) * 3.5;
-    const dist = Math.min(Math.abs(idx - center), 12 - Math.abs(idx - center));
-    return Math.max(0.08, 1 - dist / 3.6);
-  }
-  if (mode === "sparkle") {
-    const base = 0.12 + ((Math.sin(tick * 0.16) + 1) * 0.04);
-    const sparkle = (idx * 7 + tick * 3) % 29;
-    if (sparkle === 0) {
-      return 1;
-    }
-    if (sparkle === 1 || sparkle === 28) {
-      return 0.58;
-    }
-    return base;
-  }
-  if (mode === "ping_pong") {
-    const phase = tick % 20;
-    const lead = phase <= 10 ? phase / 2 : (20 - phase) / 2;
-    const a = Math.round(Math.max(0, Math.min(5, lead)));
-    const b = 11 - a;
-    const dist = Math.min(nativeLedRingDistance(idx, a), nativeLedRingDistance(idx, b));
-    return dist === 0 ? 1 : dist === 1 ? 0.64 : dist === 2 ? 0.32 : 0.03;
-  }
-  if (mode === "voice_ring") {
-    const radius = 1.25 + nativeLedTriWave(tick, 18) * 3.2;
-    const dist = nativeLedRingDistance(idx, 6);
-    return Math.max(0.02, Math.min(1, radius - dist + 0.12));
-  }
-  if (mode === "spinner") {
-    const head = tick % 12;
-    const dist = nativeLedRingDistance(idx, head);
-    return dist === 0 ? 1 : dist === 1 ? 0.62 : dist === 2 ? 0.28 : 0.03;
-  }
-  if (mode === "orbit") {
-    const head = tick % 12;
-    const dist = Math.min(nativeLedRingDistance(idx, head), nativeLedRingDistance(idx, (head + 6) % 12));
-    return dist === 0 ? 1 : dist === 1 ? 0.75 : dist === 2 ? 0.42 : 0.04;
-  }
-  if (mode === "breathe") {
-    return 0.08 + nativeLedTriWave(tick, 34) * 0.84;
-  }
-  if (mode === "comet") {
-    return nativeLedCometLevel(idx, tick % 12, false);
-  }
-  if (mode === "dual_comet") {
-    return nativeLedCometLevel(idx, tick % 12, true);
-  }
-  if (mode === "scanner") {
-    const period = 22;
-    const phase = tick % period;
-    const head = phase < 12 ? phase : period - phase;
-    const dist = nativeLedRingDistance(idx, head);
-    return dist === 0 ? 1 : dist === 1 ? 0.54 : dist === 2 ? 0.22 : 0.025;
-  }
-  if (mode === "ripple") {
-    const radius = nativeLedTriWave(tick, 24) * 5.75;
-    const dist = nativeLedRingDistance(idx, 6);
-    return 0.035 + Math.max(0, 1 - Math.abs(dist - radius) / 1.45) * 0.88;
-  }
-  if (mode === "heartbeat") {
-    const phase = tick % 34;
-    let pulse = 0;
-    if (phase <= 4) {
-      pulse = 1 - phase / 5;
-    } else if (phase >= 8 && phase <= 11) {
-      pulse = 0.72 * (1 - (phase - 8) / 4);
-    }
-    return (0.04 + pulse * 0.92) * (idx % 2 === 0 ? 1 : 0.72);
-  }
-  if (mode === "theater") {
-    const slot = (idx + tick) % 6;
-    return slot === 0 ? 1 : slot === 1 ? 0.48 : slot === 5 ? 0.24 : 0.025;
-  }
-  if (mode === "wave") {
-    const center = (tick / 2) % 12;
-    const rawDist = Math.abs(idx - center);
-    const dist = rawDist > 6 ? 12 - rawDist : rawDist;
-    const opposite = (center + 6) % 12;
-    const rawCrossDist = Math.abs(idx - opposite);
-    const crossDist = rawCrossDist > 6 ? 12 - rawCrossDist : rawCrossDist;
-    return Math.min(1, 0.05 + Math.max(0, 1 - dist / 4.2) * 0.84 + Math.max(0, 1 - crossDist / 2.4) * 0.16);
-  }
-  if (mode === "shimmer") {
-    const breath = 0.08 + nativeLedTriWave(tick, 28) * 0.18;
-    const phase = (idx * 17 + tick * 5) % 37;
-    if (phase === 0) {
-      return 1;
-    }
-    if (phase <= 3 || phase >= 34) {
-      return 0.46;
-    }
-    if ((phase + idx) % 11 === 0) {
-      return 0.28;
-    }
-    return breath;
-  }
-  if (mode === "twinkle") {
-    const phase = (idx * 7 + tick * 3) % 31;
-    if (phase === 0) {
-      return 0.95;
-    }
-    if (phase === 1 || phase === 30) {
-      return 0.48;
-    }
-    if (phase === 2 || phase === 29) {
-      return 0.2;
-    }
-    return 0.04;
-  }
-  if (mode === "equalizer") {
-    let phase = (idx * 5 + tick * 3) % 20;
-    if (phase > 10) {
-      phase = 20 - phase;
-    }
-    const spike = (idx * 13 + tick) % 17 === 0 ? 0.28 : 0;
-    return Math.min(1, 0.05 + (phase / 10) * 0.72 + spike);
-  }
-  if (mode === "solid") {
-    return 0.78;
-  }
-  const pulse = 0.18 + ((Math.sin(tick * 0.22) + 1) * 0.38);
-  return Math.max(0.08, Math.min(1, pulse));
-}
-
-function bindNativeLedPreview(fieldsEl) {
-  if (!(fieldsEl instanceof HTMLElement)) {
-    return;
-  }
-  const previews = Array.from(fieldsEl.querySelectorAll("[data-native-led-preview]")).filter((node) => node instanceof HTMLElement);
-  if (!previews.length) {
-    return;
-  }
-  clearNativeLedPreview();
-
-  const inputForKey = (key) =>
-    Array.from(fieldsEl.querySelectorAll("[data-setting-key]")).find(
-      (node) => String(node?.dataset?.settingKey || "").trim() === key
-    );
-  const colorInput = inputForKey("led_color");
-  const readValue = (key, fallback) => {
-    const input = inputForKey(key);
-    return String(input?.value || fallback || "").trim();
-  };
-  let tick = 0;
-  const paint = () => {
-    const color = nativeLedHexToRgb(colorInput?.value || "#ff5a1f");
-    previews.forEach((preview) => {
-      preview.querySelectorAll("[data-led-preview-ring]").forEach((ring) => {
-        const animationKey = String(ring?.dataset?.ledPreviewRing || "").trim();
-        const animation = readValue(animationKey, "pulse");
-        const modeEl = ring.querySelector(".native-led-preview-mode");
-        if (modeEl instanceof HTMLElement) {
-          modeEl.textContent = animation.replace(/_/g, " ");
-        }
-        ring.querySelectorAll(".native-led-dot").forEach((dot) => {
-          const idx = Number(dot?.dataset?.ledIndex || 0);
-          const level = nativeLedAnimationLevel(animation, idx, tick);
-          const alpha = Math.max(0.08, Math.min(1, level));
-          dot.style.background = `rgb(${Math.round(color.r * alpha)}, ${Math.round(color.g * alpha)}, ${Math.round(color.b * alpha)})`;
-          dot.style.boxShadow = alpha > 0.35 ? `0 0 ${Math.round(4 + alpha * 12)}px rgba(${color.r}, ${color.g}, ${color.b}, ${0.18 + alpha * 0.32})` : "none";
-          dot.style.opacity = String(0.35 + alpha * 0.65);
-        });
-      });
-    });
-    tick += 1;
-  };
-  const interval = window.setInterval(paint, 80);
-  const refreshInputs = Array.from(fieldsEl.querySelectorAll("[data-setting-key^='led_']"));
-  refreshInputs.forEach((input) => {
-    input.addEventListener("input", paint);
-    input.addEventListener("change", paint);
-  });
-  state.nativeLedPreviewCleanup = () => {
-    window.clearInterval(interval);
-  };
-  paint();
-}
-
 function buildSettingInput(field, inputId) {
   const safeLabel = escapeHtml(field.label || field.key);
   const safeKey = escapeHtml(field.key || "");
   const safeDesc = field.description ? `<div class="small">${escapeHtml(field.description)}</div>` : "";
   const type = String(field.type || "text").toLowerCase();
-  const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
-  const wrapRuntimeSetting = (html) => {
-    const sourceKey = String(showWhen?.source_key ?? showWhen?.key ?? "").trim();
-    const values = [];
-    const addValue = (raw) => {
-      const token = String(raw ?? "").trim();
-      if (token && !values.includes(token)) {
-        values.push(token);
-      }
-    };
-    if (Array.isArray(showWhen?.any_of)) {
-      showWhen.any_of.forEach(addValue);
-    }
-    if (Array.isArray(showWhen?.values)) {
-      showWhen.values.forEach(addValue);
-    }
-    if (showWhen?.equals !== undefined) {
-      addValue(showWhen.equals);
-    }
-    if (showWhen?.value !== undefined) {
-      addValue(showWhen.value);
-    }
-    if (!sourceKey || !values.length) {
-      return html;
-    }
-    let encoded = "";
-    try {
-      encoded = encodeURIComponent(JSON.stringify(values));
-    } catch (_error) {
-      encoded = "";
-    }
-    return `<div class="runtime-setting-conditional" data-runtime-show-source-key="${escapeHtml(sourceKey)}" data-runtime-show-values="${escapeHtml(
-      encoded
-    )}">${html}</div>`;
-  };
-
-  if (type === "section" || type === "header") {
-    return wrapRuntimeSetting(`
-      <section class="runtime-settings-section">
-        <div class="runtime-settings-section-title">${safeLabel}</div>
-        ${safeDesc}
-      </section>
-    `);
-  }
-
-  if (type === "led_preview") {
-    return wrapRuntimeSetting(nativeLedPreviewMarkup(field));
-  }
-
-  if (type === "readonly" || type === "read_only") {
-    return wrapRuntimeSetting(`
-      <label class="runtime-settings-readonly-row">
-        <span>${safeLabel}</span>
-        <div class="runtime-settings-readonly-value">${escapeHtml(field.value ?? "")}</div>
-        ${safeDesc}
-      </label>
-    `);
-  }
 
   if (type === "select") {
     const options = Array.isArray(field.options) ? field.options : [];
@@ -4540,7 +4209,7 @@ function buildSettingInput(field, inputId) {
       })
       .join("");
 
-    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" data-setting-type="select" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`);
+    return `<label>${safeLabel}<select id="${inputId}" data-setting-type="select" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`;
   }
 
   if (type === "multiselect") {
@@ -4584,17 +4253,17 @@ function buildSettingInput(field, inputId) {
       })
       .join("");
 
-    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" class="settings-multiselect" multiple size="${size}" data-setting-type="multiselect" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`);
+    return `<label>${safeLabel}<select id="${inputId}" class="settings-multiselect" multiple size="${size}" data-setting-type="multiselect" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`;
   }
 
   if (type === "checkbox") {
     const checked = boolFromAny(field?.value, false) ? "checked" : "";
     const toggleInput = `<input id="${inputId}" class="toggle-input" type="checkbox" data-setting-type="checkbox" data-setting-key="${safeKey}" ${checked} />`;
-    return wrapRuntimeSetting(`<label>${safeLabel}${renderToggleRow(toggleInput)}${safeDesc}</label>`);
+    return `<label>${safeLabel}${renderToggleRow(toggleInput)}${safeDesc}</label>`;
   }
 
   if (type === "textarea" || type === "multiline") {
-    return wrapRuntimeSetting(`<label>${safeLabel}<textarea id="${inputId}" data-setting-type="textarea" data-setting-key="${safeKey}">${escapeHtml(field.value ?? "")}</textarea>${safeDesc}</label>`);
+    return `<label>${safeLabel}<textarea id="${inputId}" data-setting-type="textarea" data-setting-key="${safeKey}">${escapeHtml(field.value ?? "")}</textarea>${safeDesc}</label>`;
   }
 
   if (type === "file") {
@@ -4604,12 +4273,12 @@ function buildSettingInput(field, inputId) {
     const currentSummary = currentValue
       ? `Current file content saved (${currentValue.length.toLocaleString()} characters).`
       : "No file saved.";
-    return wrapRuntimeSetting(`<label>${safeLabel}<input id="${inputId}" type="file"${acceptAttr} data-setting-type="file" data-setting-key="${safeKey}" /><textarea hidden data-setting-current-key="${safeKey}">${escapeHtml(
+    return `<label>${safeLabel}<input id="${inputId}" type="file"${acceptAttr} data-setting-type="file" data-setting-key="${safeKey}" /><textarea hidden data-setting-current-key="${safeKey}">${escapeHtml(
       currentValue
-    )}</textarea><div class="small">${escapeHtml(currentSummary)}</div>${safeDesc}</label>`);
+    )}</textarea><div class="small">${escapeHtml(currentSummary)}</div>${safeDesc}</label>`;
   }
 
-  const htmlType = type === "password" ? "password" : type === "number" ? "number" : type === "color" ? "color" : "text";
+  const htmlType = type === "password" ? "password" : type === "number" ? "number" : "text";
   const numberAttrs =
     type === "number"
       ? ` step="${escapeHtml(field?.step ?? "any")}"${
@@ -4620,13 +4289,13 @@ function buildSettingInput(field, inputId) {
     field.value ?? ""
   )}" data-setting-type="${escapeHtml(type)}" data-setting-key="${safeKey}" />`;
   if (runtimeSettingKeySupportsGenerator(field) && (htmlType === "password" || htmlType === "text")) {
-    return wrapRuntimeSetting(`<label>${safeLabel}<div class="runtime-setting-input-action">${inputHtml}<button type="button" class="inline-btn runtime-copy-key-btn" data-target-input="${escapeHtml(
+    return `<label>${safeLabel}<div class="runtime-setting-input-action">${inputHtml}<button type="button" class="inline-btn runtime-copy-key-btn" data-target-input="${escapeHtml(
       inputId
     )}">Copy Key</button><button type="button" class="inline-btn runtime-generate-key-btn" data-target-input="${escapeHtml(
       inputId
-    )}">Generate Key</button></div>${safeDesc}</label>`);
+    )}">Generate Key</button></div>${safeDesc}</label>`;
   }
-  return wrapRuntimeSetting(`<label>${safeLabel}${inputHtml}${safeDesc}</label>`);
+  return `<label>${safeLabel}${inputHtml}${safeDesc}</label>`;
 }
 
 async function getInputValue(input) {
@@ -4665,9 +4334,6 @@ async function getInputValue(input) {
 async function collectFormValues(formElement) {
   const values = {};
   for (const input of formElement.querySelectorAll("[data-setting-key]")) {
-    if (input.disabled) {
-      continue;
-    }
     const key = String(input.dataset.settingKey || "").trim();
     if (!key) {
       continue;
@@ -4675,58 +4341,6 @@ async function collectFormValues(formElement) {
     values[key] = parseSettingValue(await getInputValue(input), input.dataset.settingType || input.type);
   }
   return values;
-}
-
-function runtimeSettingFieldValue(input) {
-  if (input instanceof HTMLInputElement && input.type === "checkbox") {
-    return input.checked ? "true" : "false";
-  }
-  return String(input?.value ?? "").trim();
-}
-
-function bindRuntimeSettingConditionalFields(fieldsEl) {
-  if (!(fieldsEl instanceof HTMLElement)) {
-    return;
-  }
-  fieldsEl.querySelectorAll("[data-runtime-show-source-key]").forEach((container) => {
-    if (!(container instanceof HTMLElement) || container.dataset.runtimeShowBound === "1") {
-      return;
-    }
-    const sourceKey = String(container.dataset.runtimeShowSourceKey || "").trim();
-    const sourceInput = sourceKey
-      ? Array.from(fieldsEl.querySelectorAll("[data-setting-key]")).find(
-          (field) => String(field?.dataset?.settingKey || "").trim() === sourceKey
-        )
-      : null;
-    if (!(sourceInput instanceof HTMLInputElement || sourceInput instanceof HTMLSelectElement || sourceInput instanceof HTMLTextAreaElement)) {
-      return;
-    }
-    let allowedValues = [];
-    try {
-      const decoded = JSON.parse(decodeURIComponent(String(container.dataset.runtimeShowValues || "")));
-      allowedValues = Array.isArray(decoded) ? decoded.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
-    } catch (_error) {
-      allowedValues = [];
-    }
-    if (!allowedValues.length) {
-      return;
-    }
-    const refresh = () => {
-      const value = runtimeSettingFieldValue(sourceInput);
-      const visible = allowedValues.includes(value);
-      container.style.display = visible ? "" : "none";
-      container.setAttribute("aria-hidden", visible ? "false" : "true");
-      container.querySelectorAll("[data-setting-key]").forEach((field) => {
-        if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) {
-          field.disabled = !visible;
-        }
-      });
-    };
-    sourceInput.addEventListener("input", refresh);
-    sourceInput.addEventListener("change", refresh);
-    container.dataset.runtimeShowBound = "1";
-    refresh();
-  });
 }
 
 function _normalizeRuntimeSettingsKind(kind) {
@@ -4819,7 +4433,6 @@ function ensureRuntimeSettingsModal() {
   const statusEl = document.getElementById("runtime-settings-status");
 
   const closeModal = () => {
-    clearNativeLedPreview();
     if (typeof state.runtimeSettingsCloseHandler === "function") {
       try {
         state.runtimeSettingsCloseHandler({ modal, form, statusEl, saveBtn, closeBtn });
@@ -4940,7 +4553,7 @@ function ensureRuntimeSettingsModal() {
   return modal;
 }
 
-function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetLabel, resetConfirm, modalClass, onOpen, onClose }) {
+function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetLabel, resetConfirm, onOpen, onClose }) {
   const modal = ensureRuntimeSettingsModal();
   const titleEl = document.getElementById("runtime-settings-title");
   const metaEl = document.getElementById("runtime-settings-meta");
@@ -4949,9 +4562,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetL
   const saveBtn = document.getElementById("runtime-settings-save");
   const resetBtn = document.getElementById("runtime-settings-reset");
   const normalizedFields = Array.isArray(fields) ? fields : [];
-  const dialogEl = modal?.querySelector(".runtime-settings-dialog") || null;
 
-  clearNativeLedPreview();
   if (typeof state.runtimeSettingsCloseHandler === "function") {
     try {
       state.runtimeSettingsCloseHandler({ modal, fieldsEl, statusEl, saveBtn });
@@ -4964,13 +4575,6 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetL
   state.runtimeSettingsResetConfirm = String(resetConfirm || "").trim();
   state.runtimeSettingsOpenHandler = typeof onOpen === "function" ? onOpen : null;
   state.runtimeSettingsCloseHandler = typeof onClose === "function" ? onClose : null;
-  if (dialogEl instanceof HTMLElement) {
-    dialogEl.classList.remove("runtime-settings-dialog-native-satellite", "runtime-settings-dialog-native-pairing");
-    const token = String(modalClass || "").trim().replace(/[^A-Za-z0-9_-]/g, "");
-    if (token) {
-      dialogEl.classList.add(token);
-    }
-  }
 
   if (titleEl) {
     titleEl.textContent = String(title || "Settings").trim() || "Settings";
@@ -5001,8 +4605,6 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetL
           return buildSettingInput(field, inputId);
         })
         .join("");
-      bindRuntimeSettingConditionalFields(fieldsEl);
-      bindNativeLedPreview(fieldsEl);
       fieldsEl.querySelectorAll(".runtime-generate-key-btn").forEach((button) => {
         button.addEventListener("click", () => {
           const targetId = String(button.getAttribute("data-target-input") || "").trim();
@@ -8762,7 +8364,7 @@ function renderEspHomeStatsPanel(sections, tables) {
     })
     .join("");
   if (!sectionHtml && !tableHtml) {
-    return renderNotice("No native satellite stats yet.");
+    return renderNotice("No ESPHome stats yet.");
   }
   return `${sectionHtml}${tableHtml}`;
 }
@@ -8801,41 +8403,6 @@ function renderEspHomeSummaryRows(summaryRows) {
         .join("")}
     </div>
   `;
-}
-
-function renderSatelliteDetailSections(sections) {
-  const normalized = Array.isArray(sections) ? sections : [];
-  const html = normalized
-    .map((section) => {
-      const title = String(section?.title || "").trim();
-      const rows = Array.isArray(section?.rows) ? section.rows : [];
-      const rowsHtml = rows
-        .map((row) => {
-          const label = String(row?.label || "").trim();
-          const value = String(row?.value ?? "").trim();
-          if (!label || !value || value === "-") {
-            return "";
-          }
-          return `
-            <div class="core-satellite-detail-row">
-              <span class="core-satellite-detail-label">${escapeHtml(label)}</span>
-              <span class="core-satellite-detail-value">${escapeHtml(value)}</span>
-            </div>
-          `;
-        })
-        .join("");
-      if (!title || !rowsHtml) {
-        return "";
-      }
-      return `
-        <section class="core-satellite-detail-section">
-          <div class="small core-satellite-detail-title">${escapeHtml(title)}</div>
-          <div class="core-satellite-detail-grid">${rowsHtml}</div>
-        </section>
-      `;
-    })
-    .join("");
-  return html ? `<div class="core-satellite-detail-sections">${html}</div>` : "";
 }
 
 function renderEspHomeEntityControl(row, connected = true) {
@@ -9032,7 +8599,6 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
   const subtitle = String(item?.subtitle || "").trim();
   const detail = String(item?.detail || "").trim();
   const saveAction = String(item?.save_action || "").trim();
-  const settingsSaveAction = String(item?.settings_save_action || saveAction || "").trim();
   const identifyAction = String(item?.identify_action || "").trim();
   const identifyLabel = String(item?.identify_label || "Identify").trim() || "Identify";
   const removeAction = String(item?.remove_action || "").trim();
@@ -9041,23 +8607,17 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
   const removeConfirm = String(item?.remove_confirm || "Forget this satellite?").trim();
   const popupFields = Array.isArray(item?.popup_fields) ? item.popup_fields : [];
   const popupFieldsEncoded = _encodeCoreManagerJson(popupFields);
-  const infoFields = Array.isArray(item?.info_fields) ? item.info_fields : [];
-  const infoFieldsEncoded = _encodeCoreManagerJson(infoFields);
   const popupConfigEncoded = _encodeCoreManagerJson(item?.popup_config || {});
   const popupMode = String(item?.popup_mode || "").trim();
   const popupTitle = String(item?.settings_title || `${title} Live Log`).trim() || `${title} Live Log`;
   const settingsLabel = String(item?.settings_label || "Live Log").trim() || "Live Log";
-  const infoTitle = String(item?.info_title || `${title} Device Info`).trim() || `${title} Device Info`;
-  const infoLabel = String(item?.info_label || "Device Info").trim() || "Device Info";
   const fields = Array.isArray(item?.fields) ? item.fields : [];
   const heroImageSrc = String(item?.hero_image_src || "").trim();
   const heroImageAlt = String(item?.hero_image_alt || title).trim() || title;
   const heroBadges = Array.isArray(item?.hero_badges) ? item.hero_badges : [];
   const summaryRows = Array.isArray(item?.summary_rows) ? item.summary_rows : [];
-  const detailSections = Array.isArray(item?.detail_sections) ? item.detail_sections : [];
   const sensorRows = Array.isArray(item?.sensor_rows) ? item.sensor_rows : [];
   const sensorTitle = String(item?.sensor_title || "Live Entities").trim() || "Live Entities";
-  const showEntityRefresh = boolFromAny(item?.show_entity_refresh, true);
   const connected = boolFromAny(item?.connected, false);
   const displaySensorsHtml = renderEspHomeDisplaySensorPanel(displaySensors, coreKey, {
     satellite: item,
@@ -9096,7 +8656,6 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
         ${heroBadgesHtml}
         ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
         ${renderEspHomeSummaryRows(summaryRows)}
-        ${renderSatelliteDetailSections(detailSections)}
         ${renderEspHomeSensorRows(sensorRows, sensorTitle, connected)}
       </div>
     </div>
@@ -9108,15 +8667,12 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
       data-core-item-id="${encodedId}"
       data-core-item-group="satellite"
       data-core-save-action="${escapeHtml(saveAction)}"
-      data-core-settings-action="${escapeHtml(settingsSaveAction)}"
       data-core-identify-action="${escapeHtml(identifyAction)}"
       data-core-remove-action="${escapeHtml(removeAction)}"
       data-core-run-action="${escapeHtml(runAction)}"
       data-core-run-confirm="${escapeHtml(runConfirm)}"
       data-core-remove-confirm="${escapeHtml(removeConfirm)}"
       data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
-      data-core-item-info-fields="${escapeHtml(infoFieldsEncoded)}"
-      data-core-item-info-title="${escapeHtml(infoTitle)}"
       data-core-item-popup-mode="${escapeHtml(popupMode)}"
       data-core-item-popup-config="${escapeHtml(popupConfigEncoded)}"
       data-core-item-popup-title="${escapeHtml(popupTitle)}">
@@ -9136,8 +8692,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
               }>${escapeHtml(identifyLabel)}</button>`
             : ""
         }
-        ${showEntityRefresh ? `<button type="button" class="inline-btn esphome-entities-refresh">Refresh Entities</button>` : ""}
-        ${infoFields.length ? `<button type="button" class="inline-btn core-manager-info">${escapeHtml(infoLabel)}</button>` : ""}
+        <button type="button" class="inline-btn esphome-entities-refresh">Refresh Entities</button>
         ${popupFields.length ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(settingsLabel)}</button>` : ""}
         ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">Forget</button>` : ""}
         ${runAction ? `<button type="button" class="action-btn core-manager-run" style="margin-left:auto;">${escapeHtml(String(item?.run_label || "Run"))}</button>` : ""}
@@ -9152,7 +8707,7 @@ function renderEspHomeSettingsCard(item, coreKey = "esphome") {
   const subtitle = String(item?.subtitle || "").trim();
   const saveAction = String(item?.save_action || "").trim();
   const resetAction = String(item?.reset_action || "").trim();
-  const resetConfirm = String(item?.reset_confirm || "Reset native voice settings to defaults?").trim();
+  const resetConfirm = String(item?.reset_confirm || "Reset ESPHome voice settings to defaults?").trim();
   const sections = Array.isArray(item?.sections) ? item.sections : [];
   return `
     <article class="card core-manager-item"
@@ -9236,30 +8791,6 @@ function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
         <span class="small core-manager-status"></span>
       </div>
     </form>
-  `;
-}
-
-function renderNativeSatellitePairingPanel(pairingConfig, coreKey = "esphome") {
-  const startAction = String(pairingConfig?.start_action || "").trim();
-  const statusAction = String(pairingConfig?.status_action || "").trim();
-  if (!startAction || !statusAction) {
-    return "";
-  }
-  return `
-    <section class="native-pairing-panel core-manager-item"
-      data-core-key="${escapeHtml(coreKey)}"
-      data-native-pairing-start-action="${escapeHtml(startAction)}"
-      data-native-pairing-status-action="${escapeHtml(statusAction)}">
-      <div>
-        <div class="small native-pairing-kicker">Tater Native</div>
-        <h3 class="card-title">Add Satellite</h3>
-        <div class="small">Create a one-time setup code for official Tater Native firmware.</div>
-      </div>
-      <div class="native-pairing-panel-actions">
-        <button type="button" class="action-btn native-satellite-add-btn">Add Satellite</button>
-        <span class="small core-manager-status"></span>
-      </div>
-    </section>
   `;
 }
 
@@ -9751,7 +9282,6 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const heroBadges = Array.isArray(variant?.hero_badges) ? variant.hero_badges : [];
   const firmwareStatus = String(variant?.firmware_update_status || "").trim();
   const prebuilt = variant?.prebuilt_firmware && typeof variant.prebuilt_firmware === "object" ? variant.prebuilt_firmware : {};
-  const nativeFirmware = boolFromAny(variant?.native_firmware ?? prebuilt?.native, false);
   const prebuiltAvailable = boolFromAny(variant?.prebuilt_firmware_available ?? prebuilt?.available, false);
   const prebuiltVersion = String(prebuilt?.version || variant?.firmware_version || "").trim();
   const prebuiltArtifacts = prebuilt?.artifacts && typeof prebuilt.artifacts === "object" ? prebuilt.artifacts : {};
@@ -9786,11 +9316,11 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const otaLogsDisabledAttr = variantAvailable && targetConnected ? "" : " disabled";
   const browserFlashDisabledAttr = prebuiltFactoryAvailable && variantAvailable ? "" : " disabled";
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
-  const otaActionLabel = nativeFirmware ? "Update Firmware" : "OTA Update";
-  const otaWorkingText = nativeFirmware ? "Sending native OTA command..." : "Uploading prebuilt firmware...";
+  const otaActionLabel = "OTA Update";
+  const otaWorkingText = "Uploading prebuilt firmware...";
   const browserActionLabel = "Browser USB Flash";
-  const browserWorkingText = nativeFirmware ? "Preparing native USB image..." : "Preparing prebuilt USB image...";
-  const browserSuccessText = nativeFirmware ? "Native USB image ready." : "Prebuilt USB image ready.";
+  const browserWorkingText = "Preparing prebuilt USB image...";
+  const browserSuccessText = "Prebuilt USB image ready.";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
   const controlsHtml = `
     <section class="core-inline-section" style="margin-top:12px;">
@@ -9819,13 +9349,9 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
     ? `
       <section class="firmware-prebuilt-strip" aria-label="Prebuilt firmware">
         <div>
-          <div class="firmware-prebuilt-kicker">${nativeFirmware ? "Tater Native Firmware" : "Prebuilt Firmware"}</div>
+          <div class="firmware-prebuilt-kicker">Prebuilt Firmware</div>
           <strong>${escapeHtml(prebuiltVersion || "Ready")}</strong>
-          <span>${
-            nativeFirmware
-              ? "OTA is sent through Tater; USB writes the native factory image and then uses the Tater setup Wi-Fi network."
-              : "No local compile. OTA uses the app image; USB uses the factory image with optional Wi-Fi setup."
-          }</span>
+          <span>No local compile. OTA uses the app image; USB uses the factory image with optional Wi-Fi setup.</span>
         </div>
         <div class="firmware-prebuilt-artifacts">
           <span><b>OTA</b>${escapeHtml(artifactSizeLabel(prebuiltOta))}</span>
@@ -9889,8 +9415,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
       data-firmware-template-key="${escapeHtml(selection.templateKey)}"
       data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
       data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
-      data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}"
-      data-firmware-native="${nativeFirmware ? "1" : "0"}">
+      data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}">
       <div class="card-head">
         <h3 class="card-title">${escapeHtml(title)}</h3>
         <span class="small">${escapeHtml(templateLabel)}</span>
@@ -9962,7 +9487,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome") 
       return {
         selector,
         templateKey,
-        title: String(row?.title || selector || "Native satellite").trim() || "Native satellite",
+        title: String(row?.title || selector || "ESPHome device").trim() || "ESPHome device",
         templateLabel: String(row?.template_label || templateKey || "Firmware").trim() || "Firmware",
         installed: String(row?.installed || "unknown").trim() || "unknown",
         latest: String(row?.latest || "").trim(),
@@ -10035,7 +9560,7 @@ function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome"
       return {
         selector,
         templateKey,
-        title: String(row?.title || selector || "Native satellite").trim() || "Native satellite",
+        title: String(row?.title || selector || "ESPHome device").trim() || "ESPHome device",
         templateLabel: String(row?.template_label || row?.templateLabel || templateKey || "Firmware").trim() || "Firmware",
         prebuilt: boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false),
       };
@@ -10272,8 +9797,8 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
   const wifiNote = String(body?.wifi_note || "").trim();
   const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
-    String(body?.empty_message || "No connected native satellites are available for firmware actions.").trim() ||
-    "No connected native satellites are available for firmware actions.";
+    String(body?.empty_message || "No connected ESPHome devices are available for firmware actions.").trim() ||
+    "No connected ESPHome devices are available for firmware actions.";
 
   return `
     <div class="card">
@@ -10282,13 +9807,13 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
         <span class="small">${escapeHtml(coreKey)}</span>
       </div>
       <div class="small">
-        Select a connected Tater satellite, let Tater match the firmware, then update by native OTA or Browser USB without compiling.
+        Select a connected satellite, let Tater match the firmware, then update by OTA or Browser USB without compiling.
       </div>
       <div class="small" style="margin-top:8px;">
         ${
           prebuiltAvailable
-            ? `Tater Native firmware: ${escapeHtml(prebuiltVersion || "available")} for ${escapeHtml(String(prebuiltDeviceCount || ""))} device${prebuiltDeviceCount === 1 ? "" : "s"}`
-            : `Tater Native firmware: ${prebuiltError ? escapeHtml(prebuiltError) : "unavailable"}`
+            ? `Prebuilt firmware: ${escapeHtml(prebuiltVersion || "available")} for ${escapeHtml(String(prebuiltDeviceCount || ""))} device${prebuiltDeviceCount === 1 ? "" : "s"}`
+            : `Prebuilt firmware: ${prebuiltError ? escapeHtml(prebuiltError) : "unavailable"}`
         }
       </div>
       ${wifiNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(wifiNote)}</div>` : ""}
@@ -11430,7 +10955,6 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const itemForms = Array.isArray(ui?.item_forms) ? ui.item_forms : [];
       const satelliteItems = itemForms.filter((item) => String(item?.group || "").trim().toLowerCase() === "satellite");
       const addForm = ui?.add_form && typeof ui.add_form === "object" ? ui.add_form : {};
-      const nativePairing = ui?.native_pairing && typeof ui.native_pairing === "object" ? ui.native_pairing : {};
       const summary = String(body.summary || "").trim();
       const headerStats = Array.isArray(body.header_stats) ? body.header_stats : [];
       const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
@@ -11454,10 +10978,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
               .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
               .join("")}</div>`
           : renderNotice(emptyMessage);
-        addHost.innerHTML =
-          nativePairing?.start_action && nativePairing?.status_action
-            ? renderNativeSatellitePairingPanel(nativePairing, coreKey)
-            : renderEspHomeAddPanel(addForm, coreKey);
+        addHost.innerHTML = renderEspHomeAddPanel(addForm, coreKey);
       }
       if (targetPanel === "firmware") {
         state.esphomeFirmwarePayload = firmware;
@@ -12178,13 +11699,12 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   }
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
-  const nativeFirmware = boolFromAny(card.dataset?.firmwareNative, false);
   const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const templateLabel =
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
   const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltOta || "").trim() === "1";
   const values = collectCoreManagerValues(card);
   if (!selector || !templateKey || !coreKey) {
@@ -12374,9 +11894,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         label: "Firmware Log",
         type: "textarea",
         value: "",
-        description: nativeFirmware
-          ? "Native OTA progress and live device logs stay in this window."
-          : "Prebuilt OTA upload progress and live device logs stay in this window.",
+        description: "Prebuilt OTA upload progress and live device logs stay in this window.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -12403,9 +11921,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         }
       }
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = nativeFirmware
-          ? `Starting native OTA update for ${deviceLabel}...`
-          : `Starting prebuilt OTA update for ${deviceLabel}...`;
+        statusNode.textContent = `Starting prebuilt OTA update for ${deviceLabel}...`;
         statusNode.classList.add("voice-log-status");
       }
       try {
@@ -12423,7 +11939,7 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
         }
-        setCoreManagerStatus(card, nativeFirmware ? "Native OTA update in progress..." : "Prebuilt OTA update in progress...");
+        setCoreManagerStatus(card, "Prebuilt OTA update in progress...");
         schedulePoll(900);
       } catch (error) {
         const message = String(error?.message || "unknown error");
@@ -12498,7 +12014,7 @@ function appendEspHomeFirmwareLog(logConsole, message, level = "info") {
   }
 }
 
-function renderEspHomeFirmwareLogEntries(logConsole, entries, reset = false, emptyText = "Waiting for device output...") {
+function renderEspHomeFirmwareLogEntries(logConsole, entries, reset = false, emptyText = "Waiting for ESPHome output...") {
   if (!(logConsole instanceof HTMLElement)) {
     return;
   }
@@ -12753,7 +12269,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
         : "Flashing firmware over browser USB...";
     }
     if (eraseAll) {
-      appendEspHomeFirmwareLog(logConsole, "Erasing flash first so stale recovery state is cleared.", "info");
+      appendEspHomeFirmwareLog(logConsole, "Erasing flash first so ESPHome safe-mode state is cleared.", "info");
     }
     const flashOptions = {
       fileArray: [{ data: firmwareData, address: 0 }],
@@ -13192,13 +12708,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   }
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
-  const nativeFirmware = boolFromAny(card.dataset?.firmwareNative, false);
   const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const templateLabel =
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
   const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltFactory || "").trim() === "1";
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before browser USB flashing.", "error", 3200);
@@ -13233,16 +12748,16 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         : "No USB device selected.";
     }
     if (buildButton instanceof HTMLButtonElement) {
-      const wifiEnabled = !nativeFirmware && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+      const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
       const ssid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
       if (wifiSsidInput instanceof HTMLInputElement) {
-        wifiSsidInput.disabled = nativeFirmware || !wifiEnabled;
+        wifiSsidInput.disabled = !wifiEnabled;
       }
       if (wifiPasswordInput instanceof HTMLInputElement) {
-        wifiPasswordInput.disabled = nativeFirmware || !wifiEnabled;
+        wifiPasswordInput.disabled = !wifiEnabled;
       }
       buildButton.disabled = !selectedPort || (wifiEnabled && !ssid);
-      buildButton.textContent = nativeFirmware ? "Flash Native Firmware" : wifiEnabled ? "Flash + Set Up Wi-Fi" : "Flash Firmware";
+      buildButton.textContent = wifiEnabled ? "Flash + Set Up Wi-Fi" : "Flash Firmware";
     }
   };
 
@@ -13301,8 +12816,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     } catch (_error) {
       // The flash succeeded; failing to record the local version should not make recovery look failed.
     }
-    const artifactNative = boolFromAny(artifact?.native_firmware ?? nativeFirmware, false);
-    const wifiEnabled = !artifactNative && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+    const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
     if (wifiEnabled) {
       selectedPort = await browserUsbWaitForReconnect(selectedPort, selector, logConsole, statusNode);
       updateSelectedPort();
@@ -13316,13 +12830,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         statusNode
       );
     } else {
-      appendEspHomeFirmwareLog(
-        logConsole,
-        artifactNative
-          ? "Native firmware flashed. Connect to the Tater-Setup Wi-Fi network and use Add Satellite pairing to provision it."
-          : "Wi-Fi setup skipped by user.",
-        "info"
-      );
+      appendEspHomeFirmwareLog(logConsole, "Wi-Fi setup skipped by user.", "info");
     }
     if (selectButton instanceof HTMLButtonElement) {
       selectButton.disabled = false;
@@ -13338,7 +12846,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       showToast("Select a USB device before flashing.", "error", 3000);
       return;
     }
-    const wifiEnabled = !nativeFirmware && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+    const wifiEnabled = wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true;
     const wifiSsid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
     if (wifiEnabled && !wifiSsid) {
       showToast("Enter a Wi-Fi SSID or turn off Wi-Fi setup.", "error", 3200);
@@ -13351,11 +12859,11 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     if (selectButton instanceof HTMLButtonElement) {
       selectButton.disabled = true;
     }
-    setCoreManagerStatus(card, nativeFirmware ? "Preparing native USB firmware..." : "Preparing prebuilt USB firmware...");
+    setCoreManagerStatus(card, "Preparing prebuilt USB firmware...");
     if (selectedPort) {
       appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
     }
-    appendEspHomeFirmwareLog(logConsole, nativeFirmware ? "Preparing native USB firmware image." : "Preparing prebuilt USB firmware image.", "info");
+    appendEspHomeFirmwareLog(logConsole, "Preparing prebuilt USB firmware image.", "info");
     try {
       const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
         id: selector,
@@ -13368,7 +12876,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         await runBrowserFlash(result);
         return;
       }
-      throw new Error("USB image did not include a firmware binary.");
+      throw new Error("Prebuilt USB image did not include a firmware binary.");
     } catch (error) {
       const message = String(error?.message || "unknown error");
       appendEspHomeFirmwareLog(logConsole, `Browser USB flash failed: ${message}`, "error");
@@ -13396,9 +12904,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         label: "Firmware Log",
         type: "textarea",
         value: "",
-        description: nativeFirmware
-          ? "Select the USB device and flash the native factory image. Provision afterward from the Tater-Setup Wi-Fi network."
-          : "Select the USB device, flash the prebuilt factory image, then optionally set up Wi-Fi over Improv Serial.",
+        description: "Select the USB device, flash the prebuilt factory image, then optionally set up Wi-Fi over Improv Serial.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -13418,18 +12924,14 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         controls.style.marginTop = "12px";
         controls.innerHTML = `
           <div class="small core-inline-section-title">USB Device</div>
-          <div class="small">${
-            nativeFirmware
-              ? "Choose the ESP32-S3 USB serial device. After flashing, connect to Tater-Setup-XXXX and enter an Add Satellite pairing code."
-              : "Choose the ESP32-S3 USB serial device from this browser."
-          }</div>
+          <div class="small">Choose the ESP32-S3 USB serial device from this browser.</div>
           <div class="inline-row" style="margin-top:10px;">
             <button type="button" class="action-btn esphome-browser-usb-select">Select USB Device</button>
-            <button type="button" class="action-btn esphome-browser-usb-build" disabled>${nativeFirmware ? "Flash Native Firmware" : "Flash + Set Up Wi-Fi"}</button>
+            <button type="button" class="action-btn esphome-browser-usb-build" disabled>Flash + Set Up Wi-Fi</button>
           </div>
           <div class="small esphome-browser-usb-selected" style="margin-top:8px;"></div>
           <div class="inline-row esphome-browser-usb-list" style="margin-top:8px;"></div>
-          <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup" style="${nativeFirmware ? "display:none;" : ""}">
+          <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup">
             <label class="firmware-usb-wifi-toggle">
               <input type="checkbox" class="esphome-browser-usb-wifi-enabled" checked>
               <span>Set up Wi-Fi after USB flash</span>
@@ -13524,7 +13026,7 @@ function openEspHomeFirmwareOtaLogs(card, coreKey) {
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
   if (!selector || !coreKey) {
     showToast("Pick a connected firmware target before opening OTA logs.", "error", 3200);
     return;
@@ -13592,7 +13094,7 @@ function openEspHomeFirmwareOtaLogs(card, coreKey) {
         label: "Live Log",
         type: "textarea",
         value: "",
-        description: "Live device logs stream in this window.",
+        description: "Live ESPHome API logs stream in this window.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -13660,7 +13162,7 @@ function openEspHomeBrowserUsbLogs(card) {
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "ESPHome Device").trim() || "ESPHome Device";
 
   let port = browserUsbStoredPort(selector);
   let stopped = false;
@@ -14619,20 +14121,6 @@ function bindCoreTabManagers() {
     }
   };
 
-  const decodeCoreManagerInfoFields = (card) => {
-    const encoded = String(card?.dataset?.coreItemInfoFields || "").trim();
-    if (!encoded) {
-      return [];
-    }
-    try {
-      const decoded = decodeURIComponent(encoded);
-      const parsed = JSON.parse(decoded);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (_error) {
-      return [];
-    }
-  };
-
   const decodeCoreManagerPopupConfig = (card) => {
     const encoded = String(card?.dataset?.coreItemPopupConfig || "").trim();
     if (!encoded) {
@@ -14744,7 +14232,7 @@ function bindCoreTabManagers() {
       if (!rows.length && reset) {
         const emptyEl = document.createElement("div");
         emptyEl.className = "voice-log-empty";
-        emptyEl.textContent = "Waiting for live device logs...";
+        emptyEl.textContent = "Waiting for live ESPHome logs...";
         logConsole.appendChild(emptyEl);
       } else if (rows.length) {
         rows.forEach((entry) => renderConsoleLine(entry));
@@ -14868,196 +14356,6 @@ function bindCoreTabManagers() {
     });
   };
 
-  const openNativeSatellitePairingModal = (trigger, coreKey, pairingConfig) => {
-    const startAction = String(pairingConfig?.start_action || trigger?.dataset?.nativePairingStartAction || "").trim();
-    const statusAction = String(pairingConfig?.status_action || trigger?.dataset?.nativePairingStatusAction || "").trim();
-    if (!startAction || !statusAction) {
-      showToast("Native pairing is not configured.", "error", 2800);
-      return;
-    }
-
-    let stopped = false;
-    let pollTimer = 0;
-    let pairingId = "";
-    let pairingCode = "";
-    let modalRef = null;
-
-    const stopPolling = () => {
-      stopped = true;
-      if (pollTimer) {
-        window.clearTimeout(pollTimer);
-        pollTimer = 0;
-      }
-    };
-
-    const renderPairingBody = (fieldsEl, result, stateText = "waiting") => {
-      if (!(fieldsEl instanceof HTMLElement)) {
-        return;
-      }
-      const code = String(result?.display_code || result?.code || pairingCode || "").trim();
-      const expiresIn = Math.max(0, Number(result?.expires_in_s || 0));
-      const minutes = Math.floor(expiresIn / 60);
-      const seconds = String(expiresIn % 60).padStart(2, "0");
-      const connectedName = String(result?.device_name || result?.device_id || result?.selector || "").trim();
-      if (stateText === "paired") {
-        fieldsEl.innerHTML = `
-          <div class="native-pairing-success">
-            <div class="native-pairing-success-mark">OK</div>
-            <div>
-              <div class="runtime-settings-section-title">Satellite Connected</div>
-              <div class="small">${escapeHtml(connectedName || "The satellite")} paired with Tater. Closing this window now.</div>
-            </div>
-          </div>
-        `;
-        return;
-      }
-      if (stateText === "expired") {
-        fieldsEl.innerHTML = `
-          <div class="native-pairing-expired">
-            <div class="runtime-settings-section-title">Pairing Code Expired</div>
-            <div class="small">Close this window and tap Add Satellite again to generate a fresh code.</div>
-          </div>
-        `;
-        return;
-      }
-      fieldsEl.innerHTML = `
-        <div class="native-pairing-modal-body">
-          <section class="native-pairing-code-panel">
-            <div class="small native-pairing-kicker">Pairing Code</div>
-            <div class="native-pairing-code" data-native-pairing-code>${escapeHtml(code)}</div>
-            <div class="inline-row native-pairing-code-actions">
-              <button type="button" class="inline-btn native-pairing-copy">Copy Code</button>
-              <span class="small">Expires in ${minutes}:${seconds}</span>
-            </div>
-          </section>
-          <section class="native-pairing-steps">
-            <div class="runtime-settings-section-title">Setup Steps</div>
-            <div class="native-pairing-step"><span>1</span><p>Put the satellite in setup mode. The LED ring should flash white and the Tater-Setup Wi-Fi network should appear.</p></div>
-            <div class="native-pairing-step"><span>2</span><p>If the white LEDs are not flashing, press the center button 5 times quickly, then press and hold on the sixth press for 5 seconds until the countdown finishes and the device reboots.</p></div>
-            <div class="native-pairing-step"><span>3</span><p>Connect your phone to the Tater-Setup Wi-Fi network and open http://192.168.4.1.</p></div>
-            <div class="native-pairing-step"><span>4</span><p>Enter Wi-Fi, Tater server address, room, name, and this code in the Pairing Code / Token field.</p></div>
-            <div class="native-pairing-step"><span>5</span><p>Save setup. This popup will close once the satellite connects.</p></div>
-          </section>
-        </div>
-      `;
-      const copyBtn = fieldsEl.querySelector(".native-pairing-copy");
-      copyBtn?.addEventListener("click", async () => {
-        try {
-          const copied = await copyTextToClipboard(code.replace(/\s+/g, ""));
-          if (!copied) {
-            throw new Error("clipboard unavailable");
-          }
-          showToast("Pairing code copied.");
-        } catch (error) {
-          showToast(`Copy failed: ${String(error?.message || "clipboard unavailable")}`, "error", 2600);
-        }
-      });
-    };
-
-    const schedulePoll = (fieldsEl, statusEl, delayMs = 1200) => {
-      if (stopped) {
-        return;
-      }
-      pollTimer = window.setTimeout(async () => {
-        if (stopped) {
-          return;
-        }
-        try {
-          const result = await runCoreManagerAction(trigger, coreKey, statusAction, {
-            pairing_id: pairingId,
-          });
-          const stateText = String(result?.state || "").trim().toLowerCase();
-          if (stateText === "paired" || result?.paired) {
-            renderPairingBody(fieldsEl, result, "paired");
-            if (statusEl instanceof HTMLElement) {
-              statusEl.textContent = "Satellite connected.";
-            }
-            showToast("Satellite connected.");
-            window.setTimeout(async () => {
-              const activeTab = persistCoreTabFromNode(trigger);
-              document.getElementById("runtime-settings-close")?.click();
-              await refreshCoreManagerInPlace(trigger, activeTab);
-            }, 1100);
-            return;
-          }
-          if (stateText === "expired" || result?.expired) {
-            renderPairingBody(fieldsEl, result, "expired");
-            if (statusEl instanceof HTMLElement) {
-              statusEl.textContent = "Pairing code expired.";
-            }
-            stopPolling();
-            return;
-          }
-          renderPairingBody(fieldsEl, result, "waiting");
-          if (statusEl instanceof HTMLElement) {
-            statusEl.textContent = "Waiting for the satellite to connect...";
-          }
-          schedulePoll(fieldsEl, statusEl, 1200);
-        } catch (error) {
-          if (statusEl instanceof HTMLElement) {
-            statusEl.textContent = `Pairing status error: ${String(error?.message || "unknown error")}`;
-          }
-          schedulePoll(fieldsEl, statusEl, 2500);
-        }
-      }, delayMs);
-    };
-
-    openRuntimeSettingsModal({
-      title: "Add Tater Satellite",
-      meta: "Native pairing",
-      fields: [{ key: "native_pairing_starting", label: "Pairing", type: "section", description: "Creating a one-time pairing code..." }],
-      modalClass: "runtime-settings-dialog-native-pairing",
-      onOpen: async ({ modal, fieldsEl, statusEl }) => {
-        modalRef = modal;
-        modal?.classList.add("native-pairing-modal");
-        if (statusEl instanceof HTMLElement) {
-          statusEl.textContent = "Creating pairing code...";
-        }
-        try {
-          const result = await runCoreManagerAction(trigger, coreKey, startAction, {});
-          pairingId = String(result?.pairing_id || "").trim();
-          pairingCode = String(result?.display_code || result?.code || "").trim();
-          renderPairingBody(fieldsEl, result, "waiting");
-          if (statusEl instanceof HTMLElement) {
-            statusEl.textContent = "Waiting for the satellite to connect...";
-          }
-          schedulePoll(fieldsEl, statusEl, 1000);
-        } catch (error) {
-          if (fieldsEl instanceof HTMLElement) {
-            fieldsEl.innerHTML = renderNotice(`Pairing failed: ${String(error?.message || "unknown error")}`);
-          }
-          if (statusEl instanceof HTMLElement) {
-            statusEl.textContent = `Pairing failed: ${String(error?.message || "unknown error")}`;
-          }
-        }
-      },
-      onClose: ({ modal }) => {
-        stopPolling();
-        (modal || modalRef)?.classList?.remove("native-pairing-modal");
-      },
-    });
-  };
-
-  document.querySelectorAll(".native-satellite-add-btn").forEach((button) => {
-    if (button.dataset.coreManagerActionBound === "1") {
-      return;
-    }
-    button.dataset.coreManagerActionBound = "1";
-    button.addEventListener("click", (event) => {
-      const panel = event.currentTarget.closest(".native-pairing-panel");
-      const coreKey = String(panel?.dataset?.coreKey || "").trim();
-      if (!panel || !coreKey) {
-        return;
-      }
-      setCoreManagerStatus(panel, "Opening pairing...");
-      openNativeSatellitePairingModal(panel, coreKey, {
-        start_action: panel.dataset.nativePairingStartAction,
-        status_action: panel.dataset.nativePairingStatusAction,
-      });
-      setCoreManagerStatus(panel, "");
-    });
-  });
-
   document.querySelectorAll(".core-manager-add-form[data-core-key][data-core-action]").forEach((form) => {
     if (form.dataset.coreManagerActionBound === "1") {
       return;
@@ -15103,7 +14401,7 @@ function bindCoreTabManagers() {
     button.addEventListener("click", (event) => {
       const card = event.currentTarget.closest(".core-manager-item");
       const coreKey = String(card?.dataset?.coreKey || "").trim();
-      const action = String(card?.dataset?.coreSettingsAction || card?.dataset?.coreSaveAction || "").trim();
+      const action = String(card?.dataset?.coreSaveAction || "").trim();
       const resetAction = String(card?.dataset?.coreResetAction || "").trim();
       const resetConfirm = String(card?.dataset?.coreResetConfirm || "").trim();
       const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
@@ -15126,7 +14424,6 @@ function bindCoreTabManagers() {
         title: popupTitle || "Settings",
         meta: coreKey,
         fields: modalFields,
-        modalClass: action === "voice_native_satellite_settings_save" ? "runtime-settings-dialog-native-satellite" : "",
         onSave: action
           ? async (values) => {
               setCoreManagerStatus(card, "Saving...");
@@ -15167,33 +14464,6 @@ function bindCoreTabManagers() {
           : undefined,
         resetLabel: "Restore Default Settings",
         resetConfirm,
-      });
-    });
-  });
-
-  document.querySelectorAll(".core-manager-info").forEach((button) => {
-    if (button.dataset.coreManagerActionBound === "1") {
-      return;
-    }
-    button.dataset.coreManagerActionBound = "1";
-    button.addEventListener("click", (event) => {
-      const card = event.currentTarget.closest(".core-manager-item");
-      const coreKey = String(card?.dataset?.coreKey || "").trim();
-      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
-      if (!card || !coreKey) {
-        return;
-      }
-      const fields = decodeCoreManagerInfoFields(card);
-      if (!fields.length) {
-        showToast("No device info found for this satellite.", "error", 2600);
-        return;
-      }
-      const title = String(card?.dataset?.coreItemInfoTitle || `${itemId || coreKey} Device Info`).trim();
-      openRuntimeSettingsModal({
-        title: title || "Device Info",
-        meta: itemId || coreKey,
-        fields,
-        modalClass: "runtime-settings-dialog-native-satellite",
       });
     });
   });
@@ -19649,8 +18919,11 @@ async function loadSettingsView() {
         .join("")
     : `<div class="small hydra-base-server-empty">No additional base servers configured.</div>`;
   const hydraRoleSpecs = [
-    { id: "astraeus", title: "Astraeus", note: "routing and tool calls" },
-    { id: "hermes", title: "Hermes", note: "chat and final response" },
+    { id: "chat", title: "Chat", note: "normal conversation replies" },
+    { id: "astraeus", title: "Astraeus", note: "planning" },
+    { id: "thanatos", title: "Thanatos", note: "execution" },
+    { id: "minos", title: "Minos", note: "judging" },
+    { id: "hermes", title: "Hermes", note: "final response" },
   ];
   const hydraRoleIds = hydraRoleSpecs.map((role) => role.id);
   const renderHydraRoleRoute = (role) => {
@@ -21433,15 +20706,21 @@ async function loadSettingsView() {
             <div class="settings-subpanel active" data-esphome-panel="satellites">
               ${renderSettingsSectionIntro(
                 "Satellites",
-                "Tater Native satellites connected directly to Tater, including room context, settings, and device logs.",
+                "Live ESPHome satellites connected directly to Tater, including room context, live entities, and device logs.",
                 "SAT",
                 "subtle"
               )}
-              <div id="settings-esphome-runtime-add">
-                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the add form.`)}
-              </div>
-              <div id="settings-esphome-runtime-satellites" style="margin-top:16px;">
+              <div id="settings-esphome-runtime-satellites">
                 ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load satellites.`)}
+              </div>
+              <div style="margin-top:16px;">
+                <div class="settings-section-title">Add Satellite</div>
+                <div class="small" style="margin-bottom:10px;">
+                  Manually add a satellite by host or IP when discovery has not found it yet.
+                </div>
+                <div id="settings-esphome-runtime-add">
+                  ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the add form.`)}
+                </div>
               </div>
             </div>
 
@@ -21515,7 +20794,7 @@ async function loadSettingsView() {
             <div class="settings-subpanel" data-esphome-panel="stats">
               ${renderSettingsSectionIntro(
                 "Stats",
-                "Voice pipeline quality, latency, fallback, and device metrics for tuning native satellites in Tater.",
+                "Voice pipeline quality, latency, fallback, and discovery metrics for tuning ESPHome devices in Tater.",
                 "QOS",
                 "subtle"
               )}
@@ -26819,9 +26098,6 @@ async function loadSettingsView() {
             <td>${escapeHtml(String(row?.planned_tool ?? ""))}</td>
             <td>${escapeHtml(String(row?.validation_status ?? ""))}</td>
             <td>${escapeHtml(String(row?.total_ms ?? ""))}</td>
-            <td>${escapeHtml(String(row?.astraeus_route_ms ?? ""))}</td>
-            <td>${escapeHtml(String(row?.hermes_chat_ms ?? ""))}</td>
-            <td>${escapeHtml(String(row?.hermes_final_ms ?? ""))}</td>
             <td>
               <button type="button" class="inline-btn cerb-ledger-open" data-ledger-index="${index}">Open</button>
             </td>
@@ -26839,14 +26115,11 @@ async function loadSettingsView() {
               <th>Time</th>
               <th>Platform</th>
               <th>Scope</th>
-              <th>Astraeus</th>
+              <th>Astraeus/Thanatos</th>
               <th>Outcome</th>
               <th>Tool</th>
               <th>Validation</th>
               <th>Total ms</th>
-              <th>Astraeus ms</th>
-              <th>Chat ms</th>
-              <th>Hermes ms</th>
               <th>Ledger</th>
             </tr>
           </thead>
@@ -27452,19 +26725,19 @@ async function loadSettingsView() {
   });
 
   document.getElementById("settings-reset-esphome-defaults")?.addEventListener("click", async () => {
-    const message = "Restore native voice settings to defaults?";
+    const message = "Restore ESPHome voice settings to defaults? This also clears the saved ESPHome API password and Noise PSK.";
     if (!window.confirm(message)) {
       return;
     }
-    statusEl.textContent = "Restoring native voice settings...";
+    statusEl.textContent = "Restoring ESPHome settings...";
     try {
       const result = await runActionWithProgress(
         {
-          title: "Restoring native voice settings",
+          title: "Restoring ESPHome settings",
           detail: "voice pipeline",
           workingText: "Restoring settings...",
           successText: "Restored.",
-          errorPrefix: "Native voice reset failed",
+          errorPrefix: "ESPHome reset failed",
         },
         () =>
           api("/api/settings/esphome/runtime/action", {
@@ -27475,7 +26748,7 @@ async function loadSettingsView() {
             }),
           })
       );
-      const notice = String(result?.message || "Native voice settings restored to defaults.");
+      const notice = String(result?.message || "ESPHome settings restored to defaults.");
       state.notice = notice;
       statusEl.textContent = notice;
       showToast(notice);
