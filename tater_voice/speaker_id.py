@@ -887,7 +887,8 @@ def match_speaker_for_audio(
     if not speaker_id_enabled():
         _debug("match skipped reason=disabled")
         return {"matched": False, "reason": "disabled"}
-    if float(speech_s or 0.0) < _min_speech_seconds():
+    best_match = _best_match_enabled()
+    if (not best_match) and float(speech_s or 0.0) < _min_speech_seconds():
         _debug(
             f"match skipped reason=too_short speech_s={float(speech_s or 0.0):.2f} "
             f"minimum_s={_min_speech_seconds():.2f}"
@@ -929,7 +930,6 @@ def match_speaker_for_audio(
     best = scored[0]
     second_score = float(scored[1].get("score") or 0.0) if len(scored) > 1 else -1.0
     margin = float(best.get("score") or 0.0) - second_score
-    best_match = _best_match_enabled()
     matched = bool(
         best_match
         or (float(best.get("score") or 0.0) >= _match_threshold() and margin >= _match_margin())

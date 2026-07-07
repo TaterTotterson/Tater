@@ -1,6 +1,5 @@
 aiohttp
 aiohomekit
-aioesphomeapi
 zeroconf
 beautifulsoup4
 bencodepy

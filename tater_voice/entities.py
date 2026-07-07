@@ -39,7 +39,7 @@ def _int(value: Any, default: int = 0, *, minimum: Optional[int] = None) -> int:
 
 
 class VoiceCoreEntityClient:
-    """Reusable helper for reading and commanding ESPHome entities via built-in ESPHome routes."""
+    """Legacy entity helper retained for imports after native satellite migration."""
 
     def __init__(self, *, timeout: float = 20.0):
         self.timeout = max(5.0, float(timeout or 0.0))
@@ -90,29 +90,10 @@ class VoiceCoreEntityClient:
             return {"ok": True, "raw": resp.text}
 
     def get_entities(self, selector: str) -> Dict[str, Any]:
-        token = _text(selector).strip()
-        if not token:
-            raise ValueError("selector is required")
-        return self._post("/tater-ha/v1/voice/esphome/entities", {"selector": token})
+        raise RuntimeError("Live entity access has been removed for Tater Native satellites.")
 
     def command(self, selector: str, entity_key: Any, command: str, *, value: Any = None) -> Dict[str, Any]:
-        token = _text(selector).strip()
-        key = _text(entity_key).strip()
-        cmd = _text(command).strip()
-        if not token:
-            raise ValueError("selector is required")
-        if not key:
-            raise ValueError("entity_key is required")
-        if not cmd:
-            raise ValueError("command is required")
-        payload: Dict[str, Any] = {
-            "selector": token,
-            "entity_key": key,
-            "command": cmd,
-        }
-        if value is not None:
-            payload["value"] = value
-        return self._post("/tater-ha/v1/voice/esphome/entities/command", payload)
+        raise RuntimeError("Live entity commands have been removed for Tater Native satellites.")
 
     @staticmethod
     def entity_text(entry: Optional[Dict[str, Any]]) -> str:

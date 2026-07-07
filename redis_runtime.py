@@ -1157,9 +1157,9 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
         raise RedisNotConfiguredError(f"Failed to start internal Redis server: {exc}") from exc
 
     try:
-        timeout = float(os.getenv("TATER_REDIS_START_TIMEOUT_SECONDS", "8") or "8")
+        timeout = float(os.getenv("TATER_REDIS_START_TIMEOUT_SECONDS", "45") or "45")
     except Exception:
-        timeout = 8.0
+        timeout = 45.0
     timeout = max(1.0, timeout)
     deadline = time.time() + timeout
     last_error = ""
@@ -1552,8 +1552,23 @@ def get_redis_connection_status() -> Dict[str, Any]:
                     connected = False
                     error = str(fallback_exc)
             else:
-                connected = False
-                error = str(exc)
+                first_error = str(exc)
+                try:
+                    with _LOCK:
+                        _reset_clients_locked()
+                        _stop_internal_redis_locked()
+                    get_redis_client(decode_responses=True).ping()
+                    with _LOCK:
+                        config = _load_config_locked()
+                        source = str(_CONFIG_SOURCE or source)
+                        fallback_reason = str(_CONFIG_FALLBACK_REASON or fallback_reason)
+                    mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
+                    configured = True
+                    connected = True
+                    error = ""
+                except Exception as retry_exc:
+                    connected = False
+                    error = str(retry_exc) or first_error
     else:
         try:
             with _LOCK:
