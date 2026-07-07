@@ -6554,6 +6554,48 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   overflow-wrap: anywhere;
 }
 
+.core-satellite-detail-sections {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.core-satellite-detail-section {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.core-satellite-detail-title {
+  color: var(--accent-soft);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.core-satellite-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.core-satellite-detail-row {
+  min-width: 0;
+}
+
+.core-satellite-detail-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  margin-bottom: 2px;
+}
+
+.core-satellite-detail-value {
+  display: block;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .core-satellite-sensors {
   border-top: 1px solid var(--line);
   padding-top: 10px;
@@ -7468,6 +7510,155 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   overflow-wrap: anywhere;
 }
 
+.runtime-settings-dialog-native-satellite {
+  width: min(980px, 96vw);
+}
+
+.runtime-settings-dialog-native-satellite .runtime-settings-fields {
+  gap: 12px;
+}
+
+.runtime-settings-dialog-native-satellite .runtime-settings-fields > label,
+.runtime-settings-dialog-native-satellite .runtime-setting-conditional > label {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  padding: 10px 11px;
+}
+
+.runtime-settings-dialog-native-satellite .runtime-settings-fields > label:focus-within,
+.runtime-settings-dialog-native-satellite .runtime-setting-conditional > label:focus-within {
+  border-color: rgba(240, 131, 69, 0.5);
+  background: rgba(240, 131, 69, 0.05);
+}
+
+.runtime-settings-section {
+  grid-column: 1 / -1;
+  border: 1px solid rgba(240, 131, 69, 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(240, 131, 69, 0.08), rgba(240, 131, 69, 0.025)),
+    rgba(0, 0, 0, 0.12);
+  padding: 10px 12px;
+}
+
+.runtime-settings-section-title {
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.runtime-settings-section .small {
+  margin-top: 3px;
+}
+
+.runtime-settings-readonly-row {
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-settings-readonly-value {
+  min-height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  color: #f3f6ff;
+  padding: 9px 10px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-settings-fields input[type="color"] {
+  height: 42px;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.native-led-preview {
+  grid-column: 1 / -1;
+  border: 1px solid rgba(240, 131, 69, 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(240, 131, 69, 0.075), rgba(240, 131, 69, 0.025)),
+    rgba(0, 0, 0, 0.14);
+  padding: 12px;
+}
+
+.native-led-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(116px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.native-led-preview-card {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  padding: 10px 8px;
+}
+
+.native-led-ring {
+  position: relative;
+  width: 86px;
+  height: 86px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.035) 0 38%, transparent 39%),
+    rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.native-led-ring::after {
+  content: "";
+  position: absolute;
+  inset: 30px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.native-led-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%) rotate(calc(var(--i) * 30deg)) translateY(-35px);
+  background: rgba(255, 90, 31, 0.3);
+  transition: background 80ms linear, opacity 80ms linear, box-shadow 80ms linear;
+}
+
+.native-led-preview-label {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.native-led-preview-mode {
+  min-height: 16px;
+  text-align: center;
+  text-transform: capitalize;
+}
+
+@media (max-width: 780px) {
+  .native-led-preview-grid {
+    grid-template-columns: repeat(2, minmax(116px, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .native-led-preview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .runtime-settings-fields.runtime-settings-fields-log {
   padding-right: 0;
 }
@@ -8157,6 +8348,146 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .core-manager-add-form {
   margin-top: 10px;
+}
+
+.native-pairing-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid rgba(240, 131, 69, 0.28);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.13), rgba(57, 212, 160, 0.055)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 3px 0 0 rgba(240, 131, 69, 0.72);
+}
+
+.native-pairing-kicker {
+  color: #ffc07f;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.native-pairing-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-settings-dialog-native-pairing {
+  width: min(720px, 96vw);
+}
+
+.runtime-settings-dialog-native-pairing .runtime-settings-fields {
+  gap: 12px;
+}
+
+.native-pairing-modal-body {
+  display: grid;
+  gap: 14px;
+}
+
+.native-pairing-code-panel,
+.native-pairing-steps,
+.native-pairing-success,
+.native-pairing-expired {
+  border: 1px solid rgba(240, 131, 69, 0.24);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(240, 131, 69, 0.08), rgba(240, 131, 69, 0.025)),
+    rgba(0, 0, 0, 0.14);
+  padding: 14px;
+}
+
+.native-pairing-code {
+  margin-top: 8px;
+  color: #f7f0e7;
+  font-size: 4.2rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.native-pairing-code-actions {
+  margin-top: 12px;
+}
+
+.native-pairing-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.native-pairing-step {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.native-pairing-step span,
+.native-pairing-success-mark {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(240, 131, 69, 0.18);
+  color: #ffc07f;
+  font-weight: 900;
+}
+
+.native-pairing-step p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.native-pairing-success {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border-color: rgba(57, 212, 160, 0.32);
+  background:
+    linear-gradient(135deg, rgba(57, 212, 160, 0.12), rgba(240, 131, 69, 0.04)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.native-pairing-success-mark {
+  min-width: 36px;
+  height: 36px;
+  background: rgba(57, 212, 160, 0.16);
+  color: #99f0d2;
+  font-size: 0.78rem;
+}
+
+.native-pairing-expired {
+  border-color: rgba(245, 186, 92, 0.3);
+}
+
+@media (max-width: 640px) {
+  .native-pairing-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .native-pairing-panel-actions {
+    justify-content: stretch;
+  }
+
+  .native-pairing-panel-actions .action-btn {
+    width: 100%;
+  }
+
+  .native-pairing-code {
+    font-size: 2.7rem;
+  }
 }
 
 .core-manager-item .settings-dropdown {

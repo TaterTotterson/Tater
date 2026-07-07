@@ -121,6 +121,24 @@ def _registry_by_selector() -> Dict[str, Dict[str, Any]]:
     return {}
 
 
+def _native_clients_by_selector() -> Dict[str, Dict[str, Any]]:
+    try:
+        from . import native_satellite
+
+        status = native_satellite.status_snapshot_sync()
+    except Exception:
+        return {}
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    rows: Dict[str, Dict[str, Any]] = {}
+    for selector, row in clients.items():
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            continue
+        token = _text(selector) or _text(row.get("selector"))
+        if token:
+            rows[token] = dict(row)
+    return rows
+
+
 def _candidate_names(row: Dict[str, Any]) -> List[str]:
     meta = _metadata(row)
     device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
@@ -128,6 +146,10 @@ def _candidate_names(row: Dict[str, Any]) -> List[str]:
         row.get("selector"),
         row.get("name"),
         row.get("host"),
+        row.get("room"),
+        row.get("area"),
+        row.get("room_name"),
+        row.get("area_name"),
         meta.get("area_name"),
         meta.get("room_name"),
         meta.get("room"),
@@ -154,6 +176,10 @@ def _candidate_label(row: Dict[str, Any], selector: str) -> str:
     meta = _metadata(row)
     device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
     for value in (
+        row.get("room"),
+        row.get("area"),
+        row.get("room_name"),
+        row.get("area_name"),
         meta.get("area_name"),
         meta.get("room_name"),
         meta.get("room"),
@@ -181,6 +207,10 @@ def _client_or_registry_row(selector: str) -> Dict[str, Any]:
         return {}
 
     registry_row = _registry_by_selector().get(token, {})
+    native_row = _native_clients_by_selector().get(token)
+    if isinstance(native_row, dict):
+        return _merge_satellite_rows(registry_row, native_row)
+
     status = device_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     row = clients.get(token)
@@ -206,6 +236,16 @@ def _target_candidates() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     seen = set()
     registry_rows = _registry_by_selector()
+    native_rows = _native_clients_by_selector()
+
+    for selector, row in native_rows.items():
+        token = _text(selector) or _text(row.get("selector"))
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        merged = _merge_satellite_rows(registry_rows.get(token, {}), row)
+        merged["selector"] = token
+        rows.append(merged)
 
     status = device_runtime.status()
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
@@ -289,7 +329,7 @@ def resolve_target(target_query: Any, *, source_selector: Any = "") -> Dict[str,
                 return {
                     "ok": False,
                     "error": "target_not_connected",
-                    "message": f"I found {selector}, but that Voice Core satellite is not connected right now.",
+                    "message": f"I found {selector}, but that Tater satellite is not connected right now.",
                     "options": target_options(current_values=[_voice_core_target(selector)]),
                 }
             row = _client_or_registry_row(selector)
@@ -334,7 +374,7 @@ def resolve_target(target_query: Any, *, source_selector: Any = "") -> Dict[str,
         return {
             "ok": False,
             "error": "target_not_found",
-            "message": f"I couldn't find a connected Voice Core satellite matching {query!r}.",
+            "message": f"I couldn't find a connected Tater satellite matching {query!r}.",
             "options": target_options(),
         }
 

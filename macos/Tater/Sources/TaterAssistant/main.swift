@@ -645,18 +645,7 @@ private final class BackendManager {
     }
 
     private func pinnedRuntimeDependenciesReady(using python: URL) -> Bool {
-        guard let expected = pinnedRequirementVersion(for: "aioesphomeapi") else {
-            return true
-        }
-        guard let installed = installedPackageVersion("aioesphomeapi", using: python) else {
-            appendLog("Private runtime is missing aioesphomeapi; setup will install \(expected).\n")
-            return false
-        }
-        if installed == expected {
-            return true
-        }
-        appendLog("Private runtime has aioesphomeapi \(installed); setup will install \(expected).\n")
-        return false
+        return true
     }
 
     private func pinnedRequirementVersion(for packageName: String) -> String? {

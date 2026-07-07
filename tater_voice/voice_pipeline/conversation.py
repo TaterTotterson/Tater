@@ -96,6 +96,7 @@ class VoiceSessionRuntime:
     stt_end_sent: bool = False
     intent_active: bool = False
     live_tool_progress_played: bool = False
+    tool_visual_sent: bool = False
     last_tool_progress_text: str = ""
     live_tool_progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], Any]] = None
     speaker_id: str = ""
@@ -333,7 +334,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
                 {"marker": "plugin_wait", "content": text, "payload": progress_payload},
             )
             callback = session.live_tool_progress_callback if callable(session.live_tool_progress_callback) else None
-            if vp._experimental_live_tool_progress_enabled() and callback is not None:
+            if callback is not None:
                 result = callback(text, progress_payload)
                 if inspect.isawaitable(result):
                     await result
