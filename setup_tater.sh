@@ -614,7 +614,7 @@ import os
 import platform
 from pathlib import Path
 
-required = ["fastapi", "uvicorn", "redis", "redislite"]
+required = ["fastapi", "uvicorn", "redis", "redislite", "aioesphomeapi"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing required packages: " + ", ".join(missing))

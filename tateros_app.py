@@ -8991,8 +8991,6 @@ async def _webui_auth_middleware(request: Request, call_next):
         return await call_next(request)
     if path.startswith("/api/speech/tts/runtime/"):
         return await call_next(request)
-    if path.startswith("/api/tater/satellite/"):
-        return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
     if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
         return await call_next(request)
@@ -15867,9 +15865,6 @@ def get_hydra_metrics(
                 "tool_result_ok": tool_result.get("ok") if isinstance(tool_result, dict) else row.get("tool_result_ok"),
                 "tool_result_summary": tool_result_summary,
                 "total_ms": int(row.get("total_ms") or 0),
-                "astraeus_route_ms": int(row.get("astraeus_route_ms") or 0),
-                "hermes_chat_ms": int(row.get("hermes_chat_ms") or 0),
-                "hermes_final_ms": int(row.get("hermes_final_ms") or 0),
                 "raw": row,
             }
         )

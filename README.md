@@ -376,7 +376,7 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - for OpenAI-compatible providers, set the endpoint host/port and model name
 2. Optional:
    - add more Base servers for round-robin regular AI calls
-   - enable `Beast Mode` and set per-head model settings for Astraeus/Hermes
+   - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
 
 Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
 

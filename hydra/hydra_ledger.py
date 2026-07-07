@@ -184,15 +184,9 @@ def write_hydra_ledger(
     outcome: str = "",
     outcome_reason: str = "",
     planner_ms: int = 0,
-    astraeus_route_ms: int = 0,
     tool_ms: int = 0,
     checker_ms: int = 0,
-    hermes_chat_ms: int = 0,
-    hermes_final_ms: int = 0,
     total_ms: int = 0,
-    hermes_llm: str = "",
-    hermes_chat_debug: Optional[Dict[str, Any]] = None,
-    hermes_final_debug: Optional[Dict[str, Any]] = None,
     retry_tool: Optional[Dict[str, Any]] = None,
     rounds_used: int = 0,
     tool_calls_used: int = 0,
@@ -240,11 +234,8 @@ def write_hydra_ledger(
         "outcome": short_text_fn(outcome, limit=16) or "done",
         "outcome_reason": short_text_fn(outcome_reason, limit=96),
         "planner_ms": max(0, int(planner_ms or 0)),
-        "astraeus_route_ms": max(0, int(astraeus_route_ms or 0)),
         "tool_ms": max(0, int(tool_ms or 0)),
         "checker_ms": max(0, int(checker_ms or 0)),
-        "hermes_chat_ms": max(0, int(hermes_chat_ms or 0)),
-        "hermes_final_ms": max(0, int(hermes_final_ms or 0)),
         "total_ms": max(0, int(total_ms or 0)),
         "retry_count": 1 if int(retry_count or 0) > 0 else 0,
         "rounds_used": max(0, int(rounds_used or 0)),
@@ -258,32 +249,6 @@ def write_hydra_ledger(
     attempted_tool_text = short_text_fn(attempted_tool, limit=80)
     if attempted_tool_text:
         entry["attempted_tool"] = attempted_tool_text
-    hermes_llm_text = short_text_fn(hermes_llm, limit=240)
-    if hermes_llm_text:
-        entry["hermes_llm"] = hermes_llm_text
-    for entry_key, debug_source in (
-        ("hermes_chat_debug", hermes_chat_debug),
-        ("hermes_final_debug", hermes_final_debug),
-    ):
-        if not isinstance(debug_source, dict) or not debug_source:
-            continue
-        debug_payload: Dict[str, Any] = {}
-        for raw_key, raw_value in debug_source.items():
-            key = str(raw_key or "").strip()
-            if not key:
-                continue
-            if isinstance(raw_value, bool):
-                debug_payload[key] = raw_value
-            elif isinstance(raw_value, int):
-                debug_payload[key] = max(0, raw_value)
-            elif isinstance(raw_value, float):
-                debug_payload[key] = round(max(0.0, raw_value), 4)
-            elif isinstance(raw_value, str):
-                text_value = short_text_fn(raw_value, limit=160)
-                if text_value:
-                    debug_payload[key] = text_value
-        if debug_payload:
-            entry[entry_key] = debug_payload
     if compact_retry_tool:
         entry["retry_tool"] = compact_retry_tool
     if isinstance(origin_preview, dict) and origin_preview:
