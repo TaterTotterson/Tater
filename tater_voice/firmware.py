@@ -72,10 +72,6 @@ _WAKE_SOUND_MANIFEST_URLS: tuple[str, ...] = (
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_sound_manifest.json",
     f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-sound-manifest.json",
 )
-_PREBUILT_FIRMWARE_RAW_BASE_URL = (
-    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}"
-)
-_PREBUILT_FIRMWARE_LATEST_URL = f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/prebuilt_firmware/latest.json"
 _NATIVE_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
 _NATIVE_FIRMWARE_GITHUB_REPO = "Tater-Native-Firmware"
 _NATIVE_FIRMWARE_GITHUB_REF = "main"
@@ -116,17 +112,24 @@ _NATIVE_FIRMWARE_LOCAL_LATEST = next(
     if _NATIVE_FIRMWARE_LOCAL_ROOTS
     else _SOURCE_ROOT / "prebuilt_firmware" / "latest.json",
 )
+_NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY = {
+    "s3box_display": "s3_box",
+}
+_NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
+    manifest_key: template_key
+    for template_key, manifest_key in _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY.items()
+}
+_NATIVE_FIRMWARE_TEMPLATE_KEYS = {
+    "voicepe",
+    "satellite1",
+    "respeaker_xvf3800",
+    "s3box_display",
+    "s3_box",
+}
 _PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
 _PREBUILT_OTA_PORT = 3232
 _PREBUILT_OTA_BLOCK_SIZE = 8192
-_PREBUILT_FIRMWARE_TEMPLATE_KEYS = {
-    "satellite1",
-    "voicepe",
-    "respeaker_lite",
-    "koala",
-    "respeaker_xvf3800",
-    "s3box_display",
-}
+_PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
 _WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
     {"key": "microWakeWords", "label": "microWakeWords"},
     {"key": "microWakeWordsV2", "label": "microWakeWordsV2"},
@@ -851,8 +854,9 @@ def _semver_tuple(value: Any) -> tuple[int, int, int]:
         return (0, 0, 0)
     if token.startswith("v"):
         token = token[1:].strip()
-    match = re.search(r"([0-9]+(\.[0-9]+){0,2})", token)
-    core = match.group(1) if match else "0.0.0"
+    matches = re.findall(r"[0-9]+(?:\.[0-9]+){0,2}", token)
+    dotted_matches = [item for item in matches if "." in item]
+    core = (dotted_matches[-1] if dotted_matches else (matches[-1] if matches else "0.0.0"))
     parts = (core.split(".") + ["0", "0", "0"])[:3]
     try:
         return (int(parts[0]), int(parts[1]), int(parts[2]))
@@ -1031,18 +1035,6 @@ def _local_json(path: Path) -> Any:
         raise RuntimeError(f"Local JSON file did not parse: {path}") from exc
 
 
-def _prebuilt_firmware_raw_url(path_or_url: Any) -> str:
-    token = _text(path_or_url).strip()
-    if not token:
-        return ""
-    parsed = urllib_parse.urlparse(token)
-    if parsed.scheme and parsed.netloc:
-        return token
-    clean = token.lstrip("/")
-    quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
-    return f"{_PREBUILT_FIRMWARE_RAW_BASE_URL}/{quoted}"
-
-
 def _native_firmware_raw_url(path_or_url: Any) -> str:
     token = _text(path_or_url).strip()
     if not token:
@@ -1070,6 +1062,16 @@ def _native_firmware_local_path(path_or_url: Any) -> Optional[Path]:
         if path.is_file():
             return path
     return (_NATIVE_FIRMWARE_LOCAL_ROOTS[0] / clean) if _NATIVE_FIRMWARE_LOCAL_ROOTS else _SOURCE_ROOT / clean
+
+
+def _native_manifest_key_for_template(template_key: Any) -> str:
+    token = _lower(template_key)
+    return _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY.get(token, token)
+
+
+def _native_template_key_for_manifest(manifest_key: Any) -> str:
+    token = _lower(manifest_key)
+    return _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY.get(token, token)
 
 
 def _load_native_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
@@ -1124,22 +1126,25 @@ def _load_native_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, 
 
 def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> Dict[str, Any]:
     key = _lower(template_key)
+    manifest_key = _native_manifest_key_for_template(key)
     try:
         manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
     except Exception as exc:
         return {
             "available": False,
             "template_key": key,
+            "native_key": manifest_key,
             "reason": "manifest_unavailable",
             "error": _text(exc) or exc.__class__.__name__,
         }
 
     devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
-    device = devices_by_key.get(key) if isinstance(devices_by_key.get(key), dict) else None
+    device = devices_by_key.get(manifest_key) if isinstance(devices_by_key.get(manifest_key), dict) else None
     if not isinstance(device, dict):
         return {
             "available": False,
             "template_key": key,
+            "native_key": manifest_key,
             "reason": "missing_device",
             "version": _text(manifest.get("version")),
             "manifest_url": _text(manifest.get("manifest_url")),
@@ -1149,6 +1154,7 @@ def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> 
     return {
         "available": bool(artifacts.get("ota") or artifacts.get("factory")),
         "template_key": key,
+        "native_key": manifest_key,
         "version": _text(device.get("firmware_version")) or _text(manifest.get("version")),
         "display_version": _text(device.get("display_version")) or _text(manifest.get("display_version")),
         "manifest_url": _text(manifest.get("manifest_url")),
@@ -1169,6 +1175,7 @@ def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
     keys: set[str] = set()
     for raw_key, raw_device in devices_by_key.items():
         key = _lower(raw_key)
+        template_key = _native_template_key_for_manifest(key)
         device = raw_device if isinstance(raw_device, dict) else {}
         artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
         has_artifact = any(
@@ -1177,80 +1184,19 @@ def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
         )
         if key and has_artifact:
             keys.add(key)
+        if template_key and has_artifact:
+            keys.add(template_key)
     return keys
-
-
-def _load_prebuilt_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
-    latest_payload = _remote_json(_PREBUILT_FIRMWARE_LATEST_URL, force_refresh=force_refresh)
-    if not isinstance(latest_payload, dict):
-        raise RuntimeError("Prebuilt firmware latest.json did not parse into an object.")
-
-    manifest_ref = _text(latest_payload.get("manifest"))
-    if not manifest_ref:
-        raise RuntimeError("Prebuilt firmware latest.json is missing a manifest path.")
-
-    manifest_url = _prebuilt_firmware_raw_url(manifest_ref)
-    manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
-    if not isinstance(manifest_payload, dict):
-        raise RuntimeError("Prebuilt firmware manifest did not parse into an object.")
-
-    devices = manifest_payload.get("devices")
-    if not isinstance(devices, list):
-        raise RuntimeError("Prebuilt firmware manifest is missing its devices list.")
-
-    version = _text(manifest_payload.get("version")) or _text(latest_payload.get("version"))
-    payload = copy.deepcopy(manifest_payload)
-    payload["version"] = version
-    payload["latest_url"] = _PREBUILT_FIRMWARE_LATEST_URL
-    payload["manifest_url"] = manifest_url
-    payload["manifest_path"] = manifest_ref
-    payload["devices_by_key"] = {
-        _text(row.get("key")): dict(row)
-        for row in devices
-        if isinstance(row, dict) and _text(row.get("key"))
-    }
-    return payload
 
 
 def _prebuilt_firmware_info(template_key: Any, *, force_refresh: bool = False) -> Dict[str, Any]:
     key = _lower(template_key)
-    if key == "voicepe":
-        native = _native_firmware_info(key, force_refresh=force_refresh)
-        if bool(native.get("available")) or _text(native.get("error")):
-            return native
+    native = _native_firmware_info(key, force_refresh=force_refresh)
+    if bool(native.get("available")) or _text(native.get("error")) or key in _PREBUILT_FIRMWARE_TEMPLATE_KEYS:
+        return native
     if key not in _PREBUILT_FIRMWARE_TEMPLATE_KEYS:
         return {"available": False, "template_key": key, "reason": "not_prebuilt"}
-    try:
-        manifest = _load_prebuilt_firmware_manifest(force_refresh=force_refresh)
-    except Exception as exc:
-        return {
-            "available": False,
-            "template_key": key,
-            "reason": "manifest_unavailable",
-            "error": _text(exc) or exc.__class__.__name__,
-        }
-
-    devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
-    device = devices_by_key.get(key) if isinstance(devices_by_key.get(key), dict) else None
-    if not isinstance(device, dict):
-        return {
-            "available": False,
-            "template_key": key,
-            "reason": "missing_device",
-            "version": _text(manifest.get("version")),
-            "manifest_url": _text(manifest.get("manifest_url")),
-        }
-
-    artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
-    return {
-        "available": bool(artifacts.get("ota") or artifacts.get("factory")),
-        "template_key": key,
-        "version": _text(manifest.get("version")),
-        "manifest_url": _text(manifest.get("manifest_url")),
-        "latest_url": _text(manifest.get("latest_url")),
-        "device": copy.deepcopy(device),
-        "artifacts": copy.deepcopy(artifacts),
-    }
+    return native
 
 
 def _prebuilt_artifact_meta(context: Dict[str, Any], kind: str) -> Dict[str, Any]:
@@ -1308,17 +1254,19 @@ def _download_prebuilt_firmware_binary(
     target_path = _prebuilt_cache_path(context, artifact)
     prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
     native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
+    if not native_firmware:
+        raise RuntimeError("Only Tater Native firmware artifacts are supported.")
+    url = _native_firmware_raw_url(artifact.get("path"))
+    local_path = _native_firmware_local_path(artifact.get("path"))
     if not force_refresh and _prebuilt_binary_is_valid(target_path, artifact):
         return {
             "path": target_path,
             "artifact": artifact,
-            "url": _native_firmware_raw_url(artifact.get("path")) if native_firmware else _prebuilt_firmware_raw_url(artifact.get("path")),
+            "url": url,
             "cached": True,
         }
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    url = _native_firmware_raw_url(artifact.get("path")) if native_firmware else _prebuilt_firmware_raw_url(artifact.get("path"))
-    local_path = _native_firmware_local_path(artifact.get("path")) if native_firmware else None
     if not url:
         raise RuntimeError("Prebuilt firmware URL is missing.")
     tmp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.tmp")
