@@ -52,6 +52,9 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [HomeKit Shortcuts](https://taterassistant.com/portals/homekit.html) | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
 | [Meshtastic Bridge](https://github.com/TaterTotterson/tater_meshtastic_bridge) | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
 | [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) | Native firmware for Tater voice satellites and related hardware. |
+| [Tater Wake Words](https://github.com/TaterTotterson/Tater-Wake-Words) | Wake-word catalog for Tater Native satellites, including issue-based `mww:` requests for generating new wake words. |
+| [WakeWord Trainer for macOS](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon) | Apple Silicon trainer app for creating custom wake words, reviewing satellite capture clips, and flashing Tater Native firmware. |
+| [WakeWord Trainer for NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing. |
 | [Little Spud WebUI](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
 | [Little Spud App](https://github.com/TaterTotterson/Little-Spud-App) | Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub. |
 | [Reachy Mini Voice Satellite](https://huggingface.co/spaces/TaterTotterson/tater_voice_sat) | Reachy Mini robot app that turns Reachy Mini into a voice satellite for Tater or Home Assistant. |
