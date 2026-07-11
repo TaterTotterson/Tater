@@ -11,32 +11,6 @@
 
 ---
 
-## What's Changed In v94
-
-- Added first-class **Tater Native Firmware** support for official voice satellites, including USB flashing, OTA update checks, pairing, diagnostics, per-satellite settings, timers, intercom, broadcast playback, LED controls, and S3 Box display settings.
-- Added the **Add Satellite** pairing flow in TaterOS. Tater now creates pairing codes that new native satellites use during Wi-Fi setup.
-- Added native satellite support for VoicePE, Sat1, ESP32-S3-BOX display satellites, and ReSpeaker XVF3800 devices.
-- Moved satellite configuration into TaterOS instead of ESPHome-style live entities, with settings stored per satellite.
-- Improved streaming playback, wake/reopen behavior, native timer alerts, reply routing, and firmware update handling for Tater Native satellites.
-
-### Native Satellite Upgrade Note
-
-Existing satellites that are still running the older ESPHome-based firmware must be moved to **Tater Native Firmware** before they can use the new native satellite features.
-
-First-time native setup:
-
-1. Open **TaterOS -> Satellites** and choose **Add Satellite**. Leave the pairing code popup open.
-2. Connect the satellite to your Mac with USB.
-3. Use the Tater firmware flasher to install the correct **factory** image for that device model. Factory flashing is required the first time a satellite moves to native firmware.
-4. After flashing, the satellite starts a setup hotspot named like `Tater-Setup-AB12`.
-5. Join that Wi-Fi network from a phone or computer, then open `http://192.168.4.1` if the setup page does not open automatically.
-6. Enter your Wi-Fi network, Tater server address, device name, room, and the pairing code shown in TaterOS.
-7. Save the setup. The satellite will reboot, join your Wi-Fi, pair with Tater, and appear on the Satellites page.
-
-After a satellite is paired with native firmware, future firmware updates can be managed from TaterOS with OTA updates. USB flashing remains available for recovery or when moving a device from older firmware to Tater Native Firmware.
-
----
-
 ## Little Spud Companion App
 
 Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your Apple devices.
