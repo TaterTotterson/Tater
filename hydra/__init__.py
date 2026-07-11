@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from . import hydra_checker as minos
 from . import hydra_doer_state as thanatos_state
 from . import hydra_execution as execution
 from . import hydra_common_helpers as common_helpers
@@ -122,7 +121,8 @@ DEFAULT_MAX_LEDGER_ITEMS = 1500
 DEFAULT_RESULT_MEMORY_MAX_SETS = 6
 DEFAULT_RESULT_MEMORY_MAX_ITEMS = 8
 DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED = False
-DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED = True
+DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED = False
+DEFAULT_ASTRAEUS_MAX_TOKENS = 420
 HYDRA_HERMES_FINAL_RENDER_TIMEOUT_SECONDS = 24.0
 HYDRA_LLM_HOST_KEY = "tater:hydra:llm_host"
 HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
@@ -137,17 +137,13 @@ CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
 HYDRA_BEAST_ROLE_IDS = (
     "ai_calls",
-    "chat",
     "astraeus",
     "thanatos",
-    "minos",
     "hermes",
 )
 HYDRA_BEAST_CONFIG_ROLE_IDS = (
-    "chat",
     "astraeus",
     "thanatos",
-    "minos",
     "hermes",
 )
 HYDRA_ROLE_LLM_KEY_PREFIX = "tater:hydra:llm:"
@@ -1783,14 +1779,6 @@ def _thanatos_system_prompt(platform: str) -> str:
     ).strip()
 
 
-def _minos_system_prompt(platform: str, retry_allowed: bool) -> str:
-    return prompts.minos_system_prompt(
-        platform=platform,
-        retry_allowed=retry_allowed,
-        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
-    ).strip()
-
-
 def _astraeus_system_prompt(platform: str) -> str:
     return prompts.astraeus_system_prompt(platform=platform)
 
@@ -2361,66 +2349,6 @@ async def _execute_tool_call(
     )
 
 
-def _parse_minos_decision(text: str) -> Dict[str, Any]:
-    return minos.parse_minos_decision(
-        text,
-        minos_decision_prefix_re=_MINOS_DECISION_PREFIX_RE,
-        parse_function_json_fn=parse_function_json,
-        is_tool_candidate_fn=_is_tool_candidate,
-        normalize_minos_decision_fn=_normalize_minos_decision,
-    )
-
-
-async def _run_minos_validation(
-    *,
-    llm_client: Any,
-    platform: str,
-    current_user_text: str,
-    turn_request_text: str,
-    agent_state: Optional[Dict[str, Any]],
-    memory_context: Optional[Dict[str, Any]],
-    available_artifacts: Optional[List[Dict[str, Any]]],
-    current_step: Optional[Dict[str, Any]],
-    goal: str,
-    planned_tool: Optional[Dict[str, Any]],
-    tool_result: Optional[Dict[str, Any]],
-    draft_response: str,
-    retry_count: int,
-    retry_allowed: bool,
-    platform_preamble: str = "",
-    max_tokens: Optional[int] = None,
-) -> Dict[str, Any]:
-    return await minos.run_minos_validation(
-        llm_client=llm_client,
-        platform=platform,
-        current_user_text=current_user_text,
-        turn_request_text=turn_request_text,
-        agent_state=agent_state,
-        memory_context=memory_context,
-        available_artifacts=available_artifacts,
-        current_step=current_step,
-        goal=goal,
-        planned_tool=planned_tool,
-        tool_result=tool_result,
-        draft_response=draft_response,
-        retry_count=retry_count,
-        retry_allowed=retry_allowed,
-        normalize_agent_state_fn=lambda state, fallback: _normalize_agent_state(state, fallback_goal=fallback),
-        coerce_non_negative_int_fn=_coerce_non_negative_int,
-        short_text_fn=_short_text,
-        memory_context_default_summary_max_chars=_MEMORY_CONTEXT_DEFAULT_SUMMARY_MAX_CHARS,
-        configured_minos_max_tokens_fn=(lambda: None),
-        minos_system_prompt_fn=lambda plat, retry: _minos_system_prompt(plat, retry_allowed=retry),
-        with_platform_preamble_fn=lambda messages, preamble: _with_platform_preamble(
-            messages, platform_preamble=preamble
-        ),
-        parse_minos_decision_fn=_parse_minos_decision,
-        coerce_text_fn=_coerce_text,
-        platform_preamble=platform_preamble,
-        max_tokens=max_tokens,
-    )
-
-
 def _sanitize_user_text(text: str, *, platform: str, tool_used: bool) -> str:
     return common_helpers.sanitize_user_text(
         text,
@@ -2436,23 +2364,6 @@ def _sanitize_user_text(text: str, *, platform: str, tool_used: bool) -> str:
 
 def _short_text(value: Any, *, limit: int = 280) -> str:
     return common_helpers.short_text(value, limit=limit)
-
-
-def _normalize_minos_decision(label: str) -> str:
-    return minos.normalize_minos_decision(label)
-
-
-def _checker_decision_value(decision: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(decision, dict):
-        return "FINAL"
-    raw = (
-        decision.get("decision")
-        or decision.get("kind")
-        or decision.get("action")
-        or decision.get("checker_action")
-        or "FINAL"
-    )
-    return _normalize_minos_decision(str(raw or "FINAL"))
 
 
 def _checker_decision_text(decision: Optional[Dict[str, Any]], *keys: str) -> str:
@@ -2584,6 +2495,7 @@ async def _run_astraeus_plan(
     available_tool_ids: set[str],
     platform_preamble: str,
     max_tokens: Optional[int],
+    debug_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     fallback_goal = _short_text(turn_request_text or current_user_text, limit=220) or "Fulfill the user request."
     topic_value = _short_text(topic_seed, limit=90)
@@ -2601,7 +2513,7 @@ async def _run_astraeus_plan(
         recent_history_all.append({"role": role, "content": content})
     recent_history = recent_history_all
 
-    payload = {
+    dynamic_payload = {
         "current_user_message": str(current_user_text or ""),
         "recent_history": recent_history,
     }
@@ -2610,7 +2522,7 @@ async def _run_astraeus_plan(
             prior_state,
             fallback_goal=fallback_goal,
         )
-        payload["prior_context"] = {
+        dynamic_payload["prior_context"] = {
             "goal": _short_text(normalized_prior.get("goal"), limit=180),
             "plan": [str(item) for item in (normalized_prior.get("plan") or []) if str(item).strip()][:8],
             "facts": [str(item) for item in (normalized_prior.get("facts") or []) if str(item).strip()][:8],
@@ -2638,28 +2550,57 @@ async def _run_astraeus_plan(
         if room_memory:
             memory_payload["room_memory"] = room_memory
         if memory_payload:
-            payload["memory_context"] = memory_payload
+            dynamic_payload["memory_context"] = memory_payload
+
+    static_payload: Dict[str, Any] = {}
     if capability_catalog:
-        payload["available_capabilities"] = capability_catalog
+        static_payload["available_capabilities"] = capability_catalog
     if available_tool_ids:
-        payload["available_tool_ids"] = sorted(str(item) for item in available_tool_ids if str(item).strip())[:200]
+        static_payload["available_tool_ids"] = sorted(str(item) for item in available_tool_ids if str(item).strip())[:200]
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _astraeus_system_prompt(platform)},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
+    if static_payload:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Astraeus stable execution catalog:\n"
+                + json.dumps(static_payload, ensure_ascii=False, separators=(",", ":"), default=str),
+            }
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": json.dumps(dynamic_payload, ensure_ascii=False, separators=(",", ":"), default=str),
+        }
+    )
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    perf_before = _llm_perf_snapshot(llm_client)
+    if isinstance(debug_out, dict):
+        _populate_llm_prompt_debug(
+            debug_out,
+            messages=messages,
+            dynamic_payload=dynamic_payload,
+            static_payload=static_payload,
+        )
     try:
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.1,
             **_chat_with_optional_max_tokens_kwargs(
-                max_tokens=max_tokens,
+                max_tokens=max_tokens if max_tokens is not None else DEFAULT_ASTRAEUS_MAX_TOKENS,
                 minimum=200,
-                fallback=900,
+                fallback=DEFAULT_ASTRAEUS_MAX_TOKENS,
+                maximum=DEFAULT_ASTRAEUS_MAX_TOKENS,
             ),
         )
     except Exception:
+        _populate_llm_perf_debug(
+            debug_out,
+            before=perf_before,
+            after=_llm_perf_snapshot(llm_client),
+        )
         return {
             "mode": "unknown",
             "topic": topic_value,
@@ -2667,7 +2608,14 @@ async def _run_astraeus_plan(
             "goal": fallback_goal,
             "steps": [],
         }
+    _populate_llm_perf_debug(
+        debug_out,
+        before=perf_before,
+        after=_llm_perf_snapshot(llm_client),
+    )
     raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    if isinstance(debug_out, dict):
+        debug_out["completion_chars"] = int(max(0, len(raw)))
     obj = _first_json_object(raw)
     if not isinstance(obj, dict):
         return {
@@ -2838,9 +2786,13 @@ async def _run_thanatos_step(
     llm_client: Any,
     thanatos_messages: List[Dict[str, Any]],
     max_tokens: Optional[int],
+    debug_out: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, float]:
     started = time.perf_counter()
     text = ""
+    perf_before = _llm_perf_snapshot(llm_client)
+    if isinstance(debug_out, dict):
+        _populate_llm_prompt_debug(debug_out, messages=thanatos_messages)
     try:
         thanatos_resp = await llm_client.chat(
             messages=thanatos_messages,
@@ -2854,7 +2806,16 @@ async def _run_thanatos_step(
         text = _coerce_text((thanatos_resp.get("message", {}) or {}).get("content", "")).strip()
     except Exception:
         text = ""
-    return text, (time.perf_counter() - started) * 1000.0
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if isinstance(debug_out, dict):
+        debug_out["completion_chars"] = int(max(0, len(text)))
+        debug_out["wall_ms"] = int(max(0.0, elapsed_ms))
+    _populate_llm_perf_debug(
+        debug_out,
+        before=perf_before,
+        after=_llm_perf_snapshot(llm_client),
+    )
+    return text, elapsed_ms
 
 
 def _estimate_text_tokens_approx(text: Any) -> int:
@@ -2870,6 +2831,90 @@ def _estimate_text_tokens_approx(text: Any) -> int:
 
 def _estimate_message_tokens_approx(content: Any) -> int:
     return _estimate_text_tokens_approx(content) + _CHAT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS
+
+
+def _llm_perf_snapshot(llm_client: Any) -> Dict[str, Any]:
+    getter = getattr(llm_client, "get_perf_stats", None)
+    if not callable(getter):
+        return {}
+    try:
+        stats = getter(reset=False)
+    except Exception:
+        return {}
+    return dict(stats) if isinstance(stats, dict) else {}
+
+
+def _llm_perf_delta(before: Dict[str, Any], after: Dict[str, Any], key: str) -> float:
+    try:
+        return float((after or {}).get(key) or 0) - float((before or {}).get(key) or 0)
+    except Exception:
+        return 0.0
+
+
+def _populate_llm_prompt_debug(
+    debug_out: Optional[Dict[str, Any]],
+    *,
+    messages: List[Dict[str, Any]],
+    dynamic_payload: Optional[Dict[str, Any]] = None,
+    static_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not isinstance(debug_out, dict):
+        return
+    prompt_chars = 0
+    prompt_tokens_est = _CHAT_ESTIMATE_REQUEST_OVERHEAD_TOKENS
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        content = _coerce_text(msg.get("content")).strip()
+        prompt_chars += len(content)
+        prompt_tokens_est += _estimate_message_tokens_approx(content)
+    debug_out.update(
+        {
+            "message_count": int(len(messages or [])),
+            "prompt_chars": int(max(0, prompt_chars)),
+            "prompt_tokens_est": int(max(0, prompt_tokens_est)),
+        }
+    )
+    if isinstance(static_payload, dict) and static_payload:
+        static_text = json.dumps(static_payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        debug_out["static_payload_chars"] = int(max(0, len(static_text)))
+    if isinstance(dynamic_payload, dict) and dynamic_payload:
+        dynamic_text = json.dumps(dynamic_payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        debug_out["dynamic_payload_chars"] = int(max(0, len(dynamic_text)))
+
+
+def _populate_llm_perf_debug(
+    debug_out: Optional[Dict[str, Any]],
+    *,
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+) -> None:
+    if not isinstance(debug_out, dict) or not isinstance(after, dict) or not after:
+        return
+    prompt_tokens = max(0, int(round(_llm_perf_delta(before, after, "prompt_tokens"))))
+    completion_tokens = max(0, int(round(_llm_perf_delta(before, after, "completion_tokens"))))
+    total_tokens = max(0, int(round(_llm_perf_delta(before, after, "total_tokens"))))
+    calls = max(0, int(round(_llm_perf_delta(before, after, "calls"))))
+    elapsed = max(0.0, _llm_perf_delta(before, after, "elapsed"))
+    prompt_elapsed = max(0.0, _llm_perf_delta(before, after, "prompt_elapsed"))
+    completion_elapsed = max(0.0, _llm_perf_delta(before, after, "completion_elapsed"))
+    if prompt_tokens:
+        debug_out["prompt_tokens"] = prompt_tokens
+    if completion_tokens:
+        debug_out["completion_tokens"] = completion_tokens
+    if total_tokens:
+        debug_out["total_tokens"] = total_tokens
+    if calls:
+        debug_out["calls"] = calls
+    if elapsed:
+        debug_out["llm_elapsed_ms"] = int(round(elapsed * 1000.0))
+    if prompt_elapsed:
+        debug_out["prompt_ms"] = int(round(prompt_elapsed * 1000.0))
+    if completion_elapsed:
+        debug_out["completion_ms"] = int(round(completion_elapsed * 1000.0))
+    speed_basis = str((after or {}).get("speed_basis") or "").strip()
+    if speed_basis:
+        debug_out["speed_basis"] = speed_basis
 
 
 def _suggest_context_window_size(needed_tokens: int) -> int:
@@ -2991,7 +3036,7 @@ def estimate_hydra_chat_context_window(
     resolved_scope = _resolve_hydra_scope(normalized_platform, scope, origin_payload)
 
     compact_history = _compact_history(history_messages or [])
-    chat_history = _chat_history_window(compact_history, max_items=0)
+    chat_history = _chat_history_window(compact_history, max_items=_configured_chat_history_max_items(r))
     history_message_count = len(chat_history)
 
     memory_context_payload = _memory_context_payload(
@@ -3013,14 +3058,7 @@ def estimate_hydra_chat_context_window(
         request_text=user_text,
     )
     chat_system_prompt = _chat_fallback_system_prompt(normalized_platform)
-    status_prompt = _render_tater_system_status_prompt(
-        platform=normalized_platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-        redis_client=r,
-        history=chat_history,
-        max_tokens=None,
-    )
+    status_prompt = ""
     clean_preamble = _sanitize_platform_preamble(normalized_platform, platform_preamble)
     seeded_user_text, seed_source = _seed_user_text_for_context_estimate(
         user_text=user_text,
@@ -3048,8 +3086,6 @@ def estimate_hydra_chat_context_window(
     high_context_verba_examples = list(context_reserve.get("high_context_verba_examples") or [])[:4]
 
     base_messages: List[Dict[str, str]] = [{"role": "system", "content": chat_system_prompt}]
-    if status_prompt:
-        base_messages.append({"role": "system", "content": status_prompt})
     if chat_core_context:
         base_messages.append({"role": "system", "content": chat_core_context})
     if clean_preamble:
@@ -3144,28 +3180,29 @@ async def _run_chat_fallback_reply(
     redis_client: Any,
     memory_context_message: str,
     platform_preamble: str,
+    max_history_items: int,
     max_tokens: Optional[int],
+    debug_out: Optional[Dict[str, Any]] = None,
 ) -> str:
-    # Use the full upstream history window (already bounded by general max_llm setting).
-    chat_history = _chat_history_window(history, max_items=0)
+    del registry, enabled_predicate, redis_client
+    chat_history = _chat_history_window(history, max_items=max_history_items)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _chat_fallback_system_prompt(platform)},
     ]
-    status_prompt = _render_tater_system_status_prompt(
-        platform=platform,
-        registry=registry,
-        enabled_predicate=enabled_predicate,
-        redis_client=redis_client,
-        history=chat_history,
-        max_tokens=max_tokens,
-    )
-    if status_prompt:
-        messages.append({"role": "system", "content": status_prompt})
     if memory_context_message:
         messages.append({"role": "system", "content": memory_context_message})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     messages.extend(chat_history)
     messages.append({"role": "user", "content": str(user_text or "")})
+    if isinstance(debug_out, dict):
+        prompt_chars = sum(len(str((msg or {}).get("content") or "")) for msg in messages if isinstance(msg, dict))
+        debug_out.update(
+            {
+                "message_count": len(messages),
+                "history_messages": len(chat_history),
+                "prompt_chars": int(max(0, prompt_chars)),
+            }
+        )
     try:
         resp = await llm_client.chat(
             messages=messages,
@@ -3606,7 +3643,7 @@ async def _should_auto_continue_head_response(
     return heuristic
 
 
-def _tool_failure_minos_reason(tool_result: Optional[Dict[str, Any]]) -> str:
+def _tool_failure_result_reason(tool_result: Optional[Dict[str, Any]]) -> str:
     if not isinstance(tool_result, dict):
         return ""
     if bool(tool_result.get("ok")):
@@ -3623,7 +3660,7 @@ def _tool_failure_minos_reason(tool_result: Optional[Dict[str, Any]]) -> str:
 
 
 def _tool_failure_checker_reason(tool_result: Optional[Dict[str, Any]]) -> str:
-    return _tool_failure_minos_reason(tool_result)
+    return _tool_failure_result_reason(tool_result)
 
 
 def _select_final_answer_text(
@@ -3824,7 +3861,9 @@ async def _run_hermes_final_render(
     core_context_message: str,
     platform_preamble: str,
     max_tokens: Optional[int],
+    debug_out: Optional[Dict[str, Any]] = None,
 ) -> str:
+    del full_tool_results, recent_history
     render_mode = _HERMES_RENDER_MODE_ALIASES.get(str(mode or "").strip().lower(), "direct")
     if render_mode not in {"direct", "summarize", "rewrite"}:
         render_mode = "direct"
@@ -3846,36 +3885,19 @@ async def _run_hermes_final_render(
                 "summary": summary_text,
             }
         )
-    full_results_payload: List[Dict[str, Any]] = []
-    for result in full_tool_results:
-        if not isinstance(result, dict):
-            continue
-        safe_result = _hermes_safe_tool_payload(result)
-        if safe_result:
-            full_results_payload.append(safe_result)
-    history_payload: List[Dict[str, str]] = []
-    for item in recent_history:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _short_text(item.get("content"), limit=260)
-        if not content:
-            continue
-        history_payload.append({"role": role, "content": content})
-
-    payload = {
-        "mode": render_mode,
-        "instruction": _short_text(instruction, limit=320),
-        "current_user_message": _short_text(user_text, limit=320),
-        "recent_history": history_payload,
+    payload: Dict[str, Any] = {
         "user_request": _short_text(user_text, limit=320),
-        "goal": _short_text(goal, limit=260),
         "base_text": _short_text(base_text, limit=2200),
         "findings": findings,
-        "tool_results_full": full_results_payload,
     }
+    goal_text = _short_text(goal, limit=260)
+    instruction_text = _short_text(instruction, limit=320)
+    if goal_text:
+        payload["goal"] = goal_text
+    if render_mode != "direct":
+        payload["mode"] = render_mode
+    if instruction_text:
+        payload["instruction"] = instruction_text
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
@@ -3893,6 +3915,16 @@ async def _run_hermes_final_render(
         messages.append({"role": "system", "content": core_context_message})
     messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    if isinstance(debug_out, dict):
+        prompt_chars = sum(len(str((msg or {}).get("content") or "")) for msg in messages if isinstance(msg, dict))
+        debug_out.update(
+            {
+                "message_count": len(messages),
+                "prompt_chars": int(max(0, prompt_chars)),
+                "payload_chars": len(json.dumps(payload, ensure_ascii=False, default=str)),
+                "findings_count": len(findings),
+            }
+        )
     try:
         resp = await llm_client.chat(
             messages=messages,
@@ -4769,9 +4801,17 @@ def _write_hydra_ledger(
     outcome: str = "",
     outcome_reason: str = "",
     planner_ms: int = 0,
+    astraeus_route_ms: int = 0,
     tool_ms: int = 0,
     checker_ms: int = 0,
+    hermes_chat_ms: int = 0,
+    hermes_final_ms: int = 0,
     total_ms: int = 0,
+    hermes_llm: str = "",
+    astraeus_debug: Optional[Dict[str, Any]] = None,
+    thanatos_debug: Optional[Dict[str, Any]] = None,
+    hermes_chat_debug: Optional[Dict[str, Any]] = None,
+    hermes_final_debug: Optional[Dict[str, Any]] = None,
     retry_tool: Optional[Dict[str, Any]] = None,
     rounds_used: int = 0,
     tool_calls_used: int = 0,
@@ -4797,9 +4837,17 @@ def _write_hydra_ledger(
         outcome=outcome,
         outcome_reason=outcome_reason,
         planner_ms=planner_ms,
+        astraeus_route_ms=astraeus_route_ms,
         tool_ms=tool_ms,
         checker_ms=checker_ms,
+        hermes_chat_ms=hermes_chat_ms,
+        hermes_final_ms=hermes_final_ms,
         total_ms=total_ms,
+        hermes_llm=hermes_llm,
+        astraeus_debug=astraeus_debug,
+        thanatos_debug=thanatos_debug,
+        hermes_chat_debug=hermes_chat_debug,
+        hermes_final_debug=hermes_final_debug,
         retry_tool=retry_tool,
         rounds_used=rounds_used,
         tool_calls_used=tool_calls_used,
@@ -4909,20 +4957,27 @@ async def _run_hydra_turn_impl(
     auto_continue_incomplete_final_enabled = _configured_auto_continue_incomplete_final_enabled(r)
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
+    astraeus_route_ms_total = 0.0
     tool_ms_total = 0.0
-    minos_ms_total = 0.0
+    checker_ms_total = 0.0
+    hermes_chat_ms_total = 0.0
+    hermes_final_ms_total = 0.0
+    astraeus_debug: Dict[str, Any] = {}
+    thanatos_debug: Dict[str, Any] = {}
+    hermes_chat_debug: Dict[str, Any] = {}
+    hermes_final_debug: Dict[str, Any] = {}
     repairs_used_count = 0
     validation_failures_count = 0
     tool_failures_count = 0
     turn_id = str(uuid.uuid4())
     role_clients = dict(llm_clients) if isinstance(llm_clients, dict) else {}
     llm_client_ai_calls = role_clients.get("ai_calls") or llm_client
-    llm_client_chat = role_clients.get("chat") or llm_client
     llm_client_astraeus = role_clients.get("astraeus") or llm_client
     llm_client_thanatos = role_clients.get("thanatos") or llm_client
-    llm_client_minos = role_clients.get("minos") or llm_client
     llm_client_hermes = role_clients.get("hermes") or llm_client
+    llm_client_chat = llm_client_hermes
     llm_label = _llm_backend_label(llm_client_ai_calls)
+    hermes_llm_label = _llm_backend_label(llm_client_hermes)
 
     validation_status: Dict[str, Any] = {
         "status": "skipped",
@@ -4936,7 +4991,7 @@ async def _run_hydra_turn_impl(
     tool_result_for_checker: Optional[Dict[str, Any]] = None
     raw_tool_payload_out: Optional[Dict[str, Any]] = None
     raw_tool_payload_history: List[Dict[str, Any]] = []
-    normalized_minos_result_out: Optional[Dict[str, Any]] = None
+    normalized_checker_result_out: Optional[Dict[str, Any]] = None
     artifacts_out: List[Dict[str, Any]] = []
     rounds_used = 0
     tool_calls_used = 0
@@ -5029,8 +5084,12 @@ async def _run_hydra_turn_impl(
             available_tool_ids=available_execution_tool_ids,
             platform_preamble=tool_platform_preamble,
             max_tokens=None,
+            debug_out=astraeus_debug,
         )
-        astraeus_ms_total += (time.perf_counter() - astraeus_started) * 1000.0
+        astraeus_route_elapsed_ms = (time.perf_counter() - astraeus_started) * 1000.0
+        astraeus_debug["wall_ms"] = int(max(0.0, astraeus_route_elapsed_ms))
+        astraeus_ms_total += astraeus_route_elapsed_ms
+        astraeus_route_ms_total += astraeus_route_elapsed_ms
     except Exception:
         astraeus_result = {
             "mode": "unknown",
@@ -5187,23 +5246,8 @@ async def _run_hydra_turn_impl(
         final_text: str,
         user_request_text: str,
     ) -> None:
-        nonlocal auto_continue_requested, auto_continue_head, minos_ms_total
-        if auto_continue_requested:
-            return
-        auto_continue_started = time.perf_counter()
-        should_continue = await _should_auto_continue_head_response(
-            llm_client=llm_client_minos,
-            platform=platform,
-            head=head,
-            user_text=user_request_text,
-            final_text=final_text,
-            continue_allowed=True,
-            enabled=auto_continue_incomplete_final_enabled,
-        )
-        minos_ms_total += (time.perf_counter() - auto_continue_started) * 1000.0
-        if should_continue:
-            auto_continue_requested = True
-            auto_continue_head = str(head or "").strip().lower()
+        del head, final_text, user_request_text
+        return
 
     async def _compose_final_answer_text(
         *,
@@ -5212,6 +5256,7 @@ async def _run_hydra_turn_impl(
         user_request_text: str,
         tool_result_payload: Optional[Dict[str, Any]],
     ) -> str:
+        nonlocal hermes_final_ms_total, hermes_final_debug
         base_text = _select_final_answer_text(
             checker_decision=checker_decision,
             draft_response=draft_response_text,
@@ -5219,19 +5264,8 @@ async def _run_hydra_turn_impl(
             tool_result=tool_result_payload,
         )
         composed_text = base_text
-        if len(completed_tool_steps) >= 2:
-            synthesized = await _synthesize_completed_steps_answer(
-                llm_client=llm_client_ai_calls,
-                platform=platform,
-                user_text=user_request_text,
-                goal=astraeus_goal or turn_request_text or current_user_turn_text,
-                completed_steps=completed_tool_steps,
-                draft_response=base_text,
-                platform_preamble=platform_preamble,
-                max_tokens=None,
-            )
-            if synthesized:
-                composed_text = synthesized
+        hermes_core_context = "" if tool_used else hermes_context_message
+        current_hermes_debug: Dict[str, Any] = {}
 
         hermes_render = _run_hermes_final_render(
             llm_client=llm_client_hermes,
@@ -5244,10 +5278,12 @@ async def _run_hydra_turn_impl(
             completed_steps=completed_tool_steps,
             full_tool_results=raw_tool_payload_history,
             recent_history=hermes_recent_history,
-            core_context_message=hermes_context_message,
+            core_context_message=hermes_core_context,
             platform_preamble=platform_preamble,
             max_tokens=None,
+            debug_out=current_hermes_debug,
         )
+        hermes_started = time.perf_counter()
         try:
             if HYDRA_HERMES_FINAL_RENDER_TIMEOUT_SECONDS > 0:
                 hermes_text = await asyncio.wait_for(
@@ -5258,6 +5294,11 @@ async def _run_hydra_turn_impl(
                 hermes_text = await hermes_render
         except asyncio.TimeoutError:
             hermes_text = ""
+        finally:
+            hermes_elapsed_ms = (time.perf_counter() - hermes_started) * 1000.0
+            hermes_final_ms_total += hermes_elapsed_ms
+            current_hermes_debug["wall_ms"] = int(max(0.0, hermes_elapsed_ms))
+            hermes_final_debug = dict(current_hermes_debug)
         if hermes_text:
             composed_text = hermes_text
             await _mark_auto_continue_from_head(
@@ -5318,9 +5359,17 @@ async def _run_hydra_turn_impl(
             outcome=outcome_value,
             outcome_reason=outcome_reason_value,
             planner_ms=int(max(0.0, astraeus_ms_total)),
+            astraeus_route_ms=int(max(0.0, astraeus_route_ms_total)),
             tool_ms=int(max(0.0, tool_ms_total)),
-            checker_ms=int(max(0.0, minos_ms_total)),
+            checker_ms=int(max(0.0, checker_ms_total)),
+            hermes_chat_ms=int(max(0.0, hermes_chat_ms_total)),
+            hermes_final_ms=int(max(0.0, hermes_final_ms_total)),
             total_ms=total_ms,
+            hermes_llm=hermes_llm_label,
+            astraeus_debug=astraeus_debug,
+            thanatos_debug=thanatos_debug,
+            hermes_chat_debug=hermes_chat_debug,
+            hermes_final_debug=hermes_final_debug,
             retry_tool=retry_tool,
             rounds_used=rounds_used,
             tool_calls_used=tool_calls_used,
@@ -5345,8 +5394,8 @@ async def _run_hydra_turn_impl(
             "auto_continue_head": auto_continue_head if final_status == "done" else "",
             "artifacts": artifacts_out,
             "raw_tool_payload": raw_tool_payload_out,
-            "normalized_minos_result": normalized_minos_result_out,
-            "normalized_checker_result": normalized_minos_result_out,
+            "normalized_minos_result": normalized_checker_result_out,
+            "normalized_checker_result": normalized_checker_result_out,
         }
 
     if not structured_plan_queue:
@@ -5354,6 +5403,7 @@ async def _run_hydra_turn_impl(
         # prefer conversational fallback over a hard block.
         if astraeus_mode in {"chat", "unknown"}:
             chat_started = time.perf_counter()
+            current_chat_debug: Dict[str, Any] = {}
             chat_text = await _run_chat_fallback_reply(
                 llm_client=llm_client_chat,
                 platform=platform,
@@ -5364,15 +5414,21 @@ async def _run_hydra_turn_impl(
                 redis_client=r,
                 memory_context_message=chat_context_message,
                 platform_preamble=platform_preamble,
+                max_history_items=chat_history_max_items,
                 max_tokens=None,
+                debug_out=current_chat_debug,
             )
-            astraeus_ms_total += (time.perf_counter() - chat_started) * 1000.0
+            chat_elapsed_ms = (time.perf_counter() - chat_started) * 1000.0
+            astraeus_ms_total += chat_elapsed_ms
+            hermes_chat_ms_total += chat_elapsed_ms
+            current_chat_debug["wall_ms"] = int(max(0.0, chat_elapsed_ms))
+            hermes_chat_debug = dict(current_chat_debug)
             planner_kind = "answer"
             planner_text_is_tool_candidate = False
             checker_reason = "complete"
             chat_final_text = chat_text or _generic_chat_fallback_text(current_user_turn_text)
             await _mark_auto_continue_from_head(
-                head="chat",
+                head="hermes",
                 final_text=chat_final_text,
                 user_request_text=turn_request_text or current_user_turn_text or user_text,
             )
@@ -5473,11 +5529,17 @@ async def _run_hydra_turn_impl(
         thanatos_messages.extend(history)
         thanatos_messages.append({"role": "user", "content": round_request_text})
 
+        current_thanatos_debug: Dict[str, Any] = {
+            "round": int(rounds_used + 1),
+            "step_id": str(current_step_id or ""),
+        }
         thanatos_text, thanatos_ms = await _run_thanatos_step(
             llm_client=llm_client_thanatos,
             thanatos_messages=thanatos_messages,
             max_tokens=None,
+            debug_out=current_thanatos_debug,
         )
+        thanatos_debug = dict(current_thanatos_debug)
         astraeus_ms_total += thanatos_ms
 
         if _is_tool_candidate(thanatos_text):
@@ -5488,67 +5550,8 @@ async def _run_hydra_turn_impl(
         if not _is_tool_candidate(thanatos_text):
             planner_kind = round_thanatos_kind
             draft_response = str(thanatos_text or "").strip()
-            checker_started = time.perf_counter()
-            checker_decision = await _run_minos_validation(
-                llm_client=llm_client_minos,
-                platform=platform,
-                current_user_text=current_user_turn_text,
-                turn_request_text=turn_request_text,
-                agent_state=agent_state,
-                memory_context=tool_memory_context_payload,
-                available_artifacts=_available_artifacts_payload(turn_available_artifacts),
-                current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
-                goal=astraeus_goal or turn_request_text or current_user_turn_text,
-                planned_tool=None,
-                tool_result=tool_result_for_checker,
-                draft_response=draft_response,
-                retry_count=0,
-                retry_allowed=False,
-                platform_preamble=tool_platform_preamble,
-                max_tokens=None,
-            )
-            minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
-            checker_action = _checker_decision_value(checker_decision)
-
-            if checker_action == "ASK_USER":
-                need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or DEFAULT_CLARIFICATION
-                checker_reason = "needs_user_input"
-                return _finish(
-                    text=need_text,
-                    status="blocked",
-                    checker_action_value="NEED_USER_INFO",
-                    checker_reason_value=checker_reason,
-                )
-
-            if checker_action == "RETRY":
-                checker_reason = "retry_removed"
-                return _finish(
-                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
-                    status="blocked",
-                    checker_action_value="FAIL",
-                    checker_reason_value=checker_reason,
-                )
-
-            if checker_action == "CONTINUE":
-                checker_reason = "step_not_executed"
-                return _finish(
-                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
-                    status="blocked",
-                    checker_action_value="FAIL",
-                    checker_reason_value=checker_reason,
-                )
-
-            if checker_action == "FAIL":
-                checker_reason = "minos_fail"
-                return _finish(
-                    text=_failed_step_message(checker_decision, draft_response, tool_result_for_checker),
-                    status="blocked",
-                    checker_action_value="FAIL",
-                    checker_reason_value=checker_reason,
-                )
-
             final_text_candidate = await _compose_final_answer_text(
-                checker_decision=checker_decision,
+                checker_decision=None,
                 draft_response_text=draft_response,
                 user_request_text=turn_request_text or user_text,
                 tool_result_payload=tool_result_for_checker,
@@ -5575,7 +5578,7 @@ async def _run_hydra_turn_impl(
                         state=agent_state,
                     )
                     if not structured_plan_queue:
-                        checker_reason = _checker_decision_text(checker_decision, "reason") or "complete"
+                        checker_reason = "complete"
                         return _finish(
                             text=final_text_candidate,
                             status="done",
@@ -5587,7 +5590,7 @@ async def _run_hydra_turn_impl(
                     continue
                 checker_reason = "step_not_executed"
                 return _finish(
-                    text=final_text_candidate or _failed_step_message(checker_decision, draft_response, tool_result_for_checker),
+                    text=final_text_candidate or _failed_step_message(None, draft_response, tool_result_for_checker),
                     status="blocked",
                     checker_action_value="FAIL",
                     checker_reason_value=checker_reason,
@@ -5761,7 +5764,7 @@ async def _run_hydra_turn_impl(
         tool_result_for_checker = doer_exec.get("minos_result")
         if not isinstance(tool_result_for_checker, dict):
             tool_result_for_checker = doer_exec.get("checker_result")
-        normalized_minos_result_out = tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
+        normalized_checker_result_out = tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
             failed_source = _tool_call_primary_web_url(planned_tool)
@@ -5845,114 +5848,12 @@ async def _run_hydra_turn_impl(
             state=agent_state,
         )
 
-        checker_started = time.perf_counter()
         turn_draft_response = _multi_step_turn_draft(
             completed_steps=completed_tool_steps,
             fallback_draft=draft_response,
         )
-        checker_decision = await _run_minos_validation(
-            llm_client=llm_client_minos,
-            platform=platform,
-            current_user_text=current_user_turn_text,
-            turn_request_text=turn_request_text,
-            agent_state=agent_state,
-            memory_context=tool_memory_context_payload,
-            available_artifacts=_available_artifacts_payload(turn_available_artifacts),
-            current_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
-            goal=astraeus_goal or turn_request_text or current_user_turn_text,
-            planned_tool=planned_tool,
-            tool_result=tool_result_for_checker,
-            draft_response=turn_draft_response,
-            retry_count=0,
-            retry_allowed=False,
-            platform_preamble=tool_platform_preamble,
-            max_tokens=None,
-        )
-        minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
-        checker_action = _checker_decision_value(checker_decision)
 
-        if checker_action == "CONTINUE":
-            if not structured_plan_queue:
-                checker_action = "FINAL"
-            elif isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
-                structured_plan_queue = structured_plan_queue[1:]
-                _clear_step_failure_state(current_step_id)
-                agent_state = _sync_agent_state_with_plan_queue(
-                    agent_state=agent_state,
-                    plan_queue=structured_plan_queue,
-                    fallback_goal=astraeus_goal or turn_request_text or user_text,
-                )
-                _save_persistent_agent_state(
-                    redis_client=r,
-                    platform=platform,
-                    scope=scope,
-                    state=agent_state,
-                )
-                if not structured_plan_queue:
-                    final_text_candidate = await _compose_final_answer_text(
-                        checker_decision=checker_decision,
-                        draft_response_text=turn_draft_response,
-                        user_request_text=turn_request_text or user_text,
-                        tool_result_payload=tool_result_for_checker,
-                    )
-                    checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
-                    return _finish(
-                        text=final_text_candidate,
-                        status="done",
-                        checker_action_value="FINAL_ANSWER",
-                        checker_reason_value=checker_reason,
-                        retry_tool=queued_retry_tool_for_ledger,
-                    )
-                checker_reason = _checker_decision_text(checker_decision, "reason", "next_action") or "continue_plan_step"
-                critic_continue_count += 1
-                continue
-            else:
-                checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "step_failed"
-                return _finish(
-                    text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
-                    status="blocked",
-                    checker_action_value="FAIL",
-                    checker_reason_value=checker_reason,
-                    retry_tool=queued_retry_tool_for_ledger,
-                )
-
-        if checker_action == "ASK_USER":
-            need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or DEFAULT_CLARIFICATION
-            checker_reason = "needs_user_input"
-            return _finish(
-                text=need_text,
-                status="blocked",
-                checker_action_value="NEED_USER_INFO",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
-
-        if checker_action == "RETRY":
-            checker_reason = "retry_removed"
-            return _finish(
-                text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
-                status="blocked",
-                checker_action_value="FAIL",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
-
-        if checker_action == "FAIL":
-            checker_reason = "minos_fail"
-            return _finish(
-                text=_failed_step_message(checker_decision, turn_draft_response, tool_result_for_checker),
-                status="blocked",
-                checker_action_value="FAIL",
-                checker_reason_value=checker_reason,
-                retry_tool=queued_retry_tool_for_ledger,
-            )
-
-        if (
-            checker_action == "FINAL"
-            and structured_plan_queue
-            and isinstance(tool_result_for_checker, dict)
-            and bool(tool_result_for_checker.get("ok"))
-        ):
+        if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
             structured_plan_queue = structured_plan_queue[1:]
             _clear_step_failure_state(current_step_id)
             agent_state = _sync_agent_state_with_plan_queue(
@@ -5968,7 +5869,7 @@ async def _run_hydra_turn_impl(
             )
             if not structured_plan_queue:
                 final_text_candidate = await _compose_final_answer_text(
-                    checker_decision=checker_decision,
+                    checker_decision=None,
                     draft_response_text=turn_draft_response,
                     user_request_text=turn_request_text or user_text,
                     tool_result_payload=tool_result_for_checker,
@@ -5985,17 +5886,17 @@ async def _run_hydra_turn_impl(
             critic_continue_count += 1
             continue
 
+        checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "tool_failed"
         final_text_candidate = await _compose_final_answer_text(
-            checker_decision=checker_decision,
+            checker_decision=None,
             draft_response_text=turn_draft_response,
             user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
-        checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
         return _finish(
-            text=final_text_candidate,
-            status="done",
-            checker_action_value="FINAL_ANSWER",
+            text=final_text_candidate or _failed_step_message(None, turn_draft_response, tool_result_for_checker),
+            status="blocked",
+            checker_action_value="FAIL",
             checker_reason_value=checker_reason,
             retry_tool=queued_retry_tool_for_ledger,
         )
@@ -6019,77 +5920,17 @@ async def _run_hydra_turn_impl(
         ),
         tool_result=tool_result_for_checker,
     )
-    fallback_step = structured_plan_queue[0] if structured_plan_queue else None
-    checker_started = time.perf_counter()
-    checker_decision = await _run_minos_validation(
-        llm_client=llm_client_minos,
-        platform=platform,
-        current_user_text=current_user_turn_text,
-        turn_request_text=turn_request_text,
-        agent_state=agent_state,
-        memory_context=tool_memory_context_payload,
-        available_artifacts=_available_artifacts_payload(turn_available_artifacts),
-        current_step=(fallback_step if isinstance(fallback_step, dict) else None),
-        goal=astraeus_goal or turn_request_text or current_user_turn_text,
-        planned_tool=planned_tool,
-        tool_result=tool_result_for_checker,
-        draft_response=best_effort,
-        retry_count=0,
-        retry_allowed=False,
-        platform_preamble=tool_platform_preamble,
-        max_tokens=None,
-    )
-    minos_ms_total += (time.perf_counter() - checker_started) * 1000.0
-    checker_action = _checker_decision_value(checker_decision)
-
-    if checker_action == "ASK_USER":
-        need_text = _checker_decision_text(checker_decision, "question", "text", "reason") or pending_question or DEFAULT_CLARIFICATION
-        checker_reason = "needs_user_input"
-        return _finish(
-            text=need_text,
-            status="blocked",
-            checker_action_value="NEED_USER_INFO",
-            checker_reason_value=checker_reason,
-            retry_tool=queued_retry_tool_for_ledger,
-        )
-
-    if checker_action in {"RETRY", "CONTINUE"}:
-        checker_reason = "budget_exhausted"
-        final_text_candidate = await _compose_final_answer_text(
-            checker_decision=checker_decision,
-            draft_response_text=best_effort,
-            user_request_text=turn_request_text or user_text,
-            tool_result_payload=tool_result_for_checker,
-        )
-        return _finish(
-            text=final_text_candidate or _failed_step_message(checker_decision, best_effort, tool_result_for_checker),
-            status="blocked",
-            checker_action_value="FAIL",
-            checker_reason_value=checker_reason,
-            retry_tool=queued_retry_tool_for_ledger,
-        )
-
-    if checker_action == "FAIL":
-        checker_reason = "minos_fail"
-        return _finish(
-            text=_failed_step_message(checker_decision, best_effort, tool_result_for_checker),
-            status="blocked",
-            checker_action_value="FAIL",
-            checker_reason_value=checker_reason,
-            retry_tool=queued_retry_tool_for_ledger,
-        )
-
-    checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or checker_reason or "complete"
+    checker_reason = "budget_exhausted" if structured_plan_queue else (_tool_failure_checker_reason(tool_result_for_checker) or "complete")
     final_text_candidate = await _compose_final_answer_text(
-        checker_decision=checker_decision,
+        checker_decision=None,
         draft_response_text=best_effort,
         user_request_text=turn_request_text or user_text,
         tool_result_payload=tool_result_for_checker,
     )
     return _finish(
         text=final_text_candidate,
-        status="done",
-        checker_action_value="FINAL_ANSWER",
+        status="blocked" if structured_plan_queue else "done",
+        checker_action_value="FAIL" if structured_plan_queue else "FINAL_ANSWER",
         checker_reason_value=checker_reason,
         retry_tool=queued_retry_tool_for_ledger,
     )

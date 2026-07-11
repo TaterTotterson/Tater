@@ -2329,11 +2329,11 @@ def _voice_core_play_media_sync(
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
     if not clean_selectors:
-        return {"ok": False, "sent_count": 0, "error": "No Voice Core satellites selected."}
+        return {"ok": False, "sent_count": 0, "error": "No Tater satellites selected."}
 
     base_url = _voice_core_base_url().rstrip("/")
     logger.info(
-        "[speech_tts] Voice Core play start base=%s selectors=%s has_source_url=%s inline_bytes=%s media_type=%s",
+        "[speech_tts] Tater satellite play start base=%s selectors=%s has_source_url=%s inline_bytes=%s media_type=%s",
         base_url,
         len(clean_selectors),
         bool(_text(source_url)),
@@ -2364,13 +2364,13 @@ def _voice_core_play_media_sync(
         payload["selector"] = selector
         try:
             response = requests.post(
-                f"{base_url}/tater-ha/v1/voice/esphome/play",
+                f"{base_url}/api/tater/satellite/v1/play",
                 json=payload,
                 headers=_voice_core_auth_headers(),
                 timeout=90,
             )
             logger.info(
-                "[speech_tts] Voice Core play attempt selector=%s status=%s",
+                "[speech_tts] Tater satellite play attempt selector=%s status=%s",
                 selector,
                 int(getattr(response, "status_code", 0) or 0),
             )
@@ -2383,7 +2383,7 @@ def _voice_core_play_media_sync(
                 detail = _text(parsed.get("detail"))
             failures.append(f"{selector} ({detail or f'HTTP {response.status_code}'})")
         except Exception as exc:
-            logger.warning("[speech_tts] Voice Core play exception selector=%s error=%s", selector, exc)
+            logger.warning("[speech_tts] Tater satellite play exception selector=%s error=%s", selector, exc)
             failures.append(f"{selector} ({exc})")
 
     if sent_count:
@@ -2391,7 +2391,7 @@ def _voice_core_play_media_sync(
         if failures:
             result["warnings"] = failures
         return result
-    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Voice Core playback failed."}
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Tater satellite playback failed."}
 
 
 def _homeassistant_play_media_sync(

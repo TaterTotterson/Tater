@@ -11,6 +11,32 @@
 
 ---
 
+## What's Changed In v94
+
+- Added first-class **Tater Native Firmware** support for official voice satellites, including USB flashing, OTA update checks, pairing, diagnostics, per-satellite settings, timers, intercom, broadcast playback, LED controls, and S3 Box display settings.
+- Added the **Add Satellite** pairing flow in TaterOS. Tater now creates pairing codes that new native satellites use during Wi-Fi setup.
+- Added native satellite support for VoicePE, Sat1, ESP32-S3-BOX display satellites, and ReSpeaker XVF3800 devices.
+- Moved satellite configuration into TaterOS instead of ESPHome-style live entities, with settings stored per satellite.
+- Improved streaming playback, wake/reopen behavior, native timer alerts, reply routing, and firmware update handling for Tater Native satellites.
+
+### Native Satellite Upgrade Note
+
+Existing satellites that are still running the older ESPHome-based firmware must be moved to **Tater Native Firmware** before they can use the new native satellite features.
+
+First-time native setup:
+
+1. Open **TaterOS -> Satellites** and choose **Add Satellite**. Leave the pairing code popup open.
+2. Connect the satellite to your Mac with USB.
+3. Use the Tater firmware flasher to install the correct **factory** image for that device model. Factory flashing is required the first time a satellite moves to native firmware.
+4. After flashing, the satellite starts a setup hotspot named like `Tater-Setup-AB12`.
+5. Join that Wi-Fi network from a phone or computer, then open `http://192.168.4.1` if the setup page does not open automatically.
+6. Enter your Wi-Fi network, Tater server address, device name, room, and the pairing code shown in TaterOS.
+7. Save the setup. The satellite will reboot, join your Wi-Fi, pair with Tater, and appear on the Satellites page.
+
+After a satellite is paired with native firmware, future firmware updates can be managed from TaterOS with OTA updates. USB flashing remains available for recovery or when moving a device from older firmware to Tater Native Firmware.
+
+---
+
 ## Little Spud Companion App
 
 Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your Apple devices.
@@ -51,16 +77,11 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [HA Add-ons](https://github.com/TaterTotterson/hassio-addons-tater) | Home Assistant add-on repository for running Tater directly inside HAOS/Supervised setups. |
 | [HomeKit Shortcuts](https://taterassistant.com/portals/homekit.html) | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
 | [Meshtastic Bridge](https://github.com/TaterTotterson/tater_meshtastic_bridge) | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
-| [microWakeWords](https://github.com/TaterTotterson/microWakeWords) | Tater VoicePE, Satellite1, ReSpeaker, and related ESPHome firmware plus microWakeWord model assets. |
-| [microWakeWord Trainer - Apple Silicon](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon) | Apple Silicon trainer for creating custom microWakeWord models. |
-| [microWakeWord Trainer - NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | NVIDIA Docker trainer for creating custom microWakeWord models with GPU acceleration. |
-| [NanoWakeWord Trainer](https://github.com/TaterTotterson/nanoWakeWord-Trainer) | Trainer for custom NanoWakeWord models used by Tater's local or standalone NanoWakeWord server. |
-| [openWakeWord Trainer](https://github.com/TaterTotterson/openWakeWord-Trainer) | Trainer for custom openWakeWord models used by Tater's local or standalone openWakeWord server. |
-| [Little Spud](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser and macOS client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
+| [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) | Native firmware for Tater voice satellites and related hardware. |
+| [Little Spud WebUI](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
+| [Little Spud App](https://github.com/TaterTotterson/Little-Spud-App) | Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub. |
 | [Reachy Mini Voice Satellite](https://huggingface.co/spaces/TaterTotterson/tater_voice_sat) | Reachy Mini robot app that turns Reachy Mini into a voice satellite for Tater or Home Assistant. |
 | [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone) | Reachy Mini robot app that can run the full Tater app/stack directly on Reachy. |
-| [Tater NWW Server](https://github.com/TaterTotterson/Tater-NWW-Server) | Standalone NanoWakeWord WebSocket server for Tater satellites using remote NanoWakeWord wake detection. |
-| [Tater OWW Server](https://github.com/TaterTotterson/Tater-OWW-Server) | Standalone openWakeWord WebSocket server for Tater satellites that need remote wake detection outside the main Tater app. |
 | [XBMC4Xbox Skin](https://github.com/TaterTotterson/skin.cortana.tater-xbmc) | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
 
 ---
@@ -207,7 +228,7 @@ sh setup_tater.sh thor
 
 ### Local Voice Acceleration Notes
 
-The setup profile only prepares the runtime. Actual voice model choices are managed in TaterOS under **Settings -> Models** and **Settings -> ESPHome -> Voice Pipeline**.
+The setup profile only prepares the runtime. Actual voice model choices are managed in TaterOS under **Settings -> Models** and **Settings -> Voice Pipeline**.
 
 macOS Apple Silicon:
 - The macOS profile writes `PYTORCH_ENABLE_MPS_FALLBACK=1` so PyTorch can fall back to CPU for unsupported MPS operations.
@@ -230,7 +251,7 @@ NVIDIA desktop/server:
 - To customize the llama.cpp build, set `TATER_LLAMA_CPP_CMAKE_ARGS` before running setup. The NVIDIA profile defaults to `-DGGML_CUDA=on`.
 - In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
 - Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
-- To override Faster Whisper compute type, use **Settings -> ESPHome -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
+- To override Faster Whisper compute type, use **Settings -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
 - To restrict which GPUs native Tater can see, start it with `CUDA_VISIBLE_DEVICES=0 sh run_ui.sh` or use a GPU UUID.
 
 AMD ROCm / Strix Halo:
@@ -376,7 +397,7 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - for OpenAI-compatible providers, set the endpoint host/port and model name
 2. Optional:
    - add more Base servers for round-robin regular AI calls
-   - enable `Beast Mode` and set per-head model settings for Chat/Astraeus/Thanatos/Minos/Hermes
+   - enable `Beast Mode` and set per-head model settings for Astraeus/Hermes
 
 Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
 
