@@ -1,14 +1,14 @@
 """
 Tater Native Voice Pipeline
 
-Clean ESPHome-compatible backend pipeline:
-- ESPHome voice_assistant session handling
+Native satellite backend pipeline:
+- Tater Native voice session handling
 - Server-side EOU strategy
 - Silero VAD backend
 - Wyoming STT/TTS orchestration
 - Hydra turn execution
 - URL-based TTS playback lifecycle (announcement_finished aware)
-- mDNS discovery + selected-satellite reconcile
+- Native WebSocket satellite transport
 
 This package is intentionally split across focused modules:
 - conversation.py: session history and Hydra turn orchestration
@@ -17,7 +17,7 @@ This package is intentionally split across focused modules:
 - routes.py: FastAPI router plus startup/shutdown lifecycle
 
 This file now keeps the remaining shared constants, config helpers, audio/VAD
-logic, ESPHome runtime bridge helpers, and session finalization flow while
+logic, native bridge helpers, and session finalization flow while
 re-exporting package-level compatibility symbols.
 """
 
@@ -351,10 +351,7 @@ DEFAULT_VOICE_SAMPLE_WIDTH = 2
 DEFAULT_VOICE_CHANNELS = 1
 DEFAULT_MAX_AUDIO_BYTES = 4 * 1024 * 1024
 
-DEFAULT_ESPHOME_API_PORT = 6053
-DEFAULT_ESPHOME_CONNECT_TIMEOUT_S = 12.0
-DEFAULT_ESPHOME_RETRY_SECONDS = 12
-DEFAULT_DISCOVERY_ENABLED = True
+DEFAULT_DISCOVERY_ENABLED = False
 DEFAULT_DISCOVERY_SCAN_SECONDS = 45
 DEFAULT_DISCOVERY_MDNS_TIMEOUT_S = 3.0
 DEFAULT_CONTINUED_CHAT_ENABLED = False
@@ -390,6 +387,7 @@ DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
+DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "silero"
@@ -406,11 +404,17 @@ DEFAULT_WEBRTC_VAD_FRAME_MS = 30
 DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.50
 DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.62
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
+DEFAULT_NOISE_SUPPRESSION_ENABLED = True
+DEFAULT_NOISE_SUPPRESSION_HIGH_PASS_ENABLED = True
+DEFAULT_NOISE_SUPPRESSION_HIGH_PASS_ALPHA = 0.995
+DEFAULT_NOISE_SUPPRESSION_TAIL_SILENCE_S = 0.24
+DEFAULT_NOISE_SUPPRESSION_SILENCE_ATTENUATION = 0.18
 DEFAULT_AUDIO_STALL_TIMEOUT_S = 1.20
 DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S = 6.00
 DEFAULT_BLANK_WAKE_TIMEOUT_S = 3.00
 DEFAULT_AUDIO_STALL_POLL_S = 0.15
 DEFAULT_TRANSCRIPT_COMPLETENESS_EXTENSION_S = 0.60
+DEFAULT_STT_TRAILING_SILENCE_KEEP_S = 0.35
 
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_HISTORY_MAX_STORE = 20
@@ -2667,12 +2671,9 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "port": _get_int_setting("VOICE_WYOMING_TTS_PORT", DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
             "voice": _text(settings.get("VOICE_WYOMING_TTS_VOICE")) or DEFAULT_WYOMING_TTS_VOICE,
         },
-        "esphome": {
-            "api_port": _get_int_setting("VOICE_ESPHOME_API_PORT", DEFAULT_ESPHOME_API_PORT, minimum=1, maximum=65535),
-            "connect_timeout_s": _get_float_setting("VOICE_ESPHOME_CONNECT_TIMEOUT_S", DEFAULT_ESPHOME_CONNECT_TIMEOUT_S, minimum=2.0, maximum=60.0),
-            "retry_seconds": _get_int_setting("VOICE_ESPHOME_RETRY_SECONDS", DEFAULT_ESPHOME_RETRY_SECONDS, minimum=2, maximum=300),
-            "password_set": bool(_text(settings.get("VOICE_ESPHOME_PASSWORD"))),
-            "noise_psk_set": bool(_text(settings.get("VOICE_ESPHOME_NOISE_PSK"))),
+        "native_satellite": {
+            "transport": "websocket",
+            "legacy_satellite_api": False,
         },
         "discovery": {
             "enabled": _get_bool_setting("VOICE_DISCOVERY_ENABLED", DEFAULT_DISCOVERY_ENABLED),
@@ -2682,6 +2683,20 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         "eou": {
             "mode": DEFAULT_EOU_MODE,
             "input_gain": _get_float_setting("VOICE_INPUT_GAIN", DEFAULT_AUDIO_INPUT_GAIN, minimum=0.5, maximum=16.0),
+            "noise_suppression_enabled": _get_bool_setting("VOICE_NOISE_SUPPRESSION_ENABLED", DEFAULT_NOISE_SUPPRESSION_ENABLED),
+            "noise_suppression_high_pass_enabled": _get_bool_setting("VOICE_NOISE_SUPPRESSION_HIGH_PASS_ENABLED", DEFAULT_NOISE_SUPPRESSION_HIGH_PASS_ENABLED),
+            "noise_suppression_tail_silence_s": _get_float_setting(
+                "VOICE_NOISE_SUPPRESSION_TAIL_SILENCE_S",
+                DEFAULT_NOISE_SUPPRESSION_TAIL_SILENCE_S,
+                minimum=0.0,
+                maximum=2.0,
+            ),
+            "noise_suppression_silence_attenuation": _get_float_setting(
+                "VOICE_NOISE_SUPPRESSION_SILENCE_ATTENUATION",
+                DEFAULT_NOISE_SUPPRESSION_SILENCE_ATTENUATION,
+                minimum=0.0,
+                maximum=1.0,
+            ),
             "backend": vad_backend,
             "silence_s": _get_float_setting("VOICE_VAD_SILENCE_SECONDS", DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
             "timeout_s": _get_float_setting("VOICE_VAD_TIMEOUT_SECONDS", DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
@@ -2716,7 +2731,7 @@ def _voice_config_snapshot() -> Dict[str, Any]:
         },
         "limits": {
             "max_audio_bytes": _get_int_setting("VOICE_NATIVE_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES, minimum=4096, maximum=16 * 1024 * 1024),
-            "tts_url_ttl_s": _get_float_setting("VOICE_ESPHOME_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
+            "tts_url_ttl_s": _get_float_setting("VOICE_NATIVE_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
             "session_ttl_s": _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS, minimum=300, maximum=24 * 60 * 60),
             "history_store": _get_int_setting("MAX_STORE", DEFAULT_HISTORY_MAX_STORE, minimum=4, maximum=200),
             "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
@@ -2915,8 +2930,10 @@ def _pcm_apply_gain(audio_bytes: bytes, *, sample_width: int, gain: float) -> by
     if not data:
         return b""
     factor = float(gain or 1.0)
-    if factor <= 1.0:
+    if abs(factor - 1.0) < 0.0001:
         return data
+    if factor <= 0.0:
+        return b"\x00" * len(data)
     width = int(sample_width or DEFAULT_VOICE_SAMPLE_WIDTH)
     if _audioop is not None:
         with contextlib.suppress(Exception):
@@ -2939,6 +2956,86 @@ def _pcm_apply_gain(audio_bytes: bytes, *, sample_width: int, gain: float) -> by
     if usable < len(data):
         out.extend(data[usable:])
     return bytes(out)
+
+
+def _pcm_high_pass_filter_session(session: "VoiceSessionRuntime", audio_bytes: bytes, *, sample_width: int) -> bytes:
+    data = bytes(audio_bytes or b"")
+    if not data or int(sample_width or DEFAULT_VOICE_SAMPLE_WIDTH) != 2:
+        return data
+    usable = len(data) - (len(data) % 2)
+    if usable <= 0:
+        return data
+
+    alpha = _get_float_setting(
+        "VOICE_NOISE_SUPPRESSION_HIGH_PASS_ALPHA",
+        DEFAULT_NOISE_SUPPRESSION_HIGH_PASS_ALPHA,
+        minimum=0.90,
+        maximum=0.9999,
+    )
+    out = bytearray(usable)
+    src = memoryview(data[:usable]).cast("h")
+    dst = memoryview(out).cast("h")
+    prev_input = float(getattr(session, "noise_highpass_prev_input", 0.0) or 0.0)
+    prev_output = float(getattr(session, "noise_highpass_prev_output", 0.0) or 0.0)
+    for idx, sample in enumerate(src):
+        current = float(sample)
+        filtered = current - prev_input + (float(alpha) * prev_output)
+        prev_input = current
+        prev_output = filtered
+        if filtered > 32767.0:
+            dst[idx] = 32767
+        elif filtered < -32768.0:
+            dst[idx] = -32768
+        else:
+            dst[idx] = int(round(filtered))
+    session.noise_highpass_prev_input = prev_input
+    session.noise_highpass_prev_output = prev_output
+    if usable < len(data):
+        out.extend(data[usable:])
+    return bytes(out)
+
+
+def _apply_stt_noise_suppression(
+    session: "VoiceSessionRuntime",
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> bytes:
+    data = bytes(audio_bytes or b"")
+    if not data or not _get_bool_setting("VOICE_NOISE_SUPPRESSION_ENABLED", DEFAULT_NOISE_SUPPRESSION_ENABLED):
+        return data
+
+    width = _as_int((audio_format or {}).get("width"), DEFAULT_VOICE_SAMPLE_WIDTH, minimum=1, maximum=4)
+    processed = data
+    if _get_bool_setting("VOICE_NOISE_SUPPRESSION_HIGH_PASS_ENABLED", DEFAULT_NOISE_SUPPRESSION_HIGH_PASS_ENABLED):
+        processed = _pcm_high_pass_filter_session(session, processed, sample_width=width)
+
+    silence_s = max(0.0, float((metrics or {}).get("silence_s") or 0.0))
+    tail_s = _get_float_setting(
+        "VOICE_NOISE_SUPPRESSION_TAIL_SILENCE_S",
+        DEFAULT_NOISE_SUPPRESSION_TAIL_SILENCE_S,
+        minimum=0.0,
+        maximum=2.0,
+    )
+    should_attenuate = bool((metrics or {}).get("voice_seen")) and silence_s >= float(tail_s)
+    if should_attenuate:
+        attenuation = _get_float_setting(
+            "VOICE_NOISE_SUPPRESSION_SILENCE_ATTENUATION",
+            DEFAULT_NOISE_SUPPRESSION_SILENCE_ATTENUATION,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        processed = _pcm_apply_gain(processed, sample_width=width, gain=attenuation)
+        session.noise_suppression_chunks += 1
+        now_ts = _now()
+        if session.noise_suppression_chunks == 1 or now_ts - float(session.noise_suppression_last_log_ts or 0.0) >= 5.0:
+            session.noise_suppression_last_log_ts = now_ts
+            _native_debug(
+                f"noise suppression tail attenuate selector={session.selector} session_id={session.session_id} "
+                f"silence_s={silence_s:.2f} attenuation={float(attenuation):.2f}"
+            )
+
+    return processed
 
 
 def _audio_format_from_settings(audio_settings: Any) -> Dict[str, int]:
@@ -2967,6 +3064,82 @@ def _audio_bytes_for_seconds(audio_format: Dict[str, Any], seconds: float) -> in
     frame_bytes = max(1, width * channels)
     frames = max(0, int(round(float(seconds or 0.0) * float(rate))))
     return int(frames * frame_bytes)
+
+
+def _stt_audio_bytes_for_transcription(session: "VoiceSessionRuntime") -> bytes:
+    if not isinstance(session, VoiceSessionRuntime):
+        return b""
+    data = bytes(session.audio_buffer or b"")
+    if not data:
+        return b""
+
+    silence_s = max(0.0, float(getattr(session, "silence_duration_s", 0.0) or 0.0))
+    keep_s = _get_float_setting(
+        "VOICE_STT_TRAILING_SILENCE_KEEP_S",
+        DEFAULT_STT_TRAILING_SILENCE_KEEP_S,
+        minimum=0.1,
+        maximum=2.0,
+    )
+    trim_s = max(0.0, silence_s - max(0.1, float(keep_s)))
+    if trim_s <= 0.0:
+        return data
+
+    audio_format = dict(getattr(session, "audio_format", {}) or {})
+    trim_bytes = _audio_bytes_for_seconds(audio_format, trim_s)
+    frame_bytes = max(
+        1,
+        _as_int(audio_format.get("width"), DEFAULT_VOICE_SAMPLE_WIDTH, minimum=1, maximum=4)
+        * _as_int(audio_format.get("channels"), DEFAULT_VOICE_CHANNELS, minimum=1, maximum=8),
+    )
+    trim_bytes -= trim_bytes % frame_bytes
+    min_keep_bytes = _audio_bytes_for_seconds(audio_format, 0.45)
+    if trim_bytes <= 0 or (len(data) - trim_bytes) < min_keep_bytes:
+        return data
+
+    trimmed = data[:-trim_bytes]
+    _native_debug(
+        f"STT trim trailing audio selector={session.selector} session_id={session.session_id} "
+        f"silence_s={silence_s:.2f} keep_s={float(keep_s):.2f} "
+        f"bytes={len(data)} trimmed={trim_bytes}"
+    )
+    return trimmed
+
+
+def _sanitize_stt_transcript(transcript: str) -> str:
+    text = re.sub(r"\s+", " ", _text(transcript)).strip()
+    if not text:
+        return ""
+
+    cleaned = text
+    for _ in range(3):
+        next_cleaned = re.sub(
+            r"(?i)(?P<prefix>.*?\b)(?P<word>[a-z0-9']+)(?:\s+(?P=word)\b){2,}(?P<punct>[.?!]*)$",
+            lambda m: f"{m.group('prefix')}{m.group('word')}{m.group('punct') or ''}",
+            cleaned,
+        ).strip()
+        if next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
+
+    words = re.findall(r"[a-z0-9']+", cleaned.lower())
+    if len(words) >= 8:
+        for size in (3, 2):
+            if len(words) < size * 3:
+                continue
+            tail = words[-size:]
+            repeats = 1
+            offset = len(words) - (size * 2)
+            while offset >= 0 and words[offset:offset + size] == tail:
+                repeats += 1
+                offset -= size
+            if repeats >= 3:
+                pattern = r"(?i)(?:\b" + r"\s+".join(re.escape(w) for w in tail) + r"\b\s*){" + str(repeats) + r"}([.?!]*)$"
+                cleaned = re.sub(pattern, " ".join(tail) + r"\1", cleaned).strip()
+                break
+
+    if cleaned != text:
+        _native_debug(f"STT transcript repetition trimmed original={text!r} cleaned={cleaned!r}")
+    return cleaned
 
 
 def _pcm_to_pcm16_mono_16k(
@@ -3740,6 +3913,34 @@ async def _send_voice_no_text_recognized(
     )
 
 
+async def _send_tool_call_visual(
+    client: Any,
+    module: Any,
+    *,
+    session: "VoiceSessionRuntime",
+    wait_text: str = "",
+    wait_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    if bool(getattr(session, "tool_visual_sent", False)):
+        return
+    payload = wait_payload if isinstance(wait_payload, dict) else {}
+    tool_name = _text(payload.get("tool") or payload.get("tool_name") or payload.get("name") or payload.get("func_name"))
+    text = _sanitize_tool_progress_spoken_text(wait_text or _text(payload.get("text")))
+    event_payload: Dict[str, Any] = {}
+    if text:
+        event_payload["text"] = text
+    if tool_name:
+        event_payload["tool"] = tool_name
+    ok = await _esphome_send_event(
+        client,
+        module,
+        ("VOICE_ASSISTANT_TOOL_CALL_START", "TOOL_CALL_START"),
+        event_payload,
+    )
+    if ok:
+        session.tool_visual_sent = True
+
+
 async def _play_live_tool_progress_for_session(
     client: Any,
     module: Any,
@@ -3749,7 +3950,15 @@ async def _play_live_tool_progress_for_session(
     session: "VoiceSessionRuntime",
     transcript: str,
     wait_text: str,
+    wait_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
+    await _send_tool_call_visual(
+        client,
+        module,
+        session=session,
+        wait_text=wait_text,
+        wait_payload=wait_payload,
+    )
     if not _experimental_live_tool_progress_enabled():
         return
     spoken = _sanitize_tool_progress_spoken_text(wait_text)
@@ -3832,7 +4041,12 @@ async def _play_live_tool_progress_for_session(
             _cancel_announcement_wait(runtime)
             _schedule_announcement_timeout(selector, client, module, timeout_s)
 
-        await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": url})
+        await _esphome_send_event(
+            client,
+            module,
+            ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
+            {"url": url, "tts_kind": "tool", "state_after": "tool_call"},
+        )
         _native_debug(
             f"live tool progress queued selector={selector} session_id={session.session_id} timeout_s={timeout_s:.2f} text={spoken!r}"
         )
@@ -4133,9 +4347,9 @@ def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_for
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
+    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
     _native_debug(
-        f"esphome tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
+        f"native tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
     )
     return url
 
@@ -4184,7 +4398,7 @@ def _store_chatterbox_tts_stream_url(
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/tts/{stream_id}.wav"
+    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
     _native_debug(
         f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"stream_id={stream_id} url={url}"
@@ -4233,9 +4447,9 @@ def _store_media_url(
         }
 
     host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/tater-ha/v1/voice/esphome/media/{stream_id}"
+    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/media/{stream_id}"
     _native_debug(
-        f"esphome media url prepared selector={_text(selector)} session_id={_text(session_id)} "
+        f"native media url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"bytes={len(data)} media_type={mime} url={url}"
     )
     return url
@@ -4283,13 +4497,15 @@ def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, sec
 
 
 def _run_end_timeout_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
-    # Leave a little extra headroom for media-player startup and network jitter so
-    # a late `announcement_finished` doesn't force an early RUN_END.
+    # Leave enough headroom for device-side HTTP fetch, WAV parsing/resampling,
+    # and scheduling jitter so a late `announcement_finished` doesn't force an
+    # early RUN_END while the satellite is still speaking.
+    fetch_headroom_s = (len(audio_bytes or b"") / DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S) + 8.0
     return max(
-        2.25,
+        5.0,
         min(
             float(DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S),
-            _estimate_pcm_duration_s(audio_bytes, audio_format) + 1.75,
+            _estimate_pcm_duration_s(audio_bytes, audio_format) + max(12.0, fetch_headroom_s),
         ),
     )
 
@@ -5102,6 +5318,38 @@ def _transcript_is_low_signal(transcript: str) -> bool:
     return len(compact) < 3
 
 
+def _continued_chat_retry_evidence(session: VoiceSessionRuntime, transcript: str = "") -> bool:
+    if not isinstance(session, VoiceSessionRuntime):
+        return False
+    if not bool(getattr(session, "continued_chat_reopen", False)):
+        return False
+
+    transcript_text = _text(transcript)
+    if transcript_text:
+        return not _transcript_is_low_signal(transcript_text)
+
+    audio_peak = (
+        float(getattr(session, "audio_peak_dbfs", -120.0) or -120.0)
+        if int(getattr(session, "audio_level_chunks", 0) or 0) > 0
+        else -120.0
+    )
+    vad_peak = (
+        float(getattr(session, "vad_audio_peak_dbfs", -120.0) or -120.0)
+        if int(getattr(session, "vad_audio_level_chunks", 0) or 0) > 0
+        else -120.0
+    )
+    peak = max(audio_peak, vad_peak)
+    chunks = int(getattr(session, "audio_chunks", 0) or 0)
+    audio_bytes = int(getattr(session, "audio_bytes", 0) or 0)
+    return peak >= -42.0 and (chunks >= 8 or audio_bytes >= 12000)
+
+
+def _continued_chat_retry_response_text(transcript: str = "") -> str:
+    if _text(transcript):
+        return "I only caught part of that. Could you say it again?"
+    return "I didn't catch that. Could you say it again?"
+
+
 def _voice_turn_has_low_speech_evidence(session: VoiceSessionRuntime, transcript: str) -> bool:
     if not isinstance(session, VoiceSessionRuntime):
         return False
@@ -5123,6 +5371,8 @@ def _voice_turn_has_low_speech_evidence(session: VoiceSessionRuntime, transcript
         return False
     if max_prob >= 0.50:
         return False
+    if speech_s < 0.12 and max_prob < 0.25 and not is_brief_command:
+        return True
     if len(words) >= 7 and vad_peak >= -36.0:
         return False
     if is_brief_command and (max_prob >= 0.12 or vad_peak >= -34.0):
@@ -5287,6 +5537,25 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
         return intercom_result
 
     if not transcript:
+        retry_text = (
+            _continued_chat_retry_response_text(transcript)
+            if _continued_chat_retry_evidence(session, transcript)
+            else ""
+        )
+        if retry_text:
+            logger.info(
+                "[native-voice] continued-chat empty transcript retry selector=%s session_id=%s audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f",
+                session.selector,
+                session.session_id,
+                int(session.audio_chunks),
+                int(session.audio_bytes),
+                float(session.audio_peak_dbfs or -120.0),
+                float(session.max_probability or 0.0),
+            )
+            return {
+                "transcript": "",
+                "response_text": retry_text,
+            }
         return {
             "transcript": "",
             "no_op": True,
@@ -5294,6 +5563,25 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
         }
 
     if _voice_turn_has_low_speech_evidence(session, transcript):
+        retry_text = (
+            _continued_chat_retry_response_text(transcript)
+            if _continued_chat_retry_evidence(session, transcript)
+            else ""
+        )
+        if retry_text:
+            logger.info(
+                "[native-voice] continued-chat low-evidence retry selector=%s session_id=%s transcript=%r speech_s=%.2f max_prob=%.3f vad_peak_dbfs=%.1f",
+                session.selector,
+                session.session_id,
+                transcript,
+                float(session.speech_duration_s or 0.0),
+                float(session.max_probability or 0.0),
+                float(session.vad_audio_peak_dbfs or -120.0),
+            )
+            return {
+                "transcript": transcript,
+                "response_text": retry_text,
+            }
         _native_debug(
             f"low-evidence transcript bypass selector={session.selector} session_id={session.session_id} "
             f"transcript={transcript!r} speech_s={float(session.speech_duration_s or 0.0):.2f} "
@@ -5319,7 +5607,11 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     completeness = _transcript_completeness_assessment(transcript)
     word_count = len(re.findall(r"[a-z0-9']+", transcript.lower()))
     if (not bool(completeness.get("complete"))) and word_count <= 6:
-        if bool(getattr(session, "no_speech_recovered_partial", False)) or bool(_text(session.wake_word)):
+        if (
+            bool(getattr(session, "no_speech_recovered_partial", False))
+            or bool(_text(session.wake_word))
+            or _continued_chat_retry_evidence(session, transcript)
+        ):
             logger.info(
                 "[native-voice] partial transcript recovery selector=%s session_id=%s words=%s reason=%s",
                 session.selector,
@@ -5329,7 +5621,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             )
             return {
                 "transcript": transcript,
-                "response_text": "I only caught part of that. Please say it again.",
+                "response_text": _continued_chat_retry_response_text(transcript),
             }
         _native_debug(
             f"clipped transcript bypass selector={session.selector} session_id={session.session_id} "
@@ -5533,9 +5825,14 @@ async def _finalize_session(
                 else -120.0
             )
             recovery_audio_evidence = recovery_audio_peak >= -38.0
+            recovery_voice_evidence = (
+                seg_speech_s >= 0.12
+                or recovery_prob >= 0.25
+                or (is_brief_command and recovery_prob >= 0.08)
+            )
             recovery_by_transcript = (
-                (len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
-                or (len(recovered_words) >= 5 and recovery_audio_evidence)
+                (recovery_voice_evidence and len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
+                or (recovery_voice_evidence and len(recovered_words) >= 5 and recovery_audio_evidence)
                 or (is_brief_command and recovery_prob >= 0.08)
             )
             partial_recovery = (
@@ -5551,6 +5848,7 @@ async def _finalize_session(
             recovery_ok = (
                 bool(recovered_transcript)
                 and (not recovered_low_signal)
+                and recovery_voice_evidence
                 and (recovered_complete or len(recovered_words) >= 7 or partial_recovery)
                 and (
                     recovery_prob >= float(recovery_prob_threshold)
@@ -5558,15 +5856,23 @@ async def _finalize_session(
                     or partial_recovery
                 )
             )
-            if recovery_ok:
+            followup_retry_ok = (
+                (not recovery_ok)
+                and _continued_chat_retry_evidence(session, recovered_transcript)
+            )
+            if recovery_ok or followup_retry_ok:
                 session.no_speech_recovered_transcript = True
-                session.no_speech_recovered_partial = bool(partial_recovery)
+                session.no_speech_recovered_partial = bool(partial_recovery or followup_retry_ok)
+                if followup_retry_ok:
+                    session.followup_retry_prompt = True
+                    session.followup_retry_reason = no_speech_reason
                 _native_debug(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
                     f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} words={len(recovered_words)} "
                     f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f} "
                     f"vad_peak_dbfs={recovery_audio_peak:.1f} "
                     f"transcript_recovery={bool(recovery_by_transcript)} partial={bool(partial_recovery)} "
+                    f"followup_retry={bool(followup_retry_ok)} "
                     f"complete={recovered_complete} complete_reason={_text(recovered_assessment.get('reason')) or '-'}"
                 )
             else:
@@ -5613,8 +5919,9 @@ async def _finalize_session(
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
                 with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": ""})
-                with contextlib.suppress(Exception):
-                    await _send_voice_no_text_recognized(client, module)
+                if _text(session.wake_word):
+                    with contextlib.suppress(Exception):
+                        await _send_voice_no_text_recognized(client, module)
                 with contextlib.suppress(Exception):
                     await _send_voice_run_end(
                         client,
@@ -5644,6 +5951,7 @@ async def _finalize_session(
                 session=session,
                 transcript=_text(session.stt_transcript),
                 wait_text=wait_text,
+                wait_payload=_wait_payload,
             )
 
         session.live_tool_progress_callback = _live_tool_progress
@@ -5658,8 +5966,9 @@ async def _finalize_session(
             outcome = _classify_no_op_outcome(session, reason=no_op_reason, transcript=transcript)
             session.turn_outcome = outcome
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
-            with contextlib.suppress(Exception):
-                await _send_voice_no_text_recognized(client, module)
+            if _text(session.wake_word):
+                with contextlib.suppress(Exception):
+                    await _send_voice_no_text_recognized(client, module)
             logger.info(
                 "[native-voice] no-op transcript finalize selector=%s session_id=%s reason=%s outcome=%s transcript_len=%s stt_ms=%.1f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f speech_s=%.2f",
                 token,
@@ -6506,6 +6815,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             if session.processing:
                 return
 
+            audio_bytes = _apply_stt_noise_suppression(session, audio_bytes, audio_format, metrics)
+            chunk_dbfs = _pcm_dbfs(audio_bytes, sample_width=width)
             session.last_audio_ts = now_ts
             if vad_startup_ignored:
                 session.vad_startup_ignored_chunks += 1

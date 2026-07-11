@@ -56,6 +56,10 @@ class VoiceSessionRuntime:
     audio_stall_no_speech_timeout_s: float = field(default_factory=lambda: _vp().DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S)
     blank_wake_timeout_s: float = field(default_factory=lambda: _vp().DEFAULT_BLANK_WAKE_TIMEOUT_S)
     audio_input_gain: float = field(default_factory=lambda: _vp().DEFAULT_AUDIO_INPUT_GAIN)
+    noise_highpass_prev_input: float = 0.0
+    noise_highpass_prev_output: float = 0.0
+    noise_suppression_chunks: int = 0
+    noise_suppression_last_log_ts: float = 0.0
 
     audio_buffer: bytearray = field(default_factory=bytearray)
     secondary_audio_buffer: bytearray = field(default_factory=bytearray)
@@ -93,9 +97,12 @@ class VoiceSessionRuntime:
     vad_audio_level_chunks: int = 0
     no_speech_recovered_transcript: bool = False
     no_speech_recovered_partial: bool = False
+    followup_retry_prompt: bool = False
+    followup_retry_reason: str = ""
     stt_end_sent: bool = False
     intent_active: bool = False
     live_tool_progress_played: bool = False
+    tool_visual_sent: bool = False
     last_tool_progress_text: str = ""
     live_tool_progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], Any]] = None
     speaker_id: str = ""
@@ -333,7 +340,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
                 {"marker": "plugin_wait", "content": text, "payload": progress_payload},
             )
             callback = session.live_tool_progress_callback if callable(session.live_tool_progress_callback) else None
-            if vp._experimental_live_tool_progress_enabled() and callback is not None:
+            if callback is not None:
                 result = callback(text, progress_payload)
                 if inspect.isawaitable(result):
                     await result

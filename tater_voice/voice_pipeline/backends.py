@@ -652,6 +652,7 @@ async def _native_wyoming_stream_stt_task(
                         if vp.Transcript.is_type(event.type):
                             transcript = vp._text(vp.Transcript.from_event(event).text)
                             if stop_sent.is_set():
+                                transcript = vp._sanitize_stt_transcript(transcript)
                                 vp._native_debug(f"STT stream transcript={transcript!r}")
                                 await _update_session_transcript(transcript=transcript, final=True)
                                 if not result_future.done():
@@ -729,7 +730,7 @@ def _buffered_stt_fallback_backend() -> str:
 
 async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason: str) -> str:
     vp = _vp()
-    audio_bytes = bytes(session.audio_buffer or b"")
+    audio_bytes = vp._stt_audio_bytes_for_transcription(session)
     if not audio_bytes:
         return ""
     backend = _buffered_stt_fallback_backend()
@@ -773,7 +774,9 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
                 session.stt_task.cancel()
                 with contextlib.suppress(BaseException):
                     await session.stt_task
-        final_text = vp._text(session.stt_transcript)
+        final_text = vp._sanitize_stt_transcript(session.stt_transcript)
+        if final_text != vp._text(session.stt_transcript):
+            session.stt_transcript = final_text
         if final_text and not bool(session.stt_stream_unhealthy):
             return final_text
         fallback = vp._text(session.partial_transcript)
@@ -795,7 +798,7 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
             await session.partial_stt_task
         session.partial_stt_task = None
 
-    audio_bytes = bytes(session.audio_buffer or b"")
+    audio_bytes = vp._stt_audio_bytes_for_transcription(session)
     if not audio_bytes:
         session.stt_transcript = ""
         return ""
@@ -863,7 +866,10 @@ async def _native_transcribe_local_audio_bytes(
         else:
             raise RuntimeError(f"Unsupported local STT backend: {token}")
 
-    return vp._text(transcript)
+    cleaned = vp._text(transcript)
+    if not bool(partial):
+        cleaned = vp._sanitize_stt_transcript(cleaned)
+    return cleaned
 
 
 async def _native_local_partial_stt_task(

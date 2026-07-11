@@ -80,6 +80,14 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
+def _assistant_first_name(client: Any = None) -> str:
+    try:
+        value = (client or redis_client).get("tater:first_name")
+    except Exception:
+        value = ""
+    return _text(value) or "Tater"
+
+
 def _lower(value: Any) -> str:
     return _text(value).lower()
 
@@ -593,6 +601,9 @@ def build_display_feed(query: Any = None, *, client: Any = None, version: str = 
         requested_slots = _slot_map_from_saved_display_profile(query, redis_obj)
     runtime_states = _runtime_integration_states(redis_obj)
     clock = _local_clock()
+    assistant = {
+        "first_name": _assistant_first_name(redis_obj),
+    }
 
     slots: Dict[str, Dict[str, Any]] = {}
     values: Dict[str, Any] = {}
@@ -616,7 +627,10 @@ def build_display_feed(query: Any = None, *, client: Any = None, version: str = 
             "service": "tater_display",
             "version": _text(version),
             "ts": time.time(),
+            "assistant": assistant,
+            "assistant_name": assistant["first_name"],
             "clock": {
+                "date": clock.get("date", ""),
                 "time": clock.get("time", ""),
                 "ampm": clock.get("ampm", ""),
             },
@@ -630,6 +644,8 @@ def build_display_feed(query: Any = None, *, client: Any = None, version: str = 
         "service": "tater_display",
         "version": _text(version),
         "ts": time.time(),
+        "assistant": assistant,
+        "assistant_name": assistant["first_name"],
         "clock": clock,
         "slots": slots,
         "values": values,

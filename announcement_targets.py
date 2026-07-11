@@ -257,10 +257,23 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
 
 def _voice_core_satellite_label(row: Dict[str, Any], selector: str) -> str:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    name = _text(row.get("name"))
+    device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+    name = (
+        _text(row.get("name"))
+        or _text(row.get("friendly_name"))
+        or _text(row.get("device_name"))
+        or _text(device_info.get("friendly_name"))
+        or _text(device_info.get("name"))
+    )
     area = ""
     for key in ("area_name", "room_name", "room", "area"):
         area = _text(metadata.get(key))
+        if area:
+            break
+        area = _text(row.get(key))
+        if area:
+            break
+        area = _text(device_info.get(key))
         if area:
             break
     host = _text(row.get("host"))
@@ -272,7 +285,7 @@ def _voice_core_satellite_label(row: Dict[str, Any], selector: str) -> str:
         details.append(host)
     details.append(selector)
     suffix = " • ".join(part for part in details if part)
-    return f"Voice Core: {title} ({suffix})" if suffix else f"Voice Core: {title}"
+    return f"Tater Satellite: {title} ({suffix})" if suffix else f"Tater Satellite: {title}"
 
 
 def _voice_core_selector_from_row(row: Dict[str, Any]) -> str:
@@ -284,19 +297,34 @@ def _voice_core_selector_from_row(row: Dict[str, Any]) -> str:
 
 
 def _voice_core_connected_clients() -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        from tater_voice import native_satellite
+
+        status = native_satellite.status_snapshot_sync()
+        clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+        for selector, row in clients.items():
+            if not isinstance(row, dict) or not bool(row.get("connected")):
+                continue
+            token = _text(selector) or _voice_core_selector_from_row(row)
+            if token:
+                out[token] = dict(row)
+    except Exception:
+        pass
+
     try:
         from tater_voice import runtime as esphome_runtime
 
         status = esphome_runtime.status()
     except Exception:
-        return {}
+        return out
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
-    out: Dict[str, Dict[str, Any]] = {}
     for selector, row in clients.items():
         if not isinstance(row, dict) or not bool(row.get("connected")):
             continue
         token = _text(selector) or _voice_core_selector_from_row(row)
-        if not token:
+        if not token or token in out:
             continue
         out[token] = dict(row)
     return out
@@ -346,7 +374,7 @@ def get_voice_core_satellite_target_options(*, current_values: Any = None) -> Li
         selector = _text(value[len(VOICE_CORE_TARGET_PREFIX):])
         if not selector:
             continue
-        rows.append({"value": value, "label": f"Voice Core: {selector} (saved)"})
+        rows.append({"value": value, "label": f"Tater Satellite: {selector} (saved)"})
         seen.add(value)
 
     rows.sort(key=lambda row: _text(row.get("label")).lower())

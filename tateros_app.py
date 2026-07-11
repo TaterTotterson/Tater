@@ -8594,6 +8594,7 @@ class AppSettingsRequest(BaseModel):
     speech_chatterbox_tts_seed: Optional[Any] = None
     speech_chatterbox_tts_speed_factor: Optional[Any] = None
     speech_chatterbox_tts_language: Optional[str] = None
+    speech_chatterbox_tts_streaming_enabled: Optional[bool] = None
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
@@ -8655,12 +8656,6 @@ class AppSettingsRequest(BaseModel):
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
     hydra_local_model_load_targets: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
-    hydra_llm_chat_provider: Optional[str] = None
-    hydra_llm_chat_host: Optional[str] = None
-    hydra_llm_chat_port: Optional[str] = None
-    hydra_llm_chat_model: Optional[str] = None
-    hydra_llm_chat_api_key: Optional[str] = None
-    hydra_llm_chat_llama_cpp_slot: Optional[Any] = None
     hydra_llm_astraeus_provider: Optional[str] = None
     hydra_llm_astraeus_host: Optional[str] = None
     hydra_llm_astraeus_port: Optional[str] = None
@@ -8673,12 +8668,6 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_thanatos_model: Optional[str] = None
     hydra_llm_thanatos_api_key: Optional[str] = None
     hydra_llm_thanatos_llama_cpp_slot: Optional[Any] = None
-    hydra_llm_minos_provider: Optional[str] = None
-    hydra_llm_minos_host: Optional[str] = None
-    hydra_llm_minos_port: Optional[str] = None
-    hydra_llm_minos_model: Optional[str] = None
-    hydra_llm_minos_api_key: Optional[str] = None
-    hydra_llm_minos_llama_cpp_slot: Optional[Any] = None
     hydra_llm_hermes_provider: Optional[str] = None
     hydra_llm_hermes_host: Optional[str] = None
     hydra_llm_hermes_port: Optional[str] = None
@@ -8990,6 +8979,8 @@ async def _webui_auth_middleware(request: Request, call_next):
     if _is_spud_link_external_api_path(path):
         return await call_next(request)
     if path.startswith("/api/speech/tts/runtime/"):
+        return await call_next(request)
+    if path.startswith("/api/tater/satellite/"):
         return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
     if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
@@ -15861,9 +15852,13 @@ def get_hydra_metrics(
                 "validation_status": str(validation.get("status") or ""),
                 "validation_reason": str(validation.get("reason") or ""),
                 "checker_action": str(row.get("checker_action") or ""),
-                "minos_action": str(row.get("checker_action") or ""),
                 "tool_result_ok": tool_result.get("ok") if isinstance(tool_result, dict) else row.get("tool_result_ok"),
                 "tool_result_summary": tool_result_summary,
+                "astraeus_route_ms": int(row.get("astraeus_route_ms") or 0),
+                "planner_ms": int(row.get("planner_ms") or 0),
+                "tool_ms": int(row.get("tool_ms") or 0),
+                "hermes_chat_ms": int(row.get("hermes_chat_ms") or 0),
+                "hermes_final_ms": int(row.get("hermes_final_ms") or 0),
                 "total_ms": int(row.get("total_ms") or 0),
                 "raw": row,
             }
@@ -15879,7 +15874,7 @@ def get_hydra_metrics(
 
         checker_reason = str(row.get("checker_reason") or "").strip()
         if checker_reason:
-            key = f"minos:{checker_reason}"
+            key = f"checker:{checker_reason}"
             reason_counts[key] = int(reason_counts.get(key, 0)) + 1
 
         outcome_reason = str(row.get("outcome_reason") or "").strip()

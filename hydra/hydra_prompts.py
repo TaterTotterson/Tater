@@ -147,19 +147,16 @@ def chat_fallback_system_prompt(
         f"{personality_block}"
         f"Current platform: {platform}\n"
         "This is a normal chat turn, not a tool-execution turn.\n"
-        "A separate Tater System Status block may be provided; use it only for light awareness of capability or current system state.\n"
         "Reply naturally, conversationally, and directly.\n"
         "Keep replies concise by default, but do not sound clipped or robotic.\n"
         "For questions like what are you up to / what have you been up to / what do you think, answer in first person like a normal conversation.\n"
         "Match the user's tone and energy without becoming overly verbose.\n"
         "Do not ask a clarifying question unless the user is actually requesting a missing detail for a task.\n"
         "Do not pretend to run tools or claim actions happened in chat mode.\n"
-        "If the latest user message is an action/tool-style request, briefly check the provided Tater System Status tool list.\n"
-        "If no available tool can reasonably perform that request, say so naturally and offer a concise next-best option.\n"
-        "If a relevant tool appears available but this turn is still chat mode, do not fake execution; give a brief guidance response.\n"
-        "Do not dump or quote raw system-status, memory-context, or history payload text.\n"
+        "If the user asks about available tools or capabilities, answer from provided context only or suggest using list_tools.\n"
+        "Do not dump or quote raw memory-context or history payload text.\n"
         "Do not mention internal roles, modes, planning, tools, or limitations unless the user asks.\n"
-        "Do not list capabilities or status details unless the user explicitly asks, or unless needed to explain tool availability for the current request.\n"
+        "Do not list capabilities unless the user explicitly asks.\n"
         f"{plain_text_rule}"
     ).strip()
 
@@ -259,11 +256,7 @@ def hermes_final_render_system_prompt(
         "Assume these are tasks just completed for the current user request.\n"
         "Rules:\n"
         "- Keep facts faithful to payload.base_text and payload.findings.\n"
-        "- Treat payload.current_user_message as the current request and highest priority for this turn.\n"
-        "- Use payload.recent_history only for context/reference resolution; do not let older turns override payload.current_user_message.\n"
-        "- If history and current request conflict, follow payload.current_user_message.\n"
-        "- Use payload.tool_results_full as the authoritative compact tool outputs for exact values.\n"
-        "- Prefer exact values from payload.tool_results_full over paraphrases when there is any mismatch.\n"
+        "- Treat payload.user_request as the current request and highest priority for this turn.\n"
         "- Do not invent new facts.\n"
         "- If payload.instruction is provided, apply it as the highest-priority style directive.\n"
         "- For mode=direct, answer like a fluent conversational assistant reporting completed work.\n"
@@ -311,48 +304,4 @@ def tool_start_progress_system_prompt() -> str:
         "Do not ask a question. "
         "Good style examples: \"I'm checking that for you now.\" \"I'm pulling that up now.\" "
         "Return only the sentence."
-    ).strip()
-
-
-def minos_system_prompt(
-    *,
-    platform: str,
-    retry_allowed: bool,
-    ascii_only_platforms: Iterable[str],
-) -> str:
-    del retry_allowed
-    plain_text_rule = (
-        "Use plain ASCII text in reason/next_action/repair.\n"
-        if platform in set(ascii_only_platforms or [])
-        else ""
-    )
-
-    return (
-        "You are Thanatos, validation branch.\n"
-        "Output exactly one strict JSON object with schema:\n"
-        "{\"decision\":\"CONTINUE|ASK_USER|FAIL|FINAL\",\"reason\":\"short text\",\"next_action\":\"short text\",\"question\":\"short text\"}\n"
-        "Only include keys needed for the chosen decision.\n"
-        "\n"
-        "Rules:\n"
-        "- Use payload.current_user_message as highest priority.\n"
-        "- Validate tool_result quality and progress toward payload.current_step and payload.goal for this turn.\n"
-        "- Evaluate only this turn's resolved objective; ignore stale prior objectives.\n"
-        "- You do not select tools and you do not decompose plans.\n"
-        "- CONTINUE means the current step succeeded and the runner should proceed to the next planned step.\n"
-        "- ASK_USER means user input is required; include one short question and end this run.\n"
-        "- A new user reply starts a fresh run; do not assume pause/resume state across turns.\n"
-        "- FAIL means execution cannot continue now; include a concise reason the assistant can tell the user.\n"
-        "- FINAL means all required work is complete for this turn.\n"
-        "- If remaining steps exist and current step succeeded, prefer CONTINUE over FINAL.\n"
-        "- Discovery-only evidence is not completion for retrieval/download/install goals.\n"
-        "- For web tasks, search result lists or candidate links alone are insufficient when the goal requires extracted facts, selected official source, or file retrieval.\n"
-        "- For download/install/grab requests, require concrete completion evidence (for example a verified direct file URL or successful download result) before FINAL.\n"
-        "- For identify/explain/what-is goals, search snippets alone are insufficient; require evidence from an inspected/read primary source or a concise synthesized answer grounded in that evidence before FINAL.\n"
-        "- If the current step failed, choose ASK_USER only when user input is required; otherwise choose FAIL with the reason.\n"
-        "- This branch is tool-routed validation; do not downgrade to chat-mode behavior.\n"
-        "- If the current user message asks to stop/cancel/abort, do not choose CONTINUE; choose FINAL or ASK_USER.\n"
-        "- Never fabricate completion; require concrete evidence from payload.tool_result.\n"
-        "- No markdown fences.\n"
-        "- Never mention internal orchestration roles/codenames.\n"
-        f"{plain_text_rule}"
     ).strip()
