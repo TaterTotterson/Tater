@@ -781,13 +781,19 @@ def _profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Di
         wake_word_url = _text(source.get("wake_word"))
     if wake_word != "custom_url":
         return dict(BUILTIN_WAKE_PROFILES.get(wake_word) or BUILTIN_WAKE_PROFILES["hey_tater"])
+    fetched = _fetch_wake_profile_json(wake_word_url)
+    fetch_error = _text(fetched.get("wake_profile_error"))
+    if not fetch_error:
+        return fetched
     if (
         _text(current_raw.get("wake_profile_source_url")) == wake_word_url and
         _text(current_raw.get("wake_profile_name")) and
         _text(current_raw.get("wake_profile_close_miss_threshold"))
     ):
-        return _wake_profile_from_source(current_raw, wake_word, wake_word_url)
-    return _fetch_wake_profile_json(wake_word_url)
+        existing = _wake_profile_from_source(current_raw, wake_word, wake_word_url)
+        existing["wake_profile_error"] = fetch_error
+        return existing
+    return fetched
 
 
 def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, Any]]:
