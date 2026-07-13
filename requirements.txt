@@ -36,8 +36,6 @@ pandas
 wyoming
 silero-vad
 webrtcvad-wheels
-openwakeword
-nanowakeword==2.1.2
 onnxruntime
 torch
 torchinfo

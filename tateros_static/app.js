@@ -113,12 +113,9 @@ const state = {
     selector: "",
   },
   esphomeDisplaySensorTarget: "",
-  esphomeFirmwareDrafts: {},
   esphomeBrowserUsbPorts: {},
   esptoolJsModule: null,
   esptoolJsLoadPromise: null,
-  esphomeWakeSoundPreviewAudio: null,
-  esphomeWakeSoundPreviewButton: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
@@ -9266,67 +9263,6 @@ function renderNativeSatellitePairingPanel(pairingConfig, coreKey = "esphome") {
   `;
 }
 
-function orderEspHomeFirmwareSections(sections) {
-  const rows = Array.isArray(sections) ? sections.slice() : [];
-  const titleFor = (section) => String(section?.title || "").trim().toLowerCase();
-  const wakeSoundIndex = rows.findIndex((section) => titleFor(section) === "wake sound");
-  if (wakeSoundIndex < 0) {
-    return rows;
-  }
-  const wakeWordIndex = rows.findIndex((section) => {
-    const title = titleFor(section);
-    return title.includes("micro wake word") || (title.includes("wake word") && title !== "wake sound");
-  });
-  if (wakeWordIndex < 0 || wakeSoundIndex === wakeWordIndex + 1) {
-    return rows;
-  }
-  const reordered = rows.slice();
-  const [wakeSoundSection] = reordered.splice(wakeSoundIndex, 1);
-  const insertAfter = reordered.findIndex((section) => {
-    const title = titleFor(section);
-    return title.includes("micro wake word") || (title.includes("wake word") && title !== "wake sound");
-  });
-  if (insertAfter < 0 || !wakeSoundSection) {
-    return rows;
-  }
-  reordered.splice(insertAfter + 1, 0, wakeSoundSection);
-  return reordered;
-}
-
-function renderEspHomeFirmwareSections(sections) {
-  const rows = orderEspHomeFirmwareSections(sections);
-  if (!rows.length) {
-    return renderNotice("No firmware options are available for this device.");
-  }
-  return rows
-    .map((section) => {
-      const title = String(section?.title || "Section").trim() || "Section";
-      const fields = Array.isArray(section?.fields) ? section.fields : [];
-      if (!fields.length) {
-        return "";
-      }
-      const wakeSoundPreviewHtml =
-        title === "Wake Sound"
-          ? `
-            <div class="esphome-wake-sound-preview-row">
-              <button type="button" class="inline-btn esphome-wake-sound-preview">Play Selected Sound</button>
-              <span class="small esphome-wake-sound-preview-status"></span>
-            </div>
-          `
-          : "";
-      return `
-        <section class="core-inline-section" style="margin-top:12px;">
-          <div class="small core-inline-section-title">${escapeHtml(title)}</div>
-          <div class="form-grid two-col">
-            ${fields.map((field) => renderCoreManagerField(field)).join("")}
-            ${wakeSoundPreviewHtml}
-          </div>
-        </section>
-      `;
-    })
-    .join("");
-}
-
 function espHomeFirmwareDevicesForTemplate(firmware, templateKey = "") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templateToken = String(templateKey || "").trim();
@@ -9376,357 +9312,6 @@ function resolveEspHomeFirmwareVariant(firmware, templateKey = "", selector = ""
   return selector && templateMap[selector] && typeof templateMap[selector] === "object" ? templateMap[selector] : null;
 }
 
-function espHomeFirmwareDraftKey(templateKey = "", selector = "") {
-  const templateToken = String(templateKey || "").trim();
-  const selectorToken = String(selector || "").trim();
-  if (!templateToken) {
-    return "";
-  }
-  return selectorToken ? `${templateToken}::${selectorToken}` : templateToken;
-}
-
-function clearEspHomeFirmwareDraft(templateKey = "", selector = "") {
-  const key = espHomeFirmwareDraftKey(templateKey, selector);
-  if (key && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object") {
-    delete state.esphomeFirmwareDrafts[key];
-  }
-}
-
-function applyEspHomeFirmwareDraftToVariant(variant, templateKey = "", selector = "") {
-  const base = variant && typeof variant === "object" ? variant : null;
-  if (!base) {
-    return null;
-  }
-  const token = espHomeFirmwareDraftKey(templateKey, selector);
-  const draft =
-    token && state.esphomeFirmwareDrafts && typeof state.esphomeFirmwareDrafts === "object"
-      ? state.esphomeFirmwareDrafts[token]
-      : null;
-  if (!draft || typeof draft !== "object") {
-    return base;
-  }
-  const sections = Array.isArray(base?.sections) ? base.sections : [];
-  return {
-    ...base,
-    sections: sections.map((section) => {
-      const fields = Array.isArray(section?.fields) ? section.fields : [];
-      return {
-        ...section,
-        fields: fields.map((field) => {
-          const key = String(field?.key || "").trim();
-          if (!key || boolFromAny(field?.read_only, false) || !Object.prototype.hasOwnProperty.call(draft, key)) {
-            return field;
-          }
-          return {
-            ...field,
-            value: draft[key],
-          };
-        }),
-      };
-    }),
-  };
-}
-
-function captureEspHomeFirmwareDraft(card, scope = {}) {
-  if (!(card instanceof HTMLElement)) {
-    return;
-  }
-  const values = collectCoreManagerValues(card);
-  const templateKey = String(scope?.templateKey || card.dataset?.firmwareTemplateKey || values?.template_key || "").trim();
-  const selector = String(scope?.selector || card.dataset?.firmwareSelector || values?.selector || "").trim();
-  if (!templateKey) {
-    return;
-  }
-  const draft = {};
-  Object.entries(values || {}).forEach(([key, value]) => {
-    const token = String(key || "").trim();
-    if (!token || token === "template_key" || token === "selector") {
-      return;
-    }
-    draft[token] = value;
-  });
-  const draftKey = espHomeFirmwareDraftKey(templateKey, selector);
-  if (draftKey) {
-    state.esphomeFirmwareDrafts[draftKey] = draft;
-  }
-}
-
-function deriveWakeWordSlugFromUrl(value) {
-  const token = String(value || "").trim();
-  if (!token) {
-    return "";
-  }
-  const clean = token.split("?")[0].trim();
-  const segments = clean.split("/").filter(Boolean);
-  const filename = String(segments[segments.length - 1] || "").trim();
-  if (!filename) {
-    return "";
-  }
-  return filename.replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase();
-}
-
-function syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker = false } = {}) {
-  if (!(card instanceof HTMLElement)) {
-    return;
-  }
-  const picker = card.querySelector('select[data-core-field-key="wake_word_catalog"]');
-  const urlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
-  const nameInput = card.querySelector('input[data-core-field-key="wake_word_name"]');
-  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
-    return;
-  }
-
-  if (fromPicker) {
-    const selectedUrl = String(picker.value || "").trim();
-    if (selectedUrl && selectedUrl !== "__custom__") {
-      urlInput.value = selectedUrl;
-      if (nameInput instanceof HTMLInputElement && !nameInput.readOnly) {
-        const slug = deriveWakeWordSlugFromUrl(selectedUrl);
-        if (slug) {
-          nameInput.value = slug;
-        }
-      }
-    }
-    captureEspHomeFirmwareDraft(card);
-    return;
-  }
-
-  const currentUrl = String(urlInput.value || "").trim();
-  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
-  if (currentUrl && optionValues.includes(currentUrl)) {
-    picker.value = currentUrl;
-  } else if (optionValues.includes("__custom__")) {
-    picker.value = "__custom__";
-  }
-  captureEspHomeFirmwareDraft(card);
-}
-
-function syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker = false } = {}) {
-  if (!(card instanceof HTMLElement)) {
-    return;
-  }
-  const picker = card.querySelector('select[data-core-field-key="wake_word_trainer_catalog"]');
-  const urlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
-  const nameInput = card.querySelector('input[data-core-field-key="wake_word_name"]');
-  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
-    return;
-  }
-
-  if (fromPicker) {
-    const selectedUrl = String(picker.value || "").trim();
-    if (selectedUrl) {
-      urlInput.value = selectedUrl;
-      if (nameInput instanceof HTMLInputElement && !nameInput.readOnly) {
-        const slug = deriveWakeWordSlugFromUrl(selectedUrl);
-        if (slug) {
-          nameInput.value = slug;
-        }
-      }
-    }
-    captureEspHomeFirmwareDraft(card);
-    return;
-  }
-
-  const currentUrl = String(urlInput.value || "").trim();
-  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
-  if (currentUrl && optionValues.includes(currentUrl)) {
-    picker.value = currentUrl;
-  }
-  captureEspHomeFirmwareDraft(card);
-}
-
-async function loadEspHomeFirmwareTrainerWakeWords(card) {
-  if (!(card instanceof HTMLElement)) {
-    return;
-  }
-  const sourceInput = card.querySelector('select[data-core-field-key="wake_word_source"]');
-  const trainerUrlInput = card.querySelector('input[data-core-field-key="wake_word_trainer_url"]');
-  const picker = card.querySelector('select[data-core-field-key="wake_word_trainer_catalog"]');
-  const modelUrlInput = card.querySelector('input[data-core-field-key="wake_word_model_url"]');
-  const coreKey = String(card.dataset?.coreKey || "esphome").trim() || "esphome";
-  const source = String(sourceInput instanceof HTMLSelectElement ? sourceInput.value || "" : "").trim();
-  const trainerUrl = String(trainerUrlInput instanceof HTMLInputElement ? trainerUrlInput.value || "" : "").trim();
-  if (source !== "trainer" || !trainerUrl || !(picker instanceof HTMLSelectElement)) {
-    return;
-  }
-
-  const previousValue = String(picker.value || modelUrlInput?.value || "").trim();
-  picker.disabled = true;
-  picker.innerHTML = `<option value="">Loading trainer wake words...</option>`;
-  setCoreManagerStatus(card, "Loading trainer wake words...");
-  try {
-    const result = await runCoreManagerAction(card, coreKey, "voice_firmware_trainer_wake_words", {
-      trainer_url: trainerUrl,
-    });
-    const options = Array.isArray(result?.options) ? result.options : [];
-    _coreRenderSelectOptions(picker, options, previousValue);
-    picker.disabled = false;
-    syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker: false });
-    setCoreManagerStatus(card, String(result?.message || "Trainer wake words loaded.").trim());
-  } catch (error) {
-    const message = String(error?.message || "Could not load trainer wake words.");
-    picker.innerHTML = `<option value="">Trainer unavailable</option>`;
-    picker.disabled = false;
-    setCoreManagerStatus(card, `Trainer wake words failed: ${message}`);
-    showToast(`Trainer wake words failed: ${message}`, "error", 4200);
-  }
-}
-
-function syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker = false } = {}) {
-  if (!(card instanceof HTMLElement)) {
-    return;
-  }
-  const picker = card.querySelector('select[data-core-field-key="wake_sound_catalog"]');
-  const urlInput = card.querySelector('input[data-core-field-key="wake_word_triggered_sound_file"]');
-  if (!(picker instanceof HTMLSelectElement) || !(urlInput instanceof HTMLInputElement)) {
-    return;
-  }
-
-  if (fromPicker) {
-    const selectedUrl = String(picker.value || "").trim();
-    if (selectedUrl && selectedUrl !== "__custom__" && selectedUrl !== "__none__") {
-      urlInput.value = selectedUrl;
-    }
-    if (selectedUrl === "__none__") {
-      resetEspHomeWakeSoundPreview("Wake sound disabled.");
-    }
-    captureEspHomeFirmwareDraft(card);
-    return;
-  }
-
-  const currentUrl = String(urlInput.value || "").trim();
-  const optionValues = Array.from(picker.options).map((option) => String(option.value || "").trim());
-  if (String(picker.value || "").trim() === "__none__") {
-    // Keep the user's saved URL around while this firmware target is configured for no wake sound.
-  } else if (currentUrl && optionValues.includes(currentUrl)) {
-    picker.value = currentUrl;
-  } else if (optionValues.includes("__custom__")) {
-    picker.value = "__custom__";
-  }
-  captureEspHomeFirmwareDraft(card);
-}
-
-function getEspHomeWakeSoundPreviewUrl(card) {
-  if (!(card instanceof HTMLElement)) {
-    return "";
-  }
-  const urlInput = card.querySelector('input[data-core-field-key="wake_word_triggered_sound_file"]');
-  const picker = card.querySelector('select[data-core-field-key="wake_sound_catalog"]');
-  const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
-  if (pickerValue === "__none__") {
-    return "";
-  }
-  const urlValue = String(urlInput instanceof HTMLInputElement ? urlInput.value || "" : "").trim();
-  if (urlValue) {
-    return urlValue;
-  }
-  return pickerValue && pickerValue !== "__custom__" ? pickerValue : "";
-}
-
-function resetEspHomeWakeSoundPreview(message = "") {
-  const audio = state.esphomeWakeSoundPreviewAudio;
-  if (audio instanceof HTMLAudioElement) {
-    try {
-      audio.pause();
-      audio.currentTime = 0;
-    } catch (_error) {
-      // Ignore browser playback cleanup failures.
-    }
-  }
-  const button = state.esphomeWakeSoundPreviewButton;
-  if (button instanceof HTMLButtonElement && document.body.contains(button)) {
-    button.disabled = false;
-    button.textContent = "Play Selected Sound";
-    const row = button.closest(".esphome-wake-sound-preview-row");
-    const status = row?.querySelector?.(".esphome-wake-sound-preview-status");
-    if (status instanceof HTMLElement) {
-      status.textContent = String(message || "").trim();
-    }
-  }
-  state.esphomeWakeSoundPreviewAudio = null;
-  state.esphomeWakeSoundPreviewButton = null;
-}
-
-function bindEspHomeWakeSoundPreview(root = document) {
-  root.querySelectorAll(".esphome-wake-sound-preview").forEach((button) => {
-    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeWakeSoundPreviewBound === "1") {
-      return;
-    }
-    button.dataset.esphomeWakeSoundPreviewBound = "1";
-    button.addEventListener("click", async () => {
-      const card = button.closest(".esphome-firmware-card");
-      const row = button.closest(".esphome-wake-sound-preview-row");
-      const status = row?.querySelector?.(".esphome-wake-sound-preview-status");
-      const activeAudio = state.esphomeWakeSoundPreviewAudio;
-      const activeButton = state.esphomeWakeSoundPreviewButton;
-      if (activeAudio instanceof HTMLAudioElement && activeButton === button && !activeAudio.paused) {
-        resetEspHomeWakeSoundPreview("Stopped.");
-        return;
-      }
-
-      const url = getEspHomeWakeSoundPreviewUrl(card);
-      if (!url) {
-        const picker = card?.querySelector?.('select[data-core-field-key="wake_sound_catalog"]');
-        const pickerValue = String(picker instanceof HTMLSelectElement ? picker.value || "" : "").trim();
-        if (pickerValue === "__none__") {
-          if (status instanceof HTMLElement) {
-            status.textContent = "Wake sound disabled for this firmware.";
-          }
-          return;
-        }
-        if (status instanceof HTMLElement) {
-          status.textContent = "Choose a wake sound or enter a URL first.";
-        }
-        showToast("Choose a wake sound or enter a URL first.", "error", 2600);
-        return;
-      }
-
-      resetEspHomeWakeSoundPreview();
-      const audio = new Audio(url);
-      audio.preload = "auto";
-      state.esphomeWakeSoundPreviewAudio = audio;
-      state.esphomeWakeSoundPreviewButton = button;
-      button.disabled = true;
-      button.textContent = "Loading...";
-      if (status instanceof HTMLElement) {
-        status.textContent = "Loading preview...";
-      }
-
-      const finish = (message) => {
-        if (state.esphomeWakeSoundPreviewAudio !== audio) {
-          return;
-        }
-        if (button instanceof HTMLButtonElement && document.body.contains(button)) {
-          button.disabled = false;
-          button.textContent = "Play Selected Sound";
-        }
-        if (status instanceof HTMLElement) {
-          status.textContent = String(message || "").trim();
-        }
-        state.esphomeWakeSoundPreviewAudio = null;
-        state.esphomeWakeSoundPreviewButton = null;
-      };
-
-      audio.addEventListener("ended", () => finish("Finished."));
-      audio.addEventListener("error", () => finish("Could not play this wake sound."));
-
-      try {
-        await audio.play();
-        if (state.esphomeWakeSoundPreviewAudio === audio) {
-          button.disabled = false;
-          button.textContent = "Stop";
-          if (status instanceof HTMLElement) {
-            status.textContent = "Playing...";
-          }
-        }
-      } catch (error) {
-        finish("Playback blocked or unavailable.");
-        showToast(`Wake sound preview failed: ${String(error?.message || "playback unavailable")}`, "error", 3600);
-      }
-    });
-  });
-}
-
 function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
@@ -9736,11 +9321,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
     templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
   const selectedDevice =
     devices.find((row) => String(row?.value || "").trim() === selection.selector) || {};
-  const variant = applyEspHomeFirmwareDraftToVariant(
-    resolveEspHomeFirmwareVariant(body, selection.templateKey, selection.selector),
-    selection.templateKey,
-    selection.selector
-  );
+  const variant = resolveEspHomeFirmwareVariant(body, selection.templateKey, selection.selector);
   const variantAvailable = Boolean(variant && typeof variant === "object");
   const title =
     String(variant?.title || selectedDevice?.title || selection.selector || "Firmware Target").trim() || "Firmware Target";
@@ -9801,11 +9382,11 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
       <div class="form-grid two-col">
         ${renderCoreManagerField({
           key: "template_key",
-          label: "Firmware Template",
+          label: "Firmware Family",
           type: "select",
           value: selection.templateKey,
           options: templates,
-          description: "Matched from the device name/model for connected satellites. Use Browser USB Recovery to pick a firmware family manually.",
+          description: "Matched from the native device board/model for connected satellites. Use Browser USB Recovery to pick a firmware family manually.",
         })}
         ${renderCoreManagerField({
           key: "selector",
@@ -9873,7 +9454,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
           }
           ${subtitle ? `<div class="small core-satellite-subtitle">${escapeHtml(subtitle)}</div>` : ""}
           ${detail ? `<div class="small core-satellite-detail">${escapeHtml(detail)}</div>` : ""}
-          <div class="small">Template: ${escapeHtml(templateLabel)}</div>
+          <div class="small">Family: ${escapeHtml(templateLabel)}</div>
           ${firmwareStatus ? `<div class="small" style="margin-top:6px;">Firmware: ${escapeHtml(firmwareStatus)}</div>` : ""}
         </div>
       </div>
@@ -11985,7 +11566,6 @@ function rerenderEspHomeFirmwarePanel(root = document) {
   state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
   const shell = document.getElementById("settings-esphome-shell");
   const coreKey = String(shell?.dataset?.coreKey || "esphome").trim() || "esphome";
-  resetEspHomeWakeSoundPreview();
   host.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
   bindCoreTabManagers();
 }
@@ -11999,10 +11579,6 @@ function bindEspHomeFirmwareSelectors(root = document) {
     if (![
       "template_key",
       "selector",
-      "wake_word_source",
-      "wake_word_catalog",
-      "wake_word_trainer_catalog",
-      "wake_sound_catalog",
     ].includes(key)) {
       return;
     }
@@ -12012,27 +11588,6 @@ function bindEspHomeFirmwareSelectors(root = document) {
     input.dataset.esphomeFirmwareSelectBound = "1";
     input.addEventListener("change", () => {
       const card = input.closest(".esphome-firmware-card");
-      if (key === "wake_word_source") {
-        captureEspHomeFirmwareDraft(card);
-        void loadEspHomeFirmwareTrainerWakeWords(card);
-        return;
-      }
-      if (key === "wake_word_catalog") {
-        syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: true });
-        return;
-      }
-      if (key === "wake_word_trainer_catalog") {
-        syncEspHomeFirmwareTrainerWakeWordCatalog(card, { fromPicker: true });
-        return;
-      }
-      if (key === "wake_sound_catalog") {
-        syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker: true });
-        return;
-      }
-      captureEspHomeFirmwareDraft(card, {
-        templateKey: String(card?.dataset?.firmwareTemplateKey || "").trim(),
-        selector: String(card?.dataset?.firmwareSelector || "").trim(),
-      });
       const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
       const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
       state.esphomeFirmwareSelection = {
@@ -12042,58 +11597,6 @@ function bindEspHomeFirmwareSelectors(root = document) {
       rerenderEspHomeFirmwarePanel(document);
     });
   });
-
-  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_model_url"]').forEach((input) => {
-    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareWakeWordBound === "1") {
-      return;
-    }
-    input.dataset.esphomeFirmwareWakeWordBound = "1";
-    const sync = () => {
-      const card = input.closest(".esphome-firmware-card");
-      syncEspHomeFirmwareWakeWordCatalog(card, { fromPicker: false });
-    };
-    input.addEventListener("input", sync);
-    input.addEventListener("change", sync);
-    sync();
-  });
-
-  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_trainer_url"]').forEach((input) => {
-    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareTrainerUrlBound === "1") {
-      return;
-    }
-    input.dataset.esphomeFirmwareTrainerUrlBound = "1";
-    input.addEventListener("change", () => {
-      const card = input.closest(".esphome-firmware-card");
-      captureEspHomeFirmwareDraft(card);
-      void loadEspHomeFirmwareTrainerWakeWords(card);
-    });
-  });
-
-  root.querySelectorAll('.esphome-firmware-card select[data-core-field-key="wake_word_source"]').forEach((input) => {
-    if (!(input instanceof HTMLSelectElement) || input.dataset.esphomeFirmwareWakeSourceLoaded === "1") {
-      return;
-    }
-    input.dataset.esphomeFirmwareWakeSourceLoaded = "1";
-    const card = input.closest(".esphome-firmware-card");
-    if (String(input.value || "").trim() === "trainer") {
-      void loadEspHomeFirmwareTrainerWakeWords(card);
-    }
-  });
-
-  root.querySelectorAll('.esphome-firmware-card input[data-core-field-key="wake_word_triggered_sound_file"]').forEach((input) => {
-    if (!(input instanceof HTMLInputElement) || input.dataset.esphomeFirmwareWakeSoundBound === "1") {
-      return;
-    }
-    input.dataset.esphomeFirmwareWakeSoundBound = "1";
-    const sync = () => {
-      const card = input.closest(".esphome-firmware-card");
-      syncEspHomeFirmwareWakeSoundCatalog(card, { fromPicker: false });
-    };
-    input.addEventListener("input", sync);
-    input.addEventListener("change", sync);
-    sync();
-  });
-
 }
 
 function bindEspHomeDisplaySensorControls(root = document) {
@@ -12207,13 +11710,11 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   const deviceLabel =
     String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
   const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltOta || "").trim() === "1";
-  const values = collectCoreManagerValues(card);
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before flashing.", "error", 3200);
     return;
   }
 
-  captureEspHomeFirmwareDraft(card);
   setEspHomeFirmwareCardBusy(card, true);
   setCoreManagerStatus(card, "Opening firmware flash log...");
 
@@ -12434,11 +11935,9 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
           id: selector,
           selector,
           template_key: templateKey,
-          values,
         });
         sessionId = String(result?.session_id || "").trim();
         cursor = Number(result?.cursor || 0);
-        clearEspHomeFirmwareDraft(templateKey, selector);
         renderEntries(Array.isArray(result?.entries) ? result.entries : [], true);
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
@@ -13230,7 +12729,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     return;
   }
 
-  captureEspHomeFirmwareDraft(card);
   setEspHomeFirmwareCardBusy(card, true);
   setCoreManagerStatus(card, "Opening browser USB flash log...");
 
@@ -13383,7 +12881,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         selector,
         template_key: templateKey,
       });
-      clearEspHomeFirmwareDraft(templateKey, selector);
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
       if (String(result?.binary_url || "").trim()) {
         await runBrowserFlash(result);
@@ -13993,12 +13490,6 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
     boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false)
   );
 
-  const currentCard = document.querySelector(".esphome-firmware-card");
-  const currentTemplateKey = String(currentCard?.dataset?.firmwareTemplateKey || "").trim();
-  const currentSelector = String(currentCard?.dataset?.firmwareSelector || "").trim();
-  const currentValues = currentCard instanceof HTMLElement ? collectCoreManagerValues(currentCard) : {};
-  const currentMatches = (row) => row.selector === currentSelector && row.template_key === currentTemplateKey;
-
   let stopped = false;
   let currentSessionId = "";
   let cursor = 0;
@@ -14119,7 +13610,6 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
     index += 1;
     cursor = 0;
     currentSessionId = "";
-    const values = currentMatches(row) ? currentValues : {};
     appendBatchLine(`Starting ${row.title} (${index}/${updates.length})...`, "info");
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = `Starting ${row.title} (${index}/${updates.length})...`;
@@ -14129,7 +13619,6 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRo
         id: row.selector,
         selector: row.selector,
         template_key: row.template_key,
-        values,
         follow_logs: false,
       });
       currentSessionId = String(result?.session_id || "").trim();
@@ -14306,8 +13795,6 @@ function bindEspHomeFirmwareActions(root = document) {
         return;
       }
 
-      const values = collectCoreManagerValues(card);
-      captureEspHomeFirmwareDraft(card);
       setCoreManagerStatus(card, workingText);
       actionButton.disabled = true;
       try {
@@ -14324,12 +13811,8 @@ function bindEspHomeFirmwareActions(root = document) {
               id: selector,
               selector,
               template_key: templateKey,
-              values,
             })
         );
-        if (action !== "voice_firmware_clean") {
-          clearEspHomeFirmwareDraft(templateKey, selector);
-        }
         await reloadEspHomeRuntimePayloadOnly();
         const message = String(result?.message || successText).trim() || successText;
         showToast(message);
@@ -14540,7 +14023,6 @@ function bindCoreTabManagers() {
   bindCoreManagerDependentSelects();
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
-  bindEspHomeWakeSoundPreview();
   bindEspHomeDisplaySensorControls();
   bindEspHomeFirmwareActions();
   bindEspHomeSpeakerIdActions();
@@ -20267,43 +19749,29 @@ async function loadSettingsView() {
   const esphomePipelineFieldsHtml = esphomePipelineFields.length
     ? esphomePipelineFields.map((field) => renderCoreManagerField(field)).join("")
     : esphomeFieldsHtml;
-  const voiceModelUi = settings?.voice_model_ui && typeof settings.voice_model_ui === "object" ? settings.voice_model_ui : {};
-  const voiceModelSections = Array.isArray(voiceModelUi.sections) ? voiceModelUi.sections : [];
-  const openWakeWordTrainer =
-    voiceModelUi.openwakeword_trainer && typeof voiceModelUi.openwakeword_trainer === "object"
-      ? voiceModelUi.openwakeword_trainer
-      : {};
-  const nanoWakeWordTrainer =
-    voiceModelUi.nanowakeword_trainer && typeof voiceModelUi.nanowakeword_trainer === "object"
-      ? voiceModelUi.nanowakeword_trainer
-      : {};
-  const voiceModelSettingKeys = new Set(
-    voiceModelSections
-      .flatMap((section) => (Array.isArray(section?.fields) ? section.fields : []))
-      .map((field) => String(field?.key || "").trim())
-      .filter(Boolean)
-  );
-  const openWakeWordTrainerUrl = String(openWakeWordTrainer.trainer_url || "http://127.0.0.1:8791").trim();
-  const nanoWakeWordTrainerUrl = String(nanoWakeWordTrainer.trainer_url || "http://127.0.0.1:8792").trim();
-  const renderVoiceModelSection = (section) => {
-    const label = String(section?.label || "").trim();
-    const fields = Array.isArray(section?.fields) ? section.fields : [];
+	  const voiceModelUi = settings?.voice_model_ui && typeof settings.voice_model_ui === "object" ? settings.voice_model_ui : {};
+	  const voiceModelSections = Array.isArray(voiceModelUi.sections) ? voiceModelUi.sections : [];
+	  const voiceModelSettingKeys = new Set(
+	    voiceModelSections
+	      .flatMap((section) => (Array.isArray(section?.fields) ? section.fields : []))
+	      .map((field) => String(field?.key || "").trim())
+	      .filter(Boolean)
+	  );
+	  const renderVoiceModelSection = (section) => {
+	    const label = String(section?.label || "").trim();
+	    const fields = Array.isArray(section?.fields) ? section.fields : [];
     if (!fields.length) {
       return "";
     }
     return `
       <div class="hydra-model-panel is-active voice-model-settings-panel">
-        <div class="hydra-model-panel-title">${escapeHtml(label || "Voice Model Settings")}</div>
-        <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-          ${escapeHtml(
-            label === "openWakeWord"
-              ? "Server-side wake model settings used by updated Tater satellite firmware."
-              : label === "NanoWakeWord"
-                ? "Server-side NanoWakeWord model settings used by updated Tater satellite firmware."
-              : label === "Faster Whisper"
-                ? "Local STT decode settings used when STT Backend is Faster Whisper."
-              : label === "Voice Activity Detection"
-                ? "Server-side speech endpoint detection used after wake."
+	        <div class="hydra-model-panel-title">${escapeHtml(label || "Voice Model Settings")}</div>
+	        <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+	          ${escapeHtml(
+	            label === "Faster Whisper"
+	                ? "Local STT decode settings used when STT Backend is Faster Whisper."
+	              : label === "Voice Activity Detection"
+	                ? "Server-side speech endpoint detection used after wake."
                 : "Local model acceleration used by voice identity and emotion models."
           )}
         </div>
@@ -20318,64 +19786,23 @@ async function loadSettingsView() {
           .map((section) => renderVoiceModelSection(section))
           .join("")
       : "";
-  const voiceVadSettingsHtml = voiceModelSectionHtmlByLabel("Voice Activity Detection");
-  const fasterWhisperSettingsHtml = voiceModelSectionHtmlByLabel("Faster Whisper");
-  const speechBrainSettingsHtml = voiceModelSectionHtmlByLabel("SpeechBrain Models");
-  const openWakeWordSettingsHtml = voiceModelSections.length
-    ? voiceModelSections
-        .filter((section) => String(section?.label || "").trim().toLowerCase() === "openwakeword")
-        .map((section) => renderVoiceModelSection(section))
-        .join("")
-    : "";
-  const nanoWakeWordSettingsHtml = voiceModelSectionHtmlByLabel("NanoWakeWord");
-  const openWakeWordTrainerHtml = `
-    <div class="hydra-model-panel is-active voice-model-settings-panel">
-      <div class="hydra-model-panel-title">openWakeWord Trainer</div>
-      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-        Load trained ONNX/TFLite artifacts from the openWakeWord trainer, download one into Tater, and use it as the active remote wake model.
-      </div>
-      <label style="grid-column: 1 / -1;">Trainer URL
-        <input id="set_openwakeword_trainer_url" type="text" value="${escapeHtml(openWakeWordTrainerUrl)}" placeholder="http://127.0.0.1:8791" />
-      </label>
-      <div class="inline-row" style="grid-column: 1 / -1;">
-        <button type="button" id="settings-openwakeword-load-trainer-models" class="inline-btn">Load Trainer Models</button>
-        <span id="settings-openwakeword-trainer-status" class="small"></span>
-      </div>
-      <label style="grid-column: 1 / -1;">Trained Model
-        <select id="settings-openwakeword-trainer-model">
-          <option value="">Load trainer models</option>
-        </select>
-      </label>
-      <div class="inline-row" style="grid-column: 1 / -1;">
-        <button type="button" id="settings-openwakeword-download-trainer-model" class="inline-btn">Download and Use Model</button>
-        <span class="small">The saved path is written into the openWakeWord Model field above.</span>
-      </div>
-    </div>
-  `;
-  const nanoWakeWordTrainerHtml = `
-    <div class="hydra-model-panel is-active voice-model-settings-panel">
-      <div class="hydra-model-panel-title">NanoWakeWord Trainer</div>
-      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-        Load trained ONNX/PyTorch artifacts from a NanoWakeWord trainer, download one into Tater, and use it as the active remote NanoWakeWord model.
-      </div>
-      <label style="grid-column: 1 / -1;">Trainer URL
-        <input id="set_nanowakeword_trainer_url" type="text" value="${escapeHtml(nanoWakeWordTrainerUrl)}" placeholder="http://127.0.0.1:8792" />
-      </label>
-      <div class="inline-row" style="grid-column: 1 / -1;">
-        <button type="button" id="settings-nanowakeword-load-trainer-models" class="inline-btn">Load Trainer Models</button>
-        <span id="settings-nanowakeword-trainer-status" class="small"></span>
-      </div>
-      <label style="grid-column: 1 / -1;">Trained Model
-        <select id="settings-nanowakeword-trainer-model">
-          <option value="">Load trainer models</option>
-        </select>
-      </label>
-      <div class="inline-row" style="grid-column: 1 / -1;">
-        <button type="button" id="settings-nanowakeword-download-trainer-model" class="inline-btn">Download and Use Model</button>
-        <span class="small">The saved path is written into the NanoWakeWord Model field above.</span>
-      </div>
-    </div>
-  `;
+	  const voiceVadSettingsHtml = voiceModelSectionHtmlByLabel("Voice Activity Detection");
+	  const fasterWhisperSettingsHtml = voiceModelSectionHtmlByLabel("Faster Whisper");
+	  const speechBrainSettingsHtml = voiceModelSectionHtmlByLabel("SpeechBrain Models");
+	  const nativeMicroWakeWordHtml = `
+	    <div class="hydra-model-panel is-active voice-model-settings-panel">
+	      <div class="hydra-model-panel-title">Tater Native microWakeWord</div>
+	      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+	        Wake detection runs on each Tater Native satellite with local int8 microWakeWord models. Choose built-in, trainer, or custom JSON wake words from each satellite's settings popup.
+	      </div>
+	      <div class="inline-row" style="grid-column: 1 / -1;">
+	        <button type="button" class="inline-btn" data-settings-tab-target="esphome">Open Satellites</button>
+	        <a class="inline-btn" href="https://github.com/TaterTotterson/Tater-Wake-Words" target="_blank" rel="noreferrer">Wake Word Catalog</a>
+	        <a class="inline-btn" href="https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon" target="_blank" rel="noreferrer">macOS Trainer</a>
+	        <a class="inline-btn" href="https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker" target="_blank" rel="noreferrer">NVIDIA Trainer</a>
+	      </div>
+	    </div>
+	  `;
   const esphomeRunning = boolFromAny(esphomeUi.running, false);
 
   root.innerHTML = `${consumeNoticeHtml()}
@@ -21015,13 +20442,10 @@ async function loadSettingsView() {
               </div>
               </div>
 
-              <div class="settings-subpanel" data-models-panel="wake">
-              ${voiceVadSettingsHtml}
-              ${openWakeWordTrainerHtml}
-              ${openWakeWordSettingsHtml}
-              ${nanoWakeWordSettingsHtml}
-              ${nanoWakeWordTrainerHtml}
-              </div>
+	              <div class="settings-subpanel" data-models-panel="wake">
+	              ${nativeMicroWakeWordHtml}
+	              ${voiceVadSettingsHtml}
+	              </div>
 
               <div class="settings-subpanel" data-models-panel="speech">
               <div class="hydra-model-panel is-active">
@@ -22247,10 +21671,13 @@ async function loadSettingsView() {
     }
   };
 
-  tabButtons.forEach((button) => {
-    button.addEventListener("click", () => activateTab(button.dataset.settingsTab));
-  });
-  activateTab(initialSettingsTab);
+	  tabButtons.forEach((button) => {
+	    button.addEventListener("click", () => activateTab(button.dataset.settingsTab));
+	  });
+	  root.querySelectorAll("[data-settings-tab-target]").forEach((button) => {
+	    button.addEventListener("click", () => activateTab(button.dataset.settingsTabTarget));
+	  });
+	  activateTab(initialSettingsTab);
   bindSettingsPeopleActions();
   bindSpudLinkRevokeActions(root);
 
@@ -26059,266 +25486,14 @@ async function loadSettingsView() {
   setSpeechTtsDownloadEnabled(false);
   applySpeechSettingsVisibility();
 
-  const openWakeWordTrainerUrlEl = document.getElementById("set_openwakeword_trainer_url");
-  const openWakeWordTrainerModelEl = document.getElementById("settings-openwakeword-trainer-model");
-  const openWakeWordTrainerStatusEl = document.getElementById("settings-openwakeword-trainer-status");
-  const openWakeWordLoadTrainerBtnEl = document.getElementById("settings-openwakeword-load-trainer-models");
-  const openWakeWordDownloadTrainerBtnEl = document.getElementById("settings-openwakeword-download-trainer-model");
-  const nanoWakeWordTrainerUrlEl = document.getElementById("set_nanowakeword_trainer_url");
-  const nanoWakeWordTrainerModelEl = document.getElementById("settings-nanowakeword-trainer-model");
-  const nanoWakeWordTrainerStatusEl = document.getElementById("settings-nanowakeword-trainer-status");
-  const nanoWakeWordLoadTrainerBtnEl = document.getElementById("settings-nanowakeword-load-trainer-models");
-  const nanoWakeWordDownloadTrainerBtnEl = document.getElementById("settings-nanowakeword-download-trainer-model");
-  const getOpenWakeWordCoreField = (key) => document.querySelector(`[data-core-field-key="${key}"]`);
-  const collectVoiceModelSettings = () => {
-    const values = collectCoreManagerValues(document.getElementById("settings-hydra-model-stack"));
-    return Object.fromEntries(
-      Object.entries(values).filter(([key]) => voiceModelSettingKeys.has(String(key || "").trim()))
-    );
-  };
-  const getOpenWakeWordRuntimeValue = () =>
-    String(getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK")?.value || "onnx").trim() || "onnx";
-  const upsertOpenWakeWordModelOption = (rawOption) => {
-    const select = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
-    if (!(select instanceof HTMLSelectElement)) {
-      return false;
-    }
-    const option = rawOption && typeof rawOption === "object" ? rawOption : {};
-    const value = String(option.value || option.model_source || option.path || "").trim();
-    if (!value) {
-      return false;
-    }
-    const label = String(option.label || option.name || value).trim() || value;
-    const framework = String(option.framework || "").trim();
-    let row = Array.from(select.options || []).find((item) => String(item.value || "") === value);
-    if (!row) {
-      row = new Option(label, value);
-      select.appendChild(row);
-    } else {
-      row.textContent = label;
-    }
-    if (framework) {
-      row.dataset.framework = framework;
-    }
-    select.value = value;
-    return true;
-  };
-  const upsertNanoWakeWordModelOption = (rawOption) => {
-    const select = getOpenWakeWordCoreField("VOICE_NANOWAKEWORD_MODEL_SOURCE");
-    if (!(select instanceof HTMLSelectElement)) {
-      return false;
-    }
-    const option = rawOption && typeof rawOption === "object" ? rawOption : {};
-    const value = String(option.value || option.model_source || option.path || "").trim();
-    if (!value) {
-      return false;
-    }
-    const label = String(option.label || option.name || value).trim() || value;
-    let row = Array.from(select.options || []).find((item) => String(item.value || "") === value);
-    if (!row) {
-      row = new Option(label, value);
-      select.appendChild(row);
-    } else {
-      row.textContent = label;
-    }
-    select.value = value;
-    return true;
-  };
-  const syncOpenWakeWordFrameworkFromModel = () => {
-    const modelSelect = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
-    const frameworkEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK");
-    if (!(modelSelect instanceof HTMLSelectElement) || !(frameworkEl instanceof HTMLSelectElement)) {
-      return;
-    }
-    const selected = modelSelect.selectedOptions?.[0] || null;
-    const framework = String(selected?.dataset?.framework || "").trim();
-    if (["onnx", "tflite"].includes(framework)) {
-      frameworkEl.value = framework;
-    }
-  };
-  const setOpenWakeWordTrainerStatus = (message) => {
-    if (openWakeWordTrainerStatusEl) {
-      openWakeWordTrainerStatusEl.textContent = String(message || "");
-    }
-  };
-  const renderOpenWakeWordTrainerOptions = (items) => {
-    if (!openWakeWordTrainerModelEl) {
-      return;
-    }
-    const rows = Array.isArray(items) ? items : [];
-    if (!rows.length) {
-      openWakeWordTrainerModelEl.innerHTML = `<option value="">No ONNX/TFLite models found</option>`;
-      return;
-    }
-    openWakeWordTrainerModelEl.innerHTML = rows
-      .map((item) => {
-        const value = String(item?.value || item?.url || "").trim();
-        const label = String(item?.label || item?.name || value).trim() || value;
-        const framework = String(item?.framework || "").trim();
-        return `<option value="${escapeHtml(value)}" data-framework="${escapeHtml(framework)}">${escapeHtml(label)}</option>`;
-      })
-      .join("");
-  };
-  const loadOpenWakeWordTrainerModels = async () => {
-    if (!openWakeWordTrainerUrlEl || !openWakeWordLoadTrainerBtnEl) {
-      return;
-    }
-    openWakeWordLoadTrainerBtnEl.disabled = true;
-    setOpenWakeWordTrainerStatus("Loading trainer models...");
-    try {
-      const result = await api("/api/settings/openwakeword/trainer-models", {
-        method: "POST",
-        body: JSON.stringify({
-          trainer_url: String(openWakeWordTrainerUrlEl.value || "").trim(),
-          framework: getOpenWakeWordRuntimeValue(),
-        }),
-      });
-      renderOpenWakeWordTrainerOptions(result?.items || []);
-      const count = Number(result?.count || 0);
-      setOpenWakeWordTrainerStatus(count ? `Loaded ${count} trained model${count === 1 ? "" : "s"}.` : "No matching trained models found.");
-    } catch (error) {
-      setOpenWakeWordTrainerStatus(`Trainer load failed: ${error.message}`);
-      showToast(`openWakeWord trainer load failed: ${error.message}`, "error", 3600);
-    } finally {
-      openWakeWordLoadTrainerBtnEl.disabled = false;
-    }
-  };
-  const downloadOpenWakeWordTrainerModel = async () => {
-    if (!openWakeWordTrainerUrlEl || !openWakeWordTrainerModelEl || !openWakeWordDownloadTrainerBtnEl) {
-      return;
-    }
-    const artifactUrl = String(openWakeWordTrainerModelEl.value || "").trim();
-    if (!artifactUrl) {
-      setOpenWakeWordTrainerStatus("Choose a trained model first.");
-      return;
-    }
-    const selected = openWakeWordTrainerModelEl.selectedOptions?.[0] || null;
-    const selectedFramework = String(selected?.dataset?.framework || getOpenWakeWordRuntimeValue()).trim();
-    openWakeWordDownloadTrainerBtnEl.disabled = true;
-    setOpenWakeWordTrainerStatus("Downloading trained model into Tater...");
-    try {
-      const result = await api("/api/settings/openwakeword/download-trainer-model", {
-        method: "POST",
-        body: JSON.stringify({
-          trainer_url: String(openWakeWordTrainerUrlEl.value || "").trim(),
-          artifact_url: artifactUrl,
-          framework: selectedFramework,
-        }),
-      });
-      const modelSourceEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE");
-      const frameworkEl = getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK");
-      const modelOption = result?.option && typeof result.option === "object"
-        ? result.option
-        : {
-            value: result?.model_source || result?.path || "",
-            label: result?.name || result?.model_source || result?.path || "",
-            framework: result?.framework || "",
-          };
-      if (!upsertOpenWakeWordModelOption(modelOption) && modelSourceEl) {
-        modelSourceEl.value = result?.model_source || result?.path || "";
-      }
-      if (frameworkEl && result?.framework) {
-        frameworkEl.value = result.framework;
-      }
-      setOpenWakeWordTrainerStatus(`Saved ${result?.name || "trained model"} for openWakeWord.`);
-      showToast("openWakeWord trainer model downloaded and selected.");
-    } catch (error) {
-      setOpenWakeWordTrainerStatus(`Download failed: ${error.message}`);
-      showToast(`openWakeWord model download failed: ${error.message}`, "error", 3600);
-    } finally {
-      openWakeWordDownloadTrainerBtnEl.disabled = false;
-    }
-  };
-  const setNanoWakeWordTrainerStatus = (message) => {
-    if (nanoWakeWordTrainerStatusEl) {
-      nanoWakeWordTrainerStatusEl.textContent = String(message || "");
-    }
-  };
-  const renderNanoWakeWordTrainerOptions = (items) => {
-    if (!nanoWakeWordTrainerModelEl) {
-      return;
-    }
-    const rows = Array.isArray(items) ? items : [];
-    if (!rows.length) {
-      nanoWakeWordTrainerModelEl.innerHTML = `<option value="">No ONNX/PyTorch models found</option>`;
-      return;
-    }
-    nanoWakeWordTrainerModelEl.innerHTML = rows
-      .map((item) => {
-        const value = String(item?.value || item?.url || "").trim();
-        const label = String(item?.label || item?.name || value).trim() || value;
-        return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
-      })
-      .join("");
-  };
-  const loadNanoWakeWordTrainerModels = async () => {
-    if (!nanoWakeWordTrainerUrlEl || !nanoWakeWordLoadTrainerBtnEl) {
-      return;
-    }
-    nanoWakeWordLoadTrainerBtnEl.disabled = true;
-    setNanoWakeWordTrainerStatus("Loading trainer models...");
-    try {
-      const result = await api("/api/settings/nanowakeword/trainer-models", {
-        method: "POST",
-        body: JSON.stringify({
-          trainer_url: String(nanoWakeWordTrainerUrlEl.value || "").trim(),
-        }),
-      });
-      renderNanoWakeWordTrainerOptions(result?.items || []);
-      const count = Number(result?.count || 0);
-      setNanoWakeWordTrainerStatus(count ? `Loaded ${count} trained model${count === 1 ? "" : "s"}.` : "No matching trained models found.");
-    } catch (error) {
-      setNanoWakeWordTrainerStatus(`Trainer load failed: ${error.message}`);
-      showToast(`NanoWakeWord trainer load failed: ${error.message}`, "error", 3600);
-    } finally {
-      nanoWakeWordLoadTrainerBtnEl.disabled = false;
-    }
-  };
-  const downloadNanoWakeWordTrainerModel = async () => {
-    if (!nanoWakeWordTrainerUrlEl || !nanoWakeWordTrainerModelEl || !nanoWakeWordDownloadTrainerBtnEl) {
-      return;
-    }
-    const artifactUrl = String(nanoWakeWordTrainerModelEl.value || "").trim();
-    if (!artifactUrl) {
-      setNanoWakeWordTrainerStatus("Choose a trained model first.");
-      return;
-    }
-    nanoWakeWordDownloadTrainerBtnEl.disabled = true;
-    setNanoWakeWordTrainerStatus("Downloading trained model into Tater...");
-    try {
-      const result = await api("/api/settings/nanowakeword/download-trainer-model", {
-        method: "POST",
-        body: JSON.stringify({
-          trainer_url: String(nanoWakeWordTrainerUrlEl.value || "").trim(),
-          artifact_url: artifactUrl,
-        }),
-      });
-      const modelSourceEl = getOpenWakeWordCoreField("VOICE_NANOWAKEWORD_MODEL_SOURCE");
-      const modelOption = result?.option && typeof result.option === "object"
-        ? result.option
-        : {
-            value: result?.model_source || result?.path || "",
-            label: result?.name || result?.model_source || result?.path || "",
-          };
-      if (!upsertNanoWakeWordModelOption(modelOption) && modelSourceEl) {
-        modelSourceEl.value = result?.model_source || result?.path || "";
-      }
-      setNanoWakeWordTrainerStatus(`Saved ${result?.name || "trained model"} for NanoWakeWord.`);
-      showToast("NanoWakeWord trainer model downloaded and selected.");
-    } catch (error) {
-      setNanoWakeWordTrainerStatus(`Download failed: ${error.message}`);
-      showToast(`NanoWakeWord model download failed: ${error.message}`, "error", 3600);
-    } finally {
-      nanoWakeWordDownloadTrainerBtnEl.disabled = false;
-    }
-  };
-  openWakeWordLoadTrainerBtnEl?.addEventListener("click", loadOpenWakeWordTrainerModels);
-  openWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadOpenWakeWordTrainerModel);
-  nanoWakeWordLoadTrainerBtnEl?.addEventListener("click", loadNanoWakeWordTrainerModels);
-  nanoWakeWordDownloadTrainerBtnEl?.addEventListener("click", downloadNanoWakeWordTrainerModel);
-  getOpenWakeWordCoreField("VOICE_OPENWAKEWORD_MODEL_SOURCE")?.addEventListener("change", syncOpenWakeWordFrameworkFromModel);
+	  const collectVoiceModelSettings = () => {
+	    const values = collectCoreManagerValues(document.getElementById("settings-hydra-model-stack"));
+	    return Object.fromEntries(
+	      Object.entries(values).filter(([key]) => voiceModelSettingKeys.has(String(key || "").trim()))
+	    );
+	  };
 
-  const localLoadTargetForModel = (provider, model) => {
+	  const localLoadTargetForModel = (provider, model) => {
     const normalizedProvider = normalizeHydraBaseProvider(provider);
     const modelId = String(model || "").trim();
     if (!isHydraLocalProvider(normalizedProvider) || !modelId) {

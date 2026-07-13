@@ -10,16 +10,12 @@ import os
 import re
 import shutil
 import socket
-import subprocess
-import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib import parse as urllib_parse, request as urllib_request
-
-import yaml
 
 from helpers import redis_client
 from tater_paths import agent_lab_path
@@ -28,26 +24,12 @@ from . import display_bus
 from . import runtime as esphome_runtime
 from . import ui_helpers as esphome_ui_helpers
 
-FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 FIRMWARE_AGENT_LABS_ROOT = agent_lab_path("esphome")
-FIRMWARE_CONFIG_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_configs"
-FIRMWARE_BUILD_ROOT = FIRMWARE_AGENT_LABS_ROOT / "firmware_builds"
 FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_AGENT_LABS_ROOT / "web_flash"
 FIRMWARE_PREBUILT_ROOT = FIRMWARE_AGENT_LABS_ROOT / "prebuilt_firmware"
-FIRMWARE_RUNNER_ROOT = FIRMWARE_AGENT_LABS_ROOT / "runner"
-FIRMWARE_PLATFORMIO_ROOT = FIRMWARE_AGENT_LABS_ROOT / "platformio"
-FIRMWARE_HOME_ROOT = FIRMWARE_AGENT_LABS_ROOT / "home"
-FIRMWARE_CACHE_ROOT = FIRMWARE_AGENT_LABS_ROOT / "cache"
-FIRMWARE_BUILD_TIMEOUT_SECONDS = 60 * 60
-_CLI_STATUS_CACHE_TTL_SECONDS = 30.0
-_CLI_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "status": {}}
-_CLI_STATUS_LOCK = threading.Lock()
 _REMOTE_TEMPLATE_FETCH_TIMEOUT_SECONDS = 3.0
-_REMOTE_TEMPLATE_CACHE_TTL_SECONDS = 60.0
-_REMOTE_TEMPLATE_CACHE: Dict[str, Dict[str, Any]] = {}
-_REMOTE_TEMPLATE_LOCK = threading.Lock()
 _REMOTE_JSON_CACHE_TTL_SECONDS = 15 * 60.0
 _REMOTE_JSON_CACHE: Dict[str, Dict[str, Any]] = {}
 _REMOTE_JSON_LOCK = threading.Lock()
@@ -61,17 +43,7 @@ _FIRMWARE_USB_RECOVERY_SELECTOR = "__usb_recovery__"
 _FIRMWARE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _FIRMWARE_SESSION_LOCK = threading.Lock()
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
-_WAKE_WORD_GITHUB_OWNER = "TaterTotterson"
-_WAKE_WORD_GITHUB_REPO = "microWakeWords"
-_WAKE_WORD_GITHUB_REF = "main"
-_WAKE_WORD_MANIFEST_URLS: tuple[str, ...] = (
-    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_word_manifest.json",
-    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-word-manifest.json",
-)
-_WAKE_SOUND_MANIFEST_URLS: tuple[str, ...] = (
-    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake_sound_manifest.json",
-    f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/wake-sound-manifest.json",
-)
+_WAKE_WORD_REQUESTS_URL = "https://github.com/TaterTotterson/Tater-Wake-Words"
 _NATIVE_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
 _NATIVE_FIRMWARE_GITHUB_REPO = "Tater-Native-Firmware"
 _NATIVE_FIRMWARE_GITHUB_REF = "main"
@@ -130,14 +102,6 @@ _PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
 _PREBUILT_OTA_PORT = 3232
 _PREBUILT_OTA_BLOCK_SIZE = 8192
 _PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
-_WAKE_WORD_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
-    {"key": "microWakeWords", "label": "microWakeWords"},
-    {"key": "microWakeWordsV2", "label": "microWakeWordsV2"},
-    {"key": "microWakeWordsV3", "label": "microWakeWordsV3"},
-)
-_WAKE_SOUND_SOURCE_SPECS: tuple[Dict[str, str], ...] = (
-    {"key": "wakeSounds", "label": "wakeSounds"},
-)
 
 _S3BOX_SENSOR_FIELD_LABELS: Dict[str, str] = {
     "sensor_temp_out": "Outdoor Temperature",
@@ -187,33 +151,11 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
     "temperature",
     "wind",
 }
-_WAKE_SOUND_AUDIO_EXTS = {".flac", ".mp3", ".ogg", ".wav"}
-_WAKE_WORD_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
-_WAKE_WORD_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
-_WAKE_WORD_CATALOG_LOCK = threading.Lock()
-_TRAINER_WAKE_WORD_CATALOG_CACHE_TTL_SECONDS = 30.0
-_TRAINER_WAKE_WORD_CATALOG_CACHE: Dict[str, Dict[str, Any]] = {}
-_TRAINER_WAKE_WORD_CATALOG_LOCK = threading.Lock()
-_WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS = 10 * 60.0
-_WAKE_SOUND_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "payload": {}}
-_WAKE_SOUND_CATALOG_LOCK = threading.Lock()
-_WAKE_SOUND_DISABLED_PICKER_VALUE = "__none__"
-_WAKE_SOUND_ENABLED_PROFILE_KEY = "wake_sound_enabled"
-_WAKE_SOUND_DEFAULT_ENABLED = False
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "voicepe",
         "label": "VoicePE",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/voicePE-TaterTimer.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "voicePE-TaterTimer.yaml"),
-            ("VoicePE-ESPHome", "voicePE-TaterTimer.yaml"),
-        ],
-        "fixed_keys": {"device_name"},
-        "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "voicepe",
             "voice-pe",
@@ -225,15 +167,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "satellite1",
         "label": "Satellite1",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/satellite1-TaterTimer.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "satellite1-TaterTimer.yaml"),
-            ("Satellite1-ESPHome", "satellite1-TaterTimer.yaml"),
-        ],
-        "fixed_keys": {"node_name"},
-        "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "satellite1",
             "sat 1",
@@ -247,14 +180,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "respeaker_lite",
         "label": "ReSpeaker Lite",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/respeakerLite-TaterTimer.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "respeakerLite-TaterTimer.yaml"),
-        ],
-        "fixed_keys": {"device_name"},
-        "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "respeaker lite",
             "respeaker_lite",
@@ -267,14 +192,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "koala",
         "label": "Koala Satellite",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/koala-TaterTimer.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "koala-TaterTimer.yaml"),
-        ],
-        "fixed_keys": {"device_name"},
-        "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "koala",
             "koala satellite",
@@ -286,14 +203,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "respeaker_xvf3800",
         "label": "ReSpeaker XVF3800",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/respeakerXVF3800-TaterTimer.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "respeakerXVF3800-TaterTimer.yaml"),
-        ],
-        "fixed_keys": {"device_name"},
-        "auto_keys": {"ha_voice_ip"},
         "match_tokens": {
             "respeaker xvf3800",
             "respeaker_xvf3800",
@@ -307,15 +216,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
     {
         "key": "s3box_display",
         "label": "Tater ESP32-S3-BOX-3 Display",
-        "source_urls": [
-            "https://github.com/TaterTotterson/microWakeWords/raw/refs/heads/main/esp32-s3-box-3.yaml",
-        ],
-        "candidates": [
-            ("microWakeWords", "esp32-s3-box-3.yaml"),
-            ("Tater-S3Box-Display", "esp32-s3-box-3.yaml"),
-        ],
-        "fixed_keys": {"device_name"},
-        "auto_keys": {"device_ip"},
         "match_tokens": {
             "s3box",
             "s3_box",
@@ -339,55 +239,6 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
         },
     },
 )
-
-
-class _FirmwareYamlLoader(yaml.SafeLoader):
-    pass
-
-
-class _FirmwareYamlDumper(yaml.SafeDumper):
-    pass
-
-
-class _TaggedYamlValue:
-    __slots__ = ("tag", "value")
-
-    def __init__(self, tag: str, value: Any) -> None:
-        self.tag = _text(tag)
-        self.value = value
-
-
-def _construct_secret(loader: yaml.SafeLoader, node: yaml.Node) -> Dict[str, str]:
-    return {"__secret__": loader.construct_scalar(node)}
-
-
-_FirmwareYamlLoader.add_constructor("!secret", _construct_secret)
-
-
-def _construct_tagged_yaml(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Node) -> _TaggedYamlValue:
-    tag = f"!{tag_suffix}"
-    if isinstance(node, yaml.ScalarNode):
-        value = loader.construct_scalar(node)
-    elif isinstance(node, yaml.SequenceNode):
-        value = loader.construct_sequence(node, deep=True)
-    elif isinstance(node, yaml.MappingNode):
-        value = loader.construct_mapping(node, deep=True)
-    else:
-        value = loader.construct_object(node, deep=True)
-    return _TaggedYamlValue(tag, value)
-
-
-def _represent_tagged_yaml(dumper: yaml.SafeDumper, value: _TaggedYamlValue) -> yaml.Node:
-    payload = value.value
-    if isinstance(payload, dict):
-        return dumper.represent_mapping(value.tag, payload)
-    if isinstance(payload, list):
-        return dumper.represent_sequence(value.tag, payload)
-    return dumper.represent_scalar(value.tag, "" if payload is None else str(payload))
-
-
-_FirmwareYamlLoader.add_multi_constructor("!", _construct_tagged_yaml)
-_FirmwareYamlDumper.add_representer(_TaggedYamlValue, _represent_tagged_yaml)
 
 
 def _text(value: Any) -> str:
@@ -775,26 +626,10 @@ def _clean_terminal_text(value: Any) -> str:
 def _ensure_agent_labs_dirs() -> None:
     for path in (
         FIRMWARE_AGENT_LABS_ROOT,
-        FIRMWARE_CONFIG_ROOT,
-        FIRMWARE_BUILD_ROOT,
         FIRMWARE_WEB_FLASH_ROOT,
         FIRMWARE_PREBUILT_ROOT,
-        FIRMWARE_RUNNER_ROOT,
-        FIRMWARE_PLATFORMIO_ROOT,
-        FIRMWARE_HOME_ROOT,
-        FIRMWARE_CACHE_ROOT,
     ):
         path.mkdir(parents=True, exist_ok=True)
-
-
-def _runner_env_overrides() -> Dict[str, str]:
-    _ensure_agent_labs_dirs()
-    return {
-        "HOME": str(FIRMWARE_HOME_ROOT),
-        "XDG_CACHE_HOME": str(FIRMWARE_CACHE_ROOT),
-        "PLATFORMIO_CORE_DIR": str(FIRMWARE_PLATFORMIO_ROOT),
-        "PLATFORMIO_CACHE_DIR": str(FIRMWARE_PLATFORMIO_ROOT / "cache"),
-    }
 
 
 def _active_flash_session_summaries() -> List[str]:
@@ -815,8 +650,16 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
         more = "" if len(active) <= 3 else f" and {len(active) - 3} more"
         raise RuntimeError(f"Stop the active firmware session(s) first: {joined}{more}.")
 
+    legacy_paths = (
+        FIRMWARE_AGENT_LABS_ROOT / "firmware_configs",
+        FIRMWARE_AGENT_LABS_ROOT / "firmware_builds",
+        FIRMWARE_AGENT_LABS_ROOT / "runner",
+        FIRMWARE_AGENT_LABS_ROOT / "platformio",
+        FIRMWARE_AGENT_LABS_ROOT / "home",
+        FIRMWARE_AGENT_LABS_ROOT / "cache",
+    )
     removed: List[str] = []
-    for path in (FIRMWARE_CONFIG_ROOT, FIRMWARE_BUILD_ROOT, FIRMWARE_RUNNER_ROOT, FIRMWARE_WEB_FLASH_ROOT, FIRMWARE_PREBUILT_ROOT):
+    for path in (FIRMWARE_WEB_FLASH_ROOT, FIRMWARE_PREBUILT_ROOT, *legacy_paths):
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
             removed.append(path.name)
@@ -830,22 +673,6 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
             + "."
         ),
     }
-
-
-def _template_default_string(raw_value: Any) -> str:
-    if isinstance(raw_value, dict) and raw_value.get("__secret__"):
-        return ""
-    if isinstance(raw_value, bool):
-        return "true" if raw_value else "false"
-    if raw_value is None:
-        return ""
-    return _text(raw_value)
-
-
-def _secret_name(raw_value: Any) -> str:
-    if isinstance(raw_value, dict):
-        return _text(raw_value.get("__secret__"))
-    return ""
 
 
 def _semver_tuple(value: Any) -> tuple[int, int, int]:
@@ -869,42 +696,6 @@ def _known_firmware_version(value: Any) -> str:
     if _lower(token) in {"unknown", "unavailable", "none", "null"}:
         return ""
     return token
-
-
-def _resolve_template_refs(value: Any, substitutions: Dict[str, Any]) -> str:
-    token = _template_default_string(value)
-    if not token:
-        return ""
-    for _idx in range(4):
-        previous = token
-        for key, raw_value in (substitutions or {}).items():
-            key_token = _text(key)
-            if key_token:
-                token = token.replace("${" + key_token + "}", _template_default_string(raw_value))
-        if token == previous:
-            break
-    return _text(token)
-
-
-def _template_firmware_metadata(template_doc: Dict[str, Any], substitutions: Dict[str, Any]) -> Dict[str, str]:
-    esphome_block = template_doc.get("esphome") if isinstance(template_doc.get("esphome"), dict) else {}
-    project_block = esphome_block.get("project") if isinstance(esphome_block.get("project"), dict) else {}
-    version = ""
-    for candidate in (
-        substitutions.get("firmware_version"),
-        project_block.get("version"),
-        substitutions.get("esp32_fw_version"),
-        substitutions.get("version"),
-    ):
-        resolved = _resolve_template_refs(candidate, substitutions)
-        if resolved:
-            version = resolved
-            break
-    project_name = _resolve_template_refs(project_block.get("name"), substitutions)
-    return {
-        "version": version,
-        "project_name": project_name,
-    }
 
 
 def _installed_version_key(selector: Any, template_key: Any) -> str:
@@ -1353,727 +1144,6 @@ def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str
     }
 
 
-def _wake_word_label_from_slug(slug: str) -> str:
-    token = _text(slug).strip()
-    if not token:
-        return "Wake Word"
-    parts = [part for part in re.split(r"[_\-\s]+", token) if part]
-    if not parts:
-        return token
-    return " ".join(part.capitalize() for part in parts)
-
-
-def _wake_word_source_version_tag(source_key: Any) -> str:
-    token = _lower(source_key)
-    if token == "microwakewordsv2":
-        return "V2"
-    if token == "microwakewordsv3":
-        return "V3"
-    if token == "microwakewords":
-        return "V1"
-    return ""
-
-
-def _wake_word_source_display_label(source_key: Any, source_label: Any = "") -> str:
-    tag = _wake_word_source_version_tag(source_key)
-    label = _text(source_label).strip() or _text(source_key).strip() or "Wake Words"
-    if not tag:
-        return label
-    return f"{tag} - {label}"
-
-
-def _wake_word_option_label(label: Any, slug: Any, source_key: Any) -> str:
-    base = _text(label).strip() or _text(slug).strip() or "Wake Word"
-    tag = _wake_word_source_version_tag(source_key)
-    if not tag:
-        return base
-    return f"{base} [{tag}]"
-
-
-def _wake_word_slug_from_url(url: str) -> str:
-    token = _text(url).strip()
-    if not token:
-        return ""
-    name = Path(token.split("?", 1)[0]).name
-    if name.lower().endswith(".json"):
-        name = name[:-5]
-    return _sanitize_token(name).lower()
-
-
-def _wake_word_source_value(value: Any) -> str:
-    token = _lower(value)
-    if token in {"prebuilt", "trainer", "custom"}:
-        return token
-    return ""
-
-
-def _wake_word_source_from_profile(profile: Dict[str, Any], wake_word_catalog: Dict[str, Any]) -> str:
-    explicit = _wake_word_source_value(profile.get("wake_word_source"))
-    if explicit:
-        return explicit
-
-    current_url = _text(profile.get("wake_word_model_url"))
-    if not current_url:
-        return "prebuilt"
-    if "/api/trained_wake_words/" in current_url:
-        return "trainer"
-
-    entries = wake_word_catalog.get("entries") if isinstance(wake_word_catalog.get("entries"), list) else []
-    prebuilt_urls = {_text(row.get("url")) for row in entries if isinstance(row, dict)}
-    if current_url in prebuilt_urls or f"/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/" in current_url:
-        return "prebuilt"
-    return "custom"
-
-
-def _trainer_base_url_from_model_url(value: Any) -> str:
-    token = _text(value)
-    if not token or "/api/trained_wake_words/" not in token:
-        return ""
-    try:
-        parsed = urllib_parse.urlparse(token)
-    except Exception:
-        return ""
-    if not parsed.scheme or not parsed.netloc:
-        return ""
-    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-
-
-def _wake_word_trainer_url_from_profile(profile: Dict[str, Any]) -> str:
-    explicit = _normalize_http_base_url(profile.get("wake_word_trainer_url"))
-    if explicit:
-        return explicit
-    return _trainer_base_url_from_model_url(profile.get("wake_word_model_url"))
-
-
-def _trainer_catalog_url(trainer_base_url: Any) -> str:
-    base = _normalize_http_base_url(trainer_base_url)
-    if not base:
-        return ""
-    if base.lower().endswith("/api/trained_wake_words/catalog"):
-        return base
-    return f"{base}/api/trained_wake_words/catalog"
-
-
-def _trainer_absolute_url(trainer_base_url: str, value: Any) -> str:
-    token = _text(value)
-    if not token:
-        return ""
-    parsed = urllib_parse.urlparse(token)
-    if parsed.scheme and parsed.netloc:
-        return token
-    base = _normalize_http_base_url(trainer_base_url)
-    if not base:
-        return token
-    if token.startswith("/"):
-        return f"{base}{token}"
-    return f"{base}/{token}"
-
-
-def _wake_sound_slug_from_url(url: str) -> str:
-    token = _text(url).strip()
-    if not token:
-        return ""
-    name = Path(token.split("?", 1)[0]).name
-    suffix = Path(name).suffix
-    if suffix:
-        name = name[: -len(suffix)]
-    return _sanitize_token(name).lower()
-
-
-def _wake_sound_label_from_slug(slug: str) -> str:
-    token = _text(slug).strip()
-    if not token:
-        return "Wake Sound"
-    parts = [part for part in re.split(r"[_\-\.\s]+", token) if part]
-    if not parts:
-        return token
-    rendered: List[str] = []
-    for part in parts:
-        if len(part) <= 3 and part.isascii():
-            rendered.append(part.upper())
-        else:
-            rendered.append(part.capitalize())
-    return " ".join(rendered)
-
-
-def _wake_word_raw_url(path: str) -> str:
-    clean = _text(path).strip().lstrip("/")
-    if not clean:
-        return ""
-    quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
-    return f"https://raw.githubusercontent.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/{_WAKE_WORD_GITHUB_REF}/{quoted}"
-
-
-def _wake_word_contents_api_url(path: str) -> str:
-    clean = _text(path).strip().lstrip("/")
-    quoted = urllib_parse.quote(clean, safe="/")
-    return (
-        f"https://api.github.com/repos/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}/contents/{quoted}"
-        f"?ref={urllib_parse.quote(_WAKE_WORD_GITHUB_REF)}"
-    )
-
-
-def _wake_word_entry(
-    *,
-    source_key: str,
-    source_label: str,
-    slug: str,
-    url: str,
-    label: str = "",
-    path: str = "",
-) -> Optional[Dict[str, str]]:
-    slug_token = _text(slug).strip()
-    url_token = _text(url).strip()
-    if not slug_token or not url_token:
-        return None
-    return {
-        "id": f"{_text(source_key)}:{slug_token}",
-        "slug": slug_token,
-        "label": _text(label).strip() or _wake_word_label_from_slug(slug_token),
-        "url": url_token,
-        "path": _text(path).strip(),
-        "source_key": _text(source_key).strip(),
-        "source_label": _text(source_label).strip() or _text(source_key).strip(),
-    }
-
-
-def _wake_sound_entry(
-    *,
-    source_key: str,
-    source_label: str,
-    slug: str,
-    url: str,
-    label: str = "",
-    path: str = "",
-) -> Optional[Dict[str, str]]:
-    slug_token = _text(slug).strip()
-    url_token = _text(url).strip()
-    if not slug_token or not url_token:
-        return None
-    return {
-        "id": f"{_text(source_key)}:{slug_token}",
-        "slug": slug_token,
-        "label": _text(label).strip() or _wake_sound_label_from_slug(slug_token),
-        "url": url_token,
-        "path": _text(path).strip(),
-        "source_key": _text(source_key).strip(),
-        "source_label": _text(source_label).strip() or _text(source_key).strip(),
-    }
-
-
-def _wake_word_entries_from_manifest(payload: Any) -> List[Dict[str, str]]:
-    rows: List[Any] = []
-    if isinstance(payload, list):
-        rows = list(payload)
-    elif isinstance(payload, dict):
-        for key in ("entries", "wake_words", "words", "models", "items"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                rows = list(candidate)
-                break
-        if not rows:
-            for source_key, candidate in payload.items():
-                if isinstance(candidate, list):
-                    for item in candidate:
-                        if isinstance(item, dict):
-                            enriched = dict(item)
-                            enriched.setdefault("source", source_key)
-                            rows.append(enriched)
-
-    entries: List[Dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        source_key = _text(row.get("source") or row.get("folder") or row.get("group"))
-        source_spec = next((spec for spec in _WAKE_WORD_SOURCE_SPECS if _lower(spec.get("key")) == _lower(source_key)), None)
-        source_key = _text((source_spec or {}).get("key")) or source_key or "custom"
-        source_label = _text((source_spec or {}).get("label")) or source_key or "Custom"
-        url = (
-            _text(row.get("url"))
-            or _text(row.get("json_url"))
-            or _text(row.get("download_url"))
-            or _text(row.get("model_url"))
-            or _text(row.get("wake_word_model_url"))
-        )
-        path = _text(row.get("path"))
-        if not url and path:
-            url = _wake_word_raw_url(path)
-        slug = _text(row.get("slug") or row.get("name") or row.get("key")) or _wake_word_slug_from_url(url)
-        entry = _wake_word_entry(
-            source_key=source_key,
-            source_label=source_label,
-            slug=slug,
-            url=url,
-            label=_text(row.get("label") or row.get("title")),
-            path=path,
-        )
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
-
-
-def _wake_sound_entries_from_manifest(payload: Any) -> List[Dict[str, str]]:
-    rows: List[Any] = []
-    if isinstance(payload, list):
-        rows = list(payload)
-    elif isinstance(payload, dict):
-        for key in ("entries", "wake_sounds", "sounds", "audio", "items"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                rows = list(candidate)
-                break
-        if not rows:
-            for source_key, candidate in payload.items():
-                if isinstance(candidate, list):
-                    for item in candidate:
-                        if isinstance(item, dict):
-                            enriched = dict(item)
-                            enriched.setdefault("source", source_key)
-                            rows.append(enriched)
-
-    entries: List[Dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        source_key = _text(row.get("source") or row.get("folder") or row.get("group")) or "wakeSounds"
-        source_spec = next((spec for spec in _WAKE_SOUND_SOURCE_SPECS if _lower(spec.get("key")) == _lower(source_key)), None)
-        source_key = _text((source_spec or {}).get("key")) or source_key
-        source_label = _text((source_spec or {}).get("label")) or source_key
-        url = (
-            _text(row.get("url"))
-            or _text(row.get("audio_url"))
-            or _text(row.get("sound_url"))
-            or _text(row.get("download_url"))
-            or _text(row.get("wake_sound_url"))
-            or _text(row.get("wake_word_triggered_sound_file"))
-        )
-        path = _text(row.get("path"))
-        if not url and path:
-            url = _wake_word_raw_url(path)
-        slug = _text(row.get("slug") or row.get("name") or row.get("key")) or _wake_sound_slug_from_url(url)
-        entry = _wake_sound_entry(
-            source_key=source_key,
-            source_label=source_label,
-            slug=slug,
-            url=url,
-            label=_text(row.get("label") or row.get("title")),
-            path=path,
-        )
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
-
-
-def _wake_word_entries_from_source_folder(source_spec: Dict[str, str], *, force_refresh: bool = False) -> List[Dict[str, str]]:
-    path = _text(source_spec.get("key"))
-    if not path:
-        return []
-    try:
-        payload = _remote_json(_wake_word_contents_api_url(path), force_refresh=force_refresh)
-    except RuntimeError as exc:
-        if "HTTP 404" in _text(exc):
-            return []
-        raise
-
-    rows = payload if isinstance(payload, list) else payload.get("entries")
-    if not isinstance(rows, list):
-        return []
-
-    entries: List[Dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if _lower(row.get("type")) != "file":
-            continue
-        name = _text(row.get("name")).strip()
-        if not name.lower().endswith(".json"):
-            continue
-        slug = name[:-5]
-        entry = _wake_word_entry(
-            source_key=path,
-            source_label=_text(source_spec.get("label")) or path,
-            slug=slug,
-            url=_wake_word_raw_url(f"{path}/{name}"),
-            path=f"{path}/{name}",
-        )
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
-
-
-def _wake_sound_entries_from_source_folder(source_spec: Dict[str, str], *, force_refresh: bool = False) -> List[Dict[str, str]]:
-    path = _text(source_spec.get("key"))
-    if not path:
-        return []
-    try:
-        payload = _remote_json(_wake_word_contents_api_url(path), force_refresh=force_refresh)
-    except RuntimeError as exc:
-        if "HTTP 404" in _text(exc):
-            return []
-        raise
-
-    rows = payload if isinstance(payload, list) else payload.get("entries")
-    if not isinstance(rows, list):
-        return []
-
-    entries: List[Dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if _lower(row.get("type")) != "file":
-            continue
-        name = _text(row.get("name")).strip()
-        if Path(name).suffix.lower() not in _WAKE_SOUND_AUDIO_EXTS:
-            continue
-        slug = _wake_sound_slug_from_url(name)
-        entry = _wake_sound_entry(
-            source_key=path,
-            source_label=_text(source_spec.get("label")) or path,
-            slug=slug,
-            url=_wake_word_raw_url(f"{path}/{name}"),
-            path=f"{path}/{name}",
-        )
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
-
-
-def _sorted_wake_word_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    source_order = {_text(spec.get("key")): index for index, spec in enumerate(_WAKE_WORD_SOURCE_SPECS)}
-    unique: Dict[str, Dict[str, str]] = {}
-    for row in entries:
-        if not isinstance(row, dict):
-            continue
-        url = _text(row.get("url"))
-        if not url:
-            continue
-        unique[url] = dict(row)
-    return sorted(
-        unique.values(),
-        key=lambda row: (
-            source_order.get(_text(row.get("source_key")), 999),
-            _lower(row.get("label")),
-            _lower(row.get("slug")),
-        ),
-    )
-
-
-def _sorted_wake_sound_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    source_order = {_text(spec.get("key")): index for index, spec in enumerate(_WAKE_SOUND_SOURCE_SPECS)}
-    unique: Dict[str, Dict[str, str]] = {}
-    for row in entries:
-        if not isinstance(row, dict):
-            continue
-        url = _text(row.get("url"))
-        if not url:
-            continue
-        unique[url] = dict(row)
-    return sorted(
-        unique.values(),
-        key=lambda row: (
-            source_order.get(_text(row.get("source_key")), 999),
-            _lower(row.get("label")),
-            _lower(row.get("slug")),
-        ),
-    )
-
-
-def _load_wake_word_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    if not force_refresh:
-        with _WAKE_WORD_CATALOG_LOCK:
-            cached_ts = float(_WAKE_WORD_CATALOG_CACHE.get("ts") or 0.0)
-            cached_payload = _WAKE_WORD_CATALOG_CACHE.get("payload")
-            if isinstance(cached_payload, dict) and (now - cached_ts) < _WAKE_WORD_CATALOG_CACHE_TTL_SECONDS:
-                return copy.deepcopy(cached_payload)
-
-    warnings: List[str] = []
-
-    for manifest_url in _WAKE_WORD_MANIFEST_URLS:
-        try:
-            manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
-            entries = _sorted_wake_word_entries(_wake_word_entries_from_manifest(manifest_payload))
-            if entries:
-                payload = {
-                    "entries": entries,
-                    "source_kind": "manifest",
-                    "source_label": manifest_url,
-                    "warning": "",
-                }
-                with _WAKE_WORD_CATALOG_LOCK:
-                    _WAKE_WORD_CATALOG_CACHE["ts"] = now
-                    _WAKE_WORD_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
-                return payload
-        except RuntimeError as exc:
-            if "HTTP 404" not in _text(exc):
-                warnings.append(_text(exc))
-
-    entries: List[Dict[str, str]] = []
-    for source_spec in _WAKE_WORD_SOURCE_SPECS:
-        try:
-            entries.extend(_wake_word_entries_from_source_folder(source_spec, force_refresh=force_refresh))
-        except RuntimeError as exc:
-            warnings.append(_text(exc))
-
-    payload = {
-        "entries": _sorted_wake_word_entries(entries),
-        "source_kind": "repo_contents",
-        "source_label": _text(_WAKE_WORD_GITHUB_REPO),
-        "warning": _text(warnings[0] if warnings else ""),
-    }
-    with _WAKE_WORD_CATALOG_LOCK:
-        _WAKE_WORD_CATALOG_CACHE["ts"] = now
-        _WAKE_WORD_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
-    return payload
-
-
-def _trainer_wake_word_entries_from_payload(payload: Any, trainer_base_url: str) -> List[Dict[str, str]]:
-    rows: List[Any] = []
-    if isinstance(payload, list):
-        rows = list(payload)
-    elif isinstance(payload, dict):
-        for key in ("wake_words", "entries", "models", "items", "words"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                rows = list(candidate)
-                break
-
-    entries: List[Dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        url = (
-            _text(row.get("json_url"))
-            or _text(row.get("url"))
-            or _text(row.get("wake_word_model_url"))
-            or _text(row.get("download_url"))
-            or _text(row.get("model_json_url"))
-            or _text(row.get("model_url"))
-        )
-        url = _trainer_absolute_url(trainer_base_url, url)
-        slug = (
-            _text(row.get("wake_word_name"))
-            or _text(row.get("slug"))
-            or _text(row.get("key"))
-            or _wake_word_slug_from_url(url)
-        )
-        label = _text(row.get("label") or row.get("wake_word") or row.get("title"))
-        entry = _wake_word_entry(
-            source_key="trainer",
-            source_label="Trainer",
-            slug=slug,
-            url=url,
-            label=label,
-            path=_text(row.get("json_file") or row.get("path")),
-        )
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return sorted(entries, key=lambda row: (_lower(row.get("label")), _text(row.get("url"))))
-
-
-def _load_trainer_wake_word_catalog(
-    trainer_base_url: Any,
-    *,
-    force_refresh: bool = False,
-    strict: bool = False,
-) -> Dict[str, Any]:
-    base = _normalize_http_base_url(trainer_base_url)
-    catalog_url = _trainer_catalog_url(base)
-    if not catalog_url:
-        if strict:
-            raise RuntimeError("Trainer URL is required.")
-        return {"entries": [], "source_kind": "trainer", "source_label": "", "warning": "Enter a trainer URL."}
-
-    now = time.time()
-    if not force_refresh:
-        with _TRAINER_WAKE_WORD_CATALOG_LOCK:
-            cached = _TRAINER_WAKE_WORD_CATALOG_CACHE.get(catalog_url)
-            cached_ts = float(cached.get("ts") or 0.0) if isinstance(cached, dict) else 0.0
-            if isinstance(cached, dict) and (now - cached_ts) < _TRAINER_WAKE_WORD_CATALOG_CACHE_TTL_SECONDS:
-                return copy.deepcopy(cached.get("payload") or {})
-
-    try:
-        payload = _remote_json(catalog_url, force_refresh=True)
-        catalog = {
-            "entries": _trainer_wake_word_entries_from_payload(payload, base),
-            "source_kind": "trainer",
-            "source_label": base,
-            "warning": "",
-        }
-    except RuntimeError as exc:
-        if strict:
-            raise
-        catalog = {
-            "entries": [],
-            "source_kind": "trainer",
-            "source_label": base,
-            "warning": _text(exc),
-        }
-
-    with _TRAINER_WAKE_WORD_CATALOG_LOCK:
-        _TRAINER_WAKE_WORD_CATALOG_CACHE[catalog_url] = {"ts": now, "payload": copy.deepcopy(catalog)}
-    return catalog
-
-
-def _load_wake_sound_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    if not force_refresh:
-        with _WAKE_SOUND_CATALOG_LOCK:
-            cached_ts = float(_WAKE_SOUND_CATALOG_CACHE.get("ts") or 0.0)
-            cached_payload = _WAKE_SOUND_CATALOG_CACHE.get("payload")
-            if isinstance(cached_payload, dict) and (now - cached_ts) < _WAKE_SOUND_CATALOG_CACHE_TTL_SECONDS:
-                return copy.deepcopy(cached_payload)
-
-    warnings: List[str] = []
-
-    for manifest_url in _WAKE_SOUND_MANIFEST_URLS:
-        try:
-            manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
-            entries = _sorted_wake_sound_entries(_wake_sound_entries_from_manifest(manifest_payload))
-            if entries:
-                payload = {
-                    "entries": entries,
-                    "source_kind": "manifest",
-                    "source_label": manifest_url,
-                    "warning": "",
-                }
-                with _WAKE_SOUND_CATALOG_LOCK:
-                    _WAKE_SOUND_CATALOG_CACHE["ts"] = now
-                    _WAKE_SOUND_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
-                return payload
-        except RuntimeError as exc:
-            if "HTTP 404" not in _text(exc):
-                warnings.append(_text(exc))
-
-    entries: List[Dict[str, str]] = []
-    for source_spec in _WAKE_SOUND_SOURCE_SPECS:
-        try:
-            entries.extend(_wake_sound_entries_from_source_folder(source_spec, force_refresh=force_refresh))
-        except RuntimeError as exc:
-            warnings.append(_text(exc))
-
-    payload = {
-        "entries": _sorted_wake_sound_entries(entries),
-        "source_kind": "repo_contents",
-        "source_label": _text(_WAKE_WORD_GITHUB_REPO),
-        "warning": _text(warnings[0] if warnings else ""),
-    }
-    with _WAKE_SOUND_CATALOG_LOCK:
-        _WAKE_SOUND_CATALOG_CACHE["ts"] = now
-        _WAKE_SOUND_CATALOG_CACHE["payload"] = copy.deepcopy(payload)
-    return payload
-
-
-def _wake_word_picker_options(
-    catalog: Dict[str, Any],
-    *,
-    include_custom: bool = True,
-    blank_label: str = "Custom URL",
-) -> List[Dict[str, Any]]:
-    entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
-    rows: List[Dict[str, str]] = []
-    for row in entries:
-        if not isinstance(row, dict):
-            continue
-        source_key = _text(row.get("source_key"))
-        url = _text(row.get("url"))
-        if not url:
-            continue
-        rows.append(
-            {
-                "value": url,
-                "label": _wake_word_option_label(row.get("label"), row.get("slug"), source_key),
-            }
-        )
-    rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
-    if include_custom:
-        return [{"value": "__custom__", "label": blank_label or "Custom URL"}, *rows]
-    return [{"value": "", "label": blank_label or "Choose wake word"}, *rows]
-
-
-def _trainer_wake_word_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
-    entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
-    options = _wake_word_picker_options(catalog, include_custom=False, blank_label="Choose trained wake word")
-    if len(options) > 1:
-        return options
-    warning = _text(catalog.get("warning"))
-    label = "Trainer unavailable" if warning else "No trained wake words found"
-    return [{"value": "", "label": label}]
-
-
-def _wake_sound_picker_options(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
-    entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
-    rows: List[Dict[str, str]] = []
-    for row in entries:
-        if not isinstance(row, dict):
-            continue
-        url = _text(row.get("url"))
-        if not url:
-            continue
-        rows.append(
-            {
-                "value": url,
-                "label": _text(row.get("label")) or _wake_sound_label_from_slug(_text(row.get("slug"))),
-            }
-        )
-    rows.sort(key=lambda option: (_lower(option.get("label")), _text(option.get("value"))))
-    return [
-        {"value": _WAKE_SOUND_DISABLED_PICKER_VALUE, "label": "No wake sound"},
-        {"value": "__custom__", "label": "Custom URL"},
-        *rows,
-    ]
-
-
-def _extract_substitution_sections(raw_text: str) -> Dict[str, str]:
-    section_map: Dict[str, str] = {}
-    in_substitutions = False
-    current_section = "Firmware"
-
-    for line in raw_text.splitlines():
-        if not in_substitutions:
-            if re.match(r"^\s*substitutions:\s*$", line):
-                in_substitutions = True
-            continue
-
-        if line and not line.startswith((" ", "\t")):
-            break
-
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            comment = stripped[1:].strip()
-            if not comment or set(comment) <= {"-"}:
-                continue
-            if len(comment) <= 40 and re.search(r"[A-Za-z]", comment):
-                current_section = comment.title() if comment.isupper() else comment
-            continue
-
-        match = re.match(r"^([A-Za-z0-9_]+)\s*:", stripped)
-        if match:
-            section_map[match.group(1)] = current_section
-
-    return section_map
-
-
-def _resolve_template_source(spec: Dict[str, Any], *, force_remote_refresh: bool = False) -> Optional[Dict[str, Any]]:
-    last_error = ""
-    for url in list(spec.get("source_urls") or []):
-        try:
-            return {
-                "repo_root": None,
-                "template_path": None,
-                "raw_text": _remote_template_text(_text(url), force_refresh=force_remote_refresh),
-                "source_kind": "remote",
-                "source_label": _text(url),
-            }
-        except Exception as exc:
-            last_error = _text(exc) or f"Failed to load template from {_text(url)}."
-    if last_error:
-        raise RuntimeError(last_error)
-    return None
-
-
 def _template_spec_by_key(template_key: str) -> Optional[Dict[str, Any]]:
     token = _lower(template_key)
     for spec in _TEMPLATE_SPECS:
@@ -2197,81 +1267,7 @@ def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) ->
     return client_row
 
 
-def _load_template_context(spec: Dict[str, Any], *, force_remote_refresh: bool = False) -> Dict[str, Any]:
-    resolved = _resolve_template_source(spec, force_remote_refresh=force_remote_refresh)
-    if not isinstance(resolved, dict):
-        raise RuntimeError(f"Firmware template for {spec.get('label') or spec.get('key')} is unavailable.")
-
-    template_path = Path(resolved["template_path"]) if resolved.get("template_path") else None
-    raw_text = _text(resolved.get("raw_text"))
-    if not raw_text:
-        if not isinstance(template_path, Path):
-            raise RuntimeError(f"Firmware template for {spec.get('label') or spec.get('key')} is unavailable.")
-        raw_text = template_path.read_text(encoding="utf-8")
-    parsed = yaml.load(raw_text, Loader=_FirmwareYamlLoader)
-    if not isinstance(parsed, dict):
-        template_name = template_path.name if isinstance(template_path, Path) else _text(resolved.get("source_label")) or "template"
-        raise RuntimeError(f"Firmware template {template_name} did not parse into a YAML mapping.")
-
-    substitutions = parsed.get("substitutions") if isinstance(parsed.get("substitutions"), dict) else {}
-    sections = _extract_substitution_sections(raw_text)
-    firmware_meta = _template_firmware_metadata(parsed, substitutions)
-    return {
-        "spec": dict(spec),
-        "repo_root": Path(resolved["repo_root"]) if resolved.get("repo_root") else None,
-        "template_path": template_path,
-        "template_doc": parsed,
-        "substitutions": dict(substitutions),
-        "firmware_version": _text(firmware_meta.get("version")),
-        "firmware_project": _text(firmware_meta.get("project_name")),
-        "sections": sections,
-        "source_kind": _text(resolved.get("source_kind")),
-        "source_label": _text(resolved.get("source_label")),
-    }
-
-
-def _profile_storage_key(template_key: str, selector: str = "") -> str:
-    token = _lower(template_key)
-    if not token:
-        return ""
-    selector_token = _lower(selector)
-    if selector_token:
-        return f"template:{token}:target:{selector_token}"
-    return f"template:{token}"
-
-
-def _profile_load(template_key: str, selector: str = "") -> Dict[str, str]:
-    tokens = [_profile_storage_key(template_key, selector), _profile_storage_key(template_key)]
-    legacy_selector = _text(selector)
-    if legacy_selector:
-        tokens.append(legacy_selector)
-
-    seen_tokens: set[str] = set()
-    for token in [item for item in tokens if _text(item)]:
-        if token in seen_tokens:
-            continue
-        seen_tokens.add(token)
-        with contextlib.suppress(Exception):
-            raw = redis_client.hget(FIRMWARE_PROFILE_HASH_KEY, token)
-            if raw:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    return {str(key): _text(value) for key, value in parsed.items() if _text(key)}
-    return {}
-
-
-def _profile_save(template_key: str, selector: str, values: Dict[str, Any]) -> None:
-    token = _profile_storage_key(template_key, selector)
-    if not token:
-        return
-    clean = {str(key): _text(value) for key, value in (values or {}).items() if _text(key)}
-    redis_client.hset(FIRMWARE_PROFILE_HASH_KEY, token, json.dumps(clean, ensure_ascii=False))
-    _display_profile_save(template_key, selector, clean)
-
-
-def _display_profile_save(template_key: str, selector: str, values: Dict[str, str]) -> None:
-    if _lower(template_key) != "s3box_display":
-        return
+def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
     raw_target = _text(values.get("display_target")) or _text(values.get("selector")) or _text(values.get("device_name"))
     target = _display_target_key(raw_target)
     if not target:
@@ -2289,7 +1285,6 @@ def _display_profile_save(template_key: str, selector: str, values: Dict[str, st
         "target_label": target_label,
         "template": "s3box_display",
         "selector": _text(selector),
-        "profile_key": _profile_storage_key(template_key, selector),
         "updated_at": time.time(),
         "slots": slots,
     }
@@ -2362,14 +1357,7 @@ def _display_sensor_slots_from_context(context: Dict[str, Any], saved_profile: D
     saved_slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
     if saved_slots:
         return {alias: _text(saved_slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS}
-
-    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
-    fields_meta = context.get("fields_meta") if isinstance(context.get("fields_meta"), dict) else {}
-    slots: Dict[str, str] = {}
-    for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
-        meta = fields_meta.get(profile_key) if isinstance(fields_meta.get(profile_key), dict) else {}
-        slots[alias] = _text(profile.get(profile_key)) or _text(meta.get("resolved_value"))
-    return slots
+    return {alias: "" for alias in _S3BOX_DISPLAY_SLOT_KEYS}
 
 
 def _display_sensor_profile_from_context(
@@ -2380,9 +1368,7 @@ def _display_sensor_profile_from_context(
 ) -> Optional[Dict[str, Any]]:
     if _lower(context.get("template_key")) != "s3box_display":
         return None
-    fields_meta = context.get("fields_meta") if isinstance(context.get("fields_meta"), dict) else {}
-    display_meta = fields_meta.get("display_target") if isinstance(fields_meta.get("display_target"), dict) else {}
-    raw_target = _text(display_meta.get("resolved_value")) or _text(selector)
+    raw_target = _text(context.get("display_target")) or _text(selector)
     target = _display_target_key(raw_target)
     if not target:
         return None
@@ -2585,7 +1571,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("selector is required")
 
     slot_source = body.get("slots") if isinstance(body.get("slots"), dict) else {}
-    values = _profile_load("s3box_display", selector)
+    values: Dict[str, str] = {}
     values["display_target"] = target
     target_label = _text(body.get("target_label")) if "target_label" in body else ""
     if target_label and _display_target_key(target_label) == target and target_label != target:
@@ -2606,7 +1592,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
             values[profile_key] = _text(body.get(profile_key))
         else:
             values.setdefault(profile_key, "")
-    _profile_save("s3box_display", selector, values)
+    _display_profile_save(selector, values)
 
     display_url = _normalize_http_base_url(body.get("display_url")) or _tater_display_base_url_for_selector(selector)
     display_url_result = _apply_s3box_display_url(selector, display_url) if display_url else {"applied": False, "reason": "missing_url"}
@@ -2726,14 +1712,6 @@ def _matched_template_key(selector: str, client_row: Dict[str, Any]) -> str:
     return _text(matched.get("key")) if isinstance(matched, dict) else ""
 
 
-def _checkbox_like_key(key: str, raw_value: Any) -> bool:
-    token = _lower(key)
-    if token in {"hidden_ssid"}:
-        return True
-    raw_text = _lower(_template_default_string(raw_value))
-    return raw_text in {"true", "false"}
-
-
 def _build_device_context(
     selector: str,
     client_row: Dict[str, Any],
@@ -2756,33 +1734,11 @@ def _build_device_context(
     template_key = _text(template_spec.get("key"))
     selector_token = _text(selector)
     native_firmware = selector_token.startswith("native:") or _text(client_row.get("source")) in {"tater_native", "native_satellite"}
+    if not native_firmware and not usb_recovery:
+        return None
+
     prebuilt_firmware = _prebuilt_firmware_info(template_key, force_refresh=force_remote_refresh)
-    if native_firmware:
-        prebuilt_device = prebuilt_firmware.get("device") if isinstance(prebuilt_firmware.get("device"), dict) else {}
-        template_ctx = {
-            "substitutions": {},
-            "sections": {},
-            "firmware_version": _text(prebuilt_device.get("firmware_version")) or _text(prebuilt_firmware.get("version")),
-            "firmware_project": _text(prebuilt_device.get("project")) or "tater.native_satellite",
-            "template_doc": {"esp32": {"flash_size": _text(prebuilt_device.get("flash_size")) or "16MB"}},
-            "source_kind": "native",
-            "source_label": _text(prebuilt_firmware.get("manifest_url")),
-        }
-    else:
-        try:
-            template_ctx = _load_template_context(template_spec, force_remote_refresh=force_remote_refresh)
-        except Exception:
-            if not bool(prebuilt_firmware.get("available")):
-                raise
-            template_ctx = {
-                "substitutions": {},
-                "sections": {},
-                "firmware_version": "",
-                "firmware_project": "",
-                "template_doc": {},
-            }
-    substitutions = template_ctx["substitutions"]
-    field_order = [key for key in substitutions.keys() if _text(key)]
+    prebuilt_device = prebuilt_firmware.get("device") if isinstance(prebuilt_firmware.get("device"), dict) else {}
 
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
     display_base_url = _tater_display_base_url_for_peer(host)
@@ -2790,9 +1746,9 @@ def _build_device_context(
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
-        else _text(template_ctx.get("firmware_version"))
+        else _text(prebuilt_device.get("firmware_version"))
     )
-    firmware_project = _text(template_ctx.get("firmware_project"))
+    firmware_project = _text(prebuilt_device.get("project")) or "tater.native_satellite"
     matched_template_key = _matched_template_key(selector_token, client_row)
     update_if_missing_installed = bool(
         connected
@@ -2807,19 +1763,6 @@ def _build_device_context(
         latest_firmware_version,
         update_if_missing_installed=update_if_missing_installed,
     )
-    profile = _profile_load(template_key, selector_token)
-    fixed_keys = set(template_spec.get("fixed_keys") or set())
-    auto_keys = set(template_spec.get("auto_keys") or set())
-    wake_word_catalog = _load_wake_word_catalog()
-    wake_word_source = _wake_word_source_from_profile(profile, wake_word_catalog)
-    wake_word_trainer_url = _wake_word_trainer_url_from_profile(profile)
-    trainer_wake_word_catalog = (
-        _load_trainer_wake_word_catalog(wake_word_trainer_url)
-        if wake_word_source == "trainer" and wake_word_trainer_url
-        else {"entries": [], "source_kind": "trainer", "source_label": wake_word_trainer_url, "warning": ""}
-    )
-    wake_sound_catalog = _load_wake_sound_catalog()
-
     if usb_recovery:
         display_name = f"{_text(template_spec.get('label')) or 'Firmware'} Browser USB Recovery"
     else:
@@ -2830,344 +1773,10 @@ def _build_device_context(
             or selector_token
         )
 
-    sections_ui: List[Dict[str, Any]] = []
-    fields_meta: Dict[str, Dict[str, Any]] = {}
-    section_lookup: Dict[str, List[Dict[str, Any]]] = {}
-
-    for key in field_order:
-        raw_value = substitutions.get(key)
-        template_default = _template_default_string(raw_value)
-        secret_hint = _secret_name(raw_value)
-        saved_value = _text(profile.get(key))
-        version_key = key in {"firmware_version", "esp32_fw_version"}
-        section_title = _text(template_ctx["sections"].get(key)) or "Firmware"
-        if key in {
-            "wake_engine",
-            "wake_word_name",
-            "wake_word_model_url",
-            "wake_model_stop_url",
-            "openwakeword_server_url",
-            "nanowakeword_server_url",
-            "openwakeword_http_timeout_ms",
-            "openwakeword_max_failures",
-        } or key.startswith("wake_cutoff_"):
-            section_title = "Wake Word"
-        if key == "wake_word_triggered_sound_file":
-            section_title = "Wake Sound"
-        if section_title not in section_lookup:
-            fields: List[Dict[str, Any]] = []
-            section_lookup[section_title] = fields
-            sections_ui.append({"title": section_title, "fields": fields})
-        fields = section_lookup[section_title]
-
-        resolved_value = saved_value or template_default
-        if version_key:
-            resolved_value = template_default
-        if key == "friendly_name":
-            resolved_value = saved_value or _text(device_info.get("friendly_name")) or display_name or template_default
-        if key == "tater_first_name":
-            resolved_value = saved_value or _current_tater_first_name() or template_default
-        if key == "tater_base_url":
-            resolved_value = _normalize_http_base_url(resolved_value)
-        if key == "openwakeword_server_url":
-            resolved_value = _normalize_http_base_url(resolved_value, default_scheme="ws")
-        if key == "nanowakeword_server_url":
-            resolved_value = _normalize_http_base_url(resolved_value, default_scheme="ws")
-        if key in auto_keys and host:
-            resolved_value = host
-        if key in fixed_keys:
-            resolved_value = template_default or resolved_value
-
-        field_type = "checkbox" if _checkbox_like_key(key, raw_value) else "text"
-        field_value: Any = resolved_value
-        field_options: Optional[List[Dict[str, Any]]] = None
-        field_disabled = False
-        field_min: Optional[Any] = None
-        field_max: Optional[Any] = None
-        field_step: Optional[Any] = None
-        description_parts: List[str] = []
-        placeholder = ""
-        read_only = key in fixed_keys or key in auto_keys or version_key
-
-        if field_type == "checkbox":
-            field_value = _as_bool(resolved_value, _as_bool(template_default, False))
-        elif key == "wifi_password":
-            field_type = "password"
-            field_value = ""
-            placeholder = "Leave blank to keep saved Wi-Fi password" if saved_value else "Enter Wi-Fi password"
-            if saved_value:
-                description_parts.append("Leave blank to keep the saved Wi-Fi password in Tater.")
-            else:
-                description_parts.append("Required before build or flash.")
-        elif key == "wifi_ssid" and secret_hint:
-            placeholder = secret_hint
-            if not saved_value:
-                description_parts.append("Required before build or flash.")
-        elif key == "wake_word_name":
-            placeholder = placeholder or "hey_tater"
-            description_parts.append("Auto-filled when you choose a prebuilt or trainer wake word, but you can still edit it.")
-        elif key == "wake_engine":
-            field_type = "select"
-            engine_value = _lower(resolved_value) or "microwakeword"
-            if engine_value not in {"microwakeword", "openwakeword", "nanowakeword"}:
-                engine_value = "microwakeword"
-            field_value = engine_value
-            field_options = [
-                {"value": "microwakeword", "label": "microWakeWord (device)"},
-                {"value": "openwakeword", "label": "openWakeWord (remote URL)"},
-                {"value": "nanowakeword", "label": "NanoWakeWord (remote URL)"},
-            ]
-            description_parts.append("Choose whether the satellite listens locally or streams wake-word audio to a configured remote wake URL.")
-        elif key == "openwakeword_server_url":
-            placeholder = placeholder or "ws://tater.local:8501"
-            description_parts.append("Base openWakeWord URL for the streaming detector. http:// and https:// values are accepted, but firmware converts them to ws:// or wss:// and streams audio only. If this endpoint fails, the device falls back to microWakeWord.")
-        elif key == "nanowakeword_server_url":
-            placeholder = placeholder or "ws://tater.local:8501"
-            description_parts.append("Base NanoWakeWord URL for the streaming detector. http:// and https:// values are accepted, but firmware converts them to ws:// or wss:// and streams audio only. If this endpoint fails, the device falls back to microWakeWord.")
-        elif key == "openwakeword_http_timeout_ms":
-            field_type = "number"
-            label = "Remote Wake Transport Timeout"
-            field_value = _as_int(resolved_value, 3000, minimum=250, maximum=10000)
-            field_min = 250
-            field_max = 10000
-            field_step = 50
-            description_parts.append("Remote openWakeWord transport timeout before the device counts a failed request.")
-        elif key == "openwakeword_max_failures":
-            field_type = "number"
-            label = "Remote Wake Max Failures"
-            field_value = _as_int(resolved_value, 3, minimum=1, maximum=20)
-            field_min = 1
-            field_max = 20
-            field_step = 1
-            description_parts.append("Consecutive remote openWakeWord request failures before the device falls back to microWakeWord.")
-        elif key == "wake_word_model_url":
-            description_parts.append("Used when microWakeWord Model Source is Custom URL.")
-        elif key == "wake_word_triggered_sound_file":
-            description_parts.append("Pick a prebuilt wake sound above or paste any custom audio URL.")
-        elif key == "tater_base_url":
-            placeholder = placeholder or "http://tater.local:8501"
-            description_parts.append("Base URL for the Tater display feed and event API.")
-        elif key == "tater_token":
-            field_type = "password"
-            description_parts.append("Use the same token as Tater's ESPHome voice/display API, if auth is enabled.")
-        elif key == "tater_first_name":
-            placeholder = placeholder or _current_tater_first_name()
-            description_parts.append("Defaults to Tater First Name from Settings and controls the display header label.")
-        elif key == "display_target":
-            description_parts.append("Display target name used for Tater events, for example livingroom or kitchen.")
-        elif key == "timezone":
-            placeholder = placeholder or "America/Chicago"
-            description_parts.append("IANA timezone used by the display clock.")
-        elif key == "device_ip":
-            placeholder = placeholder or host or "192.168.1.50"
-            description_parts.append("OTA target address for this ESPHome display.")
-        elif version_key:
-            description_parts.append("Managed by the firmware template and used for update checks.")
-        elif key in _S3BOX_SENSOR_FIELD_LABELS:
-            field_type = "select"
-            sensor_select = _tater_sensor_select_state(resolved_value)
-            field_options = sensor_select.get("options") if isinstance(sensor_select.get("options"), list) else []
-            sensor_ready = bool(sensor_select.get("ready"))
-            field_disabled = not sensor_ready
-            if sensor_ready:
-                description_parts.append("Choose an Environment Core reading to show in this display slot.")
-            else:
-                description_parts.append(_text(sensor_select.get("message")) or "Install Environment Core to choose display sensors.")
-
-        if key in fixed_keys:
-            description_parts.append("Locked to the firmware template for this device family.")
-        elif key in auto_keys:
-            description_parts.append("Auto-filled from the currently connected satellite IP.")
-        elif secret_hint and key not in {"wifi_password", "wifi_ssid"}:
-            placeholder = placeholder or secret_hint
-
-        effective_read_only = read_only or field_disabled
-        field_row = {
-            "key": key,
-            "label": _firmware_field_label(key),
-            "type": field_type,
-            "value": field_value,
-            "read_only": effective_read_only,
-        }
-        if isinstance(field_options, list):
-            field_row["options"] = field_options
-        if field_min is not None:
-            field_row["min"] = field_min
-        if field_max is not None:
-            field_row["max"] = field_max
-        if field_step is not None:
-            field_row["step"] = field_step
-        if key == "wake_word_model_url":
-            field_row["show_when"] = {"source_key": "wake_word_source", "equals": "custom"}
-        if key == "wake_word_triggered_sound_file":
-            field_row["disable_when"] = {"source_key": "wake_sound_catalog", "equals": _WAKE_SOUND_DISABLED_PICKER_VALUE}
-            field_row["disabled_note"] = "Wake sound is disabled for this build."
-        if field_disabled:
-            field_row["disabled"] = True
-        if placeholder and not effective_read_only:
-            field_row["placeholder"] = placeholder
-        if description_parts:
-            field_row["description"] = " ".join(part for part in description_parts if part)
-        fields.append(field_row)
-
-        fields_meta[key] = {
-            "type": field_type,
-            "template_default": template_default,
-            "secret_hint": secret_hint,
-            "read_only": effective_read_only,
-            "resolved_value": resolved_value,
-            "required": key in {"wifi_ssid", "wifi_password"},
-        }
-
-    wake_word_section = section_lookup.get("Wake Word") if isinstance(section_lookup.get("Wake Word"), list) else None
-    if isinstance(wake_word_section, list) and "wake_word_model_url" in fields_meta:
-        wake_word_entries = wake_word_catalog.get("entries") if isinstance(wake_word_catalog.get("entries"), list) else []
-        trainer_wake_word_entries = (
-            trainer_wake_word_catalog.get("entries")
-            if isinstance(trainer_wake_word_catalog.get("entries"), list)
-            else []
-        )
-        current_wake_word_url = _text(
-            (
-                fields_meta.get("wake_word_model_url", {}).get("resolved_value")
-                if isinstance(fields_meta.get("wake_word_model_url"), dict)
-                else ""
-            )
-        )
-        available_urls = {_text(row.get("url")) for row in wake_word_entries if isinstance(row, dict)}
-        trainer_available_urls = {_text(row.get("url")) for row in trainer_wake_word_entries if isinstance(row, dict)}
-        picker_value = current_wake_word_url if current_wake_word_url in available_urls else ""
-        trainer_picker_value = current_wake_word_url if current_wake_word_url in trainer_available_urls else ""
-        catalog_description = (
-            f"Choose from {len(wake_word_entries)} prebuilt microWakeWord models. If you need a new shared wake word, request it from the "
-            "microWakeWords repo link below and this list will update after it is added."
-            if wake_word_entries
-            else "Prebuilt microWakeWord catalog is unavailable right now. "
-            "If you need a new wake word, request it from the microWakeWords repo link below and this list will update after it is added."
-        )
-        catalog_warning = _text(wake_word_catalog.get("warning"))
-        if catalog_warning and not wake_word_entries:
-            catalog_description = f"{catalog_description} {_text(catalog_warning)}".strip()
-        trainer_description = (
-            f"Loaded {len(trainer_wake_word_entries)} trained microWakeWord models from the trainer app."
-            if trainer_wake_word_entries
-            else "Enter a trainer URL; Tater loads this list when the URL changes or when the tab refreshes."
-        )
-        trainer_warning = _text(trainer_wake_word_catalog.get("warning"))
-        if trainer_warning and not trainer_wake_word_entries:
-            trainer_description = f"{trainer_description} {trainer_warning}".strip()
-        micro_wakeword_picker_fields = [
-            {
-                "key": "wake_word_source",
-                "label": "microWakeWord Model Source",
-                "type": "select",
-                "value": wake_word_source,
-                "options": [
-                    {"value": "prebuilt", "label": "Prebuilt"},
-                    {"value": "trainer", "label": "Trainer App"},
-                    {"value": "custom", "label": "Custom URL"},
-                ],
-                "description": "Choose the local microWakeWord model flashed onto the device. openWakeWord uses the separate Wake Engine and openWakeWord URL settings.",
-            },
-            {
-                "key": "wake_word_catalog",
-                "label": "Prebuilt microWakeWord",
-                "type": "select",
-                "value": picker_value,
-                "options": _wake_word_picker_options(
-                    wake_word_catalog,
-                    include_custom=False,
-                    blank_label="Choose prebuilt microWakeWord",
-                ),
-                "description": catalog_description,
-                "show_when": {"source_key": "wake_word_source", "equals": "prebuilt"},
-            },
-            {
-                "key": "wake_word_trainer_url",
-                "label": "microWakeWord Trainer URL",
-                "type": "text",
-                "value": wake_word_trainer_url,
-                "placeholder": "http://trainer.local:8789",
-                "description": "Tater will read /api/trained_wake_words/catalog from this microWakeWord trainer app.",
-                "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
-            },
-            {
-                "key": "wake_word_trainer_catalog",
-                "label": "Trainer microWakeWord",
-                "type": "select",
-                "value": trainer_picker_value,
-                "options": _trainer_wake_word_picker_options(trainer_wake_word_catalog),
-                "description": trainer_description,
-                "show_when": {"source_key": "wake_word_source", "equals": "trainer"},
-            },
-        ]
-        wake_engine_index = next(
-            (
-                idx
-                for idx, field in enumerate(wake_word_section)
-                if isinstance(field, dict) and _text(field.get("key")) == "wake_engine"
-            ),
-            -1,
-        )
-        insert_at = wake_engine_index + 1 if wake_engine_index >= 0 else 0
-        wake_word_section[insert_at:insert_at] = micro_wakeword_picker_fields
-
-    wake_sound_section = section_lookup.get("Wake Sound") if isinstance(section_lookup.get("Wake Sound"), list) else None
-    if isinstance(wake_sound_section, list) and "wake_word_triggered_sound_file" in fields_meta:
-        wake_sound_entries = wake_sound_catalog.get("entries") if isinstance(wake_sound_catalog.get("entries"), list) else []
-        wake_sound_enabled = _as_bool(profile.get(_WAKE_SOUND_ENABLED_PROFILE_KEY), _WAKE_SOUND_DEFAULT_ENABLED)
-        current_wake_sound_url = _text(
-            (
-                fields_meta.get("wake_word_triggered_sound_file", {}).get("resolved_value")
-                if isinstance(fields_meta.get("wake_word_triggered_sound_file"), dict)
-                else ""
-            )
-        )
-        available_urls = {_text(row.get("url")) for row in wake_sound_entries if isinstance(row, dict)}
-        picker_value = (
-            _WAKE_SOUND_DISABLED_PICKER_VALUE
-            if not wake_sound_enabled
-            else current_wake_sound_url
-            if current_wake_sound_url in available_urls
-            else "__custom__"
-        )
-        catalog_description = (
-            f"Choose from {len(wake_sound_entries)} prebuilt wake sounds, "
-            "select No wake sound, or leave this on Custom URL and paste your own audio URL below. No wake sound gives the fastest first-word capture."
-            if wake_sound_entries
-            else "Prebuilt wake-sound catalog is unavailable right now. You can still select No wake sound for fastest first-word capture or paste any custom audio URL below."
-        )
-        catalog_warning = _text(wake_sound_catalog.get("warning"))
-        if catalog_warning and not wake_sound_entries:
-            catalog_description = f"{catalog_description} {_text(catalog_warning)}".strip()
-        wake_sound_section.insert(
-            0,
-            {
-                "key": "wake_sound_catalog",
-                "label": "Prebuilt Wake Sound",
-                "type": "select",
-                "value": picker_value,
-                "options": _wake_sound_picker_options(wake_sound_catalog),
-                "description": catalog_description,
-            },
-        )
-
-    cli_status = {
-        "available": False,
-        "label": "Prebuilt only",
-        "detail": "Firmware flashing uses official Tater Native OTA and USB images; local builds are not required.",
-    }
-    links = (
-        [
-            {"label": "Native Firmware Manifest", "href": _text(prebuilt_firmware.get("manifest_url"))},
-            {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
-        ]
-        if native_firmware
-        else [
-            {"label": "Template YAML", "href": _text((template_spec.get("source_urls") or [""])[0])},
-            {"label": "Wake Word Requests", "href": f"https://github.com/{_WAKE_WORD_GITHUB_OWNER}/{_WAKE_WORD_GITHUB_REPO}"},
-        ]
-    )
+    links = [
+        {"label": "Native Firmware Manifest", "href": _text(prebuilt_firmware.get("manifest_url"))},
+        {"label": "Wake Word Requests", "href": _WAKE_WORD_REQUESTS_URL},
+    ]
 
     model = _text(device_info.get("model"))
     project_name = _text(device_info.get("project_name"))
@@ -3181,6 +1790,7 @@ def _build_device_context(
     elif latest_firmware_version:
         firmware_badges.append({"label": "Firmware version unknown", "tone": "muted"})
 
+    display_target = _display_target_key(display_name) or _sanitize_token(selector_token)
     item = {
         "id": selector_token,
         "selector": selector_token,
@@ -3189,7 +1799,7 @@ def _build_device_context(
         "subtitle": " • ".join(part for part in [host, _text(template_spec.get("label"))] if part),
         "detail": " • ".join(detail_parts),
         "template_label": _text(template_spec.get("label")),
-        "template_url": _text((template_spec.get("source_urls") or [""])[0]),
+        "template_url": "",
         "firmware_version": latest_firmware_version,
         "firmware_project": firmware_project,
         "installed_firmware_version": installed_firmware_version,
@@ -3218,14 +1828,14 @@ def _build_device_context(
         ),
         "hero_image_alt": f"{display_name} firmware target",
         "connected": connected,
-        "sections": sections_ui,
+        "sections": [],
         "links": [row for row in links if _text(row.get("href"))],
-        "cli_available": bool(cli_status.get("available")),
-        "cli_reason": _text(cli_status.get("detail")),
+        "cli_available": False,
+        "cli_reason": "Firmware flashing uses official Tater Native OTA and USB images; local builds are not required.",
         "host": host,
         "display_base_url": display_base_url,
-        "display_target": _text(fields_meta.get("display_target", {}).get("resolved_value")),
-        "native_firmware": native_firmware,
+        "display_target": display_target,
+        "native_firmware": True,
     }
 
     return {
@@ -3238,162 +1848,16 @@ def _build_device_context(
         "firmware_version": latest_firmware_version,
         "firmware_project": firmware_project,
         "template_spec": template_spec,
-        "template_ctx": template_ctx,
+        "template_ctx": {
+            "template_doc": {"esp32": {"flash_size": _text(prebuilt_device.get("flash_size")) or "16MB"}},
+            "source_kind": "native",
+            "source_label": _text(prebuilt_firmware.get("manifest_url")),
+        },
         "prebuilt_firmware": prebuilt_firmware,
-        "native_firmware": native_firmware,
-        "profile": profile,
-        "field_order": field_order,
-        "fields_meta": fields_meta,
+        "native_firmware": True,
+        "display_target": display_target,
         "item": item,
     }
-
-
-def _summarize_process_output(stdout: str, stderr: str, *, max_lines: int = 16) -> str:
-    joined = "\n".join(part for part in [_text(stdout), _text(stderr)] if _text(part))
-    if not joined:
-        return ""
-    lines = [line.rstrip() for line in joined.splitlines() if line.strip()]
-    return "\n".join(lines[-max_lines:])
-
-
-def _remote_template_text(url: str, *, force_refresh: bool = False) -> str:
-    target = _text(url)
-    if not target:
-        raise RuntimeError("Firmware template URL is missing.")
-
-    now = time.time()
-    if not force_refresh:
-        with _REMOTE_TEMPLATE_LOCK:
-            cached = _REMOTE_TEMPLATE_CACHE.get(target)
-            cached_ts = float(cached.get("ts") or 0.0) if isinstance(cached, dict) else 0.0
-            if isinstance(cached, dict) and (now - cached_ts) < _REMOTE_TEMPLATE_CACHE_TTL_SECONDS:
-                text_value = _text(cached.get("text"))
-                if text_value:
-                    return text_value
-                error_value = _text(cached.get("error"))
-                if error_value:
-                    raise RuntimeError(error_value)
-
-    req = urllib_request.Request(
-        target,
-        headers={
-            "User-Agent": "Tater/1.0",
-            "Accept": "text/plain, text/yaml, application/yaml, */*",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        },
-    )
-    try:
-        with urllib_request.urlopen(req, timeout=_REMOTE_TEMPLATE_FETCH_TIMEOUT_SECONDS) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            text_value = response.read().decode(charset, errors="replace")
-    except Exception as exc:
-        message = f"Failed to fetch firmware template from {target}: {_text(exc) or exc.__class__.__name__}."
-        with _REMOTE_TEMPLATE_LOCK:
-            _REMOTE_TEMPLATE_CACHE[target] = {"ts": now, "error": message}
-        raise RuntimeError(message) from exc
-
-    with _REMOTE_TEMPLATE_LOCK:
-        _REMOTE_TEMPLATE_CACHE[target] = {"ts": now, "text": text_value}
-    return text_value
-
-
-def _probe_cli_executable(path_token: str) -> Dict[str, Any]:
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
-    env.update(_runner_env_overrides())
-    proc = subprocess.run(
-        [path_token, "version"],
-        cwd=str(FIRMWARE_RUNNER_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if proc.returncode == 0:
-        return {
-            "available": True,
-            "label": path_token,
-            "detail": "Using ESPHome from PATH.",
-            "argv": [path_token],
-            "cwd": str(FIRMWARE_RUNNER_ROOT),
-            "env": _runner_env_overrides(),
-        }
-    return {
-        "available": False,
-        "label": path_token,
-        "detail": _summarize_process_output(proc.stdout, proc.stderr) or f"`{path_token} version` failed.",
-    }
-
-
-def _probe_source_checkout() -> Dict[str, Any]:
-    source_root = _repo_siblings_root() / "esphome"
-    if not source_root.is_dir():
-        return {"available": False, "label": "Source checkout", "detail": "No ESPHome source checkout was found."}
-
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
-    env.update(_runner_env_overrides())
-    existing_pythonpath = _text(env.get("PYTHONPATH"))
-    env["PYTHONPATH"] = (
-        f"{source_root}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(source_root)
-    )
-    argv = [sys.executable, "-m", "esphome"]
-    proc = subprocess.run(
-        [*argv, "version"],
-        cwd=str(FIRMWARE_RUNNER_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if proc.returncode == 0:
-        return {
-            "available": True,
-            "label": f"{Path(sys.executable).name} -m esphome",
-            "detail": f"Using ESPHome source checkout in {source_root} with isolated runner workspace.",
-            "argv": argv,
-            "cwd": str(FIRMWARE_RUNNER_ROOT),
-            "env": {
-                **_runner_env_overrides(),
-                "PYTHONPATH": env["PYTHONPATH"],
-            },
-        }
-    return {
-        "available": False,
-        "label": "Source checkout",
-        "detail": _summarize_process_output(proc.stdout, proc.stderr)
-        or f"ESPHome source checkout in {source_root} is not runnable in the current Python environment.",
-    }
-
-
-def esphome_cli_status(*, force: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    with _CLI_STATUS_LOCK:
-        cached = _CLI_STATUS_CACHE.get("status")
-        cached_ts = float(_CLI_STATUS_CACHE.get("ts") or 0.0)
-        if not force and isinstance(cached, dict) and (now - cached_ts) < _CLI_STATUS_CACHE_TTL_SECONDS:
-            return dict(cached)
-
-    status = {"available": False, "label": "Unavailable", "detail": "ESPHome CLI is not available."}
-    path_cli = shutil.which("esphome")
-    if path_cli:
-        status = _probe_cli_executable(path_cli)
-    if not bool(status.get("available")):
-        source_status = _probe_source_checkout()
-        if bool(source_status.get("available")):
-            status = source_status
-        elif not path_cli:
-            status = source_status
-        else:
-            status["detail"] = _text(status.get("detail")) or _text(source_status.get("detail")) or status["detail"]
-
-    with _CLI_STATUS_LOCK:
-        _CLI_STATUS_CACHE["ts"] = now
-        _CLI_STATUS_CACHE["status"] = dict(status)
-    return dict(status)
 
 
 def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3679,234 +2143,6 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _normalize_profile_values(context: Dict[str, Any], values: Dict[str, Any]) -> Dict[str, str]:
-    incoming = values if isinstance(values, dict) else {}
-    existing = context.get("profile") if isinstance(context.get("profile"), dict) else {}
-    normalized: Dict[str, str] = dict(existing)
-    wake_word_source = (
-        _wake_word_source_value(incoming.get("wake_word_source"))
-        or _wake_word_source_value(existing.get("wake_word_source"))
-        or "prebuilt"
-    )
-    normalized["wake_word_source"] = wake_word_source
-
-    if "wake_word_trainer_url" in incoming:
-        trainer_url = _normalize_http_base_url(incoming.get("wake_word_trainer_url"))
-    else:
-        trainer_url = _normalize_http_base_url(existing.get("wake_word_trainer_url"))
-    if trainer_url:
-        normalized["wake_word_trainer_url"] = trainer_url
-    else:
-        normalized.pop("wake_word_trainer_url", None)
-
-    for key in list(context.get("field_order") or []):
-        meta = context.get("fields_meta", {}).get(key) if isinstance(context.get("fields_meta"), dict) else {}
-        field_type = _text(meta.get("type"))
-        current_value = _text(meta.get("resolved_value"))
-        if bool(meta.get("read_only")):
-            normalized[key] = current_value
-            continue
-
-        has_incoming_value = key in incoming
-        raw_value = incoming.get(key)
-        if not has_incoming_value:
-            normalized[key] = _text(existing.get(key)) or current_value
-            continue
-
-        if field_type == "checkbox":
-            normalized[key] = "true" if _as_bool(raw_value, False) else "false"
-            continue
-
-        if key == "wake_engine":
-            engine_value = _lower(raw_value)
-            if engine_value in {"openwakeword", "open_wake_word", "open wakeword"}:
-                normalized[key] = "openwakeword"
-            elif engine_value in {"nanowakeword", "nano_wake_word", "nano wakeword"}:
-                normalized[key] = "nanowakeword"
-            else:
-                normalized[key] = "microwakeword"
-            continue
-
-        if key == "wifi_password":
-            token = _text(raw_value)
-            normalized[key] = token or _text(existing.get(key))
-            continue
-
-        if key == "tater_base_url":
-            normalized[key] = _normalize_http_base_url(raw_value)
-            continue
-
-        if key == "openwakeword_server_url":
-            normalized[key] = _normalize_http_base_url(raw_value, default_scheme="ws")
-            continue
-
-        if key == "nanowakeword_server_url":
-            normalized[key] = _normalize_http_base_url(raw_value, default_scheme="ws")
-            continue
-
-        if key == "openwakeword_http_timeout_ms":
-            normalized[key] = str(_as_int(raw_value, 3000, minimum=250, maximum=10000))
-            continue
-
-        if key == "openwakeword_max_failures":
-            normalized[key] = str(_as_int(raw_value, 3, minimum=1, maximum=20))
-            continue
-
-        normalized[key] = _text(raw_value)
-
-    wake_word_catalog_value = _text(incoming.get("wake_word_catalog"))
-    if wake_word_source == "prebuilt" and wake_word_catalog_value and "wake_word_model_url" in normalized:
-        normalized["wake_word_model_url"] = wake_word_catalog_value
-        if "wake_word_name" in normalized:
-            normalized["wake_word_name"] = _wake_word_slug_from_url(wake_word_catalog_value) or _text(normalized.get("wake_word_name"))
-
-    trainer_wake_word_value = _text(incoming.get("wake_word_trainer_catalog"))
-    if wake_word_source == "trainer" and trainer_wake_word_value and "wake_word_model_url" in normalized:
-        normalized["wake_word_model_url"] = trainer_wake_word_value
-        if "wake_word_name" in normalized:
-            normalized["wake_word_name"] = _wake_word_slug_from_url(trainer_wake_word_value) or _text(normalized.get("wake_word_name"))
-
-    wake_sound_catalog_value = _text(incoming.get("wake_sound_catalog"))
-    if wake_sound_catalog_value == _WAKE_SOUND_DISABLED_PICKER_VALUE:
-        normalized[_WAKE_SOUND_ENABLED_PROFILE_KEY] = "false"
-    elif wake_sound_catalog_value:
-        normalized[_WAKE_SOUND_ENABLED_PROFILE_KEY] = "true"
-    if (
-        wake_sound_catalog_value
-        and wake_sound_catalog_value not in {"__custom__", _WAKE_SOUND_DISABLED_PICKER_VALUE}
-        and "wake_word_triggered_sound_file" in normalized
-    ):
-        normalized["wake_word_triggered_sound_file"] = wake_sound_catalog_value
-
-    if _text(context.get("host")) and "ha_voice_ip" in normalized:
-        normalized["ha_voice_ip"] = _text(context.get("host"))
-
-    return {key: _text(value) for key, value in normalized.items() if _text(key)}
-
-
-def _validate_profile_values(context: Dict[str, Any], values: Dict[str, str]) -> None:
-    required: List[str] = []
-    if "wifi_ssid" in values and not _text(values.get("wifi_ssid")):
-        required.append("Wi-Fi SSID")
-    if "wifi_password" in values and not _text(values.get("wifi_password")):
-        required.append("Wi-Fi password")
-    if "ha_voice_ip" in values and not _text(values.get("ha_voice_ip")):
-        required.append("satellite IP")
-    if required:
-        raise RuntimeError(f"Missing required firmware values: {', '.join(required)}.")
-
-
-def _rewrite_local_packages(config: Dict[str, Any], repo_root: Optional[Path]) -> None:
-    if not isinstance(repo_root, Path):
-        return
-    packages = config.get("packages")
-    if not isinstance(packages, dict):
-        return
-
-    new_packages: Dict[str, Any] = {}
-    changed = False
-    for package_name, package_value in packages.items():
-        if not isinstance(package_value, dict):
-            new_packages[_text(package_name)] = package_value
-            continue
-        files = package_value.get("files")
-        if not isinstance(files, list):
-            new_packages[_text(package_name)] = package_value
-            continue
-
-        changed = True
-        for index, entry in enumerate(files, start=1):
-            file_path = ""
-            file_vars: Dict[str, Any] = {}
-            if isinstance(entry, dict):
-                file_path = _text(entry.get("path"))
-                file_vars = entry.get("vars") if isinstance(entry.get("vars"), dict) else {}
-            else:
-                file_path = _text(entry)
-            if not file_path:
-                continue
-            absolute_path = repo_root / file_path
-            package_row: Dict[str, Any] = {"file": str(absolute_path)}
-            if file_vars:
-                package_row["vars"] = dict(file_vars)
-            new_packages[f"{_text(package_name) or 'package'}.{index}"] = package_row
-
-    if changed and new_packages:
-        config["packages"] = new_packages
-
-
-def _append_esphome_on_boot(config: Dict[str, Any], automation: Dict[str, Any]) -> None:
-    if not isinstance(config, dict) or not isinstance(automation, dict):
-        return
-    esphome_block = config.get("esphome") if isinstance(config.get("esphome"), dict) else {}
-    existing = esphome_block.get("on_boot")
-    if isinstance(existing, list):
-        existing.append(automation)
-    elif existing:
-        esphome_block["on_boot"] = [existing, automation]
-    else:
-        esphome_block["on_boot"] = [automation]
-    config["esphome"] = esphome_block
-
-
-def _apply_wake_sound_profile(config: Dict[str, Any], values: Dict[str, str]) -> None:
-    if _as_bool((values or {}).get(_WAKE_SOUND_ENABLED_PROFILE_KEY), _WAKE_SOUND_DEFAULT_ENABLED):
-        return
-    substitutions = config.get("substitutions") if isinstance(config.get("substitutions"), dict) else {}
-    if "wake_sound_restore_mode" in substitutions:
-        substitutions["wake_sound_restore_mode"] = "ALWAYS_OFF"
-        config["substitutions"] = substitutions
-    _append_esphome_on_boot(
-        config,
-        {
-            "priority": -100,
-            "then": [
-                {"switch.turn_off": "wake_sound"},
-            ],
-        },
-    )
-
-
-def _render_config_text(context: Dict[str, Any], values: Dict[str, str]) -> str:
-    config = copy.deepcopy(context["template_ctx"]["template_doc"])
-    substitutions = config.get("substitutions") if isinstance(config.get("substitutions"), dict) else {}
-    for key in list(context.get("field_order") or []):
-        substitutions[key] = _text(values.get(key))
-    config["substitutions"] = substitutions
-    esphome_block = config.get("esphome") if isinstance(config.get("esphome"), dict) else {}
-    esphome_block["build_path"] = str(
-        FIRMWARE_BUILD_ROOT / _sanitize_token(context.get("selector")) / _sanitize_token(context.get("template_key"))
-    )
-    config["esphome"] = esphome_block
-    _apply_wake_sound_profile(config, values)
-    _rewrite_local_packages(config, context["template_ctx"].get("repo_root"))
-    return yaml.dump(config, Dumper=_FirmwareYamlDumper, sort_keys=False, allow_unicode=True)
-
-
-def _prepare_config_path(context: Dict[str, Any], values: Dict[str, str]) -> Path:
-    _ensure_agent_labs_dirs()
-    _reset_build_path_for_context(context)
-    selector_dir = FIRMWARE_CONFIG_ROOT / _sanitize_token(context.get("selector"))
-    selector_dir.mkdir(parents=True, exist_ok=True)
-    config_path = selector_dir / f"{_sanitize_token(context.get('template_key'))}.yaml"
-    config_path.write_text(_render_config_text(context, values), encoding="utf-8")
-    return config_path
-
-
-def _build_path_for_context(context: Dict[str, Any]) -> Path:
-    return FIRMWARE_BUILD_ROOT / _sanitize_token(context.get("selector")) / _sanitize_token(context.get("template_key"))
-
-
-def _reset_build_path_for_context(context: Dict[str, Any]) -> Optional[Path]:
-    build_path = _build_path_for_context(context)
-    if not build_path.exists():
-        return None
-    shutil.rmtree(build_path, ignore_errors=True)
-    if build_path.exists():
-        raise RuntimeError(f"Could not clear stale firmware workspace output at {build_path}.")
-    return build_path
-
-
 def _browser_flash_artifact_id(context: Dict[str, Any]) -> str:
     base = "_".join(
         part
@@ -4188,28 +2424,6 @@ def _create_native_ota_artifact(context: Dict[str, Any], binary_path: Path) -> D
     }
 
 
-def _runner_env(status: Dict[str, Any]) -> Dict[str, str]:
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
-    env.update(_runner_env_overrides())
-    runner_env = status.get("env") if isinstance(status.get("env"), dict) else {}
-    for key, value in runner_env.items():
-        env[str(key)] = _text(value)
-    return env
-
-
-def _run_esphome_command(argv: List[str], *, cwd: str = "", env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv,
-        cwd=cwd or None,
-        env=env or None,
-        capture_output=True,
-        text=True,
-        timeout=FIRMWARE_BUILD_TIMEOUT_SECONDS,
-        check=False,
-    )
-
-
 def _entry_time_text(ts_value: Optional[float] = None) -> str:
     stamp = float(ts_value or time.time())
     return time.strftime("%H:%M:%S", time.localtime(stamp))
@@ -4375,52 +2589,6 @@ def _set_session_phase_locked(session: Dict[str, Any], phase: str) -> None:
     session["updated_ts"] = time.time()
 
 
-def _cli_line_level(line: str) -> str:
-    text_value = _clean_terminal_text(line)
-    if not text_value:
-        return "info"
-    upper = text_value.upper()
-    if re.search(r"\[[^\]]+\]\[E\]", text_value):
-        return "error"
-    if re.search(r"\[[^\]]+\]\[W\]", text_value):
-        return "warn"
-    if re.search(r"\[[^\]]+\]\[[DV]\]", text_value):
-        return "debug"
-    if any(token in upper for token in ["ERROR", "FAILED", "EXCEPTION", "TRACEBACK"]):
-        return "error"
-    if "WARN" in upper:
-        return "warn"
-    if "DEBUG" in upper or "VERBOSE" in upper:
-        return "debug"
-    return "info"
-
-
-def _cli_line_phase(current_phase: str, line: str) -> str:
-    token = _lower(current_phase)
-    text_value = _lower(_clean_terminal_text(line))
-    upload_markers = (
-        "uploading",
-        "espota.py",
-        "sending invitation to",
-        "ota",
-        "writing at",
-        "hard resetting via",
-    )
-    build_markers = (
-        "dependency graph",
-        "compiling ",
-        "linking ",
-        "archiving ",
-        "building ",
-        ".pioenvs",
-    )
-    if any(marker in text_value for marker in upload_markers):
-        return "uploading"
-    if token in {"starting", ""} and any(marker in text_value for marker in build_markers):
-        return "building"
-    return token or "building"
-
-
 def _final_session_phase(session: Dict[str, Any]) -> str:
     phase = _lower(session.get("phase"))
     if phase in {"failed", "cancelled"}:
@@ -4488,10 +2656,8 @@ def _prune_firmware_sessions() -> None:
             if not isinstance(session, dict):
                 _FIRMWARE_SESSIONS.pop(session_id, None)
                 continue
-            proc = session.get("proc")
-            running = isinstance(proc, subprocess.Popen) and proc.poll() is None
             updated_ts = float(session.get("updated_ts") or session.get("created_ts") or 0.0)
-            if running:
+            if bool(session.get("active")):
                 continue
             if updated_ts <= 0 or (now - updated_ts) < _FIRMWARE_SESSION_TTL_SECONDS:
                 continue
@@ -4514,165 +2680,6 @@ def _active_flash_for_selector(selector: str) -> Optional[Dict[str, Any]]:
             if bool(session.get("active")):
                 return dict(session)
     return None
-
-
-def _firmware_session_worker(session_id: str) -> None:
-    with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(session, dict):
-            return
-        command = list(session.get("command") or [])
-        cwd = _text(session.get("cwd"))
-        env = session.get("env") if isinstance(session.get("env"), dict) else None
-        initial_phase = "uploading" if _lower(session.get("operation")) == "prebuilt_ota_upload" else "building"
-        _set_session_phase_locked(session, initial_phase)
-
-    proc: Optional[subprocess.Popen[str]] = None
-    try:
-        proc = subprocess.Popen(
-            command,
-            cwd=cwd or None,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except Exception as exc:
-        with _FIRMWARE_SESSION_LOCK:
-            session = _FIRMWARE_SESSIONS.get(session_id)
-            if isinstance(session, dict):
-                session["active"] = False
-                session["error"] = _text(exc) or exc.__class__.__name__
-                _set_session_phase_locked(session, "failed")
-                _append_session_entry_locked(
-                    session,
-                    level="error",
-                    message=f"Failed to start ESPHome CLI: {_text(exc) or exc.__class__.__name__}.",
-                    source="cli",
-                )
-        return
-
-    with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(session, dict):
-            with contextlib.suppress(Exception):
-                proc.terminate()
-            return
-        session["proc"] = proc
-        session["pid"] = int(proc.pid or 0)
-        _append_session_entry_locked(
-            session,
-            level="debug",
-            message=f"ESPHome process started (pid {int(proc.pid or 0)}).",
-            source="cli",
-        )
-
-    try:
-        if proc.stdout is not None:
-            for raw_line in proc.stdout:
-                line = raw_line.rstrip("\r\n")
-                if not line:
-                    continue
-                with _FIRMWARE_SESSION_LOCK:
-                    session = _FIRMWARE_SESSIONS.get(session_id)
-                    if not isinstance(session, dict):
-                        continue
-                    next_phase = _cli_line_phase(_text(session.get("phase")), line)
-                    if next_phase != _text(session.get("phase")):
-                        _set_session_phase_locked(session, next_phase)
-                    _append_session_entry_locked(
-                        session,
-                        level=_cli_line_level(line),
-                        message=line,
-                        source="cli",
-                    )
-    finally:
-        with contextlib.suppress(Exception):
-            if proc.stdout is not None:
-                proc.stdout.close()
-        returncode = proc.wait()
-
-    with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(session_id)
-        if not isinstance(session, dict):
-            return
-        session["proc"] = None
-        session["returncode"] = int(returncode)
-        stop_requested = bool(session.get("stop_requested"))
-        if stop_requested:
-            session["active"] = False
-            session["message"] = "Firmware flash stopped."
-            _set_session_phase_locked(session, "cancelled")
-            _append_session_entry_locked(
-                session,
-                level="warn",
-                message="Firmware flash cancelled.",
-                source="cli",
-            )
-            return
-        if returncode != 0:
-            session["active"] = False
-            session["error"] = f"ESPHome exited with code {int(returncode)}."
-            session["message"] = "Firmware flash failed."
-            _set_session_phase_locked(session, "failed")
-            _append_session_entry_locked(
-                session,
-                level="error",
-                message=f"ESPHome CLI exited with code {int(returncode)}.",
-                source="cli",
-            )
-            return
-        if _lower(session.get("operation")) == "browser_build":
-            session["active"] = False
-            session["error"] = "Browser build sessions are no longer supported."
-            session["message"] = "Firmware session type is no longer supported."
-            _set_session_phase_locked(session, "failed")
-            _append_session_entry_locked(
-                session,
-                level="error",
-                message="Browser build sessions are disabled; use prebuilt USB firmware instead.",
-                source="session",
-            )
-            return
-        _save_recorded_firmware_version(
-            session.get("selector"),
-            session.get("template_key"),
-            session.get("firmware_version"),
-            display_name=session.get("display_name"),
-            source="ota_flash",
-        )
-        if not bool(session.get("follow_logs", True)):
-            session["active"] = False
-            session["returncode"] = 0
-            session["message"] = "Firmware uploaded successfully."
-            _set_session_phase_locked(session, "completed")
-            _append_session_entry_locked(
-                session,
-                level="info",
-                message=(
-                    "Prebuilt firmware upload finished."
-                    if _lower(session.get("operation")) == "prebuilt_ota_upload"
-                    else "Build and upload finished."
-                ),
-                source="session",
-            )
-            return
-        session["returncode"] = 0
-        session["message"] = "Firmware uploaded successfully. Waiting for live device logs."
-        session["device_log_next_retry_ts"] = time.time()
-        session["device_log_retry_count"] = 0
-        _set_session_phase_locked(session, "awaiting_device_logs")
-        _append_session_entry_locked(
-            session,
-            level="info",
-            message=(
-                "Prebuilt firmware upload finished. Waiting for the device to reconnect so live logs can continue here."
-                if _lower(session.get("operation")) == "prebuilt_ota_upload"
-                else "Build and upload finished. Waiting for the device to reconnect so live logs can continue here."
-            ),
-            source="session",
-        )
 
 
 def _pump_session_device_logs(session_id: str) -> None:
@@ -5008,8 +3015,6 @@ def _prebuilt_ota_session_worker(session_id: str) -> None:
 
 def _start_flash_session(
     context: Dict[str, Any],
-    profile_values: Dict[str, str],
-    cli_status: Dict[str, Any],
     *,
     follow_logs: bool = True,
 ) -> Dict[str, Any]:
@@ -5025,7 +3030,6 @@ def _start_flash_session(
     prebuilt_upload = _prebuilt_artifact_available(context, "ota")
     if not prebuilt_upload:
         raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
-    config_path: Optional[Path] = None
     native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
     if not host and not native_firmware:
         raise RuntimeError("OTA target host is missing.")
@@ -5040,7 +3044,7 @@ def _start_flash_session(
     command_display = (
         f"Tater Native OTA --selector {selector} --url {_text(ota_artifact.get('ota_url'))}"
         if native_firmware
-        else f"Native ESPHome OTA upload --device {host} --file {Path(prebuilt_binary['path']).name}"
+        else f"Prebuilt OTA upload --device {host} --file {Path(prebuilt_binary['path']).name}"
     )
     session_id = f"fw_{uuid.uuid4().hex}"
     target_label = _text(context.get("display_name")) or selector
@@ -5053,7 +3057,6 @@ def _start_flash_session(
         "host": host,
         "operation": operation,
         "context": context,
-        "config_path": str(config_path) if config_path else "",
         "command": command,
         "source_binary": str(prebuilt_binary.get("path") or ""),
         "ota_url": _text(ota_artifact.get("ota_url")),
@@ -5061,8 +3064,6 @@ def _start_flash_session(
         "binary_url": _text(ota_artifact.get("ota_url")),
         "binary_name": _text(ota_artifact.get("binary_name")),
         "binary_size": int(ota_artifact.get("binary_size") or Path(prebuilt_binary["path"]).stat().st_size),
-        "cwd": _text(cli_status.get("cwd")),
-        "env": _runner_env(cli_status),
         "created_ts": time.time(),
         "updated_ts": time.time(),
         "cursor": 0,
@@ -5079,7 +3080,6 @@ def _start_flash_session(
             else f"Streaming prebuilt upload logs for {target_label}."
         ),
         "returncode": None,
-        "proc": None,
         "stop_requested": False,
         "follow_logs": bool(follow_logs),
         "device_logs_started": False,
@@ -5114,13 +3114,6 @@ def _start_flash_session(
                     message=f"Device download URL: {_text(ota_artifact.get('ota_url'))}",
                     source="session",
                 )
-        if config_path is not None:
-            _append_session_entry_locked(
-                session,
-                level="debug",
-                message=f"Config written to {str(config_path)}",
-                source="session",
-            )
         _append_session_entry_locked(
             session,
             level="debug",
@@ -5156,7 +3149,6 @@ def _poll_flash_session(session_id: str, *, after_seq: int = 0) -> Dict[str, Any
 def _stop_flash_session(session_id: str) -> Dict[str, Any]:
     _prune_firmware_sessions()
     session_token = _text(session_id)
-    proc: Optional[subprocess.Popen[str]] = None
     selector = ""
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_token)
@@ -5165,24 +3157,13 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         session["stop_requested"] = True
         session["active"] = False
         selector = _text(session.get("selector"))
-        proc = session.get("proc") if isinstance(session.get("proc"), subprocess.Popen) else None
-        if proc is None:
-            _set_session_phase_locked(session, _final_session_phase(session))
-            _append_session_entry_locked(
-                session,
-                level="info",
-                message="Firmware log viewer closed.",
-                source="session",
-            )
-
-    if isinstance(proc, subprocess.Popen) and proc.poll() is None:
-        with contextlib.suppress(Exception):
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            with contextlib.suppress(Exception):
-                proc.kill()
+        _set_session_phase_locked(session, _final_session_phase(session))
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message="Firmware log viewer closed.",
+            source="session",
+        )
 
     if selector:
         with contextlib.suppress(Exception):
@@ -5210,21 +3191,6 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
 
 
 def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if action_name == "voice_firmware_trainer_wake_words":
-        body = payload if isinstance(payload, dict) else {}
-        trainer_url = _normalize_http_base_url(body.get("trainer_url"))
-        catalog = _load_trainer_wake_word_catalog(trainer_url, force_refresh=True, strict=True)
-        entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
-        return {
-            "ok": True,
-            "action": action_name,
-            "trainer_url": trainer_url,
-            "entries": entries,
-            "options": _trainer_wake_word_picker_options(catalog),
-            "count": len(entries),
-            "message": f"Loaded {len(entries)} trained wake word(s) from {trainer_url}.",
-        }
-
     if action_name == "voice_firmware_flash_poll":
         body = payload if isinstance(payload, dict) else {}
         session_id = _text(body.get("session_id") or body.get("id"))
@@ -5331,8 +3297,6 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
             raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
         result = _start_flash_session(
             context,
-            {},
-            {"cwd": str(FIRMWARE_RUNNER_ROOT), "env": {}},
             follow_logs=_as_bool(body.get("follow_logs"), True),
         )
         result["action"] = action_name
@@ -5374,7 +3338,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
             prebuilt_upload_result = _native_ota_upload(host, Path(prebuilt_binary["path"]))
         except Exception as exc:
             raise RuntimeError(
-                f"ESPHome prebuilt OTA failed for {context.get('display_name') or selector}.\n\n"
+                f"Prebuilt OTA failed for {context.get('display_name') or selector}.\n\n"
                 f"{_text(exc) or exc.__class__.__name__}"
             ) from exc
 

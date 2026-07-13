@@ -20,9 +20,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>94.2</string>
+  <string>94.4</string>
   <key>CFBundleVersion</key>
-  <string>104</string>
+  <string>106</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
