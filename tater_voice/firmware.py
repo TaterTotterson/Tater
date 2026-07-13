@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib import parse as urllib_parse, request as urllib_request
 
 from helpers import redis_client
@@ -1212,6 +1212,7 @@ def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) ->
                     "port": 0,
                     "connected": bool(native_row.get("connected")),
                     "selected": True,
+                    "room": _text(native_row.get("room")),
                     "source": "tater_native",
                     "device_info": {
                         "name": _text(native_row.get("device_id")) or selector_token,
@@ -1289,6 +1290,7 @@ def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
         "slots": slots,
     }
     redis_client.hset(DISPLAY_PROFILE_HASH_KEY, target, json.dumps(payload, ensure_ascii=False))
+    _cleanup_stale_display_profiles(target, _text(selector))
 
 
 def _display_profile_rows_from_store() -> Dict[str, Dict[str, Any]]:
@@ -1327,6 +1329,102 @@ def _display_profile_rows_from_store() -> Dict[str, Dict[str, Any]]:
             "slots": {str(key): _text(value) for key, value in slots.items() if _text(key)},
         }
     return rows
+
+
+def _add_display_identity_token(tokens: Set[str], value: Any) -> None:
+    token = _display_target_key(value)
+    if token:
+        tokens.add(token)
+
+
+def _display_selector_identity_tokens(selector: Any, host: Any = "") -> Set[str]:
+    tokens: Set[str] = set()
+    selector_token = _text(selector)
+    host_token = _host_from_url_or_host(host)
+    if selector_token:
+        _add_display_identity_token(tokens, selector_token)
+        if selector_token.startswith("host:"):
+            _add_display_identity_token(tokens, selector_token[5:])
+    if not host_token and selector_token:
+        with contextlib.suppress(Exception):
+            host_token = _selector_host(selector_token)
+    if host_token:
+        _add_display_identity_token(tokens, host_token)
+        _add_display_identity_token(tokens, f"host:{host_token}")
+    return tokens
+
+
+def _display_profile_identity_tokens(target: str, profile: Dict[str, Any]) -> Set[str]:
+    tokens: Set[str] = set()
+    _add_display_identity_token(tokens, target)
+    for value in (
+        profile.get("target"),
+        profile.get("display_target"),
+        profile.get("selector"),
+        profile.get("id"),
+        profile.get("host"),
+        profile.get("device"),
+        profile.get("device_name"),
+    ):
+        _add_display_identity_token(tokens, value)
+    selector = _text(profile.get("selector"))
+    if selector.startswith("host:"):
+        _add_display_identity_token(tokens, selector[5:])
+    host = _host_from_url_or_host(profile.get("host"))
+    if host:
+        _add_display_identity_token(tokens, f"host:{host}")
+    return tokens
+
+
+def _display_context_identity_tokens(selector: str, context: Dict[str, Any]) -> Set[str]:
+    item = context.get("item") if isinstance(context.get("item"), dict) else {}
+    host = _text(context.get("host")) or _text(item.get("host"))
+    tokens = _display_selector_identity_tokens(selector, host)
+    for value in (
+        context.get("display_target"),
+        context.get("display_name"),
+        item.get("id"),
+        item.get("selector"),
+        item.get("host"),
+    ):
+        _add_display_identity_token(tokens, value)
+    return tokens
+
+
+def _saved_display_profile_for_context(
+    target: str,
+    selector: str,
+    context: Dict[str, Any],
+    saved_profiles: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    direct = saved_profiles.get(target) if isinstance(saved_profiles.get(target), dict) else {}
+    if direct:
+        return direct, target
+
+    context_tokens = _display_context_identity_tokens(selector, context)
+    if not context_tokens:
+        return {}, ""
+    for saved_target, saved_profile in saved_profiles.items():
+        if not isinstance(saved_profile, dict):
+            continue
+        if _display_profile_identity_tokens(saved_target, saved_profile).intersection(context_tokens):
+            return saved_profile, saved_target
+    return {}, ""
+
+
+def _cleanup_stale_display_profiles(target: str, selector: str) -> None:
+    target_token = _display_target_key(target)
+    selector_tokens = _display_selector_identity_tokens(selector)
+    if not target_token or not selector_tokens:
+        return
+    for saved_target, saved_profile in _display_profile_rows_from_store().items():
+        saved_target_token = _display_target_key(saved_target)
+        if not saved_target_token or saved_target_token == target_token:
+            continue
+        if not _display_profile_identity_tokens(saved_target, saved_profile).intersection(selector_tokens):
+            continue
+        with contextlib.suppress(Exception):
+            redis_client.hdel(DISPLAY_PROFILE_HASH_KEY, saved_target)
 
 
 def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1368,14 +1466,16 @@ def _display_sensor_profile_from_context(
 ) -> Optional[Dict[str, Any]]:
     if _lower(context.get("template_key")) != "s3box_display":
         return None
-    raw_target = _text(context.get("display_target")) or _text(selector)
-    target = _display_target_key(raw_target)
+    raw_target = _text(context.get("display_target_label")) or _text(context.get("display_target")) or _text(selector)
+    target = _display_target_key(context.get("display_target")) or _display_target_key(raw_target)
     if not target:
         return None
-    saved_profile = saved_profiles.get(target) if isinstance(saved_profiles.get(target), dict) else {}
+    saved_profile, saved_profile_target = _saved_display_profile_for_context(target, _text(selector), context, saved_profiles)
     item = context.get("item") if isinstance(context.get("item"), dict) else {}
     slots = _display_sensor_slots_from_context(context, saved_profile)
     target_label = _text(saved_profile.get("target_label"))
+    if not target_label:
+        target_label = _text(context.get("display_target_label"))
     if not target_label and raw_target and raw_target != target:
         target_label = raw_target
     return {
@@ -1387,6 +1487,7 @@ def _display_sensor_profile_from_context(
         "connected": bool(item.get("connected")),
         "updated_at": saved_profile.get("updated_at"),
         "display_url": _text(context.get("display_base_url")),
+        "_saved_target": saved_profile_target,
         "fields": _display_sensor_field_rows(slots, sensor_select),
     }
 
@@ -1395,7 +1496,21 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     sensor_select = _tater_sensor_select_state("")
     saved_profiles = _display_profile_rows_from_store()
     profiles_by_target: Dict[str, Dict[str, Any]] = {}
+    attached_saved_targets: Set[str] = set()
+
+    for row in display_contexts:
+        selector = _text(row.get("selector"))
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        profile = _display_sensor_profile_from_context(selector, context, sensor_select, saved_profiles)
+        if isinstance(profile, dict) and _text(profile.get("target")):
+            saved_target = _text(profile.pop("_saved_target", ""))
+            if saved_target and saved_target != _text(profile.get("target")):
+                attached_saved_targets.add(saved_target)
+            profiles_by_target[_text(profile.get("target"))] = profile
+
     for target, saved_profile in saved_profiles.items():
+        if target in profiles_by_target or target in attached_saved_targets:
+            continue
         slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
         target_label = _text(saved_profile.get("target_label"))
         profiles_by_target[target] = {
@@ -1412,13 +1527,6 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
                 sensor_select,
             ),
         }
-
-    for row in display_contexts:
-        selector = _text(row.get("selector"))
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        profile = _display_sensor_profile_from_context(selector, context, sensor_select, saved_profiles)
-        if isinstance(profile, dict) and _text(profile.get("target")):
-            profiles_by_target[_text(profile.get("target"))] = profile
 
     profiles = sorted(
         profiles_by_target.values(),
@@ -1743,6 +1851,7 @@ def _build_device_context(
     host = _text(client_row.get("host")) or esphome_runtime.satellite_host_from_selector(selector_token)
     display_base_url = _tater_display_base_url_for_peer(host)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
+    metadata = client_row.get("metadata") if isinstance(client_row.get("metadata"), dict) else {}
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
@@ -1790,7 +1899,9 @@ def _build_device_context(
     elif latest_firmware_version:
         firmware_badges.append({"label": "Firmware version unknown", "tone": "muted"})
 
-    display_target = _display_target_key(display_name) or _sanitize_token(selector_token)
+    room_name = _text(client_row.get("room")) or _text(metadata.get("room")) or _text(metadata.get("room_name")) or _text(metadata.get("area_name"))
+    display_target_label = room_name if _lower(template_key) == "s3box_display" and room_name else display_name
+    display_target = _display_target_key(display_target_label) or _sanitize_token(selector_token)
     item = {
         "id": selector_token,
         "selector": selector_token,
@@ -1835,6 +1946,7 @@ def _build_device_context(
         "host": host,
         "display_base_url": display_base_url,
         "display_target": display_target,
+        "display_target_label": display_target_label if display_target_label != display_target else "",
         "native_firmware": True,
     }
 
@@ -1856,6 +1968,7 @@ def _build_device_context(
         "prebuilt_firmware": prebuilt_firmware,
         "native_firmware": True,
         "display_target": display_target,
+        "display_target_label": display_target_label if display_target_label != display_target else "",
         "item": item,
     }
 
