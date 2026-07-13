@@ -12,19 +12,7 @@ from integration_runtime import integration_runtime_states
 from . import display_bus
 
 
-_FIRMWARE_PROFILE_HASH_KEY = "tater:esphome:firmware:profiles:v1"
 _DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
-_S3BOX_FIRMWARE_TEMPLATE_KEY = "s3box_display"
-_S3BOX_FIRMWARE_PROFILE_KEY = "template:s3box_display"
-_DISPLAY_SLOT_PROFILE_KEYS: Dict[str, str] = {
-    "temp_out": "sensor_temp_out",
-    "temp_in": "sensor_temp_in",
-    "humidity_out": "sensor_humidity_out",
-    "humidity_in": "sensor_humidity_in",
-    "wind_speed": "sensor_wind_speed",
-    "rain_rate": "sensor_rain_rate",
-    "lightning_strikes": "sensor_lightning_strikes",
-}
 _DEFAULT_SLOT_LABELS: Dict[str, str] = {
     "temp_out": "Outdoor Temperature",
     "temp_in": "Indoor Temperature",
@@ -292,23 +280,6 @@ def _json_from_hash(client: Any, hash_key: str, field: str) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _slots_from_profile_values(values: Mapping[str, Any]) -> Dict[str, str]:
-    slots: Dict[str, str] = {}
-    for alias, key in _DISPLAY_SLOT_PROFILE_KEYS.items():
-        value = _text(values.get(key))
-        if _valid_slot_spec(value):
-            slots[alias] = value
-    return slots
-
-
-def _firmware_profile_key_for_target(template_key: str, target: str) -> str:
-    template_token = _lower(template_key)
-    target_token = _lower(target)
-    if not template_token or not target_token:
-        return ""
-    return f"template:{template_token}:target:{target_token}"
-
-
 def _slot_map_from_saved_display_profile(query: Any, client: Any) -> Dict[str, str]:
     target = _target_from_query(query)
     if target:
@@ -317,21 +288,6 @@ def _slot_map_from_saved_display_profile(query: Any, client: Any) -> Dict[str, s
         out = {alias: _text(value) for alias, value in slots.items() if _valid_slot_spec(value)}
         if out:
             return out
-
-    firmware_profile_keys = []
-    if target:
-        firmware_profile_keys.append(_firmware_profile_key_for_target(_S3BOX_FIRMWARE_TEMPLATE_KEY, target))
-    firmware_profile_keys.append(_S3BOX_FIRMWARE_PROFILE_KEY)
-    for firmware_profile_key in [key for key in firmware_profile_keys if key]:
-        firmware_profile = _json_from_hash(client, _FIRMWARE_PROFILE_HASH_KEY, firmware_profile_key)
-        if not firmware_profile:
-            continue
-        firmware_target = _display_target_key(firmware_profile.get("display_target"))
-        if target and firmware_target not in {"", target}:
-            continue
-        slots = _slots_from_profile_values(firmware_profile)
-        if slots:
-            return slots
     return {}
 
 

@@ -6360,7 +6360,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         with contextlib.suppress(Exception):
             legacy_wake_listen_requested = bool(int(request_flags or 0) & 0x02)
         if legacy_wake_listen_requested and not wake_phrase:
-            msg = "Legacy continuous wake-listen requests are no longer supported. Flash firmware that uses remote_wake_word and openwakeword_server_url."
+            msg = "Legacy continuous wake-listen requests are no longer supported. Flash Tater Native firmware with on-device microWakeWord."
             logger.warning("[native-voice] %s selector=%s", msg, token)
             await _esphome_send_event(
                 client,

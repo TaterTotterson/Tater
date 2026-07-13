@@ -20,36 +20,6 @@ VOICE_MODEL_SETTING_GROUPS = [
         "SpeechBrain Models",
         ["VOICE_SPEECHBRAIN_ACCELERATION"],
     ),
-    (
-        "openWakeWord",
-        [
-            "VOICE_OPENWAKEWORD_ENABLED",
-            "VOICE_OPENWAKEWORD_MODEL_SOURCE",
-            "VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK",
-            "VOICE_OPENWAKEWORD_DEVICE",
-            "VOICE_OPENWAKEWORD_THRESHOLD",
-            "VOICE_OPENWAKEWORD_PATIENCE",
-            "VOICE_OPENWAKEWORD_DEBOUNCE_S",
-            "VOICE_OPENWAKEWORD_VAD_THRESHOLD",
-            "VOICE_OPENWAKEWORD_STREAM_QUEUE_MAX",
-            "VOICE_OPENWAKEWORD_DROP_QUEUED_FRAMES",
-            "VOICE_OPENWAKEWORD_DIAGNOSTIC_LOGGING",
-        ],
-    ),
-    (
-        "NanoWakeWord",
-        [
-            "VOICE_NANOWAKEWORD_ENABLED",
-            "VOICE_NANOWAKEWORD_MODEL_SOURCE",
-            "VOICE_NANOWAKEWORD_DEVICE",
-            "VOICE_NANOWAKEWORD_THRESHOLD",
-            "VOICE_NANOWAKEWORD_PATIENCE",
-            "VOICE_NANOWAKEWORD_DEBOUNCE_S",
-            "VOICE_NANOWAKEWORD_STREAM_QUEUE_MAX",
-            "VOICE_NANOWAKEWORD_DROP_QUEUED_FRAMES",
-            "VOICE_NANOWAKEWORD_DIAGNOSTIC_LOGGING",
-        ],
-    ),
 ]
 
 VOICE_MODEL_SETTING_KEYS = {
@@ -478,189 +448,6 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "Controls SpeechBrain models used by Speaker ID and Emotion ID. Auto uses NVIDIA CUDA, AMD ROCm, then Apple MPS when available, with CPU fallback if accelerated load fails.",
         },
         {
-            "key": "VOICE_OPENWAKEWORD_ENABLED",
-            "label": "Enable Tater openWakeWord",
-            "type": "checkbox",
-            "default": True,
-            "description": "Enables Tater's openWakeWord detector for satellites that stream wake audio to /api/openwakeword/stream. Turn off only when every satellite is using device-local microWakeWord.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_MODEL_SOURCE",
-            "label": "openWakeWord Model",
-            "type": "select",
-            "default": "hey_jarvis",
-            "options": [],
-            "description": "Choose a prebuilt openWakeWord model or one downloaded from the trainer.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK",
-            "label": "openWakeWord Runtime",
-            "type": "select",
-            "default": "onnx",
-            "options": [
-                {"value": "onnx", "label": "ONNX"},
-                {"value": "tflite", "label": "TFLite"},
-            ],
-            "description": "ONNX is preferred for Tater hosts and can use the NVIDIA image's accelerated runtime where supported.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_DEVICE",
-            "label": "openWakeWord Device",
-            "type": "select",
-            "default": "auto",
-            "options": [
-                {"value": "auto", "label": "Auto"},
-                {"value": "cpu", "label": "CPU"},
-                {"value": "gpu", "label": "GPU / CUDA"},
-            ],
-            "description": "Auto uses CUDA-capable ONNX Runtime when available and otherwise falls back to CPU.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_THRESHOLD",
-            "label": "openWakeWord Threshold",
-            "type": "number",
-            "default": 0.5,
-            "min": 0.01,
-            "max": 0.99,
-            "step": 0.01,
-            "description": "Higher values are stricter and reduce false wake triggers. 0.5 matches the old Home Assistant openWakeWord default.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_PATIENCE",
-            "label": "openWakeWord Patience",
-            "type": "number",
-            "default": 1,
-            "min": 1,
-            "max": 10,
-            "step": 1,
-            "description": "How many consecutive model hits are required before Tater reports a remote wake. 1 is closest to the old Home Assistant openWakeWord behavior.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_DEBOUNCE_S",
-            "label": "openWakeWord Debounce (sec)",
-            "type": "number",
-            "default": 2.0,
-            "min": 0.0,
-            "max": 30.0,
-            "step": 0.1,
-            "description": "Minimum time between accepted remote openWakeWord detections from one satellite.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_VAD_THRESHOLD",
-            "label": "openWakeWord VAD Threshold",
-            "type": "number",
-            "default": 0.0,
-            "min": 0.0,
-            "max": 0.99,
-            "step": 0.01,
-            "description": "Optional openWakeWord internal VAD gate. Leave at 0 unless you are tuning false wakes.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_STREAM_QUEUE_MAX",
-            "label": "openWakeWord Stream Queue",
-            "type": "number",
-            "default": 12,
-            "min": 1,
-            "max": 120,
-            "step": 1,
-            "description": "How many remote wake audio chunks can wait while Tater is busy. Higher values reduce drops but can add detection latency.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_DROP_QUEUED_FRAMES",
-            "label": "Drop Queued openWakeWord Frames",
-            "type": "checkbox",
-            "default": True,
-            "description": "When enabled, old queued wake audio is discarded if Tater falls behind. Turn off to preserve every frame and let the stream backpressure instead.",
-        },
-        {
-            "key": "VOICE_OPENWAKEWORD_DIAGNOSTIC_LOGGING",
-            "label": "openWakeWord Diagnostic Logs",
-            "type": "checkbox",
-            "default": True,
-            "description": "Log best-label, score, threshold, and hit-count details for remote openWakeWord tuning. Turn off once the model is tuned if you want quieter logs.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_ENABLED",
-            "label": "Enable Tater NanoWakeWord",
-            "type": "checkbox",
-            "default": True,
-            "description": "Enables Tater's NanoWakeWord detector for satellites that stream wake audio to /api/nanowakeword/stream.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_MODEL_SOURCE",
-            "label": "NanoWakeWord Model",
-            "type": "select",
-            "default": "",
-            "options": [],
-            "description": "Choose a downloaded/local NanoWakeWord model or one pulled from a NanoWakeWord trainer.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_DEVICE",
-            "label": "NanoWakeWord Device",
-            "type": "select",
-            "default": "auto",
-            "options": [
-                {"value": "auto", "label": "Auto"},
-                {"value": "cpu", "label": "CPU"},
-                {"value": "gpu", "label": "GPU / CUDA"},
-            ],
-            "description": "Auto uses CUDA for NanoWakeWord when the selected runtime supports it and otherwise falls back to CPU.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_THRESHOLD",
-            "label": "NanoWakeWord Threshold",
-            "type": "number",
-            "default": 0.90,
-            "min": 0.01,
-            "max": 0.99,
-            "step": 0.01,
-            "description": "Higher values are stricter and reduce false wake triggers.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_PATIENCE",
-            "label": "NanoWakeWord Patience",
-            "type": "number",
-            "default": 2,
-            "min": 1,
-            "max": 10,
-            "step": 1,
-            "description": "How many consecutive model hits are required before Tater reports a remote wake.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_DEBOUNCE_S",
-            "label": "NanoWakeWord Debounce (sec)",
-            "type": "number",
-            "default": 4.0,
-            "min": 0.0,
-            "max": 30.0,
-            "step": 0.1,
-            "description": "Minimum time between accepted remote NanoWakeWord detections from one satellite.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_STREAM_QUEUE_MAX",
-            "label": "NanoWakeWord Stream Queue",
-            "type": "number",
-            "default": 12,
-            "min": 1,
-            "max": 120,
-            "step": 1,
-            "description": "How many remote wake audio chunks can wait while Tater is busy. Higher values reduce drops but can add detection latency.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_DROP_QUEUED_FRAMES",
-            "label": "Drop Queued NanoWakeWord Frames",
-            "type": "checkbox",
-            "default": True,
-            "description": "When enabled, old queued wake audio is discarded if Tater falls behind. Turn off to preserve every frame and let the stream backpressure instead.",
-        },
-        {
-            "key": "VOICE_NANOWAKEWORD_DIAGNOSTIC_LOGGING",
-            "label": "NanoWakeWord Diagnostic Logs",
-            "type": "checkbox",
-            "default": False,
-            "description": "Log score, threshold, and hit-count details for remote NanoWakeWord tuning. Leave off during normal use.",
-        },
-        {
             "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
             "label": "Live Tool Progress Speech",
             "type": "checkbox",
@@ -793,16 +580,6 @@ def settings_fields() -> List[Dict[str, Any]]:
 
         if field_type in {"select", "multiselect"}:
             row["options"] = list(spec.get("options") or [])
-            if key == "VOICE_OPENWAKEWORD_MODEL_SOURCE":
-                with contextlib.suppress(Exception):
-                    from . import openwakeword_engine
-
-                    row["options"] = openwakeword_engine.model_source_options(current=raw_value)
-            if key == "VOICE_NANOWAKEWORD_MODEL_SOURCE":
-                with contextlib.suppress(Exception):
-                    from . import nanowakeword_engine
-
-                    row["options"] = nanowakeword_engine.model_source_options(current=raw_value)
 
         if field_type == "password":
             has_saved = bool(vp._text(stored.get(key)))
@@ -975,13 +752,10 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     current = vp._voice_settings()
     mapping: Dict[str, str] = {}
     changed_keys: List[str] = []
-    openwakeword_model_settings_touched = False
 
     for key, spec in specs.items():
         if key not in incoming:
             continue
-        if key in {"VOICE_OPENWAKEWORD_MODEL_SOURCE", "VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK"}:
-            openwakeword_model_settings_touched = True
         field_type = vp._lower(spec.get("type") or "text")
         raw_value = incoming.get(key)
 
@@ -1012,63 +786,10 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
         else:
             normalized = vp._text(raw_value)
 
-        if key == "VOICE_OPENWAKEWORD_MODEL_SOURCE":
-            try:
-                from . import openwakeword_engine
-
-                normalized, _inferred_openwakeword_framework = openwakeword_engine.normalize_model_source(
-                    normalized,
-                    framework=(
-                        incoming.get("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK")
-                        or current.get("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK")
-                    ),
-                    copy_external=True,
-                )
-            except Exception as exc:
-                raise ValueError(str(exc) or "Invalid openWakeWord model source.") from exc
-
-        if key == "VOICE_NANOWAKEWORD_MODEL_SOURCE":
-            try:
-                from . import nanowakeword_engine
-
-                normalized = nanowakeword_engine.normalize_model_source(normalized, copy_external=True)
-            except Exception as exc:
-                raise ValueError(str(exc) or "Invalid NanoWakeWord model source.") from exc
-
         old = vp._text(current.get(key))
         if normalized != old:
             mapping[key] = normalized
             changed_keys.append(key)
-
-    def _set_normalized_mapping(key: str, normalized: str) -> None:
-        old = vp._text(current.get(key))
-        if normalized != old:
-            mapping[key] = normalized
-            if key not in changed_keys:
-                changed_keys.append(key)
-            return
-        mapping.pop(key, None)
-        while key in changed_keys:
-            changed_keys.remove(key)
-
-    if openwakeword_model_settings_touched:
-        try:
-            from . import openwakeword_engine
-
-            normalized_source, inferred_openwakeword_framework = openwakeword_engine.normalize_model_source(
-                mapping.get("VOICE_OPENWAKEWORD_MODEL_SOURCE")
-                or vp._text(current.get("VOICE_OPENWAKEWORD_MODEL_SOURCE")),
-                framework=(
-                    mapping.get("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK")
-                    or vp._text(current.get("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK"))
-                ),
-                copy_external=True,
-            )
-        except Exception as exc:
-            raise ValueError(str(exc) or "Invalid openWakeWord model source.") from exc
-        _set_normalized_mapping("VOICE_OPENWAKEWORD_MODEL_SOURCE", normalized_source)
-        if inferred_openwakeword_framework:
-            _set_normalized_mapping("VOICE_OPENWAKEWORD_INFERENCE_FRAMEWORK", inferred_openwakeword_framework)
 
     if mapping:
         redis_client.hset(settings_hash_key(), mapping=mapping)
