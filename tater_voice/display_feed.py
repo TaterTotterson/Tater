@@ -5,7 +5,7 @@ import math
 import re
 import time
 from datetime import datetime
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from helpers import redis_client
 from integration_runtime import integration_runtime_states
@@ -26,6 +26,7 @@ _DEFAULT_SLOT_LABELS: Dict[str, str] = {
 _RESERVED_QUERY_KEYS = {
     "compact",
     "device",
+    "display_target",
     "format",
     "limit",
     "mode",
@@ -280,15 +281,122 @@ def _json_from_hash(client: Any, hash_key: str, field: str) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _slot_map_from_saved_display_profile(query: Any, client: Any) -> Dict[str, str]:
-    target = _target_from_query(query)
-    if target:
-        profile = _json_from_hash(client, _DISPLAY_PROFILE_HASH_KEY, target)
-        slots = profile.get("slots") if isinstance(profile.get("slots"), dict) else {}
-        out = {alias: _text(value) for alias, value in slots.items() if _valid_slot_spec(value)}
-        if out:
-            return out
-    return {}
+def _display_identity_items(query: Any) -> List[Tuple[str, str]]:
+    items: List[Tuple[str, str]] = []
+    for raw_key, raw_value in _iter_query_items(query):
+        key = _lower(raw_key)
+        if key not in {"target", "display_target", "device", "selector"}:
+            continue
+        value = _display_target_key(raw_value)
+        if value:
+            items.append((key, value))
+    return items
+
+
+def _display_identity_candidates(query: Any) -> List[str]:
+    items = _display_identity_items(query)
+    candidates: List[str] = []
+    for wanted_key in ("target", "display_target", "device", "selector"):
+        for key, value in items:
+            if key == wanted_key and value not in candidates:
+                candidates.append(value)
+    return candidates
+
+
+def _display_profile_slots(profile: Mapping[str, Any]) -> Dict[str, str]:
+    slots = profile.get("slots") if isinstance(profile.get("slots"), dict) else {}
+    return {alias: _text(value) for alias, value in slots.items() if _valid_slot_spec(value)}
+
+
+def _display_profile_matches_candidates(profile: Mapping[str, Any], fallback_key: Any, candidates: Iterable[str]) -> bool:
+    candidate_set = {value for value in candidates if value}
+    if not candidate_set:
+        return False
+    values = [
+        fallback_key,
+        profile.get("target"),
+        profile.get("display_target"),
+        profile.get("selector"),
+        profile.get("id"),
+        profile.get("device"),
+        profile.get("device_name"),
+    ]
+    return any(_display_target_key(value) in candidate_set for value in values if _text(value))
+
+
+def _display_profile_matches_selector(profile: Mapping[str, Any], fallback_key: Any, candidates: Iterable[str]) -> bool:
+    candidate_set = {value for value in candidates if value}
+    if not candidate_set:
+        return False
+    values = [
+        fallback_key,
+        profile.get("selector"),
+        profile.get("id"),
+        profile.get("device"),
+        profile.get("device_name"),
+    ]
+    return any(_display_target_key(value) in candidate_set for value in values if _text(value))
+
+
+def _iter_saved_display_profiles(client: Any) -> Iterable[Tuple[str, Dict[str, Any]]]:
+    try:
+        raw_rows = client.hgetall(_DISPLAY_PROFILE_HASH_KEY)
+    except Exception:
+        return []
+    if not isinstance(raw_rows, dict):
+        return []
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    for raw_key, raw_value in raw_rows.items():
+        key = _text(raw_key)
+        try:
+            parsed = json.loads(_text(raw_value))
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        template = _lower(parsed.get("template"))
+        if template and template != "s3box_display":
+            continue
+        rows.append((key, parsed))
+    return rows
+
+
+def _saved_display_profile_from_query(query: Any, client: Any) -> Tuple[Dict[str, Any], bool]:
+    identity_items = _display_identity_items(query)
+    candidates = _display_identity_candidates(query)
+    selector_candidates: List[str] = []
+    for key, value in identity_items:
+        if key == "selector" and value not in selector_candidates:
+            selector_candidates.append(value)
+    if not candidates:
+        return {}, False
+    target_fallback: Dict[str, Any] = {}
+    for candidate in candidates:
+        profile = _json_from_hash(client, _DISPLAY_PROFILE_HASH_KEY, candidate)
+        if profile:
+            if selector_candidates and not _display_profile_matches_selector(profile, candidate, selector_candidates):
+                if not target_fallback:
+                    target_fallback = profile
+                continue
+            return profile, True
+    saved_profiles = list(_iter_saved_display_profiles(client))
+    if selector_candidates:
+        for fallback_key, profile in saved_profiles:
+            if _display_profile_matches_selector(profile, fallback_key, selector_candidates):
+                return profile, True
+    for fallback_key, profile in saved_profiles:
+        if _display_profile_matches_candidates(profile, fallback_key, candidates):
+            return profile, True
+    if target_fallback:
+        return target_fallback, True
+    return {}, False
+
+
+def _slot_map_from_saved_display_profile(query: Any, client: Any) -> Tuple[Dict[str, str], bool]:
+    profile, found = _saved_display_profile_from_query(query, client)
+    if not found:
+        return {}, False
+    return _display_profile_slots(profile), True
 
 
 def _slot_map_from_query(query: Any) -> Dict[str, str]:
@@ -315,11 +423,8 @@ def _slot_map_from_query(query: Any) -> Dict[str, str]:
 
 
 def _target_from_query(query: Any) -> str:
-    for raw_key, raw_value in _iter_query_items(query):
-        key = _lower(raw_key)
-        if key in {"target", "device", "selector"}:
-            return _display_target_key(raw_value)
-    return ""
+    candidates = _display_identity_candidates(query)
+    return candidates[0] if candidates else ""
 
 
 def _compact_requested(query: Any) -> bool:
@@ -552,9 +657,10 @@ def _normalize_integration_slot(
 
 def build_display_feed(query: Any = None, *, client: Any = None, version: str = "") -> Dict[str, Any]:
     redis_obj = client or redis_client
-    requested_slots = _slot_map_from_query(query)
-    if not requested_slots:
-        requested_slots = _slot_map_from_saved_display_profile(query, redis_obj)
+    identity_present = bool(_display_identity_candidates(query))
+    requested_slots, saved_profile_found = _slot_map_from_saved_display_profile(query, redis_obj)
+    if not requested_slots and not saved_profile_found and not identity_present:
+        requested_slots = _slot_map_from_query(query)
     runtime_states = _runtime_integration_states(redis_obj)
     clock = _local_clock()
     assistant = {
