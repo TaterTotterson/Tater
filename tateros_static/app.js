@@ -9823,6 +9823,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
     return `
       <details class="${wrapperClass}"
         data-core-key="${escapeHtml(coreKey)}"
+        data-core-action-endpoint="/api/settings/esphome/runtime/action"
         data-display-target="${escapeHtml(target)}"
         data-display-target-label="${escapeHtml(targetLabel)}"
         data-display-selector="${escapeHtml(selector)}"
@@ -9844,6 +9845,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
   return `
     <section class="${wrapperClass}"
       data-core-key="${escapeHtml(coreKey)}"
+      data-core-action-endpoint="/api/settings/esphome/runtime/action"
       data-display-target="${escapeHtml(target)}"
       data-display-target-label="${escapeHtml(targetLabel)}"
       data-display-selector="${escapeHtml(selector)}"
