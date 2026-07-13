@@ -515,6 +515,85 @@ def _pretty_timestamp(value: Any) -> str:
     return "-"
 
 
+def _selector_aliases(selector: Any) -> set[str]:
+    token = _vp()._text(selector)
+    if not token:
+        return set()
+    aliases = {token}
+    if token.startswith("native:"):
+        bare = token.split(":", 1)[1].strip()
+        if bare:
+            aliases.add(bare)
+    else:
+        aliases.add(f"native:{token}")
+    return aliases
+
+
+def _selector_matches(left: Any, right: Any) -> bool:
+    left_aliases = _selector_aliases(left)
+    right_aliases = _selector_aliases(right)
+    return bool(left_aliases and right_aliases and left_aliases.intersection(right_aliases))
+
+
+def _known_selectors(status: Dict[str, Any]) -> List[str]:
+    vp = _vp()
+    tokens: List[str] = []
+    clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
+    for selector, row in clients.items():
+        token = vp._text(selector)
+        if not token and isinstance(row, dict):
+            token = vp._text(row.get("selector"))
+        if token:
+            tokens.append(token)
+    with contextlib.suppress(Exception):
+        for row in list(vp.load_satellite_registry() or []):
+            if not isinstance(row, dict):
+                continue
+            token = vp._text(row.get("selector"))
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def _canonical_selector(selector: Any, status: Dict[str, Any]) -> str:
+    token = _vp()._text(selector)
+    if not token:
+        return ""
+    for known in _known_selectors(status if isinstance(status, dict) else {}):
+        if _selector_matches(token, known):
+            return _vp()._text(known)
+    return token
+
+
+def _remember_selector_label(labels: Dict[str, str], selector: Any, label: str) -> None:
+    token = _vp()._text(selector)
+    if not token:
+        return
+    text = _vp()._text(label) or token
+    for existing in list(labels.keys()):
+        if existing and _selector_matches(existing, token):
+            if token.startswith("native:") and existing != token:
+                labels.pop(existing, None)
+                labels[token] = text
+            else:
+                labels[existing] = text
+            return
+    labels[token] = text
+
+
+def _selector_label_from_options(selector: Any, options: List[Dict[str, str]]) -> str:
+    token = _vp()._text(selector)
+    if not token:
+        return "Any satellite"
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        value = _vp()._text(option.get("value"))
+        if value and _selector_matches(token, value):
+            return _vp()._text(option.get("label")) or value
+    return token
+
+
 def _pending_enrollment_state() -> Dict[str, Any]:
     with _PENDING_LOCK:
         pending = dict(_PENDING_ENROLLMENT or {})
@@ -589,7 +668,7 @@ def consume_pending_enrollment(selector: str = "") -> Dict[str, Any]:
             _debug(f"enrollment expired selector={token or 'unknown'}")
             return {}
         expected_selector = _vp()._text(pending.get("selector"))
-        if expected_selector and expected_selector != token:
+        if expected_selector and not _selector_matches(expected_selector, token):
             return {}
         _PENDING_ENROLLMENT.clear()
     _log_info(
@@ -842,6 +921,17 @@ def _pcm_to_waveform(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Any:
     return tensor.unsqueeze(0)
 
 
+def _estimate_audio_duration_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
+    pcm = bytes(audio_bytes or b"")
+    if not pcm:
+        return 0.0
+    rate = int(audio_format.get("rate") or _vp().DEFAULT_VOICE_SAMPLE_RATE_HZ)
+    width = int(audio_format.get("width") or _vp().DEFAULT_VOICE_SAMPLE_WIDTH)
+    channels = int(audio_format.get("channels") or _vp().DEFAULT_VOICE_CHANNELS)
+    frame_bytes = max(1, width * max(1, channels))
+    return float(len(pcm)) / float(max(1, rate * frame_bytes))
+
+
 def _compute_embedding(audio_bytes: bytes, audio_format: Dict[str, Any]) -> List[float]:
     available, detail = _speechbrain_state()
     if not available:
@@ -887,10 +977,15 @@ def match_speaker_for_audio(
     if not speaker_id_enabled():
         _debug("match skipped reason=disabled")
         return {"matched": False, "reason": "disabled"}
+    effective_speech_s = max(
+        0.0,
+        float(speech_s or 0.0),
+        _estimate_audio_duration_s(audio_bytes, audio_format),
+    )
     best_match = _best_match_enabled()
-    if (not best_match) and float(speech_s or 0.0) < _min_speech_seconds():
+    if (not best_match) and effective_speech_s < _min_speech_seconds():
         _debug(
-            f"match skipped reason=too_short speech_s={float(speech_s or 0.0):.2f} "
+            f"match skipped reason=too_short speech_s={effective_speech_s:.2f} "
             f"minimum_s={_min_speech_seconds():.2f}"
         )
         return {"matched": False, "reason": "too_short"}
@@ -898,8 +993,8 @@ def match_speaker_for_audio(
     if not speakers:
         _debug("match skipped reason=no_speakers")
         return {"matched": False, "reason": "no_speakers"}
-    _log_info("match start speech_s=%.2f speakers=%s", float(speech_s or 0.0), len(speakers))
-    _debug(f"match start speech_s={float(speech_s or 0.0):.2f} speakers={len(speakers)}")
+    _log_info("match start speech_s=%.2f speakers=%s", effective_speech_s, len(speakers))
+    _debug(f"match start speech_s={effective_speech_s:.2f} speakers={len(speakers)}")
     query = _compute_embedding(audio_bytes, audio_format)
     scored: List[Dict[str, Any]] = []
     for speaker in speakers:
@@ -920,7 +1015,7 @@ def match_speaker_for_audio(
         result = {
             "matched": False,
             "reason": "no_embeddings",
-            "speech_s": float(speech_s or 0.0),
+            "speech_s": effective_speech_s,
             "model_source": _model_source(),
             "updated_ts": time.time(),
         }
@@ -973,7 +1068,7 @@ def match_speaker_for_audio(
         "best_match": bool(best_match),
         "sample_count": int(best.get("sample_count") or 0),
         "candidates": scored[:3],
-        "speech_s": float(speech_s or 0.0),
+        "speech_s": effective_speech_s,
         "model_source": _model_source(),
         "updated_ts": time.time(),
     }
@@ -988,12 +1083,17 @@ def add_enrollment_sample(
     audio_format: Dict[str, Any],
     speech_s: float = 0.0,
 ) -> Dict[str, Any]:
-    if float(speech_s or 0.0) < _enroll_min_speech_seconds():
+    effective_speech_s = max(
+        0.0,
+        float(speech_s or 0.0),
+        _estimate_audio_duration_s(audio_bytes, audio_format),
+    )
+    if effective_speech_s < _enroll_min_speech_seconds():
         raise RuntimeError(
             f"Enrollment sample was too short. Speak one clear sentence for at least {_enroll_min_speech_seconds():.2f} seconds."
         )
-    _log_info("enrollment sample start speaker_id=%s speech_s=%.2f", _vp()._text(speaker_id), float(speech_s or 0.0))
-    _debug(f"enrollment sample start speaker_id={_vp()._text(speaker_id)!r} speech_s={float(speech_s or 0.0):.2f}")
+    _log_info("enrollment sample start speaker_id=%s speech_s=%.2f", _vp()._text(speaker_id), effective_speech_s)
+    _debug(f"enrollment sample start speaker_id={_vp()._text(speaker_id)!r} speech_s={effective_speech_s:.2f}")
     speakers = _all_speakers()
     target_index = next((index for index, row in enumerate(speakers) if _vp()._text(row.get("id")) == _vp()._text(speaker_id)), -1)
     if target_index < 0:
@@ -1002,7 +1102,7 @@ def add_enrollment_sample(
     sample = {
         "embedding": embedding,
         "created_ts": time.time(),
-        "speech_s": float(speech_s or 0.0),
+        "speech_s": effective_speech_s,
     }
     speaker = dict(speakers[target_index])
     samples = list(speaker.get("samples") or [])
@@ -1015,11 +1115,11 @@ def add_enrollment_sample(
         "enrollment sample saved speaker=%s sample_count=%s speech_s=%.2f",
         _vp()._text(speaker.get("name")) or "Speaker",
         len(samples),
-        float(speech_s or 0.0),
+        effective_speech_s,
     )
     _debug(
         f"enrollment sample saved speaker={_vp()._text(speaker.get('name'))!r} "
-        f"sample_count={len(samples)} speech_s={float(speech_s or 0.0):.2f}"
+        f"sample_count={len(samples)} speech_s={effective_speech_s:.2f}"
     )
     return {
         "speaker_id": _vp()._text(speaker.get("id")),
@@ -1043,7 +1143,7 @@ def _selector_options(status: Dict[str, Any]) -> List[Dict[str, str]]:
             continue
         host = vp._text(row.get("host"))
         name = vp._text(row.get("name")) or selector
-        labels[selector] = f"{name}{f' ({host})' if host else ''}"
+        _remember_selector_label(labels, selector, f"{name}{f' ({host})' if host else ''}")
     for selector, row in clients.items():
         if not isinstance(row, dict):
             continue
@@ -1058,9 +1158,37 @@ def _selector_options(status: Dict[str, Any]) -> List[Dict[str, str]]:
             or vp._text(token)
         )
         host = vp._text(row.get("host"))
-        labels[token] = f"{label}{f' ({host})' if host else ''}"
+        _remember_selector_label(labels, token, f"{label}{f' ({host})' if host else ''}")
     ordered = sorted(((key, value) for key, value in labels.items()), key=lambda item: (item[0] != "", item[1].lower()))
     return [{"value": key, "label": value} for key, value in ordered]
+
+
+def _speaker_panel_row(row: Dict[str, Any], status: Dict[str, Any], selector_options: List[Dict[str, str]]) -> Dict[str, Any]:
+    vp = _vp()
+    preferred_selector = _canonical_selector(row.get("preferred_selector"), status)
+    return {
+        "speaker_id": vp._text(row.get("id")),
+        "name": vp._text(row.get("name")),
+        "sample_count": len(list(row.get("samples") or [])),
+        "preferred_selector": preferred_selector,
+        "updated_at": _pretty_timestamp(row.get("updated_ts")),
+        "fields": [
+            {
+                "key": "speaker_name",
+                "label": "Speaker Name",
+                "type": "text",
+                "value": vp._text(row.get("name")),
+            },
+            {
+                "key": "preferred_selector",
+                "label": "Preferred Satellite",
+                "type": "select",
+                "options": selector_options,
+                "value": preferred_selector,
+                "description": "If set, the next capture must come from this satellite.",
+            },
+        ],
+    }
 
 
 def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
@@ -1068,6 +1196,10 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     speakers = _all_speakers()
     selector_options = _selector_options(status)
     pending = current_pending_enrollment()
+    if pending:
+        pending = dict(pending)
+        pending["selector"] = _canonical_selector(pending.get("selector"), status)
+        pending["selector_label"] = _selector_label_from_options(pending.get("selector"), selector_options)
     availability = runtime_availability()
     last = last_result()
     return {
@@ -1111,29 +1243,7 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             },
         ],
         "speakers": [
-            {
-                "speaker_id": vp._text(row.get("id")),
-                "name": vp._text(row.get("name")),
-                "sample_count": len(list(row.get("samples") or [])),
-                "preferred_selector": vp._text(row.get("preferred_selector")),
-                "updated_at": _pretty_timestamp(row.get("updated_ts")),
-                "fields": [
-                    {
-                        "key": "speaker_name",
-                        "label": "Speaker Name",
-                        "type": "text",
-                        "value": vp._text(row.get("name")),
-                    },
-                    {
-                        "key": "preferred_selector",
-                        "label": "Preferred Satellite",
-                        "type": "select",
-                        "options": selector_options,
-                        "value": vp._text(row.get("preferred_selector")),
-                        "description": "If set, the next capture must come from this satellite.",
-                    },
-                ],
-            }
+            _speaker_panel_row(row, status, selector_options)
             for row in sorted(speakers, key=lambda item: vp._text(item.get("name")).lower())
         ],
     }
@@ -1163,7 +1273,10 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any], status: Dic
         speaker_name = esphome_runtime.text(values.get("speaker_name") or body.get("speaker_name"))
         if not speaker_name:
             raise ValueError("speaker_name is required")
-        preferred_selector = esphome_runtime.text(values.get("preferred_selector") or body.get("preferred_selector"))
+        preferred_selector = _canonical_selector(
+            values.get("preferred_selector") or body.get("preferred_selector"),
+            status,
+        )
         speakers = _all_speakers()
         if any(esphome_runtime.lower(row.get("name")) == esphome_runtime.lower(speaker_name) for row in speakers):
             raise ValueError(f"A speaker named {speaker_name} already exists.")
@@ -1199,7 +1312,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any], status: Dic
         if any(esphome_runtime.text(other.get("id")) != speaker_id and esphome_runtime.lower(other.get("name")) == esphome_runtime.lower(new_name) for other in speakers):
             raise ValueError(f"A speaker named {new_name} already exists.")
         row["name"] = new_name
-        row["preferred_selector"] = esphome_runtime.text(values.get("preferred_selector"))
+        row["preferred_selector"] = _canonical_selector(values.get("preferred_selector"), status)
         row["updated_ts"] = time.time()
         speakers[index] = row
         _save_speakers(speakers)
@@ -1242,7 +1355,10 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any], status: Dic
         available, detail = _speechbrain_state()
         if not available:
             raise RuntimeError(detail or "SpeechBrain model is unavailable.")
-        selector = esphome_runtime.text(values.get("preferred_selector")) or esphome_runtime.text(target.get("preferred_selector"))
+        selector = _canonical_selector(
+            esphome_runtime.text(values.get("preferred_selector")) or esphome_runtime.text(target.get("preferred_selector")),
+            status,
+        )
         pending = arm_enrollment(
             speaker_id=speaker_id,
             speaker_name=esphome_runtime.text(target.get("name")) or "Speaker",

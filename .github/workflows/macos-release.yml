@@ -121,6 +121,7 @@ jobs:
       ZIP_PATH: macos/Tater/releases/Tater-${{ github.ref_name }}.zip
       DMG_PATH: macos/Tater/releases/Tater-${{ github.ref_name }}.dmg
       MANIFEST_PATH: macos/Tater/update-manifest.json
+      RELEASE_NOTES_PATH: macos/Tater/RELEASE_NOTES.md
 
     steps:
       - name: Check out generated release files
@@ -197,8 +198,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Tater ${{ env.VERSION_LABEL }}
-          prerelease: true
-          generate_release_notes: true
+          prerelease: false
+          make_latest: true
+          body_path: ${{ env.RELEASE_NOTES_PATH }}
           files: |
             ${{ env.ZIP_PATH }}
             ${{ env.DMG_PATH }}
