@@ -413,6 +413,12 @@ def _merge_native_satellites(status: Dict[str, Any], native_status: Dict[str, An
     return merged
 
 
+def _runtime_status_with_native(native_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    status = esphome_runtime.status()
+    native = native_status if isinstance(native_status, dict) else _native_satellite_status_snapshot()
+    return _merge_native_satellites(status, native)
+
+
 def _is_native_satellite_row(row: Dict[str, Any]) -> bool:
     selector = esphome_runtime.text(row.get("selector"))
     source = esphome_runtime.text(row.get("source"))
@@ -438,9 +444,8 @@ def get_runtime_payload(
     include_speaker_id = panel_token in {"", "speakerid"}
     include_emotion_id = panel_token in {"", "emotionid"}
     include_stats = panel_token in {"", "stats"}
-    status = esphome_runtime.status()
     native_status = _native_satellite_status_snapshot()
-    status = _merge_native_satellites(status, native_status)
+    status = _runtime_status_with_native(native_status)
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     voice_metrics = (
         status.get("voice_metrics")
@@ -775,11 +780,13 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
     if isinstance(firmware_result, dict):
         return firmware_result
 
-    speaker_id_result = esphome_speaker_id.handle_runtime_action(action_name, body, esphome_runtime.status())
+    runtime_status = _runtime_status_with_native()
+
+    speaker_id_result = esphome_speaker_id.handle_runtime_action(action_name, body, runtime_status)
     if isinstance(speaker_id_result, dict):
         return speaker_id_result
 
-    emotion_id_result = esphome_emotion_id.handle_runtime_action(action_name, body, esphome_runtime.status())
+    emotion_id_result = esphome_emotion_id.handle_runtime_action(action_name, body, runtime_status)
     if isinstance(emotion_id_result, dict):
         return emotion_id_result
 
@@ -790,7 +797,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             esphome_runtime.reconcile_once(force=True, timeout=45.0)
         updated = int(result.get("updated_count") or 0)
         message = f"Saved {updated} setting(s)." if updated > 0 else "No settings changed."
-        return {"ok": True, "action": action_name, "message": message, **result, "status": esphome_runtime.status()}
+        return {"ok": True, "action": action_name, "message": message, **result, "status": _runtime_status_with_native()}
 
     if action_name == "voice_settings_reset_defaults":
         result = esphome_settings.reset_settings_defaults()
@@ -798,7 +805,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             esphome_runtime.reconcile_once(force=True, timeout=45.0)
         updated = int(result.get("updated_count") or 0)
         message = f"Restored {updated} setting(s) to defaults." if updated > 0 else "Settings already use defaults."
-        return {"ok": True, "action": action_name, "message": message, **result, "status": esphome_runtime.status()}
+        return {"ok": True, "action": action_name, "message": message, **result, "status": _runtime_status_with_native()}
 
     if action_name == "voice_satellite_add_manual":
         raise ValueError("Manual legacy satellite add has been removed. Use Add Satellite pairing for Tater Native firmware.")
