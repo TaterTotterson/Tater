@@ -24,6 +24,7 @@ def sample_registry():
             {"id": "switch", "name": "Switches", "order": 20},
             {"id": "fan", "name": "Fans", "order": 35},
             {"id": "garage_door", "name": "Garage Doors", "order": 40},
+            {"id": "climate", "name": "Climate", "order": 80},
             {"id": "temperature", "name": "Temperature", "order": 90},
             {"id": "humidity", "name": "Humidity", "order": 100},
             {"id": "sensor", "name": "Sensors", "order": 220},
@@ -67,6 +68,21 @@ def sample_registry():
                 "actions": ["open", "close"],
                 "state": "closed",
             },
+            {
+                "integration_id": "ecobee_homekit",
+                "id": "thermostat:office",
+                "room": "Office",
+                "room_id": "office",
+                "category_ids": ["climate", "temperature", "humidity"],
+                "actions": ["set_temperature", "set_hvac_mode"],
+                "state": "71 F",
+                "details": {
+                    "current_temperature_f": 71,
+                    "target_temperature_f": 69,
+                    "current_humidity": 41,
+                    "target_hvac_mode": "heat",
+                },
+            },
         ],
         "cache": {"cached": True, "age_seconds": 3},
     }
@@ -78,7 +94,7 @@ class LittleSpudHomeTests(unittest.TestCase):
         self.assertTrue(snapshot["ok"])
         self.assertEqual(snapshot["room_count"], 2)
         office = next(room for room in snapshot["rooms"] if room["id"] == "office")
-        self.assertEqual(office["device_count"], 3)
+        self.assertEqual(office["device_count"], 4)
         self.assertNotIn("devices", office)
         self.assertNotIn("devices", office["categories"][0])
         light = next(category for category in office["categories"] if category["id"] == "light")
@@ -95,8 +111,8 @@ class LittleSpudHomeTests(unittest.TestCase):
         snapshot = build_home_snapshot(sample_registry())
         office = next(room for room in snapshot["rooms"] if room["id"] == "office")
         sensors = {category["id"]: category for category in office["sensors"]}
-        self.assertEqual(sensors["temperature"]["summary"], "72.5°F")
-        self.assertEqual(sensors["humidity"]["summary"], "43%")
+        self.assertEqual(sensors["temperature"]["summary"], "71.8°F")
+        self.assertEqual(sensors["humidity"]["summary"], "42%")
         self.assertNotIn("sensor", sensors)
 
     def test_action_targets_are_limited_to_room_category_and_capability(self):
@@ -121,6 +137,42 @@ class LittleSpudHomeTests(unittest.TestCase):
         self.assertEqual(payload["brightness_pct"], 100)
         self.assertEqual(payload["level"], 100)
         self.assertEqual(payload["percent"], 100)
+
+    def test_thermostat_payload_exposes_controls_and_setpoint(self):
+        snapshot = build_home_snapshot(sample_registry())
+        office = next(room for room in snapshot["rooms"] if room["id"] == "office")
+        climate = next(category for category in office["controls"] if category["id"] == "climate")
+        self.assertEqual(climate["control_type"], "thermostat")
+        self.assertEqual(climate["current_temperature"], 71)
+        self.assertEqual(climate["target_temperature"], 69)
+        self.assertEqual(climate["temperature_unit"], "F")
+        self.assertEqual(climate["hvac_mode"], "heat")
+        self.assertEqual(climate["available_hvac_modes"], ["off", "heat", "cool", "auto"])
+        self.assertEqual(
+            climate["available_actions"],
+            ["set_temperature", "set_hvac_mode"],
+        )
+
+    def test_thermostat_actions_are_scoped_and_build_provider_payloads(self):
+        targets = resolve_home_action_targets(
+            sample_registry(),
+            room_id="office",
+            category_id="climate",
+            action="set_temperature",
+        )
+        self.assertEqual([target["id"] for target in targets], ["thermostat:office"])
+        self.assertEqual(
+            home_action_payload("set_temperature", 72, temperature_unit="F"),
+            {
+                "temperature": 72.0,
+                "target_temperature": 72.0,
+                "temperature_unit": "F",
+            },
+        )
+        self.assertEqual(
+            home_action_payload("set_hvac_mode", mode="cool"),
+            {"mode": "cool", "hvac_mode": "cool"},
+        )
 
     def test_unknown_safety_sensor_is_not_reported_as_clear(self):
         registry = sample_registry()
@@ -156,8 +208,8 @@ class LittleSpudHomeTests(unittest.TestCase):
         snapshot = build_home_snapshot(registry)
         office = next(room for room in snapshot["rooms"] if room["id"] == "office")
         sensors = {category["id"]: category for category in office["sensors"]}
-        self.assertEqual(sensors["temperature"]["summary"], "23°C")
-        self.assertEqual(sensors["humidity"]["summary"], "48%")
+        self.assertEqual(sensors["temperature"]["summary"], "22.3°C")
+        self.assertEqual(sensors["humidity"]["summary"], "44%")
 
     def test_camera_previews_are_opaque_and_scoped_to_the_room_and_client(self):
         registry = sample_registry()
