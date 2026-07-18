@@ -215,10 +215,34 @@ def _average(values: Iterable[float]) -> float | None:
 
 
 def _temperature_unit(device: Dict[str, Any]) -> str:
-    unit = _text(_lookup(device, "temperature_unit", "unit_of_measurement", "unit")).upper()
-    if not unit:
-        unit = _state(device).upper()
-    if "C" in unit and "F" not in unit:
+    raw_unit = _text(_lookup(device, "temperature_unit", "unit_of_measurement", "unit"))
+    unit = raw_unit.upper() if raw_unit else _state(device).upper()
+    unit_token = _token(unit)
+    if unit_token in {"c", "celsius", "degree_c", "degrees_c"} or re.search(
+        r"(?:^|[^A-Z])C(?:$|[^A-Z])",
+        unit,
+    ):
+        return "C"
+    if unit_token in {"f", "fahrenheit", "degree_f", "degrees_f"} or re.search(
+        r"(?:^|[^A-Z])F(?:$|[^A-Z])",
+        unit,
+    ):
+        return "F"
+    celsius_value = _lookup(
+        device,
+        "current_temperature_c",
+        "temperature_c",
+        "target_temperature_c",
+        "setpoint_c",
+    )
+    fahrenheit_value = _lookup(
+        device,
+        "current_temperature_f",
+        "temperature_f",
+        "target_temperature_f",
+        "setpoint_f",
+    )
+    if celsius_value not in (None, "") and fahrenheit_value in (None, ""):
         return "C"
     return "F"
 
@@ -312,6 +336,7 @@ def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
         average = _average(value for value in values if value is not None)
         if average is not None:
             return f"{_format_number(average, 1)}°{unit}"
+        return "Status unavailable"
     if category_id == "humidity":
         values = [
             _number(_lookup(device, "humidity", "current_humidity", "relative_humidity", "value", "state"))
@@ -320,6 +345,7 @@ def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
         average = _average(value for value in values if value is not None)
         if average is not None:
             return f"{_format_number(average)}%"
+        return "Status unavailable"
     if category_id == "battery":
         values = [
             _number(_lookup(device, "battery", "battery_level", "battery_pct", "percentage", "value", "state"))
@@ -328,6 +354,7 @@ def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
         average = _average(value for value in values if value is not None)
         if average is not None:
             return f"{_format_number(average)}% average"
+        return "Status unavailable"
     if category_id == "illuminance":
         values = [
             _number(_lookup(device, "illuminance", "lux", "value", "state"))
@@ -336,10 +363,12 @@ def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
         average = _average(value for value in values if value is not None)
         if average is not None:
             return f"{_format_number(average)} lux"
+        return "Status unavailable"
     if category_id == "energy":
         value = _number(_lookup(devices[0], "power", "power_w", "watts", "energy", "value", "state"))
         if value is not None:
             return f"{_format_number(value, 1)} W"
+        return "Status unavailable"
     if category_id == "entry_sensor":
         known = [
             state

@@ -209,7 +209,33 @@ class LittleSpudHomeTests(unittest.TestCase):
         office = next(room for room in snapshot["rooms"] if room["id"] == "office")
         sensors = {category["id"]: category for category in office["sensors"]}
         self.assertEqual(sensors["temperature"]["summary"], "22.3°C")
+        self.assertEqual(sensors["temperature"]["current_temperature"], 22.3)
+        self.assertEqual(sensors["temperature"]["temperature_unit"], "C")
         self.assertEqual(sensors["humidity"]["summary"], "44%")
+
+    def test_non_temperature_state_is_not_mistaken_for_celsius(self):
+        registry = sample_registry()
+        registry["devices"].append(
+            {
+                "integration_id": "entry_provider",
+                "id": "entry:back-door",
+                "room": "Back Door",
+                "room_id": "back_door",
+                "category_ids": ["entry_sensor", "temperature"],
+                "actions": [],
+                "state": "Closed",
+            }
+        )
+        snapshot = build_home_snapshot(registry)
+        back_door = next(room for room in snapshot["rooms"] if room["id"] == "back_door")
+        temperature = next(
+            category
+            for category in back_door["sensors"]
+            if category["id"] == "temperature"
+        )
+        self.assertEqual(temperature["summary"], "Status unavailable")
+        self.assertIsNone(temperature["current_temperature"])
+        self.assertEqual(temperature["temperature_unit"], "F")
 
     def test_camera_previews_are_opaque_and_scoped_to_the_room_and_client(self):
         registry = sample_registry()
