@@ -1889,10 +1889,23 @@ def _update_cached_device_after_action(
     action_id: str,
     device_id: str,
     result: Any,
+    payload: Dict[str, Any] | None = None,
     client: Any = None,
 ) -> None:
     state = _action_implied_state(action_id)
-    if not state:
+    action = _normalize_token(action_id)
+    action_payload = dict(payload or {})
+    brightness: Optional[float] = None
+    if action == "set_brightness":
+        for key in ("brightness_pct", "brightness", "level", "percent"):
+            try:
+                candidate = float(action_payload.get(key))
+            except (TypeError, ValueError):
+                continue
+            brightness = max(0.0, min(100.0, candidate))
+            state = "on" if brightness > 0 else "off"
+            break
+    if not state and brightness is None:
         return
     redis_obj = _cache_client(client)
     if not redis_obj:
@@ -1916,6 +1929,21 @@ def _update_cached_device_after_action(
             row["last_action"] = _normalize_token(action_id)
             row["last_action_at"] = now
             row["last_action_result"] = result_payload
+            if brightness is not None:
+                row["brightness"] = brightness
+                details = row.get("details") if isinstance(row.get("details"), dict) else {}
+                row["details"] = {**details, "brightness": brightness, "brightness_pct": brightness}
+                runtime_state = row.get("runtime_state") if isinstance(row.get("runtime_state"), dict) else {}
+                runtime_payload = runtime_state.get("payload") if isinstance(runtime_state.get("payload"), dict) else {}
+                row["runtime_state"] = {
+                    **runtime_state,
+                    "payload": {
+                        **runtime_payload,
+                        "state": state,
+                        "brightness": brightness,
+                        "brightness_pct": brightness,
+                    },
+                }
             online = _online_from_state_text(state)
             if online is not None:
                 row["online"] = online
@@ -1981,14 +2009,16 @@ def run_integration_device_action(integration_id: str, action_id: str, device_id
 
     runner = getattr(module, "run_integration_device_action", None)
     if callable(runner):
-        result = runner(action, device, dict(payload or {}))
-        _update_cached_device_after_action(integration_id, action, device, result)
+        action_payload = dict(payload or {})
+        result = runner(action, device, action_payload)
+        _update_cached_device_after_action(integration_id, action, device, result, payload=action_payload)
         return result
 
     runner = getattr(module, "integration_device_action", None)
     if callable(runner):
-        result = runner(action, device, dict(payload or {}))
-        _update_cached_device_after_action(integration_id, action, device, result)
+        action_payload = dict(payload or {})
+        result = runner(action, device, action_payload)
+        _update_cached_device_after_action(integration_id, action, device, result, payload=action_payload)
         return result
 
     if action in {"camera_snapshot", "snapshot"}:

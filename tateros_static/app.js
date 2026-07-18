@@ -17173,29 +17173,37 @@ async function loadChatView() {
   };
 
   const streamedChatTextByJob = {};
+  const streamedChatRenderFramesByJob = {};
 
   const removeAssistantStreamPreview = (jobId = "") => {
     const id = String(jobId || "").trim();
     if (!id) {
       return;
     }
+    const pendingFrame = Number(streamedChatRenderFramesByJob[id] || 0);
+    if (pendingFrame) {
+      window.cancelAnimationFrame(pendingFrame);
+    }
+    delete streamedChatRenderFramesByJob[id];
     chatLog
       .querySelectorAll("[data-chat-stream-job]")
       .forEach((node) => {
         if (String(node.dataset.chatStreamJob || "") === id) {
           node.remove();
         }
-      });
+    });
     delete streamedChatTextByJob[id];
   };
 
-  const appendAssistantStreamChunk = (jobId, chunk) => {
+  const renderAssistantStreamPreview = (jobId) => {
     const id = String(jobId || "").trim();
-    const text = String(chunk || "");
-    if (!id || !text) {
+    delete streamedChatRenderFramesByJob[id];
+    const content = String(streamedChatTextByJob[id] || "");
+    if (!id || !content) {
       return;
     }
-    streamedChatTextByJob[id] = String(streamedChatTextByJob[id] || "") + text;
+    const wasNearBottom =
+      chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 120;
     removeChatTypingIndicator();
     const existing = Array.from(chatLog.querySelectorAll("[data-chat-stream-job]")).find(
       (node) => String(node.dataset.chatStreamJob || "") === id
@@ -17205,8 +17213,10 @@ async function loadChatView() {
     wrapper.innerHTML = renderChatMessage({
       role: "assistant",
       username: "assistant",
-      content: streamedChatTextByJob[id],
+      content,
     });
+    wrapper.setAttribute("aria-live", "polite");
+    wrapper.setAttribute("aria-busy", "true");
     if (!existing) {
       const existingLog = String(chatLog.innerHTML || "").trim();
       if (!existingLog || existingLog.includes('class="notice"')) {
@@ -17215,7 +17225,27 @@ async function loadChatView() {
       chatLog.appendChild(wrapper);
     }
     syncChatTypingIndicator(false);
-    stickChatToBottom();
+    if (wasNearBottom || !existing) {
+      chatLog.scrollTop = chatLog.scrollHeight;
+      window.requestAnimationFrame(() => {
+        chatLog.scrollTop = chatLog.scrollHeight;
+      });
+    }
+  };
+
+  const appendAssistantStreamChunk = (jobId, chunk) => {
+    const id = String(jobId || "").trim();
+    const text = String(chunk || "");
+    if (!id || !text) {
+      return;
+    }
+    streamedChatTextByJob[id] = String(streamedChatTextByJob[id] || "") + text;
+    if (Number(streamedChatRenderFramesByJob[id] || 0)) {
+      return;
+    }
+    streamedChatRenderFramesByJob[id] = window.requestAnimationFrame(() => {
+      renderAssistantStreamPreview(id);
+    });
   };
 
   async function refreshChatSpeedStats() {

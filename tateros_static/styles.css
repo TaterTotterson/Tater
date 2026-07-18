@@ -9161,6 +9161,41 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+[data-chat-stream-job] .bubble {
+  border-color: rgba(240, 131, 69, 0.24);
+  box-shadow: var(--shadow-soft), 0 0 0 1px rgba(240, 131, 69, 0.06);
+}
+
+[data-chat-stream-job] .bubble-body::after {
+  content: "";
+  display: inline-block;
+  width: 0.48rem;
+  height: 1em;
+  margin-left: 0.22rem;
+  border-radius: 2px;
+  vertical-align: -0.12em;
+  background: rgba(240, 131, 69, 0.92);
+  animation: chatStreamCursor 0.9s steps(1, end) infinite;
+}
+
+@keyframes chatStreamCursor {
+  0%,
+  48% {
+    opacity: 1;
+  }
+
+  49%,
+  100% {
+    opacity: 0.18;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-chat-stream-job] .bubble-body::after {
+    animation: none;
+  }
+}
+
 .bubble-body.markdown {
   white-space: normal;
   line-height: 1.45;
