@@ -13,6 +13,7 @@ from little_spud_home import (  # noqa: E402
     build_home_snapshot,
     home_action_payload,
     resolve_home_action_targets,
+    resolve_home_camera_target,
 )
 
 
@@ -157,6 +158,54 @@ class LittleSpudHomeTests(unittest.TestCase):
         sensors = {category["id"]: category for category in office["sensors"]}
         self.assertEqual(sensors["temperature"]["summary"], "23°C")
         self.assertEqual(sensors["humidity"]["summary"], "48%")
+
+    def test_camera_previews_are_opaque_and_scoped_to_the_room_and_client(self):
+        registry = sample_registry()
+        registry["category_definitions"].append(
+            {"id": "camera", "name": "Cameras", "order": 15}
+        )
+        registry["devices"].append(
+            {
+                "integration_id": "protect",
+                "id": "camera:office-entry",
+                "room": "Office",
+                "room_id": "office",
+                "category_ids": ["camera", "motion"],
+                "actions": ["camera_snapshot"],
+                "state": "connected",
+            }
+        )
+
+        snapshot = build_home_snapshot(registry, camera_ref_secret="client-one-secret")
+        office = next(room for room in snapshot["rooms"] if room["id"] == "office")
+        camera = next(category for category in office["categories"] if category["id"] == "camera")
+        preview = camera["camera_previews"][0]
+        self.assertRegex(preview["id"], r"^[a-f0-9]{24}$")
+        self.assertNotIn("camera:office-entry", str(snapshot))
+        self.assertNotIn("protect", str(snapshot))
+
+        target, action = resolve_home_camera_target(
+            registry,
+            room_id="office",
+            camera_id=preview["id"],
+            camera_ref_secret="client-one-secret",
+        )
+        self.assertEqual(target["id"], "camera:office-entry")
+        self.assertEqual(action, "camera_snapshot")
+        with self.assertRaises(LookupError):
+            resolve_home_camera_target(
+                registry,
+                room_id="garage",
+                camera_id=preview["id"],
+                camera_ref_secret="client-one-secret",
+            )
+        with self.assertRaises(LookupError):
+            resolve_home_camera_target(
+                registry,
+                room_id="office",
+                camera_id=preview["id"],
+                camera_ref_secret="another-client-secret",
+            )
 
 
 if __name__ == "__main__":

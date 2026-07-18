@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
 import re
 import time
@@ -310,10 +312,48 @@ def _control_type(category_id: str, supports_brightness: bool) -> str:
     return "read_only"
 
 
+def camera_preview_ref(device: Dict[str, Any], secret: Any) -> str:
+    integration_id = _text(device.get("integration_id"))
+    device_id = _text(device.get("id") or device.get("ref"))
+    secret_text = _text(secret)
+    if not integration_id or not device_id or not secret_text:
+        return ""
+    digest = hmac.new(
+        secret_text.encode("utf-8"),
+        f"{integration_id}\0{device_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:24]
+
+
+def _camera_previews(devices: List[Dict[str, Any]], secret: Any) -> List[Dict[str, Any]]:
+    compatible = [
+        device
+        for device in devices
+        if _actions(device).intersection({"camera_snapshot", "snapshot"})
+    ]
+    multiple = len(compatible) > 1
+    previews: List[Dict[str, Any]] = []
+    for index, device in enumerate(compatible, start=1):
+        preview_id = camera_preview_ref(device, secret)
+        if not preview_id:
+            continue
+        previews.append(
+            {
+                "id": preview_id,
+                "label": f"Camera {index}" if multiple else "Camera",
+                "snapshot_available": True,
+            }
+        )
+    return previews
+
+
 def _category_payload(
     category_id: str,
     devices: List[Dict[str, Any]],
     definition: Dict[str, Any],
+    *,
+    camera_ref_secret: Any = "",
 ) -> Dict[str, Any]:
     action_sets = [_actions(device) for device in devices]
     available_actions = [
@@ -379,7 +419,7 @@ def _category_payload(
     brightness_values = [_brightness(device) for device in devices]
     brightness = _average(value for value in brightness_values if value is not None)
     name = _text(definition.get("name")) or category_id.replace("_", " ").title()
-    return {
+    payload = {
         "id": category_id,
         "name": name,
         "count": count,
@@ -396,6 +436,9 @@ def _category_payload(
         "brightness": round(brightness, 1) if brightness is not None else None,
         "reading": summary if not controllable else "",
     }
+    if category_id == "camera":
+        payload["camera_previews"] = _camera_previews(devices, camera_ref_secret)
+    return payload
 
 
 def _room_summary(categories: List[Dict[str, Any]]) -> List[str]:
@@ -464,7 +507,11 @@ def categorized_devices(registry: Dict[str, Any]) -> Dict[Tuple[str, str], List[
     return grouped
 
 
-def build_home_snapshot(registry: Dict[str, Any]) -> Dict[str, Any]:
+def build_home_snapshot(
+    registry: Dict[str, Any],
+    *,
+    camera_ref_secret: Any = "",
+) -> Dict[str, Any]:
     definitions, order = _category_definitions(registry)
     grouped = categorized_devices(registry)
     room_devices: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
@@ -497,7 +544,14 @@ def build_home_snapshot(registry: Dict[str, Any]) -> Dict[str, Any]:
                 category_id,
                 {"id": category_id, "name": category_id.replace("_", " ").title(), "order": order.get(category_id, 1000)},
             )
-            category_rows.append(_category_payload(category_id, devices, definition))
+            category_rows.append(
+                _category_payload(
+                    category_id,
+                    devices,
+                    definition,
+                    camera_ref_secret=camera_ref_secret,
+                )
+            )
         read_only = [row for row in category_rows if row.get("read_only")]
         controls = [row for row in category_rows if not row.get("read_only")]
         rooms.append(
@@ -526,6 +580,35 @@ def build_home_snapshot(registry: Dict[str, Any]) -> Dict[str, Any]:
             "age_seconds": float(cache.get("age_seconds") or 0.0),
         },
     }
+
+
+def resolve_home_camera_target(
+    registry: Dict[str, Any],
+    *,
+    room_id: Any,
+    camera_id: Any,
+    camera_ref_secret: Any,
+) -> Tuple[Dict[str, Any], str]:
+    clean_room = _token(room_id)
+    clean_camera = _text(camera_id).lower()
+    secret_text = _text(camera_ref_secret)
+    if not clean_room or not clean_camera or not secret_text:
+        raise ValueError("Room and camera are required.")
+    if not re.fullmatch(r"[a-f0-9]{24}", clean_camera):
+        raise LookupError("That camera is no longer available.")
+
+    devices = categorized_devices(registry).get((clean_room, "camera"), [])
+    for device in devices:
+        preview_id = camera_preview_ref(device, secret_text)
+        if not preview_id or not hmac.compare_digest(preview_id, clean_camera):
+            continue
+        actions = _actions(device)
+        if "camera_snapshot" in actions:
+            return device, "camera_snapshot"
+        if "snapshot" in actions:
+            return device, "snapshot"
+        break
+    raise LookupError("That camera is no longer available.")
 
 
 def resolve_home_action_targets(

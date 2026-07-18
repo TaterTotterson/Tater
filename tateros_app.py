@@ -240,6 +240,7 @@ from little_spud_home import (
     build_home_snapshot,
     home_action_payload,
     resolve_home_action_targets,
+    resolve_home_camera_target,
 )
 from integration_runtime import (
     bind_integration_runtime_loop,
@@ -13758,12 +13759,98 @@ def spud_link_home(request: Request, refresh: bool = False) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="Home controls require a paired Little Spud client.")
     try:
         registry = get_integration_device_registry(redis_client, refresh=bool(refresh))
-        snapshot = build_home_snapshot(registry)
+        snapshot = build_home_snapshot(
+            registry,
+            camera_ref_secret=node.get("token_hash"),
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not load integrated devices: {exc}") from exc
     _spud_link_touch_node_from_request(node, request)
     _spud_link_store_node(node)
     return snapshot
+
+
+def _spud_link_camera_snapshot_bytes(result: Any) -> Tuple[bytes, str]:
+    content: Any = None
+    content_type = ""
+    if isinstance(result, (tuple, list)) and result:
+        content = result[0]
+        if len(result) > 1:
+            content_type = str(result[1] or "").strip()
+    elif isinstance(result, dict):
+        if result.get("ok") is False:
+            raise ValueError(str(result.get("error") or "The camera rejected the snapshot request."))
+        for key in ("bytes", "content", "data"):
+            candidate = result.get(key)
+            if isinstance(candidate, (bytes, bytearray, memoryview)):
+                content = candidate
+                break
+        content_type = str(
+            result.get("content_type")
+            or result.get("mimetype")
+            or result.get("media_type")
+            or ""
+        ).strip()
+    elif isinstance(result, (bytes, bytearray, memoryview)):
+        content = result
+
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        raise ValueError("The camera provider did not return image bytes.")
+    raw = bytes(content)
+    if not raw:
+        raise ValueError("The camera returned an empty snapshot.")
+    if len(raw) > 12 * 1024 * 1024:
+        raise ValueError("The camera snapshot is too large.")
+    if not content_type.lower().startswith("image/"):
+        content_type = "image/jpeg"
+    return raw, content_type
+
+
+@app.get("/api/spudlink/v1/home/rooms/{room_id}/cameras/{camera_id}/snapshot")
+def spud_link_home_camera_snapshot(room_id: str, camera_id: str, request: Request) -> Response:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Camera snapshots require a paired Little Spud client.")
+    if len(room_id) > 160 or len(camera_id) > 80:
+        raise HTTPException(status_code=404, detail="That camera is no longer available.")
+
+    registry = get_integration_device_registry(redis_client)
+    try:
+        device, action = resolve_home_camera_target(
+            registry,
+            room_id=room_id,
+            camera_id=camera_id,
+            camera_ref_secret=node.get("token_hash"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    integration_id = str(device.get("integration_id") or "").strip()
+    device_id = str(device.get("id") or device.get("ref") or "").strip()
+    if not integration_id or not device_id:
+        raise HTTPException(status_code=404, detail="That camera is no longer available.")
+    try:
+        result = run_registered_integration_device_action(
+            integration_id,
+            action,
+            device_id,
+            {},
+        )
+        content, content_type = _spud_link_camera_snapshot_bytes(result)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Could not load the camera snapshot.") from exc
+
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return _spud_link_media_bytes_response(
+        content,
+        content_type,
+        request,
+        cache_control="private, no-store",
+    )
 
 
 @app.post("/api/spudlink/v1/home/actions")
@@ -13825,7 +13912,10 @@ def spud_link_home_action(payload: SpudLinkHomeActionRequest, request: Request) 
     )
     _spud_link_store_node(node)
     updated_registry = get_integration_device_registry(redis_client)
-    snapshot = build_home_snapshot(updated_registry)
+    snapshot = build_home_snapshot(
+        updated_registry,
+        camera_ref_secret=node.get("token_hash"),
+    )
     snapshot["action_result"] = {
         "room_id": payload.room_id,
         "category_id": payload.category_id,
