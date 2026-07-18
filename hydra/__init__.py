@@ -876,6 +876,8 @@ async def _llm_resolve_delivery_intent(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.0,
+            activity="execution",
+            cache_namespace="hydra:thanatos:delivery",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=120,
@@ -2588,6 +2590,8 @@ async def _run_astraeus_plan(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.1,
+            activity="planning",
+            cache_namespace="hydra:astraeus",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens if max_tokens is not None else DEFAULT_ASTRAEUS_MAX_TOKENS,
                 minimum=200,
@@ -2737,6 +2741,8 @@ async def _review_execution_plan_for_completeness(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.0,
+            activity="planning",
+            cache_namespace="hydra:astraeus:review",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=120,
@@ -2797,6 +2803,8 @@ async def _run_thanatos_step(
         thanatos_resp = await llm_client.chat(
             messages=thanatos_messages,
             temperature=0.2,
+            activity="execution",
+            cache_namespace="hydra:thanatos",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=1,
@@ -3183,6 +3191,7 @@ async def _run_chat_fallback_reply(
     max_history_items: int,
     max_tokens: Optional[int],
     debug_out: Optional[Dict[str, Any]] = None,
+    stream_callback: Optional[Callable[[str], Any]] = None,
 ) -> str:
     del registry, enabled_predicate, redis_client
     chat_history = _chat_history_window(history, max_items=max_history_items)
@@ -3207,6 +3216,9 @@ async def _run_chat_fallback_reply(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.4,
+            activity="chat",
+            cache_namespace="hydra:hermes:chat",
+            stream_callback=stream_callback,
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=64,
@@ -3632,6 +3644,8 @@ async def _should_auto_continue_head_response(
             messages=messages,
             temperature=0,
             max_tokens=40,
+            activity="chat",
+            cache_namespace="hydra:hermes:continuation-check",
         )
         content = _coerce_text(((resp or {}).get("message") or {}).get("content", ""))
         parsed = _first_json_object(content)
@@ -3829,6 +3843,8 @@ async def _synthesize_completed_steps_answer(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.2,
+            activity="chat",
+            cache_namespace="hydra:hermes:synthesis",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=220,
@@ -3862,6 +3878,7 @@ async def _run_hermes_final_render(
     platform_preamble: str,
     max_tokens: Optional[int],
     debug_out: Optional[Dict[str, Any]] = None,
+    stream_callback: Optional[Callable[[str], Any]] = None,
 ) -> str:
     del full_tool_results, recent_history
     render_mode = _HERMES_RENDER_MODE_ALIASES.get(str(mode or "").strip().lower(), "direct")
@@ -3929,6 +3946,9 @@ async def _run_hermes_final_render(
         resp = await llm_client.chat(
             messages=messages,
             temperature=0.2,
+            activity="chat",
+            cache_namespace="hydra:hermes:final",
+            stream_callback=stream_callback,
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=120,
@@ -4024,6 +4044,8 @@ async def _tool_start_progress(
         progress_resp = await llm_client.chat(
             messages=progress_messages,
             temperature=0.1,
+            activity="execution",
+            cache_namespace="hydra:progress",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=56,
@@ -4794,6 +4816,7 @@ def _write_hydra_ledger(
     validation_status: Dict[str, Any],
     tool_result: Optional[Dict[str, Any]],
     checker_action: str,
+    assistant_response: str = "",
     retry_count: int = 0,
     checker_reason: str = "",
     planner_kind: str = "",
@@ -4802,6 +4825,9 @@ def _write_hydra_ledger(
     outcome_reason: str = "",
     planner_ms: int = 0,
     astraeus_route_ms: int = 0,
+    thanatos_ms: int = 0,
+    progress_ms: int = 0,
+    state_update_ms: int = 0,
     tool_ms: int = 0,
     checker_ms: int = 0,
     hermes_chat_ms: int = 0,
@@ -4830,6 +4856,7 @@ def _write_hydra_ledger(
         validation_status=validation_status,
         tool_result=tool_result,
         checker_action=checker_action,
+        assistant_response=assistant_response,
         retry_count=retry_count,
         checker_reason=checker_reason,
         planner_kind=planner_kind,
@@ -4838,6 +4865,9 @@ def _write_hydra_ledger(
         outcome_reason=outcome_reason,
         planner_ms=planner_ms,
         astraeus_route_ms=astraeus_route_ms,
+        thanatos_ms=thanatos_ms,
+        progress_ms=progress_ms,
+        state_update_ms=state_update_ms,
         tool_ms=tool_ms,
         checker_ms=checker_ms,
         hermes_chat_ms=hermes_chat_ms,
@@ -4891,6 +4921,7 @@ async def _run_hydra_turn_impl(
     active_job_id: str = "",
     origin: Optional[Dict[str, Any]] = None,
     wait_callback: Optional[Callable[..., Any]] = None,
+    response_callback: Optional[Callable[[str], Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     redis_client: Any = None,
     max_rounds: Optional[int] = None,
@@ -4958,6 +4989,9 @@ async def _run_hydra_turn_impl(
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
     astraeus_route_ms_total = 0.0
+    thanatos_ms_total = 0.0
+    progress_ms_total = 0.0
+    state_update_ms_total = 0.0
     tool_ms_total = 0.0
     checker_ms_total = 0.0
     hermes_chat_ms_total = 0.0
@@ -5255,6 +5289,7 @@ async def _run_hydra_turn_impl(
         draft_response_text: str,
         user_request_text: str,
         tool_result_payload: Optional[Dict[str, Any]],
+        stream_response: bool = True,
     ) -> str:
         nonlocal hermes_final_ms_total, hermes_final_debug
         base_text = _select_final_answer_text(
@@ -5282,6 +5317,7 @@ async def _run_hydra_turn_impl(
             platform_preamble=platform_preamble,
             max_tokens=None,
             debug_out=current_hermes_debug,
+            stream_callback=(response_callback if stream_response else None),
         )
         hermes_started = time.perf_counter()
         try:
@@ -5348,6 +5384,7 @@ async def _run_hydra_turn_impl(
             validation_status=validation_status_override if validation_status_override is not None else validation_status,
             tool_result=tool_result_for_checker,
             checker_action=final_checker_action,
+            assistant_response=final_text,
             retry_count=max(0, int(critic_continue_count)),
             checker_reason=final_checker_reason,
             planner_kind=planner_kind_value if planner_kind_value is not None else planner_kind,
@@ -5360,6 +5397,9 @@ async def _run_hydra_turn_impl(
             outcome_reason=outcome_reason_value,
             planner_ms=int(max(0.0, astraeus_ms_total)),
             astraeus_route_ms=int(max(0.0, astraeus_route_ms_total)),
+            thanatos_ms=int(max(0.0, thanatos_ms_total)),
+            progress_ms=int(max(0.0, progress_ms_total)),
+            state_update_ms=int(max(0.0, state_update_ms_total)),
             tool_ms=int(max(0.0, tool_ms_total)),
             checker_ms=int(max(0.0, checker_ms_total)),
             hermes_chat_ms=int(max(0.0, hermes_chat_ms_total)),
@@ -5417,9 +5457,9 @@ async def _run_hydra_turn_impl(
                 max_history_items=chat_history_max_items,
                 max_tokens=None,
                 debug_out=current_chat_debug,
+                stream_callback=response_callback,
             )
             chat_elapsed_ms = (time.perf_counter() - chat_started) * 1000.0
-            astraeus_ms_total += chat_elapsed_ms
             hermes_chat_ms_total += chat_elapsed_ms
             current_chat_debug["wall_ms"] = int(max(0.0, chat_elapsed_ms))
             hermes_chat_debug = dict(current_chat_debug)
@@ -5540,7 +5580,7 @@ async def _run_hydra_turn_impl(
             debug_out=current_thanatos_debug,
         )
         thanatos_debug = dict(current_thanatos_debug)
-        astraeus_ms_total += thanatos_ms
+        thanatos_ms_total += thanatos_ms
 
         if _is_tool_candidate(thanatos_text):
             round_thanatos_kind = "tool"
@@ -5555,6 +5595,11 @@ async def _run_hydra_turn_impl(
                 draft_response_text=draft_response,
                 user_request_text=turn_request_text or user_text,
                 tool_result_payload=tool_result_for_checker,
+                stream_response=not (
+                    structured_plan_queue
+                    and len(structured_plan_queue) > 1
+                    and _plan_step_can_complete_with_answer(current_plan_step)
+                ),
             )
             if structured_plan_queue:
                 if _plan_step_can_complete_with_answer(current_plan_step):
@@ -5717,17 +5762,6 @@ async def _run_hydra_turn_impl(
             active_job_id,
             _active_chat_job_tool_label(tool_call=planned_tool, registry=registry),
         )
-        wait_text, wait_payload = await _tool_start_progress(
-            llm_client=llm_client_ai_calls,
-            platform=platform,
-            tool_call=planned_tool,
-            round_request_text=tool_user_text,
-            current_plan_step=(current_plan_step if isinstance(current_plan_step, dict) else None),
-            completed_steps_count=len(completed_tool_steps),
-            total_plan_steps=structured_plan_total_steps,
-            platform_preamble=tool_platform_preamble,
-            max_tokens=None,
-        )
         tool_started = time.perf_counter()
         tool_origin_payload = dict(origin_payload) if isinstance(origin_payload, dict) else {}
         if raw_tool_payload_history:
@@ -5736,22 +5770,85 @@ async def _run_hydra_turn_impl(
                 for item in raw_tool_payload_history[-8:]
                 if isinstance(item, dict)
             ]
+        progress_args = {
+            "llm_client": llm_client_ai_calls,
+            "platform": platform,
+            "tool_call": planned_tool,
+            "round_request_text": tool_user_text,
+            "current_plan_step": (
+                current_plan_step if isinstance(current_plan_step, dict) else None
+            ),
+            "completed_steps_count": len(completed_tool_steps),
+            "total_plan_steps": structured_plan_total_steps,
+            "platform_preamble": tool_platform_preamble,
+            "max_tokens": None,
+        }
+        progress_started = time.perf_counter()
         try:
-            doer_exec = await _execute_tool_call(
-                llm_client=llm_client_ai_calls,
-                tool_call=planned_tool,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                context=context,
-                user_text=tool_user_text,
-                origin=tool_origin_payload,
-                scope=scope,
-                wait_callback=wait_callback,
-                wait_text=wait_text,
-                wait_payload=wait_payload,
-                admin_guard=admin_guard,
-            )
+            if admin_guard is None:
+                # Progress copy and the actual tool are independent. Starting
+                # both now removes an entire LLM round trip from the critical
+                # path while still emitting the generated status before Hydra
+                # publishes the tool result.
+                progress_task = asyncio.create_task(_tool_start_progress(**progress_args))
+                tool_task = asyncio.create_task(
+                    _execute_tool_call(
+                        llm_client=llm_client_ai_calls,
+                        tool_call=planned_tool,
+                        platform=platform,
+                        registry=registry,
+                        enabled_predicate=enabled_predicate,
+                        context=context,
+                        user_text=tool_user_text,
+                        origin=tool_origin_payload,
+                        scope=scope,
+                        wait_callback=None,
+                        wait_text="",
+                        wait_payload=None,
+                        admin_guard=None,
+                    )
+                )
+                try:
+                    wait_text, wait_payload = await progress_task
+                    progress_ms_total += (
+                        time.perf_counter() - progress_started
+                    ) * 1000.0
+                    await execution.dispatch_wait_callback(
+                        wait_callback,
+                        func=_canonical_tool_name(str(planned_tool.get("function") or "").strip()),
+                        plugin_obj=registry.get(
+                            _canonical_tool_name(str(planned_tool.get("function") or "").strip())
+                        ),
+                        wait_text=wait_text,
+                        wait_payload=wait_payload,
+                    )
+                    doer_exec = await tool_task
+                except BaseException:
+                    for pending_task in (progress_task, tool_task):
+                        if not pending_task.done():
+                            pending_task.cancel()
+                    await asyncio.gather(progress_task, tool_task, return_exceptions=True)
+                    raise
+            else:
+                wait_text, wait_payload = await _tool_start_progress(**progress_args)
+                progress_ms_total += (
+                    time.perf_counter() - progress_started
+                ) * 1000.0
+                doer_exec = await _execute_tool_call(
+                    llm_client=llm_client_ai_calls,
+                    tool_call=planned_tool,
+                    platform=platform,
+                    registry=registry,
+                    enabled_predicate=enabled_predicate,
+                    context=context,
+                    user_text=tool_user_text,
+                    origin=tool_origin_payload,
+                    scope=scope,
+                    wait_callback=wait_callback,
+                    wait_text=wait_text,
+                    wait_payload=wait_payload,
+                    admin_guard=admin_guard,
+                )
         finally:
             _set_active_chat_job_current_tool(active_job_id, "")
         tool_ms_total += (time.perf_counter() - tool_started) * 1000.0
@@ -5816,44 +5913,68 @@ async def _run_hydra_turn_impl(
                     break
         tool_calls_used += 1
 
-        agent_state = await _run_thanatos_state_update(
-            llm_client=llm_client_thanatos,
-            platform=platform,
-            user_request=tool_user_text or turn_request_text,
-            prior_state=agent_state,
-            tool_call=planned_tool,
-            tool_result=tool_result_for_checker,
-            max_tokens=None,
-        )
-        if structured_plan_queue:
-            agent_state = _sync_agent_state_with_plan_queue(
-                agent_state=agent_state,
-                plan_queue=structured_plan_queue,
-                fallback_goal=astraeus_goal or turn_request_text or user_text,
-            )
-        agent_state = _remember_tool_result_in_agent_state(
-            agent_state=agent_state,
-            tool_call=planned_tool,
-            raw_payload=(raw_payload if isinstance(raw_payload, dict) else None),
-            tool_result=(tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None),
-            request_text=str(tool_user_text or round_request_text or turn_request_text or "").strip(),
-            fallback_goal=astraeus_goal or turn_request_text or user_text,
-            max_sets=result_memory_max_sets,
-            max_items=result_memory_max_items,
-        )
-        _save_persistent_agent_state(
-            redis_client=r,
-            platform=platform,
-            scope=scope,
-            state=agent_state,
-        )
-
         turn_draft_response = _multi_step_turn_draft(
             completed_steps=completed_tool_steps,
             fallback_draft=draft_response,
         )
+        tool_succeeded = (
+            isinstance(tool_result_for_checker, dict)
+            and bool(tool_result_for_checker.get("ok"))
+        )
+        final_render_task: Optional[asyncio.Task[str]] = None
+        if tool_succeeded and len(structured_plan_queue) <= 1:
+            final_render_task = asyncio.create_task(
+                _compose_final_answer_text(
+                    checker_decision=None,
+                    draft_response_text=turn_draft_response,
+                    user_request_text=turn_request_text or user_text,
+                    tool_result_payload=tool_result_for_checker,
+                )
+            )
 
-        if isinstance(tool_result_for_checker, dict) and bool(tool_result_for_checker.get("ok")):
+        try:
+            state_update_started = time.perf_counter()
+            agent_state = await _run_thanatos_state_update(
+                llm_client=llm_client_thanatos,
+                platform=platform,
+                user_request=tool_user_text or turn_request_text,
+                prior_state=agent_state,
+                tool_call=planned_tool,
+                tool_result=tool_result_for_checker,
+                max_tokens=None,
+            )
+            state_update_ms_total += (
+                time.perf_counter() - state_update_started
+            ) * 1000.0
+            if structured_plan_queue:
+                agent_state = _sync_agent_state_with_plan_queue(
+                    agent_state=agent_state,
+                    plan_queue=structured_plan_queue,
+                    fallback_goal=astraeus_goal or turn_request_text or user_text,
+                )
+            agent_state = _remember_tool_result_in_agent_state(
+                agent_state=agent_state,
+                tool_call=planned_tool,
+                raw_payload=(raw_payload if isinstance(raw_payload, dict) else None),
+                tool_result=(tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None),
+                request_text=str(tool_user_text or round_request_text or turn_request_text or "").strip(),
+                fallback_goal=astraeus_goal or turn_request_text or user_text,
+                max_sets=result_memory_max_sets,
+                max_items=result_memory_max_items,
+            )
+            _save_persistent_agent_state(
+                redis_client=r,
+                platform=platform,
+                scope=scope,
+                state=agent_state,
+            )
+        except BaseException:
+            if final_render_task is not None and not final_render_task.done():
+                final_render_task.cancel()
+                await asyncio.gather(final_render_task, return_exceptions=True)
+            raise
+
+        if tool_succeeded:
             structured_plan_queue = structured_plan_queue[1:]
             _clear_step_failure_state(current_step_id)
             agent_state = _sync_agent_state_with_plan_queue(
@@ -5868,11 +5989,15 @@ async def _run_hydra_turn_impl(
                 state=agent_state,
             )
             if not structured_plan_queue:
-                final_text_candidate = await _compose_final_answer_text(
-                    checker_decision=None,
-                    draft_response_text=turn_draft_response,
-                    user_request_text=turn_request_text or user_text,
-                    tool_result_payload=tool_result_for_checker,
+                final_text_candidate = (
+                    await final_render_task
+                    if final_render_task is not None
+                    else await _compose_final_answer_text(
+                        checker_decision=None,
+                        draft_response_text=turn_draft_response,
+                        user_request_text=turn_request_text or user_text,
+                        tool_result_payload=tool_result_for_checker,
+                    )
                 )
                 checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
                 return _finish(
@@ -5949,6 +6074,7 @@ async def run_hydra_turn(
     task_id: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
     wait_callback: Optional[Callable[..., Any]] = None,
+    response_callback: Optional[Callable[[str], Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     redis_client: Any = None,
     max_rounds: Optional[int] = None,
@@ -5991,6 +6117,7 @@ async def run_hydra_turn(
                     active_job_id=active_job_id,
                     origin=current_origin,
                     wait_callback=wait_callback,
+                    response_callback=response_callback,
                     admin_guard=admin_guard,
                     redis_client=r,
                     max_rounds=max_rounds,

@@ -93,6 +93,9 @@ def _display_snapshot_response(snapshot_id: str) -> Response:
 
 async def startup() -> None:
     vp = _vp()
+    from .. import native_satellite
+
+    native_satellite.bind_runtime_loop()
     selected_stt_backend = vp._selected_stt_backend()
     effective_stt_backend, stt_backend_note = vp._resolve_stt_backend()
     selected_tts_backend = vp._selected_tts_backend()

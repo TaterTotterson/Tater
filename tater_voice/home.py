@@ -46,9 +46,9 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
 def runtime_tab_spec() -> Dict[str, Any]:
     return {
         "label": "Tater Voice",
-        "core_key": "esphome",
-        "surface_key": "esphome",
-        "surface_kind": "esphome",
+        "core_key": "voice",
+        "surface_key": "voice",
+        "surface_kind": "voice",
         "order": 40,
         "requires_running": False,
         "running": is_running(),
@@ -60,6 +60,7 @@ def is_running() -> bool:
 
 
 async def startup() -> None:
+    native_satellite.bind_runtime_loop()
     await esphome_runtime.startup()
 
 
@@ -74,7 +75,7 @@ def _runtime_panel_token(panel: Any = "") -> str:
 
 def _native_satellite_status_snapshot() -> Dict[str, Any]:
     try:
-        result = esphome_runtime.run_async_blocking(native_satellite.status(), timeout=3.0)
+        result = native_satellite.run_on_runtime_loop(native_satellite.status(), timeout=3.0)
     except Exception:
         return {}
     return result if isinstance(result, dict) else {}
@@ -112,7 +113,10 @@ def _native_log_entries(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _native_logs_payload(selector: str, *, after_seq: int = 0, start: bool = False, stop: bool = False) -> Dict[str, Any]:
     if stop:
         return {"ok": True, "selector": selector, "active": False, "stopped": False, "viewer_count": 0}
-    result = esphome_runtime.run_async_blocking(native_satellite.logs(selector, after_seq=after_seq, limit=200), timeout=3.0)
+    result = native_satellite.run_on_runtime_loop(
+        native_satellite.logs(selector, after_seq=after_seq, limit=200),
+        timeout=3.0,
+    )
     if not isinstance(result, dict):
         result = {}
     rows = list(result.get("logs") or []) if isinstance(result.get("logs"), list) else []
@@ -434,7 +438,7 @@ def _is_native_satellite_row(row: Dict[str, Any]) -> bool:
 def get_runtime_payload(
     *,
     redis_client: Any = None,
-    core_key: str = "esphome",
+    core_key: str = "voice",
     core_tab: Optional[Dict[str, Any]] = None,
     panel: str = "",
 ) -> Dict[str, Any]:
@@ -772,7 +776,7 @@ def _identify_satellite(selector: str, *, redis_client: Any = None) -> Dict[str,
     }
 
 
-def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "esphome") -> Dict[str, Any]:
+def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client: Any = None, core_key: str = "voice") -> Dict[str, Any]:
     action_name = esphome_runtime.lower(action)
     body = payload if isinstance(payload, dict) else {}
 
@@ -827,7 +831,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         values = esphome_runtime.payload_values(body)
         if not selector:
             raise ValueError("selector is required")
-        result = esphome_runtime.run_async_blocking(
+        result = native_satellite.run_on_runtime_loop(
             native_satellite.save_live_settings(values, selector=selector),
             timeout=5.0,
         )
@@ -848,7 +852,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        result = esphome_runtime.run_async_blocking(
+        result = native_satellite.run_on_runtime_loop(
             native_satellite.send_command(
                 selector,
                 "setup.reset",

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import hashlib
+import weakref
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -73,12 +74,47 @@ _INTERNAL_PORTAL_HTTP_PATCHED = False
 _ORIG_REQUESTS_SESSION_REQUEST = None
 _ORIG_HTTPX_CLIENT_REQUEST = None
 _ORIG_HTTPX_ASYNC_CLIENT_REQUEST = None
+_SHARED_ASYNC_HTTP_CLIENTS: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
+_SHARED_ASYNC_HTTP_CLIENTS_LOCK = threading.RLock()
 
 
 def _text(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _shared_async_http_client() -> Any:
+    if httpx is None:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    with _SHARED_ASYNC_HTTP_CLIENTS_LOCK:
+        client = _SHARED_ASYNC_HTTP_CLIENTS.get(loop)
+        if client is not None and not bool(getattr(client, "is_closed", False)):
+            return client
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=32,
+                keepalive_expiry=60.0,
+            )
+        )
+        _SHARED_ASYNC_HTTP_CLIENTS[loop] = client
+        return client
+
+
+async def close_shared_async_http_client() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    with _SHARED_ASYNC_HTTP_CLIENTS_LOCK:
+        client = _SHARED_ASYNC_HTTP_CLIENTS.pop(loop, None)
+    if client is not None and not bool(getattr(client, "is_closed", False)):
+        await client.aclose()
 
 
 def _boolish(value: Any, default: bool = False) -> bool:
@@ -536,6 +572,7 @@ DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS = 3
 DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL = ""
 DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
+DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS = 256
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
@@ -1438,6 +1475,19 @@ def _llama_cpp_n_ubatch(*, vision: bool = False) -> int:
     return max(16 if vision else 32, min(8192, value))
 
 
+def _llama_cpp_cache_reuse_tokens() -> int:
+    raw = str(
+        os.getenv("TATER_LLAMA_CPP_CACHE_REUSE_TOKENS")
+        or os.getenv("TATER_LLAMA_CPP_CACHE_REUSE")
+        or DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS
+    ).strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS
+    return max(0, min(8192, int(value)))
+
+
 def _llama_cpp_slot_count() -> int:
     raw = str(
         _safe_redis_text_get(HYDRA_LLAMA_CPP_SLOT_COUNT_KEY)
@@ -1473,6 +1523,42 @@ def _llama_cpp_slot_id(scope: str = "base", value: Any = None) -> int:
     if parsed >= slot_count:
         return DEFAULT_LLAMA_CPP_SLOT_ID
     return int(parsed)
+
+
+def _llama_cpp_cache_namespace_slot(
+    cache_namespace: Any,
+    *,
+    configured_slot: Any = None,
+    vision: bool = False,
+) -> int:
+    """Keep stable Hydra roles on stable llama-server slots.
+
+    Calls without a namespace retain the configured slot behavior exactly. This
+    makes the optimization private to callers that explicitly opt into cache
+    affinity and avoids changing generic llama.cpp or vision traffic.
+    """
+    if vision:
+        return _llama_cpp_slot_id("vision", configured_slot)
+
+    base_slot = _llama_cpp_slot_id("base", configured_slot)
+    namespace = str(cache_namespace or "").strip().lower()
+    slot_count = _llama_cpp_slot_count()
+    if not namespace or slot_count <= 1:
+        return base_slot
+
+    start_slot = base_slot if base_slot >= 0 else 0
+    role_offsets = (
+        (("hermes", "chat", "final"), 1),
+        (("thanatos", "state", "execution"), 2),
+        (("progress", "waiting"), 3),
+        (("astraeus", "plan", "review"), 0),
+    )
+    for role_tokens, offset in role_offsets:
+        if any(token in namespace for token in role_tokens):
+            return int((start_slot + offset) % slot_count)
+
+    digest = hashlib.sha256(namespace.encode("utf-8", "ignore")).digest()
+    return int((start_slot + int.from_bytes(digest[:4], "big")) % slot_count)
 
 
 def _llama_cpp_n_threads() -> int:
@@ -2773,6 +2859,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
         "n_batch": _llama_cpp_n_batch(),
         "n_ubatch": _llama_cpp_n_ubatch(),
+        "cache_reuse_tokens": _llama_cpp_cache_reuse_tokens(),
         "slot_count": _llama_cpp_slot_count(),
         "base_slot": _llama_cpp_slot_id("base"),
         "vision_slot": _llama_cpp_slot_id("vision"),
@@ -2786,6 +2873,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
             "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
             "TATER_LLAMA_CPP_N_UBATCH": str(os.getenv("TATER_LLAMA_CPP_N_UBATCH") or ""),
+            "TATER_LLAMA_CPP_CACHE_REUSE_TOKENS": str(os.getenv("TATER_LLAMA_CPP_CACHE_REUSE_TOKENS") or ""),
             "TATER_LLAMA_CPP_FLASH_ATTN": str(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN") or ""),
             "TATER_LLAMA_CPP_OFFLOAD_KQV": str(os.getenv("TATER_LLAMA_CPP_OFFLOAD_KQV") or ""),
             "TATER_LLAMA_CPP_SLOT_COUNT": str(os.getenv("TATER_LLAMA_CPP_SLOT_COUNT") or ""),
@@ -5762,6 +5850,7 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_n_gpu_layers(),
         _llama_cpp_n_batch(vision=vision),
         _llama_cpp_n_ubatch(vision=vision),
+        _llama_cpp_cache_reuse_tokens(),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
@@ -5785,6 +5874,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_n_batch(vision=True),
         _llama_cpp_n_ubatch(vision=False),
         _llama_cpp_n_ubatch(vision=True),
+        _llama_cpp_cache_reuse_tokens(),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
@@ -5805,6 +5895,7 @@ _LLAMA_CPP_ENGINE_WORKER_ARG = "--tater-llama-cpp-engine-worker"
 _LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
 _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
 _LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
+_LLAMA_CPP_HTTP_THREAD_LOCAL = threading.local()
 
 
 def _macos_bundled_llama_server_candidates() -> List[Path]:
@@ -5898,6 +5989,14 @@ def _llama_cpp_native_auth_headers(api_key: Any = "") -> Dict[str, str]:
     }
 
 
+def _llama_cpp_native_http_session() -> requests.Session:
+    session = getattr(_LLAMA_CPP_HTTP_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        _LLAMA_CPP_HTTP_THREAD_LOCAL.session = session
+    return session
+
+
 def _llama_cpp_native_json_get(
     base_url: str,
     endpoint: str,
@@ -5905,7 +6004,7 @@ def _llama_cpp_native_json_get(
     timeout: float = 10.0,
     api_key: Any = "",
 ) -> Dict[str, Any]:
-    response = requests.get(
+    response = _llama_cpp_native_http_session().get(
         _llama_cpp_native_url(base_url, endpoint),
         headers=_llama_cpp_native_auth_headers(api_key),
         timeout=timeout,
@@ -5928,7 +6027,7 @@ def _llama_cpp_native_json_post(
     timeout: float = 600.0,
     api_key: Any = "",
 ) -> Dict[str, Any]:
-    response = requests.post(
+    response = _llama_cpp_native_http_session().post(
         _llama_cpp_native_url(base_url, endpoint),
         json=payload,
         headers=_llama_cpp_native_auth_headers(api_key),
@@ -5942,6 +6041,80 @@ def _llama_cpp_native_json_post(
         raise RuntimeError(f"llama-server POST {endpoint} failed with HTTP {response.status_code}{suffix}") from exc
     data = response.json()
     return data if isinstance(data, dict) else {"data": data}
+
+
+def _llama_cpp_native_stream_post(
+    base_url: str,
+    endpoint: str,
+    payload: Dict[str, Any],
+    *,
+    stream_callback: Callable[[str], Any],
+    timeout: float = 600.0,
+    api_key: Any = "",
+) -> Dict[str, Any]:
+    response = _llama_cpp_native_http_session().post(
+        _llama_cpp_native_url(base_url, endpoint),
+        json=payload,
+        headers=_llama_cpp_native_auth_headers(api_key),
+        timeout=timeout,
+        stream=True,
+    )
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        detail = _tail_text(str(getattr(response, "text", "") or ""), 1800)
+        suffix = f": {detail}" if detail else ""
+        response.close()
+        raise RuntimeError(
+            f"llama-server POST {endpoint} failed with HTTP {response.status_code}{suffix}"
+        ) from exc
+
+    content_parts: List[str] = []
+    final_payload: Dict[str, Any] = {}
+    try:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            final_payload.update(event)
+            chunk = _coerce_content_to_text(event.get("content"))
+            if chunk:
+                content_parts.append(chunk)
+                try:
+                    stream_callback(chunk)
+                except Exception:
+                    logger.debug("[llama-cpp-native] stream callback failed", exc_info=True)
+    finally:
+        response.close()
+    final_payload["content"] = "".join(content_parts)
+    return final_payload
+
+
+async def _dispatch_llm_stream_callback(
+    stream_callback: Optional[Callable[[str], Any]],
+    chunk: Any,
+) -> None:
+    if not callable(stream_callback):
+        return
+    text = _coerce_content_to_text(chunk)
+    if not text:
+        return
+    try:
+        result = stream_callback(text)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.debug("LLM stream callback failed", exc_info=True)
 
 
 def _llama_cpp_native_media_marker() -> str:
@@ -6263,6 +6436,7 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "n_ctx",
         "n_batch",
         "n_ubatch",
+        "cache_reuse_tokens",
         "slot_count",
         "base_slot",
         "vision_slot",
@@ -6368,8 +6542,12 @@ def _llama_cpp_native_server_command(
     temp_dir: str,
 ) -> Tuple[List[str], Dict[str, Any]]:
     n_ctx = max(_llama_cpp_n_ctx(vision=False), _llama_cpp_n_ctx(vision=True) if mmproj_path else 0)
-    n_batch = _llama_cpp_n_batch(vision=bool(mmproj_path))
-    n_ubatch = _llama_cpp_n_ubatch(vision=bool(mmproj_path))
+    # A unified text+vision server still spends nearly all Hydra time on text
+    # prefill. Loading an mmproj must not silently replace the configured text
+    # batch sizes with the conservative vision-only defaults.
+    n_batch = _llama_cpp_n_batch(vision=False)
+    n_ubatch = _llama_cpp_n_ubatch(vision=False)
+    cache_reuse_tokens = _llama_cpp_cache_reuse_tokens()
     n_gpu_layers = _llama_cpp_n_gpu_layers()
     slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
@@ -6409,6 +6587,8 @@ def _llama_cpp_native_server_command(
         cmd.extend(["--parallel", str(int(slot_count))])
     if n_ubatch > 0:
         cmd.extend(["--ubatch-size", str(int(n_ubatch))])
+    if cache_reuse_tokens > 0:
+        cmd.extend(["--cache-reuse", str(int(cache_reuse_tokens))])
     if _llama_cpp_flash_attn_enabled():
         cmd.extend(["--flash-attn", "on"])
     if not _llama_cpp_offload_kqv_enabled():
@@ -6441,6 +6621,7 @@ def _llama_cpp_native_server_command(
         "n_gpu_layers": int(n_gpu_layers),
         "n_batch": int(n_batch),
         "n_ubatch": int(n_ubatch),
+        "cache_reuse_tokens": int(cache_reuse_tokens),
         "slot_count": int(slot_count),
         "base_slot": int(_llama_cpp_slot_id("base")),
         "vision_slot": int(_llama_cpp_slot_id("vision")),
@@ -6587,6 +6768,7 @@ def _llama_cpp_native_worker_chat(
     *,
     vision: bool,
     slot_id: Any = None,
+    stream_callback: Optional[Callable[[str], Any]] = None,
     timeout: float,
 ) -> Dict[str, Any]:
     metadata = _llama_cpp_native_worker_load(state, model_token, vision=vision, timeout=max(60.0, timeout or 900.0))
@@ -6613,7 +6795,22 @@ def _llama_cpp_native_worker_chat(
         }
     completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=slot_id)
     generation_started = time.perf_counter()
-    completion_response = _llama_cpp_native_json_post(base_url, "/completion", completion_payload, timeout=max(30.0, timeout or 600.0))
+    if callable(stream_callback):
+        completion_payload["stream"] = True
+        completion_response = _llama_cpp_native_stream_post(
+            base_url,
+            "/completion",
+            completion_payload,
+            stream_callback=stream_callback,
+            timeout=max(30.0, timeout or 600.0),
+        )
+    else:
+        completion_response = _llama_cpp_native_json_post(
+            base_url,
+            "/completion",
+            completion_payload,
+            timeout=max(30.0, timeout or 600.0),
+        )
     generation_elapsed = max(0.0, time.perf_counter() - generation_started)
     return _llama_cpp_native_completion_result(
         model_token=model_token,
@@ -6646,6 +6843,7 @@ class _TaterLlamaCppEngineProcess:
         self._send_lock = threading.RLock()
         self._response_cv = threading.Condition()
         self._responses: Dict[str, Dict[str, Any]] = {}
+        self._stream_callbacks: Dict[str, Callable[[str], Any]] = {}
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._stderr_tail: List[str] = []
@@ -6703,6 +6901,16 @@ class _TaterLlamaCppEngineProcess:
                 request_id = str(payload.get("id") or "").strip()
                 if not request_id:
                     continue
+                if str(payload.get("event") or "").strip().lower() == "chunk":
+                    callback = None
+                    with self._response_cv:
+                        callback = self._stream_callbacks.get(request_id)
+                    if callable(callback):
+                        try:
+                            callback(str(payload.get("chunk") or ""))
+                        except Exception:
+                            logger.debug("[llama-cpp-engine] stream callback failed", exc_info=True)
+                    continue
                 with self._response_cv:
                     self._responses[request_id] = payload
                     self._response_cv.notify_all()
@@ -6735,7 +6943,14 @@ class _TaterLlamaCppEngineProcess:
         suffix = f" Logs: {detail}" if detail else ""
         return f"Tater llama.cpp engine exited during {op} (exit {code}).{suffix}"
 
-    def request(self, op: str, payload: Optional[Dict[str, Any]] = None, *, timeout: Optional[float] = None) -> Any:
+    def request(
+        self,
+        op: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+        stream_callback: Optional[Callable[[str], Any]] = None,
+    ) -> Any:
         self.start()
         proc = self.process
         if proc is None or proc.stdin is None:
@@ -6750,6 +6965,9 @@ class _TaterLlamaCppEngineProcess:
             "op": str(op or ""),
             "payload": payload or {},
         }
+        if callable(stream_callback):
+            with self._response_cv:
+                self._stream_callbacks[request_id] = stream_callback
         try:
             line = json.dumps(message, separators=(",", ":"), default=str)
         except Exception:
@@ -6762,18 +6980,22 @@ class _TaterLlamaCppEngineProcess:
                 raise RuntimeError("Tater llama.cpp engine is not accepting requests.") from exc
 
         deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else 0.0
-        with self._response_cv:
-            while request_id not in self._responses:
-                if proc.poll() is not None:
-                    raise RuntimeError(self._exit_detail(op))
-                if deadline > 0:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(f"Tater llama.cpp engine timed out during {op}.")
-                    self._response_cv.wait(timeout=min(1.0, max(0.05, remaining)))
-                else:
-                    self._response_cv.wait(timeout=1.0)
-            response = self._responses.pop(request_id)
+        try:
+            with self._response_cv:
+                while request_id not in self._responses:
+                    if proc.poll() is not None:
+                        raise RuntimeError(self._exit_detail(op))
+                    if deadline > 0:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(f"Tater llama.cpp engine timed out during {op}.")
+                        self._response_cv.wait(timeout=min(1.0, max(0.05, remaining)))
+                    else:
+                        self._response_cv.wait(timeout=1.0)
+                response = self._responses.pop(request_id)
+        finally:
+            with self._response_cv:
+                self._stream_callbacks.pop(request_id, None)
 
         if not bool(response.get("ok")):
             detail = str(response.get("error") or "").strip() or f"Tater llama.cpp engine {op} failed."
@@ -6924,10 +7146,10 @@ def _llama_cpp_engine_chat_completion(
     timeout: Any = None,
     vision: bool = False,
     slot_id: Any = None,
+    stream_callback: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
     bundle = _load_llama_cpp_engine_bundle(model_token, vision=bool(vision))
     engine = bundle.get("engine")
-    generation_lock = bundle.get("lock")
     if not callable(getattr(engine, "request", None)):
         raise RuntimeError("Tater llama.cpp engine is not loaded.")
     try:
@@ -6935,33 +7157,23 @@ def _llama_cpp_engine_chat_completion(
     except Exception:
         timeout_seconds = 0.0
     local_messages = _llama_cpp_disable_thinking_messages(messages)
-    lock_obj = generation_lock if hasattr(generation_lock, "__enter__") and hasattr(generation_lock, "__exit__") else None
-    if lock_obj is None:
-        return engine.request(
-            "chat",
-            {
-                "model": model_token,
-                "messages": local_messages,
-                "chat_kwargs": dict(chat_kwargs),
-                "vision": bool(vision),
-                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
-                "timeout": timeout_seconds,
-            },
-            timeout=timeout_seconds,
-        )
-    with lock_obj:
-        return engine.request(
-            "chat",
-            {
-                "model": model_token,
-                "messages": local_messages,
-                "chat_kwargs": dict(chat_kwargs),
-                "vision": bool(vision),
-                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
-                "timeout": timeout_seconds,
-            },
-            timeout=timeout_seconds,
-        )
+    # llama-server owns slot-level queuing and can execute distinct slots in
+    # parallel. A process-wide lock here previously reduced --parallel back to
+    # one effective request even when Hydra had independent work available.
+    return engine.request(
+        "chat",
+        {
+            "model": model_token,
+            "messages": local_messages,
+            "chat_kwargs": dict(chat_kwargs),
+            "vision": bool(vision),
+            "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
+            "stream": bool(callable(stream_callback)),
+            "timeout": timeout_seconds,
+        },
+        timeout=timeout_seconds,
+        stream_callback=stream_callback,
+    )
 
 
 def _load_llama_cpp_bundle(
@@ -8855,6 +9067,12 @@ class LLMClientWrapper:
         base_url = _normalize_base_url(resolved_host)
 
         resolved_api_key = explicit_api_key or os.getenv("LLM_API_KEY") or "not-needed"
+        self._uses_shared_http_client = False
+        if "http_client" not in kwargs:
+            shared_http_client = _shared_async_http_client()
+            if shared_http_client is not None:
+                kwargs["http_client"] = shared_http_client
+                self._uses_shared_http_client = True
         self.client = AsyncOpenAI(
             base_url=base_url,
             api_key=resolved_api_key,
@@ -8881,6 +9099,8 @@ class LLMClientWrapper:
         self._llm_speed_basis = "api_round_trip"
 
     async def aclose(self):
+        if bool(getattr(self, "_uses_shared_http_client", False)):
+            return
         client = getattr(self, "client", None)
         if client is None:
             return
@@ -8950,7 +9170,10 @@ class LLMClientWrapper:
                 timeout = None
 
         stream = kwargs.pop("stream", False)
+        stream_callback = kwargs.pop("stream_callback", None)
+        effective_stream = bool(stream or callable(stream_callback))
         activity_hint = kwargs.pop("activity", "")
+        kwargs.pop("cache_namespace", "")
         model = kwargs.pop("model", self.model)
 
         # Provide sensible defaults if not supplied. A caller can pass
@@ -8972,7 +9195,7 @@ class LLMClientWrapper:
         call_id = _register_active_llm_call(
             host=str(self.host or "").strip(),
             model=str(model or "").strip(),
-            stream=bool(stream),
+            stream=effective_stream,
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or ""),
@@ -8992,13 +9215,107 @@ class LLMClientWrapper:
                 detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
             )
             started_at = asyncio.get_running_loop().time()
-            response = await self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=stream,
-                timeout=timeout,
-                **kwargs,
-            )
+            if callable(stream_callback):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        stream=True,
+                        timeout=timeout,
+                        **kwargs,
+                    )
+                except Exception:
+                    logger.debug(
+                        "OpenAI-compatible streaming was rejected; retrying non-streaming",
+                        exc_info=True,
+                    )
+                    response = await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        stream=False,
+                        timeout=timeout,
+                        **kwargs,
+                    )
+                    effective_stream = False
+            else:
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=effective_stream,
+                    timeout=timeout,
+                    **kwargs,
+                )
+            if callable(stream_callback) and effective_stream:
+                content_parts: List[str] = []
+                response_model = str(model or "").strip()
+                usage = None
+                async for event in response:
+                    event_model = getattr(event, "model", None)
+                    if event_model:
+                        response_model = str(event_model)
+                    event_usage = getattr(event, "usage", None)
+                    if event_usage is not None:
+                        usage = event_usage
+                    choices = getattr(event, "choices", None)
+                    first_choice = choices[0] if choices else None
+                    delta = getattr(first_choice, "delta", None) if first_choice is not None else None
+                    chunk = (
+                        getattr(delta, "content", "")
+                        if delta is not None
+                        else ""
+                    )
+                    chunk_text = _coerce_content_to_text(chunk)
+                    if chunk_text:
+                        content_parts.append(chunk_text)
+                        await _dispatch_llm_stream_callback(stream_callback, chunk_text)
+                elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+                try:
+                    if isinstance(usage, dict):
+                        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                        completion_tokens = int(usage.get("completion_tokens") or 0)
+                        total_tokens = int(usage.get("total_tokens") or 0)
+                    elif usage is not None:
+                        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+                except Exception:
+                    prompt_tokens = completion_tokens = total_tokens = 0
+                if total_tokens <= 0:
+                    total_tokens = max(0, prompt_tokens + completion_tokens)
+                self._llm_calls += 1
+                self._llm_elapsed_sec += elapsed
+                self._llm_prompt_tokens += max(0, prompt_tokens)
+                self._llm_completion_tokens += max(0, completion_tokens)
+                self._llm_total_tokens += max(0, total_tokens)
+                self._llm_model_last = response_model or str(model or "")
+                final_model = self._llm_model_last
+                result = {
+                    "model": final_model,
+                    "message": {
+                        "role": "assistant",
+                        "content": _strip_local_thinking_blocks(
+                            "".join(content_parts)
+                        ).strip(),
+                    },
+                }
+                _append_llm_debug_result(
+                    call_id=call_id,
+                    provider=HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+                    host=str(self.host or "").strip(),
+                    model=final_model,
+                    result=result,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                    timing={"speed_basis": "api_round_trip"},
+                    elapsed=elapsed,
+                )
+                return result
             elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
             self._llm_calls += 1
             self._llm_elapsed_sec += elapsed
@@ -9032,7 +9349,7 @@ class LLMClientWrapper:
             self._llm_completion_tokens += max(0, completion_tokens)
             self._llm_total_tokens += max(0, total_tokens)
 
-            if stream:
+            if stream and effective_stream:
                 return response
 
             # Defensive: choices can be empty in edge cases / errors
@@ -9079,6 +9396,7 @@ class LLMClientWrapper:
                 timing={"speed_basis": "api_round_trip"},
                 elapsed=elapsed,
             )
+            await _dispatch_llm_stream_callback(stream_callback, content_text)
             return result
         except Exception as exc:
             call_error = exc
@@ -9112,7 +9430,11 @@ class SpudLinkLLMClientWrapper:
         self.provider = HYDRA_LLM_PROVIDER_SPUD_LINK
         self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-        self._client = httpx.AsyncClient() if httpx is not None else None
+        self._client = _shared_async_http_client()
+        self._owns_http_client = False
+        if self._client is None and httpx is not None:
+            self._client = httpx.AsyncClient()
+            self._owns_http_client = True
 
         self._llm_calls = 0
         self._llm_elapsed_sec = 0.0
@@ -9126,7 +9448,7 @@ class SpudLinkLLMClientWrapper:
 
     async def aclose(self):
         client = getattr(self, "_client", None)
-        if client is not None:
+        if client is not None and bool(getattr(self, "_owns_http_client", False)):
             await client.aclose()
 
     async def __aenter__(self):
@@ -9168,9 +9490,11 @@ class SpudLinkLLMClientWrapper:
         timeout = float(timeout or 120.0)
 
         stream = bool(kwargs.pop("stream", False))
-        if stream:
+        stream_callback = kwargs.pop("stream_callback", None)
+        if stream and not callable(stream_callback):
             raise RuntimeError("Spud Link native LLM routing does not support streaming model calls yet.")
         activity_hint = kwargs.pop("activity", "")
+        kwargs.pop("cache_namespace", "")
         model = str(kwargs.pop("model", self.model) or self.model).strip() or "tater/base"
 
         if "max_tokens" not in kwargs:
@@ -9188,7 +9512,7 @@ class SpudLinkLLMClientWrapper:
         call_id = _register_active_llm_call(
             host=str(self.host or "").strip(),
             model=model,
-            stream=False,
+            stream=bool(callable(stream_callback)),
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or "spud_link_native"),
@@ -9285,6 +9609,7 @@ class SpudLinkLLMClientWrapper:
                 timing={"speed_basis": "spud_link_native"},
                 elapsed=elapsed,
             )
+            await _dispatch_llm_stream_callback(stream_callback, content_text)
             return result
         except Exception as exc:
             call_error = exc
@@ -9717,10 +10042,12 @@ class TransformersLLMClientWrapper:
                 timeout = None
 
         stream = kwargs.pop("stream", False)
-        if stream:
+        stream_callback = kwargs.pop("stream_callback", None)
+        if stream and not callable(stream_callback):
             raise RuntimeError("Hugging Face Transformers LLM backend does not support streaming yet.")
 
         activity_hint = kwargs.pop("activity", "")
+        kwargs.pop("cache_namespace", "")
         model = kwargs.pop("model", self.model)
         if model and str(model).strip() != self.model:
             self.model = str(model).strip()
@@ -9743,7 +10070,7 @@ class TransformersLLMClientWrapper:
         call_id = _register_active_llm_call(
             host=self.host,
             model=str(self.model or "").strip(),
-            stream=False,
+            stream=bool(callable(stream_callback)),
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or ""),
@@ -9795,6 +10122,10 @@ class TransformersLLMClientWrapper:
                 },
                 timing=timing,
                 elapsed=elapsed,
+            )
+            await _dispatch_llm_stream_callback(
+                stream_callback,
+                ((result or {}).get("message") or {}).get("content", ""),
             )
             return result
         except Exception as exc:
@@ -9941,11 +10272,19 @@ class LlamaCppLLMClientWrapper:
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
+        cache_namespace = kwargs.pop("_cache_namespace", "")
+        stream_callback = kwargs.pop("_stream_callback", None)
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
-        request_slot = self.llama_cpp_slot
-        if vision_requested and not self.vision:
-            request_slot = _llama_cpp_slot_id("vision")
+        request_slot = _llama_cpp_cache_namespace_slot(
+            cache_namespace,
+            configured_slot=(
+                _llama_cpp_slot_id("vision")
+                if vision_requested and not self.vision
+                else self.llama_cpp_slot
+            ),
+            vision=vision_requested,
+        )
         return _llama_cpp_engine_chat_completion(
             self.model,
             local_messages,
@@ -9953,6 +10292,7 @@ class LlamaCppLLMClientWrapper:
             timeout=timeout,
             vision=vision_requested,
             slot_id=request_slot,
+            stream_callback=stream_callback,
         )
 
     async def chat(self, messages, **kwargs):
@@ -9964,9 +10304,11 @@ class LlamaCppLLMClientWrapper:
             except Exception:
                 timeout = None
         stream = kwargs.pop("stream", False)
-        if stream:
+        stream_callback = kwargs.pop("stream_callback", None)
+        if stream and not callable(stream_callback):
             raise RuntimeError("llama.cpp provider does not support streaming yet.")
         activity_hint = kwargs.pop("activity", "")
+        cache_namespace = kwargs.pop("cache_namespace", "")
         model = kwargs.pop("model", self.model)
         if model and str(model).strip() != self.model:
             self.model = str(model).strip()
@@ -9987,17 +10329,37 @@ class LlamaCppLLMClientWrapper:
         call_id = _register_active_llm_call(
             host=self.host,
             model=str(self.model or "").strip(),
-            stream=False,
+            stream=bool(callable(stream_callback)),
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or ""),
         )
         call_error: Optional[Exception] = None
         final_model = str(self.model or "").strip()
-        started_at = asyncio.get_running_loop().time()
-        debug_slot = self.llama_cpp_slot
-        if _vision_payload_has_image_url(messages) and not self.vision:
-            debug_slot = _llama_cpp_slot_id("vision")
+        event_loop = asyncio.get_running_loop()
+        started_at = event_loop.time()
+        stream_futures: List[Any] = []
+
+        def thread_stream_callback(chunk: str) -> None:
+            if not callable(stream_callback):
+                return
+            stream_futures.append(
+                asyncio.run_coroutine_threadsafe(
+                    _dispatch_llm_stream_callback(stream_callback, chunk),
+                    event_loop,
+                )
+            )
+
+        vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
+        debug_slot = _llama_cpp_cache_namespace_slot(
+            cache_namespace,
+            configured_slot=(
+                _llama_cpp_slot_id("vision")
+                if vision_requested and not self.vision
+                else self.llama_cpp_slot
+            ),
+            vision=vision_requested,
+        )
         try:
             provider_label = "Remote" if self.provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE else "Local"
             _append_llm_debug_event(
@@ -10008,10 +10370,28 @@ class LlamaCppLLMClientWrapper:
                 provider=self.provider,
                 host=self.host,
                 model=str(self.model or "").strip(),
-                detail=f"messages={len(messages) if isinstance(messages, list) else 0} slot={debug_slot if debug_slot >= 0 else 'auto'}",
+                detail=(
+                    f"messages={len(messages) if isinstance(messages, list) else 0} "
+                    f"slot={debug_slot if debug_slot >= 0 else 'auto'}"
+                    f"{f' cache={cache_namespace}' if cache_namespace else ''}"
+                ),
             )
-            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
-            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
+            result = await asyncio.to_thread(
+                self._chat_sync,
+                messages,
+                timeout=timeout,
+                _cache_namespace=cache_namespace,
+                _stream_callback=(
+                    thread_stream_callback if callable(stream_callback) else None
+                ),
+                **kwargs,
+            )
+            if stream_futures:
+                await asyncio.gather(
+                    *(asyncio.wrap_future(item) for item in stream_futures),
+                    return_exceptions=True,
+                )
+            elapsed = max(0.0, float(event_loop.time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
             timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
             prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
@@ -10083,6 +10463,8 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
+        cache_namespace = kwargs.pop("_cache_namespace", "")
+        stream_callback = kwargs.pop("_stream_callback", None)
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
         prepared_messages, media = _llama_cpp_native_prepare_messages(local_messages)
@@ -10112,20 +10494,62 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
                 "prompt_string": prompt,
                 "multimodal_data": media,
             }
-        request_slot = self.llama_cpp_slot
-        if vision_requested and not self.vision:
-            request_slot = _llama_cpp_slot_id("vision")
+        request_slot = _llama_cpp_cache_namespace_slot(
+            cache_namespace,
+            configured_slot=(
+                _llama_cpp_slot_id("vision")
+                if vision_requested and not self.vision
+                else self.llama_cpp_slot
+            ),
+            vision=vision_requested,
+        )
         completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=request_slot)
         if remote_mode == "router":
             completion_payload["model"] = self.model
         generation_started = time.perf_counter()
-        completion_response = _llama_cpp_native_json_post(
-            self.host,
-            "/completion",
-            completion_payload,
-            timeout=max(30.0, timeout or 600.0),
-            api_key=self.api_key,
-        )
+        if callable(stream_callback):
+            emitted_chunk = False
+
+            def _emit_remote_chunk(chunk: str) -> None:
+                nonlocal emitted_chunk
+                emitted_chunk = True
+                stream_callback(chunk)
+
+            try:
+                completion_payload["stream"] = True
+                completion_response = _llama_cpp_native_stream_post(
+                    self.host,
+                    "/completion",
+                    completion_payload,
+                    stream_callback=_emit_remote_chunk,
+                    timeout=max(30.0, timeout or 600.0),
+                    api_key=self.api_key,
+                )
+            except Exception:
+                logger.debug(
+                    "[llama-cpp-remote] streaming was rejected; retrying non-streaming",
+                    exc_info=True,
+                )
+                completion_payload["stream"] = False
+                completion_response = _llama_cpp_native_json_post(
+                    self.host,
+                    "/completion",
+                    completion_payload,
+                    timeout=max(30.0, timeout or 600.0),
+                    api_key=self.api_key,
+                )
+                if not emitted_chunk:
+                    stream_callback(
+                        _coerce_content_to_text(completion_response.get("content"))
+                    )
+        else:
+            completion_response = _llama_cpp_native_json_post(
+                self.host,
+                "/completion",
+                completion_payload,
+                timeout=max(30.0, timeout or 600.0),
+                api_key=self.api_key,
+            )
         generation_elapsed = max(0.0, time.perf_counter() - generation_started)
         return _llama_cpp_native_completion_result(
             model_token=self.model,
@@ -10394,9 +10818,11 @@ class MlxLmLLMClientWrapper:
             except Exception:
                 timeout = None
         stream = kwargs.pop("stream", False)
-        if stream:
+        stream_callback = kwargs.pop("stream_callback", None)
+        if stream and not callable(stream_callback):
             raise RuntimeError("MLX LM provider does not support streaming yet.")
         activity_hint = kwargs.pop("activity", "")
+        kwargs.pop("cache_namespace", "")
         model = kwargs.pop("model", self.model)
         if model and str(model).strip() != self.model:
             self.model = str(model).strip()
@@ -10414,7 +10840,7 @@ class MlxLmLLMClientWrapper:
         call_id = _register_active_llm_call(
             host=self.host,
             model=str(self.model or "").strip(),
-            stream=False,
+            stream=bool(callable(stream_callback)),
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or ""),
@@ -10464,6 +10890,10 @@ class MlxLmLLMClientWrapper:
                 },
                 timing=timing,
                 elapsed=elapsed,
+            )
+            await _dispatch_llm_stream_callback(
+                stream_callback,
+                ((result or {}).get("message") or {}).get("content", ""),
             )
             return result
         except Exception as exc:
@@ -11143,14 +11573,20 @@ class RoundRobinLLMClientWrapper:
         self.host = str(getattr(self._clients[0], "host", "") or "")
         self.model = str(getattr(self._clients[0], "model", "") or "")
 
-    def _select_client(self) -> LLMClientWrapper:
+    def _select_client(self, cache_namespace: Any = "") -> LLMClientWrapper:
         if len(self._clients) == 1:
             return self._clients[0]
+        namespace = str(cache_namespace or "").strip()
+        if namespace:
+            digest = hashlib.sha256(
+                f"{self._pool_key}|{namespace}".encode("utf-8", "ignore")
+            ).digest()
+            return self._clients[int.from_bytes(digest[:4], "big") % len(self._clients)]
         idx = _next_hydra_base_rr_index(self._pool_key, len(self._clients))
         return self._clients[idx]
 
     async def chat(self, messages, **kwargs):
-        client = self._select_client()
+        client = self._select_client(kwargs.get("cache_namespace"))
         return await client.chat(messages, **kwargs)
 
     async def aclose(self):
@@ -11669,26 +12105,93 @@ def _llama_cpp_engine_worker_main() -> int:
     current_vision = False
     native_state: Dict[str, Any] = {}
     return_code = 0
+    state_lock = threading.RLock()
+    reply_lock = threading.Lock()
+    chat_executor = ThreadPoolExecutor(
+        max_workers=max(1, _llama_cpp_slot_count()),
+        thread_name_prefix="tater-llama-chat",
+    )
+
+    def _reply(payload: Dict[str, Any]) -> None:
+        with reply_lock:
+            _llama_cpp_engine_worker_reply(protocol_out, payload)
 
     def _ensure_loaded(model_token: str, *, vision: bool) -> Dict[str, Any]:
         nonlocal current_model, current_vision
-        desired_vision = bool(vision)
-        if current_model == model_token and native_state.get("process") is not None:
-            proc = native_state.get("process")
-            if callable(getattr(proc, "poll", None)) and proc.poll() is None:
-                metadata = dict(native_state.get("metadata") or {})
-                if not desired_vision or bool(metadata.get("supports_vision")):
-                    return metadata
-        _llama_cpp_native_shutdown_state(native_state)
-        bundle = _llama_cpp_native_worker_load(
-            native_state,
-            model_token,
-            vision=desired_vision,
-            timeout=max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900")),
-        )
-        current_model = model_token
-        current_vision = desired_vision
-        return bundle
+        with state_lock:
+            desired_vision = bool(vision)
+            if current_model == model_token and native_state.get("process") is not None:
+                proc = native_state.get("process")
+                if callable(getattr(proc, "poll", None)) and proc.poll() is None:
+                    metadata = dict(native_state.get("metadata") or {})
+                    if not desired_vision or bool(metadata.get("supports_vision")):
+                        current_vision = bool(current_vision or desired_vision)
+                        return metadata
+            _llama_cpp_native_shutdown_state(native_state)
+            bundle = _llama_cpp_native_worker_load(
+                native_state,
+                model_token,
+                vision=desired_vision,
+                timeout=max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900")),
+            )
+            current_model = model_token
+            current_vision = desired_vision
+            return bundle
+
+    def _handle_chat(request_id: str, payload: Dict[str, Any]) -> None:
+        try:
+            model_token = str((payload or {}).get("model") or "").strip()
+            if not model_token:
+                with state_lock:
+                    model_token = str(current_model or "").strip()
+            if not model_token:
+                raise RuntimeError("llama.cpp engine chat needs a loaded model.")
+            with state_lock:
+                loaded_model = str(current_model or "").strip()
+                loaded_vision = bool(current_vision)
+            if loaded_model and model_token != loaded_model:
+                raise RuntimeError(
+                    f"Tater llama.cpp engine is loaded with {loaded_model}; got request for {model_token}."
+                )
+            messages = (payload or {}).get("messages")
+            if not isinstance(messages, list):
+                messages = []
+            chat_kwargs = (payload or {}).get("chat_kwargs")
+            if not isinstance(chat_kwargs, dict):
+                chat_kwargs = {}
+            requested_vision = _boolish((payload or {}).get("vision"), default=False)
+            slot_id = (payload or {}).get("slot_id")
+            desired_vision = bool(loaded_vision or requested_vision)
+            _ensure_loaded(model_token, vision=desired_vision)
+            result = _llama_cpp_native_worker_chat(
+                native_state,
+                model_token,
+                messages,
+                chat_kwargs,
+                vision=desired_vision,
+                slot_id=slot_id,
+                stream_callback=(
+                    lambda chunk: _reply(
+                        {
+                            "id": request_id,
+                            "event": "chunk",
+                            "chunk": str(chunk or ""),
+                        }
+                    )
+                    if _boolish((payload or {}).get("stream"), default=False)
+                    else None
+                ),
+                timeout=float((payload or {}).get("timeout") or 0.0),
+            )
+            _reply({"id": request_id, "ok": True, "result": result})
+        except Exception as exc:
+            _reply(
+                {
+                    "id": request_id,
+                    "ok": False,
+                    "error": str(exc) or exc.__class__.__name__,
+                }
+            )
 
     for line in sys.stdin:
         request_id = ""
@@ -11700,7 +12203,7 @@ def _llama_cpp_engine_worker_main() -> int:
             if not request_id:
                 continue
             if op == "shutdown":
-                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": {"shutdown": True}})
+                _reply({"id": request_id, "ok": True, "result": {"shutdown": True}})
                 return_code = 0
                 break
             if op == "load":
@@ -11711,42 +12214,15 @@ def _llama_cpp_engine_worker_main() -> int:
                 bundle = _ensure_loaded(model_token, vision=requested_vision)
                 result = _llama_cpp_public_bundle_metadata(bundle)
                 result["runtime"] = "tater-llama-engine"
-                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
+                _reply({"id": request_id, "ok": True, "result": result})
                 continue
             if op == "chat":
-                model_token = str((payload or {}).get("model") or current_model or "").strip()
-                if not model_token:
-                    raise RuntimeError("llama.cpp engine chat needs a loaded model.")
-                if current_model and model_token != current_model:
-                    raise RuntimeError(
-                        f"Tater llama.cpp engine is loaded with {current_model}; got request for {model_token}."
-                    )
-                messages = (payload or {}).get("messages")
-                if not isinstance(messages, list):
-                    messages = []
-                chat_kwargs = (payload or {}).get("chat_kwargs")
-                if not isinstance(chat_kwargs, dict):
-                    chat_kwargs = {}
-                requested_vision = _boolish((payload or {}).get("vision"), default=False)
-                slot_id = (payload or {}).get("slot_id")
-                desired_vision = bool(current_vision or requested_vision)
-                _ensure_loaded(model_token, vision=desired_vision)
-                result = _llama_cpp_native_worker_chat(
-                    native_state,
-                    model_token,
-                    messages,
-                    chat_kwargs,
-                    vision=desired_vision,
-                    slot_id=slot_id,
-                    timeout=float((payload or {}).get("timeout") or 0.0),
-                )
-                _llama_cpp_engine_worker_reply(protocol_out, {"id": request_id, "ok": True, "result": result})
+                chat_executor.submit(_handle_chat, request_id, dict(payload or {}))
                 continue
             raise RuntimeError(f"Unknown llama.cpp engine op: {op or 'missing'}")
         except Exception as exc:
             if request_id:
-                _llama_cpp_engine_worker_reply(
-                    protocol_out,
+                _reply(
                     {
                         "id": request_id,
                         "ok": False,
@@ -11755,6 +12231,7 @@ def _llama_cpp_engine_worker_main() -> int:
                 )
             else:
                 logger.warning("[llama-cpp-engine] failed handling request: %s", exc, exc_info=True)
+    chat_executor.shutdown(wait=True, cancel_futures=False)
     _llama_cpp_native_shutdown_state(native_state)
     try:
         protocol_out.flush()

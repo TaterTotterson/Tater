@@ -34,6 +34,11 @@ cp "${PROJECT_DIR}/Resources/TaterIcon.icns" "${RESOURCES_DIR}/TaterIcon.icns"
 cp "${PROJECT_DIR}/Resources/TaterMenuBarTemplate.png" "${RESOURCES_DIR}/TaterMenuBarTemplate.png"
 cp "${PROJECT_DIR}/Resources/TaterAvatar.png" "${RESOURCES_DIR}/TaterAvatar.png"
 cp "${PROJECT_DIR}/Resources/TaterSetupLogo.png" "${RESOURCES_DIR}/TaterSetupLogo.png"
+cp "${PROJECT_DIR}/Resources/TaterMascotSprite.png" "${RESOURCES_DIR}/TaterMascotSprite.png"
+mkdir -p "${RESOURCES_DIR}/TaterMascotFrames"
+cp "${PROJECT_DIR}/Resources/TaterMascotFrames/"*.png "${RESOURCES_DIR}/TaterMascotFrames/"
+mkdir -p "${RESOURCES_DIR}/TaterMascotIdleFrames"
+cp "${PROJECT_DIR}/Resources/TaterMascotIdleFrames/"*.png "${RESOURCES_DIR}/TaterMascotIdleFrames/"
 rsync -a --delete \
   --exclude='/.git/' \
   --exclude='/.github/' \

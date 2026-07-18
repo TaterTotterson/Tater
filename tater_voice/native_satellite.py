@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import secrets
@@ -41,6 +42,8 @@ VOICE_EVENT_STATE = {
 
 _clients_lock = asyncio.Lock()
 _clients: Dict[str, Dict[str, Any]] = {}
+_client_loop: Optional[asyncio.AbstractEventLoop] = None
+_client_loop_lock = threading.RLock()
 _pairing_lock = threading.RLock()
 _pairing_sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -49,6 +52,76 @@ def _vp():
     from . import voice_pipeline as vp
 
     return vp
+
+
+def bind_runtime_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> asyncio.AbstractEventLoop:
+    """Bind native client state to the server loop that owns its WebSockets."""
+    global _client_loop
+    target = loop
+    if target is None:
+        try:
+            target = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError("Native satellite runtime loop must be bound from async startup") from exc
+    if target.is_closed():
+        raise RuntimeError("Cannot bind native satellite runtime to a closed event loop")
+    with _client_loop_lock:
+        owner = _client_loop
+        if owner is not None and owner is not target and owner.is_running() and not owner.is_closed():
+            raise RuntimeError("Native satellite runtime is already bound to a different event loop")
+        _client_loop = target
+    return target
+
+
+def release_runtime_loop(loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    """Release the server loop binding during application shutdown."""
+    global _client_loop
+    with _client_loop_lock:
+        if loop is None or _client_loop is loop:
+            _client_loop = None
+
+
+def _runtime_loop() -> Optional[asyncio.AbstractEventLoop]:
+    with _client_loop_lock:
+        loop = _client_loop
+    if loop is not None and loop.is_running() and not loop.is_closed():
+        return loop
+    return None
+
+
+def _close_awaitable(awaitable: Any) -> None:
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+
+
+def run_on_runtime_loop(awaitable: Any, *, timeout: float = 20.0) -> Any:
+    """Run native client work on the loop that owns its locks and WebSockets."""
+    owner = _runtime_loop()
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+
+    if owner is current and current is not None:
+        _close_awaitable(awaitable)
+        raise RuntimeError("Cannot synchronously wait for native satellite work on its runtime loop")
+
+    timeout_seconds = max(0.1, float(timeout or 20.0))
+    if owner is not None:
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(awaitable, timeout=timeout_seconds),
+            owner,
+        )
+        try:
+            return future.result(timeout=timeout_seconds + 1.0)
+        except TimeoutError:
+            future.cancel()
+            raise TimeoutError("Timed out waiting for native satellite action") from None
+
+    if current is not None and current.is_running():
+        _close_awaitable(awaitable)
+        raise RuntimeError("Native satellite runtime loop has not been bound")
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=timeout_seconds))
 
 
 def _text(value: Any) -> str:
@@ -1193,6 +1266,7 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
 
 
 async def handle_websocket(websocket: WebSocket) -> None:
+    bind_runtime_loop()
     await websocket.accept()
 
     selector = ""

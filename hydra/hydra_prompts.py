@@ -142,7 +142,6 @@ def chat_fallback_system_prompt(
         else ""
     )
     return (
-        f"Current Date and Time: {now_text}\n"
         f"You are {first_name} {last_name}, a {platform_label}-savvy AI assistant.\n"
         f"{personality_block}"
         f"Current platform: {platform}\n"
@@ -158,6 +157,7 @@ def chat_fallback_system_prompt(
         "Do not mention internal roles, modes, planning, tools, or limitations unless the user asks.\n"
         "Do not list capabilities unless the user explicitly asks.\n"
         f"{plain_text_rule}"
+        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 
@@ -174,7 +174,6 @@ def thanatos_system_prompt(
     )
 
     return (
-        f"Current Date and Time: {now_text}\n"
         f"Current platform: {platform}\n"
         "Execution role: Thanatos.\n"
         "Execute exactly ONE locked atomic step from Astraeus.\n"
@@ -215,6 +214,7 @@ def thanatos_system_prompt(
         "- Never mention internal orchestration roles or codenames.\n"
         "- If outputting a tool call, output only the JSON object and nothing else.\n"
         f"{plain_text_rule}"
+        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 
@@ -249,7 +249,6 @@ def hermes_final_render_system_prompt(
         else ""
     )
     return (
-        f"Current Date and Time: {now_text}\n"
         f"You are {first_name} {last_name}.\n"
         f"{personality_block}"
         "Transform base_text and findings into the final user-facing answer.\n"
@@ -268,6 +267,7 @@ def hermes_final_render_system_prompt(
         "- Do not mention internal roles, orchestration, or tool execution.\n"
         "- Output plain user-facing text only.\n"
         f"{plain_text_rule}"
+        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 

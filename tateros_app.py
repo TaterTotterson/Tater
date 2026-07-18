@@ -82,6 +82,7 @@ import portal_registry as portal_registry_module
 from tater_paths import agent_lab_path
 from tater_voice import firmware as esphome_firmware_module
 from tater_voice import home as esphome_home_module
+from tater_voice import native_satellite as native_satellite_module
 from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
@@ -190,6 +191,7 @@ from helpers import (
     clear_llama_cpp_chat_template_override,
     set_local_llm_chat_template_override,
     clear_local_llm_chat_template_override,
+    close_shared_async_http_client,
     unload_local_llm_models,
 )
 from runtime_executors import configure_runtime_executors, run_dashboard, shutdown_runtime_executors
@@ -377,6 +379,7 @@ WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "port
 WEBUI_AUTH_PASSWORD_HASH_KEY = "tater:webui_auth:password_hash"
 WEBUI_AUTH_SESSIONS_KEY = "tater:webui_auth:sessions"
 WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
+NATIVE_STATUS_TOKEN_ENV = "TATER_NATIVE_STATUS_TOKEN"
 WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
 WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
@@ -865,7 +868,7 @@ def _esphome_settings_fields() -> List[Dict[str, Any]]:
         rows = esphome_home_module.settings_fields()
         return rows if isinstance(rows, list) else []
     except Exception:
-        logger.exception("[esphome] failed building ESPHome settings fields")
+        logger.exception("[voice] failed building Tater Voice settings fields")
         return []
 
 
@@ -875,7 +878,7 @@ def _save_esphome_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc) or "Failed to save ESPHome settings.") from exc
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to save Tater Voice settings.") from exc
     return result if isinstance(result, dict) else {"ok": True}
 
 
@@ -6822,6 +6825,7 @@ async def _process_message(
     input_artifacts: Optional[List[Dict[str, Any]]] = None,
     session_scope_id: str,
     wait_callback: Optional[Callable[..., None]] = None,
+    response_callback: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
     max_llm = _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM)
     loop_messages = _load_loop_messages_for_hydra(max_llm)
@@ -6881,6 +6885,9 @@ async def _process_message(
             origin=origin,
             redis_client=redis_client,
             wait_callback=(_wait if callable(wait_callback) else None),
+            response_callback=(
+                response_callback if callable(response_callback) else None
+            ),
             max_rounds=0,
             max_tool_calls=0,
             platform_preamble="",
@@ -6915,6 +6922,42 @@ class ChatJobManager:
         self.order: List[str] = []
         self.ttl_seconds = int(ttl_seconds)
         self.max_jobs = int(max_jobs)
+        self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._async_loop_thread: Optional[threading.Thread] = None
+        self._async_loop_ready = threading.Event()
+
+    def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
+        with self.lock:
+            loop = self._async_loop
+            thread = self._async_loop_thread
+            if (
+                loop is not None
+                and not loop.is_closed()
+                and thread is not None
+                and thread.is_alive()
+            ):
+                return loop
+
+            self._async_loop_ready.clear()
+            loop = asyncio.new_event_loop()
+            self._async_loop = loop
+
+            def _run_loop() -> None:
+                asyncio.set_event_loop(loop)
+                self._async_loop_ready.set()
+                loop.run_forever()
+
+            thread = threading.Thread(
+                target=_run_loop,
+                daemon=True,
+                name="chat-job-async-runtime",
+            )
+            self._async_loop_thread = thread
+            thread.start()
+
+        if not self._async_loop_ready.wait(timeout=5.0):
+            raise RuntimeError("Chat async runtime did not start.")
+        return loop
 
     def _emit(self, job: Dict[str, Any], event: Dict[str, Any]) -> None:
         event_queue = job.get("events")
@@ -6957,7 +7000,7 @@ class ChatJobManager:
         job["status"] = status
         job["current_tool"] = current_tool
 
-    def _worker(
+    async def _worker(
         self,
         *,
         job_id: str,
@@ -7018,6 +7061,7 @@ class ChatJobManager:
                 wait_line = str(wait_text or progress_payload.get("text") or "").strip()
                 if not wait_line:
                     wait_line = "I'm working on that now."
+                job_local["last_wait_text"] = wait_line
                 if wait_line:
                     _save_chat_message("assistant", "assistant", {"marker": "plugin_wait", "content": wait_line})
                     event_payload: Dict[str, Any] = {
@@ -7033,15 +7077,45 @@ class ChatJobManager:
                         event_payload,
                     )
 
-        try:
-            payload = asyncio.run(
-                _process_message(
-                    user_name=user_name,
-                    message_content=message,
-                    input_artifacts=list(input_artifacts or []),
-                    session_scope_id=session_id,
-                    wait_callback=_on_tool,
+        def _on_response_chunk(chunk: str) -> None:
+            text = str(chunk or "")
+            if not text:
+                return
+            with self.lock:
+                job_local = self.jobs.get(job_id)
+                if not isinstance(job_local, dict):
+                    return
+                if str(job_local.get("status") or "") not in {"queued", "running"}:
+                    return
+                job_local["stream_text"] = (
+                    str(job_local.get("stream_text") or "") + text
                 )
+                pending = str(job_local.get("stream_pending") or "") + text
+                now = time.monotonic()
+                last_emit = float(job_local.get("stream_last_emit") or 0.0)
+                if now - last_emit < 0.04 and "\n" not in pending:
+                    job_local["stream_pending"] = pending
+                    return
+                job_local["stream_pending"] = ""
+                job_local["stream_last_emit"] = now
+                self._emit(
+                    job_local,
+                    {
+                        "type": "response_chunk",
+                        "status": "running",
+                        "chunk": pending,
+                        "job_id": job_id,
+                    },
+                )
+
+        try:
+            payload = await _process_message(
+                user_name=user_name,
+                message_content=message,
+                input_artifacts=list(input_artifacts or []),
+                session_scope_id=session_id,
+                wait_callback=_on_tool,
+                response_callback=_on_response_chunk,
             )
             responses = list(payload.get("responses") or []) if isinstance(payload, dict) else []
             task_name = (
@@ -7114,6 +7188,9 @@ class ChatJobManager:
                 "current_tool": "",
                 "responses": [],
                 "error": "",
+                "stream_text": "",
+                "stream_pending": "",
+                "stream_last_emit": 0.0,
                 "created_at": time.time(),
                 "completed_at": 0.0,
                 "events": queue.Queue(maxsize=512),
@@ -7131,19 +7208,21 @@ class ChatJobManager:
                 },
             )
 
-        worker = threading.Thread(
-            target=self._worker,
-            kwargs={
-                "job_id": job_id,
-                "user_name": user_name,
-                "message": message,
-                "input_artifacts": list(input_artifacts or []),
-                "session_id": session_id,
-            },
-            daemon=True,
-            name=f"chat-job-{job_id[:8]}",
+        loop = self._ensure_async_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._worker(
+                job_id=job_id,
+                user_name=user_name,
+                message=message,
+                input_artifacts=list(input_artifacts or []),
+                session_id=session_id,
+            ),
+            loop,
         )
-        worker.start()
+        with self.lock:
+            job_live = self.jobs.get(job_id)
+            if isinstance(job_live, dict):
+                job_live["future"] = future
 
         return {
             "job_id": job_id,
@@ -7169,6 +7248,41 @@ class ChatJobManager:
                 "completed_at": float(job.get("completed_at") or 0.0),
             }
 
+    def mascot_snapshot(self, *, recent_seconds: int = 300) -> Dict[str, Any]:
+        now = time.time()
+        with self.lock:
+            self._cleanup_locked()
+            active: Dict[str, Any] = {}
+            recent: Dict[str, Any] = {}
+            for job_id in reversed(self.order):
+                job = self.jobs.get(job_id)
+                if not isinstance(job, dict):
+                    continue
+                status = str(job.get("status") or "").strip().lower()
+                if not active and status in {"queued", "running"}:
+                    active = {
+                        "job_id": str(job.get("id") or ""),
+                        "status": status,
+                        "task_name": str(job.get("task_name") or "").strip(),
+                        "current_tool": str(job.get("current_tool") or "").strip(),
+                        "last_wait_text": str(job.get("last_wait_text") or "").strip(),
+                        "age_seconds": max(0, int(now - float(job.get("created_at") or now))),
+                    }
+                if not recent and status in {"done", "error"}:
+                    completed_at = float(job.get("completed_at") or 0.0)
+                    if completed_at > 0 and (now - completed_at) <= max(1, int(recent_seconds or 0)):
+                        recent = {
+                            "job_id": str(job.get("id") or ""),
+                            "status": status,
+                            "task_name": str(job.get("task_name") or "").strip(),
+                            "completed_at": completed_at,
+                            "completed_age_seconds": max(0, int(now - completed_at)),
+                            "response": _native_mascot_response_text(list(job.get("responses") or []), error=str(job.get("error") or "")),
+                        }
+                if active and recent:
+                    break
+            return {"active": active, "recent": recent}
+
     def get_event_queue(self, job_id: str) -> Optional[queue.Queue]:
         with self.lock:
             job = self.jobs.get(job_id)
@@ -7185,6 +7299,37 @@ class ChatJobManager:
                 if status in {"queued", "running"}:
                     count += 1
             return count
+
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        with self.lock:
+            loop = self._async_loop
+            thread = self._async_loop_thread
+            futures = [
+                job.get("future")
+                for job in self.jobs.values()
+                if isinstance(job, dict) and job.get("future") is not None
+            ]
+        if loop is None or loop.is_closed():
+            return
+        for future in futures:
+            if callable(getattr(future, "cancel", None)) and not future.done():
+                future.cancel()
+        try:
+            asyncio.run_coroutine_threadsafe(
+                close_shared_async_http_client(),
+                loop,
+            ).result(timeout=max(0.5, float(timeout or 5.0)))
+        except Exception:
+            logger.debug("Chat async HTTP pool shutdown failed", exc_info=True)
+        loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            thread.join(timeout=max(0.5, float(timeout or 5.0)))
+        if not loop.is_running() and not loop.is_closed():
+            loop.close()
+        with self.lock:
+            self._async_loop = None
+            self._async_loop_thread = None
+            self._async_loop_ready.clear()
 
 
 chat_jobs = ChatJobManager()
@@ -7574,7 +7719,7 @@ def _dashboard_firmware_update_group() -> Dict[str, Any]:
     try:
         payload = esphome_home_module.get_runtime_payload(
             redis_client=redis_client,
-            core_key="esphome",
+            core_key="voice",
             core_tab=_esphome_platform_tab_spec(),
             panel="firmware",
         )
@@ -7594,7 +7739,7 @@ def _dashboard_firmware_update_group() -> Dict[str, Any]:
         if not isinstance(row, dict):
             continue
         selector = str(row.get("selector") or "").strip()
-        title = str(row.get("title") or selector or "ESPHome device").strip()
+        title = str(row.get("title") or selector or "Voice satellite").strip()
         rows.append(
             {
                 "id": selector,
@@ -7697,15 +7842,15 @@ def _run_async_sync(coro: Any, timeout: float = 45.0) -> Any:
 def _start_builtin_esphome() -> None:
     if esphome_home_module.is_running():
         return
-    logger.info("[startup] starting built-in ESPHome services")
-    _run_async_sync(esphome_home_module.startup(), timeout=60.0)
+    logger.info("[startup] starting built-in Tater Voice services")
+    native_satellite_module.run_on_runtime_loop(esphome_home_module.startup(), timeout=60.0)
 
 
 def _stop_builtin_esphome() -> None:
     if not esphome_home_module.is_running():
         return
-    logger.info("[shutdown] stopping built-in ESPHome services")
-    _run_async_sync(esphome_home_module.shutdown(), timeout=30.0)
+    logger.info("[shutdown] stopping built-in Tater Voice services")
+    native_satellite_module.run_on_runtime_loop(esphome_home_module.shutdown(), timeout=30.0)
 
 
 def _redis_reachable_for_startup() -> tuple[bool, str]:
@@ -7824,7 +7969,7 @@ def _restore_enabled_surfaces() -> Dict[str, Any]:
     # Refresh registries after potential module downloads.
     core_registry_module.refresh_core_registry()
     portal_registry_module.refresh_portal_registry()
-    summary["builtin_platforms"] = ["esphome"]
+    summary["builtin_platforms"] = ["voice"]
 
     return summary
 
@@ -8071,7 +8216,7 @@ def _quiesce_surfaces_for_redis_maintenance(
         len(portal_keys),
     )
 
-    # Stop portals first to reduce inbound chatter, then ESPHome, then cores.
+    # Stop portals first to reduce inbound chatter, then Tater Voice, then cores.
     stopped_portals = _stop_surface_keys(
         portal_runtime,
         portal_keys,
@@ -8083,7 +8228,7 @@ def _quiesce_surfaces_for_redis_maintenance(
         try:
             _stop_builtin_esphome()
         except Exception:
-            logger.exception("[%s] failed stopping built-in ESPHome services", action)
+            logger.exception("[%s] failed stopping built-in Tater Voice services", action)
             esphome_failed = True
     stopped_cores = _stop_surface_keys(
         core_runtime,
@@ -8136,7 +8281,7 @@ def _resume_surfaces_after_redis_maintenance(snapshot: Dict[str, Any]) -> Dict[s
     esphome_was_running = bool(active_before.get("esphome"))
     portal_keys = [str(key).strip() for key in (active_before.get("portals") or []) if str(key).strip()]
 
-    # Start cores first, then built-in ESPHome services, then portals.
+    # Start cores first, then built-in Tater Voice services, then portals.
     resumed_cores = _resume_surface_keys(core_runtime, core_keys)
     esphome_resumed = {"requested": ["built_in"] if esphome_was_running else [], "resumed": [], "already_running": [], "failed": []}
     if esphome_was_running:
@@ -8819,6 +8964,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.on_event("startup")
 async def _startup_event() -> None:
+    set_main_loop(asyncio.get_running_loop())
+    native_satellite_module.bind_runtime_loop()
     restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
         "1",
         "true",
@@ -8847,7 +8994,6 @@ async def _startup_event() -> None:
         logger.info("TaterOS backend started")
         return
 
-    set_main_loop(asyncio.get_running_loop())
     bind_integration_runtime_loop()
     verba_registry_module.ensure_verbas_loaded()
 
@@ -8905,13 +9051,19 @@ async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: flo
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
     logger.info("TaterOS backend stopping")
-    await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
-    await _run_shutdown_step("core runtime", lambda: core_runtime.stop_all(timeout=8.0), timeout=10.0)
-    await _run_shutdown_step("ESPHome voice runtime", esphome_home_module.shutdown, timeout=10.0)
-    await _run_shutdown_step("portal runtime", lambda: portal_runtime.stop_all(timeout=8.0), timeout=10.0)
-    await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
-    await _run_shutdown_step("runtime executors", lambda: shutdown_runtime_executors(wait=False, cancel_futures=True), timeout=5.0)
-    await _run_shutdown_step("internal Redis", shutdown_internal_redis, timeout=5.0)
+    loop = asyncio.get_running_loop()
+    try:
+        await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
+        await _run_shutdown_step("core runtime", lambda: core_runtime.stop_all(timeout=8.0), timeout=10.0)
+        await _run_shutdown_step("Tater Voice runtime", esphome_home_module.shutdown, timeout=10.0)
+        await _run_shutdown_step("portal runtime", lambda: portal_runtime.stop_all(timeout=8.0), timeout=10.0)
+        await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
+        await _run_shutdown_step("chat jobs", chat_jobs.shutdown, timeout=6.0)
+        await _run_shutdown_step("shared async HTTP", close_shared_async_http_client, timeout=5.0)
+        await _run_shutdown_step("runtime executors", lambda: shutdown_runtime_executors(wait=False, cancel_futures=True), timeout=5.0)
+        await _run_shutdown_step("internal Redis", shutdown_internal_redis, timeout=5.0)
+    finally:
+        native_satellite_module.release_runtime_loop(loop)
     logger.info("TaterOS backend stopped")
 
 
@@ -8938,6 +9090,8 @@ async def _webui_auth_middleware(request: Request, call_next):
     if path.startswith("/api/speech/tts/runtime/"):
         return await call_next(request)
     if path.startswith("/api/tater/satellite/"):
+        return await call_next(request)
+    if path.startswith("/api/native/mascot/"):
         return await call_next(request)
     path_parts = [part for part in path.strip("/").split("/") if part]
     if len(path_parts) == 5 and path_parts[0] == "api" and path_parts[1] == "cores" and path_parts[3] == "webhook":
@@ -9841,12 +9995,12 @@ def _dashboard_esphome_payload() -> Optional[Dict[str, Any]]:
     try:
         payload = esphome_home_module.get_runtime_payload(
             redis_client=redis_client,
-            core_key="esphome",
+            core_key="voice",
             core_tab=_esphome_platform_tab_spec(),
             panel="satellites",
         )
     except Exception:
-        logger.debug("[dashboard] failed loading ESPHome dashboard payload", exc_info=True)
+        logger.debug("[dashboard] failed loading Tater Voice dashboard payload", exc_info=True)
         return None
     if not isinstance(payload, dict):
         return None
@@ -9854,14 +10008,14 @@ def _dashboard_esphome_payload() -> Optional[Dict[str, Any]]:
         try:
             extra = esphome_home_module.get_runtime_payload(
                 redis_client=redis_client,
-                core_key="esphome",
+                core_key="voice",
                 core_tab=_esphome_platform_tab_spec(),
                 panel=panel,
             )
             if isinstance(extra, dict) and isinstance(extra.get(key), dict):
                 payload[key] = extra[key]
         except Exception:
-            logger.debug("[dashboard] failed loading ESPHome %s payload", panel, exc_info=True)
+            logger.debug("[dashboard] failed loading Tater Voice %s payload", panel, exc_info=True)
     return payload
 
 
@@ -12426,7 +12580,7 @@ def _spudex_platform_options(settings: Any) -> List[Dict[str, Any]]:
 
     add("webui", "Web UI", running=True, description="Tater browser UI", kind="built_in")
     if esphome_home_module.is_running():
-        add("voice_core", "Native Voice", running=True, description="ESPHome satellite voice path", kind="built_in")
+        add("voice_core", "Native Voice", running=True, description="Tater Native satellite voice path", kind="built_in")
     if core_runtime.is_running("voice_core"):
         add("voice_core", "Native Voice", running=True, description="Running native voice core", kind="core")
 
@@ -12672,6 +12826,243 @@ async def close_spudex_session_api(session_id: str) -> Dict[str, Any]:
 def runtime_breakdown() -> Dict[str, Any]:
     payload = _runtime_breakdown_payload()
     return {"ok": True, **payload}
+
+
+def _require_native_status_token(request: Request) -> None:
+    expected = str(os.getenv(NATIVE_STATUS_TOKEN_ENV) or "").strip()
+    if not expected:
+        raise HTTPException(status_code=404, detail="Native mascot status is not enabled.")
+    provided = str(request.headers.get("x-tater-native-token") or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid native mascot status token.")
+
+
+def _native_mascot_compact_text(value: Any, *, limit: int = 88) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= int(limit):
+        return text
+    return text[: max(0, int(limit) - 1)].rstrip() + "..."
+
+
+def _native_mascot_response_text(responses: Any, *, error: str = "") -> str:
+    error_text = _native_mascot_compact_text(error, limit=84)
+    if error_text:
+        return error_text
+    for item in responses or []:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            if item.get("marker") == "plugin_response":
+                payload = item.get("content")
+                if isinstance(payload, str):
+                    text = payload
+                elif isinstance(payload, dict):
+                    text = next(
+                        (
+                            str(payload.get(key) or "").strip()
+                            for key in ("summary", "text", "message", "content")
+                            if str(payload.get(key) or "").strip()
+                        ),
+                        "",
+                    )
+                else:
+                    text = json.dumps(payload, ensure_ascii=False) if payload is not None else ""
+            elif str(item.get("type") or "").strip().lower() in {"image", "audio", "video", "file"}:
+                name = str(item.get("name") or item.get("filename") or "").strip()
+                text = f"{str(item.get('type') or 'file').capitalize()} ready"
+                if name:
+                    text = f"{text}: {name}"
+            else:
+                text = next(
+                    (
+                        str(item.get(key) or "").strip()
+                        for key in ("summary", "text", "message", "content")
+                        if str(item.get(key) or "").strip()
+                    ),
+                    "",
+                )
+        else:
+            text = str(item or "")
+        text = _native_mascot_compact_text(text, limit=84)
+        if text:
+            return text
+    return ""
+
+
+def _native_mascot_hydra_recent(*, recent_seconds: int = 300) -> Dict[str, Any]:
+    now = time.time()
+    try:
+        rows = _load_chat_job_history_rows(max_items=1000)
+    except Exception:
+        logger.exception("Failed to load hydra ledger rows for native mascot status")
+        return {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        completed_at = float(row.get("timestamp") or 0.0)
+        if completed_at <= 0:
+            continue
+        age = now - completed_at
+        if age < 0 or age > max(1, int(recent_seconds or 0)):
+            continue
+
+        outcome = str(row.get("outcome") or "").strip().lower()
+        if outcome not in {"done", "blocked", "failed"}:
+            continue
+
+        tool_result = row.get("tool_result") if isinstance(row.get("tool_result"), dict) else {}
+        response_text = _native_mascot_compact_text(row.get("assistant_response"), limit=112)
+        if not response_text:
+            response_text = _native_mascot_response_text(
+                [
+                    {
+                        "summary": (
+                            tool_result.get("summary")
+                            or row.get("tool_result_summary")
+                            or row.get("outcome_reason")
+                        )
+                    }
+                ]
+            )
+        if not response_text:
+            response_text = _native_mascot_compact_text(row.get("outcome_reason"), limit=96)
+
+        platform = normalize_platform(row.get("platform")) or "unknown"
+        user_message = str(row.get("user_message") or "").strip()
+        return {
+            "job_id": str(row.get("turn_id") or ""),
+            "status": "error" if outcome in {"blocked", "failed"} else "done",
+            "outcome": outcome,
+            "task_name": _native_mascot_compact_text(user_message, limit=72),
+            "platform": platform,
+            "platform_label": _runtime_platform_label(platform),
+            "completed_at": completed_at,
+            "completed_age_seconds": max(0, int(age)),
+            "response": response_text,
+        }
+    return {}
+
+
+def _native_mascot_status_payload() -> Dict[str, Any]:
+    hydra_jobs = _chat_job_counts_with_breakdown(include_history=False)
+    web_snapshot = chat_jobs.mascot_snapshot(recent_seconds=300)
+    web_active = web_snapshot.get("active") if isinstance(web_snapshot.get("active"), dict) else {}
+    web_recent = web_snapshot.get("recent") if isinstance(web_snapshot.get("recent"), dict) else {}
+    hydra_recent = _native_mascot_hydra_recent(recent_seconds=300)
+    active_turns = [
+        dict(row)
+        for row in list(hydra_jobs.get("active_turns") or [])
+        if isinstance(row, dict)
+    ]
+    active_turns.sort(key=lambda row: float(row.get("started_at") or 0.0))
+
+    selected: Dict[str, Any] = {}
+    for row in reversed(active_turns):
+        if str(row.get("current_tool") or "").strip():
+            selected = row
+            break
+    if not selected and active_turns:
+        selected = active_turns[-1]
+
+    total_active = int(hydra_jobs.get("total") or 0)
+    if not selected:
+        if total_active > 0:
+            if web_active:
+                current_tool = str(web_active.get("current_tool") or "").strip()
+                wait_text = str(web_active.get("last_wait_text") or "").strip()
+                task_name = str(web_active.get("task_name") or "").strip()
+                if current_tool:
+                    message = f"Using {current_tool}"
+                elif wait_text:
+                    message = wait_text
+                else:
+                    message = f"Working on {task_name}" if task_name else "Preparing a Tater task"
+                return {
+                    "ok": True,
+                    "state": "tool" if current_tool else "running",
+                    "message": _native_mascot_compact_text(message, limit=96),
+                    "detail": _native_mascot_compact_text(task_name or f"{total_active} active", limit=72),
+                    "active_count": total_active,
+                    "updated_at": time.time(),
+                }
+            return {
+                "ok": True,
+                "state": "running",
+                "message": "Preparing a Tater task",
+                "detail": f"{total_active} active",
+                "active_count": total_active,
+                "updated_at": time.time(),
+            }
+        recent = web_recent
+        if hydra_recent and (
+            not recent
+            or float(hydra_recent.get("completed_at") or 0.0) > float(recent.get("completed_at") or 0.0)
+        ):
+            recent = hydra_recent
+        if recent:
+            status = str(recent.get("status") or "").strip().lower()
+            response_text = str(recent.get("response") or "").strip()
+            task_name = str(recent.get("task_name") or "").strip()
+            platform_label = str(recent.get("platform_label") or "").strip()
+            if status == "error":
+                message = "Task failed"
+                detail = response_text or task_name or platform_label or "Needs attention"
+                state = "attention"
+            else:
+                message = f"Done: {response_text}" if response_text else "Task complete"
+                detail = platform_label or task_name
+                state = "idle"
+            return {
+                "ok": True,
+                "state": state,
+                "message": _native_mascot_compact_text(message, limit=112),
+                "detail": _native_mascot_compact_text(detail, limit=72),
+                "active_count": total_active,
+                "updated_at": time.time(),
+            }
+        return {
+            "ok": True,
+            "state": "idle",
+            "message": "Tater is idle",
+            "detail": "Ready when you are.",
+            "active_count": total_active,
+            "updated_at": time.time(),
+        }
+
+    task_name = str(selected.get("task_name") or "").strip()
+    current_tool = str(selected.get("current_tool") or "").strip()
+    platform_label = str(selected.get("platform_label") or selected.get("platform") or "Tater").strip()
+    age_seconds = max(0, int(selected.get("age_seconds") or 0))
+
+    if current_tool:
+        state = "tool"
+        message = f"Using {current_tool}"
+    else:
+        state = "running"
+        message = f"Working on {task_name}" if task_name else "Tater is working"
+
+    detail_parts = [part for part in [platform_label, f"{age_seconds}s"] if part]
+    return {
+        "ok": True,
+        "state": state,
+        "message": _native_mascot_compact_text(message, limit=96),
+        "detail": _native_mascot_compact_text(" - ".join(detail_parts), limit=72),
+        "active_count": total_active,
+        "task_name": task_name,
+        "current_tool": current_tool,
+        "platform": str(selected.get("platform") or "").strip(),
+        "platform_label": platform_label,
+        "age_seconds": age_seconds,
+        "updated_at": time.time(),
+    }
+
+
+@app.get("/api/native/mascot/status")
+def native_mascot_status(request: Request) -> Dict[str, Any]:
+    _require_native_status_token(request)
+    return _native_mascot_status_payload()
 
 
 @app.get("/api/runtime/llm/debug")
@@ -14730,33 +15121,35 @@ async def run_portal_api(portal_key: str, request: Request, api_path: str = "") 
         raise HTTPException(status_code=500, detail=f"Portal API failed: {exc}")
 
 
-@app.get("/api/settings/esphome/runtime")
-def get_esphome_runtime_payload(panel: str = "") -> Dict[str, Any]:
+@app.get("/api/settings/voice/runtime")
+@app.get("/api/settings/esphome/runtime", include_in_schema=False)
+def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
     tab = _esphome_platform_tab_spec()
     return {
         "tab": {
             "label": str(tab.get("label") or "Voice"),
-            "core_key": str(tab.get("core_key") or "esphome"),
-            "surface_kind": str(tab.get("surface_kind") or "esphome"),
+            "core_key": str(tab.get("core_key") or "voice"),
+            "surface_kind": str(tab.get("surface_kind") or "voice"),
             "running": bool(tab.get("running")),
         },
         "payload": esphome_home_module.get_runtime_payload(
             redis_client=redis_client,
-            core_key=str(tab.get("core_key") or "esphome"),
+            core_key=str(tab.get("core_key") or "voice"),
             core_tab=tab,
             panel=panel,
         ),
     }
 
 
-@app.post("/api/settings/esphome/runtime/action")
-def run_esphome_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
+@app.post("/api/settings/voice/runtime/action")
+@app.post("/api/settings/esphome/runtime/action", include_in_schema=False)
+def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
     try:
         return esphome_home_module.handle_runtime_action(
             action=str(payload.action or "").strip(),
             payload=payload.payload if isinstance(payload.payload, dict) else {},
             redis_client=redis_client,
-            core_key="esphome",
+            core_key="voice",
         )
     except HTTPException:
         raise
@@ -14765,11 +15158,12 @@ def run_esphome_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"ESPHome action failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Voice action failed: {exc}")
 
 
-@app.get("/api/settings/esphome/firmware-web/{artifact_id}/{relative_path:path}")
-def get_esphome_firmware_web_artifact(artifact_id: str, relative_path: str) -> FileResponse:
+@app.get("/api/settings/voice/firmware-web/{artifact_id}/{relative_path:path}")
+@app.get("/api/settings/esphome/firmware-web/{artifact_id}/{relative_path:path}", include_in_schema=False)
+def get_voice_firmware_web_artifact(artifact_id: str, relative_path: str) -> FileResponse:
     try:
         path = esphome_firmware_module.browser_flash_artifact_path(artifact_id, relative_path)
     except KeyError as exc:

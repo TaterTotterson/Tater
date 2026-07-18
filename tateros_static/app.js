@@ -8765,7 +8765,7 @@ function renderEspHomeStatsPanel(sections, tables) {
 }
 
 async function runEspHomeRefreshAction() {
-  return api("/api/settings/esphome/runtime/action", {
+  return api("/api/settings/voice/runtime/action", {
     method: "POST",
     body: JSON.stringify({
       action: "voice_refresh",
@@ -9022,7 +9022,7 @@ function renderEspHomeSensorRows(sensorRows, sensorTitle = "Live Entities", conn
   `;
 }
 
-function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = null) {
+function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = null) {
   const itemId = String(item?.id || "").trim();
   const encodedId = escapeHtml(encodeCoreManagerId(itemId));
   const title = String(item?.title || itemId || "Satellite").trim() || "Satellite";
@@ -9147,7 +9147,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "esphome", displaySensors = 
   `;
 }
 
-function renderEspHomeSettingsCard(item, coreKey = "esphome") {
+function renderEspHomeSettingsCard(item, coreKey = "voice") {
   const title = String(item?.title || "Voice Pipeline Settings").trim() || "Voice Pipeline Settings";
   const subtitle = String(item?.subtitle || "").trim();
   const saveAction = String(item?.save_action || "").trim();
@@ -9190,7 +9190,7 @@ function renderEspHomeSettingsCard(item, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeActionCard(item, coreKey = "esphome") {
+function renderEspHomeActionCard(item, coreKey = "voice") {
   const title = String(item?.title || "Action").trim() || "Action";
   const subtitle = String(item?.subtitle || "").trim();
   const runAction = String(item?.run_action || "").trim();
@@ -9215,7 +9215,7 @@ function renderEspHomeActionCard(item, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
+function renderEspHomeAddPanel(addForm, coreKey = "voice") {
   const action = String(addForm?.action || "").trim();
   const submitLabel = String(addForm?.submit_label || "Add Satellite").trim() || "Add Satellite";
   const fields = Array.isArray(addForm?.fields) ? addForm.fields : [];
@@ -9239,7 +9239,7 @@ function renderEspHomeAddPanel(addForm, coreKey = "esphome") {
   `;
 }
 
-function renderNativeSatellitePairingPanel(pairingConfig, coreKey = "esphome") {
+function renderNativeSatellitePairingPanel(pairingConfig, coreKey = "voice") {
   const startAction = String(pairingConfig?.start_action || "").trim();
   const statusAction = String(pairingConfig?.status_action || "").trim();
   if (!startAction || !statusAction) {
@@ -9312,7 +9312,7 @@ function resolveEspHomeFirmwareVariant(firmware, templateKey = "", selector = ""
   return selector && templateMap[selector] && typeof templateMap[selector] === "object" ? templateMap[selector] : null;
 }
 
-function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
+function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
   const selection = normalizeEspHomeFirmwareSelection(body);
@@ -9535,7 +9535,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome") {
+function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "voice") {
   const rows = (Array.isArray(firmwareUpdates) ? firmwareUpdates : [])
     .map((row) => {
       const selector = String(row?.selector || "").trim();
@@ -9608,7 +9608,7 @@ function renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey = "esphome") 
   `;
 }
 
-function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "esphome") {
+function renderEspHomeFirmwareFlashAllPanel(firmwareTargets, coreKey = "voice") {
   const rows = (Array.isArray(firmwareTargets) ? firmwareTargets : [])
     .map((row) => {
       const selector = String(row?.selector || "").trim();
@@ -9727,7 +9727,7 @@ function displaySensorPayloadForSatellite(displaySensors, satellite) {
   };
 }
 
-function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", options = {}) {
+function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "voice", options = {}) {
   const body = displaySensors && typeof displaySensors === "object" ? displaySensors : {};
   const profiles = getEspHomeDisplaySensorProfiles(body);
   const profile = resolveEspHomeDisplaySensorProfile(body, options);
@@ -9823,7 +9823,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
     return `
       <details class="${wrapperClass}"
         data-core-key="${escapeHtml(coreKey)}"
-        data-core-action-endpoint="/api/settings/esphome/runtime/action"
+        data-core-action-endpoint="/api/settings/voice/runtime/action"
         data-display-target="${escapeHtml(target)}"
         data-display-target-label="${escapeHtml(targetLabel)}"
         data-display-selector="${escapeHtml(selector)}"
@@ -9845,7 +9845,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
   return `
     <section class="${wrapperClass}"
       data-core-key="${escapeHtml(coreKey)}"
-      data-core-action-endpoint="/api/settings/esphome/runtime/action"
+      data-core-action-endpoint="/api/settings/voice/runtime/action"
       data-display-target="${escapeHtml(target)}"
       data-display-target-label="${escapeHtml(targetLabel)}"
       data-display-selector="${escapeHtml(selector)}"
@@ -9860,7 +9860,7 @@ function renderEspHomeDisplaySensorPanel(displaySensors, coreKey = "esphome", op
   `;
 }
 
-function renderEspHomeFirmwarePanel(firmware, coreKey = "esphome") {
+function renderEspHomeFirmwarePanel(firmware, coreKey = "voice") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const devices = Array.isArray(body?.devices) ? body.devices : [];
   const warnings = Array.isArray(body?.warnings) ? body.warnings : [];
@@ -9933,7 +9933,7 @@ function renderEspHomeSpeakerIdSummaryMetrics(metrics) {
   `;
 }
 
-function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
+function renderEspHomeSpeakerIdPanel(payload, coreKey = "voice") {
   const body = payload && typeof payload === "object" ? payload : {};
   const availability = body?.availability && typeof body.availability === "object" ? body.availability : {};
   const settingsSections = Array.isArray(body?.settings_sections) ? body.settings_sections : [];
@@ -10078,7 +10078,7 @@ function renderEspHomeSpeakerIdPanel(payload, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeEmotionIdPanel(payload, coreKey = "esphome") {
+function renderEspHomeEmotionIdPanel(payload, coreKey = "voice") {
   const body = payload && typeof payload === "object" ? payload : {};
   const availability = body?.availability && typeof body.availability === "object" ? body.availability : {};
   const settingsSections = Array.isArray(body?.settings_sections) ? body.settings_sections : [];
@@ -10174,12 +10174,12 @@ function renderEspHomeEmotionIdPanel(payload, coreKey = "esphome") {
   `;
 }
 
-function renderEspHomeRuntimeHeader({ title = "Voice", summary = "", stats = [], coreKey = "esphome" } = {}) {
+function renderEspHomeRuntimeHeader({ title = "Voice", summary = "", stats = [], coreKey = "voice" } = {}) {
   return `
     <div class="card esphome-runtime-shell">
       <div class="card-head">
         <h3 class="card-title">${escapeHtml(String(title || "Voice"))}</h3>
-        <span class="small">${escapeHtml(String(coreKey || "esphome"))}</span>
+        <span class="small">${escapeHtml(String(coreKey || "voice"))}</span>
       </div>
       ${summary ? `<div class="small">${escapeHtml(summary)}</div>` : ""}
       ${renderEspHomeRuntimeStats(Array.isArray(stats) ? stats : [])}
@@ -10963,7 +10963,7 @@ function getActiveEspHomeRuntimePanel(defaultPanel = "satellites") {
 
 async function fetchEspHomeRuntimePayload(panel = "") {
   const targetPanel = normalizeEspHomeRuntimePanel(panel);
-  return api(`/api/settings/esphome/runtime?panel=${encodeURIComponent(targetPanel)}`);
+  return api(`/api/settings/voice/runtime?panel=${encodeURIComponent(targetPanel)}`);
 }
 
 async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
@@ -10997,9 +10997,9 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     return state.esphomeRuntimeLoadPromise;
   }
 
-  shell.dataset.coreActionEndpoint = "/api/settings/esphome/runtime/action";
+  shell.dataset.coreActionEndpoint = "/api/settings/voice/runtime/action";
   shell.dataset.coreRefreshScope = "esphome-runtime";
-  shell.dataset.coreKey = "esphome";
+  shell.dataset.coreKey = "voice";
   shell.dataset.runtimeLoaded = "loading";
   shell.dataset.runtimePanel = targetPanel;
   head.innerHTML = renderNotice(force ? "Refreshing Voice runtime..." : "Loading Voice runtime...");
@@ -11025,7 +11025,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const tabSpec =
         result?.tab && typeof result.tab === "object"
           ? result.tab
-          : { core_key: "esphome", label: "Voice", surface_kind: "esphome" };
+          : { core_key: "voice", label: "Voice", surface_kind: "voice" };
       const payload = result?.payload && typeof result.payload === "object" ? result.payload : result;
       const body = payload && typeof payload === "object" ? payload : {};
       const ui = body?.ui && typeof body.ui === "object" ? body.ui : {};
@@ -11042,7 +11042,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const speakerId = body?.speaker_id && typeof body.speaker_id === "object" ? body.speaker_id : {};
       const emotionId = body?.emotion_id && typeof body.emotion_id === "object" ? body.emotion_id : {};
       const emptyMessage = String(body.empty_message || "No satellites discovered yet.").trim();
-      const coreKey = String(tabSpec?.core_key || "esphome").trim() || "esphome";
+      const coreKey = String(tabSpec?.core_key || "voice").trim() || "voice";
 
       head.innerHTML = renderEspHomeRuntimeHeader({
         title: String(ui?.title || tabSpec?.label || "Voice"),
@@ -11256,7 +11256,7 @@ function updateEspHomeSatelliteSensorRows(card, entityRows) {
 function bindEspHomeEntityControls(root = document) {
   const executeEntityAction = async (controlEl, payload, { revert } = {}) => {
     const card = controlEl?.closest?.(".esphome-satellite-card");
-    const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+    const coreKey = String(card?.dataset?.coreKey || "voice").trim();
     const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
     if (!(card instanceof HTMLElement) || !coreKey || !selector) {
       throw new Error("Missing satellite context.");
@@ -11306,7 +11306,7 @@ function bindEspHomeEntityControls(root = document) {
     button.dataset.esphomeBound = "1";
     button.addEventListener("click", async () => {
       const card = button.closest(".esphome-satellite-card");
-      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const coreKey = String(card?.dataset?.coreKey || "voice").trim();
       const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
       const action = String(card?.dataset?.coreIdentifyAction || "voice_satellite_identify").trim();
       if (!(card instanceof HTMLElement) || !coreKey || !selector || !action) {
@@ -11341,7 +11341,7 @@ function bindEspHomeEntityControls(root = document) {
     button.dataset.esphomeBound = "1";
     button.addEventListener("click", async () => {
       const card = button.closest(".esphome-satellite-card");
-      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const coreKey = String(card?.dataset?.coreKey || "voice").trim();
       const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
       if (!(card instanceof HTMLElement) || !coreKey || !selector) {
         return;
@@ -11567,7 +11567,7 @@ function rerenderEspHomeFirmwarePanel(root = document) {
   }
   state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
   const shell = document.getElementById("settings-esphome-shell");
-  const coreKey = String(shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  const coreKey = String(shell?.dataset?.coreKey || "voice").trim() || "voice";
   host.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
   bindCoreTabManagers();
 }
@@ -11623,7 +11623,7 @@ function bindEspHomeDisplaySensorControls(root = document) {
       if (!(card instanceof HTMLElement)) {
         return;
       }
-      const coreKey = String(card.dataset?.coreKey || "esphome").trim() || "esphome";
+      const coreKey = String(card.dataset?.coreKey || "voice").trim() || "voice";
       const values = collectCoreManagerValues(card);
       const rawTarget = String(values?.target || card.dataset?.displayTarget || "").trim();
       const normalizedTarget = normalizeEspHomeDisplayTargetKey(rawTarget);
@@ -13460,7 +13460,7 @@ function espHomeFirmwareFlashTargetRows() {
     .filter(Boolean);
 }
 
-function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "esphome", updateRows = null, options = {}) {
+function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows = null, options = {}) {
   const batchMode = String(options?.mode || "updates").trim();
   const flashAllMode = batchMode === "flash_all";
   const actionPast = flashAllMode ? "flashed" : "updated";
@@ -13720,7 +13720,7 @@ function bindEspHomeFirmwareActions(root = document) {
     }
     button.dataset.esphomeFirmwareFlashAllBound = "1";
     button.addEventListener("click", () => {
-      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      const coreKey = String(button.dataset?.coreKey || "voice").trim() || "voice";
       openEspHomeFirmwareUpdateAllFlow(button, coreKey, espHomeFirmwareFlashTargetRows(), {
         mode: "flash_all",
         emptyMessage: "No connected firmware devices are available to flash.",
@@ -13734,7 +13734,7 @@ function bindEspHomeFirmwareActions(root = document) {
     }
     button.dataset.esphomeFirmwareUpdateAllBound = "1";
     button.addEventListener("click", () => {
-      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      const coreKey = String(button.dataset?.coreKey || "voice").trim() || "voice";
       openEspHomeFirmwareUpdateAllFlow(button, coreKey);
     });
   });
@@ -13745,7 +13745,7 @@ function bindEspHomeFirmwareActions(root = document) {
     }
     button.dataset.esphomeFirmwareUpdateOneBound = "1";
     button.addEventListener("click", () => {
-      const coreKey = String(button.dataset?.coreKey || "esphome").trim() || "esphome";
+      const coreKey = String(button.dataset?.coreKey || "voice").trim() || "voice";
       const selector = String(button.dataset?.selector || "").trim();
       const templateKey = String(button.dataset?.templateKey || "").trim();
       const row = espHomeFirmwareUpdateRows().find(
@@ -13768,7 +13768,7 @@ function bindEspHomeFirmwareActions(root = document) {
     button.addEventListener("click", async (event) => {
       const actionButton = event.currentTarget;
       const card = actionButton?.closest?.(".esphome-firmware-card");
-      const coreKey = String(card?.dataset?.coreKey || "esphome").trim();
+      const coreKey = String(card?.dataset?.coreKey || "voice").trim();
       const selector = String(card?.dataset?.firmwareSelector || decodeCoreManagerId(card?.dataset?.coreItemId || "")).trim();
       const templateKey = String(card?.dataset?.firmwareTemplateKey || "").trim();
       const action = String(actionButton?.dataset?.firmwareAction || "").trim();
@@ -13840,7 +13840,7 @@ function rerenderEspHomeSpeakerIdPanel(root = document) {
     return;
   }
   const shell = document.getElementById("settings-esphome-shell");
-  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "voice").trim() || "voice";
   const payload =
     state.esphomeSpeakerIdPayload && typeof state.esphomeSpeakerIdPayload === "object" ? state.esphomeSpeakerIdPayload : {};
   host.dataset.coreKey = coreKey;
@@ -13853,7 +13853,7 @@ function bindEspHomeSpeakerIdActions(root = document) {
     const statusHost = host instanceof HTMLElement ? host : null;
     setCoreManagerStatus(statusHost, "Working...");
     try {
-      const result = await api("/api/settings/esphome/runtime/action", {
+      const result = await api("/api/settings/voice/runtime/action", {
         method: "POST",
         body: JSON.stringify({ action, payload }),
       });
@@ -13970,7 +13970,7 @@ function rerenderEspHomeEmotionIdPanel(root = document) {
     return;
   }
   const shell = document.getElementById("settings-esphome-shell");
-  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "esphome").trim() || "esphome";
+  const coreKey = String(host.dataset.coreKey || shell?.dataset?.coreKey || "voice").trim() || "voice";
   const payload =
     state.esphomeEmotionIdPayload && typeof state.esphomeEmotionIdPayload === "object" ? state.esphomeEmotionIdPayload : {};
   host.dataset.coreKey = coreKey;
@@ -13983,7 +13983,7 @@ function bindEspHomeEmotionIdActions(root = document) {
     const statusHost = host instanceof HTMLElement ? host : null;
     setCoreManagerStatus(statusHost, "Working...");
     try {
-      const result = await api("/api/settings/esphome/runtime/action", {
+      const result = await api("/api/settings/voice/runtime/action", {
         method: "POST",
         body: JSON.stringify({ action, payload }),
       });
@@ -17172,6 +17172,52 @@ async function loadChatView() {
     ]);
   };
 
+  const streamedChatTextByJob = {};
+
+  const removeAssistantStreamPreview = (jobId = "") => {
+    const id = String(jobId || "").trim();
+    if (!id) {
+      return;
+    }
+    chatLog
+      .querySelectorAll("[data-chat-stream-job]")
+      .forEach((node) => {
+        if (String(node.dataset.chatStreamJob || "") === id) {
+          node.remove();
+        }
+      });
+    delete streamedChatTextByJob[id];
+  };
+
+  const appendAssistantStreamChunk = (jobId, chunk) => {
+    const id = String(jobId || "").trim();
+    const text = String(chunk || "");
+    if (!id || !text) {
+      return;
+    }
+    streamedChatTextByJob[id] = String(streamedChatTextByJob[id] || "") + text;
+    removeChatTypingIndicator();
+    const existing = Array.from(chatLog.querySelectorAll("[data-chat-stream-job]")).find(
+      (node) => String(node.dataset.chatStreamJob || "") === id
+    );
+    const wrapper = existing || document.createElement("div");
+    wrapper.dataset.chatStreamJob = id;
+    wrapper.innerHTML = renderChatMessage({
+      role: "assistant",
+      username: "assistant",
+      content: streamedChatTextByJob[id],
+    });
+    if (!existing) {
+      const existingLog = String(chatLog.innerHTML || "").trim();
+      if (!existingLog || existingLog.includes('class="notice"')) {
+        chatLog.innerHTML = "";
+      }
+      chatLog.appendChild(wrapper);
+    }
+    syncChatTypingIndicator(false);
+    stickChatToBottom();
+  };
+
   async function refreshChatSpeedStats() {
     if (!speedStatsEl) {
       return;
@@ -17396,6 +17442,7 @@ async function loadChatView() {
     const pollMeta = _getChatPollMeta();
     delete pollMeta[id];
     state.chatPollMeta = pollMeta;
+    removeAssistantStreamPreview(id);
 
     const inlineRendered = appendAssistantResponses(responses);
     if (inlineRendered) {
@@ -17536,6 +17583,11 @@ async function loadChatView() {
         return;
       }
       appendAssistantWaitLine(waitText);
+    });
+
+    eventSource.addEventListener("response_chunk", (event) => {
+      const payload = safeJsonParse(event.data) || {};
+      appendAssistantStreamChunk(id, payload.chunk || "");
     });
 
     eventSource.addEventListener("done", async (event) => {
@@ -19950,9 +20002,9 @@ async function loadSettingsView() {
           <div
             id="settings-models-shell"
             class="form-grid two-col"
-            data-core-action-endpoint="/api/settings/esphome/runtime/action"
+            data-core-action-endpoint="/api/settings/voice/runtime/action"
             data-core-refresh-scope="esphome-runtime"
-            data-core-key="esphome"
+            data-core-key="voice"
           >
             <div id="settings-hydra-model-stack" class="hydra-model-stack">
               <div class="settings-subtabs" style="grid-column: 1 / -1;">
@@ -20925,9 +20977,9 @@ async function loadSettingsView() {
           )}
           <div
             id="settings-esphome-shell"
-            data-core-action-endpoint="/api/settings/esphome/runtime/action"
+            data-core-action-endpoint="/api/settings/voice/runtime/action"
             data-core-refresh-scope="esphome-runtime"
-            data-core-key="esphome"
+            data-core-key="voice"
           >
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
@@ -26719,7 +26771,7 @@ async function loadSettingsView() {
           errorPrefix: "Native voice reset failed",
         },
         () =>
-          api("/api/settings/esphome/runtime/action", {
+          api("/api/settings/voice/runtime/action", {
             method: "POST",
             body: JSON.stringify({
               action: "voice_settings_reset_defaults",

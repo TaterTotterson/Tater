@@ -270,6 +270,8 @@ async def run_minos_validation(
             ),
             "temperature": 0.1,
             "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+            "activity": "execution",
+            "cache_namespace": "hydra:checker",
         }
         response = await llm_client.chat(**chat_kwargs)
         text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()

@@ -34,6 +34,24 @@ async def _dispatch_wait_callback(
             return
 
 
+async def dispatch_wait_callback(
+    wait_callback: Optional[Callable[..., Any]],
+    *,
+    func: str,
+    plugin_obj: Any,
+    wait_text: str,
+    wait_payload: Optional[Dict[str, Any]],
+) -> None:
+    """Public compatibility wrapper used when progress generation is overlapped."""
+    await _dispatch_wait_callback(
+        wait_callback,
+        func=func,
+        plugin_obj=plugin_obj,
+        wait_text=wait_text,
+        wait_payload=wait_payload,
+    )
+
+
 async def normalize_tool_result_for_minos(
     *,
     result_payload: Any,
