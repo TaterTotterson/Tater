@@ -189,6 +189,8 @@ def _selector_runtime(selector: str) -> Dict[str, Any]:
             "audio_stall_task": None,
             "pending_followup_conversation_id": "",
             "pending_followup_until_ts": 0.0,
+            "continued_chat_retry_conversation_id": "",
+            "continued_chat_retry_used": False,
             "streamed_tts": None,
             "streamed_tts_dispatch_task": None,
             "service_running": False,

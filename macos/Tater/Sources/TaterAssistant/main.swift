@@ -40,6 +40,7 @@ private final class BackendManager {
     let logsDir: URL
     let sourceRoot: URL
     let webURL = URL(string: "http://127.0.0.1:\(taterPort)")!
+    let nativeStatusToken = UUID().uuidString
 
     var onStateChange: ((BackendState) -> Void)?
     var onLogAppend: ((String) -> Void)?
@@ -801,6 +802,7 @@ private final class BackendManager {
         environment["HTMLUI_HOST"] = "0.0.0.0"
         environment["HTMLUI_PORT"] = "\(taterPort)"
         environment["TATER_PYTHON"] = venvDir.appendingPathComponent("bin/python").path
+        environment["TATER_NATIVE_STATUS_TOKEN"] = nativeStatusToken
         return environment
     }
 
@@ -1436,6 +1438,694 @@ private final class UpdateManager {
     }
 }
 
+private enum TaterMascotMood: Equatable {
+    case idle
+    case starting
+    case running
+    case tool
+    case attention
+    case stopped
+
+    static var themeOrange: NSColor {
+        NSColor(calibratedRed: 1.0, green: 0.48, blue: 0.04, alpha: 1.0)
+    }
+
+    var glowColor: NSColor {
+        Self.themeOrange.withAlphaComponent(0.30)
+    }
+
+    var accentColor: NSColor {
+        Self.themeOrange
+    }
+}
+
+private struct TaterMascotDisplay {
+    let mood: TaterMascotMood
+    let message: String
+    let detail: String
+}
+
+private struct NativeMascotStatus: Decodable {
+    let state: String?
+    let message: String?
+    let detail: String?
+    let activeCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case message
+        case detail
+        case activeCount = "active_count"
+    }
+}
+
+private final class TaterMascotBubbleView: NSView {
+    var display = TaterMascotDisplay(mood: .idle, message: "Tater is idle", detail: "Ready when you are.") {
+        didSet { needsDisplay = true }
+    }
+    var phase: CGFloat = 0 {
+        didSet { needsDisplay = true }
+    }
+
+    override var isOpaque: Bool {
+        false
+    }
+
+    func preferredSize(maxWidth: CGFloat) -> NSSize {
+        let safeMaxWidth = max(132, min(maxWidth, 232))
+        let message = display.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = display.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let longestText = max(message.count, detail.count)
+        let targetWidth = min(safeMaxWidth, max(136, 112 + CGFloat(min(longestText, 84)) * 1.45))
+        let textWidth = max(90, targetWidth - 32)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .paragraphStyle: paragraph
+        ]
+        let detailAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9, weight: .regular),
+            .paragraphStyle: paragraph
+        ]
+
+        let titleBounds = NSString(string: message.isEmpty ? "Tater is thinking" : message).boundingRect(
+            with: NSSize(width: textWidth, height: 40),
+            options: [.usesLineFragmentOrigin],
+            attributes: titleAttributes
+        )
+        let titleHeight = min(34, max(14, ceil(titleBounds.height)))
+
+        let detailHeight: CGFloat
+        if detail.isEmpty {
+            detailHeight = 0
+        } else {
+            let detailBounds = NSString(string: detail).boundingRect(
+                with: NSSize(width: textWidth, height: 30),
+                options: [.usesLineFragmentOrigin],
+                attributes: detailAttributes
+            )
+            detailHeight = min(24, max(11, ceil(detailBounds.height)))
+        }
+
+        let dotsHeight: CGFloat = showsProgressDots ? 7 : 0
+        let height = min(94, max(42, 29 + titleHeight + detailHeight + dotsHeight))
+        return NSSize(width: ceil(targetWidth), height: ceil(height))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let bubbleRect = NSRect(
+            x: 6,
+            y: 10,
+            width: max(1, bounds.width - 12),
+            height: max(1, bounds.height - 18)
+        )
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.16)
+        shadow.shadowBlurRadius = 8
+        shadow.shadowOffset = NSSize(width: 0, height: -2)
+        shadow.set()
+
+        let fill = NSColor.windowBackgroundColor
+            .blended(withFraction: 0.12, of: TaterMascotMood.themeOrange)?
+            .withAlphaComponent(0.70)
+            ?? NSColor.windowBackgroundColor.withAlphaComponent(0.70)
+        let bubble = NSBezierPath(roundedRect: bubbleRect, xRadius: 12, yRadius: 12)
+        fill.setFill()
+        bubble.fill()
+        NSShadow().set()
+
+        display.mood.accentColor.withAlphaComponent(0.28).setStroke()
+        bubble.lineWidth = 1.0
+        bubble.stroke()
+
+        let tail = NSBezierPath()
+        let centerX = bubbleRect.midX + 14
+        tail.move(to: NSPoint(x: centerX - 7, y: bubbleRect.minY + 1))
+        tail.line(to: NSPoint(x: centerX + 3, y: bubbleRect.minY - 7))
+        tail.line(to: NSPoint(x: centerX + 10, y: bubbleRect.minY + 1))
+        tail.close()
+        fill.setFill()
+        tail.fill()
+        display.mood.accentColor.withAlphaComponent(0.22).setStroke()
+        tail.lineWidth = 0.8
+        tail.stroke()
+
+        let bottomInset: CGFloat = showsProgressDots ? 14 : 8
+        let contentRect = NSRect(
+            x: bubbleRect.minX + 11,
+            y: bubbleRect.minY + bottomInset,
+            width: max(1, bubbleRect.width - 22),
+            height: max(1, bubbleRect.height - bottomInset - 7)
+        )
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+
+        let message = display.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = display.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.92),
+            .paragraphStyle: paragraph
+        ]
+        let detailAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.82),
+            .paragraphStyle: paragraph
+        ]
+
+        let detailHeight: CGFloat = detail.isEmpty ? 0 : min(24, max(11, contentRect.height * 0.34))
+        let titleHeight = max(14, contentRect.height - detailHeight - (detail.isEmpty ? 0 : 3))
+        let titleRect = NSRect(
+            x: contentRect.minX,
+            y: contentRect.minY + detailHeight + (detail.isEmpty ? 0 : 3),
+            width: contentRect.width,
+            height: titleHeight
+        )
+        NSString(string: message.isEmpty ? "Tater is thinking" : message).draw(
+            with: titleRect,
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+            attributes: titleAttributes
+        )
+
+        if !detail.isEmpty {
+            let detailRect = NSRect(x: contentRect.minX, y: contentRect.minY, width: contentRect.width, height: detailHeight)
+            NSString(string: detail).draw(
+                with: detailRect,
+                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                attributes: detailAttributes
+            )
+        }
+
+        guard showsProgressDots else {
+            return
+        }
+        let dotY = bubbleRect.minY + 5
+        let dotStart = bubbleRect.midX - 10
+        for index in 0..<3 {
+            let offset = CGFloat(index) * 10
+            let pulse = 0.45 + 0.45 * max(0, sin(phase * 2.2 + CGFloat(index) * 0.9))
+            display.mood.accentColor.withAlphaComponent(pulse).setFill()
+            NSBezierPath(ovalIn: NSRect(x: dotStart + offset, y: dotY, width: 4, height: 4)).fill()
+        }
+    }
+
+    private var showsProgressDots: Bool {
+        display.mood == .running || display.mood == .tool || display.mood == .starting
+    }
+}
+
+private final class TaterMascotContentView: NSView {
+    var onMoved: ((NSPoint) -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    private let imageView = NSImageView(frame: .zero)
+    private let bubbleView = TaterMascotBubbleView(frame: .zero)
+    private let idleShuffleInterval: ClosedRange<CGFloat> = 60.0...150.0
+    private var mascotFrames: [NSImage] = []
+    private var idleFrames: [NSImage] = []
+    private var currentIdleFrameIndex = 0
+    private var nextIdleShuffleAt: CGFloat = 0
+    private var animationTimer: Timer?
+    private var phase: CGFloat = 0
+    private var dragStartPoint = NSPoint.zero
+    private var dragStartFrame = NSRect.zero
+    private var display = TaterMascotDisplay(mood: .idle, message: "Tater is idle", detail: "Ready when you are.")
+
+    init(frames: [NSImage], idleFrames: [NSImage], fallbackImage: NSImage?) {
+        mascotFrames = frames
+        self.idleFrames = idleFrames
+        if !idleFrames.isEmpty {
+            currentIdleFrameIndex = Int.random(in: 0..<idleFrames.count)
+            nextIdleShuffleAt = CGFloat.random(in: idleShuffleInterval)
+        }
+        super.init(frame: .zero)
+        let initialImage = idleFrames.indices.contains(currentIdleFrameIndex) ? idleFrames[currentIdleFrameIndex] : (frames.first ?? fallbackImage)
+        setup(image: initialImage)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup(image: nil)
+    }
+
+    deinit {
+        animationTimer?.invalidate()
+    }
+
+    override var isOpaque: Bool {
+        false
+    }
+
+    func setDisplay(_ next: TaterMascotDisplay) {
+        let wasIdle = display.mood == .idle
+        display = next
+        bubbleView.display = next
+        if next.mood == .idle && !wasIdle {
+            chooseNextIdleFrame()
+        }
+        updateMascotFrame()
+        applyMascotTransform()
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    private func setup(image: NSImage?) {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+
+        bubbleView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bubbleView)
+
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.animates = false
+        imageView.wantsLayer = true
+        imageView.layer?.masksToBounds = false
+        addSubview(imageView)
+
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.advanceAnimation()
+        }
+        animationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    override func layout() {
+        super.layout()
+        let baseSide = min(bounds.width - 76, bounds.height - 104)
+        imageView.frame = NSRect(
+            x: (bounds.width - baseSide) / 2,
+            y: 8,
+            width: baseSide,
+            height: baseSide
+        )
+
+        let bubbleMaxWidth = min(bounds.width - 22, 232)
+        let bubbleSize = bubbleView.preferredSize(maxWidth: bubbleMaxWidth)
+        let bubbleX = min(
+            bounds.width - bubbleSize.width - 8,
+            max(8, imageView.frame.midX - bubbleSize.width * 0.42)
+        )
+        let bubbleY = min(
+            bounds.height - bubbleSize.height - 8,
+            max(imageView.frame.maxY - 12, imageView.frame.midY + 20)
+        )
+        bubbleView.frame = NSRect(
+            x: bubbleX,
+            y: bubbleY,
+            width: bubbleSize.width,
+            height: bubbleSize.height
+        )
+        applyMascotTransform()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            onDoubleClick?()
+            return
+        }
+        dragStartPoint = window?.convertPoint(toScreen: event.locationInWindow) ?? .zero
+        dragStartFrame = window?.frame ?? .zero
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window else { return }
+        let current = window.convertPoint(toScreen: event.locationInWindow)
+        let deltaX = current.x - dragStartPoint.x
+        let deltaY = current.y - dragStartPoint.y
+        let nextOrigin = NSPoint(x: dragStartFrame.origin.x + deltaX, y: dragStartFrame.origin.y + deltaY)
+        window.setFrameOrigin(nextOrigin)
+        onMoved?(nextOrigin)
+    }
+
+    private func advanceAnimation() {
+        phase += 1.0 / 60.0
+        bubbleView.phase = phase
+        if display.mood == .idle && phase >= nextIdleShuffleAt {
+            chooseNextIdleFrame()
+        }
+        updateMascotFrame()
+        applyMascotTransform()
+        needsDisplay = true
+    }
+
+    private func updateMascotFrame() {
+        if display.mood == .idle && !idleFrames.isEmpty {
+            let safeIndex = idleFrames.indices.contains(currentIdleFrameIndex) ? currentIdleFrameIndex : 0
+            imageView.image = idleFrames[safeIndex]
+            return
+        }
+        guard !mascotFrames.isEmpty else { return }
+        let indices = frameIndicesForCurrentMood()
+        guard !indices.isEmpty else { return }
+        let frameRate: CGFloat
+        switch display.mood {
+        case .idle:
+            frameRate = 1.0
+        case .starting:
+            frameRate = 1.0
+        case .running:
+            frameRate = 1.0
+        case .tool:
+            frameRate = 1.0
+        case .attention:
+            frameRate = 1.0
+        case .stopped:
+            frameRate = 1.0
+        }
+        let offset = Int(floor(phase * frameRate)) % indices.count
+        let frameIndex = indices[offset]
+        if frameIndex < mascotFrames.count {
+            imageView.image = mascotFrames[frameIndex]
+        }
+    }
+
+    private func frameIndicesForCurrentMood() -> [Int] {
+        let desired: [Int]
+        switch display.mood {
+        case .idle:
+            desired = [0]
+        case .starting:
+            desired = [1]
+        case .running:
+            desired = [2]
+        case .tool:
+            desired = [3]
+        case .attention:
+            desired = [4]
+        case .stopped:
+            desired = [5]
+        }
+        let available = desired.filter { $0 >= 0 && $0 < mascotFrames.count }
+        if !available.isEmpty {
+            return available
+        }
+        return mascotFrames.indices.map { Int($0) }
+    }
+
+    private func chooseNextIdleFrame() {
+        guard !idleFrames.isEmpty else { return }
+        if idleFrames.count == 1 {
+            currentIdleFrameIndex = 0
+            scheduleNextIdleShuffle()
+            return
+        }
+
+        var nextIndex = currentIdleFrameIndex
+        while nextIndex == currentIdleFrameIndex {
+            nextIndex = Int.random(in: 0..<idleFrames.count)
+        }
+        currentIdleFrameIndex = nextIndex
+        scheduleNextIdleShuffle()
+    }
+
+    private func scheduleNextIdleShuffle() {
+        nextIdleShuffleAt = phase + CGFloat.random(in: idleShuffleInterval)
+    }
+
+    private func applyMascotTransform() {
+        imageView.layer?.setAffineTransform(.identity)
+        imageView.alphaValue = display.mood == .stopped ? 0.82 : 1.0
+    }
+}
+
+private final class TaterMascotController {
+    private let backend: BackendManager
+    private let defaults = UserDefaults.standard
+    private var panel: NSPanel?
+    private var mascotView: TaterMascotContentView?
+    private var pollTimer: Timer?
+    private var backendState: BackendState = .stopped
+    private var enabled = false
+
+    private let originXKey = "TaterMascotOriginX"
+    private let originYKey = "TaterMascotOriginY"
+    private let panelSize = NSSize(width: 260, height: 260)
+
+    init(backend: BackendManager) {
+        self.backend = backend
+    }
+
+    func setEnabled(_ next: Bool) {
+        guard enabled != next else {
+            if next {
+                refreshForBackendState()
+            }
+            return
+        }
+        enabled = next
+        if next {
+            show()
+        } else {
+            pollTimer?.invalidate()
+            pollTimer = nil
+            panel?.orderOut(nil)
+        }
+    }
+
+    func handleBackendState(_ state: BackendState) {
+        backendState = state
+        guard enabled else { return }
+        refreshForBackendState()
+    }
+
+    private func show() {
+        if panel == nil {
+            makePanel()
+        }
+        panel?.orderFrontRegardless()
+        refreshForBackendState()
+    }
+
+    private func makePanel() {
+        let frame = NSRect(origin: initialOrigin(), size: panelSize)
+        let panel = NSPanel(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+
+        let contentView = TaterMascotContentView(
+            frames: mascotFrames(),
+            idleFrames: mascotIdleFrames(),
+            fallbackImage: fallbackMascotImage()
+        )
+        contentView.frame = NSRect(origin: .zero, size: panelSize)
+        contentView.autoresizingMask = [.width, .height]
+        contentView.onMoved = { [weak self] origin in
+            self?.save(origin: origin)
+        }
+        contentView.onDoubleClick = { [weak self] in
+            NSApp.activate(ignoringOtherApps: true)
+            self?.panel?.orderFrontRegardless()
+        }
+        panel.contentView = contentView
+
+        self.panel = panel
+        self.mascotView = contentView
+    }
+
+    private func mascotFrames() -> [NSImage] {
+        var frames: [NSImage] = []
+        for index in 0..<12 {
+            let name = String(format: "frame-%02d", index)
+            guard
+                let url = Bundle.main.url(forResource: name, withExtension: "png", subdirectory: "TaterMascotFrames"),
+                let image = NSImage(contentsOf: url)
+            else {
+                continue
+            }
+            frames.append(image)
+        }
+        return frames
+    }
+
+    private func mascotIdleFrames() -> [NSImage] {
+        var frames: [NSImage] = []
+        for index in 0..<8 {
+            let name = String(format: "idle-%02d", index)
+            guard
+                let url = Bundle.main.url(forResource: name, withExtension: "png", subdirectory: "TaterMascotIdleFrames"),
+                let image = NSImage(contentsOf: url)
+            else {
+                continue
+            }
+            frames.append(image)
+        }
+        return frames
+    }
+
+    private func fallbackMascotImage() -> NSImage? {
+        if let url = Bundle.main.url(forResource: "TaterAvatar", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+        return nil
+    }
+
+    private func initialOrigin() -> NSPoint {
+        if
+            defaults.object(forKey: originXKey) != nil,
+            defaults.object(forKey: originYKey) != nil
+        {
+            let saved = NSPoint(x: defaults.double(forKey: originXKey), y: defaults.double(forKey: originYKey))
+            let savedFrame = NSRect(origin: saved, size: panelSize)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(savedFrame) }) {
+                return saved
+            }
+        }
+
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 80, y: 80, width: 1200, height: 800)
+        return NSPoint(
+            x: screenFrame.maxX - panelSize.width - 28,
+            y: screenFrame.minY + 34
+        )
+    }
+
+    private func save(origin: NSPoint) {
+        defaults.set(Double(origin.x), forKey: originXKey)
+        defaults.set(Double(origin.y), forKey: originYKey)
+    }
+
+    private func refreshForBackendState() {
+        switch backendState {
+        case .running:
+            schedulePolling()
+            pollStatus()
+        case .bootstrapping:
+            stopPolling()
+            mascotView?.setDisplay(TaterMascotDisplay(
+                mood: .starting,
+                message: "Setting up Tater",
+                detail: "Preparing the runtime"
+            ))
+        case .starting:
+            stopPolling()
+            mascotView?.setDisplay(TaterMascotDisplay(
+                mood: .starting,
+                message: "Starting Tater",
+                detail: "Opening the local service"
+            ))
+        case .stopped:
+            stopPolling()
+            mascotView?.setDisplay(TaterMascotDisplay(
+                mood: .stopped,
+                message: "Tater is stopped",
+                detail: "Use the menu bar to start"
+            ))
+        case .failed(let message):
+            stopPolling()
+            mascotView?.setDisplay(TaterMascotDisplay(
+                mood: .attention,
+                message: "Tater needs attention",
+                detail: shortText(message, limit: 44)
+            ))
+        }
+    }
+
+    private func schedulePolling() {
+        guard pollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.4, repeats: true) { [weak self] _ in
+            self?.pollStatus()
+        }
+        pollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    private func pollStatus() {
+        guard enabled else { return }
+        guard case .running = backendState else { return }
+        guard let url = URL(string: "/api/native/mascot/status", relativeTo: backend.webURL)?.absoluteURL else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0
+        request.setValue(backend.nativeStatusToken, forHTTPHeaderField: "X-Tater-Native-Token")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            let display: TaterMascotDisplay
+            if error != nil {
+                display = TaterMascotDisplay(mood: .running, message: "Watching Tater", detail: "Status feed is warming up")
+            } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                display = TaterMascotDisplay(mood: .running, message: "Watching Tater", detail: "Waiting for native status")
+            } else if let data, let decoded = try? JSONDecoder().decode(NativeMascotStatus.self, from: data) {
+                display = self.display(from: decoded)
+            } else {
+                display = TaterMascotDisplay(mood: .idle, message: "Tater is idle", detail: "Ready when you are.")
+            }
+
+            DispatchQueue.main.async {
+                guard self.enabled else { return }
+                self.mascotView?.setDisplay(display)
+            }
+        }.resume()
+    }
+
+    private func display(from status: NativeMascotStatus) -> TaterMascotDisplay {
+        let state = (status.state ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let mood: TaterMascotMood
+        switch state {
+        case "tool":
+            mood = .tool
+        case "running":
+            mood = .running
+        case "idle":
+            mood = .idle
+        case "attention", "error", "failed":
+            mood = .attention
+        case "stopped":
+            mood = .stopped
+        default:
+            mood = .running
+        }
+
+        let activeCount = max(0, status.activeCount ?? 0)
+        let baseDetail = shortText(status.detail ?? "", limit: 72)
+        let detail: String
+        if activeCount > 1 {
+            detail = baseDetail.isEmpty ? "\(activeCount) active tasks" : "\(baseDetail) - \(activeCount) active"
+        } else {
+            detail = baseDetail
+        }
+
+        return TaterMascotDisplay(
+            mood: mood,
+            message: shortText(status.message ?? "Tater is working", limit: 96),
+            detail: detail.isEmpty ? "Ready when you are." : shortText(detail, limit: 72)
+        )
+    }
+
+    private func shortText(_ raw: String, limit: Int) -> String {
+        let compact = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard compact.count > limit else { return compact }
+        let end = compact.index(compact.startIndex, offsetBy: max(0, limit - 1))
+        return String(compact[..<end]) + "..."
+    }
+}
+
 private final class TaterWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate {
     private let webView: WKWebView
     private let setupView: NSVisualEffectView
@@ -1781,21 +2471,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stopMenuItem: NSMenuItem?
     private var updateMenuItem: NSMenuItem?
     private var checkUpdatesMenuItem: NSMenuItem?
+    private var mascotMenuItem: NSMenuItem?
     private var windowController: TaterWindowController?
+    private var mascotController: TaterMascotController?
     private var usesMenuBarImage = false
     private var recoveryTimer: Timer?
     private var updateMenuResetTimer: Timer?
     private var updateCheckTimer: Timer?
     private let automaticUpdateInterval: TimeInterval = 12 * 60 * 60
     private let lastAutomaticUpdateCheckKey = "LastAutomaticUpdateCheck"
+    private let mascotEnabledKey = "TaterMascotEnabled"
+    private var mascotEnabled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        mascotController = TaterMascotController(backend: backend)
         configureStatusItem()
 
         backend.onStateChange = { [weak self] state in
             self?.refreshMenu(for: state)
             self?.refreshWindow(for: state)
+            self?.mascotController?.handleBackendState(state)
         }
         backend.onLogAppend = { [weak self] text in
             self?.windowController?.updateSetupProgress(from: text)
@@ -1805,6 +2501,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         showWindow()
+        mascotEnabled = UserDefaults.standard.object(forKey: mascotEnabledKey) as? Bool ?? false
+        mascotController?.setEnabled(mascotEnabled)
+        refreshMascotMenu()
         backend.start()
         startRecoveryWatchdog()
         startAutomaticUpdateChecks()
@@ -1818,6 +2517,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         recoveryTimer?.invalidate()
         updateCheckTimer?.invalidate()
         updateMenuResetTimer?.invalidate()
+        mascotController?.setEnabled(false)
         backend.stop(waitForExit: true)
         return .terminateNow
     }
@@ -1895,6 +2595,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Tater", action: #selector(openTater), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "Open in Browser", action: #selector(openBrowser), keyEquivalent: "b"))
+        let mascot = NSMenuItem(title: "Enable Tater Mascot", action: #selector(toggleMascot), keyEquivalent: "m")
+        mascot.target = self
+        menu.addItem(mascot)
         menu.addItem(NSMenuItem.separator())
         let start = NSMenuItem(title: "Start", action: #selector(startTater), keyEquivalent: "s")
         let stop = NSMenuItem(title: "Stop", action: #selector(stopTater), keyEquivalent: "")
@@ -1916,8 +2619,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         stopMenuItem = stop
         updateMenuItem = update
         checkUpdatesMenuItem = checkUpdates
+        mascotMenuItem = mascot
         refreshMenu(for: backend.state)
         refreshUpdateMenu(for: updater.state)
+        refreshMascotMenu()
     }
 
     private func refreshMenu(for state: BackendState) {
@@ -1989,6 +2694,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMenuItem?.title = "Update Available"
     }
 
+    private func refreshMascotMenu() {
+        mascotMenuItem?.title = mascotEnabled ? "Disable Tater Mascot" : "Enable Tater Mascot"
+        mascotMenuItem?.state = mascotEnabled ? .on : .off
+    }
+
     private func resetCheckUpdateTitleSoon() {
         updateMenuResetTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
             self?.checkUpdatesMenuItem?.title = "Check for Updates..."
@@ -2032,6 +2742,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openBrowser() {
         NSWorkspace.shared.open(backend.webURL)
+    }
+
+    @objc private func toggleMascot() {
+        mascotEnabled.toggle()
+        UserDefaults.standard.set(mascotEnabled, forKey: mascotEnabledKey)
+        mascotController?.setEnabled(mascotEnabled)
+        refreshMascotMenu()
     }
 
     @objc private func startTater() {

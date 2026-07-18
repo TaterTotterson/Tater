@@ -5321,32 +5321,41 @@ def _transcript_is_low_signal(transcript: str) -> bool:
 def _continued_chat_retry_evidence(session: VoiceSessionRuntime, transcript: str = "") -> bool:
     if not isinstance(session, VoiceSessionRuntime):
         return False
-    if not bool(getattr(session, "continued_chat_reopen", False)):
+    if not (
+        bool(getattr(session, "continued_chat_reopen", False))
+        or bool(_text(getattr(session, "wake_word", "")))
+    ):
+        return False
+
+    # Do not turn background noise or buffered audio packets into a spoken
+    # retry. A retry requires VAD-confirmed speech, even when STT returned text.
+    speech_s = max(0.0, float(getattr(session, "speech_duration_s", 0.0) or 0.0))
+    if speech_s < 0.12:
         return False
 
     transcript_text = _text(transcript)
-    if transcript_text:
-        return not _transcript_is_low_signal(transcript_text)
+    if not transcript_text:
+        return False
+    return not _transcript_is_low_signal(transcript_text)
 
-    audio_peak = (
-        float(getattr(session, "audio_peak_dbfs", -120.0) or -120.0)
-        if int(getattr(session, "audio_level_chunks", 0) or 0) > 0
-        else -120.0
-    )
-    vad_peak = (
-        float(getattr(session, "vad_audio_peak_dbfs", -120.0) or -120.0)
-        if int(getattr(session, "vad_audio_level_chunks", 0) or 0) > 0
-        else -120.0
-    )
-    peak = max(audio_peak, vad_peak)
-    chunks = int(getattr(session, "audio_chunks", 0) or 0)
-    audio_bytes = int(getattr(session, "audio_bytes", 0) or 0)
-    return peak >= -42.0 and (chunks >= 8 or audio_bytes >= 12000)
+
+def _claim_continued_chat_retry(session: VoiceSessionRuntime, transcript: str = "") -> bool:
+    if not _continued_chat_retry_evidence(session, transcript):
+        return False
+
+    runtime = _selector_runtime(session.selector)
+    conversation_id = _text(session.conversation_id) or _text(session.session_id)
+    prior_conversation_id = _text(runtime.get("continued_chat_retry_conversation_id"))
+    if bool(runtime.get("continued_chat_retry_used")) and prior_conversation_id == conversation_id:
+        return False
+
+    runtime["continued_chat_retry_conversation_id"] = conversation_id
+    runtime["continued_chat_retry_used"] = True
+    return True
 
 
 def _continued_chat_retry_response_text(transcript: str = "") -> str:
-    if _text(transcript):
-        return "I only caught part of that. Could you say it again?"
+    _ = transcript
     return "I didn't catch that. Could you say it again?"
 
 
@@ -5537,25 +5546,6 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
         return intercom_result
 
     if not transcript:
-        retry_text = (
-            _continued_chat_retry_response_text(transcript)
-            if _continued_chat_retry_evidence(session, transcript)
-            else ""
-        )
-        if retry_text:
-            logger.info(
-                "[native-voice] continued-chat empty transcript retry selector=%s session_id=%s audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f max_prob=%.3f",
-                session.selector,
-                session.session_id,
-                int(session.audio_chunks),
-                int(session.audio_bytes),
-                float(session.audio_peak_dbfs or -120.0),
-                float(session.max_probability or 0.0),
-            )
-            return {
-                "transcript": "",
-                "response_text": retry_text,
-            }
         return {
             "transcript": "",
             "no_op": True,
@@ -5565,7 +5555,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     if _voice_turn_has_low_speech_evidence(session, transcript):
         retry_text = (
             _continued_chat_retry_response_text(transcript)
-            if _continued_chat_retry_evidence(session, transcript)
+            if _claim_continued_chat_retry(session, transcript)
             else ""
         )
         if retry_text:
@@ -5607,11 +5597,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
     completeness = _transcript_completeness_assessment(transcript)
     word_count = len(re.findall(r"[a-z0-9']+", transcript.lower()))
     if (not bool(completeness.get("complete"))) and word_count <= 6:
-        if (
-            bool(getattr(session, "no_speech_recovered_partial", False))
-            or bool(_text(session.wake_word))
-            or _continued_chat_retry_evidence(session, transcript)
-        ):
+        if _claim_continued_chat_retry(session, transcript):
             logger.info(
                 "[native-voice] partial transcript recovery selector=%s session_id=%s words=%s reason=%s",
                 session.selector,
@@ -6387,6 +6373,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             else:
                 followup_conv = _claim_pending_followup(runtime)
                 continued_chat_reopen = bool(followup_conv)
+            if not continued_chat_reopen:
+                runtime["continued_chat_retry_conversation_id"] = ""
+                runtime["continued_chat_retry_used"] = False
         conv = explicit_conv or followup_conv or sid
         if continued_chat_reopen:
             _native_debug(f"continued chat reuse selector={token} session_id={sid} conversation_id={conv}")
@@ -7122,8 +7111,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
 # -------------------- Compatibility Helpers --------------------
 # These small helpers are still used by `tater_voice.runtime` and the native
-# ESPHome settings/runtime surface even though the older HTMLUI tab bridge
-# has been removed.
+# Voice settings/runtime surface even though the older HTMLUI tab bridge has
+# been removed.
 def _format_ts_label(ts_value: Any) -> str:
     return _esphome_ui_helpers.format_ts_label(ts_value)
 

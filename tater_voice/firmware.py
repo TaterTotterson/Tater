@@ -1201,7 +1201,7 @@ def _firmware_action_client_row(selector: str, template_spec: Dict[str, Any]) ->
         with contextlib.suppress(Exception):
             from . import native_satellite
 
-            native_status = esphome_runtime.run_async_blocking(native_satellite.status(), timeout=3.0)
+            native_status = native_satellite.run_on_runtime_loop(native_satellite.status(), timeout=3.0)
             native_clients = native_status.get("clients") if isinstance(native_status, dict) and isinstance(native_status.get("clients"), dict) else {}
             native_row = native_clients.get(selector_token)
             if isinstance(native_row, dict):
@@ -2286,7 +2286,7 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
     factory_artifact = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
     native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
-    base_url = f"/api/settings/esphome/firmware-web/{artifact_id}"
+    base_url = f"/api/settings/voice/firmware-web/{artifact_id}"
     return {
         "artifact_id": artifact_id,
         "binary_url": f"{base_url}/{target_binary_name}",
@@ -2631,7 +2631,10 @@ def _native_log_entries(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _native_logs_fetch(selector: str, *, after_seq: int = 0, start: bool = False) -> Dict[str, Any]:
     from . import native_satellite
 
-    result = esphome_runtime.run_async_blocking(native_satellite.logs(selector, after_seq=after_seq, limit=200), timeout=5.0)
+    result = native_satellite.run_on_runtime_loop(
+        native_satellite.logs(selector, after_seq=after_seq, limit=200),
+        timeout=5.0,
+    )
     if not isinstance(result, dict):
         result = {}
     rows = list(result.get("logs") or []) if isinstance(result.get("logs"), list) else []
@@ -2966,7 +2969,7 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
     try:
         from . import native_satellite
 
-        result = esphome_runtime.run_async_blocking(
+        result = native_satellite.run_on_runtime_loop(
             native_satellite.send_command(selector, "ota.url", {"url": ota_url}),
             timeout=5.0,
         )
@@ -3435,7 +3438,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         try:
             from . import native_satellite
 
-            esphome_runtime.run_async_blocking(
+            native_satellite.run_on_runtime_loop(
                 native_satellite.send_command(selector, "ota.url", {"url": _text(ota_artifact.get("ota_url"))}),
                 timeout=5.0,
             )

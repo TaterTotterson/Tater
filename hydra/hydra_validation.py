@@ -153,6 +153,8 @@ async def repair_tool_call_text(
             ),
             "temperature": 0.1,
             "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+            "activity": "execution",
+            "cache_namespace": "hydra:thanatos:repair",
         }
         response = await llm_client.chat(**chat_kwargs)
         return coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
@@ -360,6 +362,8 @@ async def generate_recovery_text(
             ),
             "temperature": 0.2,
             "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+            "activity": "chat",
+            "cache_namespace": "hydra:hermes:recovery",
         }
         response = await llm_client.chat(**chat_kwargs)
         out = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
