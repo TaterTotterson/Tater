@@ -8553,6 +8553,8 @@ class SpudLinkHomeActionRequest(BaseModel):
     category_id: str = Field(min_length=1, max_length=80)
     action: str = Field(min_length=1, max_length=80)
     value: Optional[float] = None
+    mode: Optional[str] = Field(default=None, max_length=40)
+    temperature_unit: Optional[str] = Field(default=None, max_length=4)
 
 
 class SpudLinkTtsRequest(BaseModel):
@@ -13868,7 +13870,12 @@ def spud_link_home_action(payload: SpudLinkHomeActionRequest, request: Request) 
             category_id=payload.category_id,
             action=payload.action,
         )
-        action_payload = home_action_payload(payload.action, payload.value)
+        action_payload = home_action_payload(
+            payload.action,
+            payload.value,
+            mode=payload.mode,
+            temperature_unit=payload.temperature_unit,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

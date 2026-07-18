@@ -16,6 +16,7 @@ CONTROL_ACTIONS: Dict[str, Tuple[str, ...]] = {
     "garage_door": ("open", "close"),
     "cover": ("open", "close"),
     "lock": ("lock", "unlock"),
+    "climate": ("set_temperature", "set_hvac_mode"),
 }
 
 _ON_STATES = {"on", "true", "active", "running", "playing", "home", "present", "detected", "motion", "wet"}
@@ -125,6 +126,20 @@ def _lookup(device: Dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _lookup_list(device: Dict[str, Any], *keys: str) -> List[Any]:
+    mappings = list(_walk_mappings(device))
+    for wanted in (_token(key) for key in keys):
+        for mapping in mappings:
+            for key, value in mapping.items():
+                if _token(key) != wanted:
+                    continue
+                if isinstance(value, (list, tuple, set)):
+                    return list(value)
+                if isinstance(value, str) and "," in value:
+                    return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
 def _number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -208,16 +223,94 @@ def _temperature_unit(device: Dict[str, Any]) -> str:
     return "F"
 
 
+def _temperature_value(device: Dict[str, Any], *, target: bool = False) -> float | None:
+    unit = _temperature_unit(device)
+    if target:
+        unit_keys = (
+            ("target_temperature_c", "setpoint_c")
+            if unit == "C"
+            else ("target_temperature_f", "setpoint_f")
+        )
+        keys = (
+            "target_temperature",
+            "set_temperature",
+            "setpoint",
+            *unit_keys,
+        )
+    else:
+        unit_keys = (
+            ("current_temperature_c", "temperature_c")
+            if unit == "C"
+            else ("current_temperature_f", "temperature_f")
+        )
+        keys = (
+            "current_temperature",
+            "temperature",
+            *unit_keys,
+            "state",
+        )
+    return _number(_lookup(device, *keys))
+
+
+def _temperature_in_unit(
+    device: Dict[str, Any],
+    unit: str,
+    *,
+    target: bool = False,
+) -> float | None:
+    value = _temperature_value(device, target=target)
+    if value is None:
+        return None
+    source_unit = _temperature_unit(device)
+    target_unit = "C" if _text(unit).upper() == "C" else "F"
+    if source_unit == target_unit:
+        return value
+    if source_unit == "C":
+        return value * 9.0 / 5.0 + 32.0
+    return (value - 32.0) * 5.0 / 9.0
+
+
+def _climate_mode(device: Dict[str, Any]) -> str:
+    return _token(
+        _lookup(
+            device,
+            "target_hvac_mode",
+            "hvac_mode",
+            "mode",
+            "current_hvac_state",
+            "status",
+        )
+    )
+
+
+def _climate_modes(device: Dict[str, Any], actions: set[str]) -> List[str]:
+    modes: List[str] = []
+    for raw in _lookup_list(
+        device,
+        "available_hvac_modes",
+        "hvac_modes",
+        "available_modes",
+        "modes",
+    ):
+        mode = _token(raw)
+        if mode and mode not in modes:
+            modes.append(mode)
+    if (
+        not modes
+        and "set_hvac_mode" in actions
+        and _token(device.get("integration_id")) == "ecobee_homekit"
+    ):
+        modes = ["off", "heat", "cool", "auto"]
+    return modes
+
+
 def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
     states = [_token(_state(device)) for device in devices]
     if category_id == "temperature":
-        values = [
-            _number(_lookup(device, "temperature", "current_temperature", "current_temperature_f", "value", "state"))
-            for device in devices
-        ]
+        unit = _temperature_unit(devices[0])
+        values = [_temperature_in_unit(device, unit) for device in devices]
         average = _average(value for value in values if value is not None)
         if average is not None:
-            unit = _temperature_unit(devices[0])
             return f"{_format_number(average, 1)}°{unit}"
     if category_id == "humidity":
         values = [
@@ -282,8 +375,8 @@ def _sensor_summary(category_id: str, devices: List[Dict[str, Any]]) -> str:
         online = sum(state in {"on", "online", "connected", "active", "true"} for state in states)
         return f"{online} online" if len(devices) > 1 else ("Online" if online else "Offline")
     if category_id == "climate":
-        temperature = _number(_lookup(devices[0], "current_temperature", "temperature", "state"))
-        mode = _text(_lookup(devices[0], "hvac_mode", "mode"))
+        temperature = _temperature_value(devices[0])
+        mode = _climate_mode(devices[0])
         pieces = []
         if temperature is not None:
             pieces.append(f"{_format_number(temperature, 1)}°{_temperature_unit(devices[0])}")
@@ -309,6 +402,8 @@ def _control_type(category_id: str, supports_brightness: bool) -> str:
         return "cover"
     if category_id == "lock":
         return "lock"
+    if category_id == "climate":
+        return "thermostat"
     return "read_only"
 
 
@@ -368,6 +463,7 @@ def _category_payload(
     summary = ""
     on_count = 0
     off_count = 0
+    open_count = 0
 
     if category_id in {"light", "fan", "switch", "plug"}:
         states = [_power_state(device) for device in devices]
@@ -415,6 +511,12 @@ def _category_payload(
     else:
         summary = _sensor_summary(category_id, devices)
         state = _token(summary) or "unknown"
+        if category_id == "entry_sensor":
+            sensor_states = [_token(_state(device)) for device in devices]
+            open_count = sum(
+                item in _OPEN_STATES or item in {"on", "active", "true"}
+                for item in sensor_states
+            )
 
     brightness_values = [_brightness(device) for device in devices]
     brightness = _average(value for value in brightness_values if value is not None)
@@ -428,6 +530,7 @@ def _category_payload(
         "summary": summary,
         "on_count": on_count,
         "off_count": off_count,
+        "open_count": open_count,
         "controllable": controllable,
         "read_only": not controllable,
         "control_type": _control_type(category_id, supports_brightness),
@@ -436,6 +539,54 @@ def _category_payload(
         "brightness": round(brightness, 1) if brightness is not None else None,
         "reading": summary if not controllable else "",
     }
+    if category_id in {"climate", "temperature"}:
+        primary = devices[0]
+        unit = _temperature_unit(primary)
+        current_temperature = (
+            _average(
+                value
+                for value in (
+                    _temperature_in_unit(device, unit)
+                    for device in devices
+                )
+                if value is not None
+            )
+            if category_id == "temperature"
+            else _temperature_value(primary)
+        )
+        payload["current_temperature"] = (
+            round(current_temperature, 1)
+            if current_temperature is not None
+            else None
+        )
+        payload["temperature_unit"] = unit
+    if category_id == "climate":
+        primary = devices[0]
+        target_temperature = _temperature_value(primary, target=True)
+        mode = _climate_mode(primary)
+        payload.update(
+            {
+                "target_temperature": (
+                    round(target_temperature, 1)
+                    if target_temperature is not None
+                    else None
+                ),
+                "hvac_mode": mode,
+                "available_hvac_modes": _climate_modes(primary, _actions(primary)),
+                "minimum_temperature": (
+                    _number(_lookup(primary, "minimum_temperature", "min_temperature", "min_temp"))
+                    or (7.0 if payload["temperature_unit"] == "C" else 45.0)
+                ),
+                "maximum_temperature": (
+                    _number(_lookup(primary, "maximum_temperature", "max_temperature", "max_temp"))
+                    or (32.0 if payload["temperature_unit"] == "C" else 90.0)
+                ),
+                "temperature_step": (
+                    _number(_lookup(primary, "temperature_step", "target_temperature_step", "step"))
+                    or (0.5 if payload["temperature_unit"] == "C" else 1.0)
+                ),
+            }
+        )
     if category_id == "camera":
         payload["camera_previews"] = _camera_previews(devices, camera_ref_secret)
     return payload
@@ -635,17 +786,41 @@ def resolve_home_action_targets(
     return targets
 
 
-def home_action_payload(action: Any, value: Any = None) -> Dict[str, Any]:
+def home_action_payload(
+    action: Any,
+    value: Any = None,
+    *,
+    mode: Any = None,
+    temperature_unit: Any = "F",
+) -> Dict[str, Any]:
     clean_action = _token(action)
-    if clean_action != "set_brightness":
-        return {}
-    brightness = _number(value)
-    if brightness is None:
-        raise ValueError("Brightness must be a percentage from 0 to 100.")
-    brightness = max(0.0, min(100.0, brightness))
-    return {
-        "brightness": brightness,
-        "brightness_pct": brightness,
-        "level": brightness,
-        "percent": brightness,
-    }
+    if clean_action == "set_brightness":
+        brightness = _number(value)
+        if brightness is None:
+            raise ValueError("Brightness must be a percentage from 0 to 100.")
+        brightness = max(0.0, min(100.0, brightness))
+        return {
+            "brightness": brightness,
+            "brightness_pct": brightness,
+            "level": brightness,
+            "percent": brightness,
+        }
+    if clean_action == "set_temperature":
+        temperature = _number(value)
+        if temperature is None:
+            raise ValueError("A target temperature is required.")
+        unit = "C" if _text(temperature_unit).upper() == "C" else "F"
+        return {
+            "temperature": temperature,
+            "target_temperature": temperature,
+            "temperature_unit": unit,
+        }
+    if clean_action == "set_hvac_mode":
+        clean_mode = _token(mode)
+        if not clean_mode:
+            raise ValueError("An HVAC mode is required.")
+        return {
+            "mode": clean_mode,
+            "hvac_mode": clean_mode,
+        }
+    return {}
