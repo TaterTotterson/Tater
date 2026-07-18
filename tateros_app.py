@@ -232,8 +232,14 @@ from integration_registry import (
     rename_integration_device,
     rename_integration_room,
     run_integration_action as run_registered_integration_action,
+    run_integration_device_action as run_registered_integration_device_action,
     save_integration_settings as save_registered_integration_settings,
     set_integration_room_preferred_media_player,
+)
+from little_spud_home import (
+    build_home_snapshot,
+    home_action_payload,
+    resolve_home_action_targets,
 )
 from integration_runtime import (
     bind_integration_runtime_loop,
@@ -6530,6 +6536,7 @@ async def _run_spud_link_native_hydra_completion(
     platform_preamble: str = "Little Spud native Tater client request.",
     context_extra: Optional[Dict[str, Any]] = None,
     wait_callback: Optional[Callable[..., Any]] = None,
+    response_callback: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
     user_text, history_messages = _openai_user_text_and_history(messages)
     session_id = str(request.headers.get("x-tater-session") or getattr(payload, "user", None) or "default").strip() or "default"
@@ -6575,6 +6582,7 @@ async def _run_spud_link_native_hydra_completion(
             redis_client=redis_client,
             platform_preamble=platform_preamble,
             wait_callback=wait_callback,
+            response_callback=response_callback,
         )
         try:
             perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
@@ -7091,6 +7099,16 @@ class ChatJobManager:
                     str(job_local.get("stream_text") or "") + text
                 )
                 pending = str(job_local.get("stream_pending") or "") + text
+                chunk_count = int(job_local.get("stream_chunk_count") or 0) + 1
+                job_local["stream_chunk_count"] = chunk_count
+                # Providers without native streaming deliver one completed
+                # callback. Hold that first callback so their UI behavior
+                # remains the normal atomic reply. A second callback confirms
+                # that this is genuinely incremental output and releases both
+                # chunks together.
+                if chunk_count < 2:
+                    job_local["stream_pending"] = pending
+                    return
                 now = time.monotonic()
                 last_emit = float(job_local.get("stream_last_emit") or 0.0)
                 if now - last_emit < 0.04 and "\n" not in pending:
@@ -7190,6 +7208,7 @@ class ChatJobManager:
                 "error": "",
                 "stream_text": "",
                 "stream_pending": "",
+                "stream_chunk_count": 0,
                 "stream_last_emit": 0.0,
                 "created_at": time.time(),
                 "completed_at": 0.0,
@@ -8526,6 +8545,13 @@ class SpudLinkPushRegistrationRequest(BaseModel):
     relay_url: Optional[str] = None
     registered_at: Optional[float] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SpudLinkHomeActionRequest(BaseModel):
+    room_id: str = Field(min_length=1, max_length=160)
+    category_id: str = Field(min_length=1, max_length=80)
+    action: str = Field(min_length=1, max_length=80)
+    value: Optional[float] = None
 
 
 class SpudLinkTtsRequest(BaseModel):
@@ -13189,8 +13215,71 @@ async def _stream_spud_link_tater_completion(
     little_spud_identity: Dict[str, str],
 ):
     event_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+    event_loop = asyncio.get_running_loop()
     run_id = f"lsrun_{uuid.uuid4().hex[:16]}"
     tool_notices: List[Dict[str, Any]] = []
+    response_stream_lock = threading.Lock()
+    response_stream_state: Dict[str, Any] = {
+        "chunk_count": 0,
+        "pending": "",
+        "last_emit": 0.0,
+    }
+
+    def _enqueue_response_chunk(chunk: str) -> None:
+        payload = {
+            "type": "response_chunk",
+            "run_id": run_id,
+            "chunk": chunk,
+        }
+        event = {"type": "response_chunk", "payload": payload}
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is event_loop:
+            event_queue.put_nowait(event)
+        else:
+            with contextlib.suppress(RuntimeError):
+                event_loop.call_soon_threadsafe(event_queue.put_nowait, event)
+
+    def _on_response_chunk(chunk: str) -> None:
+        text = str(chunk or "")
+        if not text:
+            return
+        pending = ""
+        with response_stream_lock:
+            response_stream_state["chunk_count"] = (
+                int(response_stream_state.get("chunk_count") or 0) + 1
+            )
+            response_stream_state["pending"] = (
+                str(response_stream_state.get("pending") or "") + text
+            )
+            # A provider without native streaming invokes the callback once
+            # with its complete response. A second callback confirms genuine
+            # incremental output before Little Spud sees a live preview.
+            if int(response_stream_state["chunk_count"]) < 2:
+                return
+            now = time.monotonic()
+            last_emit = float(response_stream_state.get("last_emit") or 0.0)
+            candidate = str(response_stream_state.get("pending") or "")
+            if now - last_emit < 0.04 and "\n" not in candidate:
+                return
+            pending = candidate
+            response_stream_state["pending"] = ""
+            response_stream_state["last_emit"] = now
+        if pending:
+            _enqueue_response_chunk(pending)
+
+    def _flush_response_chunks() -> None:
+        pending = ""
+        with response_stream_lock:
+            if int(response_stream_state.get("chunk_count") or 0) >= 2:
+                pending = str(response_stream_state.get("pending") or "")
+                response_stream_state["pending"] = ""
+                if pending:
+                    response_stream_state["last_emit"] = time.monotonic()
+        if pending:
+            _enqueue_response_chunk(pending)
 
     async def _on_tool(
         func_name: str,
@@ -13261,7 +13350,9 @@ async def _stream_spud_link_tater_completion(
                 platform_preamble=platform_preamble,
                 context_extra=context_extra,
                 wait_callback=_on_tool,
+                response_callback=_on_response_chunk,
             )
+            _flush_response_chunks()
             assistant_content = str(completion.get("content") or "").strip() if isinstance(completion, dict) else ""
             spud_link_artifacts = (
                 completion.get("artifacts")
@@ -13320,6 +13411,10 @@ async def _stream_spud_link_tater_completion(
             if event_type == "tool":
                 event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 yield _sse("tater.tool", event_payload)
+                continue
+            if event_type == "response_chunk":
+                event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                yield _sse("tater.response_chunk", event_payload)
                 continue
             if event_type == "error":
                 event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -13653,6 +13748,93 @@ def spud_link_forget_pairing(request: Request) -> Dict[str, Any]:
         "revoked": removed > 0,
         "cleanup": cleanup,
     }
+
+
+@app.get("/api/spudlink/v1/home")
+def spud_link_home(request: Request, refresh: bool = False) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Home controls require a paired Little Spud client.")
+    try:
+        registry = get_integration_device_registry(redis_client, refresh=bool(refresh))
+        snapshot = build_home_snapshot(registry)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not load integrated devices: {exc}") from exc
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return snapshot
+
+
+@app.post("/api/spudlink/v1/home/actions")
+def spud_link_home_action(payload: SpudLinkHomeActionRequest, request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Home controls require a paired Little Spud client.")
+
+    registry = get_integration_device_registry(redis_client)
+    try:
+        targets = resolve_home_action_targets(
+            registry,
+            room_id=payload.room_id,
+            category_id=payload.category_id,
+            action=payload.action,
+        )
+        action_payload = home_action_payload(payload.action, payload.value)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    succeeded = 0
+    failures: List[str] = []
+    for device in targets:
+        integration_id = str(device.get("integration_id") or "").strip()
+        device_id = str(device.get("id") or device.get("ref") or "").strip()
+        if not integration_id or not device_id:
+            failures.append("A device is missing its integration target.")
+            continue
+        try:
+            result = run_registered_integration_device_action(
+                integration_id,
+                payload.action,
+                device_id,
+                action_payload,
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                failures.append(str(result.get("error") or "The integration rejected the action."))
+            else:
+                succeeded += 1
+        except Exception as exc:
+            failures.append(str(exc) or "The integration action failed.")
+
+    if succeeded <= 0:
+        detail = failures[0] if failures else "No compatible devices accepted the action."
+        raise HTTPException(status_code=502, detail=detail)
+
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "home_control",
+            "last_device": request.headers.get("x-spudlink-device"),
+            "role": role,
+        },
+        allow_previews=False,
+    )
+    _spud_link_store_node(node)
+    updated_registry = get_integration_device_registry(redis_client)
+    snapshot = build_home_snapshot(updated_registry)
+    snapshot["action_result"] = {
+        "room_id": payload.room_id,
+        "category_id": payload.category_id,
+        "action": payload.action,
+        "succeeded": succeeded,
+        "failed": len(failures),
+        "warning": failures[0] if failures else "",
+    }
+    return snapshot
 
 
 @app.post("/api/spudlink/v1/push-registration")

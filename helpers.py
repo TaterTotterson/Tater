@@ -6072,8 +6072,15 @@ def _llama_cpp_native_stream_post(
     content_parts: List[str] = []
     final_payload: Dict[str, Any] = {}
     try:
-        for raw_line in response.iter_lines(decode_unicode=True):
-            line = str(raw_line or "").strip()
+        # llama-server streams UTF-8 JSON, but its response does not always
+        # declare a charset. Letting requests infer the encoding can therefore
+        # decode UTF-8 as Latin-1 and turn characters such as “ and 👋 into
+        # mojibake. Keep the wire data as bytes and decode it explicitly.
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if isinstance(raw_line, bytes):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            else:
+                line = str(raw_line or "").strip()
             if not line:
                 continue
             if line.startswith("data:"):

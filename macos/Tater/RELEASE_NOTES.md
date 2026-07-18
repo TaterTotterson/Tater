@@ -1,10 +1,11 @@
-# Tater v95
+# Tater v96
 
 ## What's Changed
 
-- Added the Tater Tube Core, connecting Tater to a Tater Tube Server for recent viewing context and AI-powered movie and series recommendations in Tater Tube. Learn more at [tatertube.tv](https://tatertube.tv).
-- Added an animated Tater mascot to the macOS app. The mascot shows when Tater is starting, working, using tools, finished, stopped, or needs attention, with live status and result previews.
-- Made Hydra feel faster with native response streaming for chat and final answers, while keeping planning, validation, and tool-call payloads fully buffered for reliable tool execution.
-- Improved llama.cpp throughput with prompt-cache reuse, stable Hydra role-to-slot affinity, concurrent server-slot requests, persistent HTTP connections, and corrected text batch sizing for unified text-and-vision servers.
-- Reduced turn latency by overlapping progress and state updates with tool execution, reusing async clients and the chat-job event loop, and streaming response previews directly to the web UI.
-- Kept the performance improvements provider-safe: OpenAI-compatible providers stream when supported and fall back cleanly, while Hugging Face, MLX, Spud, and existing non-streaming paths retain their prior behavior.
+- Fixed native llama.cpp streaming text so emoji, smart punctuation, and other UTF-8 characters no longer appear as mojibake in replies.
+- Added smooth live reply rendering to the Web UI, including frame-coalesced updates, a streaming cursor, stable auto-scroll, reduced-motion support, and clean replacement by the completed message.
+- Added native response chunks to the Little Spud Spud Link protocol so supported clients can render Tater replies as they arrive while tool notices and final tool results remain reliable.
+- Preserved normal one-shot behavior for providers that do not stream: Tater waits for a second response chunk before showing a live preview and otherwise delivers the completed reply atomically.
+- Added the Tater side of Little Spud Home controls with authenticated room summaries, grouped device categories, bulk light/fan/switch/plug controls, light brightness, garage door and cover actions, lock actions, and compact read-only sensor status.
+- Kept Home controls provider-neutral and safe by using the existing integration registry, allowing only advertised category actions, leaving unsupported categories read-only, and never exposing individual device inventories to Little Spud.
+- Improved integration state caching after brightness changes so room status and controls reflect the requested light level immediately.

@@ -174,10 +174,13 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 self.decode_unicode = decode_unicode
                 return iter(
                     [
-                        'data: {"content":"Hi"}',
-                        'data: {"content":" there"}',
-                        'data: {"content":"","timings":{"prompt_n":2,"predicted_n":2}}',
-                        "data: [DONE]",
+                        'data: {"content":"Spud Lord! 👋"}'.encode("utf-8"),
+                        'data: {"content":" What’s good? 🐶🎮"}'.encode("utf-8"),
+                        (
+                            'data: {"content":"","timings":'
+                            '{"prompt_n":2,"predicted_n":2}}'
+                        ).encode("utf-8"),
+                        b"data: [DONE]",
                     ]
                 )
 
@@ -197,8 +200,9 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 stream_callback=chunks.append,
             )
 
-        self.assertEqual(chunks, ["Hi", " there"])
-        self.assertEqual(payload["content"], "Hi there")
+        self.assertFalse(response.decode_unicode)
+        self.assertEqual(chunks, ["Spud Lord! 👋", " What’s good? 🐶🎮"])
+        self.assertEqual(payload["content"], "Spud Lord! 👋 What’s good? 🐶🎮")
         self.assertEqual(payload["timings"]["prompt_n"], 2)
         self.assertTrue(response.closed)
 
@@ -593,6 +597,72 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(row["state_update_ms"], 40)
 
 
+class SpudLinkStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def _collect_events(self, callback_chunks):
+        import tateros_app
+
+        async def fake_completion(*_args, **kwargs):
+            callback = kwargs.get("response_callback")
+            if callable(callback):
+                for chunk in callback_chunks:
+                    callback(chunk)
+            return {"content": "".join(callback_chunks), "artifacts": []}
+
+        with (
+            mock.patch.object(
+                tateros_app,
+                "_run_spud_link_native_hydra_completion",
+                side_effect=fake_completion,
+            ),
+            mock.patch.object(tateros_app, "_save_little_spud_active_run"),
+            mock.patch.object(tateros_app, "_save_little_spud_history"),
+            mock.patch.object(tateros_app, "_clear_little_spud_active_run"),
+            mock.patch.object(
+                tateros_app,
+                "_spud_link_follow_up_decision",
+                new=mock.AsyncMock(return_value={}),
+            ),
+        ):
+            stream = tateros_app._stream_spud_link_tater_completion(
+                payload=SimpleNamespace(),
+                messages=[{"role": "user", "content": "hello"}],
+                tools_enabled=True,
+                request=SimpleNamespace(),
+                platform="little_spud",
+                origin_override={},
+                scope_override="little-spud:test",
+                platform_preamble="Little Spud test.",
+                context_extra={},
+                little_spud_identity={"scope": "little-spud:test"},
+            )
+            return [event async for event in stream]
+
+    async def test_spud_link_emits_real_chunks_before_final_message(self):
+        events = await self._collect_events(["hel", "lo"])
+
+        chunk_index = next(
+            index
+            for index, event in enumerate(events)
+            if "event: tater.response_chunk" in event
+        )
+        message_index = next(
+            index
+            for index, event in enumerate(events)
+            if "event: tater.message" in event
+        )
+
+        self.assertLess(chunk_index, message_index)
+        self.assertIn('"chunk": "hello"', events[chunk_index])
+
+    async def test_spud_link_keeps_one_shot_provider_reply_atomic(self):
+        events = await self._collect_events(["complete response"])
+
+        self.assertFalse(
+            any("event: tater.response_chunk" in event for event in events)
+        )
+        self.assertTrue(any("event: tater.message" in event for event in events))
+
+
 class ChatRuntimeReuseTests(unittest.TestCase):
     def test_chat_jobs_share_one_async_runtime_and_emit_stream_chunks(self):
         import tateros_app
@@ -604,7 +674,8 @@ class ChatRuntimeReuseTests(unittest.TestCase):
             loop_ids.append(id(asyncio.get_running_loop()))
             callback = kwargs.get("response_callback")
             if callable(callback):
-                callback("hello")
+                callback("hel")
+                callback("lo")
             return {
                 "responses": ["hello"],
                 "agent": True,
@@ -642,6 +713,51 @@ class ChatRuntimeReuseTests(unittest.TestCase):
 
             self.assertEqual(len(set(loop_ids)), 1)
             self.assertIn("response_chunk", event_types)
+            self.assertIn("done", event_types)
+        finally:
+            manager.shutdown(timeout=2)
+
+    def test_chat_jobs_keep_one_shot_provider_reply_atomic(self):
+        import tateros_app
+
+        manager = tateros_app.ChatJobManager()
+
+        async def fake_process_message(**kwargs):
+            callback = kwargs.get("response_callback")
+            if callable(callback):
+                callback("complete response")
+            return {
+                "responses": ["complete response"],
+                "agent": True,
+                "task_name": "test",
+            }
+
+        try:
+            with (
+                mock.patch.object(
+                    tateros_app,
+                    "_process_message",
+                    side_effect=fake_process_message,
+                ),
+                mock.patch.object(tateros_app, "_save_chat_message"),
+            ):
+                created = manager.create_job(
+                    user_name="User",
+                    message="message",
+                    session_id="session",
+                )
+                job_id = created["job_id"]
+                with manager.lock:
+                    future = manager.jobs[job_id]["future"]
+                future.result(timeout=3)
+
+                with manager.lock:
+                    event_queue = manager.jobs[job_id]["events"]
+                    event_types = []
+                    while not event_queue.empty():
+                        event_types.append(event_queue.get_nowait()["type"])
+
+            self.assertNotIn("response_chunk", event_types)
             self.assertIn("done", event_types)
         finally:
             manager.shutdown(timeout=2)
