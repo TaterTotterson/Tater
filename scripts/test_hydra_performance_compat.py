@@ -30,6 +30,17 @@ def _local_result(text: str = "ok"):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
+    def test_context_bounded_generation_maps_to_llama_infinity_sentinel(self):
+        client = helpers.LlamaCppLLMClientWrapper(model="test-model")
+        chat_kwargs = client._build_chat_kwargs(
+            None,
+            {"max_tokens": None, "temperature": 0.0},
+        )
+        payload = helpers._llama_cpp_native_completion_payload("prompt", chat_kwargs)
+
+        self.assertEqual(chat_kwargs["max_tokens"], -1)
+        self.assertEqual(payload["n_predict"], -1)
+
     def test_unified_vision_server_keeps_text_batch_settings(self):
         def n_ctx(*, vision=False):
             return 4096 if vision else 70000
@@ -208,6 +219,89 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
 
 class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_omitted_max_tokens_keeps_local_provider_default(self):
+        for client in (
+            helpers.TransformersLLMClientWrapper(model="test-model"),
+            helpers.LlamaCppLLMClientWrapper(model="test-model"),
+            helpers.MlxLmLLMClientWrapper(model="test-model"),
+        ):
+            captured = {}
+
+            def fake_chat(messages, *, timeout=None, **kwargs):
+                captured.update(kwargs)
+                return _local_result()
+
+            with mock.patch.object(client, "_chat_sync", side_effect=fake_chat):
+                await client.chat([{"role": "user", "content": "hello"}])
+
+            self.assertEqual(captured["max_tokens"], client.max_tokens)
+
+    async def test_explicit_none_reaches_local_provider_builders(self):
+        for client in (
+            helpers.TransformersLLMClientWrapper(model="test-model"),
+            helpers.LlamaCppLLMClientWrapper(model="test-model"),
+            helpers.MlxLmLLMClientWrapper(model="test-model"),
+        ):
+            captured = {}
+
+            def fake_chat(messages, *, timeout=None, **kwargs):
+                captured.update(kwargs)
+                return _local_result()
+
+            with mock.patch.object(client, "_chat_sync", side_effect=fake_chat):
+                await client.chat(
+                    [{"role": "user", "content": "hello"}],
+                    max_tokens=None,
+                )
+
+            self.assertIn("max_tokens", captured)
+            self.assertIsNone(captured["max_tokens"])
+
+    def test_transformers_none_uses_remaining_context(self):
+        client = helpers.TransformersLLMClientWrapper(model="test-model")
+        tokenizer = SimpleNamespace(eos_token_id=2, pad_token_id=2)
+        with mock.patch.object(helpers, "_hf_llm_max_input_tokens", return_value=4096):
+            kwargs = client._build_generation_kwargs(
+                tokenizer,
+                None,
+                {"max_tokens": None, "temperature": 0.0},
+                prompt_tokens=1096,
+            )
+
+        self.assertEqual(kwargs["max_new_tokens"], 3000)
+
+    def test_mlx_none_uses_remaining_model_context(self):
+        client = helpers.MlxLmLLMClientWrapper(model="test-model")
+        tokenizer = SimpleNamespace(encode=lambda _text: list(range(128)))
+        bundle = {
+            "config": {"text_config": {"max_position_embeddings": 32768}},
+            "tokenizer": tokenizer,
+        }
+        captured = {}
+
+        def fake_generate(_bundle, _prompt, **kwargs):
+            captured.update(kwargs)
+            return {
+                "content": "ok",
+                "prompt_tokens": 128,
+                "completion_tokens": 1,
+                "elapsed": 0.01,
+            }
+
+        with (
+            mock.patch.object(client, "_chat_template_prompt", return_value="prompt"),
+            mock.patch.object(helpers, "_mlx_lm_max_kv_size", return_value=None),
+            mock.patch.object(helpers, "_mlx_engine_run_generation", side_effect=fake_generate),
+        ):
+            client._chat_sync_mlx_engine(
+                bundle,
+                [{"role": "user", "content": "hello"}],
+                max_tokens=None,
+                temperature=0.0,
+            )
+
+        self.assertEqual(captured["max_tokens"], 32640)
+
     async def test_local_llama_streams_without_forwarding_cache_metadata(self):
         client = helpers.LlamaCppLLMClientWrapper(model="test-model")
         captured = {}
@@ -491,6 +585,97 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, ["ok"])
         self.assertNotIn("cache_namespace", fake_http.body)
         self.assertNotIn("activity", fake_http.body)
+
+    async def test_spud_link_preserves_explicit_context_bounded_request(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "model": "test-model",
+                    "message": {"role": "assistant", "content": "ok"},
+                    "usage": {},
+                }
+
+        class Client:
+            async def post(self, _url, *, json, headers, timeout):
+                self.body = dict(json)
+                return Response()
+
+        client = helpers.SpudLinkLLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+            api_key="secret",
+        )
+        fake_http = Client()
+        client._client = fake_http
+        client._owns_http_client = False
+
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            max_tokens=None,
+        )
+
+        self.assertIn("max_tokens", fake_http.body)
+        self.assertIsNone(fake_http.body["max_tokens"])
+
+    async def test_spud_link_hub_distinguishes_omitted_and_explicit_null_max_tokens(self):
+        import tateros_app
+
+        class LLMClient:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, _messages, **kwargs):
+                self.calls.append(dict(kwargs))
+                return {
+                    "model": "test-model",
+                    "message": {"role": "assistant", "content": "ok"},
+                }
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        class ClientContext:
+            def __init__(self, client):
+                self.client = client
+
+            async def __aenter__(self):
+                return self.client
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        client = LLMClient()
+        omitted = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        explicit_null = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=None,
+        )
+
+        with (
+            mock.patch.object(
+                tateros_app,
+                "get_llm_client_from_env",
+                side_effect=lambda **_kwargs: ClientContext(client),
+            ),
+            mock.patch.object(tateros_app, "_save_last_llm_stats"),
+        ):
+            await tateros_app._run_spud_link_native_llm_completion(
+                omitted,
+                omitted.messages,
+            )
+            await tateros_app._run_spud_link_native_llm_completion(
+                explicit_null,
+                explicit_null.messages,
+            )
+
+        self.assertNotIn("max_tokens", client.calls[0])
+        self.assertIn("max_tokens", client.calls[1])
+        self.assertIsNone(client.calls[1]["max_tokens"])
 
     async def test_round_robin_is_role_affine_but_plain_calls_still_rotate(self):
         class Client:
