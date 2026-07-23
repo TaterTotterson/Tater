@@ -573,6 +573,7 @@ DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL = ""
 DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS = 256
+DEFAULT_LLAMA_CPP_MTP_CONTEXT_CHECKPOINTS = 0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
@@ -1487,6 +1488,21 @@ def _llama_cpp_cache_reuse_tokens() -> int:
     except Exception:
         value = DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS
     return max(0, min(8192, int(value)))
+
+
+def _llama_cpp_context_checkpoints(*, mtp_enabled: bool = False) -> int:
+    raw = str(
+        os.getenv("TATER_LLAMA_CPP_CTX_CHECKPOINTS")
+        or os.getenv("LLAMA_ARG_CTX_CHECKPOINTS")
+        or ""
+    ).strip()
+    if not raw:
+        return DEFAULT_LLAMA_CPP_MTP_CONTEXT_CHECKPOINTS if mtp_enabled else -1
+    try:
+        value = int(float(raw))
+    except Exception:
+        return DEFAULT_LLAMA_CPP_MTP_CONTEXT_CHECKPOINTS if mtp_enabled else -1
+    return max(0, min(1024, int(value)))
 
 
 def _llama_cpp_slot_count() -> int:
@@ -2861,6 +2877,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "n_batch": _llama_cpp_n_batch(),
         "n_ubatch": _llama_cpp_n_ubatch(),
         "cache_reuse_tokens": _llama_cpp_cache_reuse_tokens(),
+        "ctx_checkpoints": _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         "slot_count": _llama_cpp_slot_count(),
         "base_slot": _llama_cpp_slot_id("base"),
         "vision_slot": _llama_cpp_slot_id("vision"),
@@ -2875,6 +2892,8 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
             "TATER_LLAMA_CPP_N_UBATCH": str(os.getenv("TATER_LLAMA_CPP_N_UBATCH") or ""),
             "TATER_LLAMA_CPP_CACHE_REUSE_TOKENS": str(os.getenv("TATER_LLAMA_CPP_CACHE_REUSE_TOKENS") or ""),
+            "TATER_LLAMA_CPP_CTX_CHECKPOINTS": str(os.getenv("TATER_LLAMA_CPP_CTX_CHECKPOINTS") or ""),
+            "LLAMA_ARG_CTX_CHECKPOINTS": str(os.getenv("LLAMA_ARG_CTX_CHECKPOINTS") or ""),
             "TATER_LLAMA_CPP_FLASH_ATTN": str(os.getenv("TATER_LLAMA_CPP_FLASH_ATTN") or ""),
             "TATER_LLAMA_CPP_OFFLOAD_KQV": str(os.getenv("TATER_LLAMA_CPP_OFFLOAD_KQV") or ""),
             "TATER_LLAMA_CPP_SLOT_COUNT": str(os.getenv("TATER_LLAMA_CPP_SLOT_COUNT") or ""),
@@ -5886,6 +5905,7 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_n_batch(vision=vision),
         _llama_cpp_n_ubatch(vision=vision),
         _llama_cpp_cache_reuse_tokens(),
+        _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
@@ -5910,6 +5930,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_n_ubatch(vision=False),
         _llama_cpp_n_ubatch(vision=True),
         _llama_cpp_cache_reuse_tokens(),
+        _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
         _llama_cpp_offload_kqv_enabled(),
@@ -6480,6 +6501,7 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "n_batch",
         "n_ubatch",
         "cache_reuse_tokens",
+        "ctx_checkpoints",
         "slot_count",
         "base_slot",
         "vision_slot",
@@ -6594,6 +6616,7 @@ def _llama_cpp_native_server_command(
     n_gpu_layers = _llama_cpp_n_gpu_layers()
     slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
+    ctx_checkpoints = _llama_cpp_context_checkpoints(mtp_enabled=mtp_requested)
     mtp_draft_model = _llama_cpp_mtp_draft_model()
     mtp_draft_model_path = ""
     if mtp_requested and mtp_draft_model:
@@ -6632,6 +6655,8 @@ def _llama_cpp_native_server_command(
         cmd.extend(["--ubatch-size", str(int(n_ubatch))])
     if cache_reuse_tokens > 0:
         cmd.extend(["--cache-reuse", str(int(cache_reuse_tokens))])
+    if ctx_checkpoints >= 0:
+        cmd.extend(["--ctx-checkpoints", str(int(ctx_checkpoints))])
     if _llama_cpp_flash_attn_enabled():
         cmd.extend(["--flash-attn", "on"])
     if not _llama_cpp_offload_kqv_enabled():
@@ -6665,6 +6690,7 @@ def _llama_cpp_native_server_command(
         "n_batch": int(n_batch),
         "n_ubatch": int(n_ubatch),
         "cache_reuse_tokens": int(cache_reuse_tokens),
+        "ctx_checkpoints": int(ctx_checkpoints),
         "slot_count": int(slot_count),
         "base_slot": int(_llama_cpp_slot_id("base")),
         "vision_slot": int(_llama_cpp_slot_id("vision")),
@@ -7203,20 +7229,43 @@ def _llama_cpp_engine_chat_completion(
     # llama-server owns slot-level queuing and can execute distinct slots in
     # parallel. A process-wide lock here previously reduced --parallel back to
     # one effective request even when Hydra had independent work available.
-    return engine.request(
-        "chat",
-        {
-            "model": model_token,
-            "messages": local_messages,
-            "chat_kwargs": dict(chat_kwargs),
-            "vision": bool(vision),
-            "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
-            "stream": bool(callable(stream_callback)),
-            "timeout": timeout_seconds,
-        },
-        timeout=timeout_seconds,
-        stream_callback=stream_callback,
-    )
+    try:
+        return engine.request(
+            "chat",
+            {
+                "model": model_token,
+                "messages": local_messages,
+                "chat_kwargs": dict(chat_kwargs),
+                "vision": bool(vision),
+                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
+                "stream": bool(callable(stream_callback)),
+                "timeout": timeout_seconds,
+            },
+            timeout=timeout_seconds,
+            stream_callback=stream_callback,
+        )
+    except Exception as exc:
+        lowered = str(exc or "").strip().lower()
+        is_timeout = isinstance(exc, (TimeoutError, requests.exceptions.Timeout)) or any(
+            marker in lowered
+            for marker in ("timed out", "read timeout", "timeout during", "timeout awaiting")
+        )
+        if is_timeout:
+            cache_key = getattr(engine, "cache_key", None)
+            if not cache_key:
+                cache_key = _llama_cpp_engine_cache_key(model_token)
+            with _LLAMA_CPP_ENGINE_CACHE_LOCK:
+                cached = _LLAMA_CPP_ENGINE_CACHE.get(cache_key)
+                if not isinstance(cached, dict) or cached.get("engine") is engine:
+                    _LLAMA_CPP_ENGINE_CACHE.pop(cache_key, None)
+            shutdown_engine = getattr(engine, "shutdown", None)
+            if callable(shutdown_engine):
+                try:
+                    shutdown_engine()
+                except Exception:
+                    logger.debug("[llama-cpp-engine] timed-out engine shutdown failed", exc_info=True)
+            logger.warning("[llama-cpp-engine] recycled the native engine after a chat timeout")
+        raise
 
 
 def _load_llama_cpp_bundle(
@@ -7254,6 +7303,7 @@ def preload_llama_cpp_llm_model(
         "n_gpu_layers": int(bundle.get("n_gpu_layers") or 0),
         "n_batch": int(bundle.get("n_batch") or 0),
         "n_ubatch": int(bundle.get("n_ubatch") or 0),
+        "ctx_checkpoints": int(bundle.get("ctx_checkpoints") or 0),
         "flash_attn": bool(bundle.get("flash_attn")),
         "offload_kqv": bool(bundle.get("offload_kqv")),
         "mtp_requested": bool(bundle.get("mtp_requested")),
@@ -10289,9 +10339,9 @@ class LlamaCppLLMClientWrapper:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
         if max_tokens is None:
-            # llama.cpp defines n_predict=-1 as generation until EOS or the
-            # available context is exhausted.
-            chat_kwargs["max_tokens"] = -1
+            # Background jobs and Spud Link may explicitly pass None. Keep
+            # those requests bounded so a missing EOS cannot monopolize a slot.
+            chat_kwargs["max_tokens"] = self.max_tokens
         else:
             try:
                 chat_kwargs["max_tokens"] = max(1, int(max_tokens))
