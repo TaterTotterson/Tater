@@ -30,7 +30,7 @@ def _local_result(text: str = "ok"):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
-    def test_context_bounded_generation_maps_to_llama_infinity_sentinel(self):
+    def test_explicit_none_uses_bounded_local_default(self):
         client = helpers.LlamaCppLLMClientWrapper(model="test-model")
         chat_kwargs = client._build_chat_kwargs(
             None,
@@ -38,8 +38,48 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         )
         payload = helpers._llama_cpp_native_completion_payload("prompt", chat_kwargs)
 
-        self.assertEqual(chat_kwargs["max_tokens"], -1)
-        self.assertEqual(payload["n_predict"], -1)
+        self.assertEqual(chat_kwargs["max_tokens"], client.max_tokens)
+        self.assertEqual(payload["n_predict"], client.max_tokens)
+
+    def test_mtp_keeps_speculation_and_disables_context_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(helpers, "_llama_cpp_n_ctx", return_value=4096),
+                mock.patch.object(helpers, "_llama_cpp_n_batch", return_value=512),
+                mock.patch.object(helpers, "_llama_cpp_n_ubatch", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_cache_reuse_tokens", return_value=256),
+                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+                mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_tokens", return_value=2),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
+                mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_offload_kqv_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_chat_template_override_text", return_value=""),
+                mock.patch.dict(
+                    helpers.os.environ,
+                    {
+                        "TATER_LLAMA_CPP_CTX_CHECKPOINTS": "",
+                        "LLAMA_ARG_CTX_CHECKPOINTS": "",
+                        "TATER_LLAMA_CPP_CHAT_FORMAT": "",
+                        "TATER_LLAMA_CPP_USE_MLOCK": "0",
+                    },
+                    clear=False,
+                ),
+            ):
+                command, metadata = helpers._llama_cpp_native_server_command(
+                    server_bin="/tmp/llama-server",
+                    model_path="/tmp/model.gguf",
+                    mmproj_path="",
+                    temp_dir=temp_dir,
+                )
+
+        self.assertEqual(command[command.index("--ctx-checkpoints") + 1], "0")
+        self.assertEqual(command[command.index("--spec-type") + 1], "draft-mtp")
+        self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "2")
+        self.assertEqual(metadata["ctx_checkpoints"], 0)
+        self.assertTrue(metadata["mtp_enabled"])
 
     def test_unified_vision_server_keeps_text_batch_settings(self):
         def n_ctx(*, vision=False):
@@ -169,6 +209,40 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 [future.result(timeout=2) for future in futures]
 
         self.assertEqual(engine.max_active, 2)
+
+    def test_parent_engine_recycles_after_chat_timeout(self):
+        class Engine:
+            def __init__(self):
+                self.cache_key = ("timeout-test",)
+                self.shutdown_calls = 0
+
+            def request(self, *_args, **_kwargs):
+                raise TimeoutError("Tater llama.cpp engine timed out during chat.")
+
+            def shutdown(self):
+                self.shutdown_calls += 1
+
+        engine = Engine()
+        bundle = {"engine": engine}
+        helpers._LLAMA_CPP_ENGINE_CACHE[engine.cache_key] = bundle
+        try:
+            with (
+                mock.patch.object(
+                    helpers, "_load_llama_cpp_engine_bundle", return_value=bundle
+                ),
+                mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
+            ):
+                with self.assertRaises(TimeoutError):
+                    helpers._llama_cpp_engine_chat_completion(
+                        "model",
+                        [{"role": "user", "content": "hello"}],
+                        {},
+                        timeout=1,
+                    )
+        finally:
+            helpers._LLAMA_CPP_ENGINE_CACHE.pop(engine.cache_key, None)
+
+        self.assertEqual(engine.shutdown_calls, 1)
 
     def test_native_stream_parser_emits_chunks_and_keeps_timings(self):
         class Response:

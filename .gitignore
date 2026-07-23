@@ -33,6 +33,7 @@ integrations/*
 
 # Local runtime config/cache.
 .runtime/
+wav2vec2_checkpoints/
 
 # macOS launcher build products.
 macos/Tater/.build/
