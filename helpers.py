@@ -579,6 +579,7 @@ DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
 DEFAULT_LLAMA_CPP_SLOT_ID = -1
 DEFAULT_MLX_LM_TRUST_REMOTE_CODE = False
 DEFAULT_MLX_LM_LAZY_LOAD = False
+DEFAULT_MLX_LM_CONTEXT_TOKENS = 4096
 DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE = 2048
 MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE = 4096
 FAST_MLX_ENGINE_PREFILL_STEP_SIZE = 8192
@@ -3164,6 +3165,40 @@ def _mlx_lm_max_kv_size() -> Optional[int]:
         None,
         minimum=128,
     )
+
+
+def _mlx_lm_context_tokens_for_bundle(bundle: Any) -> int:
+    configured = _mlx_lm_max_kv_size()
+    if configured is not None:
+        return max(1, int(configured))
+
+    sources: List[Any] = []
+    if isinstance(bundle, dict):
+        config = bundle.get("config")
+        sources.append(config)
+        if isinstance(config, dict):
+            sources.extend((config.get("text_config"), config.get("llm_config")))
+        sources.extend((bundle.get("tokenizer"), bundle.get("processor")))
+
+    for source in sources:
+        if source is None:
+            continue
+        for key in (
+            "max_position_embeddings",
+            "max_sequence_length",
+            "max_seq_len",
+            "seq_length",
+            "context_length",
+            "model_max_length",
+        ):
+            value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if 256 <= parsed <= 1_048_576:
+                return parsed
+    return DEFAULT_MLX_LM_CONTEXT_TOKENS
 
 
 def _mlx_runtime_call(func: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
@@ -6252,7 +6287,8 @@ def _llama_cpp_native_completion_payload(
     if "n_predict" not in payload:
         payload["n_predict"] = int(os.getenv("LLM_MAX_TOKENS", "1024"))
     try:
-        payload["n_predict"] = max(1, int(payload.get("n_predict") or 1024))
+        n_predict = int(payload.get("n_predict") if payload.get("n_predict") is not None else 1024)
+        payload["n_predict"] = -1 if n_predict < 0 else max(1, n_predict)
     except Exception:
         payload["n_predict"] = 1024
     return payload
@@ -9506,8 +9542,6 @@ class SpudLinkLLMClientWrapper:
 
         if "max_tokens" not in kwargs:
             kwargs["max_tokens"] = self.max_tokens
-        elif kwargs.get("max_tokens") is None:
-            kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
@@ -9943,13 +9977,26 @@ class TransformersLLMClientWrapper:
         except Exception:
             return _coerce_content_to_text(raw)
 
-    def _build_generation_kwargs(self, tokenizer: Any, timeout: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_generation_kwargs(
+        self,
+        tokenizer: Any,
+        timeout: Any,
+        kwargs: Dict[str, Any],
+        *,
+        prompt_tokens: int = 0,
+    ) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
         max_new_tokens = kwargs.pop("max_tokens", self.max_tokens)
-        try:
-            generation_kwargs["max_new_tokens"] = max(1, int(max_new_tokens))
-        except Exception:
-            generation_kwargs["max_new_tokens"] = self.max_tokens
+        if max_new_tokens is None:
+            generation_kwargs["max_new_tokens"] = max(
+                1,
+                _hf_llm_max_input_tokens() - max(0, int(prompt_tokens or 0)),
+            )
+        else:
+            try:
+                generation_kwargs["max_new_tokens"] = max(1, int(max_new_tokens))
+            except Exception:
+                generation_kwargs["max_new_tokens"] = self.max_tokens
 
         temperature = kwargs.pop("temperature", self.temperature)
         try:
@@ -10009,7 +10056,13 @@ class TransformersLLMClientWrapper:
         generation_lock = bundle["lock"]
 
         encoded, prompt_tokens = self._encode_messages(bundle, messages)
-        generation_kwargs = self._build_generation_kwargs(tokenizer, timeout, kwargs)
+        is_encoder_decoder = bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
+        generation_kwargs = self._build_generation_kwargs(
+            tokenizer,
+            timeout,
+            kwargs,
+            prompt_tokens=0 if is_encoder_decoder else prompt_tokens,
+        )
 
         with generation_lock:
             generation_started = time.perf_counter()
@@ -10018,7 +10071,6 @@ class TransformersLLMClientWrapper:
         generation_elapsed = max(0.0, time.perf_counter() - generation_started)
 
         input_ids = encoded["input_ids"]
-        is_encoder_decoder = bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
         completion_ids = output_ids[0] if is_encoder_decoder else output_ids[0][int(input_ids.shape[-1]):]
         content = self._decode_completion(bundle, completion_ids)
         content = self._apply_stop_sequences(_coerce_content_to_text(content).strip(), stop).strip()
@@ -10061,8 +10113,6 @@ class TransformersLLMClientWrapper:
 
         if "max_tokens" not in kwargs:
             kwargs["max_tokens"] = self.max_tokens
-        elif kwargs.get("max_tokens") is None:
-            kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
@@ -10238,10 +10288,15 @@ class LlamaCppLLMClientWrapper:
         if chat_template_kwargs:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
-        try:
-            chat_kwargs["max_tokens"] = max(1, int(max_tokens))
-        except Exception:
-            chat_kwargs["max_tokens"] = self.max_tokens
+        if max_tokens is None:
+            # llama.cpp defines n_predict=-1 as generation until EOS or the
+            # available context is exhausted.
+            chat_kwargs["max_tokens"] = -1
+        else:
+            try:
+                chat_kwargs["max_tokens"] = max(1, int(max_tokens))
+            except Exception:
+                chat_kwargs["max_tokens"] = self.max_tokens
         temperature = kwargs.pop("temperature", self.temperature)
         try:
             chat_kwargs["temperature"] = float(temperature)
@@ -10321,8 +10376,6 @@ class LlamaCppLLMClientWrapper:
             self.model = str(model).strip()
         if "max_tokens" not in kwargs:
             kwargs["max_tokens"] = self.max_tokens
-        elif kwargs.get("max_tokens") is None:
-            kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
         try:
@@ -10687,10 +10740,13 @@ class MlxLmLLMClientWrapper:
     def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
-        try:
-            generation_kwargs["max_tokens"] = max(1, int(max_tokens))
-        except Exception:
-            generation_kwargs["max_tokens"] = self.max_tokens
+        if max_tokens is None:
+            generation_kwargs["max_tokens"] = _mlx_lm_context_tokens_for_bundle(bundle)
+        else:
+            try:
+                generation_kwargs["max_tokens"] = max(1, int(max_tokens))
+            except Exception:
+                generation_kwargs["max_tokens"] = self.max_tokens
 
         temperature = kwargs.pop("temperature", self.temperature)
         try:
@@ -10769,10 +10825,16 @@ class MlxLmLLMClientWrapper:
         tokenizer = bundle.get("tokenizer") or bundle.get("processor")
         prompt = self._chat_template_prompt(tokenizer, messages)
         max_tokens = kwargs.pop("max_tokens", self.max_tokens)
-        try:
-            max_tokens_i = max(1, int(max_tokens))
-        except Exception:
-            max_tokens_i = self.max_tokens
+        if max_tokens is None:
+            max_tokens_i = max(
+                1,
+                _mlx_lm_context_tokens_for_bundle(bundle) - self._estimate_tokens(tokenizer, prompt),
+            )
+        else:
+            try:
+                max_tokens_i = max(1, int(max_tokens))
+            except Exception:
+                max_tokens_i = self.max_tokens
         temperature = kwargs.pop("temperature", self.temperature)
         try:
             temp_value = max(0.0, float(temperature))
@@ -10835,8 +10897,6 @@ class MlxLmLLMClientWrapper:
             self.model = str(model).strip()
         if "max_tokens" not in kwargs:
             kwargs["max_tokens"] = self.max_tokens
-        elif kwargs.get("max_tokens") is None:
-            kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
         try:

@@ -6281,7 +6281,12 @@ async def _run_tater_api_direct_completion(
     messages: List[Dict[str, str]],
 ) -> Dict[str, Any]:
     generation_kwargs: Dict[str, Any] = {"activity": "external_api"}
-    if payload.max_tokens is not None:
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    if "max_tokens" in set(fields_set or set()) and payload.max_tokens is None:
+        generation_kwargs["max_tokens"] = None
+    elif payload.max_tokens is not None:
         try:
             generation_kwargs["max_tokens"] = max(1, int(payload.max_tokens))
         except Exception:
@@ -6435,7 +6440,12 @@ async def _run_spud_link_native_llm_completion(
     messages: List[Dict[str, str]],
 ) -> Dict[str, Any]:
     generation_kwargs: Dict[str, Any] = {"activity": "spud_link_model"}
-    if payload.max_tokens is not None:
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    if "max_tokens" in set(fields_set or set()) and payload.max_tokens is None:
+        generation_kwargs["max_tokens"] = None
+    elif payload.max_tokens is not None:
         try:
             generation_kwargs["max_tokens"] = max(1, int(payload.max_tokens))
         except Exception:
