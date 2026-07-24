@@ -574,6 +574,7 @@ DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS = 256
 DEFAULT_LLAMA_CPP_MTP_CONTEXT_CHECKPOINTS = 0
+DEFAULT_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS = 120.0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
@@ -1647,6 +1648,47 @@ def _llama_cpp_mtp_draft_model() -> str:
 def _llama_cpp_mtp_spec_type() -> str:
     token = str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or "draft-mtp").strip().lower()
     return token or "draft-mtp"
+
+
+def _llama_cpp_mtp_single_slot_workaround(
+    model_identifier: Any,
+    *,
+    mtp_enabled: bool,
+) -> bool:
+    """Protect affected Qwen hybrid MTP models from Metal parallel-slot stalls."""
+    if not mtp_enabled:
+        return False
+    if platform.system().lower() != "darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
+        return False
+    if not _boolish(os.getenv("TATER_LLAMA_CPP_MTP_SINGLE_SLOT"), default=True):
+        return False
+    token = re.sub(r"[^a-z0-9]+", "", str(model_identifier or "").lower())
+    return (
+        any(version in token for version in ("qwen35", "qwen36"))
+        and "35b" in token
+        and "a3b" in token
+    )
+
+
+def _llama_cpp_mtp_stall_timeout_seconds(
+    model_identifier: Any,
+    *,
+    mtp_enabled: bool,
+) -> float:
+    if not _llama_cpp_mtp_single_slot_workaround(
+        model_identifier,
+        mtp_enabled=mtp_enabled,
+    ):
+        return 0.0
+    raw = str(
+        os.getenv("TATER_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS")
+        or DEFAULT_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS
+    ).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = DEFAULT_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS
+    return max(30.0, min(600.0, value))
 
 
 def _llama_cpp_mtp_load_arg_support(Llama: Any) -> Dict[str, Any]:
@@ -2905,6 +2947,10 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_MTP_DRAFT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS") or ""),
             "TATER_LLAMA_CPP_MTP_SPEC_TYPE": str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or ""),
             "TATER_LLAMA_CPP_MTP_DRAFT_MODEL": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_MODEL") or ""),
+            "TATER_LLAMA_CPP_MTP_SINGLE_SLOT": str(os.getenv("TATER_LLAMA_CPP_MTP_SINGLE_SLOT") or ""),
+            "TATER_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS": str(
+                os.getenv("TATER_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS") or ""
+            ),
             "TATER_LLAMA_CPP_SERVER_BIN": str(os.getenv("TATER_LLAMA_CPP_SERVER_BIN") or ""),
             "TATER_LLAMA_CPP_NATIVE_BIN": str(os.getenv("TATER_LLAMA_CPP_NATIVE_BIN") or ""),
             "CUDA_VISIBLE_DEVICES": str(os.getenv("CUDA_VISIBLE_DEVICES") or ""),
@@ -6502,6 +6548,7 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "n_ubatch",
         "cache_reuse_tokens",
         "ctx_checkpoints",
+        "configured_slot_count",
         "slot_count",
         "base_slot",
         "vision_slot",
@@ -6518,6 +6565,8 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "mtp_draft_tokens",
         "mtp_draft_model",
         "mtp_draft_model_path",
+        "mtp_single_slot_workaround",
+        "mtp_stall_timeout_seconds",
         "mtp_warning",
         "chat_template_override",
         "chat_template_override_hash",
@@ -6614,8 +6663,29 @@ def _llama_cpp_native_server_command(
     n_ubatch = _llama_cpp_n_ubatch(vision=False)
     cache_reuse_tokens = _llama_cpp_cache_reuse_tokens()
     n_gpu_layers = _llama_cpp_n_gpu_layers()
-    slot_count = _llama_cpp_slot_count()
+    configured_slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
+    model_identity = " ".join(
+        (
+            str(model_path or ""),
+            str(os.getenv("TATER_LLAMA_CPP_ACTIVE_MODEL") or ""),
+        )
+    )
+    mtp_single_slot_workaround = _llama_cpp_mtp_single_slot_workaround(
+        model_identity,
+        mtp_enabled=mtp_requested,
+    )
+    slot_count = 1 if mtp_single_slot_workaround else configured_slot_count
+    mtp_stall_timeout_seconds = _llama_cpp_mtp_stall_timeout_seconds(
+        model_identity,
+        mtp_enabled=mtp_requested,
+    )
+    base_slot = _llama_cpp_slot_id("base")
+    if base_slot >= slot_count:
+        base_slot = DEFAULT_LLAMA_CPP_SLOT_ID
+    vision_slot = _llama_cpp_slot_id("vision")
+    if vision_slot >= slot_count:
+        vision_slot = DEFAULT_LLAMA_CPP_SLOT_ID
     ctx_checkpoints = _llama_cpp_context_checkpoints(mtp_enabled=mtp_requested)
     mtp_draft_model = _llama_cpp_mtp_draft_model()
     mtp_draft_model_path = ""
@@ -6691,9 +6761,10 @@ def _llama_cpp_native_server_command(
         "n_ubatch": int(n_ubatch),
         "cache_reuse_tokens": int(cache_reuse_tokens),
         "ctx_checkpoints": int(ctx_checkpoints),
+        "configured_slot_count": int(configured_slot_count),
         "slot_count": int(slot_count),
-        "base_slot": int(_llama_cpp_slot_id("base")),
-        "vision_slot": int(_llama_cpp_slot_id("vision")),
+        "base_slot": int(base_slot),
+        "vision_slot": int(vision_slot),
         "flash_attn": bool(_llama_cpp_flash_attn_enabled()),
         "offload_kqv": bool(_llama_cpp_offload_kqv_enabled()),
         "mtp_requested": bool(mtp_requested),
@@ -6702,6 +6773,14 @@ def _llama_cpp_native_server_command(
         "mtp_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
         "mtp_draft_model": mtp_draft_model,
         "mtp_draft_model_path": mtp_draft_model_path,
+        "mtp_single_slot_workaround": bool(mtp_single_slot_workaround),
+        "mtp_stall_timeout_seconds": float(mtp_stall_timeout_seconds),
+        "mtp_warning": (
+            "Apple Metal hybrid-MTP safeguard: one llama.cpp slot with a "
+            f"{int(mtp_stall_timeout_seconds)}-second inactivity watchdog."
+            if mtp_single_slot_workaround
+            else ""
+        ),
         "chat_template_override": bool(chat_template),
         "chat_template_handler": "llama-server --chat-template-file" if chat_template else "",
         "chat_template_warning": "",
@@ -6862,23 +6941,48 @@ def _llama_cpp_native_worker_chat(
             "prompt_string": prompt,
             "multimodal_data": media,
         }
-    completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=slot_id)
+    try:
+        effective_slot_count = max(1, int(metadata.get("slot_count") or 1))
+    except Exception:
+        effective_slot_count = 1
+    try:
+        requested_slot = int(slot_id) if slot_id is not None else DEFAULT_LLAMA_CPP_SLOT_ID
+    except Exception:
+        requested_slot = DEFAULT_LLAMA_CPP_SLOT_ID
+    effective_slot = (
+        requested_slot
+        if effective_slot_count > 1 and 0 <= requested_slot < effective_slot_count
+        else None
+    )
+    completion_payload = _llama_cpp_native_completion_payload(
+        completion_prompt,
+        chat_kwargs,
+        slot_id=effective_slot,
+    )
+    try:
+        stall_timeout = max(0.0, float(metadata.get("mtp_stall_timeout_seconds") or 0.0))
+    except Exception:
+        stall_timeout = 0.0
+    request_timeout = max(30.0, timeout or 600.0)
+    if stall_timeout > 0:
+        request_timeout = min(request_timeout, stall_timeout)
     generation_started = time.perf_counter()
-    if callable(stream_callback):
+    if callable(stream_callback) or stall_timeout > 0:
         completion_payload["stream"] = True
+        completion_payload["return_progress"] = bool(stall_timeout > 0)
         completion_response = _llama_cpp_native_stream_post(
             base_url,
             "/completion",
             completion_payload,
-            stream_callback=stream_callback,
-            timeout=max(30.0, timeout or 600.0),
+            stream_callback=stream_callback if callable(stream_callback) else (lambda _chunk: None),
+            timeout=request_timeout,
         )
     else:
         completion_response = _llama_cpp_native_json_post(
             base_url,
             "/completion",
             completion_payload,
-            timeout=max(30.0, timeout or 600.0),
+            timeout=request_timeout,
         )
     generation_elapsed = max(0.0, time.perf_counter() - generation_started)
     return _llama_cpp_native_completion_result(
@@ -6926,6 +7030,11 @@ class _TaterLlamaCppEngineProcess:
         env = dict(os.environ)
         env[_LLAMA_CPP_ENGINE_WORKER_ENV] = "1"
         env.setdefault("PYTHONUNBUFFERED", "1")
+        popen_kwargs = dict(_macos_posix_spawn_kwargs())
+        if os.name != "nt":
+            # Keep the engine worker and its llama-server child in a dedicated
+            # process group so a forced recycle cannot orphan the child.
+            popen_kwargs["start_new_session"] = True
         self.process = subprocess.Popen(
             self._command(),
             stdin=subprocess.PIPE,
@@ -6934,7 +7043,7 @@ class _TaterLlamaCppEngineProcess:
             text=True,
             bufsize=1,
             env=env,
-            **_macos_posix_spawn_kwargs(),
+            **popen_kwargs,
         )
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
@@ -7081,14 +7190,11 @@ class _TaterLlamaCppEngineProcess:
             except Exception:
                 pass
         if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _terminate_process(
+                proc,
+                timeout=5.0,
+                process_group=(os.name != "nt"),
+            )
         try:
             if proc.stdin is not None:
                 proc.stdin.close()
@@ -7304,6 +7410,8 @@ def preload_llama_cpp_llm_model(
         "n_batch": int(bundle.get("n_batch") or 0),
         "n_ubatch": int(bundle.get("n_ubatch") or 0),
         "ctx_checkpoints": int(bundle.get("ctx_checkpoints") or 0),
+        "configured_slot_count": int(bundle.get("configured_slot_count") or bundle.get("slot_count") or 1),
+        "slot_count": int(bundle.get("slot_count") or 1),
         "flash_attn": bool(bundle.get("flash_attn")),
         "offload_kqv": bool(bundle.get("offload_kqv")),
         "mtp_requested": bool(bundle.get("mtp_requested")),
@@ -7312,6 +7420,8 @@ def preload_llama_cpp_llm_model(
         "mtp_draft_tokens": int(bundle.get("mtp_draft_tokens") or 0),
         "mtp_draft_model": str(bundle.get("mtp_draft_model") or ""),
         "mtp_draft_model_path": str(bundle.get("mtp_draft_model_path") or ""),
+        "mtp_single_slot_workaround": bool(bundle.get("mtp_single_slot_workaround")),
+        "mtp_stall_timeout_seconds": float(bundle.get("mtp_stall_timeout_seconds") or 0.0),
         "mmproj_path": str(bundle.get("mmproj_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
@@ -12348,8 +12458,11 @@ def _llama_cpp_engine_worker_main() -> int:
                 )
             else:
                 logger.warning("[llama-cpp-engine] failed handling request: %s", exc, exc_info=True)
+    # Stop llama-server first so in-flight HTTP calls unblock before waiting
+    # for their executor threads. This also handles parent death/pipe EOF.
+    with state_lock:
+        _llama_cpp_native_shutdown_state(native_state)
     chat_executor.shutdown(wait=True, cancel_futures=False)
-    _llama_cpp_native_shutdown_state(native_state)
     try:
         protocol_out.flush()
         sys.stderr.flush()
