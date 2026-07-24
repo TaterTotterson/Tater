@@ -78,8 +78,100 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--ctx-checkpoints") + 1], "0")
         self.assertEqual(command[command.index("--spec-type") + 1], "draft-mtp")
         self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "2")
+        self.assertEqual(command[command.index("--parallel") + 1], "2")
         self.assertEqual(metadata["ctx_checkpoints"], 0)
+        self.assertEqual(metadata["configured_slot_count"], 2)
+        self.assertEqual(metadata["slot_count"], 2)
+        self.assertFalse(metadata["mtp_single_slot_workaround"])
         self.assertTrue(metadata["mtp_enabled"])
+
+    def test_qwen_hybrid_mtp_uses_single_slot_on_apple_silicon(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+                mock.patch.object(helpers.platform, "machine", return_value="arm64"),
+                mock.patch.object(helpers, "_llama_cpp_n_ctx", return_value=70000),
+                mock.patch.object(helpers, "_llama_cpp_n_batch", return_value=512),
+                mock.patch.object(helpers, "_llama_cpp_n_ubatch", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_cache_reuse_tokens", return_value=256),
+                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+                mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_tokens", return_value=2),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
+                mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_offload_kqv_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_chat_template_override_text", return_value=""),
+                mock.patch.dict(
+                    helpers.os.environ,
+                    {
+                        "TATER_LLAMA_CPP_MTP_SINGLE_SLOT": "",
+                        "TATER_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS": "",
+                        "TATER_LLAMA_CPP_CHAT_FORMAT": "",
+                        "TATER_LLAMA_CPP_USE_MLOCK": "0",
+                    },
+                    clear=False,
+                ),
+            ):
+                command, metadata = helpers._llama_cpp_native_server_command(
+                    server_bin="/tmp/llama-server",
+                    model_path="/tmp/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf",
+                    mmproj_path="",
+                    temp_dir=temp_dir,
+                )
+
+        self.assertNotIn("--parallel", command)
+        self.assertIn("--spec-type", command)
+        self.assertEqual(metadata["configured_slot_count"], 2)
+        self.assertEqual(metadata["slot_count"], 1)
+        self.assertTrue(metadata["mtp_single_slot_workaround"])
+        self.assertEqual(metadata["mtp_stall_timeout_seconds"], 120.0)
+
+    def test_qwen_hybrid_mtp_watchdog_streams_progress_and_uses_auto_slot(self):
+        state = {"base_url": "http://127.0.0.1:1234"}
+        metadata = {
+            "slot_count": 1,
+            "supports_vision": False,
+            "mtp_stall_timeout_seconds": 120.0,
+        }
+        completion = {
+            "content": "ok",
+            "timings": {"prompt_n": 2, "predicted_n": 1},
+        }
+        with (
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_worker_load",
+                return_value=metadata,
+            ),
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_json_post",
+                return_value={"prompt": "user: hello\nassistant:"},
+            ),
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_stream_post",
+                return_value=completion,
+            ) as stream_post,
+        ):
+            result = helpers._llama_cpp_native_worker_chat(
+                state,
+                "model",
+                [{"role": "user", "content": "hello"}],
+                {"max_tokens": 20},
+                vision=False,
+                slot_id=1,
+                timeout=0.0,
+            )
+
+        payload = stream_post.call_args.args[2]
+        self.assertTrue(payload["stream"])
+        self.assertTrue(payload["return_progress"])
+        self.assertNotIn("id_slot", payload)
+        self.assertEqual(stream_post.call_args.kwargs["timeout"], 120.0)
+        self.assertEqual(result["message"]["content"], "ok")
 
     def test_unified_vision_server_keeps_text_batch_settings(self):
         def n_ctx(*, vision=False):
@@ -244,6 +336,50 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
         self.assertEqual(engine.shutdown_calls, 1)
 
+    def test_engine_worker_starts_in_dedicated_process_group(self):
+        process = SimpleNamespace(
+            poll=lambda: None,
+            stdout=[],
+            stderr=[],
+        )
+        engine = helpers._TaterLlamaCppEngineProcess(
+            cache_key=("process-group-test",),
+            model_token="model",
+        )
+
+        with (
+            mock.patch.object(helpers.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(helpers.threading, "Thread") as thread,
+        ):
+            engine.start()
+
+        if helpers.os.name != "nt":
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(thread.call_count, 2)
+
+    def test_engine_shutdown_terminates_worker_process_group(self):
+        process = SimpleNamespace(
+            poll=lambda: None,
+            stdin=mock.Mock(),
+        )
+        engine = helpers._TaterLlamaCppEngineProcess(
+            cache_key=("process-group-shutdown-test",),
+            model_token="model",
+        )
+        engine.process = process
+
+        with (
+            mock.patch.object(engine, "request", return_value={"shutdown": True}),
+            mock.patch.object(helpers, "_terminate_process") as terminate,
+        ):
+            engine.shutdown()
+
+        terminate.assert_called_once_with(
+            process,
+            timeout=5.0,
+            process_group=(helpers.os.name != "nt"),
+        )
+
     def test_native_stream_parser_emits_chunks_and_keeps_timings(self):
         class Response:
             status_code = 200
@@ -259,6 +395,10 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 self.decode_unicode = decode_unicode
                 return iter(
                     [
+                        (
+                            'data: {"content":"","prompt_progress":'
+                            '{"total":2,"cache":0,"processed":1,"time_ms":5}}'
+                        ).encode("utf-8"),
                         'data: {"content":"Spud Lord! 👋"}'.encode("utf-8"),
                         'data: {"content":" What’s good? 🐶🎮"}'.encode("utf-8"),
                         (

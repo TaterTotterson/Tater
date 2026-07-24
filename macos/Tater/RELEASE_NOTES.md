@@ -1,9 +1,9 @@
-# Tater v96.5
+# Tater v96.6
 
 ## What's Changed
 
-- Improved native llama.cpp stability for MTP models by disabling the per-slot context checkpoint snapshots that can hang hybrid and recurrent architectures, while keeping MTP speculative decoding and normal slots enabled.
-- Added configurable context-checkpoint controls and runtime diagnostics through `TATER_LLAMA_CPP_CTX_CHECKPOINTS` and llama.cpp's `LLAMA_ARG_CTX_CHECKPOINTS` override.
-- Timed-out native llama.cpp chats now recycle the affected engine so a stuck slot cannot continue blocking Spud Link, background work, or later requests.
-- Explicitly uncapped llama.cpp requests now use Tater's configured completion limit, preventing a missing end-of-sequence token from monopolizing a local slot. Context-bounded behavior for the other local providers is unchanged.
-- Added regression coverage for MTP launch arguments, bounded llama.cpp generation, and timeout recovery.
+- Added an Apple Silicon safeguard for Qwen 3.5/3.6 35B-A3B MTP models: MTP remains enabled, but affected models use one effective llama.cpp slot to avoid the Metal parallel-slot stall.
+- Added a 120-second inactivity watchdog backed by llama.cpp prompt-progress streaming. Long requests may continue normally while they are making progress; only stalled requests are recycled early.
+- Native engine workers and their llama-server children now share a dedicated process group, ensuring forced recycling and parent shutdown cannot leave orphan llama-server processes behind.
+- Worker shutdown now stops llama-server before joining in-flight chat threads so blocked HTTP requests unwind promptly.
+- Added regression coverage for model-specific MTP launch behavior, progress-aware timeout handling, and process-tree cleanup.
