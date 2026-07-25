@@ -57,7 +57,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [WakeWord Trainer for NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing. |
 | [Little Spud WebUI](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
 | [Little Spud App](https://github.com/TaterTotterson/Little-Spud-App) | Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub. |
-| [Reachy Mini Voice Satellite](https://huggingface.co/spaces/TaterTotterson/tater_voice_sat) | Reachy Mini robot app that turns Reachy Mini into a voice satellite for Tater or Home Assistant. |
+| [Reachy Home Assistant Satellite](https://huggingface.co/spaces/TaterTotterson/reachy_home_assistant_satellite) | Preserved ESPHome-style Home Assistant voice satellite app for Reachy Mini. |
 | [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone) | Reachy Mini robot app that can run the full Tater app/stack directly on Reachy. |
 | [XBMC4Xbox Skin](https://github.com/TaterTotterson/skin.cortana.tater-xbmc) | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
 
