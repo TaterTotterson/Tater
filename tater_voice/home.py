@@ -12,6 +12,7 @@ from . import native_satellite
 from . import reply_playback as esphome_reply_playback
 from . import settings as esphome_settings
 from . import speaker_id as esphome_speaker_id
+from . import wake_trainer_link
 from . import emotion_id as esphome_emotion_id
 
 IDENTIFY_SATELLITE_TEXT = (
@@ -60,6 +61,7 @@ def is_running() -> bool:
 
 
 async def startup() -> None:
+    esphome_settings.cleanup_removed_user_settings()
     native_satellite.bind_runtime_loop()
     await esphome_runtime.startup()
 
@@ -79,6 +81,196 @@ def _native_satellite_status_snapshot() -> Dict[str, Any]:
     except Exception:
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def _global_satellite_settings_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    connected = len(
+        [
+            row
+            for row in clients.values()
+            if isinstance(row, dict) and bool(row.get("connected"))
+        ]
+    )
+    return {
+        "id": "voice_global_satellite_settings",
+        "group": "global_satellite_settings",
+        "title": "Satellite Voice Settings",
+        "subtitle": (
+            "Shared by every Tater Native satellite. Saving applies these settings immediately "
+            f"to all connected satellites ({connected} connected)."
+        ),
+        "sections": native_live_settings.global_settings_sections(),
+        "save_action": "voice_global_satellite_settings_save",
+        "save_label": "Apply To All Satellites",
+        "remove_action": "",
+    }
+
+
+def _wake_trainer_link_item_form() -> Dict[str, Any]:
+    link = wake_trainer_link.status()
+    linked = bool(link.get("linked"))
+    return {
+        "id": "voice_wake_trainer_link",
+        "group": "wake_trainer_link",
+        "title": "Wake Word Trainer",
+        "subtitle": (
+            "Securely link the trainer with a short pairing code. Once linked, only that trainer "
+            "can publish a new wake word to every satellite."
+        ),
+        "linked": linked,
+        "status_label": "Linked" if linked else "Not Linked",
+        "trainer_name": esphome_runtime.text(link.get("trainer_name")) or "Wake Word Trainer",
+        "trainer_url": esphome_runtime.text(link.get("trainer_url")),
+        "publish_base_url": esphome_runtime.text(link.get("publish_base_url")),
+        "linked_at": esphome_runtime.text(link.get("linked_at")),
+        "last_publish_at": esphome_runtime.text(link.get("last_publish_at")),
+        "last_wake_word": esphome_runtime.text(link.get("last_wake_word")),
+        "start_action": "voice_wake_trainer_link_pairing_start",
+        "status_action": "voice_wake_trainer_link_pairing_status",
+        "unlink_action": "voice_wake_trainer_link_unlink",
+    }
+
+
+def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    rows: List[Dict[str, Any]] = []
+    total_checks = 0
+    total_rejected = 0
+    total_fail_open = 0
+
+    for selector, raw_row in sorted(clients.items(), key=lambda item: esphome_runtime.text(item[0])):
+        if not isinstance(raw_row, dict):
+            continue
+        server = raw_row.get("wake_verifier") if isinstance(raw_row.get("wake_verifier"), dict) else {}
+        last = server.get("last") if isinstance(server.get("last"), dict) else {}
+        last_status = raw_row.get("last_status") if isinstance(raw_row.get("last_status"), dict) else {}
+        wake_engine = last_status.get("wake_engine") if isinstance(last_status.get("wake_engine"), dict) else {}
+        device = wake_engine.get("verifier") if isinstance(wake_engine.get("verifier"), dict) else {}
+
+        server_checks = int(server.get("count") or 0)
+        server_rejected = int(server.get("rejections") or 0)
+        device_checks = int(device.get("completed") or 0)
+        device_rejected = int(device.get("rejections") or 0)
+        checks = max(server_checks, device_checks)
+        rejected = min(checks, max(server_rejected, device_rejected))
+        accepted = max(0, checks - rejected)
+        fail_open = int(device.get("fail_open") or 0)
+        total_checks += checks
+        total_rejected += rejected
+        total_fail_open += fail_open
+
+        connected = bool(raw_row.get("connected"))
+        supported = bool(device) or bool(last)
+        if connected and supported:
+            status_label = "Ready"
+        elif connected:
+            status_label = "No verifier firmware"
+        else:
+            status_label = "Offline"
+
+        if last:
+            if not bool(last.get("available", True)):
+                last_result = "Fail-open"
+            else:
+                last_result = "Accepted" if bool(last.get("accepted")) else "Rejected"
+        else:
+            reason = esphome_runtime.text(device.get("last_reason"))
+            last_result = reason.replace("_", " ").title() if reason else "—"
+
+        transcript = esphome_runtime.text(last.get("transcript")) or "—"
+        score = f"{float(last.get('score') or 0.0):.3f}" if last else "—"
+        stt_ms = f"{float(last.get('stt_ms') or 0.0):.1f} ms" if last else "—"
+        name = (
+            esphome_runtime.text(raw_row.get("device_name"))
+            or esphome_runtime.text(raw_row.get("name"))
+            or esphome_runtime.text(selector)
+        )
+        rows.append(
+            {
+                "satellite": name,
+                "status": status_label,
+                "checks": checks,
+                "accepted": accepted,
+                "rejected": rejected,
+                "fail_open": fail_open,
+                "last_result": last_result,
+                "transcript": transcript,
+                "score": score,
+                "stt_ms": stt_ms,
+            }
+        )
+
+    accepted_total = max(0, total_checks - total_rejected)
+    mode = esphome_settings.wake_verifier_mode()
+    return {
+        "id": "global_wake_verifier",
+        "group": "wake_verifier",
+        "title": "STT Wake Verification",
+        "subtitle": (
+            "Applies one mode to every Tater Native satellite. Observe records decisions without blocking; "
+            "Enabled rejects transcript mismatches and opens the mic if Tater errors or exceeds the 500 ms deadline."
+        ),
+        "sections": [
+            {
+                "label": "Global Mode",
+                "fields": [
+                    {
+                        "key": esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY,
+                        "label": "Wake Verifier",
+                        "type": "select",
+                        "value": mode,
+                        "default": "off",
+                        "options": [
+                            {"value": "off", "label": "Disabled"},
+                            {"value": "observe", "label": "Observe"},
+                            {"value": "enforce", "label": "Enabled"},
+                        ],
+                        "description": "The selected mode is pushed immediately to all connected satellites and is sent to satellites that connect later.",
+                    },
+                    {
+                        "key": "wake_verifier_summary",
+                        "label": "Current Results",
+                        "type": "text",
+                        "read_only": True,
+                        "value": (
+                            f"{total_checks} checks • {accepted_total} accepted • {total_rejected} rejected • "
+                            f"{total_fail_open} fail-open"
+                        ),
+                        "description": "Counts use each satellite's current firmware uptime and reset when that satellite reboots.",
+                    },
+                ],
+            },
+            {
+                "label": "Results By Satellite",
+                "fields": [
+                    {
+                        "key": "wake_verifier_results",
+                        "label": "Latest verifier results",
+                        "type": "table",
+                        "full_width": True,
+                        "columns": [
+                            {"key": "satellite", "label": "Satellite"},
+                            {"key": "status", "label": "Status"},
+                            {"key": "checks", "label": "Checks"},
+                            {"key": "accepted", "label": "Accepted"},
+                            {"key": "rejected", "label": "Rejected"},
+                            {"key": "fail_open", "label": "Fail-open"},
+                            {"key": "last_result", "label": "Last"},
+                            {"key": "transcript", "label": "Transcript"},
+                            {"key": "score", "label": "Score"},
+                            {"key": "stt_ms", "label": "STT"},
+                        ],
+                        "rows": rows,
+                        "description": "Observe mode populates this table while allowing every wake to continue normally.",
+                    }
+                ],
+            },
+        ],
+        "save_action": "voice_wake_verifier_save",
+        "save_label": "Apply To All Satellites",
+        "remove_action": "",
+    }
 
 
 def _native_log_entries(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -339,7 +531,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_wake_tuning", "Wake Threshold / Window", wake_tuning),
         _native_detail_row("native_wake_sound", "Wake Sound", live_settings.get("wake_sound") or "no_sound"),
         _native_detail_row("native_volume", "Volume", f"{live_settings.get('volume_percent', 80)}%"),
-        _native_detail_row("native_led_brightness", "LED Brightness", live_settings.get("led_brightness", 64)),
+        _native_detail_row("native_led_brightness", "LED Brightness", f"{live_settings.get('led_brightness', 80)}%"),
         _native_detail_row("native_led_color", "LED Color", live_settings.get("led_color") or "#ff5a1f"),
         _native_detail_row(
             "native_led_animations",
@@ -417,10 +609,71 @@ def _merge_native_satellites(status: Dict[str, Any], native_status: Dict[str, An
     return merged
 
 
+def _has_specific_native_board(value: Any) -> bool:
+    return esphome_runtime.lower(value) not in {"", "unknown", "native", "native satellite"}
+
+
+def _merge_saved_native_satellites(status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = dict(status.get("clients") if isinstance(status.get("clients"), dict) else {})
+    for saved_row in esphome_runtime.load_satellite_registry():
+        if not isinstance(saved_row, dict) or not _is_native_satellite_row(saved_row):
+            continue
+        selector = esphome_runtime.text(saved_row.get("selector"))
+        if not selector:
+            continue
+
+        saved_meta = saved_row.get("metadata") if isinstance(saved_row.get("metadata"), dict) else {}
+        saved_board = esphome_runtime.text(saved_meta.get("board"))
+        saved_firmware = esphome_runtime.text(saved_meta.get("firmware_version"))
+        saved_name = esphome_runtime.text(saved_row.get("name")) or selector
+        saved_host = esphome_runtime.text(saved_row.get("host"))
+        current = dict(clients.get(selector) if isinstance(clients.get(selector), dict) else {})
+        current_meta = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+        current_info = current.get("device_info") if isinstance(current.get("device_info"), dict) else {}
+
+        metadata = {**saved_meta, **current_meta}
+        if saved_board and not _has_specific_native_board(metadata.get("board")):
+            metadata["board"] = saved_board
+        metadata.setdefault("native_selected", True)
+        metadata["native_connected"] = bool(current.get("connected"))
+
+        device_info = dict(current_info)
+        current_model = device_info.get("model") or current.get("board")
+        if saved_board and not _has_specific_native_board(current_model):
+            device_info["model"] = saved_board
+        if saved_firmware and not esphome_runtime.text(device_info.get("project_version")):
+            device_info["project_version"] = saved_firmware
+        device_info.setdefault("project_name", "tater.native_satellite")
+        device_info.setdefault("manufacturer", "Tater")
+        if not esphome_runtime.text(device_info.get("name")):
+            device_info["name"] = selector
+        if not esphome_runtime.text(device_info.get("friendly_name")):
+            device_info["friendly_name"] = saved_name
+
+        current.update(
+            {
+                "selector": selector,
+                "host": esphome_runtime.text(current.get("host")) or saved_host,
+                "source": esphome_runtime.text(current.get("source")) or "tater_native",
+                "name": esphome_runtime.text(current.get("name")) or saved_name,
+                "selected": bool(current.get("selected", metadata.get("native_selected", True))),
+                "connected": bool(current.get("connected")),
+                "metadata": metadata,
+                "device_info": device_info,
+                "last_seen_ts": float(current.get("last_seen_ts") or saved_row.get("last_seen_ts") or 0.0),
+            }
+        )
+        clients[selector] = current
+
+    merged = dict(status)
+    merged["clients"] = clients
+    return merged
+
+
 def _runtime_status_with_native(native_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     status = esphome_runtime.status()
     native = native_status if isinstance(native_status, dict) else _native_satellite_status_snapshot()
-    return _merge_native_satellites(status, native)
+    return _merge_saved_native_satellites(_merge_native_satellites(status, native))
 
 
 def _is_native_satellite_row(row: Dict[str, Any]) -> bool:
@@ -511,11 +764,16 @@ def get_runtime_payload(
             },
         },
     }
+    item_forms = [
+        _global_satellite_settings_item_form(native_status),
+        _wake_trainer_link_item_form(),
+        _wake_verifier_item_form(native_status),
+    ]
     if include_satellites:
-        item_forms = [esphome_settings.settings_item_form()]
+        item_forms.append(esphome_settings.settings_item_form())
         item_forms.extend(esphome_settings.satellite_item_forms(status))
-        payload["ui"]["item_forms"] = item_forms
         payload["display_sensors"] = esphome_firmware.display_sensor_profiles_payload(status)
+    payload["ui"]["item_forms"] = item_forms
 
     if include_firmware:
         payload["firmware"] = esphome_firmware.firmware_panel_payload(status)
@@ -538,7 +796,6 @@ def get_runtime_payload(
         else:
             tts_catalog_count = 0
             tts_catalog_updated = None
-        discovery_stats = esphome_runtime.discovery_stats()
         stt_backend_rows = [
             {"backend": esphome_runtime.text(name) or "unknown", "avg_ms": f"{float(value or 0.0):.1f}"}
             for name, value in sorted(
@@ -794,25 +1051,103 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
     if isinstance(emotion_id_result, dict):
         return emotion_id_result
 
+    if action_name == "voice_wake_trainer_link_pairing_start":
+        result = wake_trainer_link.start_pairing()
+        return {
+            "ok": True,
+            "action": action_name,
+            **result,
+            "wake_trainer_link": _wake_trainer_link_item_form(),
+        }
+
+    if action_name == "voice_wake_trainer_link_pairing_status":
+        values = esphome_runtime.payload_values(body)
+        result = wake_trainer_link.pairing_status(values.get("pairing_id"))
+        return {
+            "ok": True,
+            "action": action_name,
+            **result,
+            "wake_trainer_link": _wake_trainer_link_item_form(),
+        }
+
+    if action_name == "voice_wake_trainer_link_unlink":
+        result = wake_trainer_link.unlink()
+        return {
+            "ok": True,
+            "action": action_name,
+            **result,
+            "wake_trainer_link": _wake_trainer_link_item_form(),
+        }
+
+    if action_name == "voice_global_satellite_settings_save":
+        values = esphome_runtime.payload_values(body)
+        allowed_values = {
+            key: value
+            for key, value in values.items()
+            if key in native_live_settings.GLOBAL_SATELLITE_CONTROL_KEYS
+        }
+        if not allowed_values:
+            raise ValueError("No global satellite settings were provided.")
+        result = native_satellite.run_on_runtime_loop(
+            native_satellite.save_live_settings(allowed_values),
+            timeout=15.0,
+        )
+        if "continued_chat" in allowed_values:
+            esphome_settings.save_settings_values(
+                {
+                    "VOICE_CONTINUED_CHAT_ENABLED": esphome_runtime.as_bool(
+                        allowed_values.get("continued_chat"),
+                        True,
+                    )
+                }
+            )
+        push = result.get("push") if isinstance(result, dict) and isinstance(result.get("push"), dict) else {}
+        pushed_count = int(push.get("count") or 0)
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": f"Applied shared voice settings to {pushed_count} connected satellite(s).",
+            **(result if isinstance(result, dict) else {}),
+            "global_satellite_settings": _global_satellite_settings_item_form(
+                _native_satellite_status_snapshot()
+            ),
+        }
+
+    if action_name == "voice_wake_verifier_save":
+        values = esphome_runtime.payload_values(body)
+        mode = esphome_runtime.lower(values.get(esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY))
+        if mode not in esphome_settings.VOICE_WAKE_VERIFIER_MODES:
+            raise ValueError("Wake verifier mode must be Disabled, Observe, or Enabled.")
+        result = esphome_settings.save_settings_values(
+            {esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY: mode}
+        )
+        push = native_satellite.run_on_runtime_loop(
+            native_satellite.push_live_settings(),
+            timeout=10.0,
+        )
+        label = {"off": "Disabled", "observe": "Observe", "enforce": "Enabled"}[mode]
+        pushed_count = int((push or {}).get("count") or 0) if isinstance(push, dict) else 0
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": f"Wake verification set to {label} for {pushed_count} connected satellite(s).",
+            **result,
+            "push": push,
+            "wake_verifier": _wake_verifier_item_form(_native_satellite_status_snapshot()),
+        }
+
     if action_name == "voice_settings_save":
         values = esphome_runtime.payload_values(body)
         result = esphome_settings.save_settings_values(values)
-        with contextlib.suppress(Exception):
-            esphome_runtime.reconcile_once(force=True, timeout=45.0)
         updated = int(result.get("updated_count") or 0)
         message = f"Saved {updated} setting(s)." if updated > 0 else "No settings changed."
         return {"ok": True, "action": action_name, "message": message, **result, "status": _runtime_status_with_native()}
 
     if action_name == "voice_settings_reset_defaults":
         result = esphome_settings.reset_settings_defaults()
-        with contextlib.suppress(Exception):
-            esphome_runtime.reconcile_once(force=True, timeout=45.0)
         updated = int(result.get("updated_count") or 0)
         message = f"Restored {updated} setting(s) to defaults." if updated > 0 else "Settings already use defaults."
         return {"ok": True, "action": action_name, "message": message, **result, "status": _runtime_status_with_native()}
-
-    if action_name == "voice_satellite_add_manual":
-        raise ValueError("Manual legacy satellite add has been removed. Use Add Satellite pairing for Tater Native firmware.")
 
     if action_name == "voice_native_satellite_pairing_start":
         result = native_satellite.start_pairing_session()
@@ -895,8 +1230,6 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         if not selector:
             raise ValueError("selector is required")
         removed = esphome_runtime.remove_satellite(selector)
-        with contextlib.suppress(Exception):
-            esphome_runtime.disconnect_selector(selector, reason="manual_remove", timeout=20.0)
         return {"ok": True, "action": action_name, "selector": selector, "removed": bool(removed), "message": "Satellite removed." if removed else "Satellite was already absent.", "status": esphome_runtime.status()}
 
     if action_name == "voice_satellite_identify":
@@ -904,15 +1237,8 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         result = _identify_satellite(selector, redis_client=redis_client)
         return {"action": action_name, "status": esphome_runtime.status(), **result}
 
-    if action_name == "voice_discover":
-        return {"ok": True, "action": action_name, "count": 0, "message": "Legacy mDNS discovery is disabled. Use Add Satellite pairing.", "status": esphome_runtime.status()}
-
-    if action_name == "voice_reconcile":
-        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
-        return {"ok": True, "action": action_name, "status": status, "message": "Legacy satellite reconcile is disabled."}
-
     if action_name == "voice_refresh":
-        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
+        status = _runtime_status_with_native()
         return {
             "ok": True,
             "action": action_name,
@@ -921,75 +1247,13 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "message": "Native satellite status refreshed. Add new devices with pairing.",
         }
 
-    if action_name == "voice_entity_refresh":
-        selector = esphome_runtime.payload_selector(body)
-        if not selector:
-            raise ValueError("selector is required")
-        result = esphome_runtime.refresh_entity_catalog(selector, timeout=20.0)
-        entity_rows = list(result.get("entity_rows") or []) if isinstance(result, dict) else []
-        wake_engine_found = any(esphome_runtime.lower(row.get("label")) == "wake engine" for row in entity_rows if isinstance(row, dict))
-        return {
-            "ok": True,
-            "action": action_name,
-            "selector": selector,
-            "entity_rows": entity_rows,
-            "message": "Live entities refreshed." if wake_engine_found else "Live entities refreshed, but Wake Engine was not exposed by this firmware.",
-        }
-
-    if action_name == "voice_connect":
-        selector = esphome_runtime.payload_selector(body)
-        if not selector:
-            raise ValueError("selector is required")
-        esphome_runtime.set_satellite_selected(selector, True)
-        status = esphome_runtime.reconcile_once(force=True, timeout=45.0)
-        return {"ok": True, "action": action_name, "selector": selector, "status": status, "message": "Satellite selected and connect requested."}
-
-    if action_name == "voice_disconnect":
-        selector = esphome_runtime.payload_selector(body)
-        if not selector:
-            raise ValueError("selector is required")
-        esphome_runtime.set_satellite_selected(selector, False)
-        esphome_runtime.disconnect_selector(selector, reason="manual_disconnect", timeout=20.0)
-        return {"ok": True, "action": action_name, "selector": selector, "status": esphome_runtime.status(), "message": "Satellite disconnected and deselected."}
-
-    if action_name == "voice_entity_command":
-        selector = esphome_runtime.payload_selector(body)
-        entity_key = esphome_runtime.text(body.get("entity_key") or body.get("key"))
-        command = esphome_runtime.text(body.get("command"))
-        if not selector:
-            raise ValueError("selector is required")
-        if not entity_key:
-            raise ValueError("entity_key is required")
-        if not command:
-            raise ValueError("command is required")
-        result = esphome_runtime.command_entity(
-            selector,
-            entity_key=entity_key,
-            command=command,
-            value=body.get("value"),
-            options=body,
-            timeout=20.0,
-        )
-        entity_rows = list(result.get("entity_rows") or []) if isinstance(result, dict) else []
-        return {
-            "ok": True,
-            "action": action_name,
-            "selector": selector,
-            "entity_key": entity_key,
-            "command": command,
-            "entity_rows": entity_rows,
-            "message": f"Updated {esphome_runtime.text(body.get('entity_label')) or 'entity'}.",
-        }
-
     if action_name == "voice_logs_start":
         selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        if esphome_runtime.lower(selector).startswith("native:"):
-            result = _native_logs_payload(selector, start=True)
-            result["action"] = action_name
-            return result
-        result = esphome_runtime.logs_start(selector, timeout=20.0)
+        if not esphome_runtime.lower(selector).startswith("native:"):
+            raise ValueError("Only Tater Native satellite logs are supported.")
+        result = _native_logs_payload(selector, start=True)
         result["action"] = action_name
         return result
 
@@ -998,11 +1262,9 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         if not selector:
             raise ValueError("selector is required")
         after_seq = esphome_runtime.as_int(body.get("after_seq"), 0, minimum=0)
-        if esphome_runtime.lower(selector).startswith("native:"):
-            result = _native_logs_payload(selector, after_seq=after_seq)
-            result["action"] = action_name
-            return result
-        result = esphome_runtime.logs_poll(selector, after_seq=after_seq, timeout=20.0)
+        if not esphome_runtime.lower(selector).startswith("native:"):
+            raise ValueError("Only Tater Native satellite logs are supported.")
+        result = _native_logs_payload(selector, after_seq=after_seq)
         result["action"] = action_name
         return result
 
@@ -1010,12 +1272,9 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        force = esphome_runtime.as_bool(body.get("force"), False)
-        if esphome_runtime.lower(selector).startswith("native:"):
-            result = _native_logs_payload(selector, stop=True)
-            result["action"] = action_name
-            return result
-        result = esphome_runtime.logs_stop(selector, force=force, timeout=20.0)
+        if not esphome_runtime.lower(selector).startswith("native:"):
+            raise ValueError("Only Tater Native satellite logs are supported.")
+        result = _native_logs_payload(selector, stop=True)
         result["action"] = action_name
         return result
 

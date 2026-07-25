@@ -51,10 +51,6 @@ def voice_metrics_snapshot() -> Dict[str, Any]:
     return _vp()._voice_metrics_snapshot()
 
 
-def discovery_stats() -> Dict[str, Any]:
-    return device_runtime.discovery_stats()
-
-
 def native_stats() -> Dict[str, Any]:
     return device_runtime.native_stats()
 
@@ -116,11 +112,6 @@ def status() -> Dict[str, Any]:
 def entities_for_selector(selector: str) -> Dict[str, Any]:
     result = device_runtime.entities_for_selector(selector)
     return result if isinstance(result, dict) else {}
-
-
-def discover_once() -> List[Dict[str, Any]]:
-    rows = device_runtime.run_on_native_loop(device_runtime.discover_mdns_once(), timeout=30.0)
-    return rows if isinstance(rows, list) else []
 
 
 def reconcile_once(*, force: bool = True, timeout: float = 45.0) -> Dict[str, Any]:

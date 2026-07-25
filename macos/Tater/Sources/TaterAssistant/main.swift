@@ -59,6 +59,8 @@ private final class BackendManager {
     private var outputPipe: Pipe?
     private var selectedPythonPath: String?
     private var externalBackendPID: pid_t?
+    private let gracefulStopTimeout: TimeInterval = 35
+    private let descendantExitGrace: TimeInterval = 3
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -118,17 +120,27 @@ private final class BackendManager {
     }
 
     func stop(waitForExit: Bool = false) {
+        if !waitForExit {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.stop(waitForExit: true)
+            }
+            return
+        }
+
         if let process, process.isRunning {
             let pid = process.processIdentifier
+            let descendants = descendantProcessIDs(of: pid)
             appendLauncherLog("Stop requested for managed backend pid \(pid).\n")
-            process.terminate()
-            if waitForExit {
-                waitForManagedProcessExit(process, timeout: 12)
-            } else {
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    self?.waitForManagedProcessExit(process, timeout: 12)
-                }
+            if Darwin.kill(pid, SIGTERM) != 0 {
+                appendLauncherLog(
+                    "Failed to send SIGTERM to managed backend pid \(pid): errno \(errno).\n"
+                )
             }
+            waitForManagedProcessExit(
+                process,
+                descendants: descendants,
+                timeout: gracefulStopTimeout
+            )
             closeLogHandle()
             self.process = nil
             externalBackendPID = nil
@@ -138,7 +150,7 @@ private final class BackendManager {
 
         if let pid = backendProcessPIDOnPort() {
             appendLauncherLog("Stop requested for discovered backend pid \(pid).\n")
-            terminateBackendProcess(pid: pid, waitForExit: waitForExit)
+            terminateBackendProcess(pid: pid, waitForExit: true)
             closeLogHandle()
             process = nil
             externalBackendPID = nil
@@ -886,7 +898,11 @@ private final class BackendManager {
         return false
     }
 
-    private func waitForManagedProcessExit(_ process: Process, timeout: TimeInterval) {
+    private func waitForManagedProcessExit(
+        _ process: Process,
+        descendants: [pid_t],
+        timeout: TimeInterval
+    ) {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
@@ -896,6 +912,7 @@ private final class BackendManager {
             Darwin.kill(process.processIdentifier, SIGKILL)
         }
         process.waitUntilExit()
+        terminateCapturedDescendants(descendants, naturalExitGrace: descendantExitGrace)
     }
 
     private func terminateBackendProcess(pid: pid_t, waitForExit: Bool) {
@@ -913,23 +930,49 @@ private final class BackendManager {
         if processExists(pid) {
             Darwin.kill(pid, SIGTERM)
         }
-        if !waitForProcessExit(pid, timeout: 12) {
+        if !waitForProcessExit(pid, timeout: gracefulStopTimeout) {
             appendLauncherLog("Discovered backend pid \(pid) did not exit; sending SIGKILL.\n")
             Darwin.kill(pid, SIGKILL)
             _ = waitForProcessExit(pid, timeout: 2)
         }
-        terminateCapturedDescendants(descendants)
+        terminateCapturedDescendants(descendants, naturalExitGrace: descendantExitGrace)
     }
 
-    private func terminateCapturedDescendants(_ pids: [pid_t]) {
-        let remaining = pids.filter { processExists($0) }
+    private func terminateCapturedDescendants(
+        _ pids: [pid_t],
+        naturalExitGrace: TimeInterval = 0
+    ) {
+        var remaining = pids.filter { processExists($0) }
+        if !remaining.isEmpty && naturalExitGrace > 0 {
+            let deadline = Date().addingTimeInterval(naturalExitGrace)
+            while !remaining.isEmpty && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+                remaining = remaining.filter { processExists($0) }
+            }
+        }
         guard !remaining.isEmpty else { return }
+        appendLauncherLog(
+            "Cleaning up \(remaining.count) backend descendant process(es): "
+                + remaining.map(String.init).joined(separator: ", ")
+                + ".\n"
+        )
         for pid in remaining {
             Darwin.kill(pid, SIGTERM)
         }
-        Thread.sleep(forTimeInterval: 0.5)
-        for pid in remaining where processExists(pid) {
+        let termDeadline = Date().addingTimeInterval(2)
+        while remaining.contains(where: processExists) && Date() < termDeadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        let stubborn = remaining.filter { processExists($0) }
+        for pid in stubborn {
             Darwin.kill(pid, SIGKILL)
+        }
+        if !stubborn.isEmpty {
+            appendLauncherLog(
+                "Forced \(stubborn.count) backend descendant process(es) to exit: "
+                    + stubborn.map(String.init).joined(separator: ", ")
+                    + ".\n"
+            )
         }
     }
 
@@ -1459,7 +1502,7 @@ private enum TaterMascotMood: Equatable {
     }
 }
 
-private struct TaterMascotDisplay {
+private struct TaterMascotDisplay: Equatable {
     let mood: TaterMascotMood
     let message: String
     let detail: String
@@ -1481,7 +1524,11 @@ private struct NativeMascotStatus: Decodable {
 
 private final class TaterMascotBubbleView: NSView {
     var display = TaterMascotDisplay(mood: .idle, message: "Tater is idle", detail: "Ready when you are.") {
-        didSet { needsDisplay = true }
+        didSet {
+            if oldValue != display {
+                needsDisplay = true
+            }
+        }
     }
     var phase: CGFloat = 0 {
         didSet { needsDisplay = true }
@@ -1653,9 +1700,12 @@ private final class TaterMascotContentView: NSView {
     private var nextIdleShuffleAt: CGFloat = 0
     private var animationTimer: Timer?
     private var phase: CGFloat = 0
+    private var lastAnimationUptime = ProcessInfo.processInfo.systemUptime
     private var dragStartPoint = NSPoint.zero
     private var dragStartFrame = NSRect.zero
     private var display = TaterMascotDisplay(mood: .idle, message: "Tater is idle", detail: "Ready when you are.")
+    private let activeAnimationInterval: TimeInterval = 1.0 / 12.0
+    private let idleAnimationInterval: TimeInterval = 1.0
 
     init(frames: [NSImage], idleFrames: [NSImage], fallbackImage: NSImage?) {
         mascotFrames = frames
@@ -1683,7 +1733,9 @@ private final class TaterMascotContentView: NSView {
     }
 
     func setDisplay(_ next: TaterMascotDisplay) {
+        guard display != next else { return }
         let wasIdle = display.mood == .idle
+        let wasAnimated = shouldAnimate(display.mood)
         display = next
         bubbleView.display = next
         if next.mood == .idle && !wasIdle {
@@ -1691,8 +1743,10 @@ private final class TaterMascotContentView: NSView {
         }
         updateMascotFrame()
         applyMascotTransform()
+        if wasIdle != (next.mood == .idle) || wasAnimated != shouldAnimate(next.mood) {
+            configureAnimationTimer()
+        }
         needsLayout = true
-        needsDisplay = true
     }
 
     private func setup(image: NSImage?) {
@@ -1709,7 +1763,28 @@ private final class TaterMascotContentView: NSView {
         imageView.layer?.masksToBounds = false
         addSubview(imageView)
 
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        configureAnimationTimer()
+    }
+
+    private func shouldAnimate(_ mood: TaterMascotMood) -> Bool {
+        mood == .starting || mood == .running || mood == .tool
+    }
+
+    private func configureAnimationTimer() {
+        animationTimer?.invalidate()
+        animationTimer = nil
+
+        let interval: TimeInterval
+        if shouldAnimate(display.mood) {
+            interval = activeAnimationInterval
+        } else if display.mood == .idle {
+            interval = idleAnimationInterval
+        } else {
+            return
+        }
+
+        lastAnimationUptime = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.advanceAnimation()
         }
         animationTimer = timer
@@ -1765,20 +1840,29 @@ private final class TaterMascotContentView: NSView {
     }
 
     private func advanceAnimation() {
-        phase += 1.0 / 60.0
-        bubbleView.phase = phase
-        if display.mood == .idle && phase >= nextIdleShuffleAt {
-            chooseNextIdleFrame()
+        let now = ProcessInfo.processInfo.systemUptime
+        phase += CGFloat(max(0, now - lastAnimationUptime))
+        lastAnimationUptime = now
+
+        if display.mood == .idle {
+            if phase >= nextIdleShuffleAt {
+                chooseNextIdleFrame()
+                updateMascotFrame()
+            }
+            return
         }
+
+        bubbleView.phase = phase
         updateMascotFrame()
-        applyMascotTransform()
-        needsDisplay = true
     }
 
     private func updateMascotFrame() {
         if display.mood == .idle && !idleFrames.isEmpty {
             let safeIndex = idleFrames.indices.contains(currentIdleFrameIndex) ? currentIdleFrameIndex : 0
-            imageView.image = idleFrames[safeIndex]
+            let nextImage = idleFrames[safeIndex]
+            if imageView.image !== nextImage {
+                imageView.image = nextImage
+            }
             return
         }
         guard !mascotFrames.isEmpty else { return }
@@ -1802,7 +1886,10 @@ private final class TaterMascotContentView: NSView {
         let offset = Int(floor(phase * frameRate)) % indices.count
         let frameIndex = indices[offset]
         if frameIndex < mascotFrames.count {
-            imageView.image = mascotFrames[frameIndex]
+            let nextImage = mascotFrames[frameIndex]
+            if imageView.image !== nextImage {
+                imageView.image = nextImage
+            }
         }
     }
 
@@ -2482,6 +2569,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let lastAutomaticUpdateCheckKey = "LastAutomaticUpdateCheck"
     private let mascotEnabledKey = "TaterMascotEnabled"
     private var mascotEnabled = false
+    private var terminationInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -2514,12 +2602,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationInProgress {
+            return .terminateLater
+        }
+        terminationInProgress = true
         recoveryTimer?.invalidate()
         updateCheckTimer?.invalidate()
         updateMenuResetTimer?.invalidate()
         mascotController?.setEnabled(false)
-        backend.stop(waitForExit: true)
-        return .terminateNow
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak sender] in
+            self?.backend.stop(waitForExit: true)
+            DispatchQueue.main.async {
+                sender?.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     private func startRecoveryWatchdog() {

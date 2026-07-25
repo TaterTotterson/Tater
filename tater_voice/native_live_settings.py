@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 from typing import Any, Dict, List
 from urllib.error import URLError
@@ -10,6 +11,9 @@ from helpers import redis_client
 
 SETTINGS_HASH_KEY = "voice_native_satellite_live_settings"
 DEVICE_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:device:"
+GLOBAL_VOICE_SETTINGS_HASH_KEY = "voice_core_settings"
+GLOBAL_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
+GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY = "_global_satellite_voice_settings_v1"
 WAKE_PROFILE_FETCH_TIMEOUT_S = 4.0
 
 DEFAULTS: Dict[str, Any] = {
@@ -37,6 +41,11 @@ DEFAULTS: Dict[str, Any] = {
     "capture_close_misses": False,
     "close_miss_threshold": 0.78,
     "trainer_app_url": "http://trainer.local:8789",
+    "wake_verifier_mode": "off",
+    "wake_verifier_phrase": "",
+    "wake_verifier_threshold": 0.85,
+    "wake_verifier_window_ms": 1000,
+    "wake_verifier_timeout_ms": 500,
     "wake_sound_enabled": False,
     "wake_sound": "no_sound",
     "wake_sound_url": "",
@@ -46,7 +55,7 @@ DEFAULTS: Dict[str, Any] = {
     "continued_chat": True,
     "barge_in_enabled": False,
     "volume_percent": 80,
-    "led_brightness": 64,
+    "led_brightness": 80,
     "led_color": "#ff5a1f",
     "led_listening_animation": "directional",
     "led_thinking_animation": "sparkle",
@@ -66,6 +75,9 @@ FIRMWARE_SETTING_KEYS = (
     "capture_close_misses",
     "close_miss_threshold",
     "trainer_app_url",
+    "wake_verifier_mode",
+    "wake_verifier_window_ms",
+    "wake_verifier_timeout_ms",
     "wake_sound_enabled",
     "wake_sound",
     "wake_sound_url",
@@ -85,7 +97,38 @@ FIRMWARE_SETTING_KEYS = (
 )
 
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
+WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
+GLOBAL_SATELLITE_CONTROL_KEYS = (
+    "wake_engine",
+    "wake_word",
+    "wake_word_url",
+    "capture_wake_audio",
+    "capture_close_misses",
+    "trainer_app_url",
+    "wake_sound_enabled",
+    "wake_sound",
+    "wake_sound_url",
+    "continued_chat",
+    "barge_in_enabled",
+)
+GLOBAL_WAKE_PROFILE_KEYS = (
+    "wake_profile_key",
+    "wake_profile_name",
+    "wake_profile_source_url",
+    "wake_profile_model_url",
+    "wake_profile_threshold",
+    "wake_profile_sliding_window",
+    "wake_profile_close_miss_threshold",
+    "wake_profile_error",
+)
+GLOBAL_SATELLITE_PERSISTED_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | set(GLOBAL_WAKE_PROFILE_KEYS)
+GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
+    "wake_section",
+    "wake_profile_name",
+    "training_section",
+    "playback_section",
+}
 WAKE_SENSITIVITY_ROWS = [
     ("conservative", "Conservative"),
     ("normal", "Normal"),
@@ -573,6 +616,65 @@ def _raw_settings(selector: Any = "") -> Dict[str, Any]:
         return {}
 
 
+def _global_settings_with_migration() -> Dict[str, Any]:
+    existing = _raw_settings()
+    if _as_bool(existing.get(GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY), False):
+        return existing
+
+    device_rows: List[Dict[str, Any]] = []
+    try:
+        for raw_key in redis_client.scan_iter(match=f"{DEVICE_SETTINGS_HASH_PREFIX}*"):
+            key = _text(raw_key)
+            if not key:
+                continue
+            row = dict(redis_client.hgetall(key) or {})
+            if row:
+                device_rows.append(row)
+    except Exception:
+        device_rows = []
+
+    migrated: Dict[str, Any] = {}
+    for key in GLOBAL_SATELLITE_CONTROL_KEYS:
+        values = [str(row.get(key) if row.get(key) is not None else "") for row in device_rows if key in row]
+        if not values:
+            continue
+        counts = Counter(values)
+        highest = max(counts.values())
+        winners = sorted(value for value, count in counts.items() if count == highest)
+        existing_value = str(existing.get(key) if existing.get(key) is not None else "")
+        migrated[key] = existing_value if existing_value in winners else winners[0]
+
+    selected_wake_word = _wake_word_value(migrated.get("wake_word", existing.get("wake_word")))
+    selected_wake_url = _text(migrated.get("wake_word_url", existing.get("wake_word_url")))
+    representative = next(
+        (
+            row
+            for row in device_rows
+            if _wake_word_value(row.get("wake_word")) == selected_wake_word
+            and _text(row.get("wake_word_url")) == selected_wake_url
+        ),
+        {},
+    )
+    for key in GLOBAL_WAKE_PROFILE_KEYS:
+        if key in representative:
+            migrated[key] = representative.get(key)
+
+    migrated[GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY] = "true"
+    try:
+        redis_client.hset(SETTINGS_HASH_KEY, mapping=migrated)
+    except Exception:
+        return {**existing, **migrated}
+    return {**existing, **migrated}
+
+
+def _global_wake_verifier_mode() -> str:
+    try:
+        mode = _lower(redis_client.hget(GLOBAL_VOICE_SETTINGS_HASH_KEY, GLOBAL_WAKE_VERIFIER_MODE_KEY))
+    except Exception:
+        mode = ""
+    return mode if mode in WAKE_VERIFIER_MODES else "off"
+
+
 def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
     token = _lower(board).replace("_", "-")
     compact = token.replace("-", "").replace(" ", "")
@@ -617,6 +719,9 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
     logging_level = _lower(source.get("logging_level")) or str(DEFAULTS["logging_level"])
     if logging_level not in LOGGING_LEVELS:
         logging_level = str(DEFAULTS["logging_level"])
+    wake_verifier_mode = _lower(source.get("wake_verifier_mode")) or str(DEFAULTS["wake_verifier_mode"])
+    if wake_verifier_mode not in WAKE_VERIFIER_MODES:
+        wake_verifier_mode = str(DEFAULTS["wake_verifier_mode"])
     wake_word = _wake_word_value(source.get("wake_word"))
     wake_word_url = _text(source.get("wake_word_url"))
     if wake_word == "custom_url" and not wake_word_url and _is_url(source.get("wake_word")):
@@ -733,6 +838,29 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "capture_close_misses": _as_bool(source.get("capture_close_misses"), bool(DEFAULTS["capture_close_misses"])),
         "close_miss_threshold": effective_close_miss_threshold,
         "trainer_app_url": _text(source.get("trainer_app_url")) or str(DEFAULTS["trainer_app_url"]),
+        "wake_verifier_mode": wake_verifier_mode,
+        "wake_verifier_phrase": _text(source.get("wake_verifier_phrase")),
+        "wake_verifier_threshold": round(
+            _as_float(
+                source.get("wake_verifier_threshold"),
+                float(DEFAULTS["wake_verifier_threshold"]),
+                minimum=0.5,
+                maximum=1.0,
+            ),
+            3,
+        ),
+        "wake_verifier_window_ms": _as_int(
+            source.get("wake_verifier_window_ms"),
+            int(DEFAULTS["wake_verifier_window_ms"]),
+            minimum=500,
+            maximum=2000,
+        ),
+        "wake_verifier_timeout_ms": _as_int(
+            source.get("wake_verifier_timeout_ms"),
+            int(DEFAULTS["wake_verifier_timeout_ms"]),
+            minimum=100,
+            maximum=2000,
+        ),
         "wake_sound_enabled": _as_bool(source.get("wake_sound_enabled"), bool(DEFAULTS["wake_sound_enabled"])),
         "wake_sound": wake_sound,
         "wake_sound_url": wake_sound_url,
@@ -747,7 +875,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "continued_chat": _as_bool(source.get("continued_chat"), bool(DEFAULTS["continued_chat"])),
         "barge_in_enabled": _as_bool(source.get("barge_in_enabled"), bool(DEFAULTS["barge_in_enabled"])),
         "volume_percent": _as_int(source.get("volume_percent"), int(DEFAULTS["volume_percent"]), minimum=0, maximum=100),
-        "led_brightness": _as_int(source.get("led_brightness"), int(DEFAULTS["led_brightness"]), minimum=0, maximum=255),
+        "led_brightness": _as_int(source.get("led_brightness"), int(DEFAULTS["led_brightness"]), minimum=0, maximum=100),
         "led_color": _led_color_value(source.get("led_color")),
         "led_listening_animation": _led_animation_value(source.get("led_listening_animation"), "led_listening_animation"),
         "led_thinking_animation": _led_animation_value(source.get("led_thinking_animation"), "led_thinking_animation"),
@@ -761,11 +889,19 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     token = _selector_token(selector)
     board_defaults = _board_default_overrides(board)
     base = normalize_settings(board_defaults) if board_defaults else None
-    global_raw = _raw_settings()
+    global_raw = _global_settings_with_migration()
     global_settings = normalize_settings(global_raw, base=base)
     if not token:
-        return global_settings
-    return normalize_settings(_raw_settings(token), base=global_settings)
+        current = global_settings
+    else:
+        device_raw = {
+            key: value
+            for key, value in _raw_settings(token).items()
+            if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
+        }
+        current = normalize_settings(device_raw, base=global_settings)
+    current["wake_verifier_mode"] = _global_wake_verifier_mode()
+    return current
 
 
 def firmware_settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
@@ -1066,13 +1202,14 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         },
         {
             "key": "led_brightness",
-            "label": "LED Brightness",
+            "label": "LED Brightness (%)",
             "type": "number",
             "value": current["led_brightness"],
             "default": DEFAULTS["led_brightness"],
             "min": 0,
-            "max": 255,
+            "max": 100,
             "step": 1,
+            "description": "Brightness percentage for this satellite's LEDs.",
         },
         {
             "key": "led_color",
@@ -1139,25 +1276,93 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             ],
         },
     ]
+    if _selector_token(selector):
+        fields = [
+            field
+            for field in fields
+            if _text(field.get("key")) not in GLOBAL_SATELLITE_DEVICE_FIELD_KEYS
+        ]
     if not _board_supports_led_settings(board):
         fields = [field for field in fields if _text(field.get("key")) not in _LED_FIELD_KEYS]
     return fields
 
 
+def global_settings_sections() -> List[Dict[str, Any]]:
+    fields = {
+        _text(field.get("key")): field
+        for field in settings_fields()
+        if isinstance(field, dict) and _text(field.get("key"))
+    }
+    groups = [
+        (
+            "Wake Word",
+            "",
+            ("wake_engine", "wake_word", "wake_word_url"),
+        ),
+        (
+            "Trainer Feedback",
+            "Choose which wake clips Tater sends for model improvement, and manage the secure trainer connection that receives them.",
+            ("capture_wake_audio", "capture_close_misses", "trainer_app_url"),
+        ),
+        (
+            "Wake Sound & Conversation",
+            "",
+            ("wake_sound_enabled", "wake_sound", "wake_sound_url", "continued_chat", "barge_in_enabled"),
+        ),
+    ]
+    return [
+        {
+            "label": label,
+            "description": description,
+            "fields": [dict(fields[key]) for key in keys if key in fields],
+        }
+        for label, description, keys in groups
+    ]
+
+
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:
     token = _selector_token(selector)
+    incoming = dict(values or {})
+    if token:
+        incoming = {
+            key: value
+            for key, value in incoming.items()
+            if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
+        }
     board_defaults = _board_default_overrides(board)
     board_base = normalize_settings(board_defaults) if board_defaults else None
-    global_raw = _raw_settings()
+    global_raw = _global_settings_with_migration()
     device_raw = _raw_settings(token) if token else {}
+    if token:
+        device_raw = {
+            key: value
+            for key, value in device_raw.items()
+            if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
+        }
     current_raw = {**global_raw, **device_raw}
     current = settings_snapshot(token, board=board)
-    profile = _profile_for_save(values or {}, current_raw)
+    if token:
+        global_wake_word = _wake_word_value(global_raw.get("wake_word"))
+        global_wake_url = _text(global_raw.get("wake_word_url"))
+        profile = _wake_profile_from_source(global_raw, global_wake_word, global_wake_url)
+    else:
+        profile = _profile_for_save(incoming, current_raw)
     current_base = normalize_settings(current_raw, base=board_base)
-    normalized = normalize_settings(values or {}, base={**current_base, **profile})
+    normalized = normalize_settings(incoming, base={**current_base, **profile})
     changed = [key for key, value in normalized.items() if current.get(key) != value]
+    persisted = normalized
+    if token:
+        persisted = {
+            key: value
+            for key, value in normalized.items()
+            if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
+        }
+        try:
+            redis_client.hdel(settings_hash_key(token), *sorted(GLOBAL_SATELLITE_PERSISTED_KEYS))
+        except Exception:
+            pass
     if changed:
-        redis_client.hset(settings_hash_key(token), mapping={key: str(value) for key, value in normalized.items()})
+        redis_client.hset(settings_hash_key(token), mapping={key: str(value) for key, value in persisted.items()})
     return {
         "ok": True,
         "selector": token,

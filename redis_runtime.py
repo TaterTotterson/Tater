@@ -1,6 +1,7 @@
 import atexit
 import hashlib
 import json
+import logging
 import os
 import signal
 import shutil
@@ -19,6 +20,9 @@ from redis.exceptions import RedisError
 from tater_paths import agent_lab_dir, runtime_dir
 
 
+logger = logging.getLogger("redis_runtime")
+
+
 class RedisNotConfiguredError(RedisError):
     """Raised when Redis is required but connection settings are missing."""
 
@@ -34,6 +38,7 @@ _RUNTIME_DIR = runtime_dir()
 _INTERNAL_REDIS_PROCESS: Optional[subprocess.Popen] = None
 _INTERNAL_REDIS_INFO: Dict[str, Any] = {}
 _INTERNAL_REDIS_ATEXIT_REGISTERED = False
+_INTERNAL_REDIS_AOF_MAINTENANCE_PIDS: set[int] = set()
 _REDIS_ENCRYPTION_KEY_PATH = (_RUNTIME_DIR / "redis_encryption.key").resolve()
 _REDIS_LIVE_ENCRYPTION_STATE_PATH = (_RUNTIME_DIR / "redis_live_encryption.json").resolve()
 _REDIS_ENCRYPTED_SNAPSHOT_PATH = (_RUNTIME_DIR / "redis_snapshot.enc").resolve()  # legacy artifact path
@@ -957,6 +962,9 @@ def _internal_redis_config_text(paths: Dict[str, Path], *, port: int, use_unix_s
             "databases 16",
             "appendonly yes",
             "appendfsync everysec",
+            "aof-use-rdb-preamble yes",
+            "auto-aof-rewrite-percentage 100",
+            "auto-aof-rewrite-min-size 512mb",
             "save 900 1",
             "save 300 10",
             "save 60 10000",
@@ -964,6 +972,94 @@ def _internal_redis_config_text(paths: Dict[str, Path], *, port: int, use_unix_s
         ]
     )
     return "\n".join(lines)
+
+
+def _schedule_internal_aof_maintenance(info: Dict[str, Any]) -> None:
+    if not _to_bool(os.getenv("TATER_REDIS_AOF_AUTO_COMPACT", "1"), default=True):
+        return
+    pid = _to_int(info.get("pid"), default=0, min_value=0)
+    if pid <= 0 or pid in _INTERNAL_REDIS_AOF_MAINTENANCE_PIDS:
+        return
+    _INTERNAL_REDIS_AOF_MAINTENANCE_PIDS.add(pid)
+
+    def _worker() -> None:
+        client: Optional[redis.Redis] = None
+        try:
+            try:
+                delay_seconds = max(
+                    0.0,
+                    float(os.getenv("TATER_REDIS_AOF_COMPACT_DELAY_SECONDS", "5") or "5"),
+                )
+            except Exception:
+                delay_seconds = 5.0
+            if delay_seconds:
+                time.sleep(delay_seconds)
+
+            kwargs: Dict[str, Any] = {
+                "db": 0,
+                "decode_responses": True,
+                "socket_timeout": 5.0,
+                "socket_connect_timeout": 2.0,
+            }
+            if bool(info.get("use_unix_socket")):
+                kwargs["unix_socket_path"] = str(info.get("socket_path") or "")
+            else:
+                kwargs["host"] = str(info.get("host") or "127.0.0.1")
+                kwargs["port"] = int(info.get("port") or 0)
+            client = redis.Redis(**kwargs)
+            persistence = client.info("persistence") or {}
+            if bool(int(persistence.get("aof_rewrite_in_progress") or 0)):
+                return
+
+            current_size = max(0, int(persistence.get("aof_current_size") or 0))
+            memory = client.info("memory") or {}
+            used_memory = max(1, int(memory.get("used_memory") or 1))
+            try:
+                minimum_size = max(
+                    64 * 1024 * 1024,
+                    int(float(os.getenv("TATER_REDIS_AOF_COMPACT_MIN_BYTES", str(1024**3)) or 1024**3)),
+                )
+            except Exception:
+                minimum_size = 1024**3
+            try:
+                size_ratio = max(
+                    2.0,
+                    float(os.getenv("TATER_REDIS_AOF_COMPACT_MEMORY_RATIO", "4") or "4"),
+                )
+            except Exception:
+                size_ratio = 4.0
+            rewrite_threshold = max(minimum_size, int(used_memory * size_ratio))
+            if current_size < rewrite_threshold:
+                return
+
+            data_dir = Path(str(info.get("data_dir") or "")).expanduser()
+            free_bytes = shutil.disk_usage(data_dir).free
+            required_free = max(512 * 1024 * 1024, used_memory * 2)
+            if free_bytes < required_free:
+                logger.warning(
+                    "[redis] skipped automatic AOF compaction: free=%d required=%d",
+                    free_bytes,
+                    required_free,
+                )
+                return
+
+            if client.bgrewriteaof():
+                logger.warning(
+                    "[redis] started automatic AOF compaction: aof=%d live_memory=%d threshold=%d",
+                    current_size,
+                    used_memory,
+                    rewrite_threshold,
+                )
+        except Exception as exc:
+            logger.warning("[redis] automatic AOF compaction check failed: %s", exc)
+        finally:
+            _close_client(client)
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"tater-redis-aof-maintenance-{pid}",
+    ).start()
 
 
 def _register_internal_redis_shutdown_locked() -> None:
@@ -1116,6 +1212,7 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
                 "server_source": "existing",
             }
             _INTERNAL_REDIS_INFO = dict(info)
+            _schedule_internal_aof_maintenance(info)
             return dict(info)
         if use_unix_socket:
             raise RedisNotConfiguredError(
@@ -1157,9 +1254,9 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
         raise RedisNotConfiguredError(f"Failed to start internal Redis server: {exc}") from exc
 
     try:
-        timeout = float(os.getenv("TATER_REDIS_START_TIMEOUT_SECONDS", "45") or "45")
+        timeout = float(os.getenv("TATER_REDIS_START_TIMEOUT_SECONDS", "180") or "180")
     except Exception:
-        timeout = 45.0
+        timeout = 180.0
     timeout = max(1.0, timeout)
     deadline = time.time() + timeout
     last_error = ""
@@ -1202,14 +1299,20 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
             }
             _INTERNAL_REDIS_PROCESS = proc
             _INTERNAL_REDIS_INFO = dict(info)
+            _schedule_internal_aof_maintenance(info)
             return dict(info)
         last_error = ping_error
         time.sleep(0.08)
 
     try:
         proc.terminate()
+        proc.wait(timeout=5.0)
     except Exception:
-        pass
+        try:
+            proc.kill()
+            proc.wait(timeout=2.0)
+        except Exception:
+            pass
     detail = _tail_text(paths["log_path"]) or last_error or "startup timed out"
     raise RedisNotConfiguredError(f"Internal Redis did not become ready: {detail}")
 

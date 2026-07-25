@@ -23,6 +23,40 @@ router = APIRouter()
 
 _DISPLAY_SNAPSHOT_KEY_PREFIX = "awareness:event_snapshot:"
 _SNAPSHOT_ID_RE = re.compile(r"^[A-Fa-f0-9]{16,64}$")
+_EVENT_LOOP_WATCHDOG_INTERVAL_S = 0.25
+_EVENT_LOOP_STALL_WARNING_S = 0.50
+
+
+async def _event_loop_watchdog() -> None:
+    vp = _vp()
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + _EVENT_LOOP_WATCHDOG_INTERVAL_S
+    try:
+        while True:
+            await asyncio.sleep(_EVENT_LOOP_WATCHDOG_INTERVAL_S)
+            now = loop.time()
+            lag_s = max(0.0, now - expected)
+            expected = now + _EVENT_LOOP_WATCHDOG_INTERVAL_S
+            if lag_s < _EVENT_LOOP_STALL_WARNING_S:
+                continue
+
+            active_sessions = 0
+            with contextlib.suppress(Exception):
+                active_sessions = sum(
+                    1
+                    for runtime in vp._voice_selector_runtime.values()
+                    if isinstance(runtime, dict)
+                    and isinstance(runtime.get("session"), VoiceSessionRuntime)
+                )
+            pending_tasks = max(0, len(asyncio.all_tasks(loop)) - 1)
+            vp.logger.warning(
+                "[voice_core] event loop stall detected lag_ms=%.1f active_voice_sessions=%s pending_tasks=%s",
+                lag_s * 1000.0,
+                active_sessions,
+                pending_tasks,
+            )
+    except asyncio.CancelledError:
+        raise
 
 
 def _display_feed_payload_from_request(request: Request, payload: Any = None) -> Dict[str, Any]:
@@ -213,6 +247,12 @@ async def startup() -> None:
     from .. import native_timers
 
     native_timers.start_scheduler()
+    watchdog = vp._background_tasks.get("event_loop_watchdog")
+    if not isinstance(watchdog, asyncio.Task) or watchdog.done():
+        vp._background_tasks["event_loop_watchdog"] = asyncio.create_task(
+            _event_loop_watchdog(),
+            name="voice-event-loop-watchdog",
+        )
 
 
 async def shutdown() -> None:
@@ -370,7 +410,7 @@ async def native_satellite_settings(selector: str = "", x_tater_token: Optional[
 @router.post("/api/tater/satellite/v1/settings")
 async def native_satellite_settings_save(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
-    vp._require_api_auth(x_tater_token)
+    vp._require_configured_api_auth(x_tater_token)
     from .. import native_satellite
 
     body = payload if isinstance(payload, dict) else {}
@@ -382,6 +422,71 @@ async def native_satellite_settings_save(payload: Dict[str, Any], x_tater_token:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/tater/satellite/v1/trainer/wake-word")
+async def linked_trainer_wake_word_save(
+    payload: Dict[str, Any],
+    x_tater_trainer_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    from .. import native_satellite, wake_trainer_link
+
+    try:
+        link = wake_trainer_link.authorize(x_tater_trainer_token)
+        body = payload if isinstance(payload, dict) else {}
+        wake_word_name = str(body.get("wake_word_name") or body.get("wake_word") or "").strip()
+        wake_word_url = wake_trainer_link.validate_wake_word_url(body.get("wake_word_url"), link)
+        result = await native_satellite.save_live_settings(
+            {
+                "wake_word": "custom_url",
+                "wake_word_url": wake_word_url,
+            }
+        )
+        wake_trainer_link.record_publish(
+            wake_word=wake_word_name,
+            wake_word_url=wake_word_url,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "wake_word": wake_word_name,
+        "wake_word_url": wake_word_url,
+        **result,
+        "trainer_link": wake_trainer_link.status(),
+    }
+
+
+@router.post("/api/tater/satellite/v1/trainer/link/claim")
+async def linked_trainer_claim(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from .. import wake_trainer_link
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        return wake_trainer_link.claim_pairing(
+            pairing_code=body.get("pairing_code"),
+            trainer_id=body.get("trainer_id"),
+            trainer_name=body.get("trainer_name"),
+            trainer_url=body.get("trainer_url"),
+            publish_base_url=body.get("publish_base_url"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/api/tater/satellite/v1/trainer/link/unlink")
+async def linked_trainer_unlink(
+    x_tater_trainer_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    from .. import wake_trainer_link
+
+    try:
+        wake_trainer_link.authorize(x_tater_trainer_token)
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return wake_trainer_link.unlink()
 
 
 @router.get("/api/tater/satellite/v1/logs")
