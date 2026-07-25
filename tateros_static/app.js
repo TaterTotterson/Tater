@@ -7459,6 +7459,7 @@ function renderCoreManagerField(field) {
   const readOnly = boolFromAny(field?.read_only, false);
   const disabled = boolFromAny(field?.disabled, false);
   const hideLabel = boolFromAny(field?.hide_label, false);
+  const fullWidth = boolFromAny(field?.full_width, false);
   const readOnlyAttr = readOnly ? " readonly" : "";
   const disabledAttr = disabled ? " disabled" : "";
   const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
@@ -7530,7 +7531,7 @@ function renderCoreManagerField(field) {
     html = showWhenAll.length
       ? showWhenAll.reduce((currentHtml, condition) => wrapWithCondition(currentHtml, condition), html)
       : wrapWithCondition(html, showWhen);
-    return html;
+    return fullWidth ? `<div style="grid-column:1 / -1; min-width:0;">${html}</div>` : html;
   };
 
   if (type === "table") {
@@ -7886,7 +7887,7 @@ function renderCoreSettingsManager(body, tabSpec) {
       const checked = boolFromAny(field?.value, false) ? " checked" : "";
       return `
         <label class="small core-stats-control-toggle">
-          <input type="checkbox"${checked} data-core-field-key="${escapeHtml(key)}" data-core-field-type="checkbox" />
+          <input class="toggle-input" type="checkbox"${checked} data-core-field-key="${escapeHtml(key)}" data-core-field-type="checkbox" />
           ${escapeHtml(label)}
         </label>
       `;
@@ -9147,13 +9148,15 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
   `;
 }
 
-function renderEspHomeSettingsCard(item, coreKey = "voice") {
+function renderEspHomeSettingsCard(item, coreKey = "voice", options = {}) {
   const title = String(item?.title || "Voice Pipeline Settings").trim() || "Voice Pipeline Settings";
   const subtitle = String(item?.subtitle || "").trim();
   const saveAction = String(item?.save_action || "").trim();
   const resetAction = String(item?.reset_action || "").trim();
   const resetConfirm = String(item?.reset_confirm || "Reset native voice settings to defaults?").trim();
   const sections = Array.isArray(item?.sections) ? item.sections : [];
+  const wakeTrainerLink =
+    options?.wakeTrainerLink && typeof options.wakeTrainerLink === "object" ? options.wakeTrainerLink : null;
   return `
     <article class="card core-manager-item"
       data-core-key="${escapeHtml(coreKey)}"
@@ -9170,11 +9173,19 @@ function renderEspHomeSettingsCard(item, coreKey = "voice") {
       ${sections
         .map((section) => {
           const sectionLabel = String(section?.label || "Section").trim() || "Section";
+          const sectionDescription = String(section?.description || "").trim();
           const fields = Array.isArray(section?.fields) ? section.fields : [];
+          const trainerFeedback = sectionLabel.toLowerCase() === "trainer feedback";
+          const trainerLinkHtml =
+            trainerFeedback && wakeTrainerLink
+              ? renderWakeTrainerLinkCard(wakeTrainerLink, coreKey, { embedded: true })
+              : "";
           return `
-            <section class="core-inline-section" style="margin-top:12px;">
+            <section class="core-inline-section${trainerFeedback ? " trainer-feedback-section" : ""}" style="margin-top:12px;">
               <div class="small core-inline-section-title">${escapeHtml(sectionLabel)}</div>
-              <div class="form-grid">
+              ${sectionDescription ? `<div class="small">${escapeHtml(sectionDescription)}</div>` : ""}
+              ${trainerLinkHtml}
+              <div class="form-grid${trainerLinkHtml ? " wake-trainer-feedback-fields" : ""}">
                 ${fields.map((field) => renderCoreManagerField(field)).join("")}
               </div>
             </section>
@@ -9187,6 +9198,85 @@ function renderEspHomeSettingsCard(item, coreKey = "voice") {
         <span class="small core-manager-status"></span>
       </div>
     </article>
+  `;
+}
+
+function renderWakeTrainerLinkCard(item, coreKey = "voice", { embedded = false } = {}) {
+  const linked = boolFromAny(item?.linked, false);
+  const trainerName = String(item?.trainer_name || "Wake Word Trainer").trim() || "Wake Word Trainer";
+  const trainerUrl = String(item?.trainer_url || "").trim();
+  const lastWakeWord = String(item?.last_wake_word || "").trim();
+  const lastWakeWordLabel = lastWakeWord.replaceAll("_", " ").replace(/\s+/g, " ").trim();
+  const linkedAtRaw = String(item?.linked_at || "").trim();
+  const lastPublishRaw = String(item?.last_publish_at || "").trim();
+  const linkedAt = linkedAtRaw && !Number.isNaN(new Date(linkedAtRaw).getTime()) ? new Date(linkedAtRaw).toLocaleString() : linkedAtRaw;
+  const lastPublish =
+    lastPublishRaw && !Number.isNaN(new Date(lastPublishRaw).getTime())
+      ? new Date(lastPublishRaw).toLocaleString()
+      : lastPublishRaw;
+  const wrapperTag = embedded ? "div" : "article";
+  const wrapperClass = embedded
+    ? "wake-trainer-link-card wake-trainer-link-panel"
+    : "card core-manager-item wake-trainer-link-card";
+  return `
+    <${wrapperTag} class="${wrapperClass}${linked ? " is-linked" : ""}"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-wake-trainer-linked="${linked ? "1" : "0"}"
+      data-wake-trainer-start-action="${escapeHtml(String(item?.start_action || ""))}"
+      data-wake-trainer-status-action="${escapeHtml(String(item?.status_action || ""))}"
+      data-wake-trainer-unlink-action="${escapeHtml(String(item?.unlink_action || ""))}"
+      role="group"
+      aria-label="Secure Wake Word Trainer link"
+      >
+      <div class="wake-trainer-link-head">
+        <div class="wake-trainer-link-heading">
+          <div class="small core-inline-section-title">Secure Trainer Link</div>
+          <div class="small">${escapeHtml(String(item?.subtitle || ""))}</div>
+        </div>
+        <span class="status-chip ${linked ? "running" : ""}">${linked ? "Linked" : "Not Linked"}</span>
+      </div>
+      ${
+        linked
+          ? `
+            <div class="wake-trainer-link-summary">
+              <div class="wake-trainer-link-identity">
+                <span class="wake-trainer-link-mark" aria-hidden="true">W</span>
+                <div>
+                  <span class="wake-trainer-link-label">Trainer</span>
+                  <strong>${escapeHtml(trainerName)}</strong>
+                  ${trainerUrl ? `<span class="wake-trainer-link-address">${escapeHtml(trainerUrl)}</span>` : ""}
+                </div>
+              </div>
+              <div class="wake-trainer-link-meta">
+                <div class="wake-trainer-link-meta-item">
+                  <span>Linked</span>
+                  <strong>${escapeHtml(linkedAt || "Linked securely")}</strong>
+                </div>
+                <div class="wake-trainer-link-meta-item">
+                  <span>Last Publish</span>
+                  <strong>${escapeHtml(
+                    lastPublish ? `${lastWakeWordLabel ? `${lastWakeWordLabel} · ` : ""}${lastPublish}` : "No wake word published yet"
+                  )}</strong>
+                </div>
+              </div>
+            </div>
+          `
+          : `
+            <div class="wake-trainer-link-empty">
+              <span class="wake-trainer-link-mark" aria-hidden="true">W</span>
+              <div>
+                <strong>No trainer linked</strong>
+                <span>Create a one-time code here, then enter it in the trainer's Auto Training tab.</span>
+              </div>
+            </div>
+          `
+      }
+      <div class="inline-row wake-trainer-link-actions">
+        <button type="button" class="action-btn wake-trainer-link-open">${linked ? "Relink Trainer" : "Link Trainer"}</button>
+        ${linked ? `<button type="button" class="inline-btn danger wake-trainer-link-unlink">Unlink</button>` : ""}
+        <span class="small core-manager-status"></span>
+      </div>
+    </${wrapperTag}>
   `;
 }
 
@@ -9289,18 +9379,29 @@ function normalizeEspHomeFirmwareSelection(firmware) {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
   const templateValues = templates.map((row) => String(row?.value || "").trim()).filter(Boolean);
-  const requestedTemplate = String(
+  let requestedTemplate = String(
     state.esphomeFirmwareSelection?.templateKey || body?.active_template_key || templateValues[0] || ""
   ).trim();
+  const requestedSelector = String(
+    state.esphomeFirmwareSelection?.selector || body?.active_selector || ""
+  ).trim();
+  if (requestedSelector && requestedSelector !== "__usb_recovery__") {
+    const matchedTemplate = templateValues.find((candidate) =>
+      espHomeFirmwareDevicesForTemplate(body, candidate).some(
+        (row) => String(row?.value || "").trim() === requestedSelector
+      )
+    );
+    if (matchedTemplate) {
+      requestedTemplate = matchedTemplate;
+    }
+  }
   const templateKey = templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "";
   const devices = espHomeFirmwareDevicesForTemplate(body, templateKey);
   const deviceValues = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
-  const requestedSelector = String(
-    state.esphomeFirmwareSelection?.selector || body?.active_selector || deviceValues[0] || ""
-  ).trim();
+  const normalizedSelector = requestedSelector || deviceValues[0] || "";
   return {
     templateKey,
-    selector: deviceValues.includes(requestedSelector) ? requestedSelector : deviceValues[0] || "",
+    selector: deviceValues.includes(normalizedSelector) ? normalizedSelector : deviceValues[0] || "",
   };
 }
 
@@ -10969,6 +11070,8 @@ async function fetchEspHomeRuntimePayload(panel = "") {
 async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const shell = document.getElementById("settings-esphome-shell");
   const head = document.getElementById("settings-esphome-runtime-head");
+  const globalSatelliteSettingsHost = document.getElementById("settings-esphome-runtime-global-satellite-settings");
+  const wakeVerifierHost = document.getElementById("settings-esphome-runtime-wake-verifier");
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
   const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
@@ -10978,6 +11081,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   if (
     !(shell instanceof HTMLElement) ||
     !(head instanceof HTMLElement) ||
+    !(globalSatelliteSettingsHost instanceof HTMLElement) ||
+    !(wakeVerifierHost instanceof HTMLElement) ||
     !(satellitesHost instanceof HTMLElement) ||
     !(addHost instanceof HTMLElement) ||
     !(firmwareHost instanceof HTMLElement) ||
@@ -11003,6 +11108,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   shell.dataset.runtimeLoaded = "loading";
   shell.dataset.runtimePanel = targetPanel;
   head.innerHTML = renderNotice(force ? "Refreshing Voice runtime..." : "Loading Voice runtime...");
+  globalSatelliteSettingsHost.innerHTML = renderNotice("Loading shared satellite voice settings...");
+  wakeVerifierHost.innerHTML = renderNotice("Loading wake verification...");
   if (targetPanel === "satellites") {
     satellitesHost.innerHTML = renderNotice("Loading satellites...");
     addHost.innerHTML = renderNotice("Loading add form...");
@@ -11030,6 +11137,12 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const body = payload && typeof payload === "object" ? payload : {};
       const ui = body?.ui && typeof body.ui === "object" ? body.ui : {};
       const itemForms = Array.isArray(ui?.item_forms) ? ui.item_forms : [];
+      const globalSatelliteSettingsItem =
+        itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "global_satellite_settings") || null;
+      const wakeTrainerLinkItem =
+        itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "wake_trainer_link") || null;
+      const wakeVerifierItem =
+        itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "wake_verifier") || null;
       const satelliteItems = itemForms.filter((item) => String(item?.group || "").trim().toLowerCase() === "satellite");
       const addForm = ui?.add_form && typeof ui.add_form === "object" ? ui.add_form : {};
       const nativePairing = ui?.native_pairing && typeof ui.native_pairing === "object" ? ui.native_pairing : {};
@@ -11050,6 +11163,16 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         stats: headerStats,
         coreKey,
       });
+      globalSatelliteSettingsHost.innerHTML = globalSatelliteSettingsItem
+        ? renderEspHomeSettingsCard(globalSatelliteSettingsItem, coreKey, {
+            wakeTrainerLink: wakeTrainerLinkItem,
+          })
+        : wakeTrainerLinkItem
+          ? renderWakeTrainerLinkCard(wakeTrainerLinkItem, coreKey)
+          : renderNotice("Shared satellite voice settings are unavailable.");
+      wakeVerifierHost.innerHTML = wakeVerifierItem
+        ? renderEspHomeSettingsCard(wakeVerifierItem, coreKey)
+        : renderNotice("Wake verification settings are unavailable.");
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = satelliteItems.length
           ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
@@ -11086,6 +11209,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       }
       const message = error instanceof Error ? error.message : String(error || "Failed to load Voice runtime.");
       head.innerHTML = renderNotice(message);
+      globalSatelliteSettingsHost.innerHTML = renderNotice(message);
+      wakeVerifierHost.innerHTML = renderNotice(message);
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = renderNotice(message);
         addHost.innerHTML = renderNotice(message);
@@ -12951,7 +13076,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
           <div class="inline-row esphome-browser-usb-list" style="margin-top:8px;"></div>
           <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup" style="${nativeFirmware ? "display:none;" : ""}">
             <label class="firmware-usb-wifi-toggle">
-              <input type="checkbox" class="esphome-browser-usb-wifi-enabled" checked>
+              <input type="checkbox" class="toggle-input esphome-browser-usb-wifi-enabled" checked>
               <span>Set up Wi-Fi after USB flash</span>
             </label>
             <div class="firmware-usb-wifi-grid">
@@ -14616,6 +14741,166 @@ function bindCoreTabManagers() {
         status_action: panel.dataset.nativePairingStatusAction,
       });
       setCoreManagerStatus(panel, "");
+    });
+  });
+
+  const openWakeTrainerLinkModal = (card) => {
+    const coreKey = String(card?.dataset?.coreKey || "voice").trim() || "voice";
+    const startAction = String(card?.dataset?.wakeTrainerStartAction || "").trim();
+    const statusAction = String(card?.dataset?.wakeTrainerStatusAction || "").trim();
+    if (!startAction || !statusAction) {
+      showToast("Wake Word Trainer linking is unavailable.", "error", 2800);
+      return;
+    }
+
+    let pollTimer = null;
+    let pairingId = "";
+    let modalRef = null;
+    const stopPolling = () => {
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    };
+    const renderSuccess = async (fieldsEl, statusEl, result) => {
+      stopPolling();
+      if (fieldsEl instanceof HTMLElement) {
+        fieldsEl.innerHTML = `
+          <div class="native-pairing-success">
+            <div class="native-pairing-success-mark">OK</div>
+            <div>
+              <div class="runtime-settings-section-title">Trainer Linked</div>
+              <div class="small">${escapeHtml(String(result?.trainer_name || "Wake Word Trainer"))} can now securely publish wake words to Tater.</div>
+            </div>
+          </div>
+        `;
+      }
+      if (statusEl instanceof HTMLElement) {
+        statusEl.textContent = "Link successful on Tater.";
+      }
+      showToast("Wake Word Trainer linked.");
+      await refreshEspHomeRuntimeInPlace();
+    };
+    const pollStatus = async (fieldsEl, statusEl) => {
+      if (!pairingId || !modalRef?.isConnected) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, statusAction, { pairing_id: pairingId });
+        if (String(result?.state || "").toLowerCase() === "linked") {
+          await renderSuccess(fieldsEl, statusEl, result);
+          return;
+        }
+        if (String(result?.state || "").toLowerCase() === "expired") {
+          if (statusEl instanceof HTMLElement) {
+            statusEl.textContent = "This code expired. Close this popup and create a new one.";
+          }
+          return;
+        }
+      } catch (error) {
+        if (statusEl instanceof HTMLElement) {
+          statusEl.textContent = `Pairing check failed: ${String(error?.message || "unknown error")}`;
+        }
+      }
+      pollTimer = window.setTimeout(() => pollStatus(fieldsEl, statusEl), 1000);
+    };
+
+    openRuntimeSettingsModal({
+      title: "Link Wake Word Trainer",
+      meta: "Secure one-time pairing",
+      fields: [{ key: "wake_trainer_link_starting", label: "Trainer Link", type: "section", description: "Creating a one-time code in Tater..." }],
+      modalClass: "runtime-settings-dialog-native-pairing",
+      onOpen: async ({ modal, fieldsEl, statusEl }) => {
+        modalRef = modal;
+        modal?.classList.add("wake-trainer-link-modal");
+        if (!(fieldsEl instanceof HTMLElement)) {
+          return;
+        }
+        if (statusEl instanceof HTMLElement) {
+          statusEl.textContent = "Creating pairing code...";
+        }
+        try {
+          const result = await runCoreManagerAction(card, coreKey, startAction, {});
+          pairingId = String(result?.pairing_id || "").trim();
+          const pairingCode = String(result?.display_code || "").trim();
+          if (!pairingId || !pairingCode) {
+            throw new Error("Tater did not create a pairing code");
+          }
+          fieldsEl.innerHTML = `
+            <div class="native-pairing-modal-body">
+              <section class="native-pairing-code-panel">
+                <div class="small native-pairing-kicker">Tater Pairing Code</div>
+                <div class="native-pairing-code">${escapeHtml(pairingCode)}</div>
+                <button type="button" class="inline-btn wake-trainer-code-copy">Copy Code</button>
+                <div class="small" style="margin-top:8px;">This code expires in 10 minutes and works once.</div>
+              </section>
+              <section class="native-pairing-steps">
+                <div class="native-pairing-step"><span>1</span><p>Open the Wake Word Trainer Auto Training tab.</p></div>
+                <div class="native-pairing-step"><span>2</span><p>Press Link Tater in the Publish to Tater card.</p></div>
+                <div class="native-pairing-step"><span>3</span><p>Enter this code and the Tater address. Both popups will confirm success.</p></div>
+              </section>
+            </div>
+          `;
+          fieldsEl.querySelector(".wake-trainer-code-copy")?.addEventListener("click", async (event) => {
+            const copied = await copyTextToClipboard(pairingCode).catch(() => false);
+            if (event.currentTarget instanceof HTMLButtonElement) {
+              event.currentTarget.textContent = copied ? "Copied" : "Copy Failed";
+            }
+          });
+          if (statusEl instanceof HTMLElement) {
+            statusEl.textContent = "Waiting for the trainer to claim this code...";
+          }
+          pollTimer = window.setTimeout(() => pollStatus(fieldsEl, statusEl), 750);
+        } catch (error) {
+          fieldsEl.innerHTML = renderNotice(`Pairing failed: ${String(error?.message || "unknown error")}`);
+          if (statusEl instanceof HTMLElement) {
+            statusEl.textContent = `Pairing failed: ${String(error?.message || "unknown error")}`;
+          }
+        }
+      },
+      onClose: ({ modal }) => {
+        stopPolling();
+        pairingId = "";
+        modal?.classList.remove("wake-trainer-link-modal");
+      },
+    });
+  };
+
+  document.querySelectorAll(".wake-trainer-link-open").forEach((button) => {
+    if (button.dataset.wakeTrainerLinkBound === "1") {
+      return;
+    }
+    button.dataset.wakeTrainerLinkBound = "1";
+    button.addEventListener("click", () => {
+      const card = button.closest(".wake-trainer-link-card");
+      if (card) {
+        openWakeTrainerLinkModal(card);
+      }
+    });
+  });
+
+  document.querySelectorAll(".wake-trainer-link-unlink").forEach((button) => {
+    if (button.dataset.wakeTrainerUnlinkBound === "1") {
+      return;
+    }
+    button.dataset.wakeTrainerUnlinkBound = "1";
+    button.addEventListener("click", async () => {
+      const card = button.closest(".wake-trainer-link-card");
+      const coreKey = String(card?.dataset?.coreKey || "voice").trim() || "voice";
+      const action = String(card?.dataset?.wakeTrainerUnlinkAction || "").trim();
+      if (!card || !action || !window.confirm("Unlink this Wake Word Trainer? It will no longer be allowed to publish models.")) {
+        return;
+      }
+      button.disabled = true;
+      setCoreManagerStatus(card, "Unlinking...");
+      try {
+        const result = await runCoreManagerAction(card, coreKey, action, {});
+        showToast(String(result?.message || "Wake Word Trainer unlinked."));
+        await refreshEspHomeRuntimeInPlace();
+      } catch (error) {
+        button.disabled = false;
+        setCoreManagerStatus(card, `Unlink failed: ${String(error?.message || "unknown error")}`);
+      }
     });
   });
 
@@ -16374,7 +16659,7 @@ function dashboardBriefRefreshIntervalOptionsHtml() {
 function dashboardSettingsToggleHtml({ key, label, description, checked }) {
   return `
     <label class="dashboard-setting-toggle">
-      <input type="checkbox" data-dashboard-setting="${escapeHtml(key)}"${checked ? " checked" : ""} />
+      <input class="toggle-input" type="checkbox" data-dashboard-setting="${escapeHtml(key)}"${checked ? " checked" : ""} />
       <span>
         <strong>${escapeHtml(label)}</strong>
         ${description ? `<small>${escapeHtml(description)}</small>` : ""}
@@ -17974,10 +18259,10 @@ function renderSettingsRedisSectionHtml(redisStatus, redisEncryptionStatus, { in
               <input id="set_redis_ca_cert_path" type="text" value="${escapeHtml(redisStatus.ca_cert_path || "")}" />
             </label>
             <label class="toggle-row" data-redis-mode-field="external">Use TLS
-              <input id="set_redis_use_tls" type="checkbox" ${redisStatus.use_tls ? "checked" : ""} />
+              <input id="set_redis_use_tls" class="toggle-input" type="checkbox" ${redisStatus.use_tls ? "checked" : ""} />
             </label>
             <label class="toggle-row" data-redis-mode-field="external">Verify TLS Cert
-              <input id="set_redis_verify_tls" type="checkbox" ${redisStatus.verify_tls ? "checked" : ""} />
+              <input id="set_redis_verify_tls" class="toggle-input" type="checkbox" ${redisStatus.verify_tls ? "checked" : ""} />
             </label>
             <div class="inline-row" style="grid-column: 1 / -1;">
               <button type="button" id="settings-redis-refresh" class="inline-btn">Refresh</button>
@@ -21044,6 +21329,14 @@ async function loadSettingsView() {
                 "RUN",
                 "subtle"
               )}
+              <div id="settings-esphome-runtime-global-satellite-settings">
+                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load shared satellite voice settings.`)}
+              </div>
+
+              <div id="settings-esphome-runtime-wake-verifier" style="margin-top:16px;">
+                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load wake verification.`)}
+              </div>
+
               <div id="settings-esphome-form">
                 <section class="core-inline-section">
                   <div class="small core-inline-section-title">Tater Voice Platform</div>
@@ -27152,7 +27445,7 @@ function renderSpudexRunCard(settings) {
           <input id="spudex-command" type="text" autocomplete="off" placeholder="python --version" />
         </label>
         <label class="toggle-row spudex-background-row">
-          <input id="spudex-background" type="checkbox" />
+          <input id="spudex-background" class="toggle-input" type="checkbox" />
           <span>Keep running</span>
         </label>
         <button class="primary-btn" type="submit">Run</button>

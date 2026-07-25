@@ -23,6 +23,18 @@ INTEGRATION_DEVICE_REGISTRY_CACHE_KEY = "tater:integration_runtime:device_regist
 INTEGRATION_ROOM_OVERRIDES_KEY = "tater:integration_runtime:room_overrides"
 INTEGRATION_RUNTIME_STATES_KEY = "tater:integration_runtime:states"
 _DEVICE_REGISTRY_CACHE_VERSION = 3
+_DEVICE_REGISTRY_VOLATILE_FIELDS = {
+    "age_seconds",
+    "duration_ms",
+    "fetched_at",
+    "generated_at",
+    "last_seen",
+    "last_seen_at",
+    "observed_at",
+    "timestamp",
+    "ts",
+    "updated_at",
+}
 
 
 CAPABILITY_CATEGORIES: List[Dict[str, Any]] = [
@@ -1578,6 +1590,38 @@ def get_cached_integration_device_registry(client: Any = None) -> Dict[str, Any]
     return _apply_runtime_state_overlay_to_registry(registry, redis_obj)
 
 
+def _device_registry_cache_comparable(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_device_registry_cache_comparable(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    has_runtime_overlay = isinstance(value.get("runtime_state"), dict)
+    comparable: Dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = _text(raw_key)
+        normalized_key = key.lower()
+        if normalized_key == "runtime_state":
+            continue
+        if has_runtime_overlay and normalized_key in {"online", "state", "status"}:
+            continue
+        if normalized_key in _DEVICE_REGISTRY_VOLATILE_FIELDS:
+            continue
+        if normalized_key == "cache":
+            cache = item if isinstance(item, dict) else {}
+            comparable[key] = {
+                "version": int(cache.get("version") or 0),
+                "enabled_integrations": sorted(
+                    _text(entry).lower()
+                    for entry in (cache.get("enabled_integrations") or [])
+                    if _text(entry)
+                ),
+            }
+            continue
+        comparable[key] = _device_registry_cache_comparable(item)
+    return comparable
+
+
 def save_integration_device_registry_cache(registry: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
     redis_obj = _cache_client(client)
     payload = _copy_dict(registry)
@@ -1592,7 +1636,23 @@ def save_integration_device_registry_cache(registry: Dict[str, Any], client: Any
         "updated_at": generated_at,
     }
     if redis_obj:
-        redis_obj.set(INTEGRATION_DEVICE_REGISTRY_CACHE_KEY, json.dumps(payload, separators=(",", ":"), default=str))
+        should_write = True
+        try:
+            existing = _json_dict_loads(redis_obj.get(INTEGRATION_DEVICE_REGISTRY_CACHE_KEY))
+            if existing:
+                should_write = (
+                    _device_registry_cache_comparable(existing)
+                    != _device_registry_cache_comparable(payload)
+                )
+        except Exception:
+            should_write = True
+        if should_write:
+            redis_obj.set(
+                INTEGRATION_DEVICE_REGISTRY_CACHE_KEY,
+                json.dumps(payload, separators=(",", ":"), default=str),
+            )
+        else:
+            logger.debug("Integration device registry unchanged; skipped cache rewrite.")
     return payload
 
 

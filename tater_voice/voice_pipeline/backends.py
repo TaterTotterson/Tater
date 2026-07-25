@@ -354,6 +354,54 @@ def _transcribe_mlx_whisper_sync(
                 os.unlink(temp_path)
 
 
+def _transcribe_mlx_whisper_wake_sync(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str] = "en",
+) -> str:
+    """Decode a short wake clip deterministically without a temporary WAV."""
+    vp = _vp()
+    if vp.MLXWhisper is None:
+        raise RuntimeError(f"mlx-whisper dependency unavailable: {vp.MLX_WHISPER_IMPORT_ERROR or 'unknown import error'}")
+
+    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    np_mod = importlib.import_module("numpy")
+    audio_np = np_mod.frombuffer(pcm16, dtype=np_mod.int16).astype(np_mod.float32) / 32768.0
+    kwargs: Dict[str, Any] = {
+        "path_or_hf_repo": vp._mlx_whisper_model(),
+        # None disables mlx-whisper's progress bar. The normal transcription
+        # path uses False so interactive transcription can still show progress.
+        "verbose": None,
+        "temperature": 0.0,
+        "condition_on_previous_text": False,
+        "compression_ratio_threshold": 2.4,
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+    }
+    lang = vp._text(language)
+    if lang:
+        kwargs["language"] = lang
+
+    with _MLX_WHISPER_TRANSCRIBE_LOCK:
+        root = vp._ensure_stt_backend_model_root("mlx_whisper")
+        with _temporary_env(
+            huggingface_environment(
+                {
+                    "HF_HOME": root,
+                    "HF_HUB_CACHE": os.path.join(root, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                }
+            )
+        ):
+            result = vp.MLXWhisper.transcribe(audio_np, **kwargs)
+    if isinstance(result, dict):
+        return re.sub(r"\s+", " ", vp._text(result.get("text"))).strip()
+    return re.sub(r"\s+", " ", vp._text(result)).strip()
+
+
 def _vosk_result_text(payload: Any) -> str:
     vp = _vp()
     raw = vp._text(payload)

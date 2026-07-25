@@ -2003,6 +2003,7 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
         or selector_token
     )
     model = _text(device_info.get("model")) or _text(device_info.get("project_name"))
+    matched_template = _match_template_spec(selector_token, client_row)
     status_label = "" if connected else "offline"
     label_parts = [part for part in [title, host, status_label] if part]
     label = " • ".join(label_parts) or selector_token
@@ -2014,6 +2015,16 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
         "host": host,
         "detail": detail,
         "connected": connected,
+        "template_key": _text(matched_template.get("key")) if isinstance(matched_template, dict) else "",
+        "hero_image_src": esphome_ui_helpers.device_image_src(
+            matched_template.get("key") if isinstance(matched_template, dict) else "",
+            matched_template.get("label") if isinstance(matched_template, dict) else "",
+            client_row.get("board"),
+            (client_row.get("metadata") or {}).get("board") if isinstance(client_row.get("metadata"), dict) else "",
+            device_info.get("model"),
+            title,
+        ),
+        "hero_image_alt": f"{title} firmware target",
     }
 
 

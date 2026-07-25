@@ -5,7 +5,6 @@ import contextlib
 import inspect
 import logging
 import re
-import threading
 import time
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
@@ -26,13 +25,6 @@ _native_stats: Dict[str, Any] = {
     "last_run_ts": 0.0,
     "last_success_ts": 0.0,
     "last_error": "",
-}
-_discovery_stats: Dict[str, Any] = {
-    "runs": 0,
-    "last_run_ts": 0.0,
-    "last_success_ts": 0.0,
-    "last_error": "",
-    "last_counts": {},
 }
 
 
@@ -200,14 +192,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
     )
 
 
-def _discovery_timeout_s() -> float:
-    return float(getattr(_vp(), "DEFAULT_DISCOVERY_MDNS_TIMEOUT_S", 2.0))
-
-
-def _discovery_scan_seconds() -> int:
-    return int(getattr(_vp(), "DEFAULT_DISCOVERY_SCAN_SECONDS", 30))
-
-
 def _format_ts_label(ts_value: Any) -> str:
     ts = _as_float(ts_value, 0.0)
     if ts <= 0:
@@ -219,10 +203,6 @@ def _format_ts_label(ts_value: Any) -> str:
 
 def target_map() -> Dict[str, str]:
     return {}
-
-
-def discovery_stats() -> Dict[str, Any]:
-    return dict(_discovery_stats)
 
 
 def native_stats() -> Dict[str, Any]:
@@ -248,149 +228,6 @@ def clients_snapshot_sync() -> Dict[str, Dict[str, Any]]:
         if isinstance(row, dict):
             out[_text(selector)] = dict(row)
     return out
-
-
-# -------------------- mDNS Discovery --------------------
-def _discover_mdns_sync(scan_seconds: float) -> List[Dict[str, Any]]:
-    try:
-        from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf  # type: ignore
-    except Exception:
-        return []
-
-    service_types = ("_esphomelib._tcp.local.", "_esphome._tcp.local.")
-    timeout_ms = max(200, int(float(scan_seconds) * 1000))
-    found: Dict[str, Dict[str, Any]] = {}
-    lock = threading.Lock()
-
-    def _decode(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            with contextlib.suppress(Exception):
-                return value.decode("utf-8", "ignore").strip()
-            return ""
-        return str(value).strip()
-
-    def _collect_addresses(info: Any) -> List[str]:
-        out: List[str] = []
-        seen = set()
-        parsed = None
-        with contextlib.suppress(Exception):
-            parsed = info.parsed_addresses()
-        if isinstance(parsed, list):
-            for addr in parsed:
-                token = _lower(addr)
-                if not token or token in seen:
-                    continue
-                seen.add(token)
-                out.append(token)
-        return out
-
-    def _on_state(*args: Any, **kwargs: Any) -> None:
-        zc = kwargs.get("zeroconf")
-        service_type = kwargs.get("service_type")
-        name = kwargs.get("name")
-        state_change = kwargs.get("state_change")
-        if zc is None and len(args) >= 1:
-            zc = args[0]
-        if service_type is None and len(args) >= 2:
-            service_type = args[1]
-        if name is None and len(args) >= 3:
-            name = args[2]
-        if state_change is None and len(args) >= 4:
-            state_change = args[3]
-
-        if zc is None or not service_type or not name:
-            return
-        if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            return
-
-        info = None
-        with contextlib.suppress(Exception):
-            info = zc.get_service_info(service_type, name, timeout=timeout_ms)
-        if info is None:
-            return
-
-        addresses = _collect_addresses(info)
-        host = ""
-        for addr in addresses:
-            if addr.startswith("127.") or addr == "::1":
-                continue
-            host = addr
-            break
-        if not host:
-            host = _lower(_decode(getattr(info, "server", "")).rstrip("."))
-        if not host:
-            return
-
-        props = getattr(info, "properties", None)
-        props_map = props if isinstance(props, dict) else {}
-        node_name = _decode(props_map.get(b"name")) or _decode(name).split(".", 1)[0] or host
-
-        row = {
-            "selector": f"host:{host}",
-            "host": host,
-            "name": node_name,
-            "source": "mdns_esphome",
-            "metadata": {
-                "mdns_service": _decode(name),
-                "mdns_type": _decode(service_type),
-                "mdns_addresses": addresses,
-            },
-        }
-        with lock:
-            found[row["selector"]] = row
-
-    zc = Zeroconf()
-    browsers = []
-    try:
-        for st in service_types:
-            with contextlib.suppress(Exception):
-                browsers.append(ServiceBrowser(zc, st, handlers=[_on_state]))
-        time.sleep(float(max(0.5, scan_seconds)))
-    finally:
-        for browser in browsers:
-            with contextlib.suppress(Exception):
-                browser.cancel()
-        with contextlib.suppress(Exception):
-            zc.close()
-
-    return list(found.values())
-
-
-async def discover_mdns_once() -> List[Dict[str, Any]]:
-    _remember_native_loop()
-    _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
-    _discovery_stats["last_run_ts"] = _now()
-    _discovery_stats["last_success_ts"] = _now()
-    _discovery_stats["last_error"] = ""
-    _discovery_stats["last_counts"] = {"native_pairing": 0}
-    return []
-
-
-async def discovery_loop() -> None:
-    _remember_native_loop()
-    while True:
-        try:
-            cfg = _voice_config_snapshot()
-            discovery = cfg.get("discovery") if isinstance(cfg.get("discovery"), dict) else {}
-            enabled = bool(discovery.get("enabled"))
-
-            _discovery_stats["last_counts"] = {"native_pairing": 0}
-
-            _discovery_stats["runs"] = int(_discovery_stats.get("runs") or 0) + 1
-            _discovery_stats["last_run_ts"] = _now()
-            _discovery_stats["last_success_ts"] = _now()
-            _discovery_stats["last_error"] = ""
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _discovery_stats["last_error"] = str(exc)
-            _discovery_stats["last_run_ts"] = _now()
-            logger.warning("[native-voice] discovery loop error: %s", exc)
-
-        interval = _get_int_setting("VOICE_DISCOVERY_SCAN_SECONDS", _discovery_scan_seconds(), minimum=5, maximum=600)
-        await asyncio.sleep(float(interval))
 
 
 # -------------------- ESPHome Native API --------------------

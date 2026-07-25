@@ -28,6 +28,7 @@ try:
     import audioop as _audioop
 except Exception:  # Python 3.13 removed audioop
     _audioop = None
+import copy
 import contextlib
 import html
 import importlib
@@ -109,6 +110,7 @@ from .backends import (
     _synthesize_spoken_response_audio,
     _transcribe_faster_whisper_sync,
     _transcribe_mlx_whisper_sync,
+    _transcribe_mlx_whisper_wake_sync,
     _transcribe_vosk_sync,
     _trim_pcm_for_playback,
     _tts_backend_available,
@@ -351,9 +353,6 @@ DEFAULT_VOICE_SAMPLE_WIDTH = 2
 DEFAULT_VOICE_CHANNELS = 1
 DEFAULT_MAX_AUDIO_BYTES = 4 * 1024 * 1024
 
-DEFAULT_DISCOVERY_ENABLED = False
-DEFAULT_DISCOVERY_SCAN_SECONDS = 45
-DEFAULT_DISCOVERY_MDNS_TIMEOUT_S = 3.0
 DEFAULT_CONTINUED_CHAT_ENABLED = False
 DEFAULT_CONTINUED_CHAT_REUSE_SECONDS = 30.0
 DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S = 4.0
@@ -451,6 +450,16 @@ _wake_arbitration_groups: Dict[str, Dict[str, Any]] = {}
 _wake_arbitration_room_claims: Dict[str, Dict[str, Any]] = {}
 _CUDA_RUNTIME_AVAILABLE_CACHE: Optional[bool] = None
 _CUDA_RUNTIME_AVAILABLE_LOCK = threading.RLock()
+_VOICE_CONFIG_CACHE_TTL_S = 1.0
+_voice_config_cache_lock = threading.RLock()
+_voice_settings_cache: Dict[str, Any] = {}
+_voice_settings_cache_loaded = False
+_voice_settings_cache_until = 0.0
+_voice_settings_merged_cache: Dict[str, Any] = {}
+_voice_settings_merged_cache_loaded = False
+_voice_settings_merged_cache_until = 0.0
+_voice_config_snapshot_cache: Optional[Dict[str, Any]] = None
+_voice_config_snapshot_cache_until = 0.0
 
 _background_tasks: Dict[str, asyncio.Task] = {}
 
@@ -1839,12 +1848,62 @@ def _require_api_auth(x_tater_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-Tater-Token")
 
 
+def _require_configured_api_auth(x_tater_token: Optional[str]) -> None:
+    settings = _voice_settings()
+    if not _as_bool(settings.get("API_AUTH_ENABLED"), False):
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthenticated satellite settings writes are disabled.",
+        )
+    _require_api_auth(x_tater_token)
+
+
+def _invalidate_voice_config_cache() -> None:
+    global _voice_settings_cache
+    global _voice_settings_cache_loaded
+    global _voice_settings_cache_until
+    global _voice_settings_merged_cache
+    global _voice_settings_merged_cache_loaded
+    global _voice_settings_merged_cache_until
+    global _voice_config_snapshot_cache
+    global _voice_config_snapshot_cache_until
+
+    with _voice_config_cache_lock:
+        _voice_settings_cache = {}
+        _voice_settings_cache_loaded = False
+        _voice_settings_cache_until = 0.0
+        _voice_settings_merged_cache = {}
+        _voice_settings_merged_cache_loaded = False
+        _voice_settings_merged_cache_until = 0.0
+        _voice_config_snapshot_cache = None
+        _voice_config_snapshot_cache_until = 0.0
+
+
 def _voice_settings() -> Dict[str, Any]:
-    with contextlib.suppress(Exception):
+    global _voice_settings_cache
+    global _voice_settings_cache_loaded
+    global _voice_settings_cache_until
+
+    now = time.monotonic()
+    with _voice_config_cache_lock:
+        if _voice_settings_cache_loaded and now < _voice_settings_cache_until:
+            return dict(_voice_settings_cache)
+
+    try:
         row = redis_client.hgetall(VOICE_CORE_SETTINGS_HASH_KEY) or {}
-        if isinstance(row, dict):
-            return row
-    return {}
+    except Exception:
+        with _voice_config_cache_lock:
+            if _voice_settings_cache_loaded:
+                return dict(_voice_settings_cache)
+        return {}
+    if not isinstance(row, dict):
+        row = {}
+
+    with _voice_config_cache_lock:
+        _voice_settings_cache = dict(row)
+        _voice_settings_cache_loaded = True
+        _voice_settings_cache_until = time.monotonic() + _VOICE_CONFIG_CACHE_TTL_S
+        return dict(_voice_settings_cache)
 
 
 def _shared_speech_voice_settings() -> Dict[str, Any]:
@@ -1878,8 +1937,27 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
 
 
 def _voice_settings_with_shared_speech(extra_values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    merged = dict(_voice_settings())
-    merged.update({key: value for key, value in _shared_speech_voice_settings().items() if value is not None})
+    global _voice_settings_merged_cache
+    global _voice_settings_merged_cache_loaded
+    global _voice_settings_merged_cache_until
+
+    now = time.monotonic()
+    cache_hit = False
+    with _voice_config_cache_lock:
+        if _voice_settings_merged_cache_loaded and now < _voice_settings_merged_cache_until:
+            merged = dict(_voice_settings_merged_cache)
+            cache_hit = True
+        else:
+            merged = {}
+
+    if not cache_hit:
+        merged = dict(_voice_settings())
+        merged.update({key: value for key, value in _shared_speech_voice_settings().items() if value is not None})
+        with _voice_config_cache_lock:
+            _voice_settings_merged_cache = dict(merged)
+            _voice_settings_merged_cache_loaded = True
+            _voice_settings_merged_cache_until = time.monotonic() + _VOICE_CONFIG_CACHE_TTL_S
+
     if isinstance(extra_values, dict):
         merged.update({key: value for key, value in extra_values.items() if value is not None})
     return merged
@@ -2541,7 +2619,7 @@ def _resolve_vosk_model_path() -> str:
     return _bootstrap_vosk_model()
 
 
-def _voice_config_snapshot() -> Dict[str, Any]:
+def _build_voice_config_snapshot() -> Dict[str, Any]:
     settings = _voice_settings_with_shared_speech()
     tts_backend = _normalize_tts_backend(settings.get("VOICE_TTS_BACKEND"))
     tts_model = _text(settings.get("VOICE_TTS_MODEL"))
@@ -2675,11 +2753,6 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "transport": "websocket",
             "legacy_satellite_api": False,
         },
-        "discovery": {
-            "enabled": _get_bool_setting("VOICE_DISCOVERY_ENABLED", DEFAULT_DISCOVERY_ENABLED),
-            "scan_seconds": _get_int_setting("VOICE_DISCOVERY_SCAN_SECONDS", DEFAULT_DISCOVERY_SCAN_SECONDS, minimum=5, maximum=600),
-            "mdns_timeout_s": _get_float_setting("VOICE_DISCOVERY_MDNS_TIMEOUT_S", DEFAULT_DISCOVERY_MDNS_TIMEOUT_S, minimum=0.5, maximum=20.0),
-        },
         "eou": {
             "mode": DEFAULT_EOU_MODE,
             "input_gain": _get_float_setting("VOICE_INPUT_GAIN", DEFAULT_AUDIO_INPUT_GAIN, minimum=0.5, maximum=16.0),
@@ -2737,6 +2810,22 @@ def _voice_config_snapshot() -> Dict[str, Any]:
             "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
         },
     }
+
+
+def _voice_config_snapshot() -> Dict[str, Any]:
+    global _voice_config_snapshot_cache
+    global _voice_config_snapshot_cache_until
+
+    now = time.monotonic()
+    with _voice_config_cache_lock:
+        if _voice_config_snapshot_cache is not None and now < _voice_config_snapshot_cache_until:
+            return copy.deepcopy(_voice_config_snapshot_cache)
+
+    snapshot = _build_voice_config_snapshot()
+    with _voice_config_cache_lock:
+        _voice_config_snapshot_cache = copy.deepcopy(snapshot)
+        _voice_config_snapshot_cache_until = time.monotonic() + _VOICE_CONFIG_CACHE_TTL_S
+    return snapshot
 
 
 # -------------------- Voice Catalog Helpers --------------------
@@ -4618,8 +4707,6 @@ def _awaiting_announcement_state(runtime: Dict[str, Any]) -> Optional[AwaitingAn
 from .. import device_runtime as _esphome_device_runtime
 from .. import ui_helpers as _esphome_ui_helpers
 
-_discover_mdns_once = _esphome_device_runtime.discover_mdns_once
-_discovery_loop = _esphome_device_runtime.discovery_loop
 _esphome_target_map = _esphome_device_runtime.target_map
 _esphome_import = _esphome_device_runtime.esphome_import
 _esphome_module_attr = _esphome_device_runtime.esphome_module_attr

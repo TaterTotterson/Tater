@@ -28,6 +28,11 @@ VOICE_MODEL_SETTING_KEYS = {
     for key in keys
 }
 
+REMOVED_DISCOVERY_SETTING_KEYS = {
+    "VOICE_DISCOVERY_ENABLED",
+    "VOICE_DISCOVERY_SCAN_SECONDS",
+    "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
+}
 LEGACY_RUNTIME_SETTING_KEYS = {
     "VOICE_WAKE_STARTUP_GATE_S",
     "VOICE_WAKE_SILENCE_SECONDS",
@@ -36,7 +41,42 @@ LEGACY_RUNTIME_SETTING_KEYS = {
     "VOICE_WAKE_MIN_SILENCE_SHORT_S",
     "VOICE_WAKE_MIN_SILENCE_LONG_S",
     "VOICE_WAKE_PREROLL_S",
+} | REMOVED_DISCOVERY_SETTING_KEYS
+
+VOICE_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
+VOICE_WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
+VOICE_STANDALONE_SETTING_KEYS = {
+    VOICE_WAKE_VERIFIER_MODE_KEY,
+    "VOICE_CONTINUED_CHAT_ENABLED",
 }
+VOICE_INTERNAL_TUNING_KEYS = {
+    "VOICE_VAD_BACKEND",
+    "VOICE_VAD_SILENCE_SECONDS",
+    "VOICE_VAD_TIMEOUT_SECONDS",
+    "VOICE_VAD_NO_SPEECH_TIMEOUT_S",
+    "VOICE_SILERO_THRESHOLD",
+    "VOICE_SILERO_NEG_THRESHOLD",
+    "VOICE_SILERO_MIN_SPEECH_FRAMES",
+    "VOICE_SILERO_MIN_SILENCE_FRAMES",
+    "VOICE_VAD_MIN_SILENCE_SHORT_S",
+    "VOICE_VAD_MIN_SILENCE_LONG_S",
+    "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
+    "VOICE_STARTUP_GATE_S",
+    "VOICE_WAKE_VAD_STARTUP_IGNORE_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS",
+    "VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS",
+    "VOICE_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES",
+    "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S",
+    "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S",
+    "VOICE_AUDIO_STALL_TIMEOUT_S",
+    "VOICE_AUDIO_STALL_NO_SPEECH_TIMEOUT_S",
+    "VOICE_BLANK_WAKE_TIMEOUT_S",
+}
+REMOVED_USER_SETTING_KEYS = VOICE_INTERNAL_TUNING_KEYS | REMOVED_DISCOVERY_SETTING_KEYS
 
 
 def _vp():
@@ -53,6 +93,18 @@ def settings_hash_key() -> str:
 def voice_ui_setting_specs() -> List[Dict[str, Any]]:
     vp = _vp()
     return [
+        {
+            "key": VOICE_WAKE_VERIFIER_MODE_KEY,
+            "label": "Wake Verification",
+            "type": "select",
+            "default": "off",
+            "options": [
+                {"value": "off", "label": "Disabled"},
+                {"value": "observe", "label": "Observe"},
+                {"value": "enforce", "label": "Enabled"},
+            ],
+            "description": "Applies to every Tater Native satellite. Observe records results without blocking wakes; Enabled rejects transcript mismatches and fails open on timeout or error.",
+        },
         {
             "key": "VOICE_NATIVE_DEBUG",
             "label": "Native Voice Debug Logs",
@@ -469,30 +521,6 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "If enabled, Tater may start speaking long replies sooner by splitting playback into early chunks. This may introduce slightly more audible sentence gaps.",
         },
         {
-            "key": "VOICE_DISCOVERY_ENABLED",
-            "label": "Enable Legacy Discovery",
-            "type": "checkbox",
-            "default": False,
-            "description": "Legacy discovery is disabled for Tater Native satellites. Use Add Satellite pairing instead.",
-        },
-        {
-            "key": "VOICE_DISCOVERY_SCAN_SECONDS",
-            "label": "Discovery Scan Interval (sec)",
-            "type": "number",
-            "default": vp.DEFAULT_DISCOVERY_SCAN_SECONDS,
-            "min": 5,
-            "max": 600,
-        },
-        {
-            "key": "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
-            "label": "mDNS Listen Window (sec)",
-            "type": "number",
-            "default": vp.DEFAULT_DISCOVERY_MDNS_TIMEOUT_S,
-            "min": 0.5,
-            "max": 20.0,
-            "step": 0.1,
-        },
-        {
             "key": "VOICE_NATIVE_WYOMING_TIMEOUT_S",
             "label": "Wyoming Timeout (sec)",
             "type": "number",
@@ -531,7 +559,7 @@ def _voice_ui_spec_map() -> Dict[str, Dict[str, Any]]:
         if not isinstance(spec, dict):
             continue
         key = vp._text(spec.get("key"))
-        if not key:
+        if not key or key in VOICE_INTERNAL_TUNING_KEYS:
             continue
         out[key] = dict(spec)
     return out
@@ -571,7 +599,7 @@ def settings_fields() -> List[Dict[str, Any]]:
         if not isinstance(spec, dict):
             continue
         key = vp._text(spec.get("key"))
-        if not key:
+        if not key or key in VOICE_INTERNAL_TUNING_KEYS:
             continue
         row = dict(spec)
         row["key"] = key
@@ -638,7 +666,6 @@ def settings_sections() -> List[Dict[str, Any]]:
         (
             "Tater Voice Extras",
             [
-                "VOICE_CONTINUED_CHAT_ENABLED",
                 "VOICE_WAKE_ARBITRATION_ENABLED",
                 "VOICE_WAKE_ARBITRATION_WINDOW_MS",
                 "VOICE_WAKE_ARBITRATION_BUSY_TIMEOUT_S",
@@ -659,49 +686,6 @@ def settings_sections() -> List[Dict[str, Any]]:
             ],
         ),
         (
-            "Voice Activity Detection",
-            [
-                "VOICE_VAD_BACKEND",
-                "VOICE_VAD_SILENCE_SECONDS",
-                "VOICE_VAD_TIMEOUT_SECONDS",
-                "VOICE_VAD_NO_SPEECH_TIMEOUT_S",
-                "VOICE_SILERO_THRESHOLD",
-                "VOICE_SILERO_NEG_THRESHOLD",
-                "VOICE_SILERO_MIN_SPEECH_FRAMES",
-                "VOICE_SILERO_MIN_SILENCE_FRAMES",
-                "VOICE_VAD_MIN_SILENCE_SHORT_S",
-                "VOICE_VAD_MIN_SILENCE_LONG_S",
-                "VOICE_WEBRTC_VAD_AGGRESSIVENESS",
-            ],
-        ),
-        (
-            "Listening",
-            [
-                "VOICE_STARTUP_GATE_S",
-                "VOICE_WAKE_VAD_STARTUP_IGNORE_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_STARTUP_GATE_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_PREROLL_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_SILENCE_SECONDS",
-                "VOICE_CONTINUED_CHAT_REOPEN_TIMEOUT_SECONDS",
-                "VOICE_CONTINUED_CHAT_REOPEN_NO_SPEECH_TIMEOUT_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_FRAMES",
-                "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_SHORT_S",
-                "VOICE_CONTINUED_CHAT_REOPEN_MIN_SILENCE_LONG_S",
-                "VOICE_AUDIO_STALL_TIMEOUT_S",
-                "VOICE_AUDIO_STALL_NO_SPEECH_TIMEOUT_S",
-                "VOICE_BLANK_WAKE_TIMEOUT_S",
-            ],
-        ),
-        (
-            "Satellite Discovery",
-            [
-                "VOICE_DISCOVERY_ENABLED",
-                "VOICE_DISCOVERY_SCAN_SECONDS",
-                "VOICE_DISCOVERY_MDNS_TIMEOUT_S",
-            ],
-        ),
-        (
             "External Voice Services",
             [
                 "VOICE_NATIVE_WYOMING_TIMEOUT_S",
@@ -713,7 +697,7 @@ def settings_sections() -> List[Dict[str, Any]]:
     return _sections_for_groups(
         runtime_groups,
         include_remaining=True,
-        remaining_exclude=VOICE_MODEL_SETTING_KEYS,
+        remaining_exclude=VOICE_MODEL_SETTING_KEYS | VOICE_STANDALONE_SETTING_KEYS,
     )
 
 
@@ -721,12 +705,18 @@ def model_settings_sections() -> List[Dict[str, Any]]:
     return _sections_for_groups(VOICE_MODEL_SETTING_GROUPS, include_remaining=False)
 
 
+def wake_verifier_mode() -> str:
+    vp = _vp()
+    mode = vp._lower(vp._voice_settings().get(VOICE_WAKE_VERIFIER_MODE_KEY)) or "off"
+    return mode if mode in VOICE_WAKE_VERIFIER_MODES else "off"
+
+
 def settings_item_form() -> Dict[str, Any]:
     return {
         "id": "voice_settings",
         "group": "settings",
         "title": "Voice Pipeline Settings",
-        "subtitle": "Tune native satellite voice runtime behavior here. Shared STT/TTS model choices now live in Tater Settings under Models.",
+        "subtitle": "Manage optional native voice features here. Tater automatically tunes listening and endpoint detection.",
         "sections": list(settings_sections()),
         "save_action": "voice_settings_save",
         "save_label": "Save Settings",
@@ -793,6 +783,7 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
 
     if mapping:
         redis_client.hset(settings_hash_key(), mapping=mapping)
+        vp._invalidate_voice_config_cache()
 
     return {
         "updated_count": len(changed_keys),
@@ -816,6 +807,17 @@ def runtime_setting_keys() -> List[str]:
     return keys
 
 
+def cleanup_removed_user_settings() -> Dict[str, Any]:
+    keys = sorted(REMOVED_USER_SETTING_KEYS)
+    removed_count = int(redis_client.hdel(settings_hash_key(), *keys) or 0) if keys else 0
+    if removed_count:
+        _vp()._invalidate_voice_config_cache()
+    return {
+        "removed_count": removed_count,
+        "removed_keys": keys,
+    }
+
+
 def reset_settings_defaults() -> Dict[str, Any]:
     keys = runtime_setting_keys()
     delete_keys = sorted(set(keys) | LEGACY_RUNTIME_SETTING_KEYS)
@@ -824,6 +826,7 @@ def reset_settings_defaults() -> Dict[str, Any]:
 
     if delete_keys:
         redis_client.hdel(settings_hash_key(), *delete_keys)
+        _vp()._invalidate_voice_config_cache()
 
     return {
         "updated_count": len(changed_keys),

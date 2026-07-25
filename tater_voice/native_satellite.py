@@ -502,6 +502,40 @@ def _firmware_settings_payload(selector: str = "", *, board: str = "") -> Dict[s
     return native_live_settings.firmware_settings_snapshot(selector, board=board)
 
 
+async def _handle_wake_verifier_packet(
+    selector: str,
+    data: bytes,
+    queue: asyncio.Queue,
+    websocket: WebSocket,
+) -> None:
+    from . import wake_verifier
+
+    result = await wake_verifier.verify_packet(data, selector=selector)
+    async with _clients_lock:
+        row = _clients.get(selector)
+        if isinstance(row, dict) and row.get("websocket") is websocket:
+            row["wake_verifier_count"] = int(row.get("wake_verifier_count") or 0) + 1
+            if not bool(result.get("accepted")):
+                row["wake_verifier_rejections"] = int(row.get("wake_verifier_rejections") or 0) + 1
+            row["wake_verifier_last"] = dict(result)
+            row["last_seen_ts"] = _now()
+            row["last_message_type"] = "wake.verify"
+    _vp().logger.info(
+        "[wake-verifier] selector=%s request=%s mode=%s accepted=%s available=%s score=%.3f stt_ms=%.1f total_ms=%.1f transcript=%r reason=%s",
+        selector,
+        result.get("request_id"),
+        "enforce" if result.get("enforce") else "observe",
+        bool(result.get("accepted")),
+        bool(result.get("available")),
+        float(result.get("score") or 0.0),
+        float(result.get("stt_ms") or 0.0),
+        float(result.get("total_ms") or 0.0),
+        _text(result.get("transcript")),
+        _text(result.get("reason")),
+    )
+    _queue_command(queue, _envelope("wake.verify.result", result))
+
+
 class _NativeVoiceAssistantEventType:
     VOICE_ASSISTANT_RUN_START = "RUN_START"
     RUN_START = "RUN_START"
@@ -965,6 +999,11 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "queued_commands": queue.qsize() if isinstance(queue, asyncio.Queue) else 0,
         "binary_frames": int(row.get("binary_frames") or 0),
         "binary_bytes": int(row.get("binary_bytes") or 0),
+        "wake_verifier": {
+            "count": int(row.get("wake_verifier_count") or 0),
+            "rejections": int(row.get("wake_verifier_rejections") or 0),
+            "last": row.get("wake_verifier_last") if isinstance(row.get("wake_verifier_last"), dict) else {},
+        },
         "voice": voice,
     }
 
@@ -1144,6 +1183,9 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         "log_seq": 0,
         "binary_frames": 0,
         "binary_bytes": 0,
+        "wake_verifier_count": 0,
+        "wake_verifier_rejections": 0,
+        "wake_verifier_last": {},
     }
     async with _clients_lock:
         _clients[selector] = row
@@ -1271,6 +1313,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
 
     selector = ""
     command_sender: Optional[asyncio.Task] = None
+    wake_verifier_tasks: set[asyncio.Task] = set()
     client_row: Optional[Dict[str, Any]] = None
     client_host = getattr(websocket.client, "host", "unknown") if websocket.client is not None else "unknown"
     send_lock = asyncio.Lock()
@@ -1413,7 +1456,15 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     client_row["binary_bytes"] = int(client_row.get("binary_bytes") or 0) + len(data)
                     client_row["last_seen_ts"] = _now()
                     client_row["last_message_type"] = "binary"
-                if bridge is not None:
+                from . import wake_verifier
+
+                if wake_verifier.is_wake_verifier_packet(data):
+                    task = asyncio.create_task(
+                        _handle_wake_verifier_packet(selector, data, queue, websocket)
+                    )
+                    wake_verifier_tasks.add(task)
+                    task.add_done_callback(wake_verifier_tasks.discard)
+                elif bridge is not None:
                     await bridge.audio(data)
     except WebSocketDisconnect:
         pass
@@ -1436,6 +1487,11 @@ async def handle_websocket(websocket: WebSocket) -> None:
         with contextlib.suppress(Exception):
             await send_json(_envelope("error", {"ok": False, "error": str(exc) or type(exc).__name__}))
     finally:
+        for task in tuple(wake_verifier_tasks):
+            task.cancel()
+        for task in tuple(wake_verifier_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         if command_sender is not None:
             command_sender.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

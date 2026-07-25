@@ -3639,6 +3639,14 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
                     None,
                 )
                 return f"loaded STT {token} and warmed CUDA decode"
+        elif token == "mlx_whisper":
+            silence = b"\x00\x00" * int(16000 * 0.5)
+            voice_pipeline._transcribe_mlx_whisper_wake_sync(
+                silence,
+                {"rate": 16000, "width": 2, "channels": 1},
+                "en",
+            )
+            return f"loaded STT {token} and warmed deterministic wake decode"
         elif token == "vosk":
             voice_pipeline._load_vosk_model()
         else:
@@ -9070,6 +9078,7 @@ async def _startup_event() -> None:
 
 
 async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: float = 10.0) -> bool:
+    started_at = time.monotonic()
     try:
         result = func()
         if inspect.isawaitable(result):
@@ -9077,6 +9086,11 @@ async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: flo
                 await asyncio.wait_for(result, timeout=float(timeout))
             else:
                 await result
+        logger.info(
+            "[shutdown] %s completed in %.2fs",
+            name,
+            max(0.0, time.monotonic() - started_at),
+        )
         return True
     except asyncio.TimeoutError:
         logger.warning("[shutdown] %s timed out after %.1fs", name, float(timeout or 0))
@@ -9093,14 +9107,43 @@ async def _shutdown_event() -> None:
     loop = asyncio.get_running_loop()
     try:
         await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
-        await _run_shutdown_step("core runtime", lambda: core_runtime.stop_all(timeout=8.0), timeout=10.0)
+        await _run_shutdown_step(
+            "portal runtime",
+            lambda: asyncio.to_thread(portal_runtime.stop_all, timeout=8.0),
+            timeout=10.0,
+        )
         await _run_shutdown_step("Tater Voice runtime", esphome_home_module.shutdown, timeout=10.0)
-        await _run_shutdown_step("portal runtime", lambda: portal_runtime.stop_all(timeout=8.0), timeout=10.0)
         await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
-        await _run_shutdown_step("chat jobs", chat_jobs.shutdown, timeout=6.0)
+        await _run_shutdown_step(
+            "core runtime",
+            lambda: asyncio.to_thread(core_runtime.stop_all, timeout=8.0),
+            timeout=10.0,
+        )
+        await _run_shutdown_step(
+            "chat jobs",
+            lambda: asyncio.to_thread(chat_jobs.shutdown, timeout=5.0),
+            timeout=7.0,
+        )
+        await _run_shutdown_step(
+            "local LLM models",
+            lambda: asyncio.to_thread(unload_local_llm_models, all_models=True),
+            timeout=12.0,
+        )
         await _run_shutdown_step("shared async HTTP", close_shared_async_http_client, timeout=5.0)
-        await _run_shutdown_step("runtime executors", lambda: shutdown_runtime_executors(wait=False, cancel_futures=True), timeout=5.0)
-        await _run_shutdown_step("internal Redis", shutdown_internal_redis, timeout=5.0)
+        await _run_shutdown_step(
+            "runtime executors",
+            lambda: asyncio.to_thread(
+                shutdown_runtime_executors,
+                wait=False,
+                cancel_futures=True,
+            ),
+            timeout=5.0,
+        )
+        await _run_shutdown_step(
+            "internal Redis",
+            lambda: asyncio.to_thread(shutdown_internal_redis),
+            timeout=10.0,
+        )
     finally:
         native_satellite_module.release_runtime_loop(loop)
     logger.info("TaterOS backend stopped")
@@ -16718,12 +16761,12 @@ def get_settings() -> Dict[str, Any]:
         voice_model_sections = []
     esphome_ui = {
         "label": "Voice",
-        "description": "Built-in voice satellite services for Tater. Satellites, firmware, live entities, and device logs live here.",
+        "description": "Built-in Tater Native voice services. Manage paired satellites, firmware, and device logs here.",
         "fields": esphome_fields,
         "sections": esphome_sections,
         "running": bool(esphome_home_module.is_running()),
         "runtime_tab_label": "Voice",
-        "runtime_tab_hint": "Satellites, live entities, rooms, and logs are managed directly in this Voice area.",
+        "runtime_tab_hint": "Tater Native satellites, rooms, firmware, and logs are managed directly in this Voice area.",
     }
     voice_model_ui = {
         "label": "Voice Models",
@@ -18776,6 +18819,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 )
             ).strip(),
         )
+        with contextlib.suppress(Exception):
+            from tater_voice import voice_pipeline
+
+            voice_pipeline._invalidate_voice_config_cache()
         if any(key in updates for key in tts_reload_keys):
             tts_reload_result = _reload_local_tts_model_caches(reason="settings-save")
         if any(key in updates for key in speech_warmup_keys):
