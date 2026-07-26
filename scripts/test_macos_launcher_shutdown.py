@@ -62,6 +62,27 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         record = implementation.index("try recordRuntimeRequirementsFingerprint()")
         self.assertLess(status_guard, record)
 
+    def test_termination_reply_runs_in_appkit_modal_run_loop(self) -> None:
+        start = self.source.index("func applicationShouldTerminate(")
+        end = self.source.index("private func startRecoveryWatchdog", start)
+        implementation = self.source[start:end]
+
+        self.assertIn("CFRunLoopPerformBlock(", implementation)
+        self.assertIn("RunLoop.Mode.modalPanel.rawValue as CFString", implementation)
+        self.assertIn("CFRunLoopWakeUp(mainRunLoop)", implementation)
+        self.assertNotIn("DispatchQueue.main.async {", implementation)
+
+    def test_installer_forces_stuck_old_app_to_exit_before_replacing_it(self) -> None:
+        start = self.source.index("private func writeInstallerScript()")
+        end = self.source.index("private func safePathComponent", start)
+        implementation = self.source[start:end]
+
+        term_index = implementation.index('kill -TERM "$APP_PID"')
+        kill_index = implementation.index('kill -KILL "$APP_PID"')
+        target_index = implementation.index('TARGET_PARENT="$(dirname "$TARGET_APP")"')
+        self.assertLess(term_index, kill_index)
+        self.assertLess(kill_index, target_index)
+
 
 if __name__ == "__main__":
     unittest.main()
