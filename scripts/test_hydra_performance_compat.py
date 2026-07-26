@@ -30,7 +30,7 @@ def _local_result(text: str = "ok"):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
-    def test_explicit_none_uses_bounded_local_default(self):
+    def test_explicit_none_runs_to_eos_or_context_boundary(self):
         client = helpers.LlamaCppLLMClientWrapper(model="test-model")
         chat_kwargs = client._build_chat_kwargs(
             None,
@@ -38,8 +38,43 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         )
         payload = helpers._llama_cpp_native_completion_payload("prompt", chat_kwargs)
 
-        self.assertEqual(chat_kwargs["max_tokens"], client.max_tokens)
-        self.assertEqual(payload["n_predict"], client.max_tokens)
+        self.assertEqual(chat_kwargs["max_tokens"], -1)
+        self.assertEqual(payload["n_predict"], -1)
+
+    def test_omitted_llama_limit_runs_to_eos_or_context_boundary(self):
+        payload = helpers._llama_cpp_native_completion_payload(
+            "prompt",
+            {"temperature": 0.0},
+        )
+
+        self.assertEqual(payload["n_predict"], -1)
+
+    def test_explicit_llama_limit_is_preserved(self):
+        client = helpers.LlamaCppLLMClientWrapper(model="test-model")
+        chat_kwargs = client._build_chat_kwargs(
+            None,
+            {"max_tokens": 4096, "temperature": 0.0},
+        )
+        payload = helpers._llama_cpp_native_completion_payload("prompt", chat_kwargs)
+
+        self.assertEqual(chat_kwargs["max_tokens"], 4096)
+        self.assertEqual(payload["n_predict"], 4096)
+
+    def test_llama_context_exhaustion_is_reported(self):
+        result = helpers._llama_cpp_native_completion_result(
+            model_token="test-model",
+            response={
+                "content": '{"partial":"value',
+                "tokens_evaluated": 100,
+                "stop_type": "limit",
+                "generation_settings": {"n_predict": -1},
+                "timings": {"predicted_n": 3996},
+            },
+            generation_elapsed=1.0,
+        )
+
+        self.assertEqual(result["_finish_reason"], "length")
+        self.assertEqual(result["_limit_reason"], "context")
 
     def test_mtp_keeps_speculation_and_disables_context_checkpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -79,6 +114,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--spec-type") + 1], "draft-mtp")
         self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "2")
         self.assertEqual(command[command.index("--parallel") + 1], "2")
+        self.assertIn("--no-context-shift", command)
         self.assertEqual(metadata["ctx_checkpoints"], 0)
         self.assertEqual(metadata["configured_slot_count"], 2)
         self.assertEqual(metadata["slot_count"], 2)
@@ -433,7 +469,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
 
 class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_omitted_max_tokens_keeps_local_provider_default(self):
+    async def test_omitted_max_tokens_reaches_context_bounded_local_builders(self):
         for client in (
             helpers.TransformersLLMClientWrapper(model="test-model"),
             helpers.LlamaCppLLMClientWrapper(model="test-model"),
@@ -448,7 +484,8 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(client, "_chat_sync", side_effect=fake_chat):
                 await client.chat([{"role": "user", "content": "hello"}])
 
-            self.assertEqual(captured["max_tokens"], client.max_tokens)
+            self.assertIn("max_tokens", captured)
+            self.assertIsNone(captured["max_tokens"])
 
     async def test_explicit_none_reaches_local_provider_builders(self):
         for client in (
@@ -667,6 +704,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["message"]["content"], "ok")
         self.assertNotIn("cache_namespace", completions.kwargs)
         self.assertNotIn("activity", completions.kwargs)
+        self.assertNotIn("max_tokens", completions.kwargs)
 
     async def test_openai_compatible_native_stream_callback(self):
         class Stream:
@@ -799,6 +837,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, ["ok"])
         self.assertNotIn("cache_namespace", fake_http.body)
         self.assertNotIn("activity", fake_http.body)
+        self.assertNotIn("max_tokens", fake_http.body)
 
     async def test_spud_link_preserves_explicit_context_bounded_request(self):
         class Response:

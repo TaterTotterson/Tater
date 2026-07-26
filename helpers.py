@@ -6352,12 +6352,14 @@ def _llama_cpp_native_completion_payload(
         if source in (chat_kwargs or {}) and chat_kwargs.get(source) is not None:
             payload[target] = chat_kwargs.get(source)
     if "n_predict" not in payload:
-        payload["n_predict"] = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        # llama.cpp defines -1 as generation until EOS or the active slot's
+        # context boundary. Do not impose a hidden global completion cap.
+        payload["n_predict"] = -1
     try:
-        n_predict = int(payload.get("n_predict") if payload.get("n_predict") is not None else 1024)
+        n_predict = int(payload.get("n_predict") if payload.get("n_predict") is not None else -1)
         payload["n_predict"] = -1 if n_predict < 0 else max(1, n_predict)
     except Exception:
-        payload["n_predict"] = 1024
+        payload["n_predict"] = -1
     return payload
 
 
@@ -6388,6 +6390,20 @@ def _llama_cpp_native_completion_result(
         "completion_tokens_per_second": _perf_nonnegative_float(timings.get("predicted_per_second")),
         "speed_basis": "llama_server_native",
     }
+    stop_type = str(response.get("stop_type") or "").strip().lower()
+    generation_settings = (
+        response.get("generation_settings")
+        if isinstance(response.get("generation_settings"), dict)
+        else {}
+    )
+    try:
+        requested_tokens = int(generation_settings.get("n_predict"))
+    except Exception:
+        requested_tokens = 0
+    finish_reason = "length" if stop_type == "limit" else "stop"
+    limit_reason = ""
+    if finish_reason == "length":
+        limit_reason = "context" if requested_tokens < 0 else "max_tokens"
     return {
         "model": str(model_token or "").strip(),
         "message": {"role": "assistant", "content": content},
@@ -6397,6 +6413,8 @@ def _llama_cpp_native_completion_result(
             "total_tokens": max(0, total_tokens),
         },
         "_timing": timing,
+        "_finish_reason": finish_reason,
+        "_limit_reason": limit_reason,
     }
 
 
@@ -6716,6 +6734,9 @@ def _llama_cpp_native_server_command(
         "0",
         "--reasoning-format",
         "none",
+        # Keep n_predict=-1 context-bounded. Context shifting would otherwise
+        # turn a missing EOS into effectively infinite generation.
+        "--no-context-shift",
         "--chat-template-kwargs",
         json.dumps(_llama_cpp_native_chat_template_kwargs({}), separators=(",", ":")),
     ]
@@ -8354,6 +8375,16 @@ def _append_llm_debug_result(
     prompt_elapsed = _perf_nonnegative_float(timing_map.get("prompt_elapsed"))
     completion_elapsed = _perf_nonnegative_float(timing_map.get("completion_elapsed"))
     speed_basis = str(timing_map.get("speed_basis") or "").strip()
+    finish_reason = (
+        str(result.get("_finish_reason") or "").strip().lower()
+        if isinstance(result, dict)
+        else ""
+    )
+    limit_reason = (
+        str(result.get("_limit_reason") or "").strip().lower()
+        if isinstance(result, dict)
+        else ""
+    )
     detail_parts: List[str] = []
     if prompt_tokens:
         detail_parts.append(f"prompt_tokens={prompt_tokens}")
@@ -8367,10 +8398,29 @@ def _append_llm_debug_result(
         detail_parts.append(f"generation_ms={round(completion_elapsed * 1000.0, 1)}")
     if speed_basis:
         detail_parts.append(f"timing={speed_basis}")
+    if finish_reason:
+        detail_parts.append(f"finish={finish_reason}")
+    if limit_reason:
+        detail_parts.append(f"limit={limit_reason}")
+    hit_limit = finish_reason == "length"
+    if hit_limit and limit_reason == "context":
+        logger.warning(
+            "LLM generation exhausted the available context "
+            "(prompt_tokens=%s completion_tokens=%s total_tokens=%s)",
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        )
     _append_llm_debug_event(
         phase="output",
-        level="success",
-        message="Model output ready",
+        level="warning" if hit_limit else "success",
+        message=(
+            "Model output reached the available context"
+            if hit_limit and limit_reason == "context"
+            else "Model output reached its configured token limit"
+            if hit_limit
+            else "Model output ready"
+        ),
         call_id=call_id,
         provider=provider,
         host=host,
@@ -9286,8 +9336,8 @@ class LLMClientWrapper:
         self.model = resolved_model
         self.api_key = resolved_api_key
 
-        # Common generation defaults (caller can override per-call)
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        # Common sampling defaults (caller can override per-call). Completion
+        # length is intentionally context-bounded unless a call supplies one.
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
         # Per-instance perf aggregation for one chat turn.
@@ -9379,11 +9429,9 @@ class LLMClientWrapper:
         kwargs.pop("cache_namespace", "")
         model = kwargs.pop("model", self.model)
 
-        # Provide sensible defaults if not supplied. A caller can pass
-        # max_tokens=None to explicitly disable token capping for this call.
-        if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self.max_tokens
-        elif kwargs.get("max_tokens") is None:
+        # Let the provider run to EOS/context unless the caller intentionally
+        # supplies a numeric completion limit.
+        if kwargs.get("max_tokens") is None:
             kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
@@ -9631,7 +9679,6 @@ class SpudLinkLLMClientWrapper:
         self.model = resolved_model
         self.api_key = explicit_api_key
         self.provider = HYDRA_LLM_PROVIDER_SPUD_LINK
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
         self._client = _shared_async_http_client()
         self._owns_http_client = False
@@ -9700,8 +9747,6 @@ class SpudLinkLLMClientWrapper:
         kwargs.pop("cache_namespace", "")
         model = str(kwargs.pop("model", self.model) or self.model).strip() or "tater/base"
 
-        if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self.max_tokens
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
@@ -9829,7 +9874,6 @@ class TransformersLLMClientWrapper:
         self.host = "hf://transformers"
         self.model = resolved_model
         self.provider = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
         self._llm_calls = 0
@@ -10146,17 +10190,18 @@ class TransformersLLMClientWrapper:
         prompt_tokens: int = 0,
     ) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
-        max_new_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        max_new_tokens = kwargs.pop("max_tokens", None)
+        remaining_context = max(
+            1,
+            _hf_llm_max_input_tokens() - max(0, int(prompt_tokens or 0)),
+        )
         if max_new_tokens is None:
-            generation_kwargs["max_new_tokens"] = max(
-                1,
-                _hf_llm_max_input_tokens() - max(0, int(prompt_tokens or 0)),
-            )
+            generation_kwargs["max_new_tokens"] = remaining_context
         else:
             try:
                 generation_kwargs["max_new_tokens"] = max(1, int(max_new_tokens))
             except Exception:
-                generation_kwargs["max_new_tokens"] = self.max_tokens
+                generation_kwargs["max_new_tokens"] = remaining_context
 
         temperature = kwargs.pop("temperature", self.temperature)
         try:
@@ -10209,6 +10254,7 @@ class TransformersLLMClientWrapper:
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         stop = kwargs.pop("stop", None)
+        context_bounded = kwargs.get("max_tokens") is None
         bundle = _load_hf_llm_bundle(self.model)
         model = bundle["model"]
         tokenizer = bundle["tokenizer"]
@@ -10236,6 +10282,8 @@ class TransformersLLMClientWrapper:
         content = self._apply_stop_sequences(_coerce_content_to_text(content).strip(), stop).strip()
         completion_tokens = int(getattr(completion_ids, "shape", [0])[-1] or 0)
         total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
+        completion_limit = max(1, int(generation_kwargs.get("max_new_tokens") or 1))
+        hit_limit = completion_tokens >= completion_limit
 
         return {
             "model": self.model,
@@ -10249,6 +10297,10 @@ class TransformersLLMClientWrapper:
                 "completion_elapsed": generation_elapsed,
                 "speed_basis": "local_generate",
             },
+            "_finish_reason": "length" if hit_limit else "stop",
+            "_limit_reason": (
+                "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
+            ),
         }
 
     async def chat(self, messages, **kwargs):
@@ -10272,7 +10324,7 @@ class TransformersLLMClientWrapper:
             self.model = str(model).strip()
 
         if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self.max_tokens
+            kwargs["max_tokens"] = None
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
 
@@ -10388,7 +10440,6 @@ class LlamaCppLLMClientWrapper:
         self.provider = HYDRA_LLM_PROVIDER_LLAMA_CPP
         self.vision = _boolish(vision, default=False)
         self.llama_cpp_slot = _llama_cpp_slot_id("vision" if self.vision else "base", kwargs.pop("llama_cpp_slot", None))
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
         self._llm_calls = 0
@@ -10447,16 +10498,19 @@ class LlamaCppLLMClientWrapper:
             chat_kwargs["reasoning_budget"] = 0
         if chat_template_kwargs:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
-        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
-            # Background jobs and Spud Link may explicitly pass None. Keep
-            # those requests bounded so a missing EOS cannot monopolize a slot.
-            chat_kwargs["max_tokens"] = self.max_tokens
+            # llama.cpp defines n_predict=-1 as generation until EOS or the
+            # available context is exhausted.
+            chat_kwargs["max_tokens"] = -1
         else:
             try:
-                chat_kwargs["max_tokens"] = max(1, int(max_tokens))
+                parsed_max_tokens = int(max_tokens)
+                chat_kwargs["max_tokens"] = (
+                    -1 if parsed_max_tokens < 0 else max(1, parsed_max_tokens)
+                )
             except Exception:
-                chat_kwargs["max_tokens"] = self.max_tokens
+                chat_kwargs["max_tokens"] = -1
         temperature = kwargs.pop("temperature", self.temperature)
         try:
             chat_kwargs["temperature"] = float(temperature)
@@ -10475,12 +10529,6 @@ class LlamaCppLLMClientWrapper:
         ):
             if key in kwargs and kwargs.get(key) is not None:
                 chat_kwargs[key] = kwargs.pop(key)
-        try:
-            timeout_value = float(timeout) if timeout is not None else 0.0
-        except Exception:
-            timeout_value = 0.0
-        if timeout_value > 0 and "max_tokens" not in chat_kwargs:
-            chat_kwargs["max_tokens"] = self.max_tokens
         chat_kwargs["stream"] = False
         return chat_kwargs
 
@@ -10535,7 +10583,7 @@ class LlamaCppLLMClientWrapper:
         if model and str(model).strip() != self.model:
             self.model = str(model).strip()
         if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self.max_tokens
+            kwargs["max_tokens"] = None
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
         try:
@@ -10808,7 +10856,6 @@ class MlxLmLLMClientWrapper:
         self.host = "mlx-lm://local"
         self.model = resolved_model
         self.provider = HYDRA_LLM_PROVIDER_MLX_LM
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 
         self._llm_calls = 0
@@ -10899,14 +10946,14 @@ class MlxLmLLMClientWrapper:
 
     def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         generation_kwargs: Dict[str, Any] = {}
-        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
             generation_kwargs["max_tokens"] = _mlx_lm_context_tokens_for_bundle(bundle)
         else:
             try:
                 generation_kwargs["max_tokens"] = max(1, int(max_tokens))
             except Exception:
-                generation_kwargs["max_tokens"] = self.max_tokens
+                generation_kwargs["max_tokens"] = _mlx_lm_context_tokens_for_bundle(bundle)
 
         temperature = kwargs.pop("temperature", self.temperature)
         try:
@@ -10984,17 +11031,19 @@ class MlxLmLLMClientWrapper:
     ) -> Dict[str, Any]:
         tokenizer = bundle.get("tokenizer") or bundle.get("processor")
         prompt = self._chat_template_prompt(tokenizer, messages)
-        max_tokens = kwargs.pop("max_tokens", self.max_tokens)
+        max_tokens = kwargs.pop("max_tokens", None)
+        context_bounded = max_tokens is None
+        remaining_context = max(
+            1,
+            _mlx_lm_context_tokens_for_bundle(bundle) - self._estimate_tokens(tokenizer, prompt),
+        )
         if max_tokens is None:
-            max_tokens_i = max(
-                1,
-                _mlx_lm_context_tokens_for_bundle(bundle) - self._estimate_tokens(tokenizer, prompt),
-            )
+            max_tokens_i = remaining_context
         else:
             try:
                 max_tokens_i = max(1, int(max_tokens))
             except Exception:
-                max_tokens_i = self.max_tokens
+                max_tokens_i = remaining_context
         temperature = kwargs.pop("temperature", self.temperature)
         try:
             temp_value = max(0.0, float(temperature))
@@ -11014,6 +11063,7 @@ class MlxLmLLMClientWrapper:
         completion_tokens = max(0, int(output.get("completion_tokens") or 0))
         total_tokens = prompt_tokens + completion_tokens
         generation_elapsed = _perf_nonnegative_float(output.get("elapsed"))
+        hit_limit = completion_tokens >= max_tokens_i
         return {
             "model": self.model,
             "message": {"role": "assistant", "content": content},
@@ -11027,6 +11077,10 @@ class MlxLmLLMClientWrapper:
                 "completion_elapsed": generation_elapsed,
                 "speed_basis": "mlx_engine",
             },
+            "_finish_reason": "length" if hit_limit else "stop",
+            "_limit_reason": (
+                "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
+            ),
         }
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
@@ -11056,7 +11110,7 @@ class MlxLmLLMClientWrapper:
         if model and str(model).strip() != self.model:
             self.model = str(model).strip()
         if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self.max_tokens
+            kwargs["max_tokens"] = None
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
         try:

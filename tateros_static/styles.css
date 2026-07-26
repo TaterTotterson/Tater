@@ -8521,6 +8521,151 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   margin-top: 10px;
 }
 
+.core-builder-step-heading {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  margin-top: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(240, 131, 69, 0.24);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(214, 90, 31, 0.14), rgba(240, 131, 69, 0.035)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow: inset 3px 0 0 rgba(240, 131, 69, 0.72);
+}
+
+.core-builder-step-heading:first-child {
+  margin-top: 0;
+}
+
+.core-builder-step-title {
+  color: var(--accent-soft);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.core-choice-card-field {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.core-choice-card-field-label {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.core-choice-card-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.core-choice-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 9px;
+}
+
+.core-choice-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-height: 76px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.13)),
+    rgba(0, 0, 0, 0.16);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+
+.core-choice-card:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(240, 131, 69, 0.36);
+  background:
+    linear-gradient(180deg, rgba(240, 131, 69, 0.08), rgba(0, 0, 0, 0.12)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.core-choice-card.selected {
+  border-color: rgba(240, 131, 69, 0.72);
+  background:
+    linear-gradient(135deg, rgba(214, 90, 31, 0.27), rgba(240, 131, 69, 0.09)),
+    rgba(0, 0, 0, 0.18);
+  box-shadow: inset 3px 0 0 rgba(240, 131, 69, 0.88), var(--accent-glow);
+}
+
+.core-choice-card:focus-visible {
+  outline: 2px solid rgba(240, 131, 69, 0.88);
+  outline-offset: 2px;
+}
+
+.core-choice-card:disabled {
+  cursor: default;
+  opacity: 0.46;
+}
+
+.core-choice-card-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(240, 131, 69, 0.26);
+  border-radius: 9px;
+  background: rgba(240, 131, 69, 0.1);
+  color: #ffc07f;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.core-choice-card-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.core-choice-card-copy strong,
+.core-choice-card-copy span,
+.core-choice-card-copy small {
+  overflow-wrap: anywhere;
+}
+
+.core-choice-card-copy strong {
+  color: var(--text);
+}
+
+.core-choice-card-copy span,
+.core-choice-card-copy small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.core-choice-card.selected .core-choice-card-copy strong {
+  color: var(--accent-soft);
+}
+
+@media (max-width: 640px) {
+  .core-choice-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .native-pairing-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
