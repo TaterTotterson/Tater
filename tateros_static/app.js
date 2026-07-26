@@ -7446,13 +7446,23 @@ function decodeCoreManagerId(value) {
 }
 
 function renderCoreManagerField(field) {
+  const type = String(field?.type || "text").toLowerCase();
+  const presentation = String(field?.presentation || field?.display || "").trim().toLowerCase();
+  const rawLabel = String(field?.label || "").trim();
+  const description = String(field?.description || "").trim();
+  if (type === "heading" || type === "section_heading") {
+    return `
+      <div class="core-builder-step-heading">
+        <div class="core-builder-step-title">${escapeHtml(rawLabel || "Automation Step")}</div>
+        ${description ? `<div class="small">${escapeHtml(description)}</div>` : ""}
+      </div>
+    `;
+  }
   const key = String(field?.key || "").trim();
   if (!key) {
     return "";
   }
-  const label = String(field?.label || key).trim() || key;
-  const type = String(field?.type || "text").toLowerCase();
-  const description = String(field?.description || "").trim();
+  const label = rawLabel || key;
   const descHtml = description ? `<div class="small">${escapeHtml(description)}</div>` : "";
   const placeholder = String(field?.placeholder || "").trim();
   const placeholderAttr = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : "";
@@ -7533,6 +7543,12 @@ function renderCoreManagerField(field) {
       : wrapWithCondition(html, showWhen);
     return fullWidth ? `<div style="grid-column:1 / -1; min-width:0;">${html}</div>` : html;
   };
+
+  if (type === "hidden") {
+    return `<input type="hidden" value="${escapeHtml(field?.value ?? "")}" data-core-field-key="${escapeHtml(
+      key
+    )}" data-core-field-type="hidden" />`;
+  }
 
   if (type === "table") {
     const rawColumns = Array.isArray(field?.columns) ? field.columns : [];
@@ -7686,6 +7702,103 @@ function renderCoreManagerField(field) {
         )}
         ${descHtml}
       </label>
+    `);
+  }
+
+  if (
+    type === "choice_cards" ||
+    type === "multi_choice_cards" ||
+    (presentation === "cards" && (type === "select" || type === "multiselect"))
+  ) {
+    const multiple = type === "multi_choice_cards" || type === "multiselect";
+    const options = Array.isArray(field?.options) ? field.options : [];
+    const selectedValues = new Set(
+      (Array.isArray(field?.value) ? field.value : [field?.value])
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    );
+    const dependent = field?.dependent_options && typeof field.dependent_options === "object" ? field.dependent_options : {};
+    const filterSourceKey = String(dependent?.source_key || "").trim();
+    let filterOptionsMap = "";
+    let filterDefaultOptions = "";
+    let filterPreferredValues = "";
+    if (filterSourceKey) {
+      try {
+        filterOptionsMap = encodeURIComponent(JSON.stringify(dependent?.options_by_source || {}));
+      } catch (_error) {
+        filterOptionsMap = "";
+      }
+      try {
+        const fallbackOptions = Array.isArray(dependent?.default_options) ? dependent.default_options : options;
+        filterDefaultOptions = encodeURIComponent(JSON.stringify(fallbackOptions));
+      } catch (_error) {
+        filterDefaultOptions = "";
+      }
+      try {
+        filterPreferredValues = encodeURIComponent(JSON.stringify(Array.from(selectedValues)));
+      } catch (_error) {
+        filterPreferredValues = "";
+      }
+    }
+    const dependentAttrs = filterSourceKey
+      ? ` data-core-filter-source-key="${escapeHtml(filterSourceKey)}"
+          data-core-filter-options-map="${escapeHtml(filterOptionsMap)}"
+          data-core-filter-default-options="${escapeHtml(filterDefaultOptions)}"
+          data-core-filter-preferred-value="${escapeHtml(String(field?.value ?? ""))}"
+          data-core-filter-preferred-values="${escapeHtml(filterPreferredValues)}"`
+      : "";
+    const normalizeOption = (raw) => {
+      if (raw && typeof raw === "object") {
+        const value = String(raw.value ?? raw.id ?? raw.key ?? raw.label ?? "");
+        return {
+          value,
+          label: String(raw.label ?? value),
+          description: String(raw.description ?? raw.subtitle ?? ""),
+          meta: String(raw.meta ?? raw.detail ?? ""),
+          icon: String(raw.icon ?? ""),
+        };
+      }
+      const value = String(raw ?? "");
+      return { value, label: value, description: "", meta: "", icon: "" };
+    };
+    const rows = options.map(normalizeOption).filter((row) => row.value || row.label);
+    const optionHtml = rows
+      .map((row) => {
+        const selected = selectedValues.has(row.value) ? " selected" : "";
+        return `<option value="${escapeHtml(row.value)}"${selected}
+          data-description="${escapeHtml(row.description)}"
+          data-meta="${escapeHtml(row.meta)}"
+          data-icon="${escapeHtml(row.icon)}">${escapeHtml(row.label)}</option>`;
+      })
+      .join("");
+    const cardsHtml = rows
+      .map((row) => {
+        const selected = selectedValues.has(row.value);
+        return `
+          <button type="button" class="core-choice-card${selected ? " selected" : ""}"
+            data-core-choice-value="${escapeHtml(row.value)}"
+            aria-pressed="${selected ? "true" : "false"}"${disabledAttr}>
+            ${row.icon ? `<span class="core-choice-card-icon" aria-hidden="true">${escapeHtml(row.icon)}</span>` : ""}
+            <span class="core-choice-card-copy">
+              <strong>${escapeHtml(row.label)}</strong>
+              ${row.description ? `<span>${escapeHtml(row.description)}</span>` : ""}
+              ${row.meta ? `<small>${escapeHtml(row.meta)}</small>` : ""}
+            </span>
+          </button>
+        `;
+      })
+      .join("");
+    return wrapField(`
+      <div class="core-choice-card-field">
+        <div class="core-choice-card-field-label">${escapeHtml(label)}</div>
+        <select class="core-choice-card-select" ${multiple ? "multiple" : ""}
+          data-core-field-key="${escapeHtml(key)}"
+          data-core-field-type="${multiple ? "multiselect" : "select"}"${dependentAttrs}${disabledAttr}>${optionHtml}</select>
+        <div class="core-choice-card-grid${multiple ? " is-multiple" : ""}" role="${multiple ? "group" : "radiogroup"}">
+          ${cardsHtml}
+        </div>
+        ${descHtml}
+      </div>
     `);
   }
 
@@ -10731,10 +10844,16 @@ function _coreNormalizeOptionRows(raw) {
       if (item && typeof item === "object") {
         const value = String(item.value ?? item.id ?? item.key ?? item.label ?? "");
         const label = String(item.label ?? value);
-        return { value, label };
+        return {
+          value,
+          label,
+          description: String(item.description ?? item.subtitle ?? ""),
+          meta: String(item.meta ?? item.detail ?? ""),
+          icon: String(item.icon ?? ""),
+        };
       }
       const value = String(item ?? "");
-      return { value, label: value };
+      return { value, label: value, description: "", meta: "", icon: "" };
     })
     .filter((row) => row.value || row.label);
 }
@@ -10756,13 +10875,20 @@ function _coreRenderSelectOptions(selectEl, options, preferredValue = "", prefer
   const rows = Array.isArray(options) ? options : [];
   if (!rows.length) {
     selectEl.innerHTML = "";
+    refreshCoreChoiceCards(selectEl);
     return;
   }
   const html = rows
     .map((row) => {
       const value = String(row?.value ?? "");
       const label = String(row?.label ?? value);
-      return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+      const description = String(row?.description ?? "");
+      const meta = String(row?.meta ?? "");
+      const icon = String(row?.icon ?? "");
+      return `<option value="${escapeHtml(value)}"
+        data-description="${escapeHtml(description)}"
+        data-meta="${escapeHtml(meta)}"
+        data-icon="${escapeHtml(icon)}">${escapeHtml(label)}</option>`;
     })
     .join("");
   selectEl.innerHTML = html;
@@ -10783,6 +10909,7 @@ function _coreRenderSelectOptions(selectEl, options, preferredValue = "", prefer
       selectEl.dispatchEvent(new Event("change", { bubbles: true }));
       selectEl.dispatchEvent(new Event("input", { bubbles: true }));
     }
+    refreshCoreChoiceCards(selectEl);
     return;
   }
   const hasCurrent = rows.some((row) => String(row?.value ?? "") === current);
@@ -10799,6 +10926,80 @@ function _coreRenderSelectOptions(selectEl, options, preferredValue = "", prefer
     selectEl.dispatchEvent(new Event("change", { bubbles: true }));
     selectEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  refreshCoreChoiceCards(selectEl);
+}
+
+function refreshCoreChoiceCards(selectEl) {
+  if (!(selectEl instanceof HTMLSelectElement) || !selectEl.classList.contains("core-choice-card-select")) {
+    return;
+  }
+  const field = selectEl.closest(".core-choice-card-field");
+  const grid = field?.querySelector(".core-choice-card-grid");
+  if (!(grid instanceof HTMLElement)) {
+    return;
+  }
+  const selectedValues = new Set(
+    Array.from(selectEl.selectedOptions || [])
+      .map((option) => String(option?.value || ""))
+  );
+  grid.innerHTML = Array.from(selectEl.options || [])
+    .map((option) => {
+      const value = String(option.value || "");
+      const label = String(option.textContent || value).trim() || value;
+      const description = String(option.dataset.description || "").trim();
+      const meta = String(option.dataset.meta || "").trim();
+      const icon = String(option.dataset.icon || "").trim();
+      const selected = selectedValues.has(value);
+      return `
+        <button type="button" class="core-choice-card${selected ? " selected" : ""}"
+          data-core-choice-value="${escapeHtml(value)}"
+          aria-pressed="${selected ? "true" : "false"}"${selectEl.disabled ? " disabled" : ""}>
+          ${icon ? `<span class="core-choice-card-icon" aria-hidden="true">${escapeHtml(icon)}</span>` : ""}
+          <span class="core-choice-card-copy">
+            <strong>${escapeHtml(label)}</strong>
+            ${description ? `<span>${escapeHtml(description)}</span>` : ""}
+            ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+          </span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function bindCoreManagerChoiceCards() {
+  document.querySelectorAll("select.core-choice-card-select[data-core-field-key]").forEach((selectEl) => {
+    if (!(selectEl instanceof HTMLSelectElement)) {
+      return;
+    }
+    const field = selectEl.closest(".core-choice-card-field");
+    const grid = field?.querySelector(".core-choice-card-grid");
+    if (!(grid instanceof HTMLElement)) {
+      return;
+    }
+    if (grid.dataset.coreChoiceBound !== "1") {
+      grid.dataset.coreChoiceBound = "1";
+      grid.addEventListener("click", (event) => {
+        const button = event.target?.closest?.("[data-core-choice-value]");
+        if (!(button instanceof HTMLButtonElement) || selectEl.disabled || button.disabled) {
+          return;
+        }
+        const value = String(button.dataset.coreChoiceValue || "");
+        const option = Array.from(selectEl.options || []).find((row) => String(row.value || "") === value);
+        if (!(option instanceof HTMLOptionElement)) {
+          return;
+        }
+        if (selectEl.multiple) {
+          option.selected = !option.selected;
+        } else {
+          selectEl.value = value;
+        }
+        refreshCoreChoiceCards(selectEl);
+        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+        selectEl.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+    refreshCoreChoiceCards(selectEl);
+  });
 }
 
 function bindCoreManagerConditionalFields() {
@@ -10834,6 +11035,7 @@ function bindCoreManagerConditionalFields() {
       container.querySelectorAll("[data-core-field-key]").forEach((input) => {
         if (input instanceof HTMLInputElement || input instanceof HTMLSelectElement || input instanceof HTMLTextAreaElement) {
           input.disabled = !visible;
+          refreshCoreChoiceCards(input);
         }
       });
     };
@@ -14145,6 +14347,7 @@ function bindCoreTabManagers() {
   bindCoreManagerSubtabs();
   bindCoreManagerSelectors();
   bindCoreManagerPagination();
+  bindCoreManagerChoiceCards();
   bindCoreManagerConditionalFields();
   bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
