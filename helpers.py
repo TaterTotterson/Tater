@@ -7059,7 +7059,7 @@ class _TaterLlamaCppEngineProcess:
         env[_LLAMA_CPP_ENGINE_WORKER_ENV] = "1"
         env.setdefault("PYTHONUNBUFFERED", "1")
         popen_kwargs = dict(_macos_posix_spawn_kwargs())
-        if os.name != "nt":
+        if _llama_cpp_engine_uses_process_group():
             # Keep the engine worker and its llama-server child in a dedicated
             # process group so a forced recycle cannot orphan the child.
             popen_kwargs["start_new_session"] = True
@@ -7231,7 +7231,7 @@ class _TaterLlamaCppEngineProcess:
             _terminate_process(
                 proc,
                 timeout=5.0,
-                process_group=(os.name != "nt"),
+                process_group=_llama_cpp_engine_uses_process_group(),
             )
         try:
             if proc.stdin is not None:
@@ -11433,6 +11433,14 @@ def _macos_posix_spawn_kwargs() -> Dict[str, Any]:
     if sys.platform == "darwin":
         return {"close_fds": False}
     return {}
+
+
+def _llama_cpp_engine_uses_process_group() -> bool:
+    # subprocess.Popen can use posix_spawn on macOS only when a new session is
+    # not requested. Falling back to fork from Tater's warmup thread can crash
+    # inside Apple's Network framework child-at-fork handlers before the engine
+    # worker starts. The worker still shuts down its llama-server child cleanly.
+    return os.name != "nt" and sys.platform != "darwin"
 
 
 def _describe_image_with_llama_cpp_direct(

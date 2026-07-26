@@ -337,6 +337,7 @@ DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
 )
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
 DEFAULT_PARAKEET_ONNX_MODEL = "nemo-parakeet-tdt-0.6b-v3"
+DEFAULT_PARAKEET_ONNX_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 DEFAULT_PARAKEET_ONNX_QUANTIZATION = "int8"
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"

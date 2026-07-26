@@ -372,7 +372,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
         self.assertEqual(engine.shutdown_calls, 1)
 
-    def test_engine_worker_starts_in_dedicated_process_group(self):
+    def test_engine_worker_uses_posix_spawn_compatible_options_on_macos(self):
         process = SimpleNamespace(
             poll=lambda: None,
             stdout=[],
@@ -384,14 +384,36 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         )
 
         with (
+            mock.patch.object(helpers.sys, "platform", "darwin"),
             mock.patch.object(helpers.subprocess, "Popen", return_value=process) as popen,
             mock.patch.object(helpers.threading, "Thread") as thread,
         ):
             engine.start()
 
+        self.assertFalse(popen.call_args.kwargs["close_fds"])
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        self.assertEqual(thread.call_count, 2)
+
+    def test_engine_worker_starts_in_dedicated_process_group_on_linux(self):
+        process = SimpleNamespace(
+            poll=lambda: None,
+            stdout=[],
+            stderr=[],
+        )
+        engine = helpers._TaterLlamaCppEngineProcess(
+            cache_key=("process-group-linux-test",),
+            model_token="model",
+        )
+
+        with (
+            mock.patch.object(helpers.sys, "platform", "linux"),
+            mock.patch.object(helpers.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(helpers.threading, "Thread"),
+        ):
+            engine.start()
+
         if helpers.os.name != "nt":
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertEqual(thread.call_count, 2)
 
     def test_engine_shutdown_terminates_worker_process_group(self):
         process = SimpleNamespace(
@@ -413,7 +435,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         terminate.assert_called_once_with(
             process,
             timeout=5.0,
-            process_group=(helpers.os.name != "nt"),
+            process_group=helpers._llama_cpp_engine_uses_process_group(),
         )
 
     def test_native_stream_parser_emits_chunks_and_keeps_timings(self):
