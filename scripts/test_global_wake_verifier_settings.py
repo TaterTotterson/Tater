@@ -214,6 +214,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
                             "transcript": "unrelated speech",
                             "score": 0.2,
                             "stt_ms": 24.5,
+                            "stt_engine": "faster_whisper",
                         },
                     },
                     "last_status": {
@@ -229,17 +230,28 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(settings, "wake_verifier_mode", return_value="observe"):
+        with (
+            mock.patch.object(settings, "wake_verifier_mode", return_value="observe"),
+            mock.patch(
+                "tater_voice.voice_pipeline._selected_stt_backend",
+                return_value="faster_whisper",
+            ),
+        ):
             card = home._wake_verifier_item_form(native_status)
 
         self.assertEqual(card["group"], "wake_verifier")
         self.assertEqual(card["sections"][0]["fields"][0]["value"], "observe")
         self.assertIn("3 checks", card["sections"][0]["fields"][1]["value"])
+        self.assertEqual(
+            card["sections"][0]["fields"][2]["value"],
+            "faster_whisper",
+        )
         rows = card["sections"][1]["fields"][0]["rows"]
         self.assertEqual(rows[0]["satellite"], "Test Satellite")
         self.assertEqual(rows[0]["accepted"], 1)
         self.assertEqual(rows[0]["rejected"], 2)
         self.assertEqual(rows[0]["fail_open"], 1)
+        self.assertEqual(rows[0]["stt_engine"], "faster_whisper")
 
     def test_save_action_broadcasts_to_all_connected_satellites(self) -> None:
         with (

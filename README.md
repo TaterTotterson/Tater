@@ -247,6 +247,9 @@ Jetson and Thor:
 
 General voice notes:
 - Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
+- **Parakeet ONNX** is available as a local multilingual STT backend on Linux, macOS, and Windows-compatible Python installs. Tater downloads the approximately 670 MB INT8 [Parakeet TDT 0.6B v3 ONNX model](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) on first selection, stores it under `agent_lab/models/stt/parakeet_onnx`, and uses the best available ONNX Runtime provider for the selected voice acceleration. The model is derived from NVIDIA Parakeet and is licensed under CC BY 4.0.
+- Parakeet supports 25 European languages with automatic language detection, punctuation, and capitalization. Set `TATER_PARAKEET_ONNX_QUANTIZATION=fp32` to use the much larger unquantized model instead of the default `int8`.
+- When the STT backend or voice acceleration changes, Tater releases obsolete local STT model caches before warming the newly selected engine.
 - Kokoro and Pocket TTS output are boosted slightly by default for clearer satellite playback. Tune them in Settings -> Models -> Speech -> TTS, or override local runs with `TATER_KOKORO_OUTPUT_GAIN` / `TATER_POCKET_TTS_OUTPUT_GAIN`; both default to `1.5`.
 - Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline VAD backend to WebRTC, which uses `webrtcvad-wheels`.
 - If Speaker ID or Emotion ID is enabled, SpeechBrain can use CUDA or MPS when supported, with CPU fallback.

@@ -136,6 +136,8 @@ def _normalize_stt_backend(value: Any) -> str:
         return "faster_whisper"
     if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
         return "mlx_whisper"
+    if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
+        return "parakeet_onnx"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -273,6 +275,7 @@ def _stt_backend_option_rows() -> List[Dict[str, Any]]:
     return [
         {"value": "faster_whisper", "label": "Faster Whisper"},
         {"value": "mlx_whisper", "label": "MLX Whisper"},
+        {"value": "parakeet_onnx", "label": "Parakeet ONNX"},
         {"value": "wyoming", "label": "Wyoming"},
         {"value": "vosk", "label": "Vosk"},
     ]
@@ -788,6 +791,7 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             "torch_rocm_available": _torch_rocm_available(),
             "mps_available": _mps_runtime_available(),
             "mlx_whisper_available": _module_available("mlx_whisper"),
+            "parakeet_onnx_available": _module_available("onnx_asr"),
             "kokoro_torch_available": _module_available("kokoro"),
             "kokoro_mlx_available": _module_available("kokoro_mlx"),
         },

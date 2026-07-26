@@ -8,8 +8,6 @@ import struct
 import time
 from typing import Any, Dict
 
-from runtime_executors import run_stt
-
 PACKET_MAGIC = b"TWV1"
 PACKET_VERSION = 1
 CODEC_PCM16_LE = 1
@@ -129,14 +127,23 @@ def _target_phrase(settings: Dict[str, Any]) -> str:
     return wake_word or "hey tater"
 
 
-def _verify_pcm_sync(pcm: bytes, phrase: str, threshold: float) -> Dict[str, Any]:
+async def _verify_pcm(
+    pcm: bytes,
+    phrase: str,
+    threshold: float,
+    *,
+    stt_engine: str,
+    selector: str,
+) -> Dict[str, Any]:
     from . import voice_pipeline as vp
 
     started = time.perf_counter()
-    transcript = vp._transcribe_mlx_whisper_wake_sync(
-        pcm,
-        {"rate": 16000, "width": 2, "channels": 1},
-        "en",
+    transcript = await vp._native_transcribe_wake_audio_bytes(
+        backend=stt_engine,
+        audio_bytes=pcm,
+        audio_format={"rate": 16000, "width": 2, "channels": 1},
+        language="en",
+        selector=selector,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     score = transcript_match_score(transcript, phrase)
@@ -150,6 +157,7 @@ def _verify_pcm_sync(pcm: bytes, phrase: str, threshold: float) -> Dict[str, Any
 
 async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
     from . import native_live_settings
+    from . import voice_pipeline as vp
 
     started = time.perf_counter()
     packet = parse_packet(data)
@@ -167,10 +175,18 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
         minimum=100,
         maximum=2000,
     )
+    selected_stt_engine = vp._selected_stt_backend()
+    effective_stt_engine, stt_fallback_reason = vp._resolve_stt_backend()
     result: Dict[str, Any]
     try:
         result = await asyncio.wait_for(
-            run_stt(_verify_pcm_sync, packet["pcm"], phrase, threshold),
+            _verify_pcm(
+                packet["pcm"],
+                phrase,
+                threshold,
+                stt_engine=effective_stt_engine,
+                selector=selector,
+            ),
             timeout=float(timeout_ms) / 1000.0,
         )
         result["available"] = True
@@ -201,6 +217,9 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
             "threshold": threshold,
             "sample_count": packet["sample_count"],
             "audio_sha256": hashlib.sha256(packet["pcm"]).hexdigest(),
+            "stt_engine": effective_stt_engine,
+            "stt_engine_selected": selected_stt_engine,
+            "stt_fallback_reason": stt_fallback_reason,
             "total_ms": round((time.perf_counter() - started) * 1000.0, 1),
         }
     )

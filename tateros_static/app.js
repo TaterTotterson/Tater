@@ -24912,7 +24912,11 @@ async function loadSettingsView() {
     speechSttBackendEl.value = nextValue;
     const selectedRow = rows.find((row) => String(row?.value || "").trim() === nextValue);
     if (speechSttBackendStatusEl) {
-      speechSttBackendStatusEl.textContent = selectedRow?.disabled ? String(selectedRow?.reason || "").trim() : "";
+      speechSttBackendStatusEl.textContent = selectedRow?.disabled
+        ? String(selectedRow?.reason || "").trim()
+        : nextValue === "parakeet_onnx"
+          ? "Multilingual Parakeet TDT 0.6B v3. Its approximately 670 MB INT8 model downloads once, then Tater loads and warms it immediately."
+          : "";
     }
   };
 
@@ -26427,6 +26431,8 @@ async function loadSettingsView() {
         message = `${label} saved. Local LLM download/load is already running.`;
       } else if (warmup?.started) {
         message = `${label} saved. Warming selected voice models in the background.`;
+      } else if (warmup?.queued) {
+        message = `${label} saved. The latest voice model selection is queued behind the current warmup.`;
       } else if (warmup?.already_running || warmup?.running) {
         message = `${label} saved. Voice model warmup is already running.`;
       } else if (loadLocalModels && !loadTargets.length) {

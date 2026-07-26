@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import importlib
 import io
 import json
@@ -28,6 +29,7 @@ def _vp():
 _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
 _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK = threading.RLock()
 _MLX_WHISPER_TRANSCRIBE_LOCK = threading.RLock()
+_PARAKEET_ONNX_TRANSCRIBE_LOCK = threading.RLock()
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
@@ -65,7 +67,7 @@ def _resolve_stt_backend() -> Tuple[str, str]:
     if ok:
         return selected, ""
     if selected != "wyoming":
-        for candidate in (vp.DEFAULT_STT_BACKEND, "faster_whisper", "mlx_whisper", "vosk"):
+        for candidate in (vp.DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "mlx_whisper", "vosk"):
             fallback = vp._normalize_stt_backend(candidate)
             if fallback == selected or fallback == "wyoming":
                 continue
@@ -232,6 +234,90 @@ def _load_faster_whisper_model() -> Any:
         return model
 
 
+def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
+    """Release cached local STT models that are no longer selected."""
+    vp = _vp()
+    keep = vp._normalize_stt_backend(keep_backend) if vp._text(keep_backend) else ""
+    cleared = {
+        "faster_whisper": 0,
+        "parakeet_onnx": 0,
+        "vosk": 0,
+    }
+
+    if keep != "faster_whisper":
+        with _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK:
+            with vp._faster_whisper_model_lock:
+                cleared["faster_whisper"] = len(vp._faster_whisper_model_cache)
+                vp._faster_whisper_model_cache.clear()
+
+    if keep != "parakeet_onnx":
+        with _PARAKEET_ONNX_TRANSCRIBE_LOCK:
+            with vp._parakeet_onnx_model_lock:
+                cleared["parakeet_onnx"] = len(vp._parakeet_onnx_model_cache)
+                vp._parakeet_onnx_model_cache.clear()
+
+    if keep != "vosk":
+        with vp._vosk_model_lock:
+            cleared["vosk"] = len(vp._vosk_model_cache)
+            vp._vosk_model_cache.clear()
+
+    if keep != "mlx_whisper":
+        with contextlib.suppress(Exception):
+            mlx_core = importlib.import_module("mlx.core")
+            clear_cache = getattr(mlx_core, "clear_cache", None)
+            if callable(clear_cache):
+                clear_cache()
+
+    if any(cleared.values()):
+        gc.collect()
+    vp.logger.info("[native-voice] cleared STT model caches keep=%s cleared=%s", keep or "-", cleared)
+    return cleared
+
+
+def _load_parakeet_onnx_model() -> Any:
+    vp = _vp()
+    if vp.OnnxASR is None:
+        raise RuntimeError(
+            f"Parakeet ONNX dependency unavailable: {vp.PARAKEET_ONNX_IMPORT_ERROR or 'unknown import error'}"
+        )
+
+    model_name = vp.DEFAULT_PARAKEET_ONNX_MODEL
+    quantization = vp._parakeet_onnx_quantization()
+    providers = tuple(vp._parakeet_onnx_providers())
+    if not providers:
+        raise RuntimeError("Parakeet ONNX cannot load because ONNX Runtime has no usable execution provider.")
+    key = (model_name, quantization or "fp32", providers)
+
+    with vp._parakeet_onnx_model_lock:
+        model = vp._parakeet_onnx_model_cache.get(key)
+        if model is None:
+            root = vp._ensure_stt_backend_model_root("parakeet_onnx")
+            vp.logger.info(
+                "[native-voice] parakeet-onnx model=%s quantization=%s providers=%s root=%s",
+                model_name,
+                quantization or "fp32",
+                ",".join(providers),
+                root,
+            )
+            with _temporary_env(
+                huggingface_environment(
+                    {
+                        "HF_HOME": root,
+                        "HF_HUB_CACHE": os.path.join(root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                    }
+                )
+            ):
+                model = vp.OnnxASR.load_model(
+                    model_name,
+                    root,
+                    quantization=quantization,
+                    providers=list(providers),
+                )
+            vp._parakeet_onnx_model_cache[key] = model
+        return model
+
+
 def _load_vosk_model() -> Any:
     vp = _vp()
     if vp.VoskModel is None:
@@ -255,6 +341,7 @@ def _transcribe_faster_whisper_sync(
     audio_format: Dict[str, int],
     language: Optional[str],
     partial: bool = False,
+    wait_for_model: bool = False,
 ) -> str:
     vp = _vp()
     pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
@@ -271,7 +358,7 @@ def _transcribe_faster_whisper_sync(
     # model object may not be safe to decode from multiple worker threads at
     # once. Partial STT cancellation can leave a worker running, so this lock
     # protects the actual model call and segment iteration.
-    if bool(partial):
+    if bool(partial) and not bool(wait_for_model):
         acquired = _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK.acquire(blocking=False)
         if not acquired:
             return ""
@@ -399,6 +486,33 @@ def _transcribe_mlx_whisper_wake_sync(
             result = vp.MLXWhisper.transcribe(audio_np, **kwargs)
     if isinstance(result, dict):
         return re.sub(r"\s+", " ", vp._text(result.get("text"))).strip()
+    return re.sub(r"\s+", " ", vp._text(result)).strip()
+
+
+def _transcribe_parakeet_onnx_sync(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    partial: bool = False,
+) -> str:
+    del partial
+    vp = _vp()
+    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    np_mod = importlib.import_module("numpy")
+    audio_np = np_mod.frombuffer(pcm16, dtype=np_mod.int16).astype(np_mod.float32) / 32768.0
+    model = _load_parakeet_onnx_model()
+    kwargs: Dict[str, Any] = {
+        "sample_rate": 16000,
+        "channel": "mean",
+    }
+    lang = vp._text(language)
+    if lang:
+        kwargs["language"] = lang
+    with _PARAKEET_ONNX_TRANSCRIBE_LOCK:
+        result = model.recognize(audio_np, **kwargs)
     return re.sub(r"\s+", " ", vp._text(result)).strip()
 
 
@@ -756,13 +870,98 @@ async def _native_wyoming_stream_stt_task(
             vp._mark_stt_stream_unhealthy(session_ref, f"wyoming_stream_failed:{exc}")
 
 
+async def _native_wyoming_transcribe_audio_bytes(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+) -> str:
+    """Transcribe one complete buffer through the selected Wyoming STT service."""
+    vp = _vp()
+    if (
+        vp.AsyncTcpClient is None
+        or vp.Transcribe is None
+        or vp.Transcript is None
+        or vp.WyomingAudioStart is None
+        or vp.WyomingAudioChunk is None
+        or vp.WyomingAudioStop is None
+        or vp.WyomingError is None
+    ):
+        raise RuntimeError(
+            f"Wyoming STT dependency unavailable: {vp.WYOMING_IMPORT_ERROR or 'unknown import error'}"
+        )
+
+    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+
+    host, port = _wyoming_stt_endpoint()
+    timeout = _wyoming_timeout_s()
+    rate = 16000
+    width = 2
+    channels = 1
+    vp._native_debug(
+        f"STT (wake verifier wyoming) connect {host}:{port} "
+        f"rate={rate} width={width} ch={channels} bytes={len(pcm16)}"
+    )
+
+    async with vp.AsyncTcpClient(host, port) as client:
+        await asyncio.wait_for(
+            client.write_event(vp.Transcribe(language=vp._text(language) or None).event()),
+            timeout=timeout,
+        )
+        await asyncio.wait_for(
+            client.write_event(
+                vp.WyomingAudioStart(rate=rate, width=width, channels=channels).event()
+            ),
+            timeout=timeout,
+        )
+        for offset in range(0, len(pcm16), 8000):
+            chunk = pcm16[offset : offset + 8000]
+            if not chunk:
+                continue
+            await asyncio.wait_for(
+                client.write_event(
+                    vp.WyomingAudioChunk(
+                        rate=rate,
+                        width=width,
+                        channels=channels,
+                        audio=chunk,
+                    ).event()
+                ),
+                timeout=timeout,
+            )
+        await asyncio.wait_for(
+            client.write_event(vp.WyomingAudioStop().event()),
+            timeout=timeout,
+        )
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            event = await asyncio.wait_for(
+                client.read_event(),
+                timeout=max(0.1, deadline - time.monotonic()),
+            )
+            if event is None:
+                break
+            if vp.Transcript.is_type(event.type):
+                transcript = vp._text(vp.Transcript.from_event(event).text)
+                return vp._sanitize_stt_transcript(transcript)
+            if vp.WyomingError.is_type(event.type):
+                err = vp.WyomingError.from_event(event)
+                raise RuntimeError(
+                    f"Wyoming STT error: {err.text} ({err.code or 'unknown'})"
+                )
+
+    raise RuntimeError("Wyoming STT did not return a transcript.")
+
+
 def _buffered_stt_fallback_backend() -> str:
     vp = _vp()
     candidates = []
     default_backend = vp._normalize_stt_backend(vp.DEFAULT_STT_BACKEND)
     if default_backend != "wyoming":
         candidates.append(default_backend)
-    candidates.extend(["mlx_whisper", "faster_whisper", "vosk"])
+    candidates.extend(["parakeet_onnx", "mlx_whisper", "faster_whisper", "vosk"])
 
     seen = set()
     for candidate in candidates:
@@ -908,6 +1107,19 @@ async def _native_transcribe_local_audio_bytes(
                 language,
                 bool(partial),
             )
+        elif token == "parakeet_onnx":
+            vp._native_debug(
+                f"STT ({mode_label} parakeet-onnx) local selector={selector} session_id={session_id} "
+                f"bytes={len(data)} model={vp.DEFAULT_PARAKEET_ONNX_MODEL} "
+                f"quantization={vp._parakeet_onnx_quantization() or 'fp32'}"
+            )
+            transcript = await _run_local_stt_thread(
+                _transcribe_parakeet_onnx_sync,
+                data,
+                audio_format,
+                language,
+                bool(partial),
+            )
         elif token == "vosk":
             vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
             transcript = await _run_local_stt_thread(_transcribe_vosk_sync, data, audio_format)
@@ -918,6 +1130,63 @@ async def _native_transcribe_local_audio_bytes(
     if not bool(partial):
         cleaned = vp._sanitize_stt_transcript(cleaned)
     return cleaned
+
+
+async def _native_transcribe_wake_audio_bytes(
+    *,
+    backend: str,
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    selector: str,
+) -> str:
+    """Transcribe a short wake clip with the effective user-selected backend."""
+    vp = _vp()
+    token = vp._normalize_stt_backend(backend)
+    data = bytes(audio_bytes or b"")
+    if not data:
+        return ""
+
+    if token == "wyoming":
+        return await _native_wyoming_transcribe_audio_bytes(data, audio_format, language)
+
+    vp._native_debug(
+        f"STT (wake verifier {token}) selector={selector} bytes={len(data)}"
+    )
+    async with _LOCAL_STT_TRANSCRIBE_LOCK:
+        if token == "faster_whisper":
+            transcript = await _run_local_stt_thread(
+                _transcribe_faster_whisper_sync,
+                data,
+                audio_format,
+                language,
+                True,
+                True,
+            )
+        elif token == "mlx_whisper":
+            transcript = await _run_local_stt_thread(
+                _transcribe_mlx_whisper_wake_sync,
+                data,
+                audio_format,
+                language,
+            )
+        elif token == "parakeet_onnx":
+            transcript = await _run_local_stt_thread(
+                _transcribe_parakeet_onnx_sync,
+                data,
+                audio_format,
+                language,
+                True,
+            )
+        elif token == "vosk":
+            transcript = await _run_local_stt_thread(
+                _transcribe_vosk_sync,
+                data,
+                audio_format,
+            )
+        else:
+            raise RuntimeError(f"Unsupported wake-verifier STT backend: {token}")
+    return vp._text(transcript)
 
 
 async def _native_local_partial_stt_task(

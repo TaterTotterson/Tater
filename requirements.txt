@@ -37,6 +37,7 @@ wyoming
 silero-vad
 webrtcvad-wheels
 onnxruntime
+onnx-asr[hub]>=0.10.0
 torch
 torchinfo
 matplotlib
