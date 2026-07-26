@@ -1,7 +1,7 @@
 {
-  "version": "97.1",
-  "build": 119,
-  "url": "https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/Tater-v97.1.zip",
-  "sha256": "cd713d7e601154d73e3de58629a357c53e47b697edc6e2ef882fd7dc4031cb26",
-  "notes": "Tater macOS update v97.1."
+  "version": "97.2",
+  "build": 120,
+  "url": "https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/Tater-v97.2.zip",
+  "sha256": "ea097795c3e5fc865024747bf9381ca52b4bf7fc16dddb99feabbe7b105cb691",
+  "notes": "Tater macOS update v97.2."
 }
