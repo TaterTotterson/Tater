@@ -292,6 +292,23 @@ def _load_parakeet_onnx_model() -> Any:
         model = vp._parakeet_onnx_model_cache.get(key)
         if model is None:
             root = vp._ensure_stt_backend_model_root("parakeet_onnx")
+            suffix = f".{quantization}" if quantization else ""
+            model_patterns = [
+                "config.json",
+                "vocab.txt",
+                f"encoder-model{suffix}.onnx",
+                f"encoder-model{suffix}.onnx.data",
+                f"decoder_joint-model{suffix}.onnx",
+                f"decoder_joint-model{suffix}.onnx.data",
+            ]
+            required_model_files = [
+                "config.json",
+                "vocab.txt",
+                f"encoder-model{suffix}.onnx",
+                f"decoder_joint-model{suffix}.onnx",
+            ]
+            if not quantization:
+                required_model_files.append("encoder-model.onnx.data")
             vp.logger.info(
                 "[native-voice] parakeet-onnx model=%s quantization=%s providers=%s root=%s",
                 model_name,
@@ -308,9 +325,17 @@ def _load_parakeet_onnx_model() -> Any:
                     }
                 )
             ):
+                snapshot_root = root
+                if not all(os.path.isfile(os.path.join(root, filename)) for filename in required_model_files):
+                    huggingface_hub = importlib.import_module("huggingface_hub")
+                    snapshot_root = huggingface_hub.snapshot_download(
+                        repo_id=vp.DEFAULT_PARAKEET_ONNX_REPO,
+                        local_dir=root,
+                        allow_patterns=model_patterns,
+                    )
                 model = vp.OnnxASR.load_model(
                     model_name,
-                    root,
+                    snapshot_root,
                     quantization=quantization,
                     providers=list(providers),
                 )

@@ -63,7 +63,9 @@ class ParakeetBackendTests(unittest.TestCase):
     def test_loader_downloads_int8_to_tater_model_root_and_caches(self) -> None:
         fake_model = object()
         onnx_asr = SimpleNamespace(load_model=mock.Mock(return_value=fake_model))
+        huggingface_hub = SimpleNamespace(snapshot_download=mock.Mock())
         with tempfile.TemporaryDirectory() as temp_dir:
+            huggingface_hub.snapshot_download.return_value = temp_dir
             with (
                 mock.patch.object(vp, "OnnxASR", onnx_asr),
                 mock.patch.object(vp, "_parakeet_onnx_quantization", return_value="int8"),
@@ -78,12 +80,67 @@ class ParakeetBackendTests(unittest.TestCase):
                     return_value=temp_dir,
                 ),
                 mock.patch.object(backends, "huggingface_environment", return_value={}),
+                mock.patch.object(
+                    backends.importlib,
+                    "import_module",
+                    return_value=huggingface_hub,
+                ),
             ):
                 first = backends._load_parakeet_onnx_model()
                 second = backends._load_parakeet_onnx_model()
 
         self.assertIs(first, fake_model)
         self.assertIs(second, fake_model)
+        huggingface_hub.snapshot_download.assert_called_once_with(
+            repo_id=vp.DEFAULT_PARAKEET_ONNX_REPO,
+            local_dir=temp_dir,
+            allow_patterns=[
+                "config.json",
+                "vocab.txt",
+                "encoder-model.int8.onnx",
+                "encoder-model.int8.onnx.data",
+                "decoder_joint-model.int8.onnx",
+                "decoder_joint-model.int8.onnx.data",
+            ],
+        )
+        onnx_asr.load_model.assert_called_once_with(
+            vp.DEFAULT_PARAKEET_ONNX_MODEL,
+            temp_dir,
+            quantization="int8",
+            providers=["CPUExecutionProvider"],
+        )
+
+    def test_loader_reuses_complete_local_snapshot_without_hub_access(self) -> None:
+        fake_model = object()
+        onnx_asr = SimpleNamespace(load_model=mock.Mock(return_value=fake_model))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for filename in (
+                "config.json",
+                "vocab.txt",
+                "encoder-model.int8.onnx",
+                "decoder_joint-model.int8.onnx",
+            ):
+                pathlib.Path(temp_dir, filename).touch()
+            with (
+                mock.patch.object(vp, "OnnxASR", onnx_asr),
+                mock.patch.object(vp, "_parakeet_onnx_quantization", return_value="int8"),
+                mock.patch.object(
+                    vp,
+                    "_parakeet_onnx_providers",
+                    return_value=["CPUExecutionProvider"],
+                ),
+                mock.patch.object(
+                    vp,
+                    "_ensure_stt_backend_model_root",
+                    return_value=temp_dir,
+                ),
+                mock.patch.object(backends, "huggingface_environment", return_value={}),
+                mock.patch.object(backends.importlib, "import_module") as import_module,
+            ):
+                loaded = backends._load_parakeet_onnx_model()
+
+        self.assertIs(loaded, fake_model)
+        import_module.assert_not_called()
         onnx_asr.load_model.assert_called_once_with(
             vp.DEFAULT_PARAKEET_ONNX_MODEL,
             temp_dir,

@@ -1,22 +1,17 @@
-# Tater v97.3
+# Tater v97.4
 
 ## What's Changed
 
-### macOS Update Reliability
+### Parakeet ONNX Reliability
 
-- Fixed the native macOS updater occasionally remaining on Installing Update after the updater helper had already completed.
-- Tater now detaches finished process-output streams before waiting for shutdown, preventing an end-of-file callback loop from holding the old app open.
-- Added regression coverage for clean backend shutdown and updater handoff.
+- Fixed first-run Parakeet model setup failing with a missing `encoder-model?int8.onnx` error.
+- Tater now downloads and validates the required INT8 model snapshot before loading it through ONNX ASR.
+- Complete local snapshots are reused without contacting Hugging Face, so Parakeet remains available after download when Tater is offline.
+- Empty or partial model directories now resume provisioning instead of being mistaken for complete offline models.
 
-### Runtime Dependency Updates
+### llama.cpp Reload Reliability
 
-- The macOS launcher now fingerprints Tater's Python requirements and automatically refreshes its private environment when an update adds or changes dependencies.
-- Existing macOS installations now install the `onnx-asr` package required by Parakeet ONNX instead of retaining an incomplete older environment.
-- Added a direct Parakeet dependency readiness check so a damaged or incomplete environment is repaired before Tater starts.
-
-### Voice and llama.cpp Stability
-
-- Added a dedicated **Save Voice Models** action that saves and warms STT/TTS without unloading or restarting an unchanged local LLM.
-- Prevented a Parakeet settings change from unnecessarily recycling a working Qwen model.
-- Hardened native llama.cpp shutdown on macOS by bypassing the unstable Metal finalizer that could abort inside `ggml_metal_rsets_free`.
-- The llama.cpp worker now gets time to finish acknowledged cleanup before Tater signals its process group.
+- Fixed full local llama.cpp model reloads crashing with exit `-11` on macOS.
+- macOS engine workers now retain the safe `posix_spawn` launch path when started by background model warmup.
+- Full model load, unload, and reload operations work without restarting Tater.
+- Linux keeps dedicated process-group cleanup, with regression coverage for both platform launch paths.
