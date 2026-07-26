@@ -21428,6 +21428,10 @@ async function loadSettingsView() {
                   <span id="settings-speech-tts-preview-status" class="small"></span>
                 </div>
               </div>
+              <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                <button type="button" id="settings-speech-model-save" class="action-btn model-save-btn">Save Voice Models</button>
+                <span class="small">Saves and warms STT/TTS without restarting an unchanged local LLM.</span>
+              </div>
               </div>
 
               <div class="settings-subpanel active llm-vision-settings-block" data-models-panel="routing">
@@ -26331,6 +26335,7 @@ async function loadSettingsView() {
       spudex: "Spudex LLM settings",
       vision: "Vision model settings",
       beast: "Beast routing settings",
+      speech: "Voice model settings",
     };
     const label = labelMap[normalizedScope] || "Model settings";
     let payload = {};
@@ -26383,12 +26388,14 @@ async function loadSettingsView() {
       }
     }
 
-    if (normalizedScope === "all") {
+    if (normalizedScope === "all" || normalizedScope === "speech") {
       payload = { ...payload, ...readSpeechModelSettingsPayload() };
     }
 
     loadTargets = dedupeLocalLoadTargets(loadTargets);
-    payload.hydra_local_model_load_targets = loadLocalModels ? loadTargets : [];
+    if (normalizedScope !== "speech") {
+      payload.hydra_local_model_load_targets = loadLocalModels ? loadTargets : [];
+    }
     if (loadLocalModels && loadTargets.length) {
       openHfLlmWarmupModal({
         running: true,
@@ -26490,6 +26497,9 @@ async function loadSettingsView() {
   });
   document.getElementById("settings-hydra-beast-save-load")?.addEventListener("click", () => {
     void saveModelSettings("beast", { loadLocalModels: true });
+  });
+  document.getElementById("settings-speech-model-save")?.addEventListener("click", () => {
+    void saveModelSettings("speech");
   });
   document.getElementById("settings-hydra-model-save")?.addEventListener("click", () => {
     void saveModelSettings("all");

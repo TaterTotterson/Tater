@@ -6629,7 +6629,14 @@ def _llama_cpp_native_shutdown_state(state: Dict[str, Any]) -> None:
     proc = state.get("process")
     if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
         try:
-            proc.terminate()
+            if sys.platform == "darwin":
+                # llama-server's Metal SIGTERM cleanup can abort in
+                # ggml_metal_rsets_free. The server owns no persistent state,
+                # so let macOS reclaim its resources without running that
+                # unstable native finalizer.
+                proc.kill()
+            else:
+                proc.terminate()
             proc.wait(timeout=5.0)
         except Exception:
             try:
@@ -7205,9 +7212,19 @@ class _TaterLlamaCppEngineProcess:
         proc = self.process
         if proc is None:
             return
+        shutdown_acknowledged = False
         if proc.poll() is None:
             try:
                 self.request("shutdown", {}, timeout=2.0)
+                shutdown_acknowledged = True
+            except Exception:
+                pass
+        if shutdown_acknowledged and proc.poll() is None:
+            try:
+                # The worker acknowledges before it closes llama-server and
+                # joins any in-flight request threads. Give that cleanup a
+                # chance to finish before signaling the whole process group.
+                proc.wait(timeout=8.0)
             except Exception:
                 pass
         if proc.poll() is None:

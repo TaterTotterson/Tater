@@ -1,23 +1,22 @@
-# Tater v97.2
+# Tater v97.3
 
 ## What's Changed
 
-### STT Wake Verification
+### macOS Update Reliability
 
-- Wake verification now uses the STT engine selected in Model Settings instead of depending on MLX Whisper.
-- Added verifier support for Faster Whisper, MLX Whisper, Parakeet ONNX, Vosk, and one-shot Wyoming STT.
-- Added the configured and effective STT engine to verifier status, satellite results, and runtime logs so backend fallbacks are visible.
-- Preserved fail-open behavior when the selected STT service is unavailable, errors, or exceeds the verifier deadline.
+- Fixed the native macOS updater occasionally remaining on Installing Update after the updater helper had already completed.
+- Tater now detaches finished process-output streams before waiting for shutdown, preventing an end-of-file callback loop from holding the old app open.
+- Added regression coverage for clean backend shutdown and updater handoff.
 
-### Parakeet ONNX
+### Runtime Dependency Updates
 
-- Added Parakeet TDT 0.6B v3 ONNX as a selectable local multilingual STT engine with punctuation, capitalization, and automatic language detection.
-- The approximately 670 MB INT8 model downloads once when selected, is stored with Tater's local models, and warms immediately for use.
-- Added automatic ONNX provider selection for CUDA, ROCm/MIGraphX, Core ML, and CPU with safe fallback when the preferred accelerator is unavailable.
-- Improved voice-model switching by releasing obsolete STT model caches and queuing the latest selection when another model warmup is already running.
-- Added Parakeet runtime model and provider diagnostics plus focused transcription, routing, wake-verifier, fallback, and cache-management coverage.
+- The macOS launcher now fingerprints Tater's Python requirements and automatically refreshes its private environment when an update adds or changes dependencies.
+- Existing macOS installations now install the `onnx-asr` package required by Parakeet ONNX instead of retaining an incomplete older environment.
+- Added a direct Parakeet dependency readiness check so a damaged or incomplete environment is repaired before Tater starts.
 
-### Docker
+### Voice and llama.cpp Stability
 
-- Added Parakeet ONNX and CPU provider validation to the standard Tater image.
-- Added the CUDA-enabled ONNX Runtime package and provider validation to the NVIDIA image while retaining CPU fallback.
+- Added a dedicated **Save Voice Models** action that saves and warms STT/TTS without unloading or restarting an unchanged local LLM.
+- Prevented a Parakeet settings change from unnecessarily recycling a working Qwen model.
+- Hardened native llama.cpp shutdown on macOS by bypassing the unstable Metal finalizer that could abort inside `ggml_metal_rsets_free`.
+- The llama.cpp worker now gets time to finish acknowledged cleanup before Tater signals its process group.
