@@ -81,11 +81,13 @@ from .conversation import (
 )
 from .backends import (
     _build_experimental_tts_chunks,
+    clear_stt_model_caches,
     clear_tts_model_caches,
     _chatterbox_tts_request,
     _iter_chatterbox_tts_stream_response,
     _load_faster_whisper_model,
     _load_kokoro_pipeline,
+    _load_parakeet_onnx_model,
     _load_piper_voice_model,
     _load_pocket_tts_model,
     _load_vosk_model,
@@ -93,7 +95,9 @@ from .backends import (
     _open_chatterbox_tts_stream_response,
     _native_synthesize_text,
     _native_transcribe_local_audio_bytes,
+    _native_transcribe_wake_audio_bytes,
     _native_transcribe_session_audio,
+    _native_wyoming_transcribe_audio_bytes,
     _native_wyoming_refresh_tts_voices,
     _native_wyoming_stream_stt_task,
     _native_wyoming_synthesize,
@@ -111,6 +115,7 @@ from .backends import (
     _transcribe_faster_whisper_sync,
     _transcribe_mlx_whisper_sync,
     _transcribe_mlx_whisper_wake_sync,
+    _transcribe_parakeet_onnx_sync,
     _transcribe_vosk_sync,
     _trim_pcm_for_playback,
     _tts_backend_available,
@@ -200,6 +205,13 @@ try:
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     MLXWhisper = None
     MLX_WHISPER_IMPORT_ERROR = str(exc)
+
+try:
+    import onnx_asr as OnnxASR
+    PARAKEET_ONNX_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    OnnxASR = None
+    PARAKEET_ONNX_IMPORT_ERROR = str(exc)
 
 try:
     from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel as VoskSetLogLevel
@@ -324,6 +336,8 @@ DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
     "garage, Home Assistant, UniFi, Ecobee, Ecowitt, Sonos, Discord, and Kodi."
 )
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
+DEFAULT_PARAKEET_ONNX_MODEL = "nemo-parakeet-tdt-0.6b-v3"
+DEFAULT_PARAKEET_ONNX_QUANTIZATION = "int8"
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 DEFAULT_STT_MODEL_ROOT = str(agent_lab_path("models", "stt"))
@@ -482,6 +496,8 @@ _piper_tts_model_catalog_meta_mem: Dict[str, Any] = {
 
 _faster_whisper_model_cache: Dict[Tuple[str, str, str], Any] = {}
 _faster_whisper_model_lock = threading.Lock()
+_parakeet_onnx_model_cache: Dict[Tuple[str, str, Tuple[str, ...]], Any] = {}
+_parakeet_onnx_model_lock = threading.Lock()
 _vosk_model_cache: Dict[str, Any] = {}
 _vosk_model_lock = threading.Lock()
 _vosk_bootstrap_lock = threading.Lock()
@@ -2071,6 +2087,36 @@ def _effective_speech_acceleration() -> str:
     return "cpu"
 
 
+def _parakeet_onnx_quantization() -> Optional[str]:
+    token = _text(os.getenv("TATER_PARAKEET_ONNX_QUANTIZATION")).lower().replace("-", "_")
+    if not token:
+        return DEFAULT_PARAKEET_ONNX_QUANTIZATION
+    if token in {"none", "off", "false", "fp32", "float32", "full"}:
+        return None
+    return token
+
+
+def _parakeet_onnx_providers() -> List[str]:
+    available: List[str] = []
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        available = [str(value) for value in (getattr(ort_mod, "get_available_providers")() or []) if _text(value)]
+    available_set = set(available)
+    acceleration = _effective_speech_acceleration()
+    preferred: List[str] = []
+    if acceleration == "cuda":
+        preferred.append("CUDAExecutionProvider")
+    elif acceleration == "rocm":
+        preferred.extend(["MIGraphXExecutionProvider", "ROCMExecutionProvider"])
+    elif acceleration == "mps":
+        preferred.append("CoreMLExecutionProvider")
+    preferred.append("CPUExecutionProvider")
+    resolved = [provider for provider in preferred if provider in available_set]
+    if resolved:
+        return resolved
+    return available[:1]
+
+
 def _faster_whisper_device() -> str:
     return "cuda" if _effective_speech_acceleration() == "cuda" and _ctranslate2_cuda_available() else DEFAULT_FASTER_WHISPER_DEVICE
 
@@ -2206,6 +2252,8 @@ def _normalize_stt_backend(value: Any) -> str:
         return "faster_whisper"
     if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
         return "mlx_whisper"
+    if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
+        return "parakeet_onnx"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -2661,6 +2709,12 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
             "mlx_whisper": {
                 "model": _mlx_whisper_model(),
                 "model_root": _stt_backend_model_root("mlx_whisper"),
+            },
+            "parakeet_onnx": {
+                "model": DEFAULT_PARAKEET_ONNX_MODEL,
+                "quantization": _parakeet_onnx_quantization() or "fp32",
+                "providers": _parakeet_onnx_providers(),
+                "model_root": _stt_backend_model_root("parakeet_onnx"),
             },
             "vosk": {
                 "model_root": _stt_backend_model_root("vosk"),
@@ -3898,6 +3952,13 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
         return WhisperModel is not None, _text(FASTER_WHISPER_IMPORT_ERROR) or "faster-whisper dependency unavailable"
     if token == "mlx_whisper":
         return MLXWhisper is not None, _text(MLX_WHISPER_IMPORT_ERROR) or "mlx-whisper dependency unavailable"
+    if token == "parakeet_onnx":
+        if OnnxASR is None:
+            return False, _text(PARAKEET_ONNX_IMPORT_ERROR) or "onnx-asr dependency unavailable"
+        providers = _parakeet_onnx_providers()
+        if not providers:
+            return False, "ONNX Runtime has no usable execution provider."
+        return True, ""
     if token == "vosk":
         if VoskModel is None or KaldiRecognizer is None:
             return False, _text(VOSK_IMPORT_ERROR) or "vosk dependency unavailable"
@@ -3919,7 +3980,7 @@ def _resolve_stt_backend_selected(selected: str) -> Tuple[str, str]:
     if ok:
         return token, ""
     if token != "wyoming":
-        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "mlx_whisper", "vosk"):
+        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "mlx_whisper", "vosk"):
             fallback = _normalize_stt_backend(candidate)
             if fallback == token or fallback == "wyoming":
                 continue

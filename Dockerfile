@@ -31,7 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 # Upgrade pip and install Python dependencies.
-RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+RUN python -m pip install --upgrade pip \
+ && python -m pip install -r requirements.txt \
+ && python -c "import onnx_asr, onnxruntime as ort; providers=ort.get_available_providers(); assert 'CPUExecutionProvider' in providers, providers; print('onnx-asr ready providers=' + ','.join(providers))"
 
 RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
  && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release \

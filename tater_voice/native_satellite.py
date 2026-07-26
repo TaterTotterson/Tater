@@ -521,10 +521,12 @@ async def _handle_wake_verifier_packet(
             row["last_seen_ts"] = _now()
             row["last_message_type"] = "wake.verify"
     _vp().logger.info(
-        "[wake-verifier] selector=%s request=%s mode=%s accepted=%s available=%s score=%.3f stt_ms=%.1f total_ms=%.1f transcript=%r reason=%s",
+        "[wake-verifier] selector=%s request=%s mode=%s engine=%s selected_engine=%s accepted=%s available=%s score=%.3f stt_ms=%.1f total_ms=%.1f transcript=%r reason=%s",
         selector,
         result.get("request_id"),
         "enforce" if result.get("enforce") else "observe",
+        _text(result.get("stt_engine")),
+        _text(result.get("stt_engine_selected")),
         bool(result.get("accepted")),
         bool(result.get("available")),
         float(result.get("score") or 0.0),

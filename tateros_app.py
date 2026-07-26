@@ -439,6 +439,8 @@ speech_model_warmup_state: Dict[str, Any] = {
     "reason": "",
     "items": [],
     "errors": [],
+    "pending_settings": {},
+    "pending_reason": "",
 }
 hf_llm_warmup_lock = threading.RLock()
 hf_llm_warmup_state: Dict[str, Any] = {
@@ -968,6 +970,8 @@ def _speech_model_warmup_snapshot() -> Dict[str, Any]:
             "reason": str(speech_model_warmup_state.get("reason") or ""),
             "items": list(speech_model_warmup_state.get("items") or []),
             "errors": list(speech_model_warmup_state.get("errors") or []),
+            "queued": bool(speech_model_warmup_state.get("pending_settings")),
+            "queued_reason": str(speech_model_warmup_state.get("pending_reason") or ""),
         }
 
 
@@ -3647,6 +3651,16 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
                 "en",
             )
             return f"loaded STT {token} and warmed deterministic wake decode"
+        elif token == "parakeet_onnx":
+            silence = b"\x00\x00" * int(16000 * 1.0)
+            voice_pipeline._transcribe_parakeet_onnx_sync(
+                silence,
+                {"rate": 16000, "width": 2, "channels": 1},
+                "en",
+                True,
+            )
+            providers = ",".join(voice_pipeline._parakeet_onnx_providers()) or "unknown"
+            return f"loaded STT {token} and warmed ONNX decode ({providers})"
         elif token == "vosk":
             voice_pipeline._load_vosk_model()
         else:
@@ -3714,6 +3728,14 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
         )
 
     logger.info("[speech-warmup] starting reason=%s items=%s", reason, items)
+    with contextlib.suppress(Exception):
+        from tater_voice import voice_pipeline
+
+        selected_stt_backend = voice_pipeline._normalize_stt_backend(settings.get("stt_backend"))
+        effective_stt_backend, _stt_fallback_reason = voice_pipeline._resolve_stt_backend_selected(
+            selected_stt_backend
+        )
+        voice_pipeline.clear_stt_model_caches(keep_backend=effective_stt_backend)
     item_states: List[Dict[str, Any]] = []
     errors: List[str] = []
     for item in items:
@@ -3738,24 +3760,45 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
             ]
             speech_model_warmup_state["errors"] = list(errors)
 
+    pending_settings: Dict[str, Any] = {}
+    pending_reason = ""
     with speech_model_warmup_lock:
+        pending_settings = dict(speech_model_warmup_state.get("pending_settings") or {})
+        pending_reason = str(speech_model_warmup_state.get("pending_reason") or "")
         speech_model_warmup_state.update(
             {
-                "running": False,
+                "running": bool(pending_settings),
                 "finished_ts": time.time(),
                 "items": item_states,
                 "errors": errors,
+                "pending_settings": {},
+                "pending_reason": "",
             }
         )
     logger.info("[speech-warmup] finished errors=%s", len(errors))
+    if pending_settings:
+        logger.info("[speech-warmup] starting queued warmup reason=%s", pending_reason or "settings-save-queued")
+        thread = threading.Thread(
+            target=_run_speech_model_warmup,
+            kwargs={
+                "settings": pending_settings,
+                "reason": pending_reason or "settings-save-queued",
+            },
+            daemon=True,
+            name="speech-model-warmup-queued",
+        )
+        thread.start()
 
 
 def _start_speech_model_warmup(settings: Dict[str, Any], *, reason: str = "settings-save") -> Dict[str, Any]:
     with speech_model_warmup_lock:
         if bool(speech_model_warmup_state.get("running")):
+            speech_model_warmup_state["pending_settings"] = dict(settings or {})
+            speech_model_warmup_state["pending_reason"] = str(reason or "settings-save")
             snapshot = _speech_model_warmup_snapshot()
             snapshot["started"] = False
             snapshot["already_running"] = True
+            snapshot["queued"] = True
             return snapshot
         speech_model_warmup_state.update(
             {
@@ -3765,6 +3808,8 @@ def _start_speech_model_warmup(settings: Dict[str, Any], *, reason: str = "setti
                 "reason": reason,
                 "items": [],
                 "errors": [],
+                "pending_settings": {},
+                "pending_reason": "",
             }
         )
 
@@ -9536,7 +9581,7 @@ def _runtime_model_memory_kind_from_device(device: Any, fallback: str = "ram") -
     token = str(device or "").strip().lower()
     if any(part in token for part in ("cuda", "gpu", "nvidia", "rocm", "hip")):
         return "vram"
-    if any(part in token for part in ("mps", "metal", "apple", "unified")):
+    if any(part in token for part in ("mps", "metal", "apple", "coreml", "unified")):
         return "unified"
     return str(fallback or "ram").strip().lower() or "ram"
 
@@ -9740,6 +9785,32 @@ def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
                     estimated_bytes=estimated,
                     memory_kind=_runtime_model_memory_kind_from_device(device),
                     details=[f"Compute {compute_type}"] if compute_type else [],
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        with voice_pipeline._parakeet_onnx_model_lock:
+            parakeet_items = list(voice_pipeline._parakeet_onnx_model_cache.items())
+        for key, model_obj in parakeet_items:
+            key_tuple = tuple(key if isinstance(key, tuple) else (key,))
+            model_name = str(key_tuple[0] if len(key_tuple) > 0 else "").strip()
+            quantization = str(key_tuple[1] if len(key_tuple) > 1 else "").strip()
+            providers = tuple(key_tuple[2] if len(key_tuple) > 2 and isinstance(key_tuple[2], tuple) else ())
+            provider_label = ",".join(str(value) for value in providers if str(value).strip())
+            model_root = str(getattr(voice_pipeline, "_stt_backend_model_root")("parakeet_onnx"))
+            estimated = _runtime_model_estimated_bytes(model_obj, model_root)
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_parakeet_onnx",
+                    provider_label="STT • Parakeet ONNX",
+                    model=model_name or "Parakeet TDT 0.6B v3",
+                    device=provider_label,
+                    model_root=model_root,
+                    estimated_bytes=estimated,
+                    memory_kind=_runtime_model_memory_kind_from_device(provider_label),
+                    details=[f"Quantization {quantization}"] if quantization else [],
                 )
             )
 
@@ -17940,6 +18011,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     updates = payload.model_dump(exclude_none=True)
     speech_warmup_result: Dict[str, Any] = {}
     hf_llm_warmup_result: Dict[str, Any] = {}
+    stt_reload_result: Dict[str, Any] = {}
     tts_reload_result: Dict[str, Any] = {}
 
     def _bounded_int(
@@ -18671,6 +18743,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
+        previous_stt_backend = str(current_speech.get("stt_backend") or "").strip()
+        previous_acceleration = str(current_speech.get("acceleration") or "").strip()
         save_shared_speech_settings(
             stt_backend=str(updates.get("speech_stt_backend", current_speech.get("stt_backend") or "")).strip(),
             acceleration=str(updates.get("speech_acceleration", current_speech.get("acceleration") or "")).strip(),
@@ -18819,14 +18893,30 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 )
             ).strip(),
         )
+        updated_speech = get_shared_speech_settings()
         with contextlib.suppress(Exception):
             from tater_voice import voice_pipeline
 
             voice_pipeline._invalidate_voice_config_cache()
+            selected_stt_backend = voice_pipeline._normalize_stt_backend(updated_speech.get("stt_backend"))
+            stt_backend_changed = (
+                voice_pipeline._normalize_stt_backend(previous_stt_backend) != selected_stt_backend
+            )
+            acceleration_changed = (
+                previous_acceleration != str(updated_speech.get("acceleration") or "").strip()
+            )
+            if stt_backend_changed or acceleration_changed:
+                stt_reload_result = {
+                    "reason": "acceleration-change" if acceleration_changed else "backend-change",
+                    "selected": selected_stt_backend,
+                    "cleared": voice_pipeline.clear_stt_model_caches(
+                        keep_backend="" if acceleration_changed else selected_stt_backend
+                    ),
+                }
         if any(key in updates for key in tts_reload_keys):
             tts_reload_result = _reload_local_tts_model_caches(reason="settings-save")
         if any(key in updates for key in speech_warmup_keys):
-            speech_warmup_result = _start_speech_model_warmup(get_shared_speech_settings(), reason="settings-save")
+            speech_warmup_result = _start_speech_model_warmup(updated_speech, reason="settings-save")
 
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
     if any(key in updates for key in spudex_model_keys):
@@ -19145,6 +19235,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "ok": True,
         "updated": sorted(updates.keys()),
         "esphome": esphome_result,
+        "stt_reload": stt_reload_result,
         "tts_reload": tts_reload_result,
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
         "hf_llm_warmup": hf_llm_warmup_result or _hf_llm_warmup_snapshot(),

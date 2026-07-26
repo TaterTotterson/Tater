@@ -133,6 +133,12 @@ def _wake_trainer_link_item_form() -> Dict[str, Any]:
 
 
 def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from . import voice_pipeline as vp
+
+        selected_stt_engine = esphome_runtime.text(vp._selected_stt_backend())
+    except Exception:
+        selected_stt_engine = ""
     clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
     rows: List[Dict[str, Any]] = []
     total_checks = 0
@@ -181,6 +187,12 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         transcript = esphome_runtime.text(last.get("transcript")) or "—"
         score = f"{float(last.get('score') or 0.0):.3f}" if last else "—"
         stt_ms = f"{float(last.get('stt_ms') or 0.0):.1f} ms" if last else "—"
+        stt_engine = (
+            esphome_runtime.text(last.get("stt_engine"))
+            or esphome_runtime.text(last.get("stt_engine_selected"))
+            or selected_stt_engine
+            or "—"
+        )
         name = (
             esphome_runtime.text(raw_row.get("device_name"))
             or esphome_runtime.text(raw_row.get("name"))
@@ -198,6 +210,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                 "transcript": transcript,
                 "score": score,
                 "stt_ms": stt_ms,
+                "stt_engine": stt_engine,
             }
         )
 
@@ -209,7 +222,8 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         "title": "STT Wake Verification",
         "subtitle": (
             "Applies one mode to every Tater Native satellite. Observe records decisions without blocking; "
-            "Enabled rejects transcript mismatches and opens the mic if Tater errors or exceeds the 500 ms deadline."
+            "Enabled rejects transcript mismatches and opens the mic if Tater errors or exceeds the 500 ms deadline. "
+            "Verification uses the STT backend selected in Model Settings."
         ),
         "sections": [
             {
@@ -239,6 +253,14 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                         ),
                         "description": "Counts use each satellite's current firmware uptime and reset when that satellite reboots.",
                     },
+                    {
+                        "key": "wake_verifier_stt_engine",
+                        "label": "Configured STT Engine",
+                        "type": "text",
+                        "read_only": True,
+                        "value": selected_stt_engine or "Unavailable",
+                        "description": "Wake verification follows the STT backend selected in Model Settings. A runtime fallback is shown per satellite when the selected local backend is unavailable.",
+                    },
                 ],
             },
             {
@@ -259,6 +281,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                             {"key": "last_result", "label": "Last"},
                             {"key": "transcript", "label": "Transcript"},
                             {"key": "score", "label": "Score"},
+                            {"key": "stt_engine", "label": "STT Engine"},
                             {"key": "stt_ms", "label": "STT"},
                         ],
                         "rows": rows,
