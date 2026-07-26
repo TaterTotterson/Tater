@@ -151,6 +151,7 @@ private final class BackendManager {
         if let pid = backendProcessPIDOnPort() {
             appendLauncherLog("Stop requested for discovered backend pid \(pid).\n")
             terminateBackendProcess(pid: pid, waitForExit: true)
+            detachOutputPipe()
             closeLogHandle()
             process = nil
             externalBackendPID = nil
@@ -158,6 +159,7 @@ private final class BackendManager {
             return
         }
 
+        detachOutputPipe()
         closeLogHandle()
         process = nil
         externalBackendPID = nil
@@ -553,6 +555,8 @@ private final class BackendManager {
         guard process.terminationStatus == 0 else {
             throw LauncherError("macOS setup failed. See \(logsDir.appendingPathComponent("setup.log").path)")
         }
+        try recordRuntimeRequirementsFingerprint()
+        appendLauncherLog("Recorded installed Python requirements fingerprint.\n")
     }
 
     private func localLLMPythonDependenciesReady(using python: URL) -> Bool {
@@ -658,7 +662,45 @@ private final class BackendManager {
     }
 
     private func pinnedRuntimeDependenciesReady(using python: URL) -> Bool {
+        guard let expected = sourceRequirementsFingerprint() else {
+            appendLog("Private runtime could not fingerprint \(sourceRoot.appendingPathComponent("requirements.txt").path).\n")
+            return false
+        }
+
+        let fingerprintURL = runtimeDir.appendingPathComponent("tater-requirements.sha256")
+        guard
+            let recorded = try? String(contentsOf: fingerprintURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !recorded.isEmpty
+        else {
+            appendLog("Private runtime has no installed requirements fingerprint; setup will refresh dependencies.\n")
+            return false
+        }
+        guard recorded == expected else {
+            appendLog("Private runtime requirements changed; setup will refresh dependencies.\n")
+            return false
+        }
+        guard installedPackageVersion("onnx-asr", using: python) != nil else {
+            appendLog("Private runtime is missing the Parakeet ONNX dependency (onnx-asr).\n")
+            return false
+        }
         return true
+    }
+
+    private func sourceRequirementsFingerprint() -> String? {
+        let requirementsURL = sourceRoot.appendingPathComponent("requirements.txt")
+        guard let data = try? Data(contentsOf: requirementsURL) else {
+            return nil
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func recordRuntimeRequirementsFingerprint() throws {
+        guard let fingerprint = sourceRequirementsFingerprint() else {
+            throw LauncherError("Could not fingerprint the installed Python requirements.")
+        }
+        let fingerprintURL = runtimeDir.appendingPathComponent("tater-requirements.sha256")
+        try "\(fingerprint)\n".write(to: fingerprintURL, atomically: true, encoding: .utf8)
     }
 
     private func pinnedRequirementVersion(for packageName: String) -> String? {
@@ -729,8 +771,7 @@ private final class BackendManager {
         process.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.outputPipe?.fileHandleForReading.readabilityHandler = nil
-                self.outputPipe = nil
+                self.detachOutputPipe()
                 self.closeLogHandle()
                 self.process = nil
                 if proc.terminationStatus == 0 {
@@ -841,7 +882,10 @@ private final class BackendManager {
         process.standardError = pipe
         pipe.fileHandleForReading.readabilityHandler = { [weak self] reader in
             let data = reader.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                reader.readabilityHandler = nil
+                return
+            }
             try? handle.write(contentsOf: data)
             if let text = String(data: data, encoding: .utf8) {
                 self?.appendLog(text)
@@ -850,6 +894,11 @@ private final class BackendManager {
             }
         }
         return pipe
+    }
+
+    private func detachOutputPipe() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        outputPipe = nil
     }
 
     private func appendLog(_ text: String) {
@@ -911,6 +960,7 @@ private final class BackendManager {
             appendLauncherLog("Managed backend pid \(process.processIdentifier) did not exit; sending SIGKILL.\n")
             Darwin.kill(process.processIdentifier, SIGKILL)
         }
+        detachOutputPipe()
         process.waitUntilExit()
         terminateCapturedDescendants(descendants, naturalExitGrace: descendantExitGrace)
     }
