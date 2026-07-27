@@ -114,7 +114,22 @@ _KERNEL_TOOL_USAGE_HINTS = {
 }
 
 
-def _kernel_tool_rows(*, platform: str) -> list[Dict[str, str]]:
+def _origin_disables_kernel_tools(origin: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(origin, dict) or "kernel_tools_enabled" not in origin:
+        return False
+    value = origin.get("kernel_tools_enabled")
+    if isinstance(value, str):
+        return value.strip().lower() in {"0", "false", "no", "off", "disabled"}
+    return not bool(value)
+
+
+def _kernel_tool_rows(
+    *,
+    platform: str,
+    origin: Optional[Dict[str, Any]] = None,
+) -> list[Dict[str, str]]:
+    if _origin_disables_kernel_tools(origin):
+        return []
     rows: list[Dict[str, str]] = []
     for tool_id in sorted(META_TOOLS):
         token = str(tool_id or "").strip()
@@ -128,7 +143,11 @@ def _kernel_tool_rows(*, platform: str) -> list[Dict[str, str]]:
             }
         )
 
-    spudex_rows = spudex_hydra_tool_rows(platform=platform, redis_client=default_redis)
+    spudex_rows = spudex_hydra_tool_rows(
+        platform=platform,
+        origin=origin,
+        redis_client=default_redis,
+    )
     for row in spudex_rows:
         if not isinstance(row, dict):
             continue
@@ -176,8 +195,16 @@ def _int_default(value: Any, default: int) -> int:
         return default
 
 
-def kernel_tool_ids(*, platform: str) -> list[str]:
-    return [str(row.get("id") or "").strip() for row in _kernel_tool_rows(platform=platform) if str(row.get("id") or "").strip()]
+def kernel_tool_ids(
+    *,
+    platform: str,
+    origin: Optional[Dict[str, Any]] = None,
+) -> list[str]:
+    return [
+        str(row.get("id") or "").strip()
+        for row in _kernel_tool_rows(platform=platform, origin=origin)
+        if str(row.get("id") or "").strip()
+    ]
 
 
 def kernel_tool_purpose_hint(*, tool_id: str, platform: str) -> str:
@@ -273,6 +300,12 @@ def _admin_gate_blocks_verba(*, plugin_id: str, platform: str, origin: Optional[
 
 
 def _admin_gate_blocks_kernel(*, platform: str, origin: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if _origin_disables_kernel_tools(origin):
+        return action_failure(
+            code="kernel_tools_disabled",
+            message="Kernel tools are disabled for this Little Spud connection.",
+            say_hint="Explain that tools must be enabled for Little Spud in Tater's Spud Link settings.",
+        )
     if not admin_gate_enabled(default_redis):
         return None
     if origin_has_full_tool_access(platform, origin, default_redis):
@@ -308,10 +341,14 @@ def list_tools(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]] = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_platform = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
 
-    kernel_tools = kernel_tool_ids(platform=normalized_platform)
+    kernel_tools = kernel_tool_ids(
+        platform=normalized_platform,
+        origin=origin,
+    )
 
     enabled_check = _effective_enabled_predicate(enabled_predicate)
     verba_tools: list[Dict[str, str]] = []
@@ -551,6 +588,7 @@ async def run_meta_tool(
     enabled_predicate: Optional[Callable[[str], bool]] = None,
     origin: Optional[Dict[str, Any]] = None,
     llm_client: Any = None,
+    progress_callback: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     effective_origin = _origin_payload(args, origin)
     gate_result = _admin_gate_blocks_kernel(platform=platform, origin=effective_origin)
@@ -562,6 +600,7 @@ async def run_meta_tool(
             platform=args.get("platform") or platform,
             registry=registry,
             enabled_predicate=enabled_predicate,
+            origin=effective_origin,
         )
 
     if func == "get_verba_help":
@@ -768,6 +807,7 @@ async def run_meta_tool(
         origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
         llm_client=llm_client,
         redis_client=default_redis,
+        progress_callback=progress_callback,
     )
     if isinstance(spudex_result, dict):
         return spudex_result
