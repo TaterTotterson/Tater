@@ -1117,6 +1117,57 @@ async def send_command(selector: str, message_type: str, payload: Optional[Dict[
     return {"ok": True, "selector": token, "message": message}
 
 
+async def send_request(
+    selector: str,
+    message_type: str,
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    timeout_s: float = 3.0,
+) -> Dict[str, Any]:
+    """Send a command and wait for the satellite's matching result message."""
+    token = _text(selector)
+    command_type = _text(message_type)
+    if not token:
+        raise ValueError("selector is required")
+    if not command_type:
+        raise ValueError("type is required")
+
+    message = _envelope(command_type, payload if isinstance(payload, dict) else {})
+    request_id = _text(message.get("id"))
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+
+    async with _clients_lock:
+        row = _clients.get(token)
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            raise RuntimeError(f"Native satellite is not connected: {token}")
+        queue = row.get("queue")
+        if not isinstance(queue, asyncio.Queue):
+            raise RuntimeError(f"Native satellite command queue unavailable: {token}")
+        pending = row.setdefault("pending_requests", {})
+        if not isinstance(pending, dict):
+            pending = {}
+            row["pending_requests"] = pending
+        pending[request_id] = future
+        try:
+            queue.put_nowait(message)
+        except Exception:
+            pending.pop(request_id, None)
+            raise
+
+    try:
+        result = await asyncio.wait_for(asyncio.shield(future), timeout=max(0.25, float(timeout_s or 3.0)))
+        return result if isinstance(result, dict) else {}
+    finally:
+        async with _clients_lock:
+            row = _clients.get(token)
+            pending = row.get("pending_requests") if isinstance(row, dict) else None
+            if isinstance(pending, dict):
+                pending.pop(request_id, None)
+        if not future.done():
+            future.cancel()
+
+
 async def push_live_settings(selector: str = "") -> Dict[str, Any]:
     token = _text(selector)
     response_board = ""
@@ -1188,6 +1239,7 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         "wake_verifier_count": 0,
         "wake_verifier_rejections": 0,
         "wake_verifier_last": {},
+        "pending_requests": {},
     }
     async with _clients_lock:
         _clients[selector] = row
@@ -1213,6 +1265,7 @@ async def _voice_bridge_for_websocket(selector: str, websocket: WebSocket) -> Op
 
 async def _mark_disconnected(selector: str, reason: str, *, websocket: Optional[WebSocket] = None) -> bool:
     hello_payload: Dict[str, Any] = {}
+    pending_futures: list[asyncio.Future] = []
     async with _clients_lock:
         row = _clients.get(selector)
         if isinstance(row, dict):
@@ -1223,6 +1276,16 @@ async def _mark_disconnected(selector: str, reason: str, *, websocket: Optional[
             row["last_error"] = reason
             hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
             hello_payload = _message_payload(hello)
+            pending = row.get("pending_requests")
+            if isinstance(pending, dict):
+                pending_futures = [
+                    future
+                    for future in pending.values()
+                    if isinstance(future, asyncio.Future) and not future.done()
+                ]
+                pending.clear()
+    for future in pending_futures:
+        future.set_exception(RuntimeError(f"Native satellite disconnected: {selector}"))
     if hello_payload:
         _upsert_registry_from_hello(selector, hello_payload, connected=False)
     return bool(hello_payload)
@@ -1231,8 +1294,10 @@ async def _mark_disconnected(selector: str, reason: str, *, websocket: Optional[
 async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     msg_type = _message_type(message)
     payload = _message_payload(message)
+    reply_to = _text(payload.get("reply_to")) if msg_type.endswith(".result") else ""
     setup_state_seen = msg_type == "status" and _is_setup_state(payload)
     hello_payload: Dict[str, Any] = {}
+    response_future: Optional[asyncio.Future] = None
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
@@ -1272,6 +1337,15 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
                         "payload": payload,
                     }
                 )
+        if reply_to:
+            pending = row.get("pending_requests")
+            if isinstance(pending, dict):
+                candidate = pending.pop(reply_to, None)
+                if isinstance(candidate, asyncio.Future):
+                    response_future = candidate
+    if response_future is not None and not response_future.done():
+        response_future.set_result(payload)
+        return None
     if hello_payload:
         _upsert_registry_from_hello(selector, hello_payload, connected=False)
     if msg_type in {"voice.start", "audio.start"}:
@@ -1414,10 +1488,6 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     raise
 
         command_sender = asyncio.create_task(send_commands())
-        with contextlib.suppress(Exception):
-            from . import native_timers
-
-            await native_timers.sync_selector(selector)
         while True:
             raw = await websocket.receive()
             raw_type = _text(raw.get("type"))

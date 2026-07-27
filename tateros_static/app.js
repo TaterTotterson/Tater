@@ -4606,7 +4606,16 @@ function buildSettingInput(field, inputId) {
     )}</textarea><div class="small">${escapeHtml(currentSummary)}</div>${safeDesc}</label>`);
   }
 
-  const htmlType = type === "password" ? "password" : type === "number" ? "number" : type === "color" ? "color" : "text";
+  const htmlType =
+    type === "password"
+      ? "password"
+      : type === "number"
+        ? "number"
+        : type === "color"
+          ? "color"
+          : type === "time"
+            ? "time"
+            : "text";
   const numberAttrs =
     type === "number"
       ? ` step="${escapeHtml(field?.step ?? "any")}"${

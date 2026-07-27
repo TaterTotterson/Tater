@@ -572,6 +572,45 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_barge_in", "Barge-In", "On" if bool(live_settings.get("barge_in_enabled", False)) else "Off"),
         _native_detail_row("native_trainer_feedback", "Trainer Feedback", ", ".join(capture_bits) if capture_bits else "Off"),
     ]
+    board_token = esphome_runtime.lower(board).replace("_", "-").replace(" ", "-")
+    compact_board = board_token.replace("-", "")
+    is_s3_box = board_token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact_board in {
+        "s3box",
+        "s3box3",
+        "esp32s3box",
+        "esp32s3box3",
+    }
+    if is_s3_box:
+        settings_rows = [
+            item
+            for item in settings_rows
+            if esphome_runtime.text(item.get("key"))
+            not in {"native_led_brightness", "native_led_color", "native_led_animations"}
+        ]
+        night_enabled = esphome_runtime.as_bool(live_settings.get("screen_night_mode_enabled"), False)
+        night_label = "Off"
+        if night_enabled:
+            night_label = (
+                f"{live_settings.get('screen_night_start') or '22:00'}–"
+                f"{live_settings.get('screen_night_end') or '07:00'} at "
+                f"{live_settings.get('screen_night_brightness', 10)}%"
+            )
+        volume_index = next(
+            (
+                index + 1
+                for index, item in enumerate(settings_rows)
+                if esphome_runtime.text(item.get("key")) == "native_volume"
+            ),
+            len(settings_rows),
+        )
+        settings_rows[volume_index:volume_index] = [
+            _native_detail_row(
+                "native_screen_brightness",
+                "Screen Brightness",
+                f"{live_settings.get('screen_brightness', 80)}%",
+            ),
+            _native_detail_row("native_screen_night_mode", "Night Dimming", night_label),
+        ]
 
     host = esphome_runtime.text(row.get("host"))
 

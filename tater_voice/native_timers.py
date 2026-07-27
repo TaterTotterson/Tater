@@ -2,28 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import math
 import re
-import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from helpers import redis_client
-
-TIMER_HASH_KEY = "voice_native_satellite_timers"
-SCHEDULER_INTERVAL_S = 0.5
-ALARM_RETRY_S = 4.0
 DEFAULT_SNOOZE_SECONDS = 300
-
-ACTIVE_STATES = {"armed", "ringing"}
-
-_timer_lock = asyncio.Lock()
-_scheduler_task: Optional[asyncio.Task] = None
-
-
-def _now() -> float:
-    return time.time()
+MAX_TIMER_SECONDS = 7 * 24 * 60 * 60
 
 
 def _text(value: Any) -> str:
@@ -32,17 +17,16 @@ def _text(value: Any) -> str:
     if isinstance(value, bytes):
         with contextlib.suppress(Exception):
             return value.decode("utf-8")
-    return str(value)
+    return str(value).strip()
 
 
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _as_int(value: Any, default: int = 0, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+def _as_int(
+    value: Any,
+    default: int = 0,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
     try:
         out = int(round(float(value)))
     except Exception:
@@ -55,131 +39,121 @@ def _as_int(value: Any, default: int = 0, *, minimum: Optional[int] = None, maxi
 
 
 def _norm(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", _text(value).strip().lower())
+    return re.sub(r"[^a-z0-9]+", "", _text(value).lower())
 
 
-def _decode_row(timer_id: Any, raw: Any) -> Optional[Dict[str, Any]]:
-    try:
-        row = json.loads(_text(raw))
-    except Exception:
-        return None
-    if not isinstance(row, dict):
-        return None
-    row["id"] = _text(row.get("id") or timer_id)
-    row["selector"] = _text(row.get("selector"))
-    row["room"] = _text(row.get("room"))
-    row["label"] = _text(row.get("label"))
-    row["state"] = _text(row.get("state") or "armed")
-    row["deadline_ts"] = _as_float(row.get("deadline_ts"), 0.0)
-    row["duration_s"] = _as_int(row.get("duration_s"), 0, minimum=0)
-    row["created_ts"] = _as_float(row.get("created_ts"), _now())
-    row["updated_ts"] = _as_float(row.get("updated_ts"), row["created_ts"])
-    row["last_alarm_attempt_ts"] = _as_float(row.get("last_alarm_attempt_ts"), 0.0)
-    return row
-
-
-def _load_rows_sync() -> List[Dict[str, Any]]:
-    raw_rows = redis_client.hgetall(TIMER_HASH_KEY) or {}
-    rows: List[Dict[str, Any]] = []
-    if not isinstance(raw_rows, dict):
-        return rows
-    stale: List[str] = []
-    for timer_id, raw in raw_rows.items():
-        row = _decode_row(timer_id, raw)
-        if row is None:
-            stale.append(_text(timer_id))
-            continue
-        rows.append(row)
-    for timer_id in stale:
-        with contextlib.suppress(Exception):
-            redis_client.hdel(TIMER_HASH_KEY, timer_id)
-    return rows
-
-
-def _save_row_sync(row: Dict[str, Any]) -> None:
-    timer_id = _text(row.get("id"))
-    if not timer_id:
-        return
-    row["updated_ts"] = _now()
-    redis_client.hset(TIMER_HASH_KEY, timer_id, json.dumps(row, ensure_ascii=False, sort_keys=True))
-
-
-def _delete_row_sync(timer_id: str) -> None:
-    token = _text(timer_id)
-    if token:
-        redis_client.hdel(TIMER_HASH_KEY, token)
-
-
-def _remaining_s(row: Dict[str, Any], *, now_ts: Optional[float] = None) -> int:
-    state = _text(row.get("state"))
-    if state == "ringing":
-        return 0
-    deadline = _as_float(row.get("deadline_ts"), 0.0)
-    if deadline <= 0:
-        return 0
-    current = _now() if now_ts is None else float(now_ts)
-    return max(0, int(math.ceil(deadline - current)))
-
-
-def _public_row(row: Dict[str, Any], *, now_ts: Optional[float] = None) -> Dict[str, Any]:
-    remaining = _remaining_s(row, now_ts=now_ts)
+def _public_timer(raw: Any, selector: str = "") -> Dict[str, Any]:
+    row = raw if isinstance(raw, dict) else {}
+    remaining_ms = _as_int(row.get("remaining_ms"), 0, minimum=0)
+    original_duration_ms = _as_int(
+        row.get("original_duration_ms") or row.get("duration_ms"),
+        0,
+        minimum=0,
+    )
+    name = _text(row.get("name") or row.get("label"))
+    state = _text(row.get("state") or ("ringing" if row.get("ringing") else "armed"))
     return {
-        "id": _text(row.get("id")),
-        "selector": _text(row.get("selector")),
-        "room": _text(row.get("room")),
-        "label": _text(row.get("label")),
-        "state": _text(row.get("state")),
-        "duration_s": _as_int(row.get("duration_s"), 0, minimum=0),
-        "remaining_s": remaining,
-        "remaining_ms": max(0, remaining * 1000),
-        "deadline_ts": _as_float(row.get("deadline_ts"), 0.0),
-        "created_ts": _as_float(row.get("created_ts"), 0.0),
-        "updated_ts": _as_float(row.get("updated_ts"), 0.0),
+        "id": _text(row.get("id") or row.get("timer_id")),
+        "selector": _text(row.get("selector") or selector),
+        "name": name,
+        "label": name,
+        "state": state,
+        "duration_s": int(math.ceil(original_duration_ms / 1000.0)) if original_duration_ms else 0,
+        "duration_ms": original_duration_ms,
+        "original_duration_s": int(math.ceil(original_duration_ms / 1000.0)) if original_duration_ms else 0,
+        "original_duration_ms": original_duration_ms,
+        "remaining_s": int(math.ceil(remaining_ms / 1000.0)) if remaining_ms else 0,
+        "remaining_ms": remaining_ms,
     }
 
 
-def _command_payload(row: Dict[str, Any]) -> Dict[str, Any]:
-    public = _public_row(row)
-    public["duration_ms"] = max(0, _as_int(row.get("duration_s"), 0, minimum=0) * 1000)
-    public["source"] = "tater"
-    return public
-
-
-def _matches_selector(row: Dict[str, Any], selector: str) -> bool:
-    token = _text(selector)
-    return bool(token) and _text(row.get("selector")) == token
-
-
-def _matches_room(row: Dict[str, Any], room: str) -> bool:
-    token = _norm(room)
-    return bool(token) and _norm(row.get("room")) == token
-
-
-async def _send_timer_command(selector: str, message_type: str, payload: Dict[str, Any]) -> bool:
+async def _request(
+    selector: str,
+    message_type: str,
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    timeout_s: float = 3.0,
+) -> Dict[str, Any]:
     token = _text(selector)
     if not token:
-        return False
+        return {
+            "ok": False,
+            "code": "missing_selector",
+            "message": "I need a satellite for that timer.",
+        }
     try:
         from . import native_satellite
 
-        if message_type == "timer.alarm" and not await native_satellite.client_has_capability(token, "timers"):
-            await native_satellite.send_command(
-                token,
-                "play.tone",
-                {
-                    "frequency_hz": 880,
-                    "duration_ms": 700,
-                    "volume_percent": 80,
-                    "tts_kind": "timer",
-                    "visual_mode": "timer",
-                    "state_after": "idle",
-                },
-            )
-            return True
-        await native_satellite.send_command(token, message_type, payload)
-        return True
-    except Exception:
-        return False
+        result = await native_satellite.send_request(
+            token,
+            message_type,
+            payload if isinstance(payload, dict) else {},
+            timeout_s=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "code": "timer_timeout",
+            "message": "The satellite did not answer the timer request.",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "satellite_unavailable",
+            "message": str(exc) or "The satellite is unavailable.",
+        }
+
+    out = dict(result) if isinstance(result, dict) else {}
+    out.setdefault("ok", False)
+    timers = out.get("timers")
+    if isinstance(timers, list):
+        out["timers"] = [_public_timer(row, token) for row in timers if isinstance(row, dict)]
+    timer = out.get("timer")
+    if isinstance(timer, dict):
+        out["timer"] = _public_timer(timer, token)
+    return out
+
+
+async def _connected_selectors(*, room: str = "") -> List[str]:
+    from . import native_satellite
+
+    snapshot = await native_satellite.status()
+    clients = snapshot.get("clients") if isinstance(snapshot, dict) else {}
+    if not isinstance(clients, dict):
+        return []
+    room_token = _norm(room)
+    selectors: List[str] = []
+    for selector, row in clients.items():
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            continue
+        if room_token and _norm(row.get("room")) != room_token:
+            continue
+        selectors.append(_text(selector))
+    return [token for token in selectors if token]
+
+
+def _filter_timers(
+    timers: List[Dict[str, Any]],
+    *,
+    timer_id: str = "",
+    name: str = "",
+    duration_s: int = 0,
+) -> List[Dict[str, Any]]:
+    timer_token = _text(timer_id)
+    name_token = _norm(name)
+    duration = _as_int(duration_s, 0, minimum=0)
+    rows = timers
+    if timer_token:
+        rows = [row for row in rows if _text(row.get("id")) == timer_token]
+    if name_token:
+        rows = [row for row in rows if _norm(row.get("name") or row.get("label")) == name_token]
+    if duration > 0:
+        rows = [
+            row
+            for row in rows
+            if _as_int(row.get("original_duration_s") or row.get("duration_s"), 0) == duration
+        ]
+    return rows
 
 
 async def create_timer(
@@ -187,49 +161,98 @@ async def create_timer(
     duration_s: int,
     *,
     label: str = "",
+    name: str = "",
     room: str = "",
     source: str = "",
 ) -> Dict[str, Any]:
+    del room
     token = _text(selector)
-    seconds = _as_int(duration_s, 0, minimum=1, maximum=7 * 24 * 60 * 60)
+    seconds = _as_int(duration_s, 0, minimum=1, maximum=MAX_TIMER_SECONDS)
     if not token:
-        return {"ok": False, "code": "missing_selector", "message": "I need a satellite to start a timer."}
-
-    now_ts = _now()
-    async with _timer_lock:
-        rows = _load_rows_sync()
-        existing = [
-            row
-            for row in rows
-            if _text(row.get("state")) in ACTIVE_STATES and _matches_selector(row, token)
-        ]
-        if existing:
-            current = sorted(existing, key=lambda row: _as_float(row.get("deadline_ts"), 0.0))[0]
-            return {
-                "ok": False,
-                "code": "already_running",
-                "timer": _public_row(current, now_ts=now_ts),
-                "remaining_s": _remaining_s(current, now_ts=now_ts),
-            }
-
-        row = {
-            "id": uuid.uuid4().hex[:12],
-            "selector": token,
-            "room": _text(room),
-            "label": _text(label),
-            "source": _text(source),
-            "state": "armed",
-            "duration_s": seconds,
-            "deadline_ts": now_ts + seconds,
-            "created_ts": now_ts,
-            "updated_ts": now_ts,
-            "last_alarm_attempt_ts": 0.0,
+        return {
+            "ok": False,
+            "code": "missing_selector",
+            "message": "I need a satellite to start a timer.",
         }
-        _save_row_sync(row)
+    if seconds <= 0:
+        return {
+            "ok": False,
+            "code": "invalid_duration",
+            "message": "The timer duration must be greater than zero.",
+        }
 
-    delivered = await _send_timer_command(token, "timer.arm", _command_payload(row))
-    public = _public_row(row)
-    return {"ok": True, "timer": public, "delivered": delivered}
+    timer_id = uuid.uuid4().hex[:12]
+    timer_name = _text(name or label)[:63]
+    result = await _request(
+        token,
+        "timer.start",
+        {
+            "id": timer_id,
+            "name": timer_name,
+            "label": timer_name,
+            "duration_ms": seconds * 1000,
+            "original_duration_ms": seconds * 1000,
+            "source": _text(source) or "tater",
+        },
+    )
+    result["delivered"] = bool(result.get("ok"))
+    return result
+
+
+async def status(
+    *,
+    selector: str = "",
+    timer_id: str = "",
+    room: str = "",
+    name: str = "",
+    duration_s: int = 0,
+) -> Dict[str, Any]:
+    token = _text(selector)
+    selectors = [token] if token else await _connected_selectors(room=room)
+    if not selectors:
+        return {
+            "ok": False if token else True,
+            "code": "satellite_unavailable" if token else "",
+            "running": False,
+            "timers": [],
+            "count": 0,
+        }
+
+    responses = await asyncio.gather(
+        *[_request(target, "timer.list", {}, timeout_s=2.0) for target in selectors],
+        return_exceptions=True,
+    )
+    timers: List[Dict[str, Any]] = []
+    answered = 0
+    for response in responses:
+        if not isinstance(response, dict) or not bool(response.get("ok")):
+            continue
+        answered += 1
+        rows = response.get("timers")
+        if isinstance(rows, list):
+            timers.extend(row for row in rows if isinstance(row, dict))
+
+    timers = _filter_timers(
+        timers,
+        timer_id=timer_id,
+        name=name,
+        duration_s=duration_s,
+    )
+    timers.sort(
+        key=lambda row: (
+            _text(row.get("state")) != "ringing",
+            _as_int(row.get("remaining_ms"), 0),
+            _text(row.get("name")),
+        )
+    )
+    return {
+        "ok": answered > 0,
+        "running": bool(timers),
+        "timers": timers,
+        "count": len(timers),
+        "satellites_queried": len(selectors),
+        "satellites_answered": answered,
+    }
 
 
 async def cancel_timer(
@@ -237,46 +260,56 @@ async def cancel_timer(
     timer_id: str = "",
     selector: str = "",
     room: str = "",
+    name: str = "",
+    duration_s: int = 0,
+    cancel_all: bool = False,
     source: str = "",
 ) -> Dict[str, Any]:
     token = _text(selector)
-    timer_token = _text(timer_id)
-    room_token = _text(room)
-    now_ts = _now()
-    async with _timer_lock:
-        rows = [row for row in _load_rows_sync() if _text(row.get("state")) in ACTIVE_STATES]
-        if timer_token:
-            matches = [row for row in rows if _text(row.get("id")) == timer_token]
-        else:
-            ringing = [row for row in rows if _text(row.get("state")) == "ringing"]
-            if ringing:
-                matches = ringing
-            elif token:
-                matches = [row for row in rows if _matches_selector(row, token)]
-                if not matches and len(rows) == 1:
-                    matches = rows
-            elif room_token:
-                matches = [row for row in rows if _matches_room(row, room_token)]
-                if not matches and len(rows) == 1:
-                    matches = rows
-            else:
-                matches = []
+    selectors = [token] if token else await _connected_selectors(room=room)
+    if not selectors:
+        return {
+            "ok": False,
+            "code": "satellite_unavailable",
+            "cancelled": 0,
+            "timers": [],
+        }
 
-        for row in matches:
-            _delete_row_sync(_text(row.get("id")))
-
-    delivered = 0
-    for row in matches:
-        payload = _public_row(row, now_ts=now_ts)
-        payload["source"] = _text(source) or "tater"
-        if await _send_timer_command(_text(row.get("selector")), "timer.clear", payload):
-            delivered += 1
-
+    payload = {
+        "id": _text(timer_id),
+        "name": _text(name)[:63],
+        "original_duration_ms": _as_int(duration_s, 0, minimum=0) * 1000,
+        "all": bool(cancel_all),
+        "source": _text(source) or "tater",
+    }
+    responses = await asyncio.gather(
+        *[_request(target, "timer.cancel", payload) for target in selectors],
+        return_exceptions=True,
+    )
+    cancelled = 0
+    timers: List[Dict[str, Any]] = []
+    code = ""
+    message = ""
+    answered = 0
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        if bool(response.get("ok")):
+            answered += 1
+        cancelled += _as_int(response.get("affected") or response.get("cancelled"), 0, minimum=0)
+        rows = response.get("timers")
+        if isinstance(rows, list):
+            timers.extend(row for row in rows if isinstance(row, dict))
+        if not code and response.get("code"):
+            code = _text(response.get("code"))
+            message = _text(response.get("message"))
     return {
-        "ok": True,
-        "cancelled": len(matches),
-        "delivered": delivered,
-        "timers": [_public_row(row, now_ts=now_ts) for row in matches],
+        "ok": answered > 0,
+        "code": code,
+        "message": message,
+        "cancelled": cancelled,
+        "delivered": answered,
+        "timers": timers,
     }
 
 
@@ -284,174 +317,84 @@ async def snooze_timer(
     *,
     selector: str = "",
     timer_id: str = "",
+    room: str = "",
+    name: str = "",
+    original_duration_s: int = 0,
     duration_s: int = DEFAULT_SNOOZE_SECONDS,
     source: str = "",
 ) -> Dict[str, Any]:
     token = _text(selector)
-    timer_token = _text(timer_id)
+    selectors = [token] if token else await _connected_selectors(room=room)
     seconds = _as_int(duration_s, DEFAULT_SNOOZE_SECONDS, minimum=1, maximum=24 * 60 * 60)
-    now_ts = _now()
-    async with _timer_lock:
-        rows = [row for row in _load_rows_sync() if _text(row.get("state")) in ACTIVE_STATES]
-        if timer_token:
-            matches = [row for row in rows if _text(row.get("id")) == timer_token]
-        else:
-            ringing = [row for row in rows if _text(row.get("state")) == "ringing"]
-            matches = ringing or ([row for row in rows if _matches_selector(row, token)] if token else [])
-            if not matches and len(rows) == 1:
-                matches = rows
-        updated: List[Dict[str, Any]] = []
-        for row in matches:
-            row["state"] = "armed"
-            row["duration_s"] = seconds
-            row["deadline_ts"] = now_ts + seconds
-            row["last_alarm_attempt_ts"] = 0.0
-            row["source"] = _text(source) or _text(row.get("source"))
-            _save_row_sync(row)
-            updated.append(dict(row))
+    if not selectors:
+        return {
+            "ok": False,
+            "code": "satellite_unavailable",
+            "snoozed": 0,
+            "timers": [],
+        }
 
-    delivered = 0
-    for row in updated:
-        if await _send_timer_command(_text(row.get("selector")), "timer.arm", _command_payload(row)):
-            delivered += 1
+    payload = {
+        "id": _text(timer_id),
+        "name": _text(name)[:63],
+        "original_duration_ms": _as_int(original_duration_s, 0, minimum=0) * 1000,
+        "duration_ms": seconds * 1000,
+        "source": _text(source) or "tater",
+    }
+    responses = await asyncio.gather(
+        *[_request(target, "timer.snooze", payload) for target in selectors],
+        return_exceptions=True,
+    )
+    snoozed = 0
+    timers: List[Dict[str, Any]] = []
+    answered = 0
+    code = ""
+    message = ""
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        if bool(response.get("ok")):
+            answered += 1
+        snoozed += _as_int(response.get("affected") or response.get("snoozed"), 0, minimum=0)
+        rows = response.get("timers")
+        if isinstance(rows, list):
+            timers.extend(row for row in rows if isinstance(row, dict))
+        if not code and response.get("code"):
+            code = _text(response.get("code"))
+            message = _text(response.get("message"))
     return {
-        "ok": True,
-        "snoozed": len(updated),
-        "delivered": delivered,
-        "timers": [_public_row(row, now_ts=now_ts) for row in updated],
+        "ok": answered > 0,
+        "code": code,
+        "message": message,
+        "snoozed": snoozed,
+        "delivered": answered,
+        "timers": timers,
     }
 
 
-async def status(*, selector: str = "", timer_id: str = "", room: str = "") -> Dict[str, Any]:
-    token = _text(selector)
-    timer_token = _text(timer_id)
-    room_token = _text(room)
-    now_ts = _now()
-    async with _timer_lock:
-        rows = [row for row in _load_rows_sync() if _text(row.get("state")) in ACTIVE_STATES]
-    if timer_token:
-        matches = [row for row in rows if _text(row.get("id")) == timer_token]
-    else:
-        ringing = [row for row in rows if _text(row.get("state")) == "ringing"]
-        if ringing:
-            matches = ringing
-        elif token:
-            matches = [row for row in rows if _matches_selector(row, token)]
-            if not matches and len(rows) == 1:
-                matches = rows
-        elif room_token:
-            matches = [row for row in rows if _matches_room(row, room_token)]
-            if not matches and len(rows) == 1:
-                matches = rows
-        else:
-            matches = rows
-    public = sorted(
-        [_public_row(row, now_ts=now_ts) for row in matches],
-        key=lambda row: (row.get("state") != "ringing", row.get("remaining_s") or 0, row.get("created_ts") or 0),
-    )
-    return {"ok": True, "running": bool(public), "timers": public, "count": len(public)}
-
-
 async def sync_selector(selector: str) -> Dict[str, Any]:
-    token = _text(selector)
-    if not token:
-        return {"ok": False, "synced": 0}
-    async with _timer_lock:
-        rows = [
-            row
-            for row in _load_rows_sync()
-            if _text(row.get("state")) in ACTIVE_STATES and _matches_selector(row, token)
-        ]
-    if not rows:
-        cleared = await _send_timer_command(token, "timer.clear", {"source": "tater", "reason": "sync"})
-        return {"ok": True, "synced": 0, "cleared": cleared}
-
-    delivered = 0
-    for row in rows:
-        msg_type = "timer.alarm" if _text(row.get("state")) == "ringing" else "timer.arm"
-        if await _send_timer_command(token, msg_type, _command_payload(row)):
-            delivered += 1
-    return {"ok": True, "synced": len(rows), "delivered": delivered}
+    # Timer state lives only on the satellite. Reconnects must never clear,
+    # restore, or otherwise mutate it.
+    return {"ok": True, "selector": _text(selector), "synced": 0}
 
 
 async def handle_device_event(selector: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    token = _text(selector)
+    # Lifecycle events are telemetry only. Tater intentionally keeps no timer
+    # database and asks the satellite for current state when needed.
     body = payload if isinstance(payload, dict) else {}
-    event = _text(body.get("event") or body.get("state")).strip().lower()
-    timer_id = _text(body.get("id") or body.get("timer_id"))
-    if event in {"stopped", "stop", "cancelled", "canceled", "clear", "cleared"}:
-        return await cancel_timer(timer_id=timer_id, selector=token, source="device")
-    if event in {"expired", "ringing", "alarm"}:
-        now_ts = _now()
-        async with _timer_lock:
-            rows = [
-                row
-                for row in _load_rows_sync()
-                if _text(row.get("state")) in ACTIVE_STATES
-                and ((timer_id and _text(row.get("id")) == timer_id) or (not timer_id and _matches_selector(row, token)))
-            ]
-            for row in rows:
-                row["state"] = "ringing"
-                row["ringing_ts"] = now_ts
-                row["last_alarm_attempt_ts"] = now_ts
-                _save_row_sync(row)
-        return {"ok": True, "updated": len(rows)}
-    if event in {"sync", "status"}:
-        return await status(selector=token, timer_id=timer_id)
-    return {"ok": True, "ignored": event or "unknown"}
-
-
-async def _scheduler_loop() -> None:
-    while True:
-        try:
-            now_ts = _now()
-            due: List[Dict[str, Any]] = []
-            retry: List[Dict[str, Any]] = []
-            async with _timer_lock:
-                rows = _load_rows_sync()
-                for row in rows:
-                    state = _text(row.get("state"))
-                    if state not in ACTIVE_STATES:
-                        continue
-                    if state == "armed" and _as_float(row.get("deadline_ts"), 0.0) <= now_ts:
-                        row["state"] = "ringing"
-                        row["ringing_ts"] = now_ts
-                        row["last_alarm_attempt_ts"] = now_ts
-                        _save_row_sync(row)
-                        due.append(dict(row))
-                    elif state == "ringing":
-                        last_attempt = _as_float(row.get("last_alarm_attempt_ts"), 0.0)
-                        if now_ts - last_attempt >= ALARM_RETRY_S:
-                            row["last_alarm_attempt_ts"] = now_ts
-                            _save_row_sync(row)
-                            retry.append(dict(row))
-
-            for row in due + retry:
-                await _send_timer_command(_text(row.get("selector")), "timer.alarm", _command_payload(row))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-        await asyncio.sleep(SCHEDULER_INTERVAL_S)
+    return {
+        "ok": True,
+        "selector": _text(selector),
+        "event": _text(body.get("event") or body.get("state")),
+        "timer_id": _text(body.get("id") or body.get("timer_id")),
+    }
 
 
 def start_scheduler() -> None:
-    global _scheduler_task
-    if _scheduler_task is not None and not _scheduler_task.done():
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    _scheduler_task = loop.create_task(_scheduler_loop())
+    # Compatibility no-op for callers from older Tater startup paths.
+    return None
 
 
 async def stop_scheduler() -> None:
-    global _scheduler_task
-    task = _scheduler_task
-    _scheduler_task = None
-    if task is None or task.done():
-        return
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    # Compatibility no-op for callers from older Tater shutdown paths.
+    return None

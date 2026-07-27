@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 import json
 from typing import Any, Dict, List
 from urllib.error import URLError
@@ -55,6 +56,11 @@ DEFAULTS: Dict[str, Any] = {
     "continued_chat": True,
     "barge_in_enabled": False,
     "volume_percent": 80,
+    "screen_brightness": 80,
+    "screen_night_mode_enabled": False,
+    "screen_night_brightness": 10,
+    "screen_night_start": "22:00",
+    "screen_night_end": "07:00",
     "led_brightness": 80,
     "led_color": "#ff5a1f",
     "led_listening_animation": "directional",
@@ -87,6 +93,11 @@ FIRMWARE_SETTING_KEYS = (
     "continued_chat",
     "barge_in_enabled",
     "volume_percent",
+    "screen_brightness",
+    "screen_night_mode_enabled",
+    "screen_night_brightness",
+    "screen_night_start",
+    "screen_night_end",
     "led_brightness",
     "led_color",
     "led_listening_animation",
@@ -563,6 +574,21 @@ def _led_animation_value(value: Any, default_key: str) -> str:
     return token if token in LED_ANIMATION_VALUES else fallback
 
 
+def _time_value(value: Any, fallback: str) -> str:
+    token = _text(value)
+    parts = token.split(":")
+    if len(parts) != 2:
+        return fallback
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        return fallback
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return fallback
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _as_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -699,6 +725,16 @@ _LED_FIELD_KEYS = {
     "led_preview",
 }
 
+_SCREEN_SETTING_KEYS = {
+    "screen_brightness",
+    "screen_night_mode_enabled",
+    "screen_night_brightness",
+    "screen_night_start",
+    "screen_night_end",
+}
+
+_SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
+
 
 def _board_supports_led_settings(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
@@ -708,6 +744,17 @@ def _board_supports_led_settings(board: Any = "") -> bool:
     if compact in {"s3box", "s3box3", "esp32s3box", "esp32s3box3"}:
         return False
     return True
+
+
+def _board_supports_screen_settings(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact in {
+        "s3box",
+        "s3box3",
+        "esp32s3box",
+        "esp32s3box3",
+    }
 
 
 def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -875,6 +922,30 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "continued_chat": _as_bool(source.get("continued_chat"), bool(DEFAULTS["continued_chat"])),
         "barge_in_enabled": _as_bool(source.get("barge_in_enabled"), bool(DEFAULTS["barge_in_enabled"])),
         "volume_percent": _as_int(source.get("volume_percent"), int(DEFAULTS["volume_percent"]), minimum=0, maximum=100),
+        "screen_brightness": _as_int(
+            source.get("screen_brightness"),
+            int(DEFAULTS["screen_brightness"]),
+            minimum=0,
+            maximum=100,
+        ),
+        "screen_night_mode_enabled": _as_bool(
+            source.get("screen_night_mode_enabled"),
+            bool(DEFAULTS["screen_night_mode_enabled"]),
+        ),
+        "screen_night_brightness": _as_int(
+            source.get("screen_night_brightness"),
+            int(DEFAULTS["screen_night_brightness"]),
+            minimum=0,
+            maximum=100,
+        ),
+        "screen_night_start": _time_value(
+            source.get("screen_night_start"),
+            str(DEFAULTS["screen_night_start"]),
+        ),
+        "screen_night_end": _time_value(
+            source.get("screen_night_end"),
+            str(DEFAULTS["screen_night_end"]),
+        ),
         "led_brightness": _as_int(source.get("led_brightness"), int(DEFAULTS["led_brightness"]), minimum=0, maximum=100),
         "led_color": _led_color_value(source.get("led_color")),
         "led_listening_animation": _led_animation_value(source.get("led_listening_animation"), "led_listening_animation"),
@@ -906,7 +977,14 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
 
 def firmware_settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     current = settings_snapshot(selector, board=board)
-    return {key: current[key] for key in FIRMWARE_SETTING_KEYS}
+    output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
+    if _board_supports_screen_settings(board):
+        now = datetime.now().astimezone()
+        output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
+    else:
+        for key in _SCREEN_SETTING_KEYS:
+            output.pop(key, None)
+    return output
 
 
 def _profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -1195,6 +1273,60 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "step": 1,
         },
         {
+            "key": "screen_section",
+            "label": "S3 Box Display",
+            "type": "section",
+            "description": "Set this S3 Box screen brightness and optionally dim it on a daily schedule.",
+        },
+        {
+            "key": "screen_brightness",
+            "label": "Screen Brightness (%)",
+            "type": "number",
+            "value": current["screen_brightness"],
+            "default": DEFAULTS["screen_brightness"],
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "description": "Normal display brightness. Setting this to 0 turns the backlight off.",
+        },
+        {
+            "key": "screen_night_mode_enabled",
+            "label": "Scheduled Night Dimming",
+            "type": "checkbox",
+            "value": current["screen_night_mode_enabled"],
+            "default": DEFAULTS["screen_night_mode_enabled"],
+            "description": "Automatically use a lower display brightness during the selected local-time window.",
+        },
+        {
+            "key": "screen_night_start",
+            "label": "Dim At",
+            "type": "time",
+            "value": current["screen_night_start"],
+            "default": DEFAULTS["screen_night_start"],
+            "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
+        },
+        {
+            "key": "screen_night_end",
+            "label": "Restore At",
+            "type": "time",
+            "value": current["screen_night_end"],
+            "default": DEFAULTS["screen_night_end"],
+            "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
+            "description": "The normal brightness returns at this local time. Overnight schedules are supported.",
+        },
+        {
+            "key": "screen_night_brightness",
+            "label": "Night Brightness (%)",
+            "type": "number",
+            "value": current["screen_night_brightness"],
+            "default": DEFAULTS["screen_night_brightness"],
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
+            "description": "Brightness used between Dim At and Restore At. Setting this to 0 turns the screen off overnight.",
+        },
+        {
             "key": "led_section",
             "label": "LED Settings",
             "type": "section",
@@ -1284,6 +1416,8 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         ]
     if not _board_supports_led_settings(board):
         fields = [field for field in fields if _text(field.get("key")) not in _LED_FIELD_KEYS]
+    if not (_selector_token(selector) and _board_supports_screen_settings(board)):
+        fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     return fields
 
 
