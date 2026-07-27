@@ -1,30 +1,28 @@
-# Tater v97.6
+# Tater v97.7
 
 ## What's Changed
 
-### Spudex Execution Engine
+### Satellite-Owned Timers
 
-- Hydra and the Spudex Workbench now use the same task execution loop, so planning, commands, file work, verification, and results behave consistently.
-- Spudex now reports truthful completed, blocked, failed, and incomplete states instead of treating a step-limit exit or unsupported success claim as a completed task.
-- Malformed model controller JSON receives one focused repair attempt before the task fails cleanly.
-- Spudex planning, actions, verification, and results now stream live progress through Hydra and supported platforms.
+- Native satellites now own their timer state, countdowns, and alarms instead of relying on Tater to persist or restore them.
+- Added support for multiple concurrent named timers on each satellite.
+- Timer requests can start, list, cancel, snooze, or stop a timer by name, duration, or identifier.
+- Reconnecting a satellite no longer clears or rebuilds its local timers.
+- Tater queries live timer state from connected satellites only when it is needed.
 
-### Little Spud
+### S3 Box Display
 
-- Added Little Spud as a Spudex platform while keeping it on the shared Hydra engine.
-- Little Spud terminal access requires an identity linked to a Tater Person marked as an administrator.
-- Disabling tools in Little Spud now removes and blocks its kernel and Spudex tools consistently.
-- Platform-origin context is preserved through tool discovery and execution.
+- Added per-S3 Box screen-brightness controls.
+- Added optional scheduled night dimming with configurable dim and restore times and a separate night brightness.
+- Screen settings only appear for individual S3 Boxes and are not sent to LED-only satellites.
+- Tater synchronizes local time to the S3 Box so its dimming schedule can continue through temporary disconnects.
 
-### Runtime Safety and Reliability
+### Timer Verba
 
-- Added bounded command output and configurable concurrent-process limits to prevent runaway terminal work from exhausting Tater.
-- Spudex subprocesses now receive a minimal runtime environment instead of inheriting Tater API keys and other unrelated secrets.
-- Added macOS process sandboxing and Linux Bubblewrap isolation when available, with truthful policy-only status when OS isolation is unavailable.
-- Improved command policy checks for file paths embedded in command flags.
-- Tater now terminates complete Spudex process groups and marks interrupted sessions stopped during shutdown.
-- Improved trusted cross-platform memory, CPU, and process diagnostics without exposing full process arguments.
+- Updated the Timer Verba for satellite-owned, concurrent named timers.
+- Improved timer-name and duration parsing for requests such as “cancel the 10 minute timer” or “how much time is left on the pasta timer.”
+- Timer responses now distinguish missing, ambiguous, unavailable, and successfully completed operations.
 
 ### Validation
 
-- Added regression coverage for the shared Spudex loop, result states, JSON repair, output limits, runtime isolation, clean shutdown, live progress, and Little Spud access controls.
+- Added regression coverage for timer routing, named timer parsing, S3-only screen controls, schedule normalization, and firmware time synchronization.

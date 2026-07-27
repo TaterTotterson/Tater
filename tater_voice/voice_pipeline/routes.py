@@ -245,9 +245,6 @@ async def startup() -> None:
             vp.logger.warning("[native-voice] webrtc VAD dependency unavailable: %s", exc)
 
     vp.logger.info("[native-voice] satellite transport active=native_websocket legacy_satellite_api=disabled")
-    from .. import native_timers
-
-    native_timers.start_scheduler()
     watchdog = vp._background_tasks.get("event_loop_watchdog")
     if not isinstance(watchdog, asyncio.Task) or watchdog.done():
         vp._background_tasks["event_loop_watchdog"] = asyncio.create_task(
@@ -258,10 +255,6 @@ async def startup() -> None:
 
 async def shutdown() -> None:
     vp = _vp()
-    with contextlib.suppress(Exception):
-        from .. import native_timers
-
-        await native_timers.stop_scheduler()
     tasks = [task for task in list(vp._background_tasks.values()) if isinstance(task, asyncio.Task)]
     for task in tasks:
         if not task.done():
@@ -532,13 +525,21 @@ async def native_satellite_timers(
     selector: str = "",
     timer_id: str = "",
     room: str = "",
+    name: str = "",
+    duration_s: int = 0,
     x_tater_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     vp = _vp()
     vp._require_api_auth(x_tater_token)
     from .. import native_timers
 
-    return await native_timers.status(selector=selector, timer_id=timer_id, room=room)
+    return await native_timers.status(
+        selector=selector,
+        timer_id=timer_id,
+        room=room,
+        name=name,
+        duration_s=duration_s,
+    )
 
 
 @router.post("/api/tater/satellite/v1/timers")
@@ -557,12 +558,10 @@ async def native_satellite_timer_create(payload: Dict[str, Any], x_tater_token: 
     result = await native_timers.create_timer(
         selector,
         duration_s,
-        label=vp._text(body.get("label")),
+        name=vp._text(body.get("name") or body.get("label")),
         room=vp._text(body.get("room") or body.get("area_name")),
         source="api",
     )
-    if not bool(result.get("ok")) and vp._text(result.get("code")) == "already_running":
-        raise HTTPException(status_code=409, detail=result)
     if not bool(result.get("ok")):
         raise HTTPException(status_code=400, detail=result)
     return result
@@ -579,6 +578,9 @@ async def native_satellite_timer_cancel(payload: Dict[str, Any], x_tater_token: 
         timer_id=vp._text(body.get("timer_id") or body.get("id")),
         selector=vp._text(body.get("selector")),
         room=vp._text(body.get("room") or body.get("area_name")),
+        name=vp._text(body.get("name") or body.get("label")),
+        duration_s=vp._as_int(body.get("original_duration_s") or body.get("duration_s"), 0, minimum=0),
+        cancel_all=vp._as_bool(body.get("all") or body.get("cancel_all"), False),
         source="api",
     )
 
@@ -594,6 +596,9 @@ async def native_satellite_timer_snooze(payload: Dict[str, Any], x_tater_token: 
     return await native_timers.snooze_timer(
         timer_id=vp._text(body.get("timer_id") or body.get("id")),
         selector=vp._text(body.get("selector")),
+        room=vp._text(body.get("room") or body.get("area_name")),
+        name=vp._text(body.get("name") or body.get("label")),
+        original_duration_s=vp._as_int(body.get("original_duration_s"), 0, minimum=0),
         duration_s=duration_s,
         source="api",
     )
