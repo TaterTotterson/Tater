@@ -2,7 +2,10 @@ import asyncio
 import difflib
 import json
 import os
+import platform as host_platform
 import re
+import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -33,8 +36,9 @@ def _ensure_dirs() -> None:
 
 
 def _subprocess_env() -> dict[str, str]:
-    env = dict(os.environ)
-    current_path = str(env.get("PATH") or "").strip()
+    source = os.environ
+    env: dict[str, str] = {}
+    current_path = str(source.get("PATH") or "").strip()
     if current_path:
         parts = [part for part in current_path.split(os.pathsep) if part]
         for part in _DEFAULT_SUBPROCESS_PATH.split(":"):
@@ -43,7 +47,117 @@ def _subprocess_env() -> dict[str, str]:
         env["PATH"] = os.pathsep.join(parts)
     else:
         env["PATH"] = _DEFAULT_SUBPROCESS_PATH
+    temp_dir = SPUDEX_DIR / "tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(AGENT_LAB_DIR)
+    env["TMPDIR"] = str(temp_dir)
+    env["TEMP"] = str(temp_dir)
+    env["TMP"] = str(temp_dir)
+    env["SPUDEX_AGENT_LAB"] = str(AGENT_LAB_DIR)
+    for key in (
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TZ",
+        "USER",
+        "LOGNAME",
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+    ):
+        value = str(source.get(key) or "").strip()
+        if value:
+            env[key] = value
     return env
+
+
+def _sandbox_profile_path(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _isolated_exec_argv(
+    argv: List[str],
+    *,
+    cwd: Path,
+    settings: Dict[str, Any],
+) -> tuple[List[str], str]:
+    if not bool(settings.get("policy_enabled", True)):
+        return list(argv), "policy_disabled"
+    if str(settings.get("sandbox_mode") or "agent_lab").strip().lower() != "agent_lab":
+        return list(argv), "policy_only"
+
+    system = host_platform.system().strip().lower()
+    allow_network = bool(settings.get("allow_network"))
+    if system == "darwin" and shutil.which("sandbox-exec"):
+        root = _sandbox_profile_path(AGENT_LAB_DIR.resolve())
+        temp_root = _sandbox_profile_path((SPUDEX_DIR / "tmp").resolve())
+        network_rule = "(allow network*)" if allow_network else ""
+        profile = " ".join(
+            part
+            for part in (
+                "(version 1)",
+                "(deny default)",
+                "(allow process*)",
+                "(allow sysctl-read)",
+                "(allow file-read*)",
+                (
+                    f'(allow file-write* (subpath "{root}") '
+                    f'(subpath "{temp_root}") (subpath "/private/tmp") (literal "/dev/null"))'
+                ),
+                network_rule,
+            )
+            if part
+        )
+        return ["/usr/bin/sandbox-exec", "-p", profile, *argv], "macos_sandbox"
+
+    bubblewrap = shutil.which("bwrap") if system == "linux" else None
+    if bubblewrap:
+        root = str(AGENT_LAB_DIR.resolve())
+        wrapped = [
+            bubblewrap,
+            "--die-with-parent",
+            "--new-session",
+            "--ro-bind",
+            "/",
+            "/",
+            "--bind",
+            root,
+            root,
+            "--chdir",
+            str(cwd),
+        ]
+        if not allow_network:
+            wrapped.append("--unshare-net")
+        wrapped.extend(["--", *argv])
+        return wrapped, "bubblewrap"
+
+    return list(argv), "policy_only"
+
+
+async def _terminate_process(process: asyncio.subprocess.Process, *, force: bool = False) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        if os.name != "nt" and getattr(process, "pid", None):
+            os.killpg(int(process.pid), signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
+    except (ProcessLookupError, PermissionError):
+        pass
+    except Exception:
+        try:
+            process.kill() if force else process.terminate()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2.0 if not force else 1.0)
+    except asyncio.TimeoutError:
+        if not force:
+            await _terminate_process(process, force=True)
 
 
 def _command_start_error(exc: Exception, argv: List[str]) -> Dict[str, Any]:
@@ -630,6 +744,22 @@ async def run_argv_in_session(
         )
 
     timeout_sec = max(5, int(settings.get("command_timeout_sec") or 45))
+    max_output_bytes = max(16384, int(settings.get("max_output_bytes") or 262144))
+    max_processes = max(1, int(settings.get("max_concurrent_processes") or 4))
+    if session_id not in _ACTIVE_PROCESSES and len(_ACTIVE_PROCESSES) >= max_processes:
+        message = f"Spudex is already running the configured limit of {max_processes} processes."
+        append_session_log(session_id, stream="system", text=message, level="error")
+        update_spudex_session(session_id, status="blocked", finished_ts=_now(), returncode=None)
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "status": "blocked",
+            "returncode": None,
+            "error": {
+                "code": "spudex_process_limit",
+                "message": message,
+            },
+        }
     meta = _load_meta(session_id)
     meta.update(
         {
@@ -646,43 +776,106 @@ async def run_argv_in_session(
     append_session_log(session_id, stream="command", text=f"$ {' '.join(argv)}", level="info")
     _detect_previews(session_id, " ".join(str(item) for item in argv))
 
-    captured_output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+    captured_output: dict[str, bytearray] = {
+        "stdout": bytearray(),
+        "stderr": bytearray(),
+    }
+    output_bytes_seen = 0
+    output_truncated = False
+    truncation_logged = False
+    exec_argv, isolation_backend = _isolated_exec_argv(
+        argv,
+        cwd=cwd,
+        settings=settings,
+    )
+    append_session_log(
+        session_id,
+        stream="policy",
+        text=f"Execution isolation: {isolation_backend}.",
+        level="info" if isolation_backend not in {"policy_only", "policy_disabled"} else "warning",
+    )
+    update_spudex_session(session_id, isolation_backend=isolation_backend)
     try:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            env=_subprocess_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        process_kwargs: Dict[str, Any] = {
+            "cwd": str(cwd),
+            "env": _subprocess_env(),
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if os.name != "nt":
+            process_kwargs["start_new_session"] = True
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        async with _SESSION_LOCK:
+            if session_id not in _ACTIVE_PROCESSES and len(_ACTIVE_PROCESSES) >= max_processes:
+                raise RuntimeError(f"Spudex process limit reached ({max_processes}).")
+            process = await asyncio.create_subprocess_exec(*exec_argv, **process_kwargs)
+            _ACTIVE_PROCESSES[session_id] = process
     except Exception as exc:
-        error = _command_start_error(exc, argv)
+        error = (
+            {
+                "code": "spudex_process_limit",
+                "message": str(exc),
+                "argv": list(argv),
+            }
+            if "process limit" in str(exc).lower()
+            else _command_start_error(exc, argv)
+        )
         message = str(error.get("message") or str(exc) or "Failed to start command.")
         append_session_log(session_id, stream="system", text=message, level="error")
         meta = _load_meta(session_id)
         meta.update({"status": "failed", "returncode": None, "finished_ts": _now(), "updated_ts": _now()})
         _save_meta(meta)
-        result = {"ok": False, "session_id": session_id, "status": "failed", "returncode": None, "error": error}
+        result = {
+            "ok": False,
+            "session_id": session_id,
+            "status": "failed",
+            "returncode": None,
+            "error": error,
+            "isolation_backend": isolation_backend,
+        }
         if capture_output:
             result.update({"stdout": "", "stderr": message, "output_truncated": False})
         return result
-    _ACTIVE_PROCESSES[session_id] = process
     meta = _load_meta(session_id)
     meta.update({"pid": getattr(process, "pid", None), "updated_ts": _now()})
     _save_meta(meta)
 
     async def _pump(stream: Any, name: str) -> None:
+        nonlocal output_bytes_seen, output_truncated, truncation_logged
         while True:
-            chunk = await stream.readline()
+            chunk = await stream.read(4096)
             if not chunk:
                 break
-            text = chunk.decode("utf-8", errors="replace").rstrip("\n")
-            if not text:
+            remaining = max(0, max_output_bytes - output_bytes_seen)
+            accepted = bytes(chunk[:remaining]) if remaining else b""
+            output_bytes_seen += len(accepted)
+            if len(accepted) < len(chunk):
+                output_truncated = True
+            if not accepted:
+                if output_truncated and not truncation_logged:
+                    truncation_logged = True
+                    append_session_log(
+                        session_id,
+                        stream="system",
+                        text=f"Command output was truncated after {max_output_bytes} bytes.",
+                        level="warning",
+                    )
                 continue
+            text = accepted.decode("utf-8", errors="replace").rstrip("\n")
             if capture_output:
-                captured_output[name].append(text)
-            append_session_log(session_id, stream=name, text=text, level="info" if name == "stdout" else "error")
-            _detect_previews(session_id, text)
+                captured_output[name].extend(accepted)
+            if text:
+                append_session_log(session_id, stream=name, text=text, level="info" if name == "stdout" else "error")
+                _detect_previews(session_id, text)
+            if output_truncated and not truncation_logged:
+                truncation_logged = True
+                append_session_log(
+                    session_id,
+                    stream="system",
+                    text=f"Command output was truncated after {max_output_bytes} bytes.",
+                    level="warning",
+                )
 
     if background:
         async def _watch_background() -> None:
@@ -696,6 +889,14 @@ async def run_argv_in_session(
                 )
                 returncode = int(process.returncode or 0)
                 status = "succeeded" if returncode == 0 else "failed"
+            except asyncio.CancelledError:
+                returncode = int(
+                    process.returncode
+                    if process.returncode is not None
+                    else -15
+                )
+                status = "stopped"
+                raise
             except Exception as exc:
                 returncode = int(getattr(process, "returncode", None) or -1)
                 status = "failed"
@@ -711,7 +912,14 @@ async def run_argv_in_session(
         _ACTIVE_TASKS[session_id] = task
         task.add_done_callback(lambda _task: _ACTIVE_TASKS.pop(session_id, None))
         append_session_log(session_id, stream="system", text="Background process started and will stay attached to this session.", level="info")
-        return {"ok": True, "session_id": session_id, "status": "running", "returncode": None, "background": True}
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "status": "running",
+            "returncode": None,
+            "background": True,
+            "isolation_backend": isolation_backend,
+        }
 
     try:
         await asyncio.wait_for(
@@ -725,8 +933,7 @@ async def run_argv_in_session(
         returncode = int(process.returncode or 0)
         status = "succeeded" if returncode == 0 else "failed"
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+        await _terminate_process(process, force=True)
         returncode = -9
         status = "timeout"
         append_session_log(session_id, stream="system", text=f"Command timed out after {timeout_sec}s.", level="error")
@@ -744,13 +951,19 @@ async def run_argv_in_session(
     )
     _save_meta(meta)
     append_session_log(session_id, stream="system", text=f"Command finished with status {status} ({returncode}).", level="info")
-    result = {"ok": returncode == 0, "session_id": session_id, "status": status, "returncode": returncode}
+    result = {
+        "ok": returncode == 0,
+        "session_id": session_id,
+        "status": status,
+        "returncode": returncode,
+        "isolation_backend": isolation_backend,
+    }
     if capture_output:
         result.update(
             {
-                "stdout": "\n".join(captured_output["stdout"]),
-                "stderr": "\n".join(captured_output["stderr"]),
-                "output_truncated": False,
+                "stdout": captured_output["stdout"].decode("utf-8", errors="replace"),
+                "stderr": captured_output["stderr"].decode("utf-8", errors="replace"),
+                "output_truncated": bool(output_truncated),
             }
         )
     return result
@@ -833,12 +1046,7 @@ async def stop_spudex_session(session_id: str) -> Dict[str, Any]:
             _save_meta(meta)
             return {"ok": True, "session": meta, "stopped": True, "stale": True}
         return {"ok": True, "session": meta, "stopped": False}
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), timeout=2)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+    await _terminate_process(process)
     append_session_log(session_id, stream="system", text="Stop requested from UI.", level="warning")
     meta = _load_meta(session_id)
     finish_spudex_plan(session_id, success=False)
@@ -847,6 +1055,67 @@ async def stop_spudex_session(session_id: str) -> Dict[str, Any]:
     _save_meta(meta)
     _ACTIVE_PROCESSES.pop(session_id, None)
     return {"ok": True, "session": meta, "stopped": True}
+
+
+async def shutdown_spudex_runtime() -> Dict[str, Any]:
+    current_task = asyncio.current_task()
+    process_rows = list(_ACTIVE_PROCESSES.items())
+    task_rows = [
+        (session_id, task)
+        for session_id, task in list(_ACTIVE_TASKS.items())
+        if task is not current_task and not task.done()
+    ]
+
+    for session_id, process in process_rows:
+        await _terminate_process(process)
+        _ACTIVE_PROCESSES.pop(session_id, None)
+
+    for _session_id, task in task_rows:
+        task.cancel()
+    if task_rows:
+        await asyncio.gather(
+            *(task for _session_id, task in task_rows),
+            return_exceptions=True,
+        )
+
+    affected_ids = {
+        str(session_id)
+        for session_id, _process in process_rows
+    } | {
+        str(session_id)
+        for session_id, _task in task_rows
+    }
+    for session_id in affected_ids:
+        meta = _load_meta(session_id)
+        if not meta:
+            continue
+        current_status = str(meta.get("status") or "").strip().lower()
+        if current_status == "succeeded" and int(meta.get("returncode") or 0) == 0:
+            continue
+        if current_status != "stopped":
+            finish_spudex_plan(session_id, success=False)
+            append_session_log(
+                session_id,
+                stream="system",
+                text="Spudex stopped because Tater is shutting down.",
+                level="warning",
+            )
+        update_spudex_session(
+            session_id,
+            status="stopped",
+            finished_ts=_now(),
+            returncode=meta.get("returncode"),
+        )
+
+    _ACTIVE_PROCESSES.clear()
+    for session_id, task in list(_ACTIVE_TASKS.items()):
+        if task.done() or session_id in affected_ids:
+            _ACTIVE_TASKS.pop(session_id, None)
+    return {
+        "ok": True,
+        "processes_stopped": len(process_rows),
+        "tasks_cancelled": len(task_rows),
+    }
 
 
 async def close_spudex_session(session_id: str) -> Dict[str, Any]:

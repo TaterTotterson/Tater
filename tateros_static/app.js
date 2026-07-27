@@ -27388,6 +27388,9 @@ function spudexStatusLabel(status) {
   if (token === "stopped") {
     return "Stopped";
   }
+  if (token === "incomplete") {
+    return "Incomplete";
+  }
   return token ? token[0].toUpperCase() + token.slice(1) : "Queued";
 }
 
@@ -27535,7 +27538,7 @@ function renderSpudexSettingsCard(settings, payload = state.spudexPayload || {})
       <div class="spudex-card-head">
         <div>
           <h3>Hydra Spudex Access</h3>
-          <p>Expose sandboxed spudex tools to Hydra when Tater needs a local command loop.</p>
+          <p>Expose policy-controlled Spudex tools to Hydra when Tater needs a local command loop.</p>
         </div>
         <span class="status-pill ${settings.enabled ? "running" : "muted"}">${settings.enabled ? "Enabled" : "Off"}</span>
       </div>
@@ -27585,7 +27588,7 @@ function spudexPolicyToggle(id, title, description, checked) {
 function renderSpudexPolicyCard(settings) {
   const policyWarning = settings.policy_enabled
     ? `<div class="spudex-policy-note">
-        Policy is active. Locked guardrails stay enforced, and only the allowed categories below can pass.
+        Policy is active. Tater checks direct commands, paths, and the configurable categories below. This is defense in depth, not OS-level isolation.
       </div>`
     : `<div class="spudex-policy-warning">
         <strong>Command safety policy is off.</strong>
@@ -27654,7 +27657,7 @@ function renderSpudexRunCard(settings) {
       <div class="spudex-card-head">
         <div>
           <h3>Manual Session</h3>
-          <p>Run one command inside the same agent_lab sandbox Tater can use.</p>
+          <p>Run one policy-controlled command from Tater's agent_lab working area.</p>
         </div>
         <span class="spudex-console-badge">agent_lab</span>
       </div>

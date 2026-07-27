@@ -227,15 +227,29 @@ def _uses_inline_eval(argv: List[str]) -> bool:
 
 def _validate_path_arg(arg: str, cwd: Path) -> Tuple[bool, str]:
     text = str(arg or "").strip()
-    if not text or text.startswith("-") or "://" in text:
+    if not text or "://" in text:
         return True, ""
-    if "/" not in text and "\\" not in text:
+    path_text = text
+    if text.startswith("-") and "=" in text:
+        _flag, _separator, flag_value = text.partition("=")
+        path_text = flag_value.strip()
+    elif text.startswith("-"):
+        absolute_markers = [
+            index
+            for index in (text.find("/"), text.find("\\"))
+            if index >= 0
+        ]
+        if not absolute_markers:
+            return True, ""
+        marker = min(absolute_markers)
+        path_text = text[marker:].strip()
+    if not path_text or ("/" not in path_text and "\\" not in path_text):
         return True, ""
-    candidate = Path(text).expanduser()
+    candidate = Path(path_text).expanduser()
     if not candidate.is_absolute():
         candidate = cwd / candidate
     if not _is_under(candidate, AGENT_LAB_DIR):
-        return False, f"Path argument `{text}` leaves agent_lab."
+        return False, f"Path argument `{path_text}` leaves agent_lab."
     return True, ""
 
 

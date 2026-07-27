@@ -134,6 +134,7 @@ async def execute_tool_call(
     origin: Optional[Dict[str, Any]],
     scope: str,
     wait_callback: Optional[Callable[..., Any]],
+    progress_callback: Optional[Callable[..., Any]],
     wait_text: str,
     wait_payload: Optional[Dict[str, Any]],
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]],
@@ -230,6 +231,7 @@ async def execute_tool_call(
             enabled_predicate=enabled_predicate,
             origin=args.get("origin") if isinstance(args.get("origin"), dict) else origin,
             llm_client=llm_client,
+            progress_callback=progress_callback,
         )
         payload = await meta_result if _is_awaitable(meta_result) else meta_result
         normalize_source = payload

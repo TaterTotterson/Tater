@@ -1425,9 +1425,13 @@ def _kernel_tool_usage(tool_id: str, *, platform: str = "") -> str:
     return '{"function":"","arguments":{}}'
 
 
-def _ordered_kernel_tool_ids(*, platform: str) -> List[str]:
+def _ordered_kernel_tool_ids(
+    *,
+    platform: str,
+    origin: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     normalized = normalize_platform(platform) or str(platform or "").strip().lower() or "webui"
-    return sorted(runtime_kernel_tool_ids(platform=normalized))
+    return sorted(runtime_kernel_tool_ids(platform=normalized, origin=origin))
 
 
 def _enabled_tool_mini_index(
@@ -1435,8 +1439,12 @@ def _enabled_tool_mini_index(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
+    origin: Optional[Dict[str, Any]] = None,
 ) -> str:
-    ordered_ids_fn = lambda: _ordered_kernel_tool_ids(platform=platform)
+    ordered_ids_fn = lambda: _ordered_kernel_tool_ids(
+        platform=platform,
+        origin=origin,
+    )
     kernel_purpose_fn = lambda tool_id: _kernel_tool_purpose(tool_id, platform=platform)
     kernel_usage_fn = lambda tool_id: _kernel_tool_usage(tool_id, platform=platform)
     return tool_index_helpers.enabled_tool_mini_index(
@@ -1457,10 +1465,11 @@ def _enabled_execution_tool_ids(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
+    origin: Optional[Dict[str, Any]] = None,
 ) -> set[str]:
     enabled_check = enabled_predicate or (lambda _name: True)
     out: set[str] = set()
-    for tool_id in _ordered_kernel_tool_ids(platform=platform):
+    for tool_id in _ordered_kernel_tool_ids(platform=platform, origin=origin):
         canonical = _canonical_tool_name(tool_id)
         if canonical:
             out.add(canonical)
@@ -1482,10 +1491,11 @@ def _astraeus_capability_catalog(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
+    origin: Optional[Dict[str, Any]] = None,
 ) -> str:
     enabled_check = enabled_predicate or (lambda _name: True)
     kernel_rows: List[str] = []
-    for tool_id in _ordered_kernel_tool_ids(platform=platform):
+    for tool_id in _ordered_kernel_tool_ids(platform=platform, origin=origin):
         canonical = _canonical_tool_name(tool_id)
         if not canonical:
             continue
@@ -1523,11 +1533,15 @@ def _tool_contract_row(
     platform: str,
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
+    origin: Optional[Dict[str, Any]] = None,
 ) -> str:
     canonical = _canonical_tool_name(tool_id)
     if not canonical:
         return ""
-    kernel_tool_ids = {_canonical_tool_name(item) for item in _ordered_kernel_tool_ids(platform=platform)}
+    kernel_tool_ids = {
+        _canonical_tool_name(item)
+        for item in _ordered_kernel_tool_ids(platform=platform, origin=origin)
+    }
     if canonical in kernel_tool_ids:
         return (
             f"- id: {canonical} | description: {_kernel_tool_purpose(canonical, platform=platform)} | "
@@ -1555,6 +1569,7 @@ def _thanatos_execution_tool_contract_prompt(
     registry: Dict[str, Any],
     enabled_predicate: Optional[Callable[[str], bool]],
     fallback_tool_index: str,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> str:
     step = current_plan_step if isinstance(current_plan_step, dict) else {}
     hinted_tool = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
@@ -1564,6 +1579,7 @@ def _thanatos_execution_tool_contract_prompt(
             platform=platform,
             registry=registry,
             enabled_predicate=enabled_predicate,
+            origin=origin,
         )
         if contract_row:
             return (
@@ -2319,6 +2335,7 @@ async def _execute_tool_call(
     origin: Optional[Dict[str, Any]],
     scope: str,
     wait_callback: Optional[Callable[..., Any]],
+    progress_callback: Optional[Callable[..., Any]] = None,
     admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     wait_text: str = "",
     wait_payload: Optional[Dict[str, Any]] = None,
@@ -2334,6 +2351,7 @@ async def _execute_tool_call(
         origin=origin,
         scope=scope,
         wait_callback=wait_callback,
+        progress_callback=progress_callback,
         wait_text=wait_text,
         wait_payload=wait_payload,
         admin_guard=admin_guard,
@@ -5053,16 +5071,19 @@ async def _run_hydra_turn_impl(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
+        origin=origin_payload,
     )
     astraeus_capability_catalog = _astraeus_capability_catalog(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
+        origin=origin_payload,
     )
     available_execution_tool_ids = _enabled_execution_tool_ids(
         platform=platform,
         registry=registry,
         enabled_predicate=enabled_predicate,
+        origin=origin_payload,
     )
     prior_state = None
     memory_context_payload = _memory_context_payload(
@@ -5559,6 +5580,7 @@ async def _run_hydra_turn_impl(
                 registry=registry,
                 enabled_predicate=enabled_predicate,
                 fallback_tool_index=tool_index,
+                origin=origin_payload,
             )
             if tool_contract_prompt:
                 thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
@@ -5803,6 +5825,7 @@ async def _run_hydra_turn_impl(
                         origin=tool_origin_payload,
                         scope=scope,
                         wait_callback=None,
+                        progress_callback=wait_callback,
                         wait_text="",
                         wait_payload=None,
                         admin_guard=None,
@@ -5845,6 +5868,7 @@ async def _run_hydra_turn_impl(
                     origin=tool_origin_payload,
                     scope=scope,
                     wait_callback=wait_callback,
+                    progress_callback=wait_callback,
                     wait_text=wait_text,
                     wait_payload=wait_payload,
                     admin_guard=admin_guard,

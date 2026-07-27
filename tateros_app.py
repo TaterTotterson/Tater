@@ -6616,6 +6616,7 @@ async def _run_spud_link_native_hydra_completion(
             "user_id": str(getattr(payload, "user", None) or "little_spud").strip() or "little_spud",
             "session_id": session_id,
         }
+    origin["kernel_tools_enabled"] = bool(tools_enabled)
     context_payload = {
         "raw_message": user_text,
         "spud_link": True,
@@ -9151,7 +9152,10 @@ async def _shutdown_event() -> None:
     logger.info("TaterOS backend stopping")
     loop = asyncio.get_running_loop()
     try:
+        from spudex.runner import shutdown_spudex_runtime
+
         await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
+        await _run_shutdown_step("Spudex runtime", shutdown_spudex_runtime, timeout=6.0)
         await _run_shutdown_step(
             "portal runtime",
             lambda: asyncio.to_thread(portal_runtime.stop_all, timeout=8.0),
@@ -12732,6 +12736,26 @@ def _spudex_platform_options(settings: Any) -> List[Dict[str, Any]]:
         options[token] = row
 
     add("webui", "Web UI", running=True, description="Tater browser UI", kind="built_in")
+    try:
+        spud_link_settings = _load_spud_link_settings()
+        spud_link_mode = _normalize_spud_link_tater_mode(spud_link_settings.get("mode"))
+        little_spud_running = (
+            spud_link_mode in SPUD_LINK_SERVER_MODE_CHOICES
+            and bool(spud_link_settings.get("allow_little_spuds"))
+        )
+    except Exception:
+        little_spud_running = False
+    add(
+        "little_spud",
+        "Little Spud",
+        running=little_spud_running,
+        description=(
+            "Paired Little Spud app clients"
+            if little_spud_running
+            else "Little Spud app clients, currently unavailable"
+        ),
+        kind="built_in",
+    )
     if esphome_home_module.is_running():
         add("voice_core", "Native Voice", running=True, description="Tater Native satellite voice path", kind="built_in")
     if core_runtime.is_running("voice_core"):
@@ -13293,7 +13317,7 @@ def _spud_link_tool_notice_payload(
         progress_payload.setdefault("tool", tool_name)
     return {
         "type": "tool",
-        "status": "running",
+        "status": str(progress_payload.get("status") or "running"),
         "phase": str(progress_payload.get("phase") or "tool_start"),
         "tool": tool_name,
         "display_name": str(display_name or tool_name or "").strip(),

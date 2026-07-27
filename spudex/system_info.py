@@ -18,6 +18,21 @@ def _human_bytes(value: Any) -> str:
 
 def _memory_info() -> Dict[str, str]:
     out: Dict[str, str] = {}
+    try:
+        import psutil  # type: ignore
+
+        memory = psutil.virtual_memory()
+        total = int(memory.total)
+        available = int(memory.available)
+        out["memory_total_bytes"] = str(total)
+        out["memory_total"] = _human_bytes(total)
+        out["memory_available_bytes"] = str(available)
+        out["memory_available"] = _human_bytes(available)
+        out["memory_source"] = "psutil"
+        return out
+    except Exception:
+        pass
+
     meminfo_path = "/proc/meminfo"
     try:
         if os.path.exists(meminfo_path):
@@ -68,6 +83,41 @@ def _memory_info() -> Dict[str, str]:
 
 def _process_info(limit: int = 50) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
+    try:
+        import psutil  # type: ignore
+
+        rows: List[Dict[str, Any]] = []
+        process_count = 0
+        for process in psutil.process_iter(
+            attrs=["pid", "name", "cmdline", "memory_percent", "status"]
+        ):
+            process_count += 1
+            info = process.info if isinstance(process.info, dict) else {}
+            command_parts = info.get("cmdline") if isinstance(info.get("cmdline"), list) else []
+            command = str(command_parts[0] or "").strip() if command_parts else ""
+            rows.append(
+                {
+                    "pid": str(info.get("pid") or ""),
+                    "name": str(info.get("name") or "unknown")[:120],
+                    "command": (command or str(info.get("name") or "unknown"))[:240],
+                    "memory_percent": round(float(info.get("memory_percent") or 0.0), 2),
+                    "status": str(info.get("status") or ""),
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                float(item.get("memory_percent") or 0.0),
+                int(item.get("pid") or 0),
+            ),
+            reverse=True,
+        )
+        out["process_source"] = "psutil"
+        out["process_count_visible"] = str(process_count)
+        out["process_sample"] = rows[: max(1, limit)]
+        return out
+    except Exception:
+        pass
+
     proc_root = "/proc"
     try:
         names = [name for name in os.listdir(proc_root) if name.isdigit()]
@@ -88,7 +138,7 @@ def _process_info(limit: int = 50) -> Dict[str, Any]:
         try:
             with open(os.path.join(base, "cmdline"), "rb") as handle:
                 raw = handle.read(400)
-            command = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            command = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace").strip()
         except Exception:
             command = ""
         process_label = proc_name or (command.split(" ")[0] if command else "") or "unknown"
@@ -117,6 +167,14 @@ def spudex_system_info() -> Dict[str, Any]:
         "path_separator": os.sep,
         "command_execution": "argv subprocess execution; no shell, pipes, redirects, or command separators",
     }
+    try:
+        info["cpu_count_logical"] = str(os.cpu_count() or "")
+        load = os.getloadavg()
+        info["load_average_1m"] = str(round(float(load[0]), 2))
+        info["load_average_5m"] = str(round(float(load[1]), 2))
+        info["load_average_15m"] = str(round(float(load[2]), 2))
+    except Exception:
+        pass
     info.update(_memory_info())
     info.update(_process_info())
     return info
