@@ -1,14 +1,14 @@
-# Tater v98.1
+# Tater v98.2
 
 ## What's Changed
 
-### Native Satellite Reply Playback
+### AI Task Background Audio
 
-- Fixed conversational replies stopping after `TTS_END` without sending the
-  satellite its `play.url` command.
-- Corrected ducking-value normalization so reply playback cannot fail while
-  preparing the duck level, attack, or release settings.
-- Preserves ordinary reply playback on pre-0.3.0 firmware while retaining the
-  new ducking and overlay behavior on firmware 0.3.0.
-- Added regression coverage for playback command delivery and bounded ducking
-  values.
+- Fixed AI Task audio scenes falling back to TTS-only when loading their
+  selected background track.
+- Agent Lab presets and uploads are now resolved securely from local storage,
+  avoiding WebUI authentication failures on Tater's loopback URL.
+- Custom external background URLs continue to download on the background HTTP
+  worker without blocking Tater's event loop.
+- Added regression coverage for both Agent Lab and external background-audio
+  sources.

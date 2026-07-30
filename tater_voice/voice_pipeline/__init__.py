@@ -48,9 +48,12 @@ import uuid
 import wave
 import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
+from urllib.parse import unquote, urlsplit
 
+import requests
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
@@ -4635,10 +4638,56 @@ def _store_media_url(
     return url
 
 
+def _local_ai_task_background_audio(source_url: str) -> Optional[Tuple[Path, str]]:
+    url = _text(source_url).strip()
+    if not url:
+        return None
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except Exception:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or _lower(parsed.hostname) not in {"127.0.0.1", "localhost", "::1"}
+        or port != _main_app_port()
+    ):
+        return None
+
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 5 or parts[:3] != ["api", "ai-tasks", "background-audio"]:
+        return None
+    kind = _lower(parts[3])
+    filename = parts[4]
+    if (
+        kind not in {"presets", "uploads"}
+        or not filename
+        or filename != Path(filename).name
+        or Path(filename).suffix.lower() not in {".wav", ".mp3", ".flac"}
+    ):
+        raise ValueError("Background audio source is invalid.")
+
+    root = agent_lab_path("ai_task", "background_audio", kind).resolve()
+    candidate = (root / filename).resolve()
+    if root not in candidate.parents or not candidate.is_file():
+        raise FileNotFoundError(f"Background audio file was not found: {filename}")
+    content_type = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".flac": "audio/flac",
+    }[candidate.suffix.lower()]
+    return candidate, content_type
+
+
 async def _download_media_source(source_url: str) -> Tuple[bytes, str]:
     url = _text(source_url).strip()
     if not url:
         raise ValueError("source_url is required")
+
+    local_audio = _local_ai_task_background_audio(url)
+    if local_audio:
+        path, content_type = local_audio
+        return await run_background(lambda: (path.read_bytes(), content_type))
 
     def _fetch() -> Tuple[bytes, str]:
         resp = requests.get(url, timeout=180)
