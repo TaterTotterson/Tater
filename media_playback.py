@@ -88,6 +88,7 @@ def _voice_core_play_media_sync(
     media_type: str = "audio/mpeg",
     media_content_type: str = "music",
     filename: str = "media.mp3",
+    volume_percent: int = 100,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
 ) -> Dict[str, Any]:
@@ -102,6 +103,7 @@ def _voice_core_play_media_sync(
         "media_content_type": _text(media_content_type) or "music",
         "playback_role": "media",
         "filename": Path(_text(filename) or "media.mp3").name,
+        "volume_percent": max(0, min(100, int(_as_float(volume_percent, 100.0)))),
         "timeout_s": _as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=30.0),
         "respect_reply_playback": bool(respect_reply_playback),
     }
@@ -291,6 +293,7 @@ def play_media_url_targets(
     media_content_type: str = "music",
     filename: str = "media.mp3",
     text: str = "",
+    volume_percent: int = 100,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
 ) -> Dict[str, Any]:
@@ -355,6 +358,7 @@ def play_media_url_targets(
             media_type=clean_media_type,
             media_content_type=media_content_type,
             filename=safe_filename,
+            volume_percent=volume_percent,
             timeout_s=timeout_s,
             respect_reply_playback=respect_reply_playback,
         )

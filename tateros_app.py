@@ -8621,6 +8621,17 @@ class SpudLinkHomeActionRequest(BaseModel):
     temperature_unit: Optional[str] = Field(default=None, max_length=4)
 
 
+class SpudLinkMusicActionRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=40)
+    provider: Optional[str] = Field(default=None, max_length=40)
+    query: Optional[str] = Field(default=None, max_length=300)
+    track_id: Optional[str] = Field(default=None, max_length=300)
+    target: Optional[str] = Field(default=None, max_length=500)
+    targets: List[str] = Field(default_factory=list)
+    shuffle: Optional[bool] = None
+    volume_percent: Optional[int] = Field(default=None, ge=0, le=100)
+
+
 class SpudLinkTtsRequest(BaseModel):
     text: Optional[str] = None
 
@@ -13730,6 +13741,13 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
             "hydra": is_server,
             "tools": hydra_tools_enabled,
             "notifications": is_server,
+            "music": (
+                is_server
+                and _as_bool_flag(
+                    redis_client.get("music_core_running"),
+                    default=False,
+                )
+            ),
         },
     }
     return {
@@ -13876,6 +13894,13 @@ def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> 
             "hydra": is_server,
             "tools": hydra_tools_enabled,
             "notifications": is_server,
+            "music": (
+                is_server
+                and _as_bool_flag(
+                    redis_client.get("music_core_running"),
+                    default=False,
+                )
+            ),
         },
     }
     return {
@@ -14083,6 +14108,253 @@ def spud_link_home_action(payload: SpudLinkHomeActionRequest, request: Request) 
         "warning": failures[0] if failures else "",
     }
     return snapshot
+
+
+def _spud_link_music_module() -> Any:
+    enabled = _as_bool_flag(
+        redis_client.get("music_core_running"),
+        default=False,
+    )
+    if not enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Install and start Music Core from Tater Shop to use Little Spud Music.",
+        )
+    try:
+        module = core_runtime._import_module("music_core", reload_module=False)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Music Core is not installed. Install it from Tater Shop first.",
+        ) from exc
+    required = (
+        "get_client_music_state",
+        "run_client_music_action",
+        "get_client_music_stream_source",
+    )
+    if any(not callable(getattr(module, name, None)) for name in required):
+        raise HTTPException(
+            status_code=409,
+            detail="Update Music Core to a version that supports Little Spud Music.",
+        )
+    return module
+
+
+def _require_little_spud_music_request(request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(
+            status_code=403,
+            detail="Music controls require a paired Little Spud client.",
+        )
+    return node
+
+
+def _spud_link_music_touch(node: Dict[str, Any], request: Request, mode: str) -> None:
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": mode,
+            "last_device": request.headers.get("x-spudlink-device"),
+            "role": SPUD_LINK_MODE_LITTLE_SPUD,
+        },
+        allow_previews=False,
+    )
+    _spud_link_store_node(node)
+
+
+def _spud_link_music_add_local_target(
+    payload: Dict[str, Any],
+    request: Request,
+) -> Dict[str, Any]:
+    result = dict(payload) if isinstance(payload, dict) else {}
+    provider = result.get("provider") if isinstance(result.get("provider"), dict) else {}
+    targets = [
+        dict(row)
+        for row in result.get("targets") or []
+        if isinstance(row, dict)
+    ]
+    if bool(provider.get("local_playback")):
+        device_name = str(request.headers.get("x-spudlink-device") or "").strip()
+        targets.insert(
+            0,
+            {
+                "id": "little_spud:local",
+                "label": f"This {device_name}" if device_name else "This Device",
+                "kind": "local",
+            },
+        )
+    result["targets"] = targets
+    return result
+
+
+@app.get("/api/spudlink/v1/music")
+def spud_link_music(
+    request: Request,
+    query: str = "",
+    limit: int = 60,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    node = _require_little_spud_music_request(request)
+    module = _spud_link_music_module()
+    try:
+        payload = module.get_client_music_state(
+            query=str(query or "")[:300],
+            limit=max(1, min(int(limit or 60), 200)),
+            refresh=bool(refresh),
+            client=redis_client,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc) or "Could not load Music Core.",
+        ) from exc
+    _spud_link_music_touch(node, request, "music_browse")
+    return _spud_link_music_add_local_target(payload, request)
+
+
+@app.post("/api/spudlink/v1/music/actions")
+def spud_link_music_action(
+    payload: SpudLinkMusicActionRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    node = _require_little_spud_music_request(request)
+    module = _spud_link_music_module()
+    values = {
+        "provider": payload.provider,
+        "query": payload.query,
+        "track_id": payload.track_id,
+        "targets": payload.targets or ([payload.target] if payload.target else []),
+        "shuffle": payload.shuffle,
+        "volume_percent": payload.volume_percent,
+    }
+    if "little_spud:local" in values["targets"]:
+        raise HTTPException(
+            status_code=400,
+            detail="On-device playback is controlled directly by the Little Spud app.",
+        )
+    try:
+        result = module.run_client_music_action(
+            payload.action,
+            values,
+            client=redis_client,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc) or "Music Core could not run that action.",
+        ) from exc
+    _spud_link_music_touch(node, request, "music_control")
+    if isinstance(result.get("state"), dict):
+        result = dict(result)
+        result["state"] = _spud_link_music_add_local_target(
+            result["state"],
+            request,
+        )
+    return result
+
+
+@app.api_route(
+    "/api/spudlink/v1/music/stream/{track_id}",
+    methods=["GET", "HEAD"],
+)
+def spud_link_music_stream(
+    track_id: str,
+    request: Request,
+    provider: str = "",
+) -> Response:
+    node = _require_little_spud_music_request(request)
+    module = _spud_link_music_module()
+    try:
+        source = module.get_client_music_stream_source(
+            track_id,
+            provider_id=provider,
+            client=redis_client,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc) or "Could not resolve the music stream.",
+        ) from exc
+
+    source_url = str(source.get("source_url") or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=404, detail="That track is not streamable.")
+    try:
+        import requests as requests_module
+
+        upstream_headers = {
+            "Accept": str(request.headers.get("accept") or "*/*"),
+            "User-Agent": "Tater-Little-Spud-Music/1",
+        }
+        range_header = str(request.headers.get("range") or "").strip()
+        if range_header:
+            upstream_headers["Range"] = range_header
+        upstream = requests_module.get(
+            source_url,
+            headers=upstream_headers,
+            stream=True,
+            allow_redirects=True,
+            timeout=(10, 90),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not open the music stream: {exc}") from exc
+    if upstream.status_code >= 400:
+        status_code = int(upstream.status_code)
+        upstream.close()
+        raise HTTPException(
+            status_code=502,
+            detail=f"The music provider returned HTTP {status_code}.",
+        )
+
+    response_headers = {
+        "Cache-Control": "private, no-store",
+        "Accept-Ranges": str(upstream.headers.get("Accept-Ranges") or "bytes"),
+        "Content-Disposition": (
+            f"inline; filename*=UTF-8''{quote(str(source.get('filename') or 'music-track'), safe='')}"
+        ),
+    }
+    for header in ("Content-Length", "Content-Range", "ETag", "Last-Modified"):
+        value = str(upstream.headers.get(header) or "").strip()
+        if value:
+            response_headers[header] = value
+    media_type = str(
+        upstream.headers.get("Content-Type")
+        or source.get("media_type")
+        or "application/octet-stream"
+    ).split(";", 1)[0].strip()
+    status_code = 206 if int(upstream.status_code) == 206 else 200
+    _spud_link_music_touch(node, request, "music_stream")
+    if request.method.upper() == "HEAD":
+        upstream.close()
+        return Response(
+            status_code=status_code,
+            media_type=media_type,
+            headers=response_headers,
+        )
+
+    def stream_body():
+        try:
+            for chunk in upstream.iter_content(chunk_size=128 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        stream_body(),
+        status_code=status_code,
+        media_type=media_type,
+        headers=response_headers,
+    )
 
 
 @app.post("/api/spudlink/v1/push-registration")

@@ -8164,6 +8164,24 @@ function renderCoreSettingsManager(body, tabSpec) {
     const removeAction = String(item?.remove_action || "").trim();
     const runAction = String(item?.run_action || "").trim();
     const runConfirm = String(item?.run_confirm || "").trim();
+    const customActions = Array.isArray(item?.actions)
+      ? item.actions
+          .map((entry) => {
+            const action = String(entry?.action || "").trim();
+            if (!action) {
+              return null;
+            }
+            return {
+              action,
+              label: String(entry?.label || entry?.title || "Run").trim() || "Run",
+              confirm: String(entry?.confirm || "").trim(),
+              tone: String(entry?.tone || "").trim().toLowerCase(),
+              workingText: String(entry?.working_text || "Working...").trim() || "Working...",
+              successText: String(entry?.success_text || "Done.").trim() || "Done.",
+            };
+          })
+          .filter(Boolean)
+      : [];
     const removeConfirm = String(item?.remove_confirm || "Remove this item?").trim();
     const resetConfirm = String(item?.reset_confirm || "Reset this item to defaults?").trim();
     const itemFieldContent = itemFields.map((field) => renderCoreManagerField(field)).join("");
@@ -8280,10 +8298,24 @@ function renderCoreSettingsManager(body, tabSpec) {
     const hasPopupSettingsBtn = Boolean(popupFieldsEncoded) && (itemFieldsPopupEnabled || explicitPopupFields.length > 0);
     const hasSaveBtn = saveAction && (!itemFieldsPopupEnabled || !popupFieldsEncoded);
     const hasResetBtn = Boolean(resetAction);
-    const hasAnyAction = Boolean(hasPopupSettingsBtn || hasSaveBtn || hasResetBtn || removeAction || runAction);
+    const hasAnyAction = Boolean(
+      hasPopupSettingsBtn || hasSaveBtn || hasResetBtn || removeAction || runAction || customActions.length
+    );
+    const customActionsHtml = customActions
+      .map((entry) => {
+        const toneClass = entry.tone === "danger" ? "inline-btn danger" : entry.tone === "muted" ? "inline-btn" : "action-btn";
+        return `<button type="button"
+          class="${toneClass} core-manager-custom-action"
+          data-core-custom-action="${escapeHtml(entry.action)}"
+          data-core-custom-confirm="${escapeHtml(entry.confirm)}"
+          data-core-custom-working="${escapeHtml(entry.workingText)}"
+          data-core-custom-success="${escapeHtml(entry.successText)}">${escapeHtml(entry.label)}</button>`;
+      })
+      .join("");
     const actionRowHtml = hasAnyAction
       ? `
         <div class="inline-row" style="margin-top:10px;">
+          ${customActionsHtml}
           ${
             hasSaveBtn
               ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(
@@ -15556,6 +15588,51 @@ function bindCoreTabManagers() {
         }
         await refreshCoreManagerInPlace(card, activeTab);
         state.notice = String(result?.message || "Queued.");
+        setCoreManagerStatus(card, state.notice);
+        showToast(state.notice);
+      } catch (error) {
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+
+  document.querySelectorAll(".core-manager-custom-action").forEach((button) => {
+    if (button.dataset.coreManagerActionBound === "1") {
+      return;
+    }
+    button.dataset.coreManagerActionBound = "1";
+    button.addEventListener("click", async (event) => {
+      const trigger = event.currentTarget;
+      const card = trigger.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(trigger?.dataset?.coreCustomAction || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      const confirmText = String(trigger?.dataset?.coreCustomConfirm || "").trim();
+      const workingText = String(trigger?.dataset?.coreCustomWorking || "Working...").trim() || "Working...";
+      const successText = String(trigger?.dataset?.coreCustomSuccess || "Done.").trim() || "Done.";
+      if (!card || !coreKey || !action) {
+        return;
+      }
+      if (confirmText && !window.confirm(confirmText)) {
+        return;
+      }
+      setCoreManagerStatus(card, workingText);
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        const values = collectCoreManagerValues(card);
+        const result = await runActionWithProgress(
+          {
+            title: "Running core action",
+            detail: itemId || coreKey,
+            workingText,
+            successText,
+            errorPrefix: "Core action failed",
+          },
+          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
+        );
+        await refreshCoreManagerInPlace(card, activeTab);
+        state.notice = String(result?.message || successText);
         setCoreManagerStatus(card, state.notice);
         showToast(state.notice);
       } catch (error) {

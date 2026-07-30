@@ -1,14 +1,18 @@
-# Tater v98.2
+# Tater v98.3
 
 ## What's Changed
 
-### AI Task Background Audio
+### Music Core Player Support
 
-- Fixed AI Task audio scenes falling back to TTS-only when loading their
-  selected background track.
-- Agent Lab presets and uploads are now resolved securely from local storage,
-  avoiding WebUI authentication failures on Tater's loopback URL.
-- Custom external background URLs continue to download on the background HTTP
-  worker without blocking Tater's event loop.
-- Added regression coverage for both Agent Lab and external background-audio
-  sources.
+- Added reusable multi-action controls for Core UI cards so a built-in music
+  player can expose Previous, Play, Stop, and Next together.
+- Added satellite media-session volume forwarding for Core-owned music
+  playback.
+- Music Core can use the same Tater satellites, synchronized stereo pairs, room
+  preferences, and supported media-player integrations as other Tater audio
+  features.
+- Added authenticated Little Spud music browsing, playback controls, destination
+  discovery, and a protected stream proxy for on-device listening without
+  exposing provider credentials.
+- Existing TTS overlays continue to duck active satellite music and restore it
+  after speech finishes.
