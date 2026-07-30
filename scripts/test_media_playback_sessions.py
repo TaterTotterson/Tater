@@ -32,6 +32,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 source_url="https://example.test/song.mp3",
                 media_type="audio/mpeg",
                 media_content_type="music",
+                volume_percent=64,
             )
 
         self.assertTrue(result["ok"])
@@ -39,6 +40,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["playback_role"], "media")
         self.assertEqual(payload["media_content_type"], "music")
+        self.assertEqual(payload["volume_percent"], 64)
 
 
 if __name__ == "__main__":
