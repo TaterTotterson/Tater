@@ -189,11 +189,22 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return bool(default)
 
 
-def _as_int(value: Any, default: int = 0) -> int:
+def _as_int(
+    value: Any,
+    default: int = 0,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
     try:
-        return int(value)
+        parsed = int(value)
     except Exception:
-        return int(default)
+        parsed = int(default)
+    if minimum is not None:
+        parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
 
 
 def _envelope(message_type: str, payload: Optional[Dict[str, Any]] = None, *, message_id: str = "", session_id: str = "") -> Dict[str, Any]:
