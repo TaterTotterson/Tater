@@ -46,6 +46,15 @@ _client_loop: Optional[asyncio.AbstractEventLoop] = None
 _client_loop_lock = threading.RLock()
 _pairing_lock = threading.RLock()
 _pairing_sessions: Dict[str, Dict[str, Any]] = {}
+_stereo_sessions: Dict[str, Dict[str, Any]] = {}
+_stereo_adjust_tasks: Dict[str, asyncio.Task] = {}
+
+STEREO_CLOCK_PROBE_COUNT = 5
+STEREO_START_LEAD_MS = 750
+STEREO_CLOCK_REFRESH_S = 60.0
+STEREO_ADJUST_INTERVAL_S = 1.0
+STEREO_ADJUST_THRESHOLD_FRAMES = 24
+STEREO_ADJUST_MAX_FRAMES = 48
 
 
 def _vp():
@@ -479,14 +488,60 @@ def _queue_command(queue: asyncio.Queue, message: Dict[str, Any]) -> None:
         queue.put_nowait(message)
 
 
-def _capabilities(payload: Dict[str, Any]) -> Dict[str, bool]:
+def _capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw = payload.get("capabilities")
     if not isinstance(raw, dict):
         return {}
+    capabilities: Dict[str, Any] = {}
+    for key, value in raw.items():
+        name = _text(key)
+        if not name:
+            continue
+        if isinstance(value, str) and _lower(value) in {
+            "0",
+            "1",
+            "true",
+            "false",
+            "yes",
+            "no",
+            "on",
+            "off",
+            "enabled",
+            "disabled",
+        }:
+            capabilities[name] = _as_bool(value)
+        elif isinstance(value, (bool, int, float, str)):
+            capabilities[name] = value
+    return capabilities
+
+
+def _satellite_ducking_payload() -> Dict[str, int]:
+    try:
+        from speech_settings import get_speech_settings
+
+        settings = get_speech_settings()
+    except Exception:
+        settings = {}
+
     return {
-        _text(key): _as_bool(value)
-        for key, value in raw.items()
-        if _text(key)
+        "target_percent": _as_int(
+            settings.get("satellite_ducking_target_percent"),
+            20,
+            minimum=0,
+            maximum=100,
+        ),
+        "attack_ms": _as_int(
+            settings.get("satellite_ducking_attack_ms"),
+            150,
+            minimum=0,
+            maximum=10000,
+        ),
+        "release_ms": _as_int(
+            settings.get("satellite_ducking_release_ms"),
+            350,
+            minimum=0,
+            maximum=10000,
+        ),
     }
 
 
@@ -631,7 +686,10 @@ class _NativeVoiceAssistantClient:
 
         url = _text(data.get("url"))
         if event == "TTS_END" and url:
-            play_payload: Dict[str, Any] = {"url": url}
+            play_payload: Dict[str, Any] = {
+                "url": url,
+                "ducking": _satellite_ducking_payload(),
+            }
             if tts_kind:
                 play_payload["tts_kind"] = tts_kind
             if tool_visual:
@@ -992,6 +1050,16 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "last_error": _text(row.get("last_error")),
         "last_message_type": _text(row.get("last_message_type")),
         "last_status": row.get("last_status") if isinstance(row.get("last_status"), dict) else {},
+        "media_session": (
+            dict(row.get("media_session"))
+            if isinstance(row.get("media_session"), dict)
+            else {"active": False}
+        ),
+        "audio_overlay": (
+            dict(row.get("audio_overlay"))
+            if isinstance(row.get("audio_overlay"), dict)
+            else {"active": False}
+        ),
         "live_settings": _live_settings_payload(selector, board=_text(payload.get("board"))),
         "auth": {
             "mode": _text(auth.get("mode")) or "open",
@@ -1058,6 +1126,16 @@ async def client_has_capability(selector: str, capability: str) -> bool:
         payload = _message_payload(hello)
     caps = _capabilities(payload)
     return bool(caps.get(cap))
+
+
+async def client_media_session_active(selector: str) -> bool:
+    token = _text(selector)
+    if not token:
+        return False
+    async with _clients_lock:
+        row = _clients.get(token)
+        session = row.get("media_session") if isinstance(row, dict) else {}
+        return bool(isinstance(session, dict) and session.get("active"))
 
 
 async def live_settings(selector: str = "") -> Dict[str, Any]:
@@ -1168,6 +1246,545 @@ async def send_request(
             future.cancel()
 
 
+def _monotonic_us() -> int:
+    return int(time.monotonic_ns() // 1000)
+
+
+async def _stereo_clock_probe(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    best: Dict[str, Any] = {}
+    for _index in range(STEREO_CLOCK_PROBE_COUNT):
+        server_send_us = _monotonic_us()
+        try:
+            result = await send_request(
+                token,
+                "audio.clock.sync",
+                {"server_send_us": server_send_us},
+                timeout_s=2.0,
+            )
+        except Exception:
+            continue
+        server_receive_us = _monotonic_us()
+        if not _as_bool(result.get("ok"), False):
+            continue
+        satellite_receive_us = _as_int(result.get("satellite_receive_us"), 0)
+        satellite_send_us = _as_int(result.get("satellite_send_us"), 0)
+        if satellite_receive_us <= 0 or satellite_send_us < satellite_receive_us:
+            continue
+        satellite_processing_us = satellite_send_us - satellite_receive_us
+        round_trip_us = max(
+            0,
+            (server_receive_us - server_send_us) - satellite_processing_us,
+        )
+        offset_us = int(
+            round(
+                (
+                    (satellite_receive_us - server_send_us)
+                    + (satellite_send_us - server_receive_us)
+                )
+                / 2.0
+            )
+        )
+        sample = {
+            "selector": token,
+            "offset_us": offset_us,
+            "round_trip_us": round_trip_us,
+            "server_sample_us": int((server_send_us + server_receive_us) // 2),
+            "satellite_sample_us": int((satellite_receive_us + satellite_send_us) // 2),
+        }
+        if not best or round_trip_us < int(best.get("round_trip_us") or 0):
+            best = sample
+        await asyncio.sleep(0)
+    if not best:
+        raise RuntimeError(f"Could not synchronize the playback clock for {token}.")
+    return best
+
+
+async def stereo_pair_compatibility(left_selector: str, right_selector: str) -> Dict[str, Any]:
+    left = _text(left_selector)
+    right = _text(right_selector)
+    if not left.startswith("native:") or not right.startswith("native:"):
+        return {"ok": False, "error": "Stereo pairs require two Tater Native satellites."}
+    if left == right:
+        return {"ok": False, "error": "Left and right satellites must be different."}
+
+    missing: list[str] = []
+    disconnected: list[str] = []
+    async with _clients_lock:
+        for selector in (left, right):
+            row = _clients.get(selector)
+            if not isinstance(row, dict) or not bool(row.get("connected")):
+                disconnected.append(selector)
+                continue
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            capabilities = _capabilities(_message_payload(hello))
+            required = {
+                "synchronized_media_sessions",
+                "stereo_channel_selection",
+                "media_playhead_telemetry",
+                "media_drift_correction",
+            }
+            absent = sorted(name for name in required if not bool(capabilities.get(name)))
+            try:
+                session_version = int(float(capabilities.get("audio_session_version") or 0))
+            except Exception:
+                session_version = 0
+            if session_version < 2:
+                absent.append("audio_session_version_2")
+            if absent:
+                missing.append(f"{selector} ({', '.join(absent)})")
+    if disconnected:
+        return {
+            "ok": False,
+            "error": f"Both stereo satellites must be connected: {', '.join(disconnected)}.",
+            "disconnected": disconnected,
+        }
+    if missing:
+        return {
+            "ok": False,
+            "error": "Update satellite firmware before creating this stereo pair: " + "; ".join(missing),
+            "missing_capabilities": missing,
+        }
+    return {"ok": True, "left_selector": left, "right_selector": right}
+
+
+async def _stop_stereo_members(selectors: list[str], *, session_id: str = "") -> None:
+    async def _stop(selector: str) -> None:
+        with contextlib.suppress(Exception):
+            await send_command(
+                selector,
+                "media.session.stop",
+                {"session_id": _text(session_id), "reason": "stereo_group_stop"},
+            )
+
+    await asyncio.gather(*(_stop(selector) for selector in selectors))
+
+
+async def prepare_stereo_media_session(
+    pair: Dict[str, Any],
+    *,
+    session_id: str,
+    media_url: str,
+    volume_percent: int = 100,
+    loop: bool = False,
+    content_type: str = "music",
+    channel_mode: str = "stereo",
+) -> Dict[str, Any]:
+    pair_row = pair if isinstance(pair, dict) else {}
+    left = _text(pair_row.get("left_selector"))
+    right = _text(pair_row.get("right_selector"))
+    compatibility = await stereo_pair_compatibility(left, right)
+    if not compatibility.get("ok"):
+        raise RuntimeError(_text(compatibility.get("error")) or "Stereo pair is unavailable.")
+    if not _text(session_id) or not _text(media_url):
+        raise ValueError("session_id and media_url are required")
+
+    group_id = _text(pair_row.get("id")) or uuid.uuid4().hex[:12]
+    group_session_id = _text(session_id)
+    base_volume = max(0, min(100, _as_int(volume_percent, 100)))
+    mono = _lower(channel_mode) in {"mono", "center", "tts"}
+    member_rows = [
+        {
+            "selector": left,
+            "channel": "mono" if mono else "left",
+            "delay_ms": max(0, min(250, _as_int(pair_row.get("left_delay_ms"), 0))),
+            "volume_percent": int(
+                round(base_volume * max(0, min(100, _as_int(pair_row.get("left_volume_percent"), 100))) / 100.0)
+            ),
+        },
+        {
+            "selector": right,
+            "channel": "mono" if mono else "right",
+            "delay_ms": max(0, min(250, _as_int(pair_row.get("right_delay_ms"), 0))),
+            "volume_percent": int(
+                round(base_volume * max(0, min(100, _as_int(pair_row.get("right_volume_percent"), 100))) / 100.0)
+            ),
+        },
+    ]
+
+    clocks = await asyncio.gather(
+        _stereo_clock_probe(left),
+        _stereo_clock_probe(right),
+    )
+    clock_by_selector = {row["selector"]: row for row in clocks}
+
+    async def _prepare(member: Dict[str, Any]) -> Dict[str, Any]:
+        result = await send_request(
+            member["selector"],
+            "media.session.prepare",
+            {
+                "session_id": group_session_id,
+                "group_id": group_id,
+                "media": {
+                    "url": media_url,
+                    "volume_percent": member["volume_percent"],
+                    "loop": bool(loop),
+                    "content_type": _text(content_type) or "music",
+                },
+                "routing": {
+                    "channel": member["channel"],
+                    "pair_selector": _text(pair_row.get("selector")),
+                },
+            },
+            timeout_s=15.0,
+        )
+        if not _as_bool(result.get("ok"), False):
+            raise RuntimeError(_text(result.get("error")) or f"{member['selector']} did not prepare audio.")
+        return result
+
+    try:
+        prepared = await asyncio.gather(*(_prepare(member) for member in member_rows))
+        start_server_us = _monotonic_us() + (STEREO_START_LEAD_MS * 1000)
+
+        async def _commit(member: Dict[str, Any]) -> Dict[str, Any]:
+            clock = clock_by_selector[member["selector"]]
+            start_at_us = (
+                start_server_us
+                + int(clock["offset_us"])
+                + (int(member["delay_ms"]) * 1000)
+            )
+            result = await send_request(
+                member["selector"],
+                "media.session.commit",
+                {
+                    "session_id": group_session_id,
+                    "group_id": group_id,
+                    "start_at_us": start_at_us,
+                },
+                timeout_s=3.0,
+            )
+            if not _as_bool(result.get("ok"), False):
+                raise RuntimeError(_text(result.get("error")) or f"{member['selector']} rejected synchronized start.")
+            return {**result, "start_at_us": start_at_us}
+
+        committed = await asyncio.gather(*(_commit(member) for member in member_rows))
+    except Exception:
+        await _stop_stereo_members([left, right], session_id=group_session_id)
+        raise
+
+    _stereo_sessions[group_id] = {
+        "group_id": group_id,
+        "pair_selector": _text(pair_row.get("selector")),
+        "session_id": group_session_id,
+        "left_selector": left,
+        "right_selector": right,
+        "clock_offsets_us": {
+            selector: int(row.get("offset_us") or 0)
+            for selector, row in clock_by_selector.items()
+        },
+        "clock_round_trip_us": {
+            selector: int(row.get("round_trip_us") or 0)
+            for selector, row in clock_by_selector.items()
+        },
+        "member_delays_ms": {
+            member["selector"]: int(member.get("delay_ms") or 0)
+            for member in member_rows
+        },
+        "clock_sync_server_us": _monotonic_us(),
+        "playheads": {},
+        "last_adjust_server_us": 0,
+        "created_server_us": _monotonic_us(),
+        "loop": bool(loop),
+        "channel_mode": "mono" if mono else "stereo",
+    }
+    return {
+        "ok": True,
+        "stereo_session_started": True,
+        "group_id": group_id,
+        "session_id": group_session_id,
+        "members": member_rows,
+        "prepared": prepared,
+        "committed": committed,
+        "start_server_us": start_server_us,
+        "clock_samples": clocks,
+    }
+
+
+def stereo_pair_media_active(pair: Dict[str, Any]) -> bool:
+    pair_selector = _text((pair or {}).get("selector"))
+    for session in _stereo_sessions.values():
+        if (
+            isinstance(session, dict)
+            and _text(session.get("pair_selector")) == pair_selector
+        ):
+            return True
+    return False
+
+
+async def start_stereo_overlay(
+    pair: Dict[str, Any],
+    *,
+    overlay_id: str,
+    foreground_url: str,
+    foreground_kind: str = "tts",
+    foreground_volume_percent: int = 100,
+    ducking: Optional[Dict[str, Any]] = None,
+    start_server_us: int = 0,
+    stop_media_when_finished: bool = False,
+) -> Dict[str, Any]:
+    pair_row = pair if isinstance(pair, dict) else {}
+    left = _text(pair_row.get("left_selector"))
+    right = _text(pair_row.get("right_selector"))
+    compatibility = await stereo_pair_compatibility(left, right)
+    if not compatibility.get("ok"):
+        raise RuntimeError(_text(compatibility.get("error")) or "Stereo pair is unavailable.")
+
+    pair_selector = _text(pair_row.get("selector"))
+    session = next(
+        (
+            row
+            for row in _stereo_sessions.values()
+            if isinstance(row, dict) and _text(row.get("pair_selector")) == pair_selector
+        ),
+        None,
+    )
+    if not isinstance(session, dict):
+        raise RuntimeError("The stereo pair does not have an active synchronized media session.")
+
+    requested_start_server_us = _as_int(start_server_us, 0)
+    minimum_start_server_us = _monotonic_us() + 100_000
+    if requested_start_server_us >= minimum_start_server_us:
+        offsets = (
+            session.get("clock_offsets_us")
+            if isinstance(session.get("clock_offsets_us"), dict)
+            else {}
+        )
+        clocks = [
+            {"selector": left, "offset_us": _as_int(offsets.get(left), 0)},
+            {"selector": right, "offset_us": _as_int(offsets.get(right), 0)},
+        ]
+        synchronized_start_server_us = requested_start_server_us
+    else:
+        clocks = await asyncio.gather(_stereo_clock_probe(left), _stereo_clock_probe(right))
+        synchronized_start_server_us = _monotonic_us() + (STEREO_START_LEAD_MS * 1000)
+    duck = ducking if isinstance(ducking, dict) else {}
+    base_volume = max(0, min(100, _as_int(foreground_volume_percent, 100)))
+    member_settings = {
+        left: {
+            "delay_ms": max(0, min(250, _as_int(pair_row.get("left_delay_ms"), 0))),
+            "volume_percent": int(
+                round(base_volume * max(0, min(100, _as_int(pair_row.get("left_volume_percent"), 100))) / 100.0)
+            ),
+        },
+        right: {
+            "delay_ms": max(0, min(250, _as_int(pair_row.get("right_delay_ms"), 0))),
+            "volume_percent": int(
+                round(base_volume * max(0, min(100, _as_int(pair_row.get("right_volume_percent"), 100))) / 100.0)
+            ),
+        },
+    }
+
+    async def _start(clock: Dict[str, Any]) -> Dict[str, Any]:
+        selector = _text(clock.get("selector"))
+        settings = member_settings.get(selector) or {}
+        start_at_us = (
+            synchronized_start_server_us
+            + int(clock.get("offset_us") or 0)
+            + (_as_int(settings.get("delay_ms"), 0) * 1000)
+        )
+        result = await send_command(
+            selector,
+            "audio.overlay.start",
+            {
+                "overlay_id": _text(overlay_id),
+                "foreground": {
+                    "url": _text(foreground_url),
+                    "kind": _text(foreground_kind) or "tts",
+                    "volume_percent": _as_int(settings.get("volume_percent"), base_volume),
+                },
+                "ducking": dict(duck),
+                "start_at_us": start_at_us,
+                "group_id": _text(session.get("group_id")),
+            },
+        )
+        return {**result, "start_at_us": start_at_us}
+
+    members = await asyncio.gather(*(_start(clock) for clock in clocks))
+    if stop_media_when_finished:
+        session["stop_on_overlay_id"] = _text(overlay_id)
+        session["overlay_finished_selectors"] = []
+        session["stop_requested"] = False
+    return {
+        "ok": True,
+        "stereo_overlay_started": True,
+        "overlay_id": _text(overlay_id),
+        "group_id": _text(session.get("group_id")),
+        "start_server_us": synchronized_start_server_us,
+        "stop_media_when_finished": bool(stop_media_when_finished),
+        "members": members,
+    }
+
+
+async def _refresh_stereo_clocks(session: Dict[str, Any]) -> None:
+    left = _text(session.get("left_selector"))
+    right = _text(session.get("right_selector"))
+    clocks = await asyncio.gather(
+        _stereo_clock_probe(left),
+        _stereo_clock_probe(right),
+        return_exceptions=True,
+    )
+    offsets = dict(session.get("clock_offsets_us") or {})
+    round_trips = dict(session.get("clock_round_trip_us") or {})
+    updated = False
+    for row in clocks:
+        if not isinstance(row, dict):
+            continue
+        selector = _text(row.get("selector"))
+        if not selector:
+            continue
+        offsets[selector] = int(row.get("offset_us") or 0)
+        round_trips[selector] = int(row.get("round_trip_us") or 0)
+        updated = True
+    if updated:
+        session["clock_offsets_us"] = offsets
+        session["clock_round_trip_us"] = round_trips
+        session["clock_sync_server_us"] = _monotonic_us()
+
+
+async def _adjust_stereo_session(group_id: str) -> None:
+    try:
+        session = _stereo_sessions.get(group_id)
+        if not isinstance(session, dict):
+            return
+        now_us = _monotonic_us()
+        last_clock_sync_us = int(session.get("clock_sync_server_us") or 0)
+        if now_us - last_clock_sync_us >= int(STEREO_CLOCK_REFRESH_S * 1_000_000):
+            await _refresh_stereo_clocks(session)
+            now_us = _monotonic_us()
+
+        playheads = session.get("playheads") if isinstance(session.get("playheads"), dict) else {}
+        left = _text(session.get("left_selector"))
+        right = _text(session.get("right_selector"))
+        left_row = playheads.get(left) if isinstance(playheads.get(left), dict) else {}
+        right_row = playheads.get(right) if isinstance(playheads.get(right), dict) else {}
+        if not left_row or not right_row:
+            return
+        if _text(left_row.get("session_id")) != _text(session.get("session_id")):
+            return
+        if _text(right_row.get("session_id")) != _text(session.get("session_id")):
+            return
+        if now_us - int(session.get("last_adjust_server_us") or 0) < int(
+            STEREO_ADJUST_INTERVAL_S * 1_000_000
+        ):
+            return
+
+        offsets = session.get("clock_offsets_us") if isinstance(session.get("clock_offsets_us"), dict) else {}
+
+        def _projected_source_frames(selector: str, row: Dict[str, Any]) -> float:
+            sample_rate = max(1, _as_int(row.get("sample_rate_hz"), 48000))
+            satellite_time_us = _as_int(row.get("satellite_time_us"), 0)
+            server_event_us = satellite_time_us - _as_int(offsets.get(selector), 0)
+            age_us = max(0, min(2_000_000, now_us - server_event_us))
+            return float(_as_int(row.get("source_frames"), 0)) + (
+                float(age_us) * float(sample_rate) / 1_000_000.0
+            )
+
+        left_frames = _projected_source_frames(left, left_row)
+        right_frames = _projected_source_frames(right, right_row)
+        member_delays = (
+            session.get("member_delays_ms")
+            if isinstance(session.get("member_delays_ms"), dict)
+            else {}
+        )
+        sample_rate = max(1, _as_int(left_row.get("sample_rate_hz"), 48000))
+        target_delta_frames = (
+            (
+                _as_int(member_delays.get(right), 0)
+                - _as_int(member_delays.get(left), 0)
+            )
+            * sample_rate
+            / 1000.0
+        )
+        phase_error_frames = (left_frames - right_frames) - target_delta_frames
+        correction = int(round(phase_error_frames))
+        if abs(correction) < STEREO_ADJUST_THRESHOLD_FRAMES:
+            return
+        correction = max(-STEREO_ADJUST_MAX_FRAMES, min(STEREO_ADJUST_MAX_FRAMES, correction))
+        result = await send_request(
+            right,
+            "media.session.adjust",
+            {
+                "session_id": _text(session.get("session_id")),
+                "group_id": group_id,
+                "correction_frames": correction,
+                "reference_selector": left,
+            },
+            timeout_s=2.0,
+        )
+        if _as_bool(result.get("ok"), False):
+            session["last_adjust_server_us"] = now_us
+            session["last_correction_frames"] = correction
+            session["last_phase_error_frames"] = phase_error_frames
+    finally:
+        _stereo_adjust_tasks.pop(group_id, None)
+
+
+def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
+    group_id = _text(payload.get("group_id"))
+    session = _stereo_sessions.get(group_id)
+    if not group_id or not isinstance(session, dict):
+        return
+    if selector not in {_text(session.get("left_selector")), _text(session.get("right_selector"))}:
+        return
+    playheads = session.setdefault("playheads", {})
+    if not isinstance(playheads, dict):
+        playheads = {}
+        session["playheads"] = playheads
+    playheads[selector] = {**dict(payload), "received_server_us": _monotonic_us()}
+    task = _stereo_adjust_tasks.get(group_id)
+    if isinstance(task, asyncio.Task) and not task.done():
+        return
+    _stereo_adjust_tasks[group_id] = asyncio.create_task(_adjust_stereo_session(group_id))
+
+
+def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:
+    session_id = _text(payload.get("session_id"))
+    for group_id, session in list(_stereo_sessions.items()):
+        if not isinstance(session, dict) or _text(session.get("session_id")) != session_id:
+            continue
+        finished = session.setdefault("finished_selectors", [])
+        if not isinstance(finished, list):
+            finished = []
+            session["finished_selectors"] = finished
+        if selector not in finished:
+            finished.append(selector)
+        members = {_text(session.get("left_selector")), _text(session.get("right_selector"))}
+        if members and members.issubset(set(finished)):
+            _stereo_sessions.pop(group_id, None)
+            task = _stereo_adjust_tasks.pop(group_id, None)
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+
+
+def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> None:
+    overlay_id = _text(payload.get("overlay_id"))
+    if not overlay_id:
+        return
+    for session in list(_stereo_sessions.values()):
+        if not isinstance(session, dict) or _text(session.get("stop_on_overlay_id")) != overlay_id:
+            continue
+        members = {_text(session.get("left_selector")), _text(session.get("right_selector"))}
+        if selector not in members:
+            continue
+        finished = session.setdefault("overlay_finished_selectors", [])
+        if not isinstance(finished, list):
+            finished = []
+            session["overlay_finished_selectors"] = finished
+        if selector not in finished:
+            finished.append(selector)
+        if members and members.issubset(set(finished)) and not _as_bool(
+            session.get("stop_requested"),
+            False,
+        ):
+            session["stop_requested"] = True
+            asyncio.create_task(
+                _stop_stereo_members(
+                    sorted(members),
+                    session_id=_text(session.get("session_id")),
+                )
+            )
+
+
 async def push_live_settings(selector: str = "") -> Dict[str, Any]:
     token = _text(selector)
     response_board = ""
@@ -1232,6 +1849,8 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         "last_seen_ts": now_ts,
         "last_message_type": "hello",
         "last_status": {},
+        "media_session": {"active": False},
+        "audio_overlay": {"active": False},
         "logs": deque(maxlen=MAX_LOG_ROWS),
         "log_seq": 0,
         "binary_frames": 0,
@@ -1312,6 +1931,57 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
                 row["last_error"] = f"setup state: {_status_state(payload)}"
                 hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
                 hello_payload = _message_payload(hello)
+        elif msg_type == "media.session.started":
+            row["media_session"] = {
+                "active": True,
+                "session_id": _text(payload.get("session_id")),
+                "group_id": _text(payload.get("group_id")),
+                "channel": _text(payload.get("channel")) or "stereo",
+                "sample_rate_hz": _as_int(payload.get("sample_rate_hz"), 48000),
+                "scheduled_start_us": _as_int(payload.get("scheduled_start_us"), 0),
+                "actual_start_us": _as_int(payload.get("actual_start_us"), 0),
+                "late_by_us": _as_int(payload.get("late_by_us"), 0),
+                "started_ts": _now(),
+            }
+        elif msg_type == "media.session.playhead":
+            previous = row.get("media_session") if isinstance(row.get("media_session"), dict) else {}
+            row["media_session"] = {
+                **previous,
+                "active": True,
+                "session_id": _text(payload.get("session_id") or previous.get("session_id")),
+                "group_id": _text(payload.get("group_id") or previous.get("group_id")),
+                "channel": _text(payload.get("channel") or previous.get("channel")) or "stereo",
+                "playhead": dict(payload),
+                "playhead_ts": _now(),
+            }
+            _record_stereo_playhead(selector, payload)
+        elif msg_type == "media.session.finished":
+            previous = row.get("media_session") if isinstance(row.get("media_session"), dict) else {}
+            row["media_session"] = {
+                **previous,
+                "active": False,
+                "session_id": _text(payload.get("session_id") or previous.get("session_id")),
+                "ok": _as_bool(payload.get("ok"), False),
+                "finished_ts": _now(),
+            }
+            row["audio_overlay"] = {"active": False}
+            _record_stereo_finished(selector, payload)
+        elif msg_type == "audio.overlay.started":
+            row["audio_overlay"] = {
+                "active": True,
+                "overlay_id": _text(payload.get("overlay_id")),
+                "started_ts": _now(),
+            }
+        elif msg_type == "audio.overlay.finished":
+            previous = row.get("audio_overlay") if isinstance(row.get("audio_overlay"), dict) else {}
+            row["audio_overlay"] = {
+                **previous,
+                "active": False,
+                "overlay_id": _text(payload.get("overlay_id") or previous.get("overlay_id")),
+                "ok": _as_bool(payload.get("ok"), False),
+                "finished_ts": _now(),
+            }
+            _record_stereo_overlay_finished(selector, payload)
         elif msg_type in {"log", "ota.status"}:
             logs_deque = row.get("logs")
             if isinstance(logs_deque, deque):
@@ -1365,11 +2035,23 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             await bridge.voice_stop(payload)
         return _envelope("voice.stop.ack", {"ok": True}, message_id=_text(message.get("id")))
 
-    if msg_type in {"announcement.finished", "playback.finished", "tts.finished"}:
+    if msg_type in {
+        "announcement.finished",
+        "playback.finished",
+        "tts.finished",
+        "audio.scene.finished",
+        "audio.overlay.finished",
+    }:
         bridge = await _voice_bridge(selector)
         if bridge is not None:
             await bridge.announcement_finished()
-        return _envelope("announcement.finished.ack", {"ok": True}, message_id=_text(message.get("id")))
+        if msg_type == "audio.scene.finished":
+            ack_type = "audio.scene.finished.ack"
+        elif msg_type == "audio.overlay.finished":
+            ack_type = "audio.overlay.finished.ack"
+        else:
+            ack_type = "announcement.finished.ack"
+        return _envelope(ack_type, {"ok": True}, message_id=_text(message.get("id")))
 
     if msg_type == "timer.event":
         from . import native_timers

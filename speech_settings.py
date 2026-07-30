@@ -37,6 +37,9 @@ DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
+DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT = 20
+DEFAULT_SATELLITE_DUCKING_ATTACK_MS = 150
+DEFAULT_SATELLITE_DUCKING_RELEASE_MS = 350
 
 KOKORO_MODEL_SPECS: Dict[str, Dict[str, str]] = {
     "v1.0:q8": {
@@ -82,12 +85,18 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _as_int(value: Any, default: int) -> int:
+def _as_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int = 65535,
+) -> int:
     try:
         parsed = int(float(value))
     except Exception:
         parsed = int(default)
-    if parsed < 1 or parsed > 65535:
+    if parsed < int(minimum) or parsed > int(maximum):
         return int(default)
     return int(parsed)
 
@@ -513,6 +522,24 @@ def get_speech_settings() -> Dict[str, Any]:
         ),
         "announcement_tts_model": _clean(shared.get("announcement_tts_model")),
         "announcement_tts_voice": _clean(shared.get("announcement_tts_voice")),
+        "satellite_ducking_target_percent": _as_int(
+            shared.get("satellite_ducking_target_percent"),
+            DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT,
+            minimum=0,
+            maximum=100,
+        ),
+        "satellite_ducking_attack_ms": _as_int(
+            shared.get("satellite_ducking_attack_ms"),
+            DEFAULT_SATELLITE_DUCKING_ATTACK_MS,
+            minimum=0,
+            maximum=10000,
+        ),
+        "satellite_ducking_release_ms": _as_int(
+            shared.get("satellite_ducking_release_ms"),
+            DEFAULT_SATELLITE_DUCKING_RELEASE_MS,
+            minimum=0,
+            maximum=10000,
+        ),
         "announcement_wyoming_tts_host": (
             _clean(shared.get("announcement_wyoming_tts_host"))
             if has_announcement_wyoming_host
@@ -629,6 +656,9 @@ def save_speech_settings(
     announcement_chatterbox_tts_seed: Any = None,
     announcement_chatterbox_tts_speed_factor: Any = None,
     announcement_chatterbox_tts_language: Any = None,
+    satellite_ducking_target_percent: Any = DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT,
+    satellite_ducking_attack_ms: Any = DEFAULT_SATELLITE_DUCKING_ATTACK_MS,
+    satellite_ducking_release_ms: Any = DEFAULT_SATELLITE_DUCKING_RELEASE_MS,
     acceleration: Any = DEFAULT_SPEECH_ACCELERATION,
 ) -> None:
     direct_tts_backend = _normalize_tts_backend(tts_backend)
@@ -669,6 +699,30 @@ def save_speech_settings(
             ),
             "announcement_tts_model": _clean(announcement_tts_model),
             "announcement_tts_voice": _clean(announcement_tts_voice),
+            "satellite_ducking_target_percent": str(
+                _as_int(
+                    satellite_ducking_target_percent,
+                    DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT,
+                    minimum=0,
+                    maximum=100,
+                )
+            ),
+            "satellite_ducking_attack_ms": str(
+                _as_int(
+                    satellite_ducking_attack_ms,
+                    DEFAULT_SATELLITE_DUCKING_ATTACK_MS,
+                    minimum=0,
+                    maximum=10000,
+                )
+            ),
+            "satellite_ducking_release_ms": str(
+                _as_int(
+                    satellite_ducking_release_ms,
+                    DEFAULT_SATELLITE_DUCKING_RELEASE_MS,
+                    minimum=0,
+                    maximum=10000,
+                )
+            ),
             "announcement_wyoming_tts_host": (
                 _clean(announcement_wyoming_tts_host)
                 if announcement_wyoming_tts_host is not None

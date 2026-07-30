@@ -12,6 +12,7 @@ from . import native_satellite
 from . import reply_playback as esphome_reply_playback
 from . import settings as esphome_settings
 from . import speaker_id as esphome_speaker_id
+from . import stereo_pairs
 from . import wake_trainer_link
 from . import emotion_id as esphome_emotion_id
 
@@ -105,6 +106,204 @@ def _global_satellite_settings_item_form(native_status: Dict[str, Any]) -> Dict[
         "save_label": "Apply To All Satellites",
         "remove_action": "",
     }
+
+
+def _stereo_pair_member_options(
+    native_status: Dict[str, Any],
+    *,
+    current_selector: str = "",
+) -> List[Dict[str, str]]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    rows: List[Dict[str, str]] = [{"value": "", "label": "Select a satellite"}]
+    seen = {""}
+    required = {
+        "synchronized_media_sessions",
+        "stereo_channel_selection",
+        "media_playhead_telemetry",
+        "media_drift_correction",
+    }
+    for selector, raw in sorted(clients.items(), key=lambda item: esphome_runtime.text(item[0])):
+        if not isinstance(raw, dict) or not bool(raw.get("connected")):
+            continue
+        token = esphome_runtime.text(selector)
+        capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {}
+        try:
+            session_version = int(float(capabilities.get("audio_session_version") or 0))
+        except Exception:
+            session_version = 0
+        if session_version < 2 or any(not bool(capabilities.get(name)) for name in required):
+            continue
+        name = esphome_runtime.text(raw.get("device_name")) or token
+        room = esphome_runtime.text(raw.get("room"))
+        suffix = f" • {room}" if room and room.lower() != name.lower() else ""
+        rows.append({"value": token, "label": f"{name}{suffix}"})
+        seen.add(token)
+    current = esphome_runtime.text(current_selector)
+    if current and current not in seen:
+        rows.append({"value": current, "label": f"{current} (offline or update required)"})
+    return rows
+
+
+def _stereo_pair_ready(pair: Dict[str, Any], native_status: Dict[str, Any]) -> bool:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    for selector in (
+        esphome_runtime.text(pair.get("left_selector")),
+        esphome_runtime.text(pair.get("right_selector")),
+    ):
+        row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
+        capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+        try:
+            session_version = int(float(capabilities.get("audio_session_version") or 0))
+        except Exception:
+            session_version = 0
+        if (
+            not bool(row.get("connected"))
+            or session_version < 2
+            or not bool(capabilities.get("synchronized_media_sessions"))
+            or not bool(capabilities.get("stereo_channel_selection"))
+            or not bool(capabilities.get("media_playhead_telemetry"))
+            or not bool(capabilities.get("media_drift_correction"))
+        ):
+            return False
+    return True
+
+
+def _stereo_pair_fields(pair: Dict[str, Any], native_status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    left_selector = esphome_runtime.text(pair.get("left_selector"))
+    right_selector = esphome_runtime.text(pair.get("right_selector"))
+    return [
+        {
+            "key": "name",
+            "label": "Pair Name",
+            "type": "text",
+            "value": esphome_runtime.text(pair.get("name")),
+            "placeholder": "Master Bedroom Stereo",
+            "description": "This appears as one destination throughout Tater.",
+        },
+        {
+            "key": "left_selector",
+            "label": "Left Satellite",
+            "type": "select",
+            "value": left_selector,
+            "options": _stereo_pair_member_options(native_status, current_selector=left_selector),
+        },
+        {
+            "key": "right_selector",
+            "label": "Right Satellite",
+            "type": "select",
+            "value": right_selector,
+            "options": _stereo_pair_member_options(native_status, current_selector=right_selector),
+        },
+        {
+            "key": "left_volume_percent",
+            "label": "Left Balance",
+            "type": "number",
+            "value": int(
+                pair.get("left_volume_percent")
+                if pair.get("left_volume_percent") is not None
+                else 100
+            ),
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "suffix": "%",
+        },
+        {
+            "key": "right_volume_percent",
+            "label": "Right Balance",
+            "type": "number",
+            "value": int(
+                pair.get("right_volume_percent")
+                if pair.get("right_volume_percent") is not None
+                else 100
+            ),
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "suffix": "%",
+        },
+        {
+            "key": "left_delay_ms",
+            "label": "Left Delay",
+            "type": "number",
+            "value": int(pair.get("left_delay_ms") or 0),
+            "min": 0,
+            "max": 250,
+            "step": 1,
+            "suffix": "ms",
+            "description": "Optional acoustic calibration. Leave both delays at zero initially.",
+        },
+        {
+            "key": "right_delay_ms",
+            "label": "Right Delay",
+            "type": "number",
+            "value": int(pair.get("right_delay_ms") or 0),
+            "min": 0,
+            "max": 250,
+            "step": 1,
+            "suffix": "ms",
+        },
+    ]
+
+
+def _stereo_pair_item_forms(native_status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for pair in stereo_pairs.list_pairs():
+        ready = _stereo_pair_ready(pair, native_status)
+        rows.append(
+            {
+                "id": pair.get("selector"),
+                "group": "stereo_pair",
+                "title": pair.get("name") or "Stereo Pair",
+                "subtitle": "Synchronized left/right Tater satellite pair",
+                "detail": (
+                    "Ready for synchronized playback"
+                    if ready
+                    else "Unavailable until both satellites are connected with current firmware"
+                ),
+                "connected": ready,
+                "hero_badges": [
+                    {"label": "Stereo", "tone": "active"},
+                    {"label": "Ready" if ready else "Unavailable", "tone": "active" if ready else "warning"},
+                ],
+                "summary_rows": [
+                    {"label": "Left", "value": pair.get("left_selector")},
+                    {"label": "Right", "value": pair.get("right_selector")},
+                ],
+                "fields": _stereo_pair_fields(pair, native_status),
+                "save_action": "voice_stereo_pair_save",
+                "save_label": "Save Pair",
+                "remove_action": "voice_stereo_pair_remove",
+                "remove_label": "Delete Pair",
+                "remove_confirm": f"Delete stereo pair {pair.get('name') or pair.get('id')}?",
+                "show_entity_refresh": False,
+            }
+        )
+    rows.append(
+        {
+            "id": "stereo:new",
+            "group": "stereo_pair_create",
+            "title": "Create Stereo Pair",
+            "subtitle": "Combine two updated Tater Native satellites into one synchronized destination.",
+            "detail": "Choose which satellite is physically on the left and right.",
+            "connected": False,
+            "hero_badges": [{"label": "New Pair", "tone": "muted"}],
+            "fields": _stereo_pair_fields(
+                {
+                    "name": "",
+                    "left_volume_percent": 100,
+                    "right_volume_percent": 100,
+                    "left_delay_ms": 0,
+                    "right_delay_ms": 0,
+                },
+                native_status,
+            ),
+            "save_action": "voice_stereo_pair_save",
+            "save_label": "Create Pair",
+            "show_entity_refresh": False,
+        }
+    )
+    return rows
 
 
 def _wake_trainer_link_item_form() -> Dict[str, Any]:
@@ -833,6 +1032,7 @@ def get_runtime_payload(
     ]
     if include_satellites:
         item_forms.append(esphome_settings.settings_item_form())
+        item_forms.extend(_stereo_pair_item_forms(native_status))
         item_forms.extend(esphome_settings.satellite_item_forms(status))
         payload["display_sensors"] = esphome_firmware.display_sensor_profiles_payload(status)
     payload["ui"]["item_forms"] = item_forms
@@ -1222,6 +1422,41 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         result = native_satellite.pairing_status(pairing_id)
         result["action"] = action_name
         return result
+
+    if action_name == "voice_stereo_pair_save":
+        selector = esphome_runtime.payload_selector(body)
+        values = esphome_runtime.payload_values(body)
+        compatibility = native_satellite.run_on_runtime_loop(
+            native_satellite.stereo_pair_compatibility(
+                esphome_runtime.text(values.get("left_selector")),
+                esphome_runtime.text(values.get("right_selector")),
+            ),
+            timeout=8.0,
+        )
+        if not isinstance(compatibility, dict) or not bool(compatibility.get("ok")):
+            raise ValueError(
+                esphome_runtime.text((compatibility or {}).get("error"))
+                or "The selected satellites are not ready for stereo pairing."
+            )
+        existing_id = stereo_pairs.pair_id_from_selector(selector)
+        saved = stereo_pairs.save_pair(values, pair_id=existing_id)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": saved.get("selector"),
+            "pair": saved,
+            "message": f"Saved stereo pair {saved.get('name')}.",
+        }
+
+    if action_name == "voice_stereo_pair_remove":
+        selector = esphome_runtime.payload_selector(body)
+        removed = stereo_pairs.remove_pair(selector)
+        return {
+            "ok": True,
+            "action": action_name,
+            **removed,
+            "message": "Stereo pair deleted." if removed.get("removed") else "Stereo pair was already removed.",
+        }
 
     if action_name == "voice_native_satellite_settings_save":
         selector = esphome_runtime.payload_selector(body)
