@@ -368,6 +368,59 @@ def get_voice_core_satellite_target_options(*, current_values: Any = None) -> Li
         seen.add(value)
         rows.append({"value": value, "label": _voice_core_satellite_label(label_row, selector)})
 
+    try:
+        from tater_voice import stereo_pairs
+
+        required_capabilities = {
+            "synchronized_media_sessions",
+            "stereo_channel_selection",
+            "media_playhead_telemetry",
+            "media_drift_correction",
+        }
+        for pair in stereo_pairs.list_pairs():
+            pair_selector = _text(pair.get("selector"))
+            left_selector = _text(pair.get("left_selector"))
+            right_selector = _text(pair.get("right_selector"))
+            if not pair_selector or not left_selector or not right_selector:
+                continue
+            member_rows = [connected_clients.get(left_selector), connected_clients.get(right_selector)]
+            ready = all(isinstance(member, dict) for member in member_rows)
+            if ready:
+                for member in member_rows:
+                    capabilities = (
+                        member.get("capabilities")
+                        if isinstance(member.get("capabilities"), dict)
+                        else {}
+                    )
+                    try:
+                        session_version = int(float(capabilities.get("audio_session_version") or 0))
+                    except Exception:
+                        session_version = 0
+                    if session_version < 2 or any(
+                        not bool(capabilities.get(capability))
+                        for capability in required_capabilities
+                    ):
+                        ready = False
+                        break
+            value = f"{VOICE_CORE_TARGET_PREFIX}{pair_selector}"
+            if value in seen:
+                continue
+            seen.add(value)
+            left_name = _text((connected_clients.get(left_selector) or {}).get("device_name")) or left_selector
+            right_name = _text((connected_clients.get(right_selector) or {}).get("device_name")) or right_selector
+            status = "ready" if ready else "offline or firmware update required"
+            rows.append(
+                {
+                    "value": value,
+                    "label": (
+                        f"Tater Stereo: {_text(pair.get('name')) or pair_selector} "
+                        f"({left_name} L + {right_name} R • {status})"
+                    ),
+                }
+            )
+    except Exception:
+        pass
+
     for value in normalize_announcement_targets(current_values):
         if not value.startswith(VOICE_CORE_TARGET_PREFIX) or value in seen:
             continue

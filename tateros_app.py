@@ -8793,6 +8793,9 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
+    speech_satellite_ducking_target_percent: Optional[int] = None
+    speech_satellite_ducking_attack_ms: Optional[int] = None
+    speech_satellite_ducking_release_ms: Optional[int] = None
     speech_announcement_wyoming_tts_host: Optional[str] = None
     speech_announcement_wyoming_tts_port: Optional[str] = None
     speech_announcement_wyoming_tts_voice: Optional[str] = None
@@ -17058,6 +17061,21 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
+        "speech_satellite_ducking_target_percent": int(
+            speech_settings.get("satellite_ducking_target_percent")
+            if speech_settings.get("satellite_ducking_target_percent") is not None
+            else 20
+        ),
+        "speech_satellite_ducking_attack_ms": int(
+            speech_settings.get("satellite_ducking_attack_ms")
+            if speech_settings.get("satellite_ducking_attack_ms") is not None
+            else 150
+        ),
+        "speech_satellite_ducking_release_ms": int(
+            speech_settings.get("satellite_ducking_release_ms")
+            if speech_settings.get("satellite_ducking_release_ms") is not None
+            else 350
+        ),
         "speech_announcement_wyoming_tts_host": str(speech_settings.get("announcement_wyoming_tts_host") or ""),
         "speech_announcement_wyoming_tts_port": str(speech_settings.get("announcement_wyoming_tts_port") or ""),
         "speech_announcement_wyoming_tts_voice": str(speech_settings.get("announcement_wyoming_tts_voice") or ""),
@@ -17387,6 +17405,37 @@ async def get_runtime_tts_asset(asset_id: str) -> Response:
 @app.get("/api/speech/tts/runtime/{asset_id}/{filename:path}")
 async def get_runtime_tts_named_asset(asset_id: str, filename: str) -> Response:
     return _runtime_tts_asset_response(asset_id)
+
+
+def _ai_task_background_audio_response(kind: str, filename: str) -> FileResponse:
+    clean_kind = str(kind or "").strip().lower()
+    clean_filename = Path(str(filename or "").strip()).name
+    if (
+        clean_kind not in {"presets", "uploads"}
+        or not clean_filename
+        or clean_filename != str(filename or "").strip()
+        or Path(clean_filename).suffix.lower() not in {".wav", ".mp3", ".flac"}
+    ):
+        raise HTTPException(status_code=404, detail="Background audio not found.")
+
+    root = agent_lab_path("ai_task", "background_audio", clean_kind).resolve()
+    candidate = (root / clean_filename).resolve()
+    if root not in candidate.parents or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Background audio not found.")
+
+    media_type = str(mimetypes.guess_type(clean_filename)[0] or "").strip()
+    if not media_type:
+        media_type = {
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".flac": "audio/flac",
+        }.get(candidate.suffix.lower(), "application/octet-stream")
+    return FileResponse(candidate, media_type=media_type, filename=clean_filename)
+
+
+@app.get("/api/ai-tasks/background-audio/{kind}/{filename}")
+async def get_ai_task_background_audio(kind: str, filename: str) -> FileResponse:
+    return _ai_task_background_audio_response(kind, filename)
 
 
 @app.post("/api/settings/speech/wyoming-tts-voices")
@@ -18736,6 +18785,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
+        "speech_satellite_ducking_target_percent",
+        "speech_satellite_ducking_attack_ms",
+        "speech_satellite_ducking_release_ms",
         "speech_announcement_wyoming_tts_host",
         "speech_announcement_wyoming_tts_port",
         "speech_announcement_wyoming_tts_voice",
@@ -18764,6 +18816,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
         "speech_chatterbox_tts_streaming_enabled",
+        "speech_satellite_ducking_target_percent",
+        "speech_satellite_ducking_attack_ms",
+        "speech_satellite_ducking_release_ms",
     }
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
@@ -18844,6 +18899,18 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             announcement_tts_voice=str(
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
             ).strip(),
+            satellite_ducking_target_percent=updates.get(
+                "speech_satellite_ducking_target_percent",
+                current_speech.get("satellite_ducking_target_percent"),
+            ),
+            satellite_ducking_attack_ms=updates.get(
+                "speech_satellite_ducking_attack_ms",
+                current_speech.get("satellite_ducking_attack_ms"),
+            ),
+            satellite_ducking_release_ms=updates.get(
+                "speech_satellite_ducking_release_ms",
+                current_speech.get("satellite_ducking_release_ms"),
+            ),
             announcement_wyoming_tts_host=str(
                 updates.get(
                     "speech_announcement_wyoming_tts_host",

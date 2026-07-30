@@ -86,6 +86,7 @@ def _voice_core_play_media_sync(
     audio_bytes: bytes | None = None,
     text: str = "",
     media_type: str = "audio/mpeg",
+    media_content_type: str = "music",
     filename: str = "media.mp3",
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
@@ -98,6 +99,8 @@ def _voice_core_play_media_sync(
         "source_url": _text(source_url),
         "text": _text(text),
         "media_type": _text(media_type) or "audio/mpeg",
+        "media_content_type": _text(media_content_type) or "music",
+        "playback_role": "media",
         "filename": Path(_text(filename) or "media.mp3").name,
         "timeout_s": _as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=30.0),
         "respect_reply_playback": bool(respect_reply_playback),
@@ -107,6 +110,9 @@ def _voice_core_play_media_sync(
 
     sent_count = 0
     failures: List[str] = []
+    media_session_sent_count = 0
+    media_session_fallback_count = 0
+    media_session_warnings: List[str] = []
     base_url = _voice_core_base_url().rstrip("/")
     headers = _voice_core_auth_headers()
 
@@ -122,6 +128,18 @@ def _voice_core_play_media_sync(
             )
             if response.status_code < 400:
                 sent_count += 1
+                response_payload: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    parsed = response.json()
+                    if isinstance(parsed, dict):
+                        response_payload = parsed
+                if bool(response_payload.get("media_session_started")):
+                    media_session_sent_count += 1
+                else:
+                    media_session_fallback_count += 1
+                    reason = _text(response_payload.get("media_session_fallback_reason"))
+                    if reason:
+                        media_session_warnings.append(f"{selector} ({reason})")
                 continue
             detail = ""
             with contextlib.suppress(Exception):
@@ -132,7 +150,14 @@ def _voice_core_play_media_sync(
             failures.append(f"{selector} ({exc})")
 
     if sent_count:
-        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        result: Dict[str, Any] = {
+            "ok": True,
+            "sent_count": sent_count,
+            "media_session_sent_count": media_session_sent_count,
+            "media_session_fallback_count": media_session_fallback_count,
+        }
+        if media_session_warnings:
+            result["media_session_warnings"] = media_session_warnings
         if failures:
             result["warnings"] = failures
         return result
@@ -328,11 +353,19 @@ def play_media_url_targets(
             audio_bytes=bytes(audio_bytes or b"") if isinstance(audio_bytes, (bytes, bytearray)) else None,
             text=text,
             media_type=clean_media_type,
+            media_content_type=media_content_type,
             filename=safe_filename,
             timeout_s=timeout_s,
             respect_reply_playback=respect_reply_playback,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["media_session_sent_count"] = int(voice_result.get("media_session_sent_count") or 0)
+        result["media_session_fallback_count"] = int(voice_result.get("media_session_fallback_count") or 0)
+        result["media_session_warnings"] = [
+            _text(item)
+            for item in list(voice_result.get("media_session_warnings") or [])
+            if _text(item)
+        ]
         sent_count += int(voice_result.get("sent_count") or 0)
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):

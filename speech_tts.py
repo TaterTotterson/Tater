@@ -2326,6 +2326,7 @@ def _voice_core_play_media_sync(
     tts_kind: str = "",
     continue_conversation: bool = False,
     conversation_id: str = "",
+    audio_scene: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
     if not clean_selectors:
@@ -2354,10 +2355,15 @@ def _voice_core_play_media_sync(
         payload_template["continue_conversation"] = True
         if _text(conversation_id):
             payload_template["conversation_id"] = _text(conversation_id)
+    if isinstance(audio_scene, dict) and audio_scene:
+        payload_template["audio_scene"] = dict(audio_scene)
     if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
         payload_template["audio_b64"] = base64.b64encode(bytes(audio_bytes)).decode("ascii")
     failures = []
     sent_count = 0
+    audio_scene_sent_count = 0
+    audio_scene_fallback_count = 0
+    audio_scene_warnings: list[str] = []
 
     for selector in clean_selectors:
         payload = dict(payload_template)
@@ -2376,6 +2382,18 @@ def _voice_core_play_media_sync(
             )
             if response.status_code < 400:
                 sent_count += 1
+                response_payload: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    parsed_response = response.json()
+                    if isinstance(parsed_response, dict):
+                        response_payload = parsed_response
+                if bool(response_payload.get("audio_scene_started")):
+                    audio_scene_sent_count += 1
+                elif isinstance(audio_scene, dict) and audio_scene:
+                    audio_scene_fallback_count += 1
+                    fallback_reason = _text(response_payload.get("audio_scene_fallback_reason"))
+                    if fallback_reason:
+                        audio_scene_warnings.append(f"{selector} ({fallback_reason})")
                 continue
             detail = ""
             with contextlib.suppress(Exception):
@@ -2387,7 +2405,14 @@ def _voice_core_play_media_sync(
             failures.append(f"{selector} ({exc})")
 
     if sent_count:
-        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        result: Dict[str, Any] = {
+            "ok": True,
+            "sent_count": sent_count,
+            "audio_scene_sent_count": audio_scene_sent_count,
+            "audio_scene_fallback_count": audio_scene_fallback_count,
+        }
+        if audio_scene_warnings:
+            result["audio_scene_warnings"] = audio_scene_warnings
         if failures:
             result["warnings"] = failures
         return result
@@ -2605,6 +2630,7 @@ async def speak_announcement_targets(
     voice_core_wyoming_voice: str = DEFAULT_WYOMING_TTS_VOICE,
     default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     tts_kind: str = "",
+    audio_scene: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     prompt = _text(text)
     if not prompt:
@@ -2734,8 +2760,16 @@ async def speak_announcement_targets(
             filename=f"tts-{selected_backend}.wav",
             timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
             tts_kind=tts_kind,
+            audio_scene=audio_scene,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["audio_scene_sent_count"] = int(voice_result.get("audio_scene_sent_count") or 0)
+        result["audio_scene_fallback_count"] = int(voice_result.get("audio_scene_fallback_count") or 0)
+        result["audio_scene_warnings"] = [
+            _text(item)
+            for item in list(voice_result.get("audio_scene_warnings") or [])
+            if _text(item)
+        ]
         sent_count += int(voice_result.get("sent_count") or 0)
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):

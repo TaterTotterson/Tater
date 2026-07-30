@@ -4464,6 +4464,35 @@ def _service_host_for_peer(peer_host: str) -> str:
     return "127.0.0.1"
 
 
+def _service_base_url_from_value(value: Any) -> str:
+    token = _text(value).strip().rstrip("/")
+    if not token:
+        return ""
+    if token.lower().startswith(("http://", "https://")):
+        return token
+
+    authority, separator, path = token.partition("/")
+    if authority.count(":") > 1 and not authority.startswith("["):
+        authority = f"[{authority}]"
+
+    has_explicit_port = (
+        (authority.startswith("[") and "]:" in authority)
+        or (not authority.startswith("[") and authority.count(":") == 1)
+    )
+    if not has_explicit_port:
+        authority = f"{authority}:{_main_app_port()}"
+
+    suffix = f"/{path.rstrip('/')}" if separator and path else ""
+    return f"http://{authority}{suffix}"
+
+
+def _service_base_url_for_peer(peer_host: str) -> str:
+    public_base_url = _text(os.getenv("VOICE_CORE_PUBLIC_BASE_URL"))
+    if public_base_url:
+        return _service_base_url_from_value(public_base_url)
+    return _service_base_url_from_value(_service_host_for_peer(peer_host))
+
+
 def _selector_host(selector: str) -> str:
     token = _text(selector)
     if token.startswith("host:"):
@@ -4497,8 +4526,8 @@ def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_for
             "wav_bytes": wav_bytes,
         }
 
-    host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    base_url = _service_base_url_for_peer(_selector_host(selector))
+    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.wav"
     _native_debug(
         f"native tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
     )
@@ -4548,8 +4577,8 @@ def _store_chatterbox_tts_stream_url(
             "max_bytes": DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES,
         }
 
-    host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    base_url = _service_base_url_for_peer(_selector_host(selector))
+    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.wav"
     _native_debug(
         f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"stream_id={stream_id} url={url}"
@@ -4597,8 +4626,8 @@ def _store_media_url(
             "body_bytes": data,
         }
 
-    host = _service_host_for_peer(_selector_host(selector))
-    url = f"http://{host}:{_main_app_port()}/api/tater/satellite/v1/media/{stream_id}"
+    base_url = _service_base_url_for_peer(_selector_host(selector))
+    url = f"{base_url}/api/tater/satellite/v1/media/{stream_id}"
     _native_debug(
         f"native media url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"bytes={len(data)} media_type={mime} url={url}"

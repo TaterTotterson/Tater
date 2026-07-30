@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 
 agent_lab/logs/*.log
+agent_lab/ai_task/background_audio/
 agent_lab/matrix-store/*.db
 agent_lab/matrix-store/*.db-*
 agent_lab/matrix-store/*.sqlite*

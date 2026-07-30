@@ -4463,8 +4463,11 @@ function buildSettingInput(field, inputId) {
   const safeDesc = field.description ? `<div class="small">${escapeHtml(field.description)}</div>` : "";
   const type = String(field.type || "text").toLowerCase();
   const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
-  const wrapRuntimeSetting = (html) => {
-    const sourceKey = String(showWhen?.source_key ?? showWhen?.key ?? "").trim();
+  const showWhenAll = Array.isArray(field?.show_when_all)
+    ? field.show_when_all.filter((item) => item && typeof item === "object")
+    : [];
+  const wrapRuntimeSettingCondition = (html, condition) => {
+    const sourceKey = String(condition?.source_key ?? condition?.key ?? "").trim();
     const values = [];
     const addValue = (raw) => {
       const token = String(raw ?? "").trim();
@@ -4472,17 +4475,17 @@ function buildSettingInput(field, inputId) {
         values.push(token);
       }
     };
-    if (Array.isArray(showWhen?.any_of)) {
-      showWhen.any_of.forEach(addValue);
+    if (Array.isArray(condition?.any_of)) {
+      condition.any_of.forEach(addValue);
     }
-    if (Array.isArray(showWhen?.values)) {
-      showWhen.values.forEach(addValue);
+    if (Array.isArray(condition?.values)) {
+      condition.values.forEach(addValue);
     }
-    if (showWhen?.equals !== undefined) {
-      addValue(showWhen.equals);
+    if (condition?.equals !== undefined) {
+      addValue(condition.equals);
     }
-    if (showWhen?.value !== undefined) {
-      addValue(showWhen.value);
+    if (condition?.value !== undefined) {
+      addValue(condition.value);
     }
     if (!sourceKey || !values.length) {
       return html;
@@ -4497,6 +4500,19 @@ function buildSettingInput(field, inputId) {
       encoded
     )}">${html}</div>`;
   };
+  const wrapRuntimeSetting = (html) =>
+    showWhenAll.length
+      ? showWhenAll.reduce(
+          (currentHtml, condition) => wrapRuntimeSettingCondition(currentHtml, condition),
+          html
+        )
+      : wrapRuntimeSettingCondition(html, showWhen);
+
+  if (type === "hidden") {
+    return `<input id="${inputId}" type="hidden" value="${escapeHtml(
+      field.value ?? ""
+    )}" data-setting-type="hidden" data-setting-key="${safeKey}" />`;
+  }
 
   if (type === "section" || type === "header") {
     return wrapRuntimeSetting(`
@@ -4597,11 +4613,21 @@ function buildSettingInput(field, inputId) {
   if (type === "file") {
     const accept = String(field.accept || "").trim();
     const acceptAttr = accept ? ` accept="${escapeHtml(accept)}"` : "";
+    const fileEncoding = String(field.file_encoding || field.encoding || "").trim().toLowerCase();
+    const fileEncodingAttr = fileEncoding
+      ? ` data-setting-file-encoding="${escapeHtml(fileEncoding)}"`
+      : "";
+    const maxBytes = Number(field.max_bytes || 0);
+    const maxBytesAttr = Number.isFinite(maxBytes) && maxBytes > 0
+      ? ` data-setting-max-bytes="${Math.floor(maxBytes)}"`
+      : "";
     const currentValue = String(field.value ?? "");
-    const currentSummary = currentValue
-      ? `Current file content saved (${currentValue.length.toLocaleString()} characters).`
-      : "No file saved.";
-    return wrapRuntimeSetting(`<label>${safeLabel}<input id="${inputId}" type="file"${acceptAttr} data-setting-type="file" data-setting-key="${safeKey}" /><textarea hidden data-setting-current-key="${safeKey}">${escapeHtml(
+    const currentSummary = fileEncoding === "base64"
+      ? "Choose a file to upload. Leave it empty to keep the currently selected audio."
+      : currentValue
+        ? `Current file content saved (${currentValue.length.toLocaleString()} characters).`
+        : "No file saved.";
+    return wrapRuntimeSetting(`<label>${safeLabel}<input id="${inputId}" type="file"${acceptAttr}${fileEncodingAttr}${maxBytesAttr} data-setting-type="file" data-setting-key="${safeKey}" /><textarea hidden data-setting-current-key="${safeKey}">${escapeHtml(
       currentValue
     )}</textarea><div class="small">${escapeHtml(currentSummary)}</div>${safeDesc}</label>`);
   }
@@ -4635,6 +4661,32 @@ function buildSettingInput(field, inputId) {
   return wrapRuntimeSetting(`<label>${safeLabel}${inputHtml}${safeDesc}</label>`);
 }
 
+async function readFileAsBase64Payload(file, maxBytes = 0) {
+  if (!(file instanceof File)) {
+    return null;
+  }
+  const limit = Number(maxBytes || 0);
+  if (Number.isFinite(limit) && limit > 0 && file.size > limit) {
+    throw new Error(`${file.name || "Selected file"} is larger than ${Math.floor(limit / (1024 * 1024))} MB.`);
+  }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read the selected file.")));
+    reader.readAsDataURL(file);
+  });
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) {
+    throw new Error(`${file.name || "Selected file"} could not be encoded.`);
+  }
+  return {
+    filename: String(file.name || "upload.bin"),
+    content_type: String(file.type || "application/octet-stream"),
+    size: Number(file.size || 0),
+    data_b64: dataUrl.slice(commaIndex + 1),
+  };
+}
+
 async function getInputValue(input) {
   const type = input.dataset.settingType || input.type;
   if (type === "multiselect") {
@@ -4653,6 +4705,9 @@ async function getInputValue(input) {
         (item) => String(item?.dataset?.settingCurrentKey || "").trim() === key
       );
       return current ? current.value : "";
+    }
+    if (String(input.dataset.settingFileEncoding || "").trim().toLowerCase() === "base64") {
+      return readFileAsBase64Payload(file, Number(input.dataset.settingMaxBytes || 0));
     }
     const text = await file.text();
     const accept = String(input.getAttribute("accept") || "").toLowerCase();
@@ -7559,6 +7614,26 @@ function renderCoreManagerField(field) {
     )}" data-core-field-type="hidden" />`;
   }
 
+  if (type === "file") {
+    const accept = String(field?.accept || "").trim();
+    const acceptAttr = accept ? ` accept="${escapeHtml(accept)}"` : "";
+    const fileEncoding = String(field?.file_encoding || field?.encoding || "").trim().toLowerCase();
+    const fileEncodingAttr = fileEncoding
+      ? ` data-core-file-encoding="${escapeHtml(fileEncoding)}"`
+      : "";
+    const maxBytes = Number(field?.max_bytes || 0);
+    const maxBytesAttr = Number.isFinite(maxBytes) && maxBytes > 0
+      ? ` data-core-file-max-bytes="${Math.floor(maxBytes)}"`
+      : "";
+    return wrapField(`
+      <label>${escapeHtml(label)}
+        <input type="file"${acceptAttr}${fileEncodingAttr}${maxBytesAttr}${disabledAttr}
+          data-core-field-key="${escapeHtml(key)}" data-core-field-type="file" />
+        ${descHtml}
+      </label>
+    `);
+  }
+
   if (type === "table") {
     const rawColumns = Array.isArray(field?.columns) ? field.columns : [];
     const columns = rawColumns
@@ -9147,15 +9222,18 @@ function renderEspHomeSensorRows(sensorRows, sensorTitle = "Live Entities", conn
 
 function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = null) {
   const itemId = String(item?.id || "").trim();
+  const itemGroup = String(item?.group || "satellite").trim() || "satellite";
   const encodedId = escapeHtml(encodeCoreManagerId(itemId));
   const title = String(item?.title || itemId || "Satellite").trim() || "Satellite";
   const subtitle = String(item?.subtitle || "").trim();
   const detail = String(item?.detail || "").trim();
   const saveAction = String(item?.save_action || "").trim();
+  const saveLabel = String(item?.save_label || "Save").trim() || "Save";
   const settingsSaveAction = String(item?.settings_save_action || saveAction || "").trim();
   const identifyAction = String(item?.identify_action || "").trim();
   const identifyLabel = String(item?.identify_label || "Identify").trim() || "Identify";
   const removeAction = String(item?.remove_action || "").trim();
+  const removeLabel = String(item?.remove_label || "Forget").trim() || "Forget";
   const runAction = String(item?.run_action || "").trim();
   const runConfirm = String(item?.run_confirm || "").trim();
   const removeConfirm = String(item?.remove_confirm || "Forget this satellite?").trim();
@@ -9226,7 +9304,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
     <article class="card core-manager-item esphome-satellite-card"
       data-core-key="${escapeHtml(coreKey)}"
       data-core-item-id="${encodedId}"
-      data-core-item-group="satellite"
+      data-core-item-group="${escapeHtml(itemGroup)}"
       data-core-save-action="${escapeHtml(saveAction)}"
       data-core-settings-action="${escapeHtml(settingsSaveAction)}"
       data-core-identify-action="${escapeHtml(identifyAction)}"
@@ -9251,7 +9329,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
       ${summaryBlockHtml}
       ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
       <div class="inline-row" style="margin-top:10px;">
-        ${saveAction ? `<button type="button" class="action-btn core-manager-save">Save</button>` : ""}
+        ${saveAction ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(saveLabel)}</button>` : ""}
         ${
           identifyAction
             ? `<button type="button" class="inline-btn esphome-satellite-identify" ${
@@ -9262,7 +9340,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
         ${showEntityRefresh ? `<button type="button" class="inline-btn esphome-entities-refresh">Refresh Entities</button>` : ""}
         ${infoFields.length ? `<button type="button" class="inline-btn core-manager-info">${escapeHtml(infoLabel)}</button>` : ""}
         ${popupFields.length ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(settingsLabel)}</button>` : ""}
-        ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">Forget</button>` : ""}
+        ${removeAction ? `<button type="button" class="inline-btn danger core-manager-remove">${escapeHtml(removeLabel)}</button>` : ""}
         ${runAction ? `<button type="button" class="action-btn core-manager-run" style="margin-left:auto;">${escapeHtml(String(item?.run_label || "Run"))}</button>` : ""}
         <span class="small core-manager-status"></span>
       </div>
@@ -10832,6 +10910,13 @@ function _coreFieldByKey(host, key) {
   return candidates.find((node) => String(node?.dataset?.coreFieldKey || "").trim() === wanted) || null;
 }
 
+function _coreConditionInputValue(input) {
+  if (input instanceof HTMLInputElement && input.type === "checkbox") {
+    return input.checked ? "true" : "false";
+  }
+  return String(input?.value || "").trim();
+}
+
 function _coreDecodeDependentJson(raw, fallback) {
   const token = String(raw || "").trim();
   if (!token) {
@@ -11037,7 +11122,7 @@ function bindCoreManagerConditionalFields() {
       return;
     }
     const refresh = () => {
-      const sourceValue = String(sourceInput.value || "").trim();
+      const sourceValue = _coreConditionInputValue(sourceInput);
       const visible = allowedValues.includes(sourceValue);
       container.style.display = visible ? "" : "none";
       container.setAttribute("aria-hidden", visible ? "false" : "true");
@@ -11082,7 +11167,7 @@ function bindCoreManagerConditionalDisabledFields() {
       return;
     }
     const refresh = () => {
-      const sourceValue = String(sourceInput.value || "").trim();
+      const sourceValue = _coreConditionInputValue(sourceInput);
       const muted = mutedValues.includes(sourceValue);
       container.classList.toggle("core-conditionally-muted", muted);
       container.setAttribute("aria-disabled", muted ? "true" : "false");
@@ -11137,7 +11222,7 @@ function bindCoreManagerDependentSelects() {
     const isMulti = targetSelect.multiple || String(targetSelect.dataset.coreFieldType || "").toLowerCase() === "multiselect";
 
     const refresh = () => {
-      const sourceValue = String(sourceInput.value || "").trim();
+      const sourceValue = _coreConditionInputValue(sourceInput);
       const sourceRows = optionsBySource && typeof optionsBySource === "object" ? optionsBySource[sourceValue] : [];
       const narrowed = _coreNormalizeOptionRows(sourceRows);
       let nextRows = defaultOptions;
@@ -11183,6 +11268,9 @@ function collectCoreManagerValues(host) {
       return;
     }
     const type = String(input.dataset.coreFieldType || input.type || "").toLowerCase();
+    if (type === "file") {
+      return;
+    }
     if (type === "checkbox") {
       values[key] = Boolean(input.checked);
       return;
@@ -11200,6 +11288,33 @@ function collectCoreManagerValues(host) {
     }
     values[key] = input.value;
   });
+  return values;
+}
+
+async function collectCoreManagerValuesWithFiles(host) {
+  const values = collectCoreManagerValues(host);
+  for (const input of host.querySelectorAll("[data-core-field-key][data-core-field-type='file']")) {
+    if (input.disabled || !(input instanceof HTMLInputElement)) {
+      continue;
+    }
+    const file = input.files && input.files.length ? input.files[0] : null;
+    if (!file) {
+      continue;
+    }
+    const key = String(input.dataset.coreFieldKey || "").trim();
+    if (!key) {
+      continue;
+    }
+    const encoding = String(input.dataset.coreFileEncoding || "").trim().toLowerCase();
+    if (encoding !== "base64") {
+      values[key] = String(await file.text());
+      continue;
+    }
+    values[key] = await readFileAsBase64Payload(
+      file,
+      Number(input.dataset.coreFileMaxBytes || 0)
+    );
+  }
   return values;
 }
 
@@ -11355,6 +11470,9 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const wakeVerifierItem =
         itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "wake_verifier") || null;
       const satelliteItems = itemForms.filter((item) => String(item?.group || "").trim().toLowerCase() === "satellite");
+      const stereoPairItems = itemForms.filter((item) =>
+        ["stereo_pair", "stereo_pair_create"].includes(String(item?.group || "").trim().toLowerCase())
+      );
       const addForm = ui?.add_form && typeof ui.add_form === "object" ? ui.add_form : {};
       const nativePairing = ui?.native_pairing && typeof ui.native_pairing === "object" ? ui.native_pairing : {};
       const summary = String(body.summary || "").trim();
@@ -11385,11 +11503,25 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         ? renderEspHomeSettingsCard(wakeVerifierItem, coreKey)
         : renderNotice("Wake verification settings are unavailable.");
       if (targetPanel === "satellites") {
-        satellitesHost.innerHTML = satelliteItems.length
+        const stereoPairHtml = stereoPairItems.length
+          ? `
+            <section class="core-inline-section" style="margin-bottom:16px;">
+              <div class="small core-inline-section-title">Stereo Pairs</div>
+              <div class="small">Paired satellites appear as one synchronized destination across Tater.</div>
+              <div class="core-tab-items core-tab-items-group-stereo-pair" style="margin-top:10px;">
+                ${stereoPairItems
+                  .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
+                  .join("")}
+              </div>
+            </section>
+          `
+          : "";
+        const satelliteHtml = satelliteItems.length
           ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
               .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
               .join("")}</div>`
           : renderNotice(emptyMessage);
+        satellitesHost.innerHTML = `${stereoPairHtml}${satelliteHtml}`;
         addHost.innerHTML =
           nativePairing?.start_action && nativePairing?.status_action
             ? renderNativeSatellitePairingPanel(nativePairing, coreKey)
@@ -15128,9 +15260,9 @@ function bindCoreTabManagers() {
       if (!coreKey || !action) {
         return;
       }
-      const values = collectCoreManagerValues(form);
       setCoreManagerStatus(form, "Saving...");
       try {
+        const values = await collectCoreManagerValuesWithFiles(form);
         const activeTab = persistCoreTabFromNode(form);
         const result = await runActionWithProgress(
           {
@@ -15275,9 +15407,9 @@ function bindCoreTabManagers() {
       if (!card || !coreKey || !action) {
         return;
       }
-      const values = collectCoreManagerValues(card);
       setCoreManagerStatus(card, "Saving...");
       try {
+        const values = await collectCoreManagerValuesWithFiles(card);
         const activeTab = persistCoreTabFromNode(card);
         const result = await runActionWithProgress(
           {
@@ -21260,6 +21392,25 @@ async function loadSettingsView() {
                 <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
                   Default for Voice Core announcement flows used by cores and verbas.
                 </div>
+                <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Satellite Media Ducking</div>
+                <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                  Applied when ordinary TTS plays over an active native-satellite media session. Individual audio scenes can override these values.
+                </div>
+                <label>Ducked Media Level (%)
+                  <input id="set_speech_satellite_ducking_target_percent" type="number" min="0" max="100" value="${escapeHtml(
+                    settings.speech_satellite_ducking_target_percent ?? 20
+                  )}" />
+                </label>
+                <label>Duck Attack (ms)
+                  <input id="set_speech_satellite_ducking_attack_ms" type="number" min="0" max="10000" value="${escapeHtml(
+                    settings.speech_satellite_ducking_attack_ms ?? 150
+                  )}" />
+                </label>
+                <label>Volume Restore (ms)
+                  <input id="set_speech_satellite_ducking_release_ms" type="number" min="0" max="10000" value="${escapeHtml(
+                    settings.speech_satellite_ducking_release_ms ?? 350
+                  )}" />
+                </label>
                 <label>Announcement Backend
                   <select id="set_speech_announcement_tts_backend">
                     ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
@@ -26320,6 +26471,15 @@ async function loadSettingsView() {
     speech_announcement_tts_backend: String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim(),
     speech_announcement_tts_model: getAnnouncementTtsModelValue(),
     speech_announcement_tts_voice: getAnnouncementTtsVoiceValue(),
+    speech_satellite_ducking_target_percent: readOptionalNumberValue(
+      document.getElementById("set_speech_satellite_ducking_target_percent")
+    ),
+    speech_satellite_ducking_attack_ms: readOptionalNumberValue(
+      document.getElementById("set_speech_satellite_ducking_attack_ms")
+    ),
+    speech_satellite_ducking_release_ms: readOptionalNumberValue(
+      document.getElementById("set_speech_satellite_ducking_release_ms")
+    ),
     speech_announcement_wyoming_tts_host: String(announcementWyomingTtsHostEl?.value || "").trim(),
     speech_announcement_wyoming_tts_port: String(announcementWyomingTtsPortEl?.value || "").trim(),
     speech_announcement_wyoming_tts_voice: String(announcementWyomingTtsVoiceEl?.value || "").trim(),
