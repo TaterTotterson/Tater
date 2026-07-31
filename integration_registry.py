@@ -22,7 +22,7 @@ integration_registry_errors: List[str] = []
 INTEGRATION_DEVICE_REGISTRY_CACHE_KEY = "tater:integration_runtime:device_registry"
 INTEGRATION_ROOM_OVERRIDES_KEY = "tater:integration_runtime:room_overrides"
 INTEGRATION_RUNTIME_STATES_KEY = "tater:integration_runtime:states"
-_DEVICE_REGISTRY_CACHE_VERSION = 3
+_DEVICE_REGISTRY_CACHE_VERSION = 4
 _DEVICE_REGISTRY_VOLATILE_FIELDS = {
     "age_seconds",
     "duration_ms",
@@ -368,6 +368,27 @@ def _normalize_actions(value: Any) -> List[str]:
     return _normalize_features(value)
 
 
+def _normalize_aliases(*values: Any) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+            return
+        text = _text(value)
+        token = text.casefold()
+        if not text or token in seen:
+            return
+        seen.add(token)
+        out.append(text)
+
+    for value in values:
+        add(value)
+    return out
+
+
 def _room_slug(value: Any) -> str:
     token = _normalize_token(value)
     return token or "unassigned"
@@ -696,6 +717,7 @@ def _apply_device_name_store_to_device(device: Dict[str, Any], store: Dict[str, 
         if reported_name and not _text(device.get("name")):
             device["name"] = reported_name
         device["device_name_source"] = "integration"
+    device["aliases"] = _normalize_aliases(device.get("aliases"), reported_name)
 
 
 def _apply_room_store_to_device(device: Dict[str, Any], store: Dict[str, Any]) -> None:
@@ -774,6 +796,7 @@ def _device_state_tokens(device: Dict[str, Any]) -> List[str]:
     device_id = _text(device.get("id"))
     if device_type and device_id:
         tokens.append(f"{device_type}:{device_id}")
+    tokens.extend(_normalize_aliases(device.get("aliases")))
     return tokens
 
 
@@ -1211,6 +1234,16 @@ def _coerce_device_row(integration_id: str, row: Dict[str, Any]) -> Dict[str, An
     )
     actions = _normalize_actions(source.get("actions"))
     features = _normalize_features(source.get("features"))
+    aliases = _normalize_aliases(
+        source.get("aliases"),
+        source.get("alias"),
+        source.get("alternate_names"),
+        source.get("alternate_name"),
+        details.get("aliases"),
+        details.get("alias"),
+        details.get("alternate_names"),
+        details.get("friendly_name"),
+    )
     for action in actions:
         if action not in features:
             features.append(action)
@@ -1218,6 +1251,7 @@ def _coerce_device_row(integration_id: str, row: Dict[str, Any]) -> Dict[str, An
         "integration_id": integration_id,
         "id": device_id or name,
         "name": name or device_id or "Device",
+        "aliases": aliases,
         "type": device_type or "device",
         "ref": ref or device_id or name,
         "capabilities": capabilities,

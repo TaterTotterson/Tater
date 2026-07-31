@@ -8,7 +8,11 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from helpers import extract_json
-from integration_registry import get_integration_devices_by_capability, run_integration_device_action
+from integration_registry import (
+    get_integration_device_registry,
+    get_integration_devices_by_capability,
+    run_integration_device_action,
+)
 from verba_base import ToolVerba
 from verba_result import action_failure, action_success
 
@@ -17,6 +21,40 @@ logger = logging.getLogger("category_device_control")
 logger.setLevel(logging.INFO)
 
 CAMERA_SNAPSHOT_ARTIFACT_TTL_SEC = int(os.getenv("TATER_CAMERA_SNAPSHOT_ARTIFACT_TTL_SEC", str(60 * 60 * 24 * 14)))
+
+_DEVICE_CATEGORY_QUERY_TERMS: Dict[str, Tuple[str, ...]] = {
+    "light": ("light", "lights", "lamp", "lamps", "bulb", "bulbs", "dimmer", "dimmers"),
+    "switch": ("switch", "switches", "relay", "relays"),
+    "plug": ("plug", "plugs", "outlet", "outlets"),
+    "fan": ("fan", "fans"),
+    "garage_door": ("garage", "garage door", "garage doors", "garage opener"),
+    "cover": ("cover", "covers", "shade", "shades", "blind", "blinds", "curtain", "curtains"),
+    "lock": ("lock", "locks"),
+    "camera": ("camera", "cameras", "doorbell", "doorbells"),
+    "climate": ("climate", "thermostat", "thermostats", "hvac"),
+    "media_player": ("media player", "media players", "speaker", "speakers", "television", "tv"),
+    "remote": ("remote", "remotes"),
+    "scene": ("scene", "scenes"),
+    "script": ("script", "scripts"),
+}
+_COLOR_NAMES = {
+    "red",
+    "orange",
+    "amber",
+    "yellow",
+    "green",
+    "blue",
+    "cyan",
+    "teal",
+    "purple",
+    "violet",
+    "magenta",
+    "pink",
+    "white",
+    "daylight",
+    "warm white",
+    "cool white",
+}
 
 
 class CategoryDeviceControlBase(ToolVerba):
@@ -58,6 +96,7 @@ class CategoryDeviceControlBase(ToolVerba):
     ignored_target_words = {"device", "devices", "the", "my", "all"}
     action_aliases: Dict[str, str] = {}
     needs_target_for_actions = True
+    inventory_scope = "category"
 
     waiting_prompt_template = (
         "Write a friendly message telling {mention} you are checking or controlling devices now. "
@@ -199,7 +238,10 @@ class CategoryDeviceControlBase(ToolVerba):
 
     def _percent_from_text(self, text: Any) -> Optional[int]:
         raw = self._text(text).lower()
-        for pattern in (r"\b(\d{1,3})\s*%", r"\b(?:to|at|level|position|volume)\s+(\d{1,3})\b"):
+        for pattern in (
+            r"\b(\d{1,3})\s*(?:%|\bpercent\b)",
+            r"\b(?:to|at|level|position|volume|brightness|speed)\s+(\d{1,3})\b",
+        ):
             match = re.search(pattern, raw)
             if not match:
                 continue
@@ -208,6 +250,49 @@ class CategoryDeviceControlBase(ToolVerba):
             except Exception:
                 continue
         return None
+
+    def _normalize_rgb(self, value: Any) -> Optional[List[int]]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return None
+        rgb: List[int] = []
+        for item in value:
+            parsed = self._normalize_int(item)
+            if parsed is None:
+                return None
+            rgb.append(max(0, min(255, parsed)))
+        return rgb
+
+    def _rgb_from_text(self, text: Any) -> Optional[List[int]]:
+        raw = self._text(text)
+        rgb_match = re.search(
+            r"\brgb\s*(?:\(\s*|[:=]?\s*)(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*\)?",
+            raw,
+            flags=re.I,
+        )
+        if rgb_match:
+            return [max(0, min(255, int(rgb_match.group(index)))) for index in (1, 2, 3)]
+        hex_match = re.search(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b", raw)
+        if not hex_match:
+            return None
+        token = hex_match.group(1)
+        if len(token) == 3:
+            token = "".join(char * 2 for char in token)
+        return [int(token[0:2], 16), int(token[2:4], 16), int(token[4:6], 16)]
+
+    def _color_name_from_text(self, text: Any) -> str:
+        raw = self._text(text).lower()
+        for color in sorted(_COLOR_NAMES, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(color)}\b", raw):
+                return color
+        return ""
+
+    def _requested_categories(self, query: Any) -> List[str]:
+        raw = self._text(query).lower().replace("_", " ").replace("-", " ")
+        out: List[str] = []
+        for category_id, terms in _DEVICE_CATEGORY_QUERY_TERMS.items():
+            if any(re.search(rf"\b{re.escape(term)}\b", raw) for term in terms):
+                out.append(category_id)
+        return out
 
     def _temperature_from_text(self, text: Any) -> Optional[float]:
         raw = self._text(text).lower()
@@ -259,6 +344,10 @@ class CategoryDeviceControlBase(ToolVerba):
             "speed": "set_percentage",
             "fan_speed": "set_percentage",
             "percentage": "set_percentage",
+            "brightness": "set_brightness",
+            "dim": "set_brightness",
+            "color": "set_color",
+            "colour": "set_color",
             "lock_door": "lock",
             "unlock_door": "unlock",
             "run_scene": "activate",
@@ -278,32 +367,75 @@ class CategoryDeviceControlBase(ToolVerba):
             return "list" if "list" in self.allowed_actions else "status"
         if re.search(r"\b(status|state|check|is|are|what|whether|how|show me)\b", compact) or "?" in compact:
             return "status"
-        if "turn_on" in self.allowed_actions and re.search(r"\b(turn|switch|power|set)\s+(?:[\w -]+?\s+)?on\b|\b(enable|activate)\b", compact):
+        requested_categories = set(self._requested_categories(compact))
+        if "activate" in self.allowed_actions and "scene" in requested_categories and re.search(
+            r"\b(activate|run|start|turn on)\b",
+            compact,
+        ):
+            return "activate"
+        if "run" in self.allowed_actions and "script" in requested_categories and re.search(
+            r"\b(run|start|execute|turn on)\b",
+            compact,
+        ):
+            return "run"
+        if (
+            "set_hvac_mode" in self.allowed_actions
+            and "climate" in requested_categories
+            and re.search(r"\b(turn|switch|set)\b.*\boff\b", compact)
+        ):
+            return "set_hvac_mode"
+        if "turn_on" in self.allowed_actions and re.search(r"\b(turn|switch|power|set)\s+(?:[\w -]+?\s+)?on\b|\benable\b", compact):
             return "turn_on"
         if "turn_off" in self.allowed_actions and re.search(r"\b(turn|switch|power|shut|set)\s+(?:[\w -]+?\s+)?off\b|\b(disable|deactivate)\b", compact):
             return "turn_off"
         if "toggle" in self.allowed_actions and re.search(r"\b(toggle|flip)\b", compact):
             return "toggle"
+        percent = self._percent_from_text(compact)
+        percent_actions = {
+            action_name
+            for action_name in ("set_brightness", "set_percentage", "set_position")
+            if action_name in self.allowed_actions
+        }
+        if percent is not None:
+            if "set_brightness" in percent_actions and re.search(
+                r"\b(light|lights|lamp|lamps|bulb|bulbs|brightness|brighten|dim|dimmer|level)\b",
+                compact,
+            ):
+                return "set_brightness"
+            if "set_percentage" in percent_actions and re.search(r"\b(fan|fans|speed)\b", compact):
+                return "set_percentage"
+            if "set_position" in percent_actions and re.search(
+                r"\b(cover|covers|shade|shades|blind|blinds|curtain|curtains|position)\b",
+                compact,
+            ):
+                return "set_position"
+            if len(percent_actions) == 1:
+                return next(iter(percent_actions))
+        if "set_color" in self.allowed_actions and (
+            self._rgb_from_text(compact)
+            or self._color_name_from_text(compact)
+            or re.search(r"\b(colou?r|hue)\b", compact)
+        ):
+            return "set_color"
+        if "unlock" in self.allowed_actions and re.search(r"\b(unlock|open lock)\b", compact):
+            return "unlock"
+        if "lock" in self.allowed_actions and re.search(r"\block\b", compact) and not re.search(r"\bunlock\b", compact):
+            return "lock"
         if "open" in self.allowed_actions and re.search(r"\b(open|raise|up)\b", compact):
             return "open"
         if "close" in self.allowed_actions and re.search(r"\b(close|shut|lower|down)\b", compact):
             return "close"
         if "stop" in self.allowed_actions and re.search(r"\b(stop|halt)\b", compact):
             return "stop"
-        if "set_position" in self.allowed_actions and self._percent_from_text(compact) is not None:
-            return "set_position"
-        if "set_percentage" in self.allowed_actions and self._percent_from_text(compact) is not None:
-            return "set_percentage"
-        if "lock" in self.allowed_actions and re.search(r"\block\b", compact) and not re.search(r"\bunlock\b", compact):
-            return "lock"
-        if "unlock" in self.allowed_actions and re.search(r"\b(unlock|open lock)\b", compact):
-            return "unlock"
-        if "activate" in self.allowed_actions and re.search(r"\b(activate|run|start|turn on)\b", compact):
+        if "activate" in self.allowed_actions and re.search(r"\bactivate\b", compact):
             return "activate"
-        if "run" in self.allowed_actions and re.search(r"\b(run|start|execute|turn on)\b", compact):
+        if "run" in self.allowed_actions and re.search(r"\b(run|execute)\b", compact):
             return "run"
-        if "send_command" in self.allowed_actions and re.search(
-            r"\b(command|press|button|mute|volume|home|back|menu|select|ok|play|pause|up|down|left|right)\b",
+        if "send_command" in self.allowed_actions and (
+            "remote" in requested_categories
+            or re.search(r"\b(command|press|button|home|back|menu|select|ok|left|right)\b", compact)
+        ) and re.search(
+            r"\b(command|press|button|mute|volume|home|back|menu|select|ok|play|pause|stop|up|down|left|right)\b",
             compact,
         ):
             return "send_command"
@@ -347,7 +479,7 @@ class CategoryDeviceControlBase(ToolVerba):
     def _clean_target(self, value: Any) -> str:
         text = self._text(value).lower()
         text = re.sub(
-            r"\b(turn|switch|power|set|shut|enable|disable|activate|deactivate|toggle|flip|status|state|check|is|are|what|whether|show|list|open|close|stop|raise|lower|play|pause|next|previous|mute|unmute|volume|temperature|mode|snapshot|photo|picture|image|lock|unlock|run|execute|press|button|command|speed|percentage|on|off|to|at|in|inside|from|for|of|with|near|currently|right|now|please|can|you|could|would)\b",
+            r"\b(turn|switch|power|set|shut|enable|disable|activate|deactivate|toggle|flip|status|state|check|is|are|what|whether|show|list|open|close|stop|raise|lower|play|pause|next|previous|mute|unmute|volume|temperature|mode|snapshot|photo|picture|image|lock|unlock|run|execute|press|button|command|speed|percentage|percent|brightness|brighten|dim|color|colour|hue|on|off|to|at|in|inside|from|for|of|with|near|currently|right|now|please|can|you|could|would)\b",
             " ",
             text,
         )
@@ -356,6 +488,8 @@ class CategoryDeviceControlBase(ToolVerba):
             text = re.sub(r"\b(" + "|".join(ignored) + r")\b", " ", text)
         text = re.sub(r"https?://\S+", " ", text)
         text = re.sub(r"\d{1,3}(?:\.\d+)?\s*(?:%|degrees?|deg|f|c)?", " ", text)
+        text = re.sub(r"#[0-9a-fA-F]{3,6}\b", " ", text)
+        text = re.sub(r"\brgb\s*\([^)]*\)", " ", text, flags=re.I)
         return " ".join(re.findall(r"[a-z0-9]+", text))
 
     async def _interpret_query(self, payload: dict, query: str, llm_client) -> dict:
@@ -364,10 +498,16 @@ class CategoryDeviceControlBase(ToolVerba):
         position = self._normalize_int(payload.get("position", payload.get("position_pct")))
         volume = self._normalize_int(payload.get("volume", payload.get("volume_pct")))
         percentage = self._normalize_int(payload.get("percentage", payload.get("speed", payload.get("speed_pct"))))
+        brightness = self._normalize_int(
+            payload.get("brightness_pct", payload.get("brightness", payload.get("level")))
+        )
+        rgb_color = self._normalize_rgb(payload.get("rgb_color")) or self._rgb_from_text(query)
+        color_name = self._text(payload.get("color_name") or payload.get("color")).lower()
         temperature = self._normalize_number(payload.get("temperature", payload.get("target_temperature")))
         hvac_mode = self._text(payload.get("mode") or payload.get("hvac_mode")).lower().replace(" ", "_")
         source_url = self._text(payload.get("source_url") or payload.get("url") or payload.get("media_url")) or self._url_from_text(query)
         command = self._text(payload.get("command") or payload.get("button"))
+        requested_categories = self._requested_categories(query)
 
         if position is None and action == "set_position":
             position = self._percent_from_text(query)
@@ -375,6 +515,10 @@ class CategoryDeviceControlBase(ToolVerba):
             volume = self._percent_from_text(query)
         if percentage is None and action == "set_percentage":
             percentage = self._percent_from_text(query)
+        if brightness is None and action in {"set_brightness", "turn_on"}:
+            brightness = self._percent_from_text(query)
+        if not color_name:
+            color_name = self._color_name_from_text(query)
         if temperature is None and action == "set_temperature":
             temperature = self._temperature_from_text(query)
         if not hvac_mode:
@@ -385,12 +529,14 @@ class CategoryDeviceControlBase(ToolVerba):
         if not action or (not target and self.needs_target_for_actions):
             system = (
                 f"Interpret one {self.category_label} request across multiple home integrations.\n"
-                "Return STRICT JSON only with keys: action, target, position, volume, percentage, temperature, hvac_mode, source_url, command.\n"
+                "Return STRICT JSON only with keys: action, target, position, volume, percentage, brightness_pct, "
+                "color_name, rgb_color, temperature, hvac_mode, source_url, command.\n"
                 f"Allowed action values: {', '.join(sorted(self.allowed_actions))}, or empty string.\n"
                 "Rules:\n"
                 "- target is the named room or specific device, without action words.\n"
                 "- list/status may have an empty target when the user asks for all devices.\n"
-                "- position, volume, and percentage are integers 0-100 or null.\n"
+                "- position, volume, percentage, and brightness_pct are integers 0-100 or null.\n"
+                "- color_name is a named light color or empty string; rgb_color is [r,g,b] or null.\n"
                 "- temperature is a number or null.\n"
                 "- source_url is a URL or empty string.\n"
                 "- command is a remote/button command such as mute, volume_up, home, back, select, play, or pause.\n"
@@ -405,6 +551,12 @@ class CategoryDeviceControlBase(ToolVerba):
                     volume = self._normalize_int(ai.get("volume"))
                 if percentage is None:
                     percentage = self._normalize_int(ai.get("percentage"))
+                if brightness is None:
+                    brightness = self._normalize_int(ai.get("brightness_pct"))
+                if rgb_color is None:
+                    rgb_color = self._normalize_rgb(ai.get("rgb_color"))
+                if not color_name:
+                    color_name = self._text(ai.get("color_name")).lower()
                 if temperature is None:
                     temperature = self._normalize_number(ai.get("temperature"))
                 if not hvac_mode:
@@ -415,17 +567,25 @@ class CategoryDeviceControlBase(ToolVerba):
                     command = self._text(ai.get("command"))
 
         if not target:
-            target = self._clean_target(query)
+            target_query = query
+            if action == "set_color":
+                for color in sorted(_COLOR_NAMES, key=len, reverse=True):
+                    target_query = re.sub(rf"\b{re.escape(color)}\b", " ", target_query, flags=re.I)
+            target = self._clean_target(target_query)
         return {
             "action": action,
             "target": target,
             "position": max(0, min(100, position)) if position is not None else None,
             "volume": max(0, min(100, volume)) if volume is not None else None,
             "percentage": max(0, min(100, percentage)) if percentage is not None else None,
+            "brightness_pct": max(0, min(100, brightness)) if brightness is not None else None,
+            "color_name": color_name,
+            "rgb_color": rgb_color,
             "temperature": temperature,
             "hvac_mode": hvac_mode,
             "source_url": source_url,
             "command": command,
+            "requested_categories": requested_categories,
         }
 
     def _remote_command_from_text(self, text: Any) -> str:
@@ -469,7 +629,14 @@ class CategoryDeviceControlBase(ToolVerba):
         return {self._text(item).lower() for item in (device.get("actions") or []) if self._text(item)}
 
     def _device_caps(self, device: dict) -> set:
-        return {self._text(item).lower() for item in (device.get("capabilities") or []) if self._text(item)}
+        out = set()
+        for raw in (device.get("capabilities"), device.get("category_ids")):
+            values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+            for item in values:
+                token = self._text(item).lower()
+                if token:
+                    out.add(token)
+        return out
 
     def _action_supported(self, device: dict, action: str) -> bool:
         if action in {"list", "status"}:
@@ -480,11 +647,77 @@ class CategoryDeviceControlBase(ToolVerba):
             return True
         if action == "camera_snapshot" and "camera" in caps:
             return True
-        if action in {"turn_on", "turn_off"} and caps.intersection({"switch", "plug", "light"}):
+        if action in {"turn_on", "turn_off", "toggle"} and caps.intersection(
+            {"switch", "plug", "light", "fan", "media_player"}
+        ):
             return True
         if action in {"open", "close"} and caps.intersection({"cover", "garage_door", "open_close"}):
             return True
+        if action == "stop" and caps.intersection({"cover", "garage_door", "media_player"}):
+            return True
+        if action == "set_position" and caps.intersection({"cover", "garage_door"}):
+            return True
+        if action == "set_brightness" and caps.intersection({"dimmable", "brightness"}):
+            return True
+        if action == "set_color" and caps.intersection({"color", "rgb", "color_temperature"}):
+            return True
+        if action == "set_percentage" and "fan" in caps:
+            return True
+        if action in {"set_temperature", "set_hvac_mode"} and "climate" in caps:
+            return True
+        if action in {"lock", "unlock"} and "lock" in caps:
+            return True
+        if action == "activate" and "scene" in caps:
+            return True
+        if action == "run" and "script" in caps:
+            return True
+        if action == "send_command" and "remote" in caps:
+            return True
+        if action in {
+            "playpause",
+            "play",
+            "pause",
+            "next",
+            "previous",
+            "mute",
+            "unmute",
+            "set_volume",
+            "volume_up",
+            "volume_down",
+            "announce",
+            "play_media",
+        } and "media_player" in caps:
+            return True
         return False
+
+    def _device_alias_values(self, device: dict) -> List[str]:
+        details = device.get("details") if isinstance(device.get("details"), dict) else {}
+        values: List[str] = []
+        seen = set()
+
+        def add(value: Any) -> None:
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    add(item)
+                return
+            text = self._text(value)
+            token = text.casefold()
+            if not text or token in seen:
+                return
+            seen.add(token)
+            values.append(text)
+
+        for value in (
+            device.get("aliases"),
+            device.get("reported_name"),
+            device.get("reported_device_name"),
+            details.get("aliases"),
+            details.get("friendly_name"),
+            details.get("alias"),
+            details.get("alternate_names"),
+        ):
+            add(value)
+        return values
 
     def _device_alias_text(self, device: dict) -> str:
         details = device.get("details") if isinstance(device.get("details"), dict) else {}
@@ -503,24 +736,57 @@ class CategoryDeviceControlBase(ToolVerba):
             details.get("model"),
             details.get("host"),
             details.get("ip"),
+            *self._device_alias_values(device),
         ]
         return " ".join(self._text(bit).lower() for bit in bits if self._text(bit))
 
     def _tokens(self, value: Any) -> List[str]:
         return [token for token in re.split(r"[^a-z0-9]+", self._text(value).lower()) if token]
 
-    def _score_device(self, target: str, device: dict) -> int:
+    def _device_matches_requested_categories(self, device: dict, requested_categories: List[str]) -> bool:
+        requested = {self._text(item).lower() for item in requested_categories if self._text(item)}
+        if not requested:
+            return True
+        if requested.intersection(self._device_caps(device)):
+            return True
+        semantic_text = " ".join(
+            [
+                self._text(device.get("name")).lower(),
+                *(self._text(value).lower() for value in self._device_alias_values(device)),
+            ]
+        )
+        for category_id in requested:
+            terms = _DEVICE_CATEGORY_QUERY_TERMS.get(category_id) or ()
+            if any(re.search(rf"\b{re.escape(term)}\b", semantic_text) for term in terms):
+                return True
+        return False
+
+    def _device_has_exact_name_or_alias(self, target: str, device: dict) -> bool:
+        target_text = self._clean_target(target)
+        if not target_text:
+            return False
+        if target_text == self._clean_target(device.get("name")):
+            return True
+        return any(
+            target_text == self._clean_target(alias_value)
+            for alias_value in self._device_alias_values(device)
+        )
+
+    def _score_device(self, target: str, device: dict, requested_categories: Optional[List[str]] = None) -> int:
         target_text = self._clean_target(target)
         if not target_text:
             return 0
         name = self._text(device.get("name")).lower()
         room = self._text(device.get("room") or device.get("area")).lower()
         alias = self._device_alias_text(device)
-        if target_text == self._clean_target(name):
+        if self._device_has_exact_name_or_alias(target_text, device):
             return 1000
         score = 0
         if target_text in self._clean_target(name):
             score += 520 + len(target_text)
+        alias_names = [self._clean_target(value) for value in self._device_alias_values(device)]
+        if any(target_text and target_text in alias_name for alias_name in alias_names):
+            score += 540 + len(target_text)
         if target_text and target_text == self._clean_target(room):
             score += 300
         elif target_text in alias:
@@ -532,9 +798,16 @@ class CategoryDeviceControlBase(ToolVerba):
                 score += 75
             elif len(token) >= 4 and any(part.startswith(token) for part in alias_tokens):
                 score += 30
+        if requested_categories and self._device_matches_requested_categories(device, requested_categories):
+            score += 40
         return score
 
-    def _room_matches(self, target: str, devices: List[dict]) -> List[dict]:
+    def _room_matches(
+        self,
+        target: str,
+        devices: List[dict],
+        requested_categories: Optional[List[str]] = None,
+    ) -> List[dict]:
         clean_target = self._clean_target(target)
         if not clean_target:
             return []
@@ -543,6 +816,12 @@ class CategoryDeviceControlBase(ToolVerba):
             room = self._clean_target(device.get("room") or device.get("area"))
             if room and clean_target == room:
                 matches.append(device)
+        if requested_categories:
+            matches = [
+                device
+                for device in matches
+                if self._device_matches_requested_categories(device, requested_categories)
+            ]
         return matches
 
     async def _ai_choose_device(self, *, query: str, intent: dict, candidates: List[dict], llm_client) -> str:
@@ -558,6 +837,8 @@ class CategoryDeviceControlBase(ToolVerba):
                 "integration": row.get("integration_name") or row.get("integration_id"),
                 "state": row.get("state") or row.get("status"),
                 "actions": row.get("actions") or [],
+                "capabilities": row.get("category_ids") or row.get("capabilities") or [],
+                "aliases": self._device_alias_values(row),
             }
             for row in shortlist
         ]
@@ -565,7 +846,10 @@ class CategoryDeviceControlBase(ToolVerba):
         system = (
             f"Choose the best {self.singular_label} for this request.\n"
             "Return STRICT JSON only: {\"device_id\":\"<id from candidates or empty>\"}.\n"
-            f"Pick exactly one id only if the request clearly names a single {self.singular_label}. Do not invent ids."
+            f"Pick exactly one id only if the request clearly identifies a single {self.singular_label}. "
+            "Use user-facing names, aliases, rooms, and the requested action. The candidates are already "
+            "filtered to devices that support the action. Do not infer a device's technical type from words "
+            "such as light, switch, or plug. Return an empty id when the choice is unclear, and never invent ids."
         )
         payload = await self._llm_json(
             llm_client=llm_client,
@@ -597,26 +881,54 @@ class CategoryDeviceControlBase(ToolVerba):
                 return [candidates[0]], []
             return [], [f"Choose a room or {self.singular_label} name."]
 
-        room_matches = self._room_matches(target, candidates)
+        requested_categories = [
+            self._text(item).lower()
+            for item in (intent.get("requested_categories") or [])
+            if self._text(item)
+        ]
+        scored = [
+            (self._score_device(target, device, requested_categories), device)
+            for device in candidates
+        ]
+        exact_matches = [
+            device
+            for device in candidates
+            if self._device_has_exact_name_or_alias(target, device)
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches, []
+
+        room_matches = self._room_matches(target, candidates, requested_categories)
         if room_matches:
             return room_matches, []
 
-        scored = [(self._score_device(target, device), device) for device in candidates]
-        scored = [(score, device) for score, device in scored if score > 0]
-        scored.sort(key=lambda item: (item[0], self._text(item[1].get("name")).lower()), reverse=True)
-        if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
-            return [scored[0][1]], []
-
-        picked_id = await self._ai_choose_device(query=query, intent=intent, candidates=candidates, llm_client=llm_client)
+        scored.sort(
+            key=lambda item: (item[0], self._text(item[1].get("name")).lower()),
+            reverse=True,
+        )
+        ranked_candidates = [device for _score, device in scored]
+        picked_id = await self._ai_choose_device(
+            query=query,
+            intent=intent,
+            candidates=ranked_candidates,
+            llm_client=llm_client,
+        )
         if picked_id:
             for device in candidates:
                 if self._text(device.get("id")) == picked_id:
                     return [device], []
 
-        if scored and len(scored) > 1 and scored[0][0] == scored[1][0]:
-            tied = [device for score, device in scored if score == scored[0][0]]
-            return [], [f"That matched multiple {self.category_label}: " + self._format_device_choices(tied[:10])]
-        return [], [f"I could not match '{target}' to a {self.singular_label}. Available matches: {self._format_device_choices(candidates[:12])}"]
+        if exact_matches:
+            return [], [
+                f"That name or alias matched multiple {self.category_label}: "
+                + self._format_device_choices(exact_matches[:10])
+            ]
+        likely_matches = [device for score, device in scored if score > 0]
+        choices = likely_matches or ranked_candidates
+        return [], [
+            f"I could not confidently match '{target}' to a {self.singular_label}. "
+            f"Available matches: {self._format_device_choices(choices[:12])}"
+        ]
 
     def _format_device_choices(self, devices: List[dict]) -> str:
         parts: List[str] = []
@@ -667,6 +979,15 @@ class CategoryDeviceControlBase(ToolVerba):
             out["percentage"] = intent.get("percentage")
             out["speed"] = intent.get("percentage")
             out["speed_pct"] = intent.get("percentage")
+        if intent.get("brightness_pct") is not None:
+            out["brightness"] = intent.get("brightness_pct")
+            out["brightness_pct"] = intent.get("brightness_pct")
+        if self._text(intent.get("action")) in {"set_color", "turn_on"}:
+            if self._text(intent.get("color_name")):
+                out["color_name"] = self._text(intent.get("color_name"))
+            rgb_color = self._normalize_rgb(intent.get("rgb_color"))
+            if rgb_color is not None:
+                out["rgb_color"] = rgb_color
         if intent.get("temperature") is not None:
             out["temperature"] = intent.get("temperature")
             out["target_temperature"] = intent.get("temperature")
@@ -835,13 +1156,27 @@ class CategoryDeviceControlBase(ToolVerba):
             return safe_items
         return self._text(value)
 
-    def _validate_intent(self, action: str, intent: dict) -> Tuple[bool, str, List[str]]:
+    def _validate_intent(
+        self,
+        action: str,
+        intent: dict,
+        payload: Optional[dict] = None,
+    ) -> Tuple[bool, str, List[str]]:
+        payload = payload or {}
         if action == "set_position" and intent.get("position") is None:
             return False, "Position requires a percentage.", ["Include a position percentage from 0 to 100."]
         if action == "set_volume" and intent.get("volume") is None:
             return False, "Volume requires a percentage.", ["Include a volume percentage from 0 to 100."]
         if action == "set_percentage" and intent.get("percentage") is None:
             return False, "Fan speed requires a percentage.", ["Include a fan speed percentage from 0 to 100."]
+        if action == "set_brightness" and intent.get("brightness_pct") is None:
+            return False, "Brightness requires a percentage.", ["Include a brightness percentage from 0 to 100."]
+        if action == "set_color" and not (
+            self._text(intent.get("color_name")) or self._normalize_rgb(intent.get("rgb_color"))
+        ):
+            return False, "Color requires a name or RGB value.", [
+                "Include a color such as blue, warm white, #33ccff, or rgb(51,204,255)."
+            ]
         if action == "set_temperature" and intent.get("temperature") is None:
             return False, "Temperature requires a target temperature.", ["Include the target temperature."]
         if action == "set_hvac_mode" and not self._text(intent.get("hvac_mode")):
@@ -855,6 +1190,20 @@ class CategoryDeviceControlBase(ToolVerba):
                 "Include a media URL in source_url, a media_content_id, or the request text."
             ]
         return True, "", []
+
+    def _inventory_devices(self) -> List[dict]:
+        if self.inventory_scope == "all":
+            registry = get_integration_device_registry()
+            return [
+                dict(row)
+                for row in (registry.get("devices") or [])
+                if isinstance(row, dict)
+            ]
+        return [
+            dict(row)
+            for row in get_integration_devices_by_capability(self.category_id)
+            if isinstance(row, dict)
+        ]
 
     async def _handle(self, args, llm_client=None):
         payload = self._normalize_handler_args(args)
@@ -878,7 +1227,7 @@ class CategoryDeviceControlBase(ToolVerba):
                 needs=[f"Use one of: {', '.join(sorted(self.allowed_actions))}."],
                 say_hint=f"Ask which {self.category_label} action the user wants.",
             )
-        ok, message, needs = self._validate_intent(action, intent)
+        ok, message, needs = self._validate_intent(action, intent, payload)
         if not ok:
             return action_failure(
                 code="missing_action_detail",
@@ -888,7 +1237,7 @@ class CategoryDeviceControlBase(ToolVerba):
             )
 
         try:
-            devices = [dict(row) for row in get_integration_devices_by_capability(self.category_id) if isinstance(row, dict)]
+            devices = self._inventory_devices()
         except Exception as exc:
             return action_failure(
                 code="device_inventory_failed",

@@ -11391,7 +11391,7 @@ function resolveCoreRefreshScope(node) {
 
 function normalizeEspHomeRuntimePanel(panel = "") {
   const token = String(panel || "").trim().toLowerCase();
-  return ["satellites", "firmware", "platform", "speakerid", "emotionid", "stats"].includes(token)
+  return ["satellites", "firmware", "stereo", "platform", "speakerid", "emotionid", "stats"].includes(token)
     ? token
     : "satellites";
 }
@@ -11433,6 +11433,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
   const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
+  const stereoPairsHost = document.getElementById("settings-esphome-runtime-stereo");
   const speakerIdHost = document.getElementById("settings-esphome-runtime-speakerid");
   const emotionIdHost = document.getElementById("settings-esphome-runtime-emotionid");
   const statsHost = document.getElementById("settings-esphome-runtime-stats");
@@ -11444,6 +11445,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     !(satellitesHost instanceof HTMLElement) ||
     !(addHost instanceof HTMLElement) ||
     !(firmwareHost instanceof HTMLElement) ||
+    !(stereoPairsHost instanceof HTMLElement) ||
     !(speakerIdHost instanceof HTMLElement) ||
     !(emotionIdHost instanceof HTMLElement)
   ) {
@@ -11473,6 +11475,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     addHost.innerHTML = renderNotice("Loading add form...");
   } else if (targetPanel === "firmware") {
     firmwareHost.innerHTML = renderNotice("Loading firmware flasher...");
+  } else if (targetPanel === "stereo") {
+    stereoPairsHost.innerHTML = renderNotice("Loading stereo pairs...");
   } else if (targetPanel === "speakerid") {
     speakerIdHost.innerHTML = renderNotice("Loading Speaker ID...");
   } else if (targetPanel === "emotionid") {
@@ -11535,25 +11539,12 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         ? renderEspHomeSettingsCard(wakeVerifierItem, coreKey)
         : renderNotice("Wake verification settings are unavailable.");
       if (targetPanel === "satellites") {
-        const stereoPairHtml = stereoPairItems.length
-          ? `
-            <section class="core-inline-section" style="margin-bottom:16px;">
-              <div class="small core-inline-section-title">Stereo Pairs</div>
-              <div class="small">Paired satellites appear as one synchronized destination across Tater.</div>
-              <div class="core-tab-items core-tab-items-group-stereo-pair" style="margin-top:10px;">
-                ${stereoPairItems
-                  .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
-                  .join("")}
-              </div>
-            </section>
-          `
-          : "";
         const satelliteHtml = satelliteItems.length
           ? `<div class="core-tab-items core-tab-items-group-satellite">${satelliteItems
               .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
               .join("")}</div>`
           : renderNotice(emptyMessage);
-        satellitesHost.innerHTML = `${stereoPairHtml}${satelliteHtml}`;
+        satellitesHost.innerHTML = satelliteHtml;
         addHost.innerHTML =
           nativePairing?.start_action && nativePairing?.status_action
             ? renderNativeSatellitePairingPanel(nativePairing, coreKey)
@@ -11563,6 +11554,13 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         state.esphomeFirmwarePayload = firmware;
         state.esphomeFirmwareSelection = normalizeEspHomeFirmwareSelection(firmware);
         firmwareHost.innerHTML = renderEspHomeFirmwarePanel(firmware, coreKey);
+      }
+      if (targetPanel === "stereo") {
+        stereoPairsHost.innerHTML = stereoPairItems.length
+          ? `<div class="core-tab-items core-tab-items-group-stereo-pair">${stereoPairItems
+              .map((item) => renderEspHomeSatelliteCard(item, coreKey, displaySensors))
+              .join("")}</div>`
+          : renderNotice("No stereo pairs are configured.");
       }
       if (targetPanel === "speakerid" && speakerIdHost instanceof HTMLElement) {
         state.esphomeSpeakerIdPayload = speakerId;
@@ -11591,6 +11589,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         addHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "firmware") {
         firmwareHost.innerHTML = renderNotice(message);
+      } else if (targetPanel === "stereo") {
+        stereoPairsHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "speakerid" && speakerIdHost instanceof HTMLElement) {
         speakerIdHost.innerHTML = renderNotice(message);
       } else if (targetPanel === "emotionid" && emotionIdHost instanceof HTMLElement) {
@@ -21731,7 +21731,7 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="esphome">
           ${renderSettingsSectionIntro(
             taterVoiceSettingsLabel,
-            "Manage satellites, firmware, stats, and native voice runtime settings from one place.",
+            "Manage satellites, firmware, stereo pairs, stats, and native voice runtime settings from one place.",
             "VOICE"
           )}
           <div
@@ -21743,6 +21743,7 @@ async function loadSettingsView() {
             <div class="settings-subtabs">
               <button type="button" class="settings-subtab-btn active" data-esphome-tab="satellites">Satellites</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="firmware">Firmware</button>
+              <button type="button" class="settings-subtab-btn" data-esphome-tab="stereo">Stereo Pairs</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="stats">Stats</button>
               <button type="button" class="settings-subtab-btn" data-esphome-tab="platform">Settings</button>
             </div>
@@ -21838,6 +21839,18 @@ async function loadSettingsView() {
               )}
               <div id="settings-esphome-runtime-firmware">
                 ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load the firmware flasher.`)}
+              </div>
+            </div>
+
+            <div class="settings-subpanel" data-esphome-panel="stereo">
+              ${renderSettingsSectionIntro(
+                "Stereo Pairs",
+                "Pair two Tater Native satellites as one synchronized playback destination.",
+                "PAIR",
+                "subtle"
+              )}
+              <div id="settings-esphome-runtime-stereo">
+                ${renderNotice(`Open Stereo Pairs to load paired satellite controls.`)}
               </div>
             </div>
 
