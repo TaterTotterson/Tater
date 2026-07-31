@@ -46,7 +46,7 @@ def _registry_payload(*, name: str = "Kitchen Light", updated_at: float = 1.0) -
         "devices": [device],
         "total": 1,
         "cache": {
-            "version": 3,
+            "version": integration_registry._DEVICE_REGISTRY_CACHE_VERSION,
             "enabled_integrations": ["homekit"],
             "generated_at": updated_at,
             "updated_at": updated_at,
