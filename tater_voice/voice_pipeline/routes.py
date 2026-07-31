@@ -795,6 +795,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     )
     ducking = _native_ducking_payload(payload.get("ducking"))
     timeout_s = vp._as_float(payload.get("timeout_s"), 180.0)
+    wait_for_completion = vp._as_bool(payload.get("wait_for_completion"), False)
     audio_scene = _native_audio_scene_payload(payload.get("audio_scene"))
 
     if not selector:
@@ -992,6 +993,8 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     loop=False,
                     content_type="tts",
                     channel_mode="mono",
+                    wait_for_completion=wait_for_completion,
+                    completion_timeout_s=timeout_s,
                 )
                 media_session_started = True
         except Exception as exc:

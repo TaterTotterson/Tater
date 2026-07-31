@@ -42,6 +42,26 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertEqual(payload["media_content_type"], "music")
         self.assertEqual(payload["volume_percent"], 64)
 
+    def test_generic_media_player_uses_its_play_media_action(self) -> None:
+        devices = [
+            {
+                "integration_id": "example_player",
+                "id": "kitchen",
+                "actions": ["play_media"],
+                "capabilities": ["media_player"],
+            }
+        ]
+        with mock.patch(
+            "integration_registry.get_integration_devices_by_capability",
+            return_value=devices,
+        ):
+            action = media_playback._integration_device_playback_action(
+                "example_player",
+                "kitchen",
+            )
+
+        self.assertEqual(action, "play_media")
+
 
 if __name__ == "__main__":
     unittest.main()

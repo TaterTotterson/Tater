@@ -296,6 +296,18 @@ def _voice_core_selector_from_row(row: Dict[str, Any]) -> str:
     return f"host:{host}" if host else ""
 
 
+def _voice_core_registry_row_is_native(row: Dict[str, Any]) -> bool:
+    selector = _voice_core_selector_from_row(row)
+    source = _text(row.get("source")).lower()
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return (
+        selector.startswith("native:")
+        or source in {"tater_native", "native_satellite"}
+        or bool(metadata.get("native_selected"))
+        or bool(metadata.get("native_protocol"))
+    )
+
+
 def _voice_core_connected_clients() -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
 
@@ -367,6 +379,20 @@ def get_voice_core_satellite_target_options(*, current_values: Any = None) -> Li
             continue
         seen.add(value)
         rows.append({"value": value, "label": _voice_core_satellite_label(label_row, selector)})
+
+    for selector, registry_row in registry_by_selector.items():
+        if selector in connected_clients or not _voice_core_registry_row_is_native(registry_row):
+            continue
+        value = f"{VOICE_CORE_TARGET_PREFIX}{selector}"
+        if value in seen:
+            continue
+        seen.add(value)
+        rows.append(
+            {
+                "value": value,
+                "label": f"{_voice_core_satellite_label(registry_row, selector)} • offline",
+            }
+        )
 
     try:
         from tater_voice import stereo_pairs
@@ -625,13 +651,12 @@ def fetch_unifi_protect_camera_target_options(*, current_values: Any = None) -> 
 def _integration_device_playback_action(row: Dict[str, Any]) -> str:
     actions = {_text(value).lower() for value in row.get("actions") or [] if _text(value)}
     features = {_text(value).lower() for value in row.get("features") or [] if _text(value)}
-    capabilities = {_text(value).lower() for value in row.get("capabilities") or [] if _text(value)}
     supported = actions | features
     if "announce" in supported:
         return "announce"
     if "play_url" in supported:
         return "play_url"
-    if "announcement_target" in capabilities and "play_media" in supported:
+    if "play_media" in supported:
         return "play_media"
     return ""
 

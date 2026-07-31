@@ -987,6 +987,7 @@ async def _play_reply_on_external_target(
         targets=[target],
         public_base_url=_text(os.getenv("VOICE_CORE_PUBLIC_BASE_URL")),
         backend=backend_used or session.tts_backend_effective or session.tts_backend,
+        wait_for_completion=True,
     )
     return result if isinstance(result, dict) else {"ok": False, "sent_count": 0, "error": "External playback failed."}
 
@@ -6365,7 +6366,13 @@ async def _finalize_session(
                 tts_mode = "external"
                 run_end_mode = "external_player"
                 playback_delay_s = max(0.5, min(45.0, _estimate_pcm_duration_s(tts_audio, tts_format) + 0.35))
-                await asyncio.sleep(playback_delay_s if external_ok else 0.25)
+                playback_completed = bool(
+                    external_result.get("voice_core_playback_completed")
+                    if isinstance(external_result, dict)
+                    else False
+                )
+                if not playback_completed:
+                    await asyncio.sleep(playback_delay_s if external_ok else 0.25)
                 if continue_conversation:
                     marker_url = await _send_followup_reopen_marker(
                         token,

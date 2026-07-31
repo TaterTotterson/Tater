@@ -354,6 +354,32 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             "http://voice-core/media/foreground",
         )
 
+    def test_stereo_pair_tts_can_wait_for_actual_pair_completion(self) -> None:
+        self.stereo_pair = {
+            "id": "bedroom12",
+            "selector": "stereo:bedroom12",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        payload = {
+            "selector": "stereo:bedroom12",
+            "audio_b64": base64.b64encode(b"stereo speech").decode("ascii"),
+            "media_type": "audio/wav",
+            "filename": "tts.wav",
+            "respect_reply_playback": False,
+            "wait_for_completion": True,
+            "timeout_s": 42,
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play(payload, None))
+
+        self.assertTrue(result["media_session_started"])
+        media = self.stereo_calls[0][2]
+        self.assertEqual(media["content_type"], "tts")
+        self.assertEqual(media["channel_mode"], "mono")
+        self.assertTrue(media["wait_for_completion"])
+        self.assertEqual(media["completion_timeout_s"], 42)
+
     def test_stereo_pair_audio_scene_synchronizes_background_and_tts(self) -> None:
         self.stereo_pair = {
             "id": "bedroom12",

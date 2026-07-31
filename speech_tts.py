@@ -2327,6 +2327,7 @@ def _voice_core_play_media_sync(
     continue_conversation: bool = False,
     conversation_id: str = "",
     audio_scene: Optional[Dict[str, Any]] = None,
+    wait_for_completion: bool = False,
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
     if not clean_selectors:
@@ -2355,6 +2356,8 @@ def _voice_core_play_media_sync(
         payload_template["continue_conversation"] = True
         if _text(conversation_id):
             payload_template["conversation_id"] = _text(conversation_id)
+    if wait_for_completion:
+        payload_template["wait_for_completion"] = True
     if isinstance(audio_scene, dict) and audio_scene:
         payload_template["audio_scene"] = dict(audio_scene)
     if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
@@ -2363,6 +2366,7 @@ def _voice_core_play_media_sync(
     sent_count = 0
     audio_scene_sent_count = 0
     audio_scene_fallback_count = 0
+    playback_completed_count = 0
     audio_scene_warnings: list[str] = []
 
     for selector in clean_selectors:
@@ -2373,7 +2377,11 @@ def _voice_core_play_media_sync(
                 f"{base_url}/api/tater/satellite/v1/play",
                 json=payload,
                 headers=_voice_core_auth_headers(),
-                timeout=90,
+                timeout=(
+                    max(90.0, min(615.0, float(timeout_s or 180.0) + 15.0))
+                    if wait_for_completion
+                    else 90
+                ),
             )
             logger.info(
                 "[speech_tts] Tater satellite play attempt selector=%s status=%s",
@@ -2394,6 +2402,8 @@ def _voice_core_play_media_sync(
                     fallback_reason = _text(response_payload.get("audio_scene_fallback_reason"))
                     if fallback_reason:
                         audio_scene_warnings.append(f"{selector} ({fallback_reason})")
+                if bool(response_payload.get("playback_completed")):
+                    playback_completed_count += 1
                 continue
             detail = ""
             with contextlib.suppress(Exception):
@@ -2410,6 +2420,8 @@ def _voice_core_play_media_sync(
             "sent_count": sent_count,
             "audio_scene_sent_count": audio_scene_sent_count,
             "audio_scene_fallback_count": audio_scene_fallback_count,
+            "playback_completed_count": playback_completed_count,
+            "playback_completed": bool(sent_count and playback_completed_count == sent_count),
         }
         if audio_scene_warnings:
             result["audio_scene_warnings"] = audio_scene_warnings
@@ -2864,6 +2876,7 @@ async def play_announcement_audio_targets(
     conversation_id: str = "",
     media_type: str = "audio/wav",
     filename: str = "",
+    wait_for_completion: bool = False,
 ) -> Dict[str, Any]:
     prompt = _text(text)
     audio = bytes(wav_bytes or b"")
@@ -2963,8 +2976,10 @@ async def play_announcement_audio_targets(
             tts_kind=tts_kind,
             continue_conversation=continue_conversation,
             conversation_id=conversation_id,
+            wait_for_completion=wait_for_completion,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["voice_core_playback_completed"] = bool(voice_result.get("playback_completed"))
         sent_count += int(voice_result.get("sent_count") or 0)
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):

@@ -1280,6 +1280,9 @@ def _core_system_prompt_fragments(
 ) -> List[str]:
     out: List[str] = []
     if str(role or "").strip().lower() in {"chat", "hermes", "memory_context", ""}:
+        speaker_prompt = origin_attach_helpers.current_speaker_prompt(origin)
+        if speaker_prompt:
+            out.append(speaker_prompt)
         try:
             import people as people_identity
 
