@@ -80,6 +80,7 @@ import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from tater_paths import agent_lab_path
+from tater_version import current_tater_version
 from tater_voice import firmware as esphome_firmware_module
 from tater_voice import home as esphome_home_module
 from tater_voice import native_satellite as native_satellite_module
@@ -4986,12 +4987,15 @@ def _webui_auth_profile_payload(
     chat_settings = redis_client.hgetall("chat_settings") or {}
     password_set = _webui_password_is_set()
     mode = "ready" if bool(authenticated) or not password_set else "login"
+    app_version = current_tater_version()
     return {
         "password_set": bool(password_set),
         "authenticated": bool(authenticated),
         "mode": mode,
         "username": str(chat_settings.get("username") or "User"),
         "user_avatar": _read_user_avatar_data_url(chat_settings),
+        "app_version": app_version,
+        "app_version_label": f"v{app_version}" if app_version else "",
     }
 
 

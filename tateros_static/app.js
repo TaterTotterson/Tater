@@ -174,6 +174,8 @@ const state = {
     mode: "ready",
     username: "User",
     userAvatar: "",
+    appVersion: "",
+    appVersionLabel: "",
   },
   chatProfile: {
     username: "User",
@@ -517,12 +519,30 @@ const HEALTH_POLL_RECOVERY_MS = 2200;
 const HEALTH_POLL_CONNECTED_MS = 8000;
 const REDIS_RECOVERY_PROMPT_COOLDOWN_MS = 1200;
 
+function _renderTaterBuildVersion(version, versionLabel) {
+  const versionEl = document.getElementById("tater-build-version");
+  if (!versionEl) {
+    return;
+  }
+  const normalizedVersion = String(version || "").trim().replace(/^v/i, "");
+  const normalizedLabel = String(versionLabel || "").trim();
+  if (!normalizedVersion && !normalizedLabel) {
+    versionEl.textContent = "";
+    versionEl.hidden = true;
+    return;
+  }
+  versionEl.textContent = `Tater ${normalizedLabel || `v${normalizedVersion}`}`;
+  versionEl.hidden = false;
+}
+
 function _setWebuiAuthStatus(raw) {
   const next = raw && typeof raw === "object" ? raw : {};
   const passwordSet = Boolean(next.password_set);
   const authenticated = Boolean(next.authenticated);
   const modeToken = String(next.mode || "").trim().toLowerCase();
   const mode = modeToken || (authenticated || !passwordSet ? "ready" : "login");
+  const appVersion = String(next.app_version || "").trim().replace(/^v/i, "");
+  const appVersionLabel = String(next.app_version_label || "").trim();
   state.auth = {
     checked: true,
     passwordSet,
@@ -530,7 +550,10 @@ function _setWebuiAuthStatus(raw) {
     mode,
     username: String(next.username || "User"),
     userAvatar: String(next.user_avatar || ""),
+    appVersion,
+    appVersionLabel,
   };
+  _renderTaterBuildVersion(appVersion, appVersionLabel);
   return state.auth;
 }
 
@@ -8065,6 +8088,15 @@ function renderCoreSettingsManager(body, tabSpec) {
   const emptyMessage = String(ui?.empty_message || body?.empty_message || "No entries found.").trim();
   const managerTabsRaw = Array.isArray(ui?.manager_tabs) ? ui.manager_tabs : [];
   const defaultManagerTab = String(ui?.default_tab || "").trim();
+  const appearanceToken = String(ui?.appearance || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "");
+  const persistentItemGroups = new Set(
+    (Array.isArray(ui?.persistent_item_groups) ? ui.persistent_item_groups : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
   const statsRefreshButton = boolFromAny(ui?.stats_refresh_button, false);
   const statsRefreshLabel = String(ui?.stats_refresh_label || "Refresh").trim() || "Refresh";
   const statsControls = Array.isArray(ui?.stats_controls)
@@ -8152,6 +8184,11 @@ function renderCoreSettingsManager(body, tabSpec) {
     const itemGroup = String(item?.group || "").trim().toLowerCase();
     const itemGroupToken = itemGroup.replace(/[^a-z0-9_-]/g, "");
     const itemGroupClass = itemGroupToken ? ` core-manager-item-${itemGroupToken}` : "";
+    const itemVariantToken = String(item?.card_variant || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, "");
+    const itemVariantClass = itemVariantToken ? ` core-manager-item-variant-${itemVariantToken}` : "";
     const itemFields = Array.isArray(item?.fields) ? item.fields : [];
     const sections = Array.isArray(item?.sections) ? item.sections : [];
     const explicitPopupFields = Array.isArray(item?.popup_fields) ? item.popup_fields : [];
@@ -8174,6 +8211,8 @@ function renderCoreSettingsManager(body, tabSpec) {
             return {
               action,
               label: String(entry?.label || entry?.title || "Run").trim() || "Run",
+              ariaLabel: String(entry?.aria_label || entry?.label || entry?.title || "Run").trim() || "Run",
+              tooltip: String(entry?.tooltip || entry?.title || entry?.aria_label || entry?.label || "Run").trim() || "Run",
               confirm: String(entry?.confirm || "").trim(),
               tone: String(entry?.tone || "").trim().toLowerCase(),
               workingText: String(entry?.working_text || "Working...").trim() || "Working...",
@@ -8225,6 +8264,8 @@ function renderCoreSettingsManager(body, tabSpec) {
       popupConfigEncoded = "";
     }
     const popupTitle = String(item?.settings_title || `${title} Settings`).trim() || `${title} Settings`;
+    const settingsAriaLabel = String(item?.settings_aria_label || item?.settings_label || itemFieldsPopupLabel).trim() || "Settings";
+    const settingsTooltip = String(item?.settings_tooltip || settingsAriaLabel).trim() || settingsAriaLabel;
     const pageIndexRaw = Number(renderOptions?.page_index ?? renderOptions?.pageIndex ?? 0);
     const pageIndex = Number.isFinite(pageIndexRaw) ? Math.max(0, Math.floor(pageIndexRaw)) : 0;
     const pageAttr = pageIndex > 0 ? ` data-core-page-index="${pageIndex}"` : "";
@@ -8296,7 +8337,10 @@ function renderCoreSettingsManager(body, tabSpec) {
         : "";
 
     const hasPopupSettingsBtn = Boolean(popupFieldsEncoded) && (itemFieldsPopupEnabled || explicitPopupFields.length > 0);
-    const hasSaveBtn = saveAction && (!itemFieldsPopupEnabled || !popupFieldsEncoded);
+    const hasSaveBtn =
+      saveAction &&
+      boolFromAny(item?.show_save_button, true) &&
+      (!itemFieldsPopupEnabled || !popupFieldsEncoded);
     const hasResetBtn = Boolean(resetAction);
     const hasAnyAction = Boolean(
       hasPopupSettingsBtn || hasSaveBtn || hasResetBtn || removeAction || runAction || customActions.length
@@ -8306,6 +8350,8 @@ function renderCoreSettingsManager(body, tabSpec) {
         const toneClass = entry.tone === "danger" ? "inline-btn danger" : entry.tone === "muted" ? "inline-btn" : "action-btn";
         return `<button type="button"
           class="${toneClass} core-manager-custom-action"
+          aria-label="${escapeHtml(entry.ariaLabel)}"
+          title="${escapeHtml(entry.tooltip)}"
           data-core-custom-action="${escapeHtml(entry.action)}"
           data-core-custom-confirm="${escapeHtml(entry.confirm)}"
           data-core-custom-working="${escapeHtml(entry.workingText)}"
@@ -8339,7 +8385,9 @@ function renderCoreSettingsManager(body, tabSpec) {
           }
           ${
             hasPopupSettingsBtn
-              ? `<button type="button" class="action-btn core-manager-settings">${escapeHtml(
+              ? `<button type="button" class="action-btn core-manager-settings" aria-label="${escapeHtml(
+                  settingsAriaLabel
+                )}" title="${escapeHtml(settingsTooltip)}">${escapeHtml(
                   String(item?.settings_label || itemFieldsPopupLabel)
                 )}</button>`
               : ""
@@ -8444,7 +8492,7 @@ function renderCoreSettingsManager(body, tabSpec) {
       : `${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}`;
 
     return `
-      <article class="card core-manager-item${itemGroupClass}"
+      <article class="card core-manager-item${itemGroupClass}${itemVariantClass}"
         data-core-key="${safeCoreKey}"
         data-core-item-id="${encodedId}"
         data-core-item-group="${escapeHtml(itemGroup)}"
@@ -8610,6 +8658,10 @@ function renderCoreSettingsManager(body, tabSpec) {
           itemGroup: String(group?.item_group || key).trim(),
           selector: boolFromAny(group?.selector, true),
           selectorLabel: String(group?.selector_label || "Select Item").trim() || "Select Item",
+          pageSize: (() => {
+            const parsed = Number(group?.page_size ?? 0);
+            return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+          })(),
           emptyMessage: String(group?.empty_message || groupPanelEmptyMessage || emptyMessage).trim() || emptyMessage,
         };
       })
@@ -8639,6 +8691,7 @@ function renderCoreSettingsManager(body, tabSpec) {
           selector: group.selector,
           selector_label: group.selectorLabel,
           item_group: group.itemGroup,
+          page_size: group.pageSize,
           empty_message: group.emptyMessage,
         });
         return `
@@ -8674,6 +8727,14 @@ function renderCoreSettingsManager(body, tabSpec) {
     : "";
 
   const itemCardsHtml = renderCoreManagerItemsContent(itemForms, { selector: false, empty_message: emptyMessage });
+  const persistentItems = itemForms.filter((item) =>
+    persistentItemGroups.has(String(item?.group || "").trim().toLowerCase())
+  );
+  const persistentItemsHtml = persistentItems.length
+    ? `<div class="core-manager-persistent">${persistentItems
+        .map((item) => renderCoreManagerItemCard(item))
+        .join("")}</div>`
+    : "";
 
   const managerTabs = managerTabsRaw
     .map((raw, index) => {
@@ -8808,12 +8869,15 @@ function renderCoreSettingsManager(body, tabSpec) {
   }
 
   return `
-    <div class="card">
+    <div class="card core-settings-manager${
+      appearanceToken ? ` core-settings-manager-${escapeHtml(appearanceToken)}` : ""
+    }">
       <div class="card-head">
         <h3 class="card-title">${safeTabLabel}</h3>
         <span class="small">${safeCoreKey}</span>
       </div>
       ${summary ? `<div class="small">${escapeHtml(summary)}</div>` : ""}
+      ${persistentItemsHtml}
       ${statsHtml}
       <div class="card" style="margin-top:10px;">
         <div class="card-head">

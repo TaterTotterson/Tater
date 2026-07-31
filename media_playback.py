@@ -186,11 +186,10 @@ def _integration_device_playback_action(integration_id: str, device_id: str) -> 
             continue
         actions = {_text(value).lower() for value in row.get("actions") or [] if _text(value)}
         features = {_text(value).lower() for value in row.get("features") or [] if _text(value)}
-        capabilities = {_text(value).lower() for value in row.get("capabilities") or [] if _text(value)}
         supported = actions | features
         if "play_url" in supported:
             return "play_url"
-        if "announcement_target" in capabilities and "play_media" in supported:
+        if "play_media" in supported:
             return "play_media"
         if "announce" in supported:
             return "announce"

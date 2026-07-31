@@ -104,6 +104,56 @@ class StereoPairPersistenceTests(unittest.TestCase):
         self.assertIn("Tater Stereo: Office Stereo", pair_option["label"])
         self.assertIn("ready", pair_option["label"])
 
+    def test_saved_native_satellite_remains_available_while_offline(self) -> None:
+        self.redis.values[announcement_targets.REDIS_VOICE_SATELLITE_REGISTRY_KEY] = json.dumps(
+            [
+                {
+                    "selector": "native:kitchen",
+                    "name": "Kitchen",
+                    "source": "tater_native",
+                },
+                {
+                    "selector": "host:legacy.local",
+                    "name": "Legacy discovery record",
+                    "source": "mdns_esphome",
+                },
+            ]
+        )
+        with (
+            mock.patch.object(announcement_targets, "_voice_core_connected_clients", return_value={}),
+            mock.patch.object(announcement_targets, "redis_client", self.redis),
+        ):
+            options = announcement_targets.get_voice_core_satellite_target_options()
+
+        values = {row["value"]: row["label"] for row in options}
+        self.assertIn("voice_core:native:kitchen", values)
+        self.assertIn("offline", values["voice_core:native:kitchen"])
+        self.assertNotIn("voice_core:host:legacy.local", values)
+
+
+class AnnouncementIntegrationTargetTests(unittest.TestCase):
+    def test_media_player_with_play_media_action_is_a_playback_target(self) -> None:
+        with mock.patch.object(
+            announcement_targets,
+            "_integration_registry_devices",
+            return_value=[
+                {
+                    "integration_id": "roon",
+                    "integration_name": "Roon",
+                    "id": "zone-kitchen",
+                    "name": "Kitchen",
+                    "actions": ["play_media"],
+                    "capabilities": ["media_player"],
+                }
+            ],
+        ):
+            options = announcement_targets.fetch_integration_playback_target_options()
+
+        self.assertEqual(
+            options,
+            [{"value": "integration:roon:zone-kitchen", "label": "Roon: Kitchen"}],
+        )
+
 
 class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -171,6 +221,75 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         right_start = commit_calls[1][2]["start_at_us"]
         self.assertEqual(right_start - left_start, 4000)
         self.assertIn("bedroom12", native_satellite._stereo_sessions)
+
+    async def test_tts_waits_for_both_members_and_marks_visual_lifecycle(self) -> None:
+        calls = []
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            calls.append((selector, message_type, dict(payload), timeout_s))
+            return {"ok": True}
+
+        async def fake_clock(selector):
+            return {
+                "selector": selector,
+                "offset_us": 0,
+                "round_trip_us": 100,
+            }
+
+        pair = {
+            "id": "office12",
+            "selector": "stereo:office12",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        with (
+            mock.patch.object(
+                native_satellite,
+                "stereo_pair_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(native_satellite, "_stereo_clock_probe", side_effect=fake_clock),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+        ):
+            playback = asyncio.create_task(
+                native_satellite.prepare_stereo_media_session(
+                    pair,
+                    session_id="tts-1",
+                    media_url="http://tater/media/tts.wav",
+                    content_type="tts",
+                    channel_mode="mono",
+                    wait_for_completion=True,
+                    completion_timeout_s=2.0,
+                )
+            )
+            for _ in range(20):
+                if "office12" in native_satellite._stereo_sessions:
+                    break
+                await asyncio.sleep(0)
+
+            prepare_calls = [row for row in calls if row[1] == "media.session.prepare"]
+            self.assertEqual(len(prepare_calls), 2)
+            self.assertEqual(prepare_calls[0][2]["media"]["content_type"], "tts")
+            self.assertEqual(prepare_calls[0][2]["visual_mode"], "speaking")
+            self.assertEqual(prepare_calls[0][2]["state_after"], "idle")
+
+            native_satellite._record_stereo_finished(
+                "native:left",
+                {"session_id": "tts-1", "ok": True},
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.done())
+
+            native_satellite._record_stereo_finished(
+                "native:right",
+                {"session_id": "tts-1", "ok": True},
+            )
+            result = await playback
+
+        self.assertTrue(result["playback_completed"])
+        self.assertTrue(result["playback_ok"])
+        self.assertEqual(result["finished_members"], ["native:left", "native:right"])
+        self.assertNotIn("office12", native_satellite._stereo_sessions)
 
     async def test_phase_error_adjusts_right_member_toward_left(self) -> None:
         now_us = native_satellite._monotonic_us()

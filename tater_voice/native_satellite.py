@@ -1380,6 +1380,8 @@ async def prepare_stereo_media_session(
     loop: bool = False,
     content_type: str = "music",
     channel_mode: str = "stereo",
+    wait_for_completion: bool = False,
+    completion_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
     pair_row = pair if isinstance(pair, dict) else {}
     left = _text(pair_row.get("left_selector"))
@@ -1392,6 +1394,8 @@ async def prepare_stereo_media_session(
 
     group_id = _text(pair_row.get("id")) or uuid.uuid4().hex[:12]
     group_session_id = _text(session_id)
+    media_content_type = _lower(content_type) or "music"
+    transient_tts = media_content_type in {"tts", "speech", "announcement"}
     base_volume = max(0, min(100, _as_int(volume_percent, 100)))
     mono = _lower(channel_mode) in {"mono", "center", "tts"}
     member_rows = [
@@ -1420,23 +1424,27 @@ async def prepare_stereo_media_session(
     clock_by_selector = {row["selector"]: row for row in clocks}
 
     async def _prepare(member: Dict[str, Any]) -> Dict[str, Any]:
+        prepare_payload = {
+            "session_id": group_session_id,
+            "group_id": group_id,
+            "media": {
+                "url": media_url,
+                "volume_percent": member["volume_percent"],
+                "loop": bool(loop),
+                "content_type": media_content_type,
+            },
+            "routing": {
+                "channel": member["channel"],
+                "pair_selector": _text(pair_row.get("selector")),
+            },
+        }
+        if transient_tts:
+            prepare_payload["visual_mode"] = "speaking"
+            prepare_payload["state_after"] = "idle"
         result = await send_request(
             member["selector"],
             "media.session.prepare",
-            {
-                "session_id": group_session_id,
-                "group_id": group_id,
-                "media": {
-                    "url": media_url,
-                    "volume_percent": member["volume_percent"],
-                    "loop": bool(loop),
-                    "content_type": _text(content_type) or "music",
-                },
-                "routing": {
-                    "channel": member["channel"],
-                    "pair_selector": _text(pair_row.get("selector")),
-                },
-            },
+            prepare_payload,
             timeout_s=15.0,
         )
         if not _as_bool(result.get("ok"), False):
@@ -1473,6 +1481,7 @@ async def prepare_stereo_media_session(
         await _stop_stereo_members([left, right], session_id=group_session_id)
         raise
 
+    completion_future = asyncio.get_running_loop().create_future()
     _stereo_sessions[group_id] = {
         "group_id": group_id,
         "pair_selector": _text(pair_row.get("selector")),
@@ -1496,9 +1505,11 @@ async def prepare_stereo_media_session(
         "last_adjust_server_us": 0,
         "created_server_us": _monotonic_us(),
         "loop": bool(loop),
+        "content_type": media_content_type,
         "channel_mode": "mono" if mono else "stereo",
+        "completion_future": completion_future,
     }
-    return {
+    result = {
         "ok": True,
         "stereo_session_started": True,
         "group_id": group_id,
@@ -1508,7 +1519,30 @@ async def prepare_stereo_media_session(
         "committed": committed,
         "start_server_us": start_server_us,
         "clock_samples": clocks,
+        "playback_completed": False,
     }
+    if wait_for_completion:
+        timeout_s = max(1.0, min(600.0, float(completion_timeout_s or 180.0)))
+        try:
+            completion = await asyncio.wait_for(
+                asyncio.shield(completion_future),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            await _stop_stereo_members([left, right], session_id=group_session_id)
+            stale = _stereo_sessions.pop(group_id, None)
+            task = _stereo_adjust_tasks.pop(group_id, None)
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+            if isinstance(stale, dict):
+                future = stale.get("completion_future")
+                if isinstance(future, asyncio.Future) and not future.done():
+                    future.cancel()
+            raise RuntimeError("Timed out waiting for synchronized stereo playback to finish.") from exc
+        result["playback_completed"] = True
+        result["playback_ok"] = _as_bool((completion or {}).get("ok"), False)
+        result["finished_members"] = list((completion or {}).get("members") or [])
+    return result
 
 
 def stereo_pair_media_active(pair: Dict[str, Any]) -> bool:
@@ -1759,8 +1793,22 @@ def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:
             session["finished_selectors"] = finished
         if selector not in finished:
             finished.append(selector)
+        finished_ok = session.setdefault("finished_ok", {})
+        if not isinstance(finished_ok, dict):
+            finished_ok = {}
+            session["finished_ok"] = finished_ok
+        finished_ok[selector] = _as_bool(payload.get("ok"), False)
         members = {_text(session.get("left_selector")), _text(session.get("right_selector"))}
         if members and members.issubset(set(finished)):
+            completion_future = session.get("completion_future")
+            completion = {
+                "ok": all(_as_bool(finished_ok.get(member), False) for member in members),
+                "members": sorted(members),
+                "session_id": session_id,
+                "group_id": group_id,
+            }
+            if isinstance(completion_future, asyncio.Future) and not completion_future.done():
+                completion_future.set_result(completion)
             _stereo_sessions.pop(group_id, None)
             task = _stereo_adjust_tasks.pop(group_id, None)
             if isinstance(task, asyncio.Task) and not task.done():
