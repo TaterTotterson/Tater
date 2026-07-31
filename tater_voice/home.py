@@ -73,7 +73,7 @@ async def shutdown() -> None:
 
 def _runtime_panel_token(panel: Any = "") -> str:
     token = esphome_runtime.lower(panel)
-    return token if token in {"satellites", "firmware", "platform", "speakerid", "emotionid", "stats"} else ""
+    return token if token in {"satellites", "firmware", "stereo", "platform", "speakerid", "emotionid", "stats"} else ""
 
 
 def _native_satellite_status_snapshot() -> Dict[str, Any]:
@@ -959,6 +959,7 @@ def get_runtime_payload(
     panel_token = _runtime_panel_token(panel)
     include_satellites = panel_token in {"", "satellites"}
     include_firmware = panel_token in {"", "firmware"}
+    include_stereo_pairs = panel_token in {"", "stereo"}
     include_speaker_id = panel_token in {"", "speakerid"}
     include_emotion_id = panel_token in {"", "emotionid"}
     include_stats = panel_token in {"", "stats"}
@@ -1032,9 +1033,10 @@ def get_runtime_payload(
     ]
     if include_satellites:
         item_forms.append(esphome_settings.settings_item_form())
-        item_forms.extend(_stereo_pair_item_forms(native_status))
         item_forms.extend(esphome_settings.satellite_item_forms(status))
         payload["display_sensors"] = esphome_firmware.display_sensor_profiles_payload(status)
+    if include_stereo_pairs:
+        item_forms.extend(_stereo_pair_item_forms(native_status))
     payload["ui"]["item_forms"] = item_forms
 
     if include_firmware:
