@@ -15564,6 +15564,66 @@ def get_core_tab_payload(core_key: str) -> Dict[str, Any]:
     return _load_surface_htmlui_tab_payload(tab)
 
 
+def _core_tab_payload_fingerprint(payload: Dict[str, Any]) -> str:
+    stable_payload = dict(payload or {})
+    stable_payload.pop("updated_at", None)
+    serialized = json.dumps(
+        stable_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+async def _stream_core_tab_events(tab: Dict[str, Any], request: Request):
+    last_fingerprint = ""
+    keepalive_at = time.monotonic()
+    interval_seconds = 1.0
+
+    while not await request.is_disconnected():
+        payload = await asyncio.to_thread(_load_surface_htmlui_tab_payload, tab)
+        fingerprint = _core_tab_payload_fingerprint(payload)
+        if fingerprint != last_fingerprint:
+            yield _sse("core-tab", payload)
+            last_fingerprint = fingerprint
+            keepalive_at = time.monotonic()
+        elif time.monotonic() - keepalive_at >= 15.0:
+            yield ": keep-alive\n\n"
+            keepalive_at = time.monotonic()
+
+        ui = payload.get("ui") if isinstance(payload.get("ui"), dict) else {}
+        try:
+            requested_interval = float(ui.get("poll_interval_ms") or 1000) / 1000.0
+        except (TypeError, ValueError):
+            requested_interval = 1.0
+        interval_seconds = max(0.75, min(10.0, requested_interval))
+        await asyncio.sleep(interval_seconds)
+
+
+@app.get("/api/cores/{core_key}/tab-events")
+async def stream_core_tab_events(core_key: str, request: Request) -> StreamingResponse:
+    key = str(core_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing core key.")
+
+    tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
+    tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
+    if not isinstance(tab, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown or unavailable core tab: {key}")
+
+    return StreamingResponse(
+        _stream_core_tab_events(tab, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/cores/{core_key}/tab-action")
 def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[str, Any]:
     key = str(core_key or "").strip()

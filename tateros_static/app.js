@@ -103,7 +103,10 @@ const state = {
   coreTabSpecs: {},
   coreTabPayloadCache: {},
   coreTabLoadPromises: {},
+  coreTabRenderedHtml: {},
   coreTabLivePollTimer: 0,
+  coreVueControllers: {},
+  coreVueModulePromise: null,
   esphomeRuntimeLoadPromise: null,
   esphomeRuntimeRequestSeq: 0,
   esphomeFirmwarePayload: null,
@@ -9058,6 +9061,79 @@ function renderCoreTabPayload(payload, tabSpec) {
   `;
 }
 
+function isVueMusicCorePayload(payload) {
+  const ui = payload?.ui && typeof payload.ui === "object" ? payload.ui : {};
+  return (
+    String(ui?.kind || "").trim() === "settings_manager" &&
+    String(ui?.appearance || "").trim().toLowerCase() === "music_library"
+  );
+}
+
+function disposeCoreVueControllers(tabName = "") {
+  const requested = String(tabName || "").trim();
+  const controllers = state.coreVueControllers && typeof state.coreVueControllers === "object"
+    ? state.coreVueControllers
+    : {};
+  Object.entries(controllers).forEach(([key, controller]) => {
+    if (requested && key !== requested) {
+      return;
+    }
+    try {
+      controller?.unmount?.();
+    } catch (error) {
+      console.warn(`Failed to unmount the ${key} Core UI.`, error);
+    }
+    delete controllers[key];
+  });
+  state.coreVueControllers = controllers;
+}
+
+async function loadCoreVueModule() {
+  if (!state.coreVueModulePromise) {
+    state.coreVueModulePromise = import(withBasePath("/static/ui/tater-music-core.js")).catch((error) => {
+      state.coreVueModulePromise = null;
+      throw error;
+    });
+  }
+  return state.coreVueModulePromise;
+}
+
+async function mountVueMusicCore(panel, payload, tabSpec) {
+  if (!(panel instanceof HTMLElement) || !isVueMusicCorePayload(payload)) {
+    return false;
+  }
+  const coreKey = String(tabSpec?.core_key || "").trim();
+  if (!coreKey) {
+    return false;
+  }
+  const existing = state.coreVueControllers?.[coreKey];
+  if (existing) {
+    existing.update?.(payload);
+    return true;
+  }
+
+  disposeCoreVueControllers(coreKey);
+  panel.innerHTML = `<div class="tater-music-core-mount" data-tater-music-core="${escapeHtml(coreKey)}"></div>`;
+  const mountTarget = panel.querySelector("[data-tater-music-core]");
+  if (!(mountTarget instanceof HTMLElement)) {
+    return false;
+  }
+
+  const module = await loadCoreVueModule();
+  if (!panel.isConnected || !mountTarget.isConnected || typeof module?.mountMusicCore !== "function") {
+    return false;
+  }
+  const encodedKey = encodeURIComponent(coreKey);
+  state.coreVueControllers[coreKey] = module.mountMusicCore(mountTarget, {
+    initialPayload: payload,
+    coreKey,
+    tabEndpoint: withBasePath(`/api/cores/${encodedKey}/tab`),
+    actionEndpoint: withBasePath(`/api/cores/${encodedKey}/tab-action`),
+    eventsEndpoint: withBasePath(`/api/cores/${encodedKey}/tab-events`),
+  });
+  return true;
+}
+
 function _encodeCoreManagerJson(value) {
   try {
     return value ? encodeURIComponent(JSON.stringify(value)) : "";
@@ -11830,7 +11906,7 @@ function scheduleCoreTabLivePoll(tabName, payload) {
   clearCoreTabLivePoll();
   const key = String(tabName || "").trim();
   const ui = payload?.ui && typeof payload.ui === "object" ? payload.ui : {};
-  if (!key || !boolFromAny(ui?.live_updates, false)) {
+  if (!key || isVueMusicCorePayload(payload) || !boolFromAny(ui?.live_updates, false)) {
     return;
   }
   const intervalRaw = Number(ui?.poll_interval_ms ?? 0);
@@ -11943,7 +12019,31 @@ async function ensureCoreTopTabLoaded(tabName = "", { force = false, silent = fa
 
   try {
     const payload = await fetchCoreTabPayload(targetTab, { force });
-    panel.innerHTML = renderCoreTabPayload(payload, tabSpec);
+    if (isVueMusicCorePayload(payload)) {
+      try {
+        const mounted = await mountVueMusicCore(panel, payload, tabSpec);
+        if (mounted) {
+          panel.dataset.coreTabLoaded = "1";
+          state.coreTabRenderedHtml[targetTab] = "vue:music_library";
+          clearCoreTabLivePoll();
+          return;
+        }
+      } catch (mountError) {
+        console.warn("The component Music Core UI failed to load; using the built-in renderer.", mountError);
+        disposeCoreVueControllers(targetTab);
+      }
+    } else {
+      disposeCoreVueControllers(targetTab);
+    }
+    const nextHtml = renderCoreTabPayload(payload, tabSpec);
+    const previousHtml = String(state.coreTabRenderedHtml?.[targetTab] || "");
+    if (silent && previousHtml === nextHtml) {
+      panel.dataset.coreTabLoaded = "1";
+      scheduleCoreTabLivePoll(targetTab, payload);
+      return;
+    }
+    state.coreTabRenderedHtml[targetTab] = nextHtml;
+    panel.innerHTML = nextHtml;
     panel.dataset.coreTabLoaded = "1";
     bindCoreTabManagers();
     if (silent) {
@@ -15929,11 +16029,13 @@ function bindCoreTabManagers() {
       if (confirmText && !window.confirm(confirmText)) {
         return;
       }
-      setCoreManagerStatus(card, "Queueing...");
+      const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+      if (!liveUpdates) {
+        setCoreManagerStatus(card, "Queueing...");
+      }
       try {
         const activeTab = persistCoreTabFromNode(card);
         const values = collectCoreManagerValues(card);
-        const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
         button.disabled = liveUpdates;
         const runAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
         const result = liveUpdates
@@ -15958,9 +16060,9 @@ function bindCoreTabManagers() {
           }
         }
         await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
-        state.notice = String(result?.message || "Queued.");
-        setCoreManagerStatus(card, state.notice);
         if (!liveUpdates) {
+          state.notice = String(result?.message || "Queued.");
+          setCoreManagerStatus(card, state.notice);
           showToast(state.notice);
         }
       } catch (error) {
@@ -15991,11 +16093,13 @@ function bindCoreTabManagers() {
       if (confirmText && !window.confirm(confirmText)) {
         return;
       }
-      setCoreManagerStatus(card, workingText);
+      const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+      if (!liveUpdates) {
+        setCoreManagerStatus(card, workingText);
+      }
       try {
         const activeTab = persistCoreTabFromNode(card);
         const values = collectCoreManagerValues(card);
-        const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
         trigger.disabled = liveUpdates;
         const runAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
         const result = liveUpdates
@@ -16011,9 +16115,9 @@ function bindCoreTabManagers() {
               runAction
             );
         await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
-        state.notice = String(result?.message || successText);
-        setCoreManagerStatus(card, state.notice);
         if (!liveUpdates) {
+          state.notice = String(result?.message || successText);
+          setCoreManagerStatus(card, state.notice);
           showToast(state.notice);
         }
       } catch (error) {
@@ -18937,6 +19041,7 @@ async function loadSurfaceView(kind) {
     );
     state.coreTabPayloadCache = {};
     state.coreTabLoadPromises = {};
+    state.coreTabRenderedHtml = {};
     const manageLabel = String(coreTabsData?.manage_label || "Manage");
     root.innerHTML = `${consumeNoticeHtml()}
       ${headerHtml}
@@ -29689,6 +29794,7 @@ async function loadSpudexView({ silent = false, resetLogs = false, preserveInput
 }
 
 async function loadView(viewName) {
+  disposeCoreVueControllers();
   state.view = viewName;
   if (state.view !== "cores") {
     clearCoreTabLivePoll();

@@ -1,28 +1,34 @@
-# Tater v98.6
+# Tater v98.7
 
 ## What's Changed
 
-### Live Music Core Player
+### Modern Music Core WebUI
 
-- Updated the Tater Shop **Music Core** to version 2.2.0 and paired it with new
-  live Core UI support in Tater.
-- Play, stop, previous, next, album playback, search, shuffle, volume changes,
-  speaker selection, and track selection now update in place without opening a
-  blocking loading screen or progress bar.
-- Fixed next-track playback by cleanly ending the active media session before
-  starting the selected track.
-- Added a collapsible current track list to the persistent player. The playing
-  song is highlighted, and another track can be started by double-clicking it.
-- Playing a different album now replaces the current track list instead of
-  stacking tracks from multiple albums.
+- Rebuilt Music Core as a component-based Vue 3 and TypeScript interface while
+  keeping Tater's existing FastAPI WebUI and native macOS wrapper.
+- Added a polished persistent player with compact transport controls, volume,
+  speaker selection, library status, and the current track list in one stable
+  view.
+- Updated Genres, Artists, and Albums into responsive library grids and kept
+  Search as a dedicated browse tab.
+- Added responsive desktop and compact-width layouts for the player, library,
+  provider setup, settings, and speaker-selection dialog.
 
-### Music Library Layout
+### Live, Flicker-Free Playback
 
-- Moved volume into a slider beneath the player transport controls.
-- Moved shuffle into the current track list.
-- Added Search as a library subtab alongside Genres, Artists, and Albums.
-- Removed the separate Queue tab because the active track list now lives with
-  the persistent player.
-- Added silent background refreshes that preserve the selected library tab,
-  open track-list dropdown, and track-list scroll position while keeping the
-  current-song highlight up to date.
+- Replaced Music Core's browser polling and full-panel redraws with an
+  authenticated live event stream that emits only when Core state changes.
+- Play, stop, previous, next, shuffle, volume, speaker selection, searches, and
+  track selection now update in place without a page loading screen or progress
+  message shifting the interface.
+- Preserved the selected library tab, open track list, scroll position, and
+  in-progress form values while playback state changes arrive.
+- Kept the existing Core renderer for every other Core, with an automatic
+  fallback if the component Music Core bundle cannot load.
+
+### Frontend Foundation
+
+- Added a reproducible Vite build with pinned Vue and TypeScript dependencies
+  and packaged production assets for the Tater updater.
+- Added regression coverage for the component loader, live Core event route,
+  compiled assets, and legacy-renderer compatibility.
