@@ -103,6 +103,7 @@ const state = {
   coreTabSpecs: {},
   coreTabPayloadCache: {},
   coreTabLoadPromises: {},
+  coreTabLivePollTimer: 0,
   esphomeRuntimeLoadPromise: null,
   esphomeRuntimeRequestSeq: 0,
   esphomeFirmwarePayload: null,
@@ -7568,6 +7569,7 @@ function renderCoreManagerField(field) {
     ? field.disable_when_all.filter((item) => item && typeof item === "object")
     : [];
   const disabledNote = String(field?.disabled_note || "").trim();
+  const fieldAction = String(field?.action || "").trim();
   const normalizeCondition = (condition) => {
     const sourceKey = String(condition?.source_key ?? condition?.key ?? "").trim();
     const values = [];
@@ -7807,6 +7809,32 @@ function renderCoreManagerField(field) {
             key
           )}" data-core-field-type="checkbox" ${checked}${disabledAttr} />`
         )}
+        ${descHtml}
+      </label>
+    `);
+  }
+
+  if (type === "range") {
+    const value = Number(field?.value ?? 0);
+    const safeValue = Number.isFinite(value) ? value : 0;
+    const min = field?.min !== undefined ? field.min : 0;
+    const max = field?.max !== undefined ? field.max : 100;
+    const step = field?.step !== undefined ? field.step : 1;
+    const suffix = String(field?.suffix || "");
+    const actionAttr = fieldAction
+      ? ` data-core-field-action="${escapeHtml(fieldAction)}"`
+      : "";
+    return wrapField(`
+      <label class="core-range-field">
+        <span class="core-range-field-head">
+          <span>${escapeHtml(label)}</span>
+          <output data-core-range-output>${escapeHtml(`${safeValue}${suffix}`)}</output>
+        </span>
+        <input type="range" min="${escapeHtml(min)}" max="${escapeHtml(max)}" step="${escapeHtml(
+          step
+        )}" value="${escapeHtml(safeValue)}"${disabledAttr}
+          data-core-field-key="${escapeHtml(key)}" data-core-field-type="range"
+          data-core-field-suffix="${escapeHtml(suffix)}"${actionAttr} />
         ${descHtml}
       </label>
     `);
@@ -8092,6 +8120,7 @@ function renderCoreSettingsManager(body, tabSpec) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "");
+  const liveUpdates = boolFromAny(ui?.live_updates, false);
   const persistentItemGroups = new Set(
     (Array.isArray(ui?.persistent_item_groups) ? ui.persistent_item_groups : [])
       .map((value) => String(value || "").trim().toLowerCase())
@@ -8279,6 +8308,13 @@ function renderCoreSettingsManager(body, tabSpec) {
     const hasSatelliteSummary = Boolean(
       heroImageSrc || heroBadges.length || summaryRows.length || sensorRows.length || detail
     );
+    const trackList = Array.isArray(item?.track_list)
+      ? item.track_list.filter((row) => row && typeof row === "object")
+      : [];
+    const trackListLabel = String(item?.track_list_label || "Current Track List").trim() || "Current Track List";
+    const trackListAction = String(item?.track_list_action || "").trim();
+    const trackListShuffleAction = String(item?.track_list_shuffle_action || "").trim();
+    const trackListShuffle = boolFromAny(item?.track_list_shuffle, false);
 
           const sectionHtml = sections
             .map((section) => {
@@ -8491,6 +8527,57 @@ function renderCoreSettingsManager(body, tabSpec) {
       `
       : `${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}`;
 
+    const trackListRowsHtml = trackList.length
+      ? trackList
+          .map((row, index) => {
+            const trackId = String(row?.id || `queue:${index}`).trim();
+            const position = String(row?.position ?? index + 1).trim();
+            const trackTitle = String(row?.title || "Untitled").trim() || "Untitled";
+            const artist = String(row?.artist || "").trim();
+            const album = String(row?.album || "").trim();
+            const duration = String(row?.duration || "").trim();
+            const active = boolFromAny(row?.active, false);
+            return `
+              <button type="button" class="core-music-track-row${active ? " active" : ""}"
+                data-core-track-id="${escapeHtml(encodeCoreManagerId(trackId))}"
+                data-core-track-action="${escapeHtml(trackListAction)}"
+                ${active ? 'aria-current="true"' : ""}
+                title="Double-click to play ${escapeHtml(trackTitle)}">
+                <span class="core-music-track-position">${active ? "▶" : escapeHtml(position)}</span>
+                <span class="core-music-track-copy">
+                  <strong>${escapeHtml(trackTitle)}</strong>
+                  <small>${escapeHtml([artist, album].filter(Boolean).join(" · ") || "Unknown artist")}</small>
+                </span>
+                <span class="core-music-track-duration">${escapeHtml(duration)}</span>
+              </button>
+            `;
+          })
+          .join("")
+      : `<div class="small core-music-track-empty">Play an album, artist, genre, or search to build the current track list.</div>`;
+    const trackListHtml = trackListAction
+      ? `
+        <details class="core-music-track-list" data-core-ui-state="music-track-list">
+          <summary class="settings-summary">
+            <span>${escapeHtml(trackListLabel)}</span>
+            <span class="small">${trackList.length} track${trackList.length === 1 ? "" : "s"}</span>
+          </summary>
+          <div class="core-music-track-toolbar">
+            ${
+              trackListShuffleAction
+                ? `<label class="small core-music-shuffle-toggle">
+                    <input class="toggle-input" type="checkbox" data-core-track-shuffle
+                      data-core-track-shuffle-action="${escapeHtml(trackListShuffleAction)}"${trackListShuffle ? " checked" : ""} />
+                    Shuffle
+                  </label>`
+                : ""
+            }
+            <span class="small">Double-click a track to play it</span>
+          </div>
+          <div class="core-music-track-rows">${trackListRowsHtml}</div>
+        </details>
+      `
+      : "";
+
     return `
       <article class="card core-manager-item${itemGroupClass}${itemVariantClass}"
         data-core-key="${safeCoreKey}"
@@ -8512,6 +8599,7 @@ function renderCoreSettingsManager(body, tabSpec) {
           <span class="small">${safeCoreKey}</span>
         </div>
         ${summaryBlockHtml}
+        ${trackListHtml}
         ${itemFieldsHtml}
         ${itemFieldsPopupEnabled ? "" : itemSectionsInDropdownEnabled ? "" : sectionHtml}
         ${actionRowHtml}
@@ -8871,7 +8959,7 @@ function renderCoreSettingsManager(body, tabSpec) {
   return `
     <div class="card core-settings-manager${
       appearanceToken ? ` core-settings-manager-${escapeHtml(appearanceToken)}` : ""
-    }">
+    }" data-core-live-updates="${liveUpdates ? "1" : "0"}">
       <div class="card-head">
         <h3 class="card-title">${safeTabLabel}</h3>
         <span class="small">${safeCoreKey}</span>
@@ -10746,7 +10834,11 @@ function activateCoreTopTab(tabName, options = {}) {
     panel.classList.toggle("active", panel.dataset.coreTabPanel === activeTab);
   });
   if (activeTab && activeTab !== "manage") {
-    void ensureCoreTopTabLoaded(activeTab, { force: forceReload });
+    const activePanel = panels.find((panel) => panel.dataset.coreTabPanel === activeTab);
+    const canRefreshSilently = String(activePanel?.dataset?.coreTabLoaded || "").trim() === "1";
+    void ensureCoreTopTabLoaded(activeTab, { force: forceReload, silent: forceReload && canRefreshSilently });
+  } else {
+    clearCoreTabLivePoll();
   }
 }
 
@@ -11371,7 +11463,7 @@ function collectCoreManagerValues(host) {
       values[key] = Boolean(input.checked);
       return;
     }
-    if (type === "number") {
+    if (type === "number" || type === "range") {
       const parsed = Number(input.value);
       values[key] = Number.isNaN(parsed) ? 0 : parsed;
       return;
@@ -11727,7 +11819,105 @@ async function fetchCoreTabPayload(coreKey, { force = false } = {}) {
   return request;
 }
 
-async function ensureCoreTopTabLoaded(tabName = "", { force = false } = {}) {
+function clearCoreTabLivePoll() {
+  if (state.coreTabLivePollTimer) {
+    window.clearTimeout(state.coreTabLivePollTimer);
+    state.coreTabLivePollTimer = 0;
+  }
+}
+
+function scheduleCoreTabLivePoll(tabName, payload) {
+  clearCoreTabLivePoll();
+  const key = String(tabName || "").trim();
+  const ui = payload?.ui && typeof payload.ui === "object" ? payload.ui : {};
+  if (!key || !boolFromAny(ui?.live_updates, false)) {
+    return;
+  }
+  const intervalRaw = Number(ui?.poll_interval_ms ?? 0);
+  const intervalMs = Number.isFinite(intervalRaw) ? Math.max(0, Math.floor(intervalRaw)) : 0;
+  if (intervalMs < 1000) {
+    return;
+  }
+  state.coreTabLivePollTimer = window.setTimeout(async () => {
+    state.coreTabLivePollTimer = 0;
+    if (state.view !== "cores" || getActiveCoreTopTab() !== key) {
+      clearCoreTabLivePoll();
+      return;
+    }
+    const panel = Array.from(document.querySelectorAll(".core-top-tab-panel[data-core-tab-panel]")).find(
+      (entry) => String(entry?.dataset?.coreTabPanel || "").trim() === key
+    );
+    const activeControl = document.activeElement;
+    if (
+      panel instanceof HTMLElement &&
+      activeControl instanceof HTMLElement &&
+      panel.contains(activeControl) &&
+      activeControl.matches("input, select, textarea, button")
+    ) {
+      scheduleCoreTabLivePoll(key, payload);
+      return;
+    }
+    await ensureCoreTopTabLoaded(key, { force: true, silent: true });
+  }, intervalMs);
+}
+
+function captureCorePanelUiState(panel) {
+  if (!(panel instanceof HTMLElement)) {
+    return {};
+  }
+  const managerTab = panel.querySelector(".core-manager-tab-btn.active[data-core-manager-tab]");
+  const subtab = panel.querySelector(".core-manager-subtab-btn.active[data-core-manager-subtab]");
+  const openDetails = Array.from(panel.querySelectorAll("details[data-core-ui-state][open]")).map((details) => {
+    const card = details.closest(".core-manager-item");
+    return {
+      state: String(details.dataset.coreUiState || "").trim(),
+      itemId: String(card?.dataset?.coreItemId || "").trim(),
+      scrollTop: Number(details.querySelector(".core-music-track-rows")?.scrollTop || 0),
+    };
+  });
+  return {
+    managerTab: String(managerTab?.dataset?.coreManagerTab || "").trim(),
+    subtab: String(subtab?.dataset?.coreManagerSubtab || "").trim(),
+    openDetails,
+  };
+}
+
+function restoreCorePanelUiState(panel, savedState) {
+  if (!(panel instanceof HTMLElement) || !savedState || typeof savedState !== "object") {
+    return;
+  }
+  const managerTab = String(savedState.managerTab || "").trim();
+  const managerButton = Array.from(panel.querySelectorAll(".core-manager-tab-btn[data-core-manager-tab]")).find(
+    (button) => String(button.dataset.coreManagerTab || "").trim() === managerTab
+  );
+  managerButton?.click();
+  const subtab = String(savedState.subtab || "").trim();
+  const subtabButton = Array.from(panel.querySelectorAll(".core-manager-subtab-btn[data-core-manager-subtab]")).find(
+    (button) => String(button.dataset.coreManagerSubtab || "").trim() === subtab
+  );
+  subtabButton?.click();
+  (Array.isArray(savedState.openDetails) ? savedState.openDetails : []).forEach((row) => {
+    const stateKey = String(row?.state || "").trim();
+    const itemId = String(row?.itemId || "").trim();
+    const details = Array.from(panel.querySelectorAll("details[data-core-ui-state]")).find((candidate) => {
+      const card = candidate.closest(".core-manager-item");
+      return (
+        String(candidate.dataset.coreUiState || "").trim() === stateKey &&
+        String(card?.dataset?.coreItemId || "").trim() === itemId
+      );
+    });
+    if (!(details instanceof HTMLDetailsElement)) {
+      return;
+    }
+    details.open = true;
+    const rows = details.querySelector(".core-music-track-rows");
+    if (rows instanceof HTMLElement) {
+      rows.scrollTop = Number(row?.scrollTop || 0);
+    }
+  });
+}
+
+async function ensureCoreTopTabLoaded(tabName = "", { force = false, silent = false } = {}) {
   const targetTab = String(tabName || "").trim();
   if (!targetTab || targetTab === "manage") {
     return;
@@ -11744,15 +11934,28 @@ async function ensureCoreTopTabLoaded(tabName = "", { force = false } = {}) {
     return;
   }
 
+  const previousPayload = state.coreTabPayloadCache?.[targetTab];
+  const savedUiState = silent ? captureCorePanelUiState(panel) : {};
   panel.dataset.coreTabLoaded = "loading";
-  panel.innerHTML = renderCoreTabPending(tabSpec, force ? "Refreshing..." : "Loading...");
+  if (!silent) {
+    panel.innerHTML = renderCoreTabPending(tabSpec, force ? "Refreshing..." : "Loading...");
+  }
 
   try {
     const payload = await fetchCoreTabPayload(targetTab, { force });
     panel.innerHTML = renderCoreTabPayload(payload, tabSpec);
     panel.dataset.coreTabLoaded = "1";
     bindCoreTabManagers();
+    if (silent) {
+      restoreCorePanelUiState(panel, savedUiState);
+    }
+    scheduleCoreTabLivePoll(targetTab, payload);
   } catch (error) {
+    if (silent) {
+      panel.dataset.coreTabLoaded = "1";
+      scheduleCoreTabLivePoll(targetTab, previousPayload);
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error || "Failed to load this core tab.");
     panel.innerHTML = renderCoreTabPayload({ error: message }, tabSpec);
     panel.dataset.coreTabLoaded = "error";
@@ -11769,27 +11972,27 @@ function persistCoreTabFromNode(node) {
   return tabName;
 }
 
-async function refreshCoreTabInPlace(tabName = "") {
+async function refreshCoreTabInPlace(tabName = "", { silent = false } = {}) {
   const targetTab = String(tabName || getActiveCoreTopTab() || "manage").trim() || "manage";
   if (targetTab === "manage") {
     await refreshShopManagerInPlace("cores", getActiveShopTab("cores") || "installed");
     activateCoreTopTab("manage");
     return;
   }
-  await ensureCoreTopTabLoaded(targetTab, { force: true });
+  await ensureCoreTopTabLoaded(targetTab, { force: true, silent });
   if (getActiveCoreTopTab() !== targetTab) {
     activateCoreTopTab(targetTab);
   }
 }
 
-async function refreshCoreManagerInPlace(node, fallbackTab = "") {
+async function refreshCoreManagerInPlace(node, fallbackTab = "", { silent = false } = {}) {
   const scope = resolveCoreRefreshScope(node);
   if (scope === "esphome-runtime") {
     await refreshEspHomeRuntimeInPlace();
     return "esphome-runtime";
   }
   const targetTab = String(fallbackTab || persistCoreTabFromNode(node) || "").trim();
-  await refreshCoreTabInPlace(targetTab);
+  await refreshCoreTabInPlace(targetTab, { silent });
   return targetTab || getActiveCoreTopTab() || "manage";
 }
 
@@ -14588,6 +14791,93 @@ function bindCoreTabManagers() {
   bindCoreManagerConditionalFields();
   bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
+  document.querySelectorAll("[data-core-field-type='range']").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.coreRangeBound === "1") {
+      return;
+    }
+    input.dataset.coreRangeBound = "1";
+    const updateOutput = () => {
+      const output = input.closest(".core-range-field")?.querySelector("[data-core-range-output]");
+      if (output) {
+        output.textContent = `${input.value}${String(input.dataset.coreFieldSuffix || "")}`;
+      }
+    };
+    input.addEventListener("input", updateOutput);
+    input.addEventListener("change", async () => {
+      const action = String(input.dataset.coreFieldAction || "").trim();
+      const card = input.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      if (!action || !card || !coreKey || input.disabled) {
+        return;
+      }
+      const values = collectCoreManagerValues(card);
+      input.disabled = true;
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        await runCoreManagerAction(card, coreKey, action, { id: itemId, values });
+        await refreshCoreManagerInPlace(card, activeTab, { silent: true });
+      } catch (error) {
+        input.disabled = false;
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+    updateOutput();
+  });
+  document.querySelectorAll(".core-music-track-row[data-core-track-action]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.coreTrackBound === "1") {
+      return;
+    }
+    button.dataset.coreTrackBound = "1";
+    button.addEventListener("dblclick", async () => {
+      const card = button.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(button.dataset.coreTrackAction || "").trim();
+      const trackId = decodeCoreManagerId(button.dataset.coreTrackId || "");
+      if (!card || !coreKey || !action || !trackId || button.disabled) {
+        return;
+      }
+      button.disabled = true;
+      button.classList.add("pending");
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        await runCoreManagerAction(card, coreKey, action, { id: trackId, values: collectCoreManagerValues(card) });
+        await refreshCoreManagerInPlace(card, activeTab, { silent: true });
+      } catch (error) {
+        button.disabled = false;
+        button.classList.remove("pending");
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
+  document.querySelectorAll("[data-core-track-shuffle][data-core-track-shuffle-action]").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.coreTrackShuffleBound === "1") {
+      return;
+    }
+    input.dataset.coreTrackShuffleBound = "1";
+    input.addEventListener("change", async () => {
+      const card = input.closest(".core-manager-item");
+      const coreKey = String(card?.dataset?.coreKey || "").trim();
+      const action = String(input.dataset.coreTrackShuffleAction || "").trim();
+      const itemId = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      if (!card || !coreKey || !action || input.disabled) {
+        return;
+      }
+      input.disabled = true;
+      try {
+        const activeTab = persistCoreTabFromNode(card);
+        await runCoreManagerAction(card, coreKey, action, { id: itemId, values: { shuffle: input.checked } });
+        await refreshCoreManagerInPlace(card, activeTab, { silent: true });
+      } catch (error) {
+        input.disabled = false;
+        input.checked = !input.checked;
+        setCoreManagerStatus(card, `Failed: ${error.message}`);
+        showToast(`Failed: ${error.message}`, "error", 3600);
+      }
+    });
+  });
   bindEspHomeEntityControls();
   bindEspHomeFirmwareSelectors();
   bindEspHomeDisplaySensorControls();
@@ -15417,17 +15707,21 @@ function bindCoreTabManagers() {
           ? async (values) => {
               setCoreManagerStatus(card, "Saving...");
               const activeTab = persistCoreTabFromNode(card);
-              const result = await runActionWithProgress(
-                {
-                  title: "Saving core item",
-                  detail: itemId || coreKey,
-                  workingText: "Saving changes...",
-                  successText: "Saved.",
-                  errorPrefix: "Core manager save failed",
-                },
-                () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
-              );
-              await refreshCoreManagerInPlace(card, activeTab);
+              const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+              const saveAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
+              const result = liveUpdates
+                ? await saveAction()
+                : await runActionWithProgress(
+                    {
+                      title: "Saving core item",
+                      detail: itemId || coreKey,
+                      workingText: "Saving changes...",
+                      successText: "Saved.",
+                      errorPrefix: "Core manager save failed",
+                    },
+                    saveAction
+                  );
+              await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
               state.notice = String(result?.message || "Saved.");
               return result;
             }
@@ -15507,21 +15801,29 @@ function bindCoreTabManagers() {
       try {
         const values = await collectCoreManagerValuesWithFiles(card);
         const activeTab = persistCoreTabFromNode(card);
-        const result = await runActionWithProgress(
-          {
-            title: "Saving core item",
-            detail: itemId || coreKey,
-            workingText: "Saving changes...",
-            successText: "Saved.",
-            errorPrefix: "Core manager save failed",
-          },
-          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
-        );
-        await refreshCoreManagerInPlace(card, activeTab);
+        const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+        button.disabled = liveUpdates;
+        const saveAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
+        const result = liveUpdates
+          ? await saveAction()
+          : await runActionWithProgress(
+              {
+                title: "Saving core item",
+                detail: itemId || coreKey,
+                workingText: "Saving changes...",
+                successText: "Saved.",
+                errorPrefix: "Core manager save failed",
+              },
+              saveAction
+            );
+        await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
         state.notice = String(result?.message || "Saved.");
         setCoreManagerStatus(card, state.notice);
-        showToast(state.notice);
+        if (!liveUpdates) {
+          showToast(state.notice);
+        }
       } catch (error) {
+        button.disabled = false;
         setCoreManagerStatus(card, `Failed: ${error.message}`);
         showToast(`Failed: ${error.message}`, "error", 3600);
       }
@@ -15631,16 +15933,21 @@ function bindCoreTabManagers() {
       try {
         const activeTab = persistCoreTabFromNode(card);
         const values = collectCoreManagerValues(card);
-        const result = await runActionWithProgress(
-          {
-            title: "Running core item",
-            detail: itemId || coreKey,
-            workingText: "Queueing run now...",
-            successText: "Queued.",
-            errorPrefix: "Core manager run failed",
-          },
-          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
-        );
+        const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+        button.disabled = liveUpdates;
+        const runAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
+        const result = liveUpdates
+          ? await runAction()
+          : await runActionWithProgress(
+              {
+                title: "Running core item",
+                detail: itemId || coreKey,
+                workingText: "Queueing run now...",
+                successText: "Queued.",
+                errorPrefix: "Core manager run failed",
+              },
+              runAction
+            );
         const sampleUrl = String(result?.sample_url || "").trim();
         if (sampleUrl) {
           try {
@@ -15650,11 +15957,14 @@ function bindCoreTabManagers() {
             showToast(`Sample ready but playback failed: ${playError.message}`, "error", 3600);
           }
         }
-        await refreshCoreManagerInPlace(card, activeTab);
+        await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
         state.notice = String(result?.message || "Queued.");
         setCoreManagerStatus(card, state.notice);
-        showToast(state.notice);
+        if (!liveUpdates) {
+          showToast(state.notice);
+        }
       } catch (error) {
+        button.disabled = false;
         setCoreManagerStatus(card, `Failed: ${error.message}`);
         showToast(`Failed: ${error.message}`, "error", 3600);
       }
@@ -15685,21 +15995,29 @@ function bindCoreTabManagers() {
       try {
         const activeTab = persistCoreTabFromNode(card);
         const values = collectCoreManagerValues(card);
-        const result = await runActionWithProgress(
-          {
-            title: "Running core action",
-            detail: itemId || coreKey,
-            workingText,
-            successText,
-            errorPrefix: "Core action failed",
-          },
-          () => runCoreManagerAction(card, coreKey, action, { id: itemId, values })
-        );
-        await refreshCoreManagerInPlace(card, activeTab);
+        const liveUpdates = Boolean(card.closest("[data-core-live-updates='1']"));
+        trigger.disabled = liveUpdates;
+        const runAction = () => runCoreManagerAction(card, coreKey, action, { id: itemId, values });
+        const result = liveUpdates
+          ? await runAction()
+          : await runActionWithProgress(
+              {
+                title: "Running core action",
+                detail: itemId || coreKey,
+                workingText,
+                successText,
+                errorPrefix: "Core action failed",
+              },
+              runAction
+            );
+        await refreshCoreManagerInPlace(card, activeTab, { silent: liveUpdates });
         state.notice = String(result?.message || successText);
         setCoreManagerStatus(card, state.notice);
-        showToast(state.notice);
+        if (!liveUpdates) {
+          showToast(state.notice);
+        }
       } catch (error) {
+        trigger.disabled = false;
         setCoreManagerStatus(card, `Failed: ${error.message}`);
         showToast(`Failed: ${error.message}`, "error", 3600);
       }
@@ -29372,6 +29690,9 @@ async function loadSpudexView({ silent = false, resetLogs = false, preserveInput
 
 async function loadView(viewName) {
   state.view = viewName;
+  if (state.view !== "cores") {
+    clearCoreTabLivePoll();
+  }
   if (state.view !== "dashboard") {
     clearDashboardRefreshTimer();
   }
