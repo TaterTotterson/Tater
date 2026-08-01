@@ -675,20 +675,28 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
     }
 
 
-def _semver_tuple(value: Any) -> tuple[int, int, int]:
+def _semver_tuple(value: Any) -> tuple[int, int, int, int]:
     token = _lower(value)
     if not token:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
     if token.startswith("v"):
         token = token[1:].strip()
-    matches = re.findall(r"[0-9]+(?:\.[0-9]+){0,2}", token)
-    dotted_matches = [item for item in matches if "." in item]
-    core = (dotted_matches[-1] if dotted_matches else (matches[-1] if matches else "0.0.0"))
+    matches = list(re.finditer(r"[0-9]+(?:\.[0-9]+){0,2}", token))
+    dotted_matches = [item for item in matches if "." in item.group(0)]
+    match = dotted_matches[-1] if dotted_matches else (matches[-1] if matches else None)
+    core = match.group(0) if match else "0.0.0"
     parts = (core.split(".") + ["0", "0", "0"])[:3]
+    suffix = token[match.end() :] if match else ""
+    revision_match = re.search(r"(?:rev|r)[._-]?(\d+)", suffix)
     try:
-        return (int(parts[0]), int(parts[1]), int(parts[2]))
+        return (
+            int(parts[0]),
+            int(parts[1]),
+            int(parts[2]),
+            int(revision_match.group(1)) if revision_match else 0,
+        )
     except Exception:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
 
 
 def _known_firmware_version(value: Any) -> str:
