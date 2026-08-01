@@ -28,6 +28,9 @@ class CoreMusicLibraryRendererTests(unittest.TestCase):
         self.assertIn("silent = false", app_js)
         self.assertIn("scheduleCoreTabLivePoll", app_js)
         self.assertIn("poll_interval_ms", app_js)
+        self.assertIn("coreTabRenderedHtml", app_js)
+        self.assertIn("silent && previousHtml === nextHtml", app_js)
+        self.assertIn("if (!liveUpdates) {\n        setCoreManagerStatus(card, workingText);", app_js)
 
     def test_music_library_layout_is_sticky_responsive_and_multicolumn(self) -> None:
         styles = (REPO_ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
@@ -55,6 +58,22 @@ class CoreMusicLibraryRendererTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_music_library_uses_component_frontend_and_event_stream(self) -> None:
+        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        app_py = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        index_html = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("isVueMusicCorePayload", app_js)
+        self.assertIn("mountMusicCore", app_js)
+        self.assertIn("/static/ui/tater-music-core.js", app_js)
+        self.assertIn("isVueMusicCorePayload(payload) || !boolFromAny", app_js)
+        self.assertIn('/api/cores/{core_key}/tab-events', app_py)
+        self.assertIn('_stream_core_tab_events', app_py)
+        self.assertIn('stable_payload.pop("updated_at", None)', app_py)
+        self.assertIn('./static/ui/tater-music-core.css', index_html)
+        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-music-core.js").is_file())
+        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-music-core.css").is_file())
 
 
 if __name__ == "__main__":
