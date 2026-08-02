@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { fetchMusicState, runMusicAction } from "./api";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
 import MusicPlayer from "./components/MusicPlayer.vue";
+import RecommendationsBrowser from "./components/RecommendationsBrowser.vue";
 import SettingsCard from "./components/SettingsCard.vue";
 import type { CoreTabPayload, MusicCoreMountOptions, MusicItem } from "./types";
 
@@ -150,6 +151,12 @@ onBeforeUnmount(() => {
         v-if="activeManagerTab?.source === 'grouped_items'"
         :groups="activeManagerTab.groups || []"
         :items="items"
+        :busy="isBusy"
+        :run="run"
+      />
+      <RecommendationsBrowser
+        v-else-if="activeManagerTab?.key === 'recommendations'"
+        :items="activeItems"
         :busy="isBusy"
         :run="run"
       />

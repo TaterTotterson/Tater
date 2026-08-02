@@ -66,14 +66,79 @@ class CoreMusicLibraryRendererTests(unittest.TestCase):
 
         self.assertIn("isVueMusicCorePayload", app_js)
         self.assertIn("mountMusicCore", app_js)
-        self.assertIn("/static/ui/tater-music-core.js", app_js)
+        self.assertIn("/static/ui/tater-ui.js", app_js)
         self.assertIn("isVueMusicCorePayload(payload) || !boolFromAny", app_js)
         self.assertIn('/api/cores/{core_key}/tab-events', app_py)
         self.assertIn('_stream_core_tab_events', app_py)
         self.assertIn('stable_payload.pop("updated_at", None)', app_py)
-        self.assertIn('./static/ui/tater-music-core.css', index_html)
-        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-music-core.js").is_file())
-        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-music-core.css").is_file())
+        self.assertNotIn('tater-music-core.css', index_html)
+        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-ui.js").is_file())
+        self.assertTrue((REPO_ROOT / "tateros_static" / "ui" / "tater-ui.css").is_file())
+        self.assertIn("taterVueAssetVersion", app_js)
+        self.assertIn('state.auth?.appVersion', app_js)
+
+        dynamic_field = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "DynamicField.vue"
+        ).read_text(encoding="utf-8")
+        settings_card = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "SettingsCard.vue"
+        ).read_text(encoding="utf-8")
+        music_styles = (
+            REPO_ROOT / "frontend" / "src" / "music" / "music-core.css"
+        ).read_text(encoding="utf-8")
+        music_app = (
+            REPO_ROOT / "frontend" / "src" / "music" / "MusicCoreApp.vue"
+        ).read_text(encoding="utf-8")
+        track_list = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "TrackList.vue"
+        ).read_text(encoding="utf-8")
+        recommendations = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "RecommendationsBrowser.vue"
+        ).read_text(encoding="utf-8")
+        music_player = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
+        ).read_text(encoding="utf-8")
+        self.assertIn('class="tm-option-copy"', dynamic_field)
+        self.assertIn(':compact="Boolean(field.compact)"', settings_card)
+        self.assertIn('const fieldGrid = ref<HTMLElement | null>(null)', settings_card)
+        self.assertIn('new ResizeObserver(scheduleFieldLayout)', settings_card)
+        self.assertIn('field.style.gridRowEnd = `span ${span}`', settings_card)
+        self.assertIn('option.friendly_name', dynamic_field)
+        self.assertIn('.tm-option-copy strong {', music_styles)
+        self.assertIn('.tm-modal-backdrop {\n  --tm-surface:', music_styles)
+        self.assertIn('.tm-option input[type="checkbox"],', music_styles)
+        self.assertIn('width: 16px;', music_styles)
+        self.assertIn('position: sticky;', music_styles)
+        self.assertIn('.tm-recommendation-grid {', music_styles)
+        self.assertIn('RecommendationsBrowser', music_app)
+        self.assertIn("activeManagerTab?.key === 'recommendations'", music_app)
+        self.assertIn('class="tm-queue">', track_list)
+        self.assertNotIn('class="tm-queue" open', track_list)
+        self.assertIn('class="tm-recommendation-card"', recommendations)
+        self.assertIn('class="tm-progress"', music_player)
+        self.assertIn('aria-label="Track position"', music_player)
+        self.assertIn('seekRelative(-1)', music_player)
+        self.assertIn('@change="setVolume"', music_player)
+        self.assertIn('@update:model-value="updateVolume"', music_player)
+        self.assertIn("const speakersDirty = ref(false)", music_player)
+        self.assertIn("if (!speakersOpen.value || !speakersDirty.value)", music_player)
+        self.assertIn("const volumeEditing = ref(false)", music_player)
+        self.assertIn("if (field && !volumeEditing.value)", music_player)
+        self.assertIn("const collapsed = ref(false)", music_player)
+        self.assertIn("'is-collapsed': collapsed", music_player)
+        self.assertIn("'Switch to mini player'", music_player)
+        self.assertIn('class="tm-player-size-icon"', music_player)
+        self.assertIn('v-if="!collapsed"', music_player)
+        self.assertIn('.tm-progress-times {', music_styles)
+        self.assertIn('.tm-player.is-collapsed .tm-player-main {', music_styles)
+        self.assertIn('.tm-player-size-toggle {', music_styles)
+        self.assertIn('.tm-player-size-icon {', music_styles)
+        self.assertIn('.tm-settings-card .tm-field.compact:not(.tm-checkbox) {', music_styles)
+        self.assertIn('align-self: start;', music_styles)
+        self.assertIn('width: min(100%, 150px);', music_styles)
+        self.assertIn('min-height: 34px;', music_styles)
+        self.assertIn('grid-auto-flow: row dense;', music_styles)
+        self.assertIn('grid-auto-rows: 8px;', music_styles)
 
 
 if __name__ == "__main__":

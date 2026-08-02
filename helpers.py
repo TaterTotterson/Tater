@@ -2441,18 +2441,19 @@ def _apple_ioreg_metal_snapshot() -> Optional[Dict[str, Any]]:
     }
 
 
-def _apple_metal_vram_snapshot() -> Optional[Dict[str, Any]]:
+def _apple_metal_vram_snapshot(*, enable_ioreg_probe: Optional[bool] = None) -> Optional[Dict[str, Any]]:
     if platform.system().lower() != "darwin":
         return None
     apple_silicon = platform.machine().lower() in {"arm64", "aarch64"}
     used_candidates: List[int] = []
     total_candidates: List[int] = []
     detail_parts: List[str] = []
-    ioreg_snapshot = (
-        _apple_ioreg_metal_snapshot()
-        if _boolish(os.getenv("TATER_APPLE_IOREG_GPU_PROBE_ENABLED"), default=False)
-        else None
+    ioreg_enabled = (
+        _boolish(os.getenv("TATER_APPLE_IOREG_GPU_PROBE_ENABLED"), default=False)
+        if enable_ioreg_probe is None
+        else bool(enable_ioreg_probe)
     )
+    ioreg_snapshot = _apple_ioreg_metal_snapshot() if ioreg_enabled else None
     if ioreg_snapshot:
         detail_parts.append("IORegistry")
         used_candidates.append(max(0, int(ioreg_snapshot.get("used_bytes") or 0)))
@@ -2614,7 +2615,7 @@ def _merge_gpu_usage_snapshot(memory_snapshot: Dict[str, Any], usage_snapshot: D
     return merged
 
 
-def _system_vram_snapshot() -> Dict[str, Any]:
+def _system_vram_snapshot(*, enable_apple_ioreg_probe: Optional[bool] = None) -> Dict[str, Any]:
     nvidia_snapshot = _nvidia_smi_vram_snapshot()
     if nvidia_snapshot:
         return nvidia_snapshot
@@ -2630,7 +2631,7 @@ def _system_vram_snapshot() -> Dict[str, Any]:
             return _merge_gpu_usage_snapshot(torch_snapshot, jetson_snapshot, backend="jetson-cuda")
         return jetson_snapshot
 
-    apple_snapshot = _apple_metal_vram_snapshot()
+    apple_snapshot = _apple_metal_vram_snapshot(enable_ioreg_probe=enable_apple_ioreg_probe)
     if apple_snapshot:
         return apple_snapshot
 
@@ -2716,7 +2717,29 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
     }
 
 
-def get_local_llm_loaded_models_snapshot(*, include_models: bool = True, include_vram_probe: bool = True) -> Dict[str, Any]:
+def get_system_hardware_snapshot(
+    *,
+    include_vram_probe: bool = True,
+    enable_apple_ioreg_probe: Optional[bool] = None,
+) -> Dict[str, Any]:
+    return {
+        "cpu": _system_cpu_snapshot(),
+        "ram": _system_ram_snapshot(),
+        "vram": (
+            _system_vram_snapshot(enable_apple_ioreg_probe=enable_apple_ioreg_probe)
+            if include_vram_probe
+            else _empty_system_vram_snapshot()
+        ),
+        "unified_memory": bool(_mlx_lm_is_apple_silicon()),
+    }
+
+
+def get_local_llm_loaded_models_snapshot(
+    *,
+    include_models: bool = True,
+    include_vram_probe: bool = True,
+    enable_apple_ioreg_probe: Optional[bool] = None,
+) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
@@ -2758,12 +2781,10 @@ def get_local_llm_loaded_models_snapshot(*, include_models: bool = True, include
         else:
             totals["estimated_ram_bytes"] += estimated
 
-    system = {
-        "cpu": _system_cpu_snapshot(),
-        "ram": _system_ram_snapshot(),
-        "vram": _system_vram_snapshot() if include_vram_probe else _empty_system_vram_snapshot(),
-        "unified_memory": bool(_mlx_lm_is_apple_silicon()),
-    }
+    system = get_system_hardware_snapshot(
+        include_vram_probe=include_vram_probe,
+        enable_apple_ioreg_probe=enable_apple_ioreg_probe,
+    )
     payload = {
         "loaded_count": len(rows),
         "by_provider": by_provider,

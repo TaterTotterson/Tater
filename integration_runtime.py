@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
-from integration_registry import refresh_integration_device_registry_cache
+from integration_registry import refresh_integration_device_registry_cache as _refresh_integration_device_registry_cache
 from helpers import redis_client as shared_redis_client
 from runtime_executors import run_background
 from tateros import integration_store as integration_store_module
@@ -31,6 +32,9 @@ _TASKS: List[asyncio.Task] = []
 _STOP_EVENT: Optional[asyncio.Event] = None
 _RUNTIME_CLIENT: Any = None
 _RUNTIME_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_DEVICE_REGISTRY_CACHE_LOOP_ENABLED = True
+_DEVICE_REGISTRY_CHANGE_LOCK = threading.RLock()
+_DEVICE_REGISTRY_CHANGE_LISTENERS: List[Callable[[str, str], Any]] = []
 _GENERIC_RUNTIME_CURSOR: Dict[str, Any] = {}
 _GENERIC_RUNTIME_NEXT_POLL: Dict[str, float] = {}
 _RUNTIME_PROVIDER_OWNER = {
@@ -47,6 +51,34 @@ def bind_integration_runtime_loop(loop: Optional[asyncio.AbstractEventLoop] = No
             return
     if loop is not None and not loop.is_closed():
         _RUNTIME_LOOP = loop
+
+
+def add_device_registry_change_listener(listener: Callable[[str, str], Any]) -> None:
+    if not callable(listener):
+        raise ValueError("listener must be callable")
+    with _DEVICE_REGISTRY_CHANGE_LOCK:
+        if listener not in _DEVICE_REGISTRY_CHANGE_LISTENERS:
+            _DEVICE_REGISTRY_CHANGE_LISTENERS.append(listener)
+
+
+def remove_device_registry_change_listener(listener: Callable[[str, str], Any]) -> None:
+    with _DEVICE_REGISTRY_CHANGE_LOCK:
+        if listener in _DEVICE_REGISTRY_CHANGE_LISTENERS:
+            _DEVICE_REGISTRY_CHANGE_LISTENERS.remove(listener)
+
+
+def _notify_device_registry_change(event: str, device_key: str = "") -> None:
+    event_token = _text(event)
+    device_token = _text(device_key)
+    if not event_token:
+        return
+    with _DEVICE_REGISTRY_CHANGE_LOCK:
+        listeners = list(_DEVICE_REGISTRY_CHANGE_LISTENERS)
+    for listener in listeners:
+        try:
+            listener(event_token, device_token)
+        except Exception:
+            continue
 
 
 def _active_runtime_loop() -> Optional[asyncio.AbstractEventLoop]:
@@ -235,11 +267,17 @@ def _state_set(client: Any, provider: str, state_id: Any, payload: Dict[str, Any
         "updated_at": time.time(),
         "payload": payload if isinstance(payload, dict) else {},
     }
-    redis_obj.hset(
+    created = redis_obj.hset(
         INTEGRATION_RUNTIME_STATES_KEY,
         f"{_text(provider)}:{token}",
         json.dumps(record, separators=(",", ":"), default=str),
     )
+    try:
+        is_new = int(created or 0) > 0
+    except Exception:
+        is_new = False
+    if is_new:
+        _notify_device_registry_change("device-discovered", f"{_text(provider)}:{token}")
 
 
 def _publish_event(client: Any, provider: str, kind: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -498,19 +536,9 @@ async def _device_registry_cache_loop(stop_event: asyncio.Event, client: Any) ->
                 device_registry_cache_refresh_seconds=refresh_seconds,
                 device_registry_cache_refreshing=True,
             )
-            registry = await run_background(
-                refresh_integration_device_registry_cache,
+            registry = await refresh_integration_device_registry_runtime_cache(
                 redis_obj,
                 source="runtime-startup" if first_refresh else "runtime",
-            )
-            _status_set(
-                redis_obj,
-                device_registry_cache_connected=True,
-                device_registry_cache_refreshing=False,
-                device_registry_cache_last_refresh_ts=time.time(),
-                device_registry_cache_device_count=int(registry.get("total") or 0),
-                device_registry_cache_category_count=len(registry.get("categories") or []),
-                device_registry_cache_last_error="",
             )
             first_refresh = False
             await _sleep(stop_event, refresh_seconds)
@@ -526,6 +554,40 @@ async def _device_registry_cache_loop(stop_event: asyncio.Event, client: Any) ->
             )
             logger.warning("[integrations] device registry cache refresh error: %s", exc)
             await _sleep(stop_event, refresh_seconds)
+
+
+async def refresh_integration_device_registry_runtime_cache(
+    client: Any = None,
+    *,
+    source: str = "system-task",
+) -> Dict[str, Any]:
+    redis_obj = _runtime_client(client)
+    _status_set(redis_obj, device_registry_cache_refreshing=True)
+    try:
+        registry = await run_background(
+            _refresh_integration_device_registry_cache,
+            redis_obj,
+            source=source,
+        )
+    except Exception as exc:
+        _status_set(
+            redis_obj,
+            device_registry_cache_connected=False,
+            device_registry_cache_refreshing=False,
+            device_registry_cache_last_error=str(exc),
+            last_error=str(exc),
+        )
+        raise
+    _status_set(
+        redis_obj,
+        device_registry_cache_connected=True,
+        device_registry_cache_refreshing=False,
+        device_registry_cache_last_refresh_ts=time.time(),
+        device_registry_cache_device_count=int(registry.get("total") or 0),
+        device_registry_cache_category_count=len(registry.get("categories") or []),
+        device_registry_cache_last_error="",
+    )
+    return registry
 
 
 async def _sleep(stop_event: asyncio.Event, seconds: float) -> None:
@@ -1595,8 +1657,12 @@ async def _ecobee_homekit_loop(stop_event: asyncio.Event, client: Any) -> None:
     _status_set(redis_obj, ecobee_homekit_connected=False, ecobee_homekit_ws_connected=False, ecobee_homekit_poll_connected=False)
 
 
-def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
-    global _RUNTIME_CLIENT, _RUNTIME_LOOP, _STOP_EVENT, _TASKS
+def start_integration_runtime(
+    client: Any = None,
+    *,
+    manage_device_registry_cache: Optional[bool] = None,
+) -> Dict[str, Any]:
+    global _RUNTIME_CLIENT, _RUNTIME_LOOP, _STOP_EVENT, _TASKS, _DEVICE_REGISTRY_CACHE_LOOP_ENABLED
     try:
         _RUNTIME_LOOP = asyncio.get_running_loop()
     except RuntimeError:
@@ -1607,6 +1673,8 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         return integration_runtime_status(client)
 
     redis_obj = _runtime_client(client)
+    if manage_device_registry_cache is not None:
+        _DEVICE_REGISTRY_CACHE_LOOP_ENABLED = bool(manage_device_registry_cache)
     _RUNTIME_CLIENT = redis_obj
     _STOP_EVENT = asyncio.Event()
     _TASKS = [
@@ -1616,8 +1684,14 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         asyncio.create_task(_hue_eventstream_loop(_STOP_EVENT, redis_obj), name="integration-runtime-hue"),
         asyncio.create_task(_ecobee_homekit_loop(_STOP_EVENT, redis_obj), name="integration-runtime-ecobee-homekit"),
         asyncio.create_task(_generic_integration_poll_loop(_STOP_EVENT, redis_obj), name="integration-runtime-generic-poll"),
-        asyncio.create_task(_device_registry_cache_loop(_STOP_EVENT, redis_obj), name="integration-runtime-device-registry-cache"),
     ]
+    if _DEVICE_REGISTRY_CACHE_LOOP_ENABLED:
+        _TASKS.append(
+            asyncio.create_task(
+                _device_registry_cache_loop(_STOP_EVENT, redis_obj),
+                name="integration-runtime-device-registry-cache",
+            )
+        )
     _status_set(
         redis_obj,
         running=True,
@@ -1636,15 +1710,33 @@ def start_integration_runtime(client: Any = None) -> Dict[str, Any]:
         ecobee_homekit_poll_connected=False,
         device_registry_cache_connected=False,
         device_registry_cache_refreshing=False,
+        device_registry_cache_managed_externally=not _DEVICE_REGISTRY_CACHE_LOOP_ENABLED,
+        device_registry_cache_refresh_seconds=(
+            0
+            if not _DEVICE_REGISTRY_CACHE_LOOP_ENABLED
+            else _as_int(
+                os.getenv("TATER_INTEGRATION_DEVICE_REGISTRY_REFRESH_SECONDS"),
+                _DEFAULT_DEVICE_REGISTRY_REFRESH_SECONDS,
+                minimum=10,
+                maximum=3600,
+            )
+        ),
         last_error="",
     )
     logger.info("[integrations] runtime started")
     return integration_runtime_status(redis_obj)
 
 
-async def ensure_integration_runtime_started(client: Any = None) -> Dict[str, Any]:
+async def ensure_integration_runtime_started(
+    client: Any = None,
+    *,
+    manage_device_registry_cache: Optional[bool] = None,
+) -> Dict[str, Any]:
     async def _start() -> Dict[str, Any]:
-        return start_integration_runtime(client)
+        return start_integration_runtime(
+            client,
+            manage_device_registry_cache=manage_device_registry_cache,
+        )
 
     return await _run_on_runtime_loop(_start)
 

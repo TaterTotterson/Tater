@@ -5,8 +5,13 @@ export interface SelectOption {
   id?: Primitive;
   key?: Primitive;
   label?: string;
+  title?: string;
+  name?: string;
+  friendly_name?: string;
   description?: string;
   meta?: string;
+  room?: string;
+  area?: string;
 }
 
 export interface MusicField {
@@ -19,6 +24,7 @@ export interface MusicField {
   required?: boolean;
   disabled?: boolean;
   read_only?: boolean;
+  compact?: boolean;
   min?: number;
   max?: number;
   step?: number | string;
@@ -54,6 +60,31 @@ export interface MusicTrack {
   album?: string;
   duration?: string;
   active?: boolean;
+  image_src?: string;
+  image_alt?: string;
+}
+
+export interface MusicPlaybackState {
+  status?: string;
+  position_seconds?: number;
+  duration_seconds?: number;
+  position_updated_at?: number;
+  seekable?: boolean;
+  seek_action?: string;
+  seek_relative_action?: string;
+  seek_step_seconds?: number;
+}
+
+export interface MusicRecommendationEntry {
+  id?: string;
+  type?: "album" | "song" | string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  reason?: string;
+  track_count?: number;
+  image_src?: string;
+  image_alt?: string;
 }
 
 export interface MusicItem {
@@ -82,7 +113,14 @@ export interface MusicItem {
   run_action?: string;
   run_label?: string;
   actions?: MusicAction[];
+  playback?: MusicPlaybackState;
   fields_dropdown?: boolean;
+  recommendation_items?: MusicRecommendationEntry[];
+  generated_at?: number;
+  history_event_count?: number;
+  recommendations_enabled?: boolean;
+  refresh_available?: boolean;
+  refresh_running?: boolean;
 }
 
 export interface ManagerGroup {

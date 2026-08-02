@@ -4602,6 +4602,62 @@ def _fetch_tts_url(stream_id: str) -> Optional[Dict[str, Any]]:
         return dict(row)
 
 
+def _strip_flac_picture_blocks(media_bytes: bytes) -> Tuple[bytes, int]:
+    """Remove embedded pictures from a temporary FLAC stream without touching audio frames."""
+    data = bytes(media_bytes or b"")
+    if len(data) < 8 or not data.startswith(b"fLaC"):
+        return data, 0
+
+    offset = 4
+    blocks: List[Tuple[int, bytes]] = []
+    removed_bytes = 0
+    saw_streaminfo = False
+    while offset + 4 <= len(data):
+        header = data[offset]
+        block_type = header & 0x7F
+        block_length = int.from_bytes(data[offset + 1 : offset + 4], "big")
+        block_end = offset + 4 + block_length
+        if block_end > len(data):
+            return data, 0
+        body = data[offset + 4 : block_end]
+        if block_type == 0:
+            saw_streaminfo = True
+        if block_type == 6:
+            removed_bytes += 4 + block_length
+        else:
+            blocks.append((block_type, body))
+        offset = block_end
+        if header & 0x80:
+            break
+    else:
+        return data, 0
+
+    if not removed_bytes or not saw_streaminfo or not blocks:
+        return data, 0
+
+    rebuilt = bytearray(b"fLaC")
+    for index, (block_type, body) in enumerate(blocks):
+        is_last = index == len(blocks) - 1
+        rebuilt.append(block_type | (0x80 if is_last else 0))
+        rebuilt.extend(len(body).to_bytes(3, "big"))
+        rebuilt.extend(body)
+    rebuilt.extend(data[offset:])
+    return bytes(rebuilt), removed_bytes
+
+
+def _sanitize_native_media_bytes(media_bytes: bytes, media_type: str = "") -> bytes:
+    data = bytes(media_bytes or b"")
+    if not data.startswith(b"fLaC"):
+        return data
+    sanitized, removed_bytes = _strip_flac_picture_blocks(data)
+    if removed_bytes:
+        logger.info(
+            "[voice_core] removed %d bytes of embedded FLAC artwork from temporary native playback stream",
+            removed_bytes,
+        )
+    return sanitized
+
+
 def _store_media_url(
     selector: str,
     session_id: str,
@@ -4610,7 +4666,7 @@ def _store_media_url(
     media_type: str,
     filename: str,
 ) -> str:
-    data = bytes(media_bytes or b"")
+    data = _sanitize_native_media_bytes(media_bytes, media_type)
     if not data:
         return ""
 

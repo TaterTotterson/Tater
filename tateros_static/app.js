@@ -107,7 +107,10 @@ const state = {
   coreTabLivePollTimer: 0,
   coreVueControllers: {},
   coreVueModulePromise: null,
+  surfaceVueController: null,
+  surfaceVueView: "",
   esphomeRuntimeLoadPromise: null,
+  esphomeRuntimeLoadPanel: "",
   esphomeRuntimeRequestSeq: 0,
   esphomeFirmwarePayload: null,
   esphomeSpeakerIdPayload: null,
@@ -124,6 +127,7 @@ const state = {
   sidebarCollapseTimer: 0,
   runtimeBreakdownPollTimer: 0,
   runtimeBreakdownPayload: null,
+  runtimeVueController: null,
   runtimeHistoryWindow: "24h",
   dashboardRefreshInFlight: null,
   dashboardLastRefreshError: "",
@@ -138,6 +142,8 @@ const state = {
   llmDebugAutoScroll: String(safeStorageGet("tater_llm_debug_auto_scroll", "true")).trim().toLowerCase() !== "false",
   settingsLogPollTimer: 0,
   settingsLogInFlight: false,
+  settingsSystemTasksPollTimer: 0,
+  settingsSystemTasksInFlight: false,
   settingsLogNextSeq: 0,
   settingsLogEntries: [],
   settingsLogAutoScroll: String(safeStorageGet("tater_settings_log_auto_scroll", "true")).trim().toLowerCase() !== "false",
@@ -212,6 +218,14 @@ function clearSettingsLogPollTimer() {
   state.settingsLogInFlight = false;
 }
 
+function clearSettingsSystemTasksPollTimer() {
+  if (state.settingsSystemTasksPollTimer) {
+    window.clearTimeout(state.settingsSystemTasksPollTimer);
+    state.settingsSystemTasksPollTimer = 0;
+  }
+  state.settingsSystemTasksInFlight = false;
+}
+
 const APP_BASE_PATH = (() => {
   const rawPath = String(window.location.pathname || "/").trim();
   const normalized = rawPath.replace(/\/+$/, "");
@@ -249,16 +263,16 @@ const VIEW_META = {
   settings: { title: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 };
 
-const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "esphome", "redis", "spudhub", "misc", "advanced", "logs"];
+const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "esphome", "redis", "spudhub", "misc", "advanced", "system", "logs"];
 
 const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
 const POPUP_EFFECT_CLOSE_MS = {
   disabled: 120,
-  flame: 280,
-  dust: 320,
-  glitch: 260,
-  portal: 300,
-  melt: 300,
+  flame: 300,
+  dust: 380,
+  glitch: 280,
+  portal: 380,
+  melt: 370,
 };
 const SIDEBAR_EFFECT_MS = {
   disabled: { collapse: 120, expand: 140 },
@@ -320,6 +334,70 @@ function getSidebarEffectLabel(direction = "collapse", style = state.popupEffect
   const normalized = normalizePopupEffectStyle(style);
   const profile = SIDEBAR_EFFECT_LABELS[normalized] || SIDEBAR_EFFECT_LABELS.flame;
   return direction === "expand" ? profile.expand : profile.collapse;
+}
+
+let popupEffectPreviewNode = null;
+
+function closePopupEffectPreview(node = popupEffectPreviewNode) {
+  if (!(node instanceof HTMLElement) || node.dataset.closing === "1") {
+    return;
+  }
+  node.dataset.closing = "1";
+  node.classList.remove("tater-popup-enter-active");
+  node.classList.add("tater-popup-leave-active");
+  const finish = () => {
+    node.remove();
+    if (popupEffectPreviewNode === node) popupEffectPreviewNode = null;
+    syncPopupBodyScrollLock();
+  };
+  node.addEventListener("animationend", finish, { once: true });
+  window.setTimeout(finish, getPopupEffectCloseMs() + 160);
+}
+
+function openPopupEffectPreview(value) {
+  const style = applyPopupEffectStyle(value);
+  if (popupEffectPreviewNode instanceof HTMLElement) {
+    popupEffectPreviewNode.remove();
+  }
+  const backdrop = document.createElement("div");
+  backdrop.className = "tv-modal-backdrop tater-popup-effect-backdrop tater-popup-enter-active popup-effect-preview-backdrop";
+  backdrop.setAttribute("role", "presentation");
+  const field = document.createElement("span");
+  field.className = "tater-popup-effect-field";
+  field.setAttribute("aria-hidden", "true");
+  const burst = document.createElement("span");
+  burst.className = "tater-popup-effect-burst";
+  burst.setAttribute("aria-hidden", "true");
+  const dialog = document.createElement("section");
+  dialog.className = "tv-modal popup-effect-preview-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-label", "Compotato popup effect preview");
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "tv-eyebrow";
+  eyebrow.textContent = "Compotato preview";
+  const title = document.createElement("h2");
+  title.textContent = `${style === "disabled" ? "Simple" : style[0].toUpperCase() + style.slice(1)} popup effect`;
+  const detail = document.createElement("p");
+  detail.textContent = "This is how dialogs enter and leave throughout the updated Tater WebUI.";
+  const closeButton = document.createElement("button");
+  closeButton.className = "tv-button";
+  closeButton.type = "button";
+  closeButton.textContent = "Close preview";
+  copy.append(eyebrow, title, detail);
+  header.append(copy, closeButton);
+  dialog.append(header);
+  backdrop.append(field, burst, dialog);
+  popupEffectPreviewNode = backdrop;
+  document.body.append(backdrop);
+  document.body.classList.add("modal-open");
+  closeButton.addEventListener("click", () => closePopupEffectPreview(backdrop));
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) closePopupEffectPreview(backdrop);
+  });
+  closeButton.focus({ preventScroll: true });
 }
 
 applyPopupEffectStyle(state.popupEffectStyle);
@@ -462,7 +540,7 @@ function waitMs(ms) {
 }
 
 function syncPopupBodyScrollLock() {
-  const hasVisibleModal = Boolean(document.querySelector(".cerb-modal.active, .cerb-modal.closing"));
+  const hasVisibleModal = Boolean(document.querySelector(".cerb-modal.active, .cerb-modal.closing, .tater-popup-effect-backdrop"));
   if (document.body) {
     document.body.classList.toggle("modal-open", hasVisibleModal);
   }
@@ -2210,6 +2288,151 @@ function renderSettingsSectionIntro(title, description = "", badge = "", variant
       </div>
     </div>
   `;
+}
+
+function systemTaskTimeLabel(value, { future = false } = {}) {
+  const seconds = Number(value || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return future ? "Not scheduled" : "Not run yet";
+  }
+  const deltaSeconds = Math.round(seconds - Date.now() / 1000);
+  if (future && deltaSeconds > 0 && deltaSeconds < 90) {
+    return `in ${deltaSeconds}s`;
+  }
+  try {
+    return new Date(seconds * 1000).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch (_error) {
+    return future ? "Scheduled" : "Completed";
+  }
+}
+
+function systemTaskIntervalLabel(value) {
+  const seconds = Math.max(0, Number(value || 0));
+  if (!seconds) return "Off";
+  if (seconds < 60) return `Every ${Math.round(seconds)}s`;
+  if (seconds < 3600) return `Every ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `Every ${Math.round(seconds / 3600)}h`;
+  return `Every ${Math.round(seconds / 86400)}d`;
+}
+
+function renderSystemTasks(payload = {}) {
+  const tasks = Array.isArray(payload?.tasks) ? payload.tasks.filter((row) => row && typeof row === "object") : [];
+  const coreGroups = Array.isArray(payload?.core_tasks)
+    ? payload.core_tasks.filter((row) => row && typeof row === "object")
+    : [];
+  const coreTasks = coreGroups.flatMap((group) =>
+    Array.isArray(group?.tasks) ? group.tasks.filter((row) => row && typeof row === "object") : []
+  );
+  const coreProviderErrors = Array.isArray(payload?.core_task_errors)
+    ? payload.core_task_errors.filter((row) => row && typeof row === "object")
+    : [];
+  const allTasks = [...tasks, ...coreTasks];
+  const runningCount = allTasks.filter((row) => boolFromAny(row?.running, false)).length;
+  const errorCount = allTasks.filter((row) => String(row?.status || "").trim().toLowerCase() === "error").length + coreProviderErrors.length;
+  const summaryHtml = `
+    <div><span>Tater tasks</span><strong>${tasks.length}</strong></div>
+    <div><span>Core tasks</span><strong>${coreTasks.length}</strong></div>
+    <div><span>Running</span><strong>${runningCount}</strong></div>
+    <div><span>Errors</span><strong>${errorCount}</strong></div>
+  `;
+  if (!allTasks.length) {
+    return { summaryHtml, listHtml: renderNotice("No system tasks are registered.") };
+  }
+
+  const renderTaskCard = (task, coreKey = "") => {
+      const taskId = String(task?.id || "").trim();
+      const label = String(task?.label || taskId || "System task").trim();
+      const description = String(task?.description || "").trim();
+      const status = String(task?.status || "idle").trim().toLowerCase();
+      const running = boolFromAny(task?.running, false);
+      const enabled = boolFromAny(task?.enabled, true);
+      const manual = coreKey ? boolFromAny(task?.manual, true) : true;
+      const canRun = coreKey ? boolFromAny(task?.can_run, false) : enabled;
+      const scheduleLabel = String(task?.schedule_label || "").trim() || systemTaskIntervalLabel(task?.interval_seconds);
+      const nextRunLabel = String(task?.next_run_label || "").trim();
+      const durationMs = Math.max(0, Number(task?.duration_ms || 0));
+      const durationLabel = durationMs > 0 ? `${durationMs < 1000 ? durationMs.toFixed(0) : (durationMs / 1000).toFixed(1)}${durationMs < 1000 ? " ms" : " s"}` : "—";
+      const lastError = String(task?.last_error || "").trim();
+      const statusLabel = running
+        ? "Running"
+        : status === "error"
+          ? "Needs attention"
+          : status === "stopped"
+            ? "Core stopped"
+            : status === "waiting"
+              ? "Waiting"
+              : enabled
+                ? "Ready"
+                : "Disabled";
+      const runAttribute = coreKey
+        ? `data-core-task-run="${escapeHtml(taskId)}" data-core-task-key="${escapeHtml(coreKey)}"`
+        : `data-system-task-run="${escapeHtml(taskId)}"`;
+      const buttonDisabled = running || !canRun;
+      const actionButton = !manual
+        ? `<button type="button" class="inline-btn system-task-run" disabled>Automatic</button>`
+        : `<button type="button" class="inline-btn system-task-run" ${runAttribute} ${buttonDisabled ? "disabled" : ""}>${running ? "Running…" : "Run Now"}</button>`;
+      return `
+        <article class="system-task-card tone-${escapeHtml(status || "idle")}" data-system-task-id="${escapeHtml(taskId)}">
+          <div class="system-task-card-head">
+            <div>
+              <span class="system-task-kicker">${escapeHtml(scheduleLabel)}</span>
+              <h3>${escapeHtml(label)}</h3>
+              ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+            </div>
+            <span class="system-task-status tone-${escapeHtml(status || "idle")}"><i></i>${escapeHtml(statusLabel)}</span>
+          </div>
+          <div class="system-task-facts">
+            <div><span>Last run</span><strong>${escapeHtml(systemTaskTimeLabel(task?.finished_at))}</strong></div>
+            <div><span>Duration</span><strong>${escapeHtml(durationLabel)}</strong></div>
+            <div><span>${nextRunLabel ? "Trigger" : "Next run"}</span><strong>${escapeHtml(nextRunLabel || (running ? "After this run" : enabled ? systemTaskTimeLabel(task?.next_run_at, { future: true }) : "Off"))}</strong></div>
+          </div>
+          ${lastError ? `<div class="system-task-error">${escapeHtml(lastError)}</div>` : ""}
+          <div class="system-task-actions">
+            <span class="small">${task?.run_count ? `${Number(task.run_count)} completed run${Number(task.run_count) === 1 ? "" : "s"}` : "Waiting for its first run"}</span>
+            ${actionButton}
+          </div>
+        </article>
+      `;
+  };
+
+  const taterCards = tasks.map((task) => renderTaskCard(task)).join("");
+  const coreSections = coreGroups
+    .map((group) => {
+      const coreKey = String(group?.core_key || "").trim();
+      const label = String(group?.label || coreKey || "Core").trim();
+      const groupTasks = Array.isArray(group?.tasks) ? group.tasks : [];
+      const coreRunning = boolFromAny(group?.running, false);
+      return `
+        <section class="system-task-core-group" data-core-task-group="${escapeHtml(coreKey)}">
+          <header class="system-task-group-head">
+            <div><span>Core tasks</span><h3>${escapeHtml(label)}</h3></div>
+            <span class="system-task-core-state ${coreRunning ? "running" : "stopped"}"><i></i>${coreRunning ? "Core running" : "Core stopped"}</span>
+          </header>
+          <div class="system-task-grid">${groupTasks.map((task) => renderTaskCard(task, coreKey)).join("")}</div>
+        </section>
+      `;
+    })
+    .join("");
+  const coreErrorHtml = coreProviderErrors
+    .map((row) => renderNotice(`${String(row?.core_key || "Core")}: ${String(row?.error || "Task status unavailable.")}`))
+    .join("");
+  const listHtml = `
+    <section class="system-task-section">
+      <header class="system-task-section-head"><span>Tater</span><h2>System Tasks</h2></header>
+      <div class="system-task-grid">${taterCards || renderNotice("No Tater system tasks are registered.")}</div>
+    </section>
+    <section class="system-task-section">
+      <header class="system-task-section-head"><span>Installed cores</span><h2>Core Tasks</h2></header>
+      <div class="system-task-core-groups">${coreSections || renderNotice("No installed cores expose background tasks yet.")}${coreErrorHtml}</div>
+    </section>
+  `;
+  return { summaryHtml, listHtml };
 }
 
 function settingsIntegrationDomPart(value) {
@@ -5399,6 +5622,10 @@ function renderRuntimeSummaryBubble(health) {
 }
 
 function setRuntimeSummaryText(text, tone = "normal") {
+  if (state.runtimeVueController?.setStatus) {
+    state.runtimeVueController.setStatus(text, tone);
+    return;
+  }
   const summary = document.getElementById("runtime-summary");
   if (!summary) {
     return;
@@ -5409,6 +5636,10 @@ function setRuntimeSummaryText(text, tone = "normal") {
 }
 
 function setRuntimeSummaryHealth(health, tone = "normal") {
+  if (state.runtimeVueController?.setHealth) {
+    state.runtimeVueController.setHealth(health || {}, tone);
+    return;
+  }
   const summary = document.getElementById("runtime-summary");
   if (!summary) {
     return;
@@ -9088,14 +9319,487 @@ function disposeCoreVueControllers(tabName = "") {
   state.coreVueControllers = controllers;
 }
 
+function taterVueAssetVersion() {
+  return String(state.auth?.appVersion || state.auth?.appVersionLabel || "").trim().replace(/^v/i, "");
+}
+
+function taterVueAssetUrl(path) {
+  const base = withBasePath(path);
+  const version = taterVueAssetVersion();
+  return version ? `${base}${base.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}` : base;
+}
+
+function ensureTaterVueStylesheet() {
+  const href = taterVueAssetUrl("/static/ui/tater-ui.css");
+  let link = document.getElementById("tater-vue-stylesheet");
+  if (link instanceof HTMLLinkElement && link.href.endsWith(href)) {
+    return;
+  }
+  if (!(link instanceof HTMLLinkElement)) {
+    link = document.createElement("link");
+    link.id = "tater-vue-stylesheet";
+    link.rel = "stylesheet";
+    document.head.appendChild(link);
+  }
+  link.href = href;
+}
+
 async function loadCoreVueModule() {
+  ensureTaterVueStylesheet();
   if (!state.coreVueModulePromise) {
-    state.coreVueModulePromise = import(withBasePath("/static/ui/tater-music-core.js")).catch((error) => {
+    state.coreVueModulePromise = import(taterVueAssetUrl("/static/ui/tater-ui.js")).catch((error) => {
       state.coreVueModulePromise = null;
       throw error;
     });
   }
   return state.coreVueModulePromise;
+}
+
+function disposeRuntimeVueController() {
+  try {
+    state.runtimeVueController?.unmount?.();
+  } catch (error) {
+    console.warn("Failed to unmount the runtime status UI.", error);
+  }
+  state.runtimeVueController = null;
+  const root = document.getElementById("runtime-summary");
+  if (root) {
+    root.replaceChildren();
+    root.classList.remove("runtime-summary-vue-host", "degraded", "offline", "interactive");
+    root.removeAttribute("role");
+    root.removeAttribute("tabindex");
+    root.removeAttribute("title");
+    delete root.dataset.bound;
+  }
+}
+
+async function mountVueRuntimeStatus() {
+  const root = document.getElementById("runtime-summary");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const module = await loadCoreVueModule();
+  if (typeof module?.mountRuntimeStatus !== "function") {
+    return false;
+  }
+  disposeRuntimeVueController();
+  root.classList.add("runtime-summary-vue-host");
+  state.runtimeVueController = module.mountRuntimeStatus(root, {
+    initialState: { text: "Checking system…", tone: "normal" },
+    endpoints: {
+      breakdown: withBasePath("/api/runtime/breakdown"),
+      unloadModel: withBasePath("/api/runtime/local-llm/unload"),
+    },
+    onBreakdownChange: (payload) => {
+      state.runtimeBreakdownPayload = payload || {};
+      try {
+        document.dispatchEvent(new CustomEvent("tater:runtime-breakdown-updated", { detail: { payload: payload || {} } }));
+      } catch {
+        // Runtime breakdown is a convenience cache for other panels; ignore event failures.
+      }
+    },
+    onHealthRefresh: () => void refreshHealth(),
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+  });
+  return true;
+}
+
+function disposeSurfaceVueController() {
+  if (state.surfaceVueView === "settings") {
+    document.getElementById("view-root")?.classList.remove("settings-vue-ready");
+  }
+  try {
+    state.surfaceVueController?.unmount?.();
+  } catch (error) {
+    console.warn(`Failed to unmount the ${state.surfaceVueView || "Tater"} Vue surface.`, error);
+  }
+  state.surfaceVueController = null;
+  state.surfaceVueView = "";
+}
+
+async function mountVueDashboard(payload) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  if (state.surfaceVueView === "dashboard" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-dashboard-mount" data-tater-dashboard></div>`;
+  const mountTarget = root.querySelector("[data-tater-dashboard]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountDashboard !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountDashboard(mountTarget, {
+    initialPayload: payload || {},
+    dashboardEndpoint: withBasePath("/api/dashboard"),
+    refreshBriefsEndpoint: withBasePath("/api/dashboard/briefs/refresh"),
+    settingsEndpoint: withBasePath("/api/dashboard/settings"),
+    initialPreferences: {
+      showMetrics: state.dashboardShowMetrics,
+      showMedia: state.dashboardShowMedia,
+    },
+    onPreferencesChange: (preferences) => {
+      state.dashboardShowMetrics = Boolean(preferences?.showMetrics);
+      state.dashboardShowMedia = Boolean(preferences?.showMedia);
+      safeStorageSet("tater_dashboard_show_metrics", state.dashboardShowMetrics ? "true" : "false");
+      safeStorageSet("tater_dashboard_show_media", state.dashboardShowMedia ? "true" : "false");
+    },
+    onPayloadChange: (nextPayload) => {
+      state.dashboardPayload = nextPayload;
+      syncDashboardRefreshSettingsFromPayload(nextPayload);
+    },
+    onNavigate: (target) => void openDashboardUpdateTarget(target),
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+  });
+  state.surfaceVueView = "dashboard";
+  return true;
+}
+
+async function loadVueDashboardView() {
+  const payload = state.dashboardPayload || await api("/api/dashboard");
+  state.dashboardPayload = payload;
+  syncDashboardRefreshSettingsFromPayload(payload);
+  return mountVueDashboard(payload);
+}
+
+function applyVueChatProfile(profile = {}) {
+  const firstName = String(profile.tater_first_name || profile.tater_name || "").trim() || "Tater";
+  const lastName = String(profile.tater_last_name || "").trim() || "Totterson";
+  const fullName = String(profile.tater_full_name || "").trim() || _composeName(firstName, lastName, "Tater Totterson");
+  state.chatProfile = {
+    username: String(profile.username || "User"),
+    userAvatar: String(profile.user_avatar || ""),
+    taterAvatar: String(profile.tater_avatar || ""),
+    taterName: firstName,
+    taterFirstName: firstName,
+    taterLastName: lastName,
+    taterFullName: fullName,
+    attachMaxMbEach: Number(profile.attach_max_mb_each ?? state.chatProfile.attachMaxMbEach ?? 0),
+    attachMaxMbTotal: Number(profile.attach_max_mb_total ?? state.chatProfile.attachMaxMbTotal ?? 0),
+  };
+  applyBranding(firstName);
+  syncChatCopy();
+}
+
+async function mountVueChat({ profile, messages, stats }) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const payload = { profile: profile || {}, messages: Array.isArray(messages) ? messages : [], stats: stats || {} };
+  if (state.surfaceVueView === "chat" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-chat-mount" data-tater-chat></div>`;
+  const mountTarget = root.querySelector("[data-tater-chat]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountChat !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountChat(mountTarget, {
+    initialProfile: payload.profile,
+    initialMessages: payload.messages,
+    initialStats: payload.stats,
+    initialJobs: state.activeChatJobs,
+    sessionId: state.sessionId,
+    isIngress: IS_HA_INGRESS,
+    endpoints: {
+      history: withBasePath("/api/chat/history"),
+      profile: withBasePath("/api/chat/profile"),
+      stats: withBasePath("/api/chat/stats"),
+      jobs: withBasePath("/api/chat/jobs"),
+      files: withBasePath("/api/chat/files"),
+    },
+    onSessionChange: (sessionId) => {
+      state.sessionId = String(sessionId || "").trim() || state.sessionId;
+      safeStorageSet("tater_tateros_session_id", state.sessionId);
+    },
+    onProfileChange: (nextProfile) => applyVueChatProfile(nextProfile || {}),
+    onJobsChange: (jobs) => {
+      state.activeChatJobs = jobs && typeof jobs === "object" ? jobs : {};
+    },
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+    onRequestError: (message) => {
+      if (_isLikelyRedisFailureDetail(message || "")) {
+        void promptRedisSetupRecovery(String(message || "Redis connection lost."));
+      } else {
+        _scheduleHealthRefresh(220);
+      }
+    },
+    onHealthRefresh: () => void refreshHealth(),
+  });
+  state.surfaceVueView = "chat";
+  return true;
+}
+
+async function loadVueChatView() {
+  const [profile, history, stats] = await Promise.all([
+    api("/api/chat/profile"),
+    api("/api/chat/history"),
+    api("/api/chat/stats").catch(() => ({ enabled: false, stats: null })),
+  ]);
+  applyVueChatProfile(profile || {});
+  return mountVueChat({
+    profile: profile || {},
+    messages: Array.isArray(history?.messages) ? history.messages : [],
+    stats: stats || { enabled: false, stats: null },
+  });
+}
+
+async function mountVueIntegrations(settings) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  if (state.surfaceVueView === "integrations" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(settings);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-integrations-mount" data-tater-integrations></div>`;
+  const mountTarget = root.querySelector("[data-tater-integrations]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountIntegrations !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountIntegrations(mountTarget, {
+    initialSettings: settings || {},
+    initialTab: state.integrationSubtab || "manager",
+    endpoints: {
+      settings: withBasePath("/api/settings"),
+      shop: withBasePath("/api/shop/integrations"),
+      integrationSettings: withBasePath("/api/settings/integrations"),
+      integrationActions: withBasePath("/api/settings/integrations"),
+      deviceRegistry: withBasePath("/api/settings/integrations/device-registry"),
+      rooms: withBasePath("/api/settings/integrations/rooms"),
+      runtime: withBasePath("/api/settings/integrations/runtime"),
+      runtimeStates: withBasePath("/api/settings/integrations/runtime/states"),
+      runtimeEvents: withBasePath("/api/settings/integrations/runtime/events"),
+      systemTasks: withBasePath("/api/settings/system-tasks"),
+    },
+    onTabChange: (tab) => setPreferredIntegrationTab(tab),
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+  });
+  state.surfaceVueView = "integrations";
+  return true;
+}
+
+async function mountVueVerbas(runtimeData, shopData) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const payload = { runtime: runtimeData || {}, shop: shopData || {} };
+  if (state.surfaceVueView === "verbas" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-verbas-mount" data-tater-verbas></div>`;
+  const mountTarget = root.querySelector("[data-tater-verbas]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountVerbas !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountVerbas(mountTarget, {
+    initialPayload: payload,
+    endpoints: {
+      runtime: withBasePath("/api/verbas"),
+      shop: withBasePath("/api/shop/verbas"),
+    },
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+    onHealthRefresh: () => void refreshHealth(),
+  });
+  state.surfaceVueView = "verbas";
+  return true;
+}
+
+async function mountVuePortals(runtimeData, shopData) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const payload = { runtime: runtimeData || {}, shop: shopData || {} };
+  if (state.surfaceVueView === "portals" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-portals-mount" data-tater-portals></div>`;
+  const mountTarget = root.querySelector("[data-tater-portals]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountPortals !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountPortals(mountTarget, {
+    initialPayload: payload,
+    endpoints: {
+      runtime: withBasePath("/api/portals"),
+      shop: withBasePath("/api/shop/portals"),
+    },
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+    onHealthRefresh: () => void refreshHealth(),
+  });
+  state.surfaceVueView = "portals";
+  return true;
+}
+
+async function mountVueCores(runtimeData, shopData, tabsData) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const payload = { runtime: runtimeData || {}, shop: shopData || {}, tabs: tabsData || { tabs: [] } };
+  const dynamicTabs = Array.isArray(tabsData?.tabs) ? tabsData.tabs : [];
+  state.coreTabSpecs = Object.fromEntries(
+    dynamicTabs
+      .map((tab) => {
+        const key = String(tab?.core_key || "").trim();
+        return key ? [key, tab] : null;
+      })
+      .filter(Boolean)
+  );
+  state.coreTabPayloadCache = {};
+  state.coreTabLoadPromises = {};
+  state.coreTabRenderedHtml = {};
+  clearCoreTabLivePoll();
+  disposeCoreVueControllers();
+  if (state.surfaceVueView === "cores" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload);
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-cores-mount" data-tater-cores></div>`;
+  const mountTarget = root.querySelector("[data-tater-cores]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountCores !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountCores(mountTarget, {
+    initialPayload: payload,
+    initialTab: state.coreTopTab || "manage",
+    endpoints: {
+      runtime: withBasePath("/api/cores"),
+      shop: withBasePath("/api/shop/cores"),
+      tabs: withBasePath("/api/cores/tabs"),
+    },
+    renderCorePanel: (host, panelPayload, tabSpec) => {
+      if (!(host instanceof HTMLElement) || !host.isConnected) {
+        return;
+      }
+      const coreKey = String(tabSpec?.core_key || "").trim();
+      if (coreKey) {
+        state.coreTabPayloadCache[coreKey] = panelPayload;
+      }
+      host.innerHTML = renderCoreTabPayload(panelPayload, tabSpec);
+      bindCoreTabManagers();
+    },
+    clearCorePanel: (host) => {
+      if (host instanceof HTMLElement) {
+        host.replaceChildren();
+      }
+    },
+    onTabChange: (tab) => persistCoreTopTab(tab),
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+    onHealthRefresh: () => void refreshHealth(),
+  });
+  state.surfaceVueView = "cores";
+  return true;
+}
+
+async function mountVueSpudex(payload) {
+  const root = document.getElementById("view-root");
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  if (state.surfaceVueView === "spudex" && state.surfaceVueController) {
+    state.surfaceVueController.update?.(payload || {});
+    return true;
+  }
+  disposeSurfaceVueController();
+  root.innerHTML = `<div class="tater-spudex-mount" data-tater-spudex></div>`;
+  const mountTarget = root.querySelector("[data-tater-spudex]");
+  const module = await loadCoreVueModule();
+  if (!(mountTarget instanceof HTMLElement) || !mountTarget.isConnected || typeof module?.mountSpudex !== "function") {
+    return false;
+  }
+  state.surfaceVueController = module.mountSpudex(mountTarget, {
+    initialPayload: payload || {},
+    initialTab: state.spudexTab || "workbench",
+    initialSessionId: state.spudexSelectedSessionId || "",
+    initialManualSessionId: state.spudexManualSessionId || "",
+    profile: {
+      username: state.chatProfile.username || "User",
+      user_avatar: state.chatProfile.userAvatar || "",
+      tater_avatar: state.chatProfile.taterAvatar || "",
+      tater_name: state.chatProfile.taterName || "Tater",
+      tater_first_name: state.chatProfile.taterFirstName || state.chatProfile.taterName || "Tater",
+      tater_last_name: state.chatProfile.taterLastName || "Totterson",
+      tater_full_name: state.chatProfile.taterFullName || getTaterFullName(),
+    },
+    endpoints: {
+      root: withBasePath("/api/spudex"),
+      settings: withBasePath("/api/spudex/settings"),
+      run: withBasePath("/api/spudex/run"),
+      chat: withBasePath("/api/spudex/chat"),
+      chatSession: withBasePath("/api/spudex/chat/session"),
+      sessions: withBasePath("/api/spudex/sessions"),
+      chatFiles: withBasePath("/api/chat/files"),
+    },
+    onTabChange: (tab) => {
+      state.spudexTab = normalizeSpudexTab(tab);
+      safeStorageSet("tater_spudex_tab", state.spudexTab);
+    },
+    onSessionChange: (sessionId) => {
+      state.spudexSelectedSessionId = String(sessionId || "").trim();
+      safeStorageSet("tater_spudex_selected_session_id", state.spudexSelectedSessionId);
+    },
+    onManualSessionChange: (sessionId) => {
+      state.spudexManualSessionId = String(sessionId || "").trim();
+      safeStorageSet("tater_spudex_manual_session_id", state.spudexManualSessionId);
+    },
+    onToast: (message, tone) => showToast(message, tone === "error" ? "error" : "success", tone === "error" ? 4200 : 2800),
+  });
+  state.surfaceVueView = "spudex";
+  return true;
+}
+
+async function mountVueSettings(settings, redisStatus) {
+  const root = document.getElementById("view-root");
+  const mountTarget = root?.querySelector("[data-tater-settings]");
+  if (!(root instanceof HTMLElement) || !(mountTarget instanceof HTMLElement)) {
+    return false;
+  }
+  disposeSurfaceVueController();
+  const module = await loadCoreVueModule();
+  if (!mountTarget.isConnected || typeof module?.mountSettings !== "function") {
+    return false;
+  }
+  const summary = {
+    redisConnected: Boolean(redisStatus?.connected),
+    adminGateCount: Array.isArray(settings?.admin_only_plugins) ? settings.admin_only_plugins.length : 0,
+    integrationCount: Array.isArray(settings?.integrations) ? settings.integrations.length : 0,
+  };
+  state.surfaceVueController = module.mountSettings(mountTarget, {
+    initialTab: !redisStatus?.connected ? "redis" : normalizeSettingsTab(state.settingsTab || "general"),
+    initialSummary: summary,
+    onTabChange: (tab) => {
+      const normalized = normalizeSettingsTab(tab);
+      const legacyButton = root.querySelector(`.settings-tab-btn[data-settings-tab="${normalized}"]`);
+      if (legacyButton instanceof HTMLButtonElement) {
+        legacyButton.click();
+      }
+    },
+  });
+  state.surfaceVueView = "settings";
+  root.classList.add("settings-vue-ready");
+  return true;
 }
 
 async function mountVueMusicCore(panel, payload, tabSpec) {
@@ -9541,7 +10245,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
     : "";
 
   const summaryBlockHtml = `
-    <div class="core-satellite-summary">
+    <div class="core-satellite-summary${heroImageSrc ? "" : " no-image"}">
       ${
         heroImageSrc
           ? `<div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(
@@ -9835,6 +10539,70 @@ function espHomeFirmwareDevicesForTemplate(firmware, templateKey = "") {
   return devices.filter((row) => allowedSelectors.has(String(row?.value || "").trim()));
 }
 
+function espHomeFirmwareAllDevices(firmware) {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const devices = Array.isArray(body?.devices) ? body.devices.filter((row) => row && typeof row === "object") : [];
+  if (devices.length) {
+    return devices;
+  }
+  const byTemplate =
+    body?.devices_by_template && typeof body.devices_by_template === "object" ? body.devices_by_template : {};
+  const seen = new Set();
+  return Object.values(byTemplate)
+    .flatMap((rows) => (Array.isArray(rows) ? rows : []))
+    .filter((row) => {
+      const selector = String(row?.value || "").trim();
+      if (!selector || seen.has(selector)) {
+        return false;
+      }
+      seen.add(selector);
+      return true;
+    });
+}
+
+function espHomeFirmwareTemplateForSelector(firmware, selector = "") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const selectorToken = String(selector || "").trim();
+  if (!selectorToken || selectorToken === "__usb_recovery__") {
+    return "";
+  }
+  const directDevice = espHomeFirmwareAllDevices(body).find(
+    (row) => String(row?.value || "").trim() === selectorToken
+  );
+  const directTemplate = String(directDevice?.template_key || "").trim();
+  if (directTemplate && !boolFromAny(directDevice?.unmatched_template, false)) {
+    return directTemplate;
+  }
+
+  const templates = Array.isArray(body?.templates) ? body.templates : [];
+  const variants = body?.variants && typeof body.variants === "object" ? body.variants : {};
+  for (const template of templates) {
+    const templateKey = String(template?.value || "").trim();
+    const variant =
+      templateKey && variants?.[templateKey]?.[selectorToken] && typeof variants[templateKey][selectorToken] === "object"
+        ? variants[templateKey][selectorToken]
+        : null;
+    if (variant && !boolFromAny(variant?.unmatched_template, false)) {
+      return String(variant?.template_key || templateKey).trim() || templateKey;
+    }
+  }
+
+  const byTemplate =
+    body?.devices_by_template && typeof body.devices_by_template === "object" ? body.devices_by_template : {};
+  for (const template of templates) {
+    const templateKey = String(template?.value || "").trim();
+    const matchedRow = (Array.isArray(byTemplate?.[templateKey]) ? byTemplate[templateKey] : []).find(
+      (row) =>
+        String(row?.value || "").trim() === selectorToken &&
+        !boolFromAny(row?.unmatched_template, false)
+    );
+    if (matchedRow) {
+      return String(matchedRow?.template_key || templateKey).trim() || templateKey;
+    }
+  }
+  return "";
+}
+
 function normalizeEspHomeFirmwareSelection(firmware) {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
@@ -9846,22 +10614,27 @@ function normalizeEspHomeFirmwareSelection(firmware) {
     state.esphomeFirmwareSelection?.selector || body?.active_selector || ""
   ).trim();
   if (requestedSelector && requestedSelector !== "__usb_recovery__") {
-    const matchedTemplate = templateValues.find((candidate) =>
-      espHomeFirmwareDevicesForTemplate(body, candidate).some(
-        (row) => String(row?.value || "").trim() === requestedSelector
-      )
-    );
+    const matchedTemplate = espHomeFirmwareTemplateForSelector(body, requestedSelector);
     if (matchedTemplate) {
       requestedTemplate = matchedTemplate;
     }
   }
-  const templateKey = templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "";
-  const devices = espHomeFirmwareDevicesForTemplate(body, templateKey);
-  const deviceValues = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
-  const normalizedSelector = requestedSelector || deviceValues[0] || "";
+  let templateKey = templateValues.includes(requestedTemplate) ? requestedTemplate : templateValues[0] || "";
+  const allDevices = espHomeFirmwareAllDevices(body);
+  const allDeviceValues = allDevices.map((row) => String(row?.value || "").trim()).filter(Boolean);
+  const familyDevices = espHomeFirmwareDevicesForTemplate(body, templateKey);
+  const preferredFamilyDevice = familyDevices.find(
+    (row) => String(row?.value || "").trim() && String(row?.value || "").trim() !== "__usb_recovery__"
+  );
+  const fallbackSelector = String(preferredFamilyDevice?.value || familyDevices[0]?.value || allDeviceValues[0] || "").trim();
+  const normalizedSelector = allDeviceValues.includes(requestedSelector) ? requestedSelector : fallbackSelector;
+  const normalizedTemplate = espHomeFirmwareTemplateForSelector(body, normalizedSelector);
+  if (normalizedTemplate && templateValues.includes(normalizedTemplate)) {
+    templateKey = normalizedTemplate;
+  }
   return {
     templateKey,
-    selector: deviceValues.includes(normalizedSelector) ? normalizedSelector : deviceValues[0] || "",
+    selector: normalizedSelector,
   };
 }
 
@@ -9877,7 +10650,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
   const selection = normalizeEspHomeFirmwareSelection(body);
-  const devices = espHomeFirmwareDevicesForTemplate(body, selection.templateKey);
+  const devices = espHomeFirmwareAllDevices(body);
   const selectedTemplate =
     templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
   const selectedDevice =
@@ -10770,7 +11543,7 @@ function bindEspHomeSettingsTabs(root = document) {
       panel.classList.toggle("active", panel.dataset.esphomePanel === tabKey);
     });
     if (load) {
-      void ensureEspHomeRuntimeLoaded({ force: true, panel: tabKey });
+      void ensureEspHomeRuntimeLoaded({ panel: tabKey });
     }
   };
   buttons.forEach((button) => {
@@ -10807,7 +11580,7 @@ function bindModelSettingsTabs(root = document) {
       panel.classList.toggle("active", panel.dataset.modelsPanel === normalized);
     });
     if (load && ["speakerid", "emotionid"].includes(normalized)) {
-      void ensureEspHomeRuntimeLoaded({ force: true, panel: normalized });
+      void ensureEspHomeRuntimeLoaded({ panel: normalized });
     }
     if (normalized !== "routing") {
       clearLlmDebugPollTimer();
@@ -11684,13 +12457,21 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       return;
   }
   const targetPanel = normalizeEspHomeRuntimePanel(panel || shell.dataset.esphomeActiveTab || "satellites");
-  const alreadyLoaded =
-    String(shell.dataset.runtimeLoaded || "").trim() === "1" &&
-    String(shell.dataset.runtimePanel || "").trim() === targetPanel;
+  const loadedPanels = new Set(
+    String(shell.dataset.runtimeLoadedPanels || "")
+      .split(",")
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  );
+  const alreadyLoaded = loadedPanels.has(targetPanel);
   if (!force && alreadyLoaded) {
     return;
   }
-  if (!force && state.esphomeRuntimeLoadPromise) {
+  if (
+    !force &&
+    state.esphomeRuntimeLoadPromise &&
+    String(state.esphomeRuntimeLoadPanel || "").trim() === targetPanel
+  ) {
     return state.esphomeRuntimeLoadPromise;
   }
 
@@ -11806,6 +12587,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
       }
       shell.dataset.runtimeLoaded = "1";
+      loadedPanels.add(targetPanel);
+      shell.dataset.runtimeLoadedPanels = Array.from(loadedPanels).join(",");
       bindCoreTabManagers();
     })
     .catch((error) => {
@@ -11842,10 +12625,12 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     .finally(() => {
       if (state.esphomeRuntimeLoadPromise === request) {
         state.esphomeRuntimeLoadPromise = null;
+        state.esphomeRuntimeLoadPanel = "";
       }
     });
 
   state.esphomeRuntimeLoadPromise = request;
+  state.esphomeRuntimeLoadPanel = targetPanel;
   return request;
 }
 
@@ -12074,6 +12859,14 @@ function persistCoreTabFromNode(node) {
 
 async function refreshCoreTabInPlace(tabName = "", { silent = false } = {}) {
   const targetTab = String(tabName || getActiveCoreTopTab() || "manage").trim() || "manage";
+  if (state.surfaceVueView === "cores" && state.surfaceVueController) {
+    if (targetTab === "manage") {
+      await state.surfaceVueController.refresh?.();
+    } else {
+      await state.surfaceVueController.refreshTab?.(targetTab);
+    }
+    return;
+  }
   if (targetTab === "manage") {
     await refreshShopManagerInPlace("cores", getActiveShopTab("cores") || "installed");
     activateCoreTopTab("manage");
@@ -12459,10 +13252,28 @@ function bindEspHomeFirmwareSelectors(root = document) {
       const card = input.closest(".esphome-firmware-card");
       const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
       const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
-      state.esphomeFirmwareSelection = {
-        templateKey: String(templateInput?.value || "").trim(),
-        selector: String(selectorInput?.value || "").trim(),
-      };
+      const firmware =
+        state.esphomeFirmwarePayload && typeof state.esphomeFirmwarePayload === "object"
+          ? state.esphomeFirmwarePayload
+          : {};
+      let templateKey = String(templateInput?.value || "").trim();
+      let selector = String(selectorInput?.value || "").trim();
+      if (key === "selector") {
+        templateKey = espHomeFirmwareTemplateForSelector(firmware, selector) || templateKey;
+      } else if (key === "template_key" && selector !== "__usb_recovery__") {
+        const familyDevices = espHomeFirmwareDevicesForTemplate(firmware, templateKey);
+        const selectedBelongsToFamily = familyDevices.some(
+          (row) =>
+            String(row?.value || "").trim() === selector &&
+            !boolFromAny(row?.unmatched_template, false)
+        );
+        if (!selectedBelongsToFamily) {
+          const familyTarget =
+            familyDevices.find((row) => String(row?.value || "").trim() !== "__usb_recovery__") || familyDevices[0];
+          selector = String(familyTarget?.value || selector || "").trim();
+        }
+      }
+      state.esphomeFirmwareSelection = { templateKey, selector };
       rerenderEspHomeFirmwarePanel(document);
     });
   });
@@ -18963,6 +19774,14 @@ async function loadVerbasView() {
     api("/api/verbas"),
     api("/api/shop/verbas"),
   ]);
+  try {
+    if (await mountVueVerbas(runtimeData, shopData)) {
+      return;
+    }
+  } catch (error) {
+    console.warn("The Vue Verba surface could not load; using the legacy renderer.", error);
+    disposeSurfaceVueController();
+  }
   const runtimeHtml = buildVerbaRuntimeHtml(runtimeData, shopData);
   const verbaItems = Array.isArray(runtimeData?.items) ? runtimeData.items : [];
   const verbaInstalled = Array.isArray(shopData?.installed) ? shopData.installed : [];
@@ -18995,6 +19814,28 @@ async function loadSurfaceView(kind) {
     [runtimeData, shopData, coreTabsData] = await Promise.all([api(endpoint), api(shopApi), api("/api/cores/tabs")]);
   } else {
     [runtimeData, shopData] = await Promise.all([api(endpoint), api(shopApi)]);
+  }
+
+  if (kind === "portals") {
+    try {
+      if (await mountVuePortals(runtimeData, shopData)) {
+        return;
+      }
+    } catch (error) {
+      console.warn("The Vue Portals surface could not load; using the legacy renderer.", error);
+      disposeSurfaceVueController();
+    }
+  }
+
+  if (kind === "cores") {
+    try {
+      if (await mountVueCores(runtimeData, shopData, coreTabsData)) {
+        return;
+      }
+    } catch (error) {
+      console.warn("The Vue Cores surface could not load; using the legacy renderer.", error);
+      disposeSurfaceVueController();
+    }
   }
 
   const root = document.getElementById("view-root");
@@ -20129,6 +20970,14 @@ function bindIntegrationsSurface(settings = {}, root = document) {
 async function loadIntegrationsView() {
   const root = document.getElementById("view-root");
   const settings = await api("/api/settings");
+  try {
+    if (await mountVueIntegrations(settings)) {
+      return;
+    }
+  } catch (error) {
+    console.warn("The Vue Integrations surface could not load; using the legacy renderer.", error);
+    disposeSurfaceVueController();
+  }
   const shopData = settings?.integration_shop || {};
   const installedItems = Array.isArray(shopData?.installed) ? shopData.installed : [];
   const registeredIntegrations = Array.isArray(settings?.integrations) ? settings.integrations : [];
@@ -20148,13 +20997,13 @@ async function loadIntegrationsView() {
 
 async function loadSettingsView() {
   const root = document.getElementById("view-root");
-  const [redisStatusPayload, redisEncryptionPayload] = await Promise.all([
+  const [redisStatusPayload, redisEncryptionPayload, settings] = await Promise.all([
     api("/api/redis/status", { _skipRedisRecovery: true, _timeoutMs: REDIS_STATUS_TIMEOUT_MS }),
     api("/api/redis/encryption/status", { _skipRedisRecovery: true, _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS }),
+    api("/api/settings"),
   ]);
   const redisStatus = _setRedisStatus(redisStatusPayload);
   const redisEncryptionStatus = normalizeRedisEncryptionStatusPayload(redisEncryptionPayload);
-  const settings = await api("/api/settings");
   let webuiPasswordIsSet = Boolean(settings?.webui_password_set);
   const adminOptions = Array.isArray(settings.admin_plugin_options)
     ? settings.admin_plugin_options.map((value) => String(value || "").trim()).filter(Boolean)
@@ -21083,11 +21932,12 @@ async function loadSettingsView() {
   const esphomeRunning = boolFromAny(esphomeUi.running, false);
 
   root.innerHTML = `${consumeNoticeHtml()}
-    <div class="card">
+    <div class="tater-settings-mount" data-tater-settings></div>
+    <div class="card ts-settings-legacy">
       <div class="card-head">
         <h3 class="card-title">Settings</h3>
       </div>
-      <div class="small">Categories: General, People, Models, Hydra, Voice, Redis, Spud Link, Misc, Advanced, Logs.</div>
+      <div class="small">Categories: General, People, Models, Hydra, Voice, Redis, Spud Link, Misc, Advanced, System Tasks, Logs.</div>
       <div id="settings-status" class="small" style="margin-top: 6px;"></div>
 
       <div class="settings-tabs">
@@ -21100,6 +21950,7 @@ async function loadSettingsView() {
         <button type="button" class="settings-tab-btn" data-settings-tab="spudhub">Spud Link</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="misc">Misc</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="advanced">Advanced</button>
+        <button type="button" class="settings-tab-btn" data-settings-tab="system">System Tasks</button>
         <button type="button" class="settings-tab-btn" data-settings-tab="logs">Logs</button>
       </div>
 
@@ -22380,8 +23231,12 @@ async function loadSettingsView() {
                     <option value="melt" ${popupEffectStyle === "melt" ? "selected" : ""}>Melt Downward</option>
                   </select>
                 </label>
+                <div class="popup-effect-preview-control">
+                  <span>Live preview</span>
+                  <button id="settings-popup-effect-preview" class="inline-btn" type="button">Preview selected effect</button>
+                </div>
                 <div class="small" style="grid-column: 1 / -1;">
-                  Applies to modal popups and toast popups when they appear and close.
+                  Applies to legacy and new modal popups, toast messages, and their closing transitions. Reduced-motion preferences are respected automatically.
                 </div>
               </div>
             </section>
@@ -22655,6 +23510,18 @@ async function loadSettingsView() {
           </div>
         </section>
 
+        <section class="settings-tab-panel" data-settings-panel="system">
+          ${renderSettingsSectionIntro(
+            "System Tasks",
+            "Background snapshots and maintenance jobs keep data ready before a page asks for it.",
+            "TASK"
+          )}
+          <div id="settings-system-tasks-summary" class="system-task-summary" aria-live="polite"></div>
+          <div id="settings-system-tasks-list" class="system-task-sections">
+            ${renderNotice("Open System Tasks to load scheduled jobs.")}
+          </div>
+        </section>
+
         <section class="settings-tab-panel" data-settings-panel="logs">
           ${renderSettingsSectionIntro(
             "Logs",
@@ -22706,6 +23573,14 @@ async function loadSettingsView() {
   `;
 
   const statusEl = document.getElementById("settings-status");
+  const popupEffectSelectEl = document.getElementById("set_popup_effect_style");
+  const popupEffectPreviewEl = document.getElementById("settings-popup-effect-preview");
+  popupEffectPreviewEl?.addEventListener("click", () => {
+    openPopupEffectPreview(popupEffectSelectEl?.value || state.popupEffectStyle);
+  });
+  popupEffectSelectEl?.addEventListener("change", () => {
+    applyPopupEffectStyle(popupEffectSelectEl.value || state.popupEffectStyle);
+  });
   const webuiPasswordEl = document.getElementById("set_webui_password");
   const webuiPasswordConfirmEl = document.getElementById("set_webui_password_confirm");
   const webuiPasswordClearBtnEl = document.getElementById("settings-webui-password-clear");
@@ -22755,6 +23630,106 @@ async function loadSettingsView() {
     statusEl.textContent = "WebUI password removal queued. Click Save Settings to apply.";
   });
   refreshWebuiPasswordUi();
+
+  const systemTasksSummaryEl = document.getElementById("settings-system-tasks-summary");
+  const systemTasksListEl = document.getElementById("settings-system-tasks-list");
+  const bindSystemTaskRunButtons = () => {
+    systemTasksListEl?.querySelectorAll("[data-system-task-run]").forEach((button) => {
+      if (!(button instanceof HTMLButtonElement) || button.dataset.systemTaskBound === "1") {
+        return;
+      }
+      button.dataset.systemTaskBound = "1";
+      button.addEventListener("click", async () => {
+        const taskId = String(button.dataset.systemTaskRun || "").trim();
+        if (!taskId || button.disabled) return;
+        button.disabled = true;
+        button.textContent = "Starting…";
+        try {
+          const payload = await api(`/api/settings/system-tasks/${encodeURIComponent(taskId)}/run`, {
+            method: "POST",
+            _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+          });
+          const rendered = renderSystemTasks(payload);
+          if (systemTasksSummaryEl) systemTasksSummaryEl.innerHTML = rendered.summaryHtml;
+          if (systemTasksListEl) systemTasksListEl.innerHTML = rendered.listHtml;
+          bindSystemTaskRunButtons();
+          showToast(payload?.queued === false ? "That task is already running." : "System task started.");
+        } catch (error) {
+          showToast(`System task failed to start: ${error.message}`, "error", 4200);
+        } finally {
+          scheduleSystemTasksPoll(500);
+        }
+      });
+    });
+    systemTasksListEl?.querySelectorAll("[data-core-task-run]").forEach((button) => {
+      if (!(button instanceof HTMLButtonElement) || button.dataset.coreTaskBound === "1") {
+        return;
+      }
+      button.dataset.coreTaskBound = "1";
+      button.addEventListener("click", async () => {
+        const coreKey = String(button.dataset.coreTaskKey || "").trim();
+        const taskId = String(button.dataset.coreTaskRun || "").trim();
+        if (!coreKey || !taskId || button.disabled) return;
+        button.disabled = true;
+        button.textContent = "Starting…";
+        try {
+          const payload = await api(
+            `/api/settings/core-tasks/${encodeURIComponent(coreKey)}/${encodeURIComponent(taskId)}/run`,
+            { method: "POST", _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS }
+          );
+          const rendered = renderSystemTasks(payload);
+          if (systemTasksSummaryEl) systemTasksSummaryEl.innerHTML = rendered.summaryHtml;
+          if (systemTasksListEl) systemTasksListEl.innerHTML = rendered.listHtml;
+          bindSystemTaskRunButtons();
+          showToast(payload?.queued === false ? "That core task is already running." : "Core task started.");
+        } catch (error) {
+          showToast(`Core task failed to start: ${error.message}`, "error", 4200);
+        } finally {
+          scheduleSystemTasksPoll(500);
+        }
+      });
+    });
+  };
+  const refreshSystemTasks = async () => {
+    if (
+      !systemTasksListEl ||
+      !document.body.contains(systemTasksListEl) ||
+      document.body.dataset.view !== "settings" ||
+      state.settingsSystemTasksInFlight
+    ) {
+      return;
+    }
+    state.settingsSystemTasksInFlight = true;
+    try {
+      const payload = await api("/api/settings/system-tasks", {
+        _skipRedisRecovery: true,
+        _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS,
+      });
+      const rendered = renderSystemTasks(payload);
+      if (systemTasksSummaryEl) systemTasksSummaryEl.innerHTML = rendered.summaryHtml;
+      systemTasksListEl.innerHTML = rendered.listHtml;
+      bindSystemTaskRunButtons();
+    } catch (error) {
+      systemTasksListEl.innerHTML = renderNotice(`System tasks failed to load: ${error.message}`);
+    } finally {
+      state.settingsSystemTasksInFlight = false;
+    }
+  };
+  const scheduleSystemTasksPoll = (delayMs = 2000) => {
+    if (state.settingsSystemTasksPollTimer) {
+      window.clearTimeout(state.settingsSystemTasksPollTimer);
+      state.settingsSystemTasksPollTimer = 0;
+    }
+    const activePanel = document.querySelector('.settings-tab-panel.active[data-settings-panel="system"]');
+    if (!systemTasksListEl || !document.body.contains(systemTasksListEl) || !activePanel || document.body.dataset.view !== "settings") {
+      return;
+    }
+    state.settingsSystemTasksPollTimer = window.setTimeout(async () => {
+      state.settingsSystemTasksPollTimer = 0;
+      await refreshSystemTasks();
+      scheduleSystemTasksPoll(2000);
+    }, Math.max(500, Number(delayMs || 2000)));
+  };
 
   const settingsLogEventsEl = document.getElementById("settings-log-events");
   const settingsLogStatusEl = document.getElementById("settings-log-status");
@@ -22968,6 +23943,9 @@ async function loadSettingsView() {
       panel.classList.toggle("active", panel.dataset.settingsPanel === normalizedTab);
     });
     setPreferredSettingsTab(normalizedTab);
+    if (state.surfaceVueView === "settings") {
+      state.surfaceVueController?.select?.(normalizedTab);
+    }
     if (normalizedTab === "logs") {
       updateSettingsLogButtons();
       if (!state.settingsLogEntries.length || state.settingsLogNextSeq <= 0) {
@@ -22979,13 +23957,19 @@ async function loadSettingsView() {
     } else {
       clearSettingsLogPollTimer();
     }
+    if (normalizedTab === "system") {
+      void refreshSystemTasks();
+      scheduleSystemTasksPoll(500);
+    } else {
+      clearSettingsSystemTasksPollTimer();
+    }
     if (normalizedTab === "esphome") {
-      void ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() });
+      void ensureEspHomeRuntimeLoaded({ panel: getActiveEspHomeRuntimePanel() });
     } else if (normalizedTab === "models") {
       const modelsShell = document.getElementById("settings-models-shell");
       const activeModelsPanel = String(modelsShell?.dataset?.modelsActiveTab || "").trim();
       if (["speakerid", "emotionid"].includes(activeModelsPanel)) {
-        void ensureEspHomeRuntimeLoaded({ force: true, panel: activeModelsPanel });
+        void ensureEspHomeRuntimeLoaded({ panel: activeModelsPanel });
       }
     } else {
       clearLlmDebugPollTimer();
@@ -23264,7 +24248,7 @@ async function loadSettingsView() {
         : selected < recommendedWindow
           ? `Current ${contextTokenLabel(selected)} is tight. Raise toward ${contextTokenLabel(recommendedWindow)} when memory allows.`
           : `Current ${contextTokenLabel(selected)} has room for the active prompt stack.`
-      : "Open the top stats bubble to refresh the runtime context estimate.";
+      : "Tater is preparing the runtime context estimate in the background.";
     const summary = error
       ? error
       : loading
@@ -23311,8 +24295,22 @@ async function loadSettingsView() {
       : {};
     renderHydraContextEstimateCards();
   };
-  const refreshHydraContextEstimateCards = () => {
-    syncHydraContextEstimateFromRuntimePayload();
+  const refreshHydraContextEstimateCards = async () => {
+    hydraContextEstimateError = "";
+    renderHydraContextEstimateCards({ loading: true });
+    try {
+      const payload = await api("/api/runtime/context-estimate", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+      hydraContextEstimatePayload = payload?.chat_context_window && typeof payload.chat_context_window === "object"
+        ? payload.chat_context_window
+        : {};
+      state.runtimeBreakdownPayload = {
+        ...(state.runtimeBreakdownPayload || {}),
+        chat_context_window: hydraContextEstimatePayload,
+      };
+    } catch (error) {
+      hydraContextEstimateError = String(error?.message || error || "Context estimate failed to load.");
+    }
+    renderHydraContextEstimateCards();
   };
   const syncHydraContextControl = (provider) => {
     const normalized = normalizeHydraBaseProvider(provider);
@@ -28077,6 +29075,14 @@ async function loadSettingsView() {
       showToast(`Restore failed: ${error.message}`, "error", 3600);
     }
   });
+
+  try {
+    await mountVueSettings(settings, redisStatus);
+  } catch (error) {
+    root.classList.remove("settings-vue-ready");
+    console.warn("The Vue Settings shell could not load; using the complete legacy navigation.", error);
+    disposeSurfaceVueController();
+  }
 }
 
 function clearSpudexPollTimer() {
@@ -29777,6 +30783,14 @@ async function loadSpudexView({ silent = false, resetLogs = false, preserveInput
   }
   const payload = await api("/api/spudex");
   state.spudexPayload = payload;
+  try {
+    if (await mountVueSpudex(payload)) {
+      return;
+    }
+  } catch (error) {
+    console.warn("The Vue Spudex surface could not load; using the legacy renderer.", error);
+    disposeSurfaceVueController();
+  }
   if (root) {
     root.innerHTML = renderSpudexView(payload);
   }
@@ -29795,7 +30809,12 @@ async function loadSpudexView({ silent = false, resetLogs = false, preserveInput
 
 async function loadView(viewName) {
   disposeCoreVueControllers();
+  disposeSurfaceVueController();
   state.view = viewName;
+  if (state.view !== "chat") {
+    closeChatEventSource();
+    stopAllChatJobPolling();
+  }
   if (state.view !== "cores") {
     clearCoreTabLivePoll();
   }
@@ -29808,6 +30827,7 @@ async function loadView(viewName) {
   if (state.view !== "settings") {
     clearLlmDebugPollTimer();
     clearSettingsLogPollTimer();
+    clearSettingsSystemTasksPollTimer();
   }
   document.body.dataset.view = String(viewName || "").trim().toLowerCase();
   setActiveNav(viewName);
@@ -29815,21 +30835,30 @@ async function loadView(viewName) {
 
   const root = document.getElementById("view-root");
   root.dataset.view = String(viewName || "").trim().toLowerCase();
-  if (viewName === "dashboard" && state.dashboardPayload) {
-    root.innerHTML = renderDashboardView(state.dashboardPayload);
-    bindDashboardControls();
-    scheduleDashboardRefresh();
-    void loadDashboardView({ silent: true, background: true }).catch(() => {});
-    return;
-  }
   root.innerHTML = renderNotice("Loading...");
 
   try {
     if (viewName === "dashboard") {
+      try {
+        if (await loadVueDashboardView()) {
+          return;
+        }
+      } catch (error) {
+        console.warn("The Vue Dashboard could not load; using the legacy renderer.", error);
+        disposeSurfaceVueController();
+      }
       await loadDashboardView();
       return;
     }
     if (viewName === "chat") {
+      try {
+        if (await loadVueChatView()) {
+          return;
+        }
+      } catch (error) {
+        console.warn("The Vue Chat surface could not load; using the legacy renderer.", error);
+        disposeSurfaceVueController();
+      }
       await loadChatView();
       return;
     }
@@ -29883,10 +30912,18 @@ function bindSidebarControls() {
 async function init() {
   bindSidebarControls();
   bindNav();
-  bindRuntimeSummary();
   state.settingsTab = normalizeSettingsTab(state.settingsTab || "general");
   await ensureRedisSetup();
   await ensureWebuiAuth();
+  try {
+    if (!(await mountVueRuntimeStatus())) {
+      bindRuntimeSummary();
+    }
+  } catch (error) {
+    console.warn("Falling back to the legacy runtime status UI.", error);
+    disposeRuntimeVueController();
+    bindRuntimeSummary();
+  }
   await refreshBranding();
   await refreshHealth();
   await loadView(state.view);
@@ -29903,6 +30940,9 @@ window.addEventListener("beforeunload", () => {
   clearSpudexPollTimer();
   clearLlmDebugPollTimer();
   clearSettingsLogPollTimer();
+  clearSettingsSystemTasksPollTimer();
+  disposeRuntimeVueController();
+  disposeSurfaceVueController();
   closeChatEventSource();
   stopAllChatJobPolling();
   stopRuntimeBreakdownPolling();

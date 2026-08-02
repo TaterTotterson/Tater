@@ -101,6 +101,7 @@ def _load_route_functions(fake_vp):
     wanted = {
         "_native_audio_scene_payload",
         "_native_ducking_payload",
+        "native_satellite_play_group",
         "native_satellite_play",
     }
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -175,9 +176,11 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.vp = FakeVoicePipeline()
         self.commands = []
         self.stereo_calls = []
+        self.group_calls = []
         self.stereo_pair = {}
         self.scene_supported = True
         self.media_session_active = False
+        self.unavailable_group_members = {}
         self.capabilities = {
             "audio_scenes": True,
             "persistent_media_sessions": True,
@@ -202,6 +205,37 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             self.stereo_calls.append(("media", pair, kwargs))
             return {"stereo_session_started": True, "start_server_us": 123456789}
 
+        async def prepare_group_media_session(members, **kwargs):
+            self.group_calls.append((members, kwargs))
+            return {
+                "group_session_started": True,
+                "group_id": kwargs["group_id"],
+                "session_id": kwargs["session_id"],
+                "members": members,
+                "start_server_us": 123456789,
+            }
+
+        async def media_group_member_status(selectors):
+            ready = [
+                selector
+                for selector in selectors
+                if selector not in self.unavailable_group_members
+            ]
+            unavailable = [
+                {
+                    "selector": selector,
+                    "reason": self.unavailable_group_members[selector],
+                }
+                for selector in selectors
+                if selector in self.unavailable_group_members
+            ]
+            return {
+                "ok": bool(ready),
+                "selectors": list(selectors),
+                "ready_selectors": ready,
+                "unavailable": unavailable,
+            }
+
         async def start_stereo_overlay(pair, **kwargs):
             self.stereo_calls.append(("overlay", pair, kwargs))
             return {"stereo_overlay_started": True}
@@ -210,6 +244,8 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         native.client_media_session_active = client_media_session_active
         native.send_command = send_command
         native.prepare_stereo_media_session = prepare_stereo_media_session
+        native.prepare_group_media_session = prepare_group_media_session
+        native.media_group_member_status = media_group_member_status
         native.start_stereo_overlay = start_stereo_overlay
         native.stereo_pair_media_active = lambda _pair: self.media_session_active
 
@@ -279,6 +315,72 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(scene["ducking"]["target_percent"], 35)
         self.assertEqual(self.vp.background_source_url, "https://example.test/morning.mp3")
 
+    def test_multi_satellite_music_route_flattens_one_synchronized_group(self) -> None:
+        payload = {
+            "selectors": ["native:kitchen", "native:office"],
+            "audio_b64": base64.b64encode(b"music").decode("ascii"),
+            "media_type": "audio/mpeg",
+            "media_content_type": "music",
+            "filename": "song.mp3",
+            "volume_percent": 65,
+            "start_lead_ms": 1125,
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        self.assertTrue(result["media_session_started"])
+        self.assertEqual(result["playback_mode"], "synchronized_group")
+        members, kwargs = self.group_calls[0]
+        self.assertEqual(
+            [row["selector"] for row in members],
+            ["native:kitchen", "native:office"],
+        )
+        self.assertTrue(all(row["channel"] == "mono" for row in members))
+        self.assertTrue(all(row["volume_percent"] == 65 for row in members))
+        self.assertEqual(kwargs["start_lead_ms"], 1125)
+        self.assertTrue(kwargs["compatibility_checked"])
+
+    def test_multi_satellite_music_route_skips_an_offline_member(self) -> None:
+        self.unavailable_group_members = {"native:office": "offline"}
+        payload = {
+            "selectors": ["native:kitchen", "native:office"],
+            "audio_b64": base64.b64encode(b"music").decode("ascii"),
+            "media_type": "audio/mpeg",
+            "media_content_type": "music",
+            "filename": "song.mp3",
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        members, _kwargs = self.group_calls[0]
+        self.assertEqual([row["selector"] for row in members], ["native:kitchen"])
+        self.assertEqual(result["played_selectors"], ["native:kitchen"])
+        self.assertEqual(result["skipped_destinations"][0]["selector"], "native:office")
+        self.assertIn("offline", result["warnings"][0])
+
+    def test_multi_satellite_music_route_skips_an_incomplete_stereo_pair(self) -> None:
+        self.stereo_pair = {
+            "id": "bedroom12",
+            "selector": "stereo:bedroom12",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        self.unavailable_group_members = {"native:right": "offline"}
+        payload = {
+            "selectors": ["stereo:bedroom12", "native:kitchen"],
+            "audio_b64": base64.b64encode(b"music").decode("ascii"),
+            "media_type": "audio/mpeg",
+            "media_content_type": "music",
+            "filename": "song.mp3",
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        members, _kwargs = self.group_calls[0]
+        self.assertEqual([row["selector"] for row in members], ["native:kitchen"])
+        self.assertEqual(result["played_selectors"], ["native:kitchen"])
+        self.assertEqual(result["skipped_destinations"][0]["selector"], "stereo:bedroom12")
+
     def test_older_satellite_falls_back_to_play_url(self) -> None:
         self.scene_supported = False
         result = asyncio.run(self.routes.native_satellite_play(self._payload(), None))
@@ -296,6 +398,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             "media_content_type": "music",
             "playback_role": "media",
             "filename": "song.mp3",
+            "start_position_ms": 37500,
             "respect_reply_playback": False,
         }
         result = asyncio.run(self.routes.native_satellite_play(payload, None))
@@ -306,6 +409,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             self.commands[0][2]["media"]["url"],
             "http://voice-core/media/foreground",
         )
+        self.assertEqual(self.commands[0][2]["media"]["start_position_ms"], 37500)
 
     def test_tts_uses_overlay_when_media_session_is_active(self) -> None:
         self.media_session_active = True
@@ -341,6 +445,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             "media_content_type": "music",
             "playback_role": "media",
             "filename": "song.mp3",
+            "start_position_ms": 42000,
             "respect_reply_playback": False,
         }
 
@@ -353,6 +458,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             self.stereo_calls[0][2]["media_url"],
             "http://voice-core/media/foreground",
         )
+        self.assertEqual(self.stereo_calls[0][2]["start_position_ms"], 42000)
 
     def test_stereo_pair_tts_can_wait_for_actual_pair_completion(self) -> None:
         self.stereo_pair = {
