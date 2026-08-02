@@ -57,8 +57,7 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [WakeWord Trainer for NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing. |
 | [Little Spud WebUI](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
 | [Little Spud App](https://github.com/TaterTotterson/Little-Spud-App) | Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub. |
-| [Reachy Home Assistant Satellite](https://huggingface.co/spaces/TaterTotterson/reachy_home_assistant_satellite) | Preserved ESPHome-style Home Assistant voice satellite app for Reachy Mini. |
-| [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone) | Reachy Mini robot app that can run the full Tater app/stack directly on Reachy. |
+| [Reachy Tater Satellite](https://huggingface.co/spaces/TaterTotterson/reachy_tater_sat) | Native Tater voice satellite for Reachy Mini with local wake words, continuous user tracking, expressive motion, reliable audio, and opt-in Reachy Vision snapshots. |
 | [XBMC4Xbox Skin](https://github.com/TaterTotterson/skin.cortana.tater-xbmc) | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
 
 ---
@@ -140,18 +139,19 @@ Once the add-ons are running, continue to **Post-Install Setup** below.
 ## Reachy Mini Installation
 
 <p>
-  <a href="https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone">
-    <img alt="Install Tater on Reachy Mini" src="https://img.shields.io/badge/Reachy%20Mini-Install%20Tater-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" />
+  <a href="https://huggingface.co/spaces/TaterTotterson/reachy_tater_sat">
+    <img alt="Install Reachy Tater Satellite" src="https://img.shields.io/badge/Reachy%20Mini-Install%20Tater%20Satellite-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" />
   </a>
 </p>
 
-The **Reachy Mini Tater Standalone** app is the easy Reachy Mini install path. It runs the Tater app/stack directly on Reachy Mini and should appear from Reachy's app list when available.
+The **Reachy Tater Satellite** app turns Reachy Mini Wireless into a native voice satellite for an existing Tater server. Microphone, speaker, local wake-word detection, user tracking, expressive motion, and optional vision snapshots remain on Reachy, while the robot connects to Tater through its authenticated native satellite connection.
 
 Install path:
 
-1. Open [Reachy Mini Tater Standalone](https://huggingface.co/spaces/TaterTotterson/tater_reachy_standalone).
-2. Follow the Space instructions for installing or launching it on Reachy Mini.
-3. Continue to **Post-Install Setup** once Tater is running.
+1. Install [Reachy Tater Satellite](https://huggingface.co/spaces/TaterTotterson/reachy_tater_sat) from the Reachy Mini app store and start it.
+2. Open the app settings from Reachy's web interface and enter the address of your running Tater server.
+3. Create a satellite pairing code in Tater, enter it once in the Reachy settings, and save the connection.
+4. Optionally enable **Allow vision snapshots** for the Reachy Vision Verba, then say **Hey Reachy**.
 
 ## Local Installation
 
