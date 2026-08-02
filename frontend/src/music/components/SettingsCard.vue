@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import DynamicField from "./DynamicField.vue";
 import type { MusicAction, MusicField, MusicItem } from "../types";
 
@@ -11,6 +11,40 @@ const props = defineProps<{
 
 const values = reactive<Record<string, unknown>>({});
 const dirty = new Set<string>();
+const fieldGrid = ref<HTMLElement | null>(null);
+let fieldLayoutFrame = 0;
+let fieldResizeObserver: ResizeObserver | null = null;
+
+function layoutFields(): void {
+  fieldLayoutFrame = 0;
+  const grid = fieldGrid.value;
+  if (!grid) return;
+  const gridStyle = window.getComputedStyle(grid);
+  const rowHeight = Number.parseFloat(gridStyle.gridAutoRows) || 8;
+  const rowGap = Number.parseFloat(gridStyle.rowGap) || 13;
+  const fields = Array.from(grid.children).filter((field): field is HTMLElement => field instanceof HTMLElement);
+  fields.forEach((field) => { field.style.gridRowEnd = "auto"; });
+  fields.forEach((field) => {
+    const height = field.getBoundingClientRect().height;
+    const span = Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)));
+    field.style.gridRowEnd = `span ${span}`;
+  });
+}
+
+function scheduleFieldLayout(): void {
+  window.cancelAnimationFrame(fieldLayoutFrame);
+  fieldLayoutFrame = window.requestAnimationFrame(layoutFields);
+}
+
+function observeFields(): void {
+  fieldResizeObserver?.disconnect();
+  const grid = fieldGrid.value;
+  if (!grid) return;
+  fieldResizeObserver = new ResizeObserver(scheduleFieldLayout);
+  fieldResizeObserver.observe(grid);
+  Array.from(grid.children).forEach((field) => fieldResizeObserver?.observe(field));
+  scheduleFieldLayout();
+}
 
 function copyFieldValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((entry) => (entry && typeof entry === "object" ? { ...entry } : entry));
@@ -24,9 +58,16 @@ watch(
     for (const field of fields || []) {
       if (!dirty.has(field.key)) values[field.key] = copyFieldValue(field.value);
     }
+    void nextTick().then(observeFields);
   },
   { immediate: true, deep: true },
 );
+
+onMounted(() => void nextTick().then(observeFields));
+onBeforeUnmount(() => {
+  window.cancelAnimationFrame(fieldLayoutFrame);
+  fieldResizeObserver?.disconnect();
+});
 
 function setValue(field: MusicField, value: unknown): void {
   values[field.key] = value;
@@ -61,24 +102,26 @@ async function runAction(entry: MusicAction): Promise<void> {
     </header>
     <p v-if="item.detail" class="tm-card-detail">{{ item.detail }}</p>
 
-    <details v-if="item.fields_dropdown && item.fields?.length" class="tm-settings-fields">
+    <details v-if="item.fields_dropdown && item.fields?.length" class="tm-settings-fields" @toggle="scheduleFieldLayout">
       <summary>Connection settings</summary>
-      <div class="tm-form-grid">
+      <div ref="fieldGrid" class="tm-form-grid">
         <DynamicField
           v-for="field in item.fields"
           :key="field.key"
           :field="field"
           :model-value="values[field.key]"
+          :compact="Boolean(field.compact)"
           @update:model-value="setValue(field, $event)"
         />
       </div>
     </details>
-    <div v-else-if="item.fields?.length" class="tm-form-grid">
+    <div v-else-if="item.fields?.length" ref="fieldGrid" class="tm-form-grid">
       <DynamicField
         v-for="field in item.fields"
         :key="field.key"
         :field="field"
         :model-value="values[field.key]"
+        :compact="Boolean(field.compact)"
         @update:model-value="setValue(field, $event)"
       />
     </div>

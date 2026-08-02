@@ -4,8 +4,12 @@ import base64
 import contextlib
 import logging
 import os
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import requests
 
@@ -15,6 +19,12 @@ from helpers import redis_client
 logger = logging.getLogger("media_playback")
 
 DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS = 360.0
+NATIVE_GROUP_START_LEAD_MS = 750
+MIXED_SONOS_NATIVE_START_LEAD_MS = 1000
+RUNTIME_MEDIA_PROXY_TTL_SECONDS = 8 * 60 * 60
+
+_runtime_media_proxy_lock = threading.RLock()
+_runtime_media_proxy_sources: Dict[str, Dict[str, Any]] = {}
 
 
 def _text(value: Any) -> str:
@@ -79,6 +89,70 @@ def _runtime_media_source_url(
         return ""
 
 
+def _prune_runtime_media_proxy_sources_locked(*, now_ts: float | None = None) -> None:
+    now = float(now_ts if now_ts is not None else time.time())
+    for asset_id, row in list(_runtime_media_proxy_sources.items()):
+        if not isinstance(row, dict) or float(row.get("expires_ts") or 0.0) <= now:
+            _runtime_media_proxy_sources.pop(asset_id, None)
+
+
+def store_runtime_media_proxy_source(
+    source_url: str,
+    *,
+    content_type: str,
+    filename: str,
+    ttl_s: float = RUNTIME_MEDIA_PROXY_TTL_SECONDS,
+) -> str:
+    url = _text(source_url)
+    if not url:
+        return ""
+    asset_id = uuid.uuid4().hex
+    with _runtime_media_proxy_lock:
+        _prune_runtime_media_proxy_sources_locked()
+        _runtime_media_proxy_sources[asset_id] = {
+            "source_url": url,
+            "content_type": _text(content_type) or "application/octet-stream",
+            "filename": Path(_text(filename) or "media.bin").name,
+            "expires_ts": time.time() + max(300.0, float(ttl_s or RUNTIME_MEDIA_PROXY_TTL_SECONDS)),
+        }
+    return asset_id
+
+
+def get_runtime_media_proxy_source(asset_id: Any) -> Dict[str, Any]:
+    token = _text(asset_id)
+    if not token:
+        return {}
+    with _runtime_media_proxy_lock:
+        _prune_runtime_media_proxy_sources_locked()
+        row = _runtime_media_proxy_sources.get(token)
+        return dict(row) if isinstance(row, dict) else {}
+
+
+def _runtime_media_proxy_source_url(
+    source_url: str,
+    *,
+    content_type: str,
+    filename: str,
+    ttl_s: float = RUNTIME_MEDIA_PROXY_TTL_SECONDS,
+) -> str:
+    asset_id = store_runtime_media_proxy_source(
+        source_url,
+        content_type=content_type,
+        filename=filename,
+        ttl_s=ttl_s,
+    )
+    if not asset_id:
+        return ""
+    try:
+        from speech_tts import _service_base_url_for_peer
+
+        base_url = _service_base_url_for_peer().rstrip("/")
+    except Exception:
+        base_url = f"http://127.0.0.1:{_main_app_port()}"
+    safe_filename = Path(_text(filename) or "media.bin").name
+    return f"{base_url}/api/media/runtime/{asset_id}/{quote(safe_filename)}"
+
+
 def _voice_core_play_media_sync(
     *,
     selectors: List[str],
@@ -89,6 +163,8 @@ def _voice_core_play_media_sync(
     media_content_type: str = "music",
     filename: str = "media.mp3",
     volume_percent: int = 100,
+    start_position_seconds: float = 0.0,
+    start_lead_ms: int = 0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
 ) -> Dict[str, Any]:
@@ -104,6 +180,10 @@ def _voice_core_play_media_sync(
         "playback_role": "media",
         "filename": Path(_text(filename) or "media.mp3").name,
         "volume_percent": max(0, min(100, int(_as_float(volume_percent, 100.0)))),
+        "start_position_ms": max(
+            0,
+            int(round(_as_float(start_position_seconds, 0.0, minimum=0.0) * 1000.0)),
+        ),
         "timeout_s": _as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=30.0),
         "respect_reply_playback": bool(respect_reply_playback),
     }
@@ -115,8 +195,82 @@ def _voice_core_play_media_sync(
     media_session_sent_count = 0
     media_session_fallback_count = 0
     media_session_warnings: List[str] = []
+    voice_core_sessions: List[Dict[str, Any]] = []
     base_url = _voice_core_base_url().rstrip("/")
     headers = _voice_core_auth_headers()
+
+    if len(clean_selectors) > 1 or int(start_lead_ms or 0) > 0:
+        group_payload = dict(payload_template)
+        group_payload["selectors"] = clean_selectors
+        group_payload["start_lead_ms"] = max(
+            250,
+            min(5000, int(start_lead_ms or NATIVE_GROUP_START_LEAD_MS)),
+        )
+        try:
+            response = requests.post(
+                f"{base_url}/api/tater/satellite/v1/play-group",
+                json=group_payload,
+                headers=headers,
+                timeout=180,
+            )
+            response_payload: Dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                parsed = response.json()
+                if isinstance(parsed, dict):
+                    response_payload = parsed
+            if response.status_code < 400 and bool(response_payload.get("media_session_started")):
+                session_id = _text(response_payload.get("session_id"))
+                members = [
+                    _text(row.get("selector"))
+                    for row in list(response_payload.get("members") or [])
+                    if isinstance(row, dict) and _text(row.get("selector"))
+                ]
+                played_selectors = [
+                    _text(selector)
+                    for selector in list(response_payload.get("played_selectors") or [])
+                    if _text(selector)
+                ]
+                logical_sent_count = len(played_selectors) if played_selectors else len(clean_selectors)
+                result: Dict[str, Any] = {
+                    "ok": True,
+                    "sent_count": logical_sent_count,
+                    "media_session_sent_count": logical_sent_count,
+                    "media_session_fallback_count": 0,
+                    "synchronized_group": True,
+                    "start_lead_ms": int(response_payload.get("start_lead_ms") or group_payload["start_lead_ms"]),
+                }
+                skipped_destinations = [
+                    dict(row)
+                    for row in list(response_payload.get("skipped_destinations") or [])
+                    if isinstance(row, dict)
+                ]
+                if skipped_destinations:
+                    result["skipped_destinations"] = skipped_destinations
+                warnings = [
+                    _text(value)
+                    for value in list(response_payload.get("warnings") or [])
+                    if _text(value)
+                ]
+                if warnings:
+                    result["warnings"] = warnings
+                if session_id:
+                    result["voice_core_sessions"] = [
+                        {
+                            "target": _text(response_payload.get("group_id")) or "synchronized-group",
+                            "session_id": session_id,
+                            "selectors": members or played_selectors or clean_selectors,
+                        }
+                    ]
+                return result
+            detail = _text(response_payload.get("detail") or response_payload.get("error"))
+            if response.status_code not in {404, 405}:
+                return {
+                    "ok": False,
+                    "sent_count": 0,
+                    "error": detail or f"Synchronized satellite playback failed (HTTP {response.status_code}).",
+                }
+        except Exception as exc:
+            return {"ok": False, "sent_count": 0, "error": f"Synchronized satellite playback failed: {exc}"}
 
     for selector in clean_selectors:
         payload = dict(payload_template)
@@ -137,6 +291,32 @@ def _voice_core_play_media_sync(
                         response_payload = parsed
                 if bool(response_payload.get("media_session_started")):
                     media_session_sent_count += 1
+                    message = (
+                        response_payload.get("message")
+                        if isinstance(response_payload.get("message"), dict)
+                        else {}
+                    )
+                    message_payload = (
+                        message.get("payload")
+                        if isinstance(message.get("payload"), dict)
+                        else {}
+                    )
+                    session_id = _text(
+                        response_payload.get("session_id") or message_payload.get("session_id")
+                    )
+                    members = [
+                        _text(row.get("selector"))
+                        for row in list(response_payload.get("members") or [])
+                        if isinstance(row, dict) and _text(row.get("selector"))
+                    ]
+                    if session_id:
+                        voice_core_sessions.append(
+                            {
+                                "target": selector,
+                                "session_id": session_id,
+                                "selectors": members or [selector],
+                            }
+                        )
                 else:
                     media_session_fallback_count += 1
                     reason = _text(response_payload.get("media_session_fallback_reason"))
@@ -158,6 +338,8 @@ def _voice_core_play_media_sync(
             "media_session_sent_count": media_session_sent_count,
             "media_session_fallback_count": media_session_fallback_count,
         }
+        if voice_core_sessions:
+            result["voice_core_sessions"] = voice_core_sessions
         if media_session_warnings:
             result["media_session_warnings"] = media_session_warnings
         if failures:
@@ -202,6 +384,7 @@ def _integration_playback_sync(
     source_url: str,
     media_content_type: str = "music",
     media_type: str = "audio/mpeg",
+    start_position_seconds: float = 0.0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     clean_targets = [
@@ -232,6 +415,11 @@ def _integration_playback_sync(
             "media_content_id": source_url,
             "media_content_type": _text(media_content_type) or "music",
             "media_type": _text(media_type) or "audio/mpeg",
+            "start_position_seconds": _as_float(
+                start_position_seconds,
+                0.0,
+                minimum=0.0,
+            ),
             "timeout_s": _as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=1.0),
         }
 
@@ -268,6 +456,8 @@ def _sonos_playback_sync(
     speakers: List[str],
     source_url: str,
     media_content_type: str = "music",
+    volume_percent: int | None = None,
+    start_position_seconds: float = 0.0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     try:
@@ -277,6 +467,13 @@ def _sonos_playback_sync(
             speakers=speakers,
             source_url=source_url,
             media_content_type=media_content_type,
+            volume_percent=volume_percent,
+            restore_after=_text(media_content_type).lower() not in {"music", "audio", "song", "media"},
+            start_position_seconds=_as_float(
+                start_position_seconds,
+                0.0,
+                minimum=0.0,
+            ),
             timeout_s=_as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=1.0),
         )
     except Exception as exc:
@@ -293,6 +490,8 @@ def play_media_url_targets(
     filename: str = "media.mp3",
     text: str = "",
     volume_percent: int = 100,
+    start_position_seconds: float = 0.0,
+    mixed_sync_adjustment_ms: int = 0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
 ) -> Dict[str, Any]:
@@ -349,6 +548,15 @@ def play_media_url_targets(
     sent_count = 0
 
     if voice_core_selectors:
+        native_start_lead_ms = NATIVE_GROUP_START_LEAD_MS if len(voice_core_selectors) > 1 else 0
+        if sonos_speakers:
+            adjustment_ms = max(-750, min(3000, int(_as_float(mixed_sync_adjustment_ms, 0.0))))
+            native_start_lead_ms = max(
+                250,
+                min(5000, MIXED_SONOS_NATIVE_START_LEAD_MS + adjustment_ms),
+            )
+            result["mixed_sync_adjustment_ms"] = adjustment_ms
+            result["mixed_native_start_lead_ms"] = native_start_lead_ms
         voice_result = _voice_core_play_media_sync(
             selectors=voice_core_selectors,
             source_url=playback_source_url,
@@ -358,6 +566,8 @@ def play_media_url_targets(
             media_content_type=media_content_type,
             filename=safe_filename,
             volume_percent=volume_percent,
+            start_position_seconds=start_position_seconds,
+            start_lead_ms=native_start_lead_ms,
             timeout_s=timeout_s,
             respect_reply_playback=respect_reply_playback,
         )
@@ -369,22 +579,41 @@ def play_media_url_targets(
             for item in list(voice_result.get("media_session_warnings") or [])
             if _text(item)
         ]
+        result["voice_core_sessions"] = [
+            dict(item)
+            for item in list(voice_result.get("voice_core_sessions") or [])
+            if isinstance(item, dict)
+        ]
         sent_count += int(voice_result.get("sent_count") or 0)
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):
             warnings.append(_text(voice_result.get("error")))
 
     if sonos_speakers:
-        if not playback_source_url:
+        sonos_source_url = playback_source_url
+        if sonos_source_url and not runtime_source_url:
+            sonos_source_url = _runtime_media_proxy_source_url(
+                sonos_source_url,
+                content_type=clean_media_type,
+                filename=safe_filename,
+                ttl_s=max(RUNTIME_MEDIA_PROXY_TTL_SECONDS, float(timeout_s or 0.0) + 600.0),
+            )
+            if sonos_source_url:
+                result["sonos_proxy_used"] = True
+        if not sonos_source_url:
             warnings.append("Sonos playback URL is missing.")
         else:
             sonos_result = _sonos_playback_sync(
                 speakers=sonos_speakers,
-                source_url=playback_source_url,
+                source_url=sonos_source_url,
                 media_content_type=media_content_type,
+                volume_percent=max(0, min(100, int(_as_float(volume_percent, 100.0)))),
+                start_position_seconds=start_position_seconds,
                 timeout_s=timeout_s,
             )
             result["sonos_sent_count"] = int(sonos_result.get("sent_count") or 0)
+            if isinstance(sonos_result.get("group"), dict):
+                result["sonos_group"] = dict(sonos_result["group"])
             sent_count += int(sonos_result.get("sent_count") or 0)
             warnings.extend([_text(item) for item in list(sonos_result.get("warnings") or []) if _text(item)])
             if not sonos_result.get("ok") and _text(sonos_result.get("error")):
@@ -405,6 +634,7 @@ def play_media_url_targets(
                 source_url=playback_source_url,
                 media_content_type=media_content_type,
                 media_type=clean_media_type,
+                start_position_seconds=start_position_seconds,
                 timeout_s=timeout_s,
             )
             result["integration_sent_count"] = int(integration_result.get("sent_count") or 0)

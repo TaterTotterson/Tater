@@ -60,6 +60,14 @@ class TaterBuildVersionTests(unittest.TestCase):
         self.assertIn("_renderTaterBuildVersion(appVersion, appVersionLabel)", app_js)
         self.assertIn(".sidebar-build-version {\n  margin-top: auto;", styles)
 
+    def test_sidebar_uses_the_dedicated_tater_app_icon(self) -> None:
+        index = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
+        icon = REPO_ROOT / "tateros_static" / "assets" / "tater-app-sidebar-icon.png"
+
+        self.assertIn("./static/assets/tater-app-sidebar-icon.png", index)
+        self.assertTrue(icon.is_file())
+        self.assertGreater(icon.stat().st_size, 0)
+
     def test_app_javascript_parses(self) -> None:
         node = shutil.which("node")
         if not node:

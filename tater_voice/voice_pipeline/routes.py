@@ -769,6 +769,247 @@ def _native_ducking_payload(raw: Any = None) -> Dict[str, int]:
     }
 
 
+@router.post("/api/tater/satellite/v1/play-group")
+async def native_satellite_play_group(
+    payload: Dict[str, Any],
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_satellite, stereo_pairs
+
+    requested_selectors: list[str] = []
+    for raw_selector in list(payload.get("selectors") or []):
+        selector = vp._text(raw_selector)
+        if selector and selector not in requested_selectors:
+            requested_selectors.append(selector)
+    if not requested_selectors:
+        raise HTTPException(status_code=400, detail="selectors are required")
+    if len(requested_selectors) > 32:
+        raise HTTPException(status_code=400, detail="A synchronized group can contain at most 32 destinations")
+
+    source_url = vp._text(payload.get("source_url"))
+    audio_b64 = vp._text(payload.get("audio_b64"))
+    if not source_url and not audio_b64:
+        raise HTTPException(status_code=400, detail="source_url or audio_b64 is required")
+    filename = vp._text(payload.get("filename")) or "audio.bin"
+    requested_media_type = vp._text(payload.get("media_type")).split(";", 1)[0].strip().lower()
+    media_content_type = vp._text(payload.get("media_content_type")).lower() or "music"
+    media_volume_percent = max(0, min(100, int(vp._as_float(payload.get("volume_percent"), 100.0))))
+    media_start_position_ms = max(0, int(vp._as_float(payload.get("start_position_ms"), 0.0)))
+    media_loop = vp._as_bool(payload.get("loop"), False)
+    start_lead_ms = max(250, min(5000, int(vp._as_float(payload.get("start_lead_ms"), 750.0))))
+
+    member_rows: list[Dict[str, Any]] = []
+    destination_members: Dict[str, list[str]] = {}
+    skipped_destinations: list[Dict[str, Any]] = []
+    seen_members: set[str] = set()
+    for selector in requested_selectors:
+        if stereo_pairs.is_stereo_selector(selector):
+            pair = stereo_pairs.get_pair(selector)
+            if not isinstance(pair, dict) or not pair:
+                destination_members[selector] = []
+                skipped_destinations.append(
+                    {"selector": selector, "reason": "stereo pair was not found", "members": []}
+                )
+                continue
+            pair_members = (
+                (
+                    vp._text(pair.get("left_selector")),
+                    "left",
+                    pair.get("left_delay_ms"),
+                    pair.get("left_volume_percent"),
+                ),
+                (
+                    vp._text(pair.get("right_selector")),
+                    "right",
+                    pair.get("right_delay_ms"),
+                    pair.get("right_volume_percent"),
+                ),
+            )
+            destination_members[selector] = [
+                member
+                for member, _channel, _delay_ms, _relative_volume in pair_members
+                if member
+            ]
+            for member, channel, delay_ms, relative_volume in pair_members:
+                if not member or member in seen_members:
+                    continue
+                seen_members.add(member)
+                calibrated_volume = int(
+                    round(
+                        media_volume_percent
+                        * max(0, min(100, int(vp._as_float(relative_volume, 100.0))))
+                        / 100.0
+                    )
+                )
+                member_rows.append(
+                    {
+                        "selector": member,
+                        "channel": channel,
+                        "delay_ms": max(0, min(250, int(vp._as_float(delay_ms, 0.0)))),
+                        "volume_percent": calibrated_volume,
+                        "destination_selector": selector,
+                    }
+                )
+            continue
+        if not selector.startswith("native:"):
+            raise HTTPException(status_code=400, detail=f"Unsupported synchronized destination: {selector}")
+        destination_members[selector] = [selector]
+        if selector in seen_members:
+            continue
+        seen_members.add(selector)
+        member_rows.append(
+            {
+                "selector": selector,
+                "channel": "mono",
+                "delay_ms": 0,
+                "volume_percent": media_volume_percent,
+                "destination_selector": selector,
+            }
+        )
+    if not member_rows:
+        detail = "; ".join(
+            f"{vp._text(row.get('selector'))}: {vp._text(row.get('reason'))}"
+            for row in skipped_destinations
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=detail or "The synchronized group has no available satellite members",
+        )
+
+    member_status = await native_satellite.media_group_member_status(
+        [vp._text(row.get("selector")) for row in member_rows]
+    )
+    ready_members = {
+        vp._text(selector)
+        for selector in list(member_status.get("ready_selectors") or [])
+        if vp._text(selector)
+    }
+    unavailable_by_selector = {
+        vp._text(row.get("selector")): vp._text(row.get("reason")) or "unavailable"
+        for row in list(member_status.get("unavailable") or [])
+        if isinstance(row, dict) and vp._text(row.get("selector"))
+    }
+    skipped_selector_ids = {
+        vp._text(row.get("selector"))
+        for row in skipped_destinations
+        if vp._text(row.get("selector"))
+    }
+    for selector, members in destination_members.items():
+        if selector in skipped_selector_ids or not members:
+            continue
+        unavailable_members = [member for member in members if member not in ready_members]
+        if not unavailable_members:
+            continue
+        reasons = [
+            f"{member} ({unavailable_by_selector.get(member, 'unavailable')})"
+            for member in unavailable_members
+        ]
+        skipped_destinations.append(
+            {
+                "selector": selector,
+                "reason": "; ".join(reasons),
+                "members": members,
+            }
+        )
+        skipped_selector_ids.add(selector)
+
+    member_rows = [
+        row
+        for row in member_rows
+        if vp._text(row.get("destination_selector")) not in skipped_selector_ids
+        and vp._text(row.get("selector")) in ready_members
+    ]
+    if not member_rows:
+        detail = "; ".join(
+            f"{vp._text(row.get('selector'))}: {vp._text(row.get('reason'))}"
+            for row in skipped_destinations
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="No selected satellites are currently available. " + detail,
+        )
+    played_selectors = [
+        selector for selector in requested_selectors if selector not in skipped_selector_ids
+    ]
+    playback_members = [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "destination_selector"
+        }
+        for row in member_rows
+    ]
+
+    fetched_media_type = ""
+    if audio_b64:
+        try:
+            media_bytes = base64.b64decode(audio_b64, validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"audio_b64 is invalid: {exc}") from exc
+        if not media_bytes:
+            raise HTTPException(status_code=400, detail="audio_b64 decoded to empty content")
+    else:
+        try:
+            media_bytes, fetched_media_type = await vp._download_media_source(source_url)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
+    media_type = requested_media_type or fetched_media_type or "application/octet-stream"
+    playback_id = uuid.uuid4().hex
+    playback_url = vp._store_media_url(
+        playback_members[0]["selector"],
+        playback_id,
+        media_bytes,
+        media_type=media_type,
+        filename=filename,
+    )
+    if not playback_url:
+        raise HTTPException(status_code=500, detail="Failed to store synchronized media for playback")
+
+    group_id = f"multi-{playback_id[:12]}"
+    try:
+        result = await native_satellite.prepare_group_media_session(
+            playback_members,
+            group_id=group_id,
+            group_selector=f"group:{group_id}",
+            session_id=playback_id,
+            media_url=playback_url,
+            start_position_ms=media_start_position_ms,
+            loop=media_loop,
+            content_type=media_content_type,
+            channel_mode="mixed" if any(row.get("channel") != "mono" for row in playback_members) else "mono",
+            start_lead_ms=start_lead_ms,
+            compatibility_checked=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Failed to queue synchronized playback: {exc}") from exc
+    response = {
+        "ok": True,
+        "selectors": requested_selectors,
+        "played_selectors": played_selectors,
+        "skipped_destinations": skipped_destinations,
+        "source_url": source_url,
+        "playback_url": playback_url,
+        "media_type": media_type,
+        "media_content_type": media_content_type,
+        "start_position_ms": media_start_position_ms,
+        "start_lead_ms": start_lead_ms,
+        "playback_mode": "synchronized_group",
+        "media_session_started": True,
+        **result,
+    }
+    if skipped_destinations:
+        response["warnings"] = [
+            "Skipped unavailable playback destinations: "
+            + "; ".join(
+                f"{vp._text(row.get('selector'))} ({vp._text(row.get('reason'))})"
+                for row in skipped_destinations
+            )
+        ]
+    return response
+
+
 @router.post("/api/tater/satellite/v1/play")
 async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -792,6 +1033,10 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     media_volume_percent = max(
         0,
         min(100, int(vp._as_float(payload.get("volume_percent"), 100.0))),
+    )
+    media_start_position_ms = max(
+        0,
+        int(vp._as_float(payload.get("start_position_ms"), 0.0)),
     )
     ducking = _native_ducking_payload(payload.get("ducking"))
     timeout_s = vp._as_float(payload.get("timeout_s"), 180.0)
@@ -970,6 +1215,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     session_id=playback_id,
                     media_url=playback_url,
                     volume_percent=media_volume_percent,
+                    start_position_ms=media_start_position_ms,
                     loop=media_loop,
                     content_type=media_content_type or "music",
                     channel_mode="stereo",
@@ -1067,6 +1313,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     "media": {
                         "url": playback_url,
                         "volume_percent": media_volume_percent,
+                        "start_position_ms": media_start_position_ms,
                         "loop": media_loop,
                         "content_type": media_content_type or "music",
                     },
@@ -1133,6 +1380,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         "playback_url": playback_url,
         "media_type": media_type,
         "media_content_type": media_content_type,
+        "start_position_ms": media_start_position_ms,
         "playback_mode": "device",
         "reply_playback_target": reply_playback_target,
         "respect_reply_playback": respect_reply_playback,

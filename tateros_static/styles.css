@@ -883,11 +883,13 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 
 .brand-mascot {
   flex: 0 0 auto;
-  width: 2.45rem;
-  height: 2.45rem;
-  object-fit: contain;
-  object-position: center bottom;
-  filter: drop-shadow(0 0 8px rgba(255, 93, 18, 0.22));
+  display: block;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.82rem;
+  object-fit: cover;
+  object-position: center;
+  filter: drop-shadow(0 0 10px rgba(255, 93, 18, 0.28));
 }
 
 .nav-stack {

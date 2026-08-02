@@ -76,11 +76,13 @@ from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
+import integration_runtime as integration_runtime_module
 import people as people_module
 import verba_registry as verba_registry_module
 import portal_registry as portal_registry_module
 from tater_paths import agent_lab_path
 from tater_version import current_tater_version
+from system_tasks import core_task_run_manager, system_task_manager
 from tater_voice import firmware as esphome_firmware_module
 from tater_voice import home as esphome_home_module
 from tater_voice import native_satellite as native_satellite_module
@@ -168,6 +170,7 @@ from helpers import (
     get_llama_cpp_chat_template_info,
     get_local_llm_chat_template_info,
     get_local_llm_loaded_models_snapshot,
+    get_system_hardware_snapshot,
     get_redis_connection_config,
     get_redis_encryption_status,
     get_redis_connection_status,
@@ -224,6 +227,7 @@ from integration_registry import (
     clear_integration_device_room,
     clear_integration_room_preferred_media_player,
     create_integration_room,
+    get_cached_integration_device_registry,
     get_integration_catalog,
     get_integration_device_group,
     get_integration_device_registry,
@@ -392,6 +396,14 @@ WEBUI_AUTH_PASSWORD_MIN_LENGTH = 4
 WEBUI_AUTH_PBKDF2_ITERATIONS = 260_000
 WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
+RUNTIME_HARDWARE_TELEMETRY_KEY = "tater:runtime:hardware-telemetry:v1"
+RUNTIME_HARDWARE_TELEMETRY_SCHEMA_VERSION = 1
+RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 15
+RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS = 45
+RUNTIME_MODEL_SNAPSHOT_KEY = "tater:runtime:model-snapshot:v1"
+RUNTIME_MODEL_SNAPSHOT_SCHEMA_VERSION = 1
+RUNTIME_MODEL_SNAPSHOT_INTERVAL_SECONDS = 30
+RUNTIME_MODEL_SNAPSHOT_STALE_SECONDS = 90
 DASHBOARD_BRIEFS_KEY = "tater:dashboard:briefs:v1"
 DASHBOARD_SNAPSHOT_KEY = "tater:dashboard:snapshot:v1"
 DASHBOARD_SETTINGS_KEY = "tater:dashboard:settings:v1"
@@ -404,6 +416,14 @@ DASHBOARD_REFRESH_INTERVAL_OPTIONS_SECONDS = (0, 30, 60, 300, 900, 1800, 3600, 7
 DASHBOARD_BRIEF_INTERVAL_OPTIONS_SECONDS = (0, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200)
 DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS = 20
 DASHBOARD_BRIEF_RETRY_SECONDS = 60 * 5
+VOICE_SATELLITE_SNAPSHOT_KEY = "tater:voice:satellites:ui-snapshot:v1"
+VOICE_SATELLITE_SNAPSHOT_SCHEMA_VERSION = 1
+VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS = 60 * 5
+VOICE_SATELLITE_SNAPSHOT_DEBOUNCE_SECONDS = 2.0
+INTEGRATION_DEVICE_REGISTRY_INTERVAL_SECONDS = 60 * 5
+INTEGRATION_DEVICE_REGISTRY_DEBOUNCE_SECONDS = 2.0
+INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_KEY = "tater:integration_runtime:room-media-player-options:v1"
+INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_SCHEMA_VERSION = 1
 DASHBOARD_AWARENESS_EVENTS_PER_SOURCE = 1000
 DASHBOARD_AWARENESS_EVENT_DETAIL_LIMIT = 320
 DASHBOARD_AWARENESS_EVENT_HIGHLIGHT_LIMIT = 18
@@ -414,6 +434,16 @@ DASHBOARD_AWARENESS_CAMERA_SUMMARY_REQUEST = (
     "Ignore simple sensor-only events unless they help explain the camera activity."
 )
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
+runtime_hardware_snapshot_lock = threading.RLock()
+runtime_hardware_snapshot_state: Dict[str, Any] = {
+    "cached_at": 0.0,
+    "payload": None,
+}
+runtime_model_snapshot_lock = threading.RLock()
+runtime_model_snapshot_state: Dict[str, Any] = {
+    "cached_at": 0.0,
+    "payload": None,
+}
 dashboard_brief_refresh_lock = threading.RLock()
 dashboard_brief_refresh_state: Dict[str, Any] = {
     "running": False,
@@ -431,7 +461,17 @@ dashboard_snapshot_refresh_state: Dict[str, Any] = {
     "last_error": "",
     "last_reason": "",
 }
-dashboard_brief_scheduler_task: Optional[asyncio.Task] = None
+voice_satellite_snapshot_lock = threading.RLock()
+voice_satellite_snapshot_state: Dict[str, Any] = {
+    "cached_at": 0.0,
+    "payload": None,
+}
+system_tasks_registered = False
+system_task_intervals_lock = threading.RLock()
+system_task_intervals: Dict[str, int] = {
+    "dashboard_snapshot": DASHBOARD_SNAPSHOT_STALE_SECONDS,
+    "dashboard_briefs": DASHBOARD_BRIEF_TTL_SECONDS,
+}
 speech_model_warmup_lock = threading.RLock()
 speech_model_warmup_state: Dict[str, Any] = {
     "running": False,
@@ -4307,6 +4347,209 @@ def _run_surface_htmlui_tab_action(tab_spec: Dict[str, Any], payload: "CoreTabAc
     return result
 
 
+def _core_task_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _core_task_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if token in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(default)
+
+
+def _core_task_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _core_task_group_label(entry: Dict[str, Any], raw: Any) -> str:
+    if isinstance(raw, dict):
+        label = str(raw.get("label") or "").strip()
+        if label:
+            return label
+    tab = entry.get("webui_tab") if isinstance(entry.get("webui_tab"), dict) else {}
+    label = str(tab.get("label") or entry.get("label") or entry.get("key") or "Core").strip()
+    if label.lower().endswith(" settings"):
+        label = label[: -len(" settings")].rstrip()
+    return label or "Core"
+
+
+def _core_tasks_snapshot() -> Dict[str, Any]:
+    now = time.time()
+    groups: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+
+    core_entries = core_registry_module.get_core_registry()
+    if not core_entries:
+        core_entries = core_registry_module.refresh_core_registry()
+    for entry in core_entries:
+        if not isinstance(entry, dict):
+            continue
+        core_key = str(entry.get("key") or "").strip()
+        if not core_key:
+            continue
+        try:
+            module = core_runtime._import_module(core_key, reload_module=False)
+        except Exception as exc:
+            errors.append({"core_key": core_key, "error": f"Import failed: {exc}"})
+            continue
+
+        provider = getattr(module, "get_core_system_tasks", None)
+        runner = getattr(module, "run_core_system_task", None)
+        if not callable(provider):
+            continue
+        try:
+            raw = provider(
+                redis_client=redis_client,
+                core_key=core_key,
+                core_running=bool(core_runtime.is_running(core_key)),
+            )
+        except Exception as exc:
+            errors.append({"core_key": core_key, "error": f"Task status failed: {exc}"})
+            continue
+
+        raw_tasks = raw.get("tasks") if isinstance(raw, dict) else raw
+        if not isinstance(raw_tasks, list):
+            errors.append({"core_key": core_key, "error": "Task provider returned an invalid payload."})
+            continue
+
+        core_running = bool(core_runtime.is_running(core_key))
+        rows: List[Dict[str, Any]] = []
+        for raw_task in raw_tasks:
+            if not isinstance(raw_task, dict):
+                continue
+            task_id = _core_task_token(raw_task.get("id"))
+            if not task_id:
+                continue
+            interval = max(0.0, _core_task_float(raw_task.get("interval_seconds"), 0.0))
+            enabled = _core_task_bool(raw_task.get("enabled"), interval > 0)
+            available = _core_task_bool(raw_task.get("available"), True)
+            manual_run = _core_task_bool(raw_task.get("manual"), True)
+            requires_running = _core_task_bool(raw_task.get("requires_running"), True)
+            provider_running = _core_task_bool(raw_task.get("running"), False)
+            provider_finished_at = max(0.0, _core_task_float(raw_task.get("finished_at"), 0.0))
+            manual = core_task_run_manager.state(core_key, task_id)
+            manual_running = bool(manual.get("running"))
+            manual_finished_at = max(0.0, _core_task_float(manual.get("finished_at"), 0.0))
+            use_manual_finish = manual_finished_at >= provider_finished_at and manual_finished_at > 0
+            running = bool(provider_running or manual_running)
+            finished_at = manual_finished_at if use_manual_finish else provider_finished_at
+            duration_ms = (
+                max(0.0, _core_task_float(manual.get("duration_ms"), 0.0))
+                if use_manual_finish
+                else max(0.0, _core_task_float(raw_task.get("duration_ms"), 0.0))
+            )
+            last_error = (
+                str(manual.get("last_error") or "").strip()
+                if use_manual_finish
+                else str(raw_task.get("last_error") or "").strip()
+            )
+            next_run_at = max(0.0, _core_task_float(raw_task.get("next_run_at"), 0.0))
+            can_run = bool(
+                callable(runner)
+                and manual_run
+                and enabled
+                and available
+                and (core_running or not requires_running)
+            )
+            raw_status = str(raw_task.get("status") or "").strip().lower()
+            if running:
+                status = "running"
+            elif last_error:
+                status = "error"
+            elif requires_running and not core_running:
+                status = "stopped"
+            elif not available:
+                status = raw_status or "waiting"
+            elif not enabled:
+                status = "disabled"
+            else:
+                status = raw_status if raw_status in {"idle", "waiting", "ready"} else "idle"
+
+            rows.append(
+                {
+                    "id": task_id,
+                    "core_key": core_key,
+                    "label": str(raw_task.get("label") or task_id).strip() or task_id,
+                    "description": str(raw_task.get("description") or "").strip(),
+                    "status": status,
+                    "running": running,
+                    "enabled": enabled,
+                    "available": available,
+                    "manual": manual_run,
+                    "can_run": can_run,
+                    "requires_running": requires_running,
+                    "core_running": core_running,
+                    "interval_seconds": interval,
+                    "schedule_label": str(raw_task.get("schedule_label") or "").strip(),
+                    "started_at": max(
+                        0.0,
+                        _core_task_float(
+                            manual.get("started_at") if manual_running else raw_task.get("started_at"),
+                            0.0,
+                        ),
+                    ),
+                    "finished_at": finished_at,
+                    "duration_ms": duration_ms,
+                    "next_run_at": next_run_at,
+                    "next_run_in_seconds": max(0.0, next_run_at - now) if next_run_at else 0.0,
+                    "next_run_label": str(raw_task.get("next_run_label") or "").strip(),
+                    "last_error": last_error,
+                    "unavailable_reason": str(raw_task.get("unavailable_reason") or "").strip(),
+                    "run_count": max(
+                        0,
+                        int(_core_task_float(raw_task.get("run_count"), 0.0)),
+                        int(_core_task_float(manual.get("run_count"), 0.0)),
+                    ),
+                    "_order": int(_core_task_float(raw_task.get("order"), 1000.0)),
+                }
+            )
+
+        if not rows:
+            continue
+        rows.sort(key=lambda row: (int(row.get("_order") or 0), str(row.get("label") or "").lower()))
+        for row in rows:
+            row.pop("_order", None)
+        try:
+            group_order = int(raw.get("order", 1000)) if isinstance(raw, dict) else 1000
+        except (TypeError, ValueError):
+            group_order = 1000
+        groups.append(
+            {
+                "core_key": core_key,
+                "label": _core_task_group_label(entry, raw),
+                "running": core_running,
+                "order": group_order,
+                "tasks": rows,
+            }
+        )
+
+    groups.sort(key=lambda row: (int(row.get("order") or 0), str(row.get("label") or "").lower()))
+    tasks = [task for group in groups for task in group.get("tasks") or []]
+    return {
+        "core_tasks": groups,
+        "core_task_count": len(tasks),
+        "core_running_count": len([task for task in tasks if task.get("running")]),
+        "core_error_count": len([task for task in tasks if task.get("status") == "error"]),
+        "core_task_errors": errors,
+    }
+
+
+def _system_tasks_payload() -> Dict[str, Any]:
+    payload = system_task_manager.snapshot()
+    payload.update(_core_tasks_snapshot())
+    return payload
+
+
 def _esphome_platform_tab_spec() -> Dict[str, Any]:
     return esphome_home_module.runtime_tab_spec()
 
@@ -8092,7 +8335,14 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         else:
             logger.info("[runtime-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
 
-        _run_async_sync(ensure_integration_runtime_started(redis_client), timeout=15.0)
+        _run_async_sync(
+            ensure_integration_runtime_started(
+                redis_client,
+                manage_device_registry_cache=False,
+            ),
+            timeout=15.0,
+        )
+        _request_integration_device_registry_refresh("runtime-bootstrap", immediate=True)
         result["local_llm_warmup"] = _start_local_llm_warmup_for_startup(reason="runtime-bootstrap")
         _start_builtin_esphome()
         if _speech_model_warmup_on_startup_enabled():
@@ -9070,6 +9320,12 @@ async def _spud_link_cors_middleware(request: Request, call_next: Callable[[Requ
 esphome_home_module.include_routes(app)
 
 STATIC_DIR = Path(__file__).resolve().parent / "tateros_static"
+VOICE_DEVICE_IMAGE_DIR = Path(__file__).resolve().parent / "images"
+app.mount(
+    "/static/device-images",
+    StaticFiles(directory=str(VOICE_DEVICE_IMAGE_DIR)),
+    name="voice-device-images",
+)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -9102,6 +9358,7 @@ async def _startup_event() -> None:
         bootstrap_state["restore_in_progress"] = False
         bootstrap_state["restore_complete"] = True
         logger.warning("Redis unavailable during startup bootstrap: %s", bootstrap_state["restore_error"])
+        _start_dashboard_brief_scheduler()
         logger.info("TaterOS backend started")
         return
 
@@ -9117,7 +9374,7 @@ async def _startup_event() -> None:
             logger.info("[startup-restore] summary: %s", summary)
         else:
             logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
-        start_integration_runtime(redis_client)
+        start_integration_runtime(redis_client, manage_device_registry_cache=False)
         local_warmup = _start_local_llm_warmup_for_startup(reason="startup")
         logger.info("[local-llm-warmup] startup scheduled: %s", local_warmup)
         await esphome_home_module.startup()
@@ -9172,7 +9429,7 @@ async def _shutdown_event() -> None:
     try:
         from spudex.runner import shutdown_spudex_runtime
 
-        await _run_shutdown_step("dashboard brief scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
+        await _run_shutdown_step("system task scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
         await _run_shutdown_step("Spudex runtime", shutdown_spudex_runtime, timeout=6.0)
         await _run_shutdown_step(
             "portal runtime",
@@ -9237,6 +9494,8 @@ async def _webui_auth_middleware(request: Request, call_next):
     if _is_spud_link_external_api_path(path):
         return await call_next(request)
     if path.startswith("/api/speech/tts/runtime/"):
+        return await call_next(request)
+    if path.startswith("/api/media/runtime/"):
         return await call_next(request)
     if path.startswith("/api/tater/satellite/"):
         return await call_next(request)
@@ -9945,8 +10204,115 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     return rows
 
 
-def _runtime_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str, Any]:
-    llm_payload = get_local_llm_loaded_models_snapshot(include_models=True, include_vram_probe=include_models)
+def _runtime_snapshot_cache_save(
+    *,
+    key: str,
+    schema_version: int,
+    lock: threading.RLock,
+    state: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    cached_at = time.time()
+    body = dict(payload) if isinstance(payload, dict) else {}
+    with lock:
+        state.update({"cached_at": cached_at, "payload": body})
+    try:
+        redis_client.set(
+            key,
+            json.dumps(
+                {
+                    "schema_version": int(schema_version),
+                    "cached_at": cached_at,
+                    "payload": body,
+                },
+                default=str,
+                separators=(",", ":"),
+            ),
+        )
+    except Exception:
+        logger.debug("[system-tasks] failed saving runtime snapshot key=%s", key, exc_info=True)
+    return {"cached_at": cached_at, "payload": body}
+
+
+def _runtime_snapshot_cache_load(
+    *,
+    key: str,
+    schema_version: int,
+    lock: threading.RLock,
+    state: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    with lock:
+        memory_payload = state.get("payload")
+        memory_cached_at = float(state.get("cached_at") or 0.0)
+    if isinstance(memory_payload, dict) and memory_cached_at > 0:
+        return dict(memory_payload), {
+            "cached_at": memory_cached_at,
+            "age_seconds": max(0.0, time.time() - memory_cached_at),
+            "source": "memory",
+        }
+
+    try:
+        raw = redis_client.get(key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        row = json.loads(str(raw or "{}"))
+    except Exception:
+        row = {}
+    if not isinstance(row, dict) or int(row.get("schema_version") or 0) != int(schema_version):
+        return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "missing"}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else None
+    cached_at = float(row.get("cached_at") or 0.0)
+    if not isinstance(payload, dict) or cached_at <= 0:
+        return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "invalid"}
+    with lock:
+        state.update({"cached_at": cached_at, "payload": payload})
+    return dict(payload), {
+        "cached_at": cached_at,
+        "age_seconds": max(0.0, time.time() - cached_at),
+        "source": "redis",
+    }
+
+
+def _runtime_hardware_snapshot_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _runtime_snapshot_cache_save(
+        key=RUNTIME_HARDWARE_TELEMETRY_KEY,
+        schema_version=RUNTIME_HARDWARE_TELEMETRY_SCHEMA_VERSION,
+        lock=runtime_hardware_snapshot_lock,
+        state=runtime_hardware_snapshot_state,
+        payload=payload,
+    )
+
+
+def _runtime_hardware_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    return _runtime_snapshot_cache_load(
+        key=RUNTIME_HARDWARE_TELEMETRY_KEY,
+        schema_version=RUNTIME_HARDWARE_TELEMETRY_SCHEMA_VERSION,
+        lock=runtime_hardware_snapshot_lock,
+        state=runtime_hardware_snapshot_state,
+    )
+
+
+def _runtime_hardware_snapshot_build() -> Dict[str, Any]:
+    return get_system_hardware_snapshot(
+        include_vram_probe=True,
+        enable_apple_ioreg_probe=True,
+    )
+
+
+async def _system_task_hardware_telemetry(_reason: str = "schedule") -> None:
+    payload = await asyncio.to_thread(_runtime_hardware_snapshot_build)
+    await asyncio.to_thread(_runtime_hardware_snapshot_save, payload)
+
+
+def _runtime_loaded_models_snapshot(
+    *,
+    include_models: bool = True,
+    system_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    llm_payload = get_local_llm_loaded_models_snapshot(
+        include_models=True,
+        include_vram_probe=bool(include_models and not system_snapshot),
+    )
     llm_rows = [dict(row) for row in list(llm_payload.get("models") or []) if isinstance(row, dict)]
     for row in llm_rows:
         row.setdefault("category", "llm")
@@ -9997,19 +10363,99 @@ def _runtime_loaded_models_snapshot(*, include_models: bool = True) -> Dict[str,
         "by_provider": by_provider,
         "by_category": by_category,
         "totals": totals,
-        "system": dict(llm_payload.get("system") or {}),
+        "system": dict(system_snapshot or llm_payload.get("system") or {}),
     }
     if include_models:
         payload["models"] = rows
     return payload
 
 
+def _runtime_model_snapshot_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _runtime_snapshot_cache_save(
+        key=RUNTIME_MODEL_SNAPSHOT_KEY,
+        schema_version=RUNTIME_MODEL_SNAPSHOT_SCHEMA_VERSION,
+        lock=runtime_model_snapshot_lock,
+        state=runtime_model_snapshot_state,
+        payload=payload,
+    )
+
+
+def _runtime_model_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    return _runtime_snapshot_cache_load(
+        key=RUNTIME_MODEL_SNAPSHOT_KEY,
+        schema_version=RUNTIME_MODEL_SNAPSHOT_SCHEMA_VERSION,
+        lock=runtime_model_snapshot_lock,
+        state=runtime_model_snapshot_state,
+    )
+
+
+def _runtime_model_snapshot_build(*, force_context_refresh: bool = True) -> Dict[str, Any]:
+    hardware, _hardware_meta = _runtime_hardware_snapshot_load()
+    if not isinstance(hardware, dict) or not hardware:
+        hardware = _runtime_hardware_snapshot_build()
+        _runtime_hardware_snapshot_save(hardware)
+    return {
+        "loaded_models": _runtime_loaded_models_snapshot(include_models=True, system_snapshot=hardware),
+        "chat_context_window": _estimate_webui_chat_context_window(force_refresh=force_context_refresh),
+    }
+
+
+async def _system_task_runtime_model_snapshot(_reason: str = "schedule") -> None:
+    payload = await asyncio.to_thread(_runtime_model_snapshot_build, force_context_refresh=True)
+    await asyncio.to_thread(_runtime_model_snapshot_save, payload)
+
+
+def _runtime_cached_loaded_models(*, include_models: bool) -> Dict[str, Any]:
+    runtime_snapshot, runtime_meta = _runtime_model_snapshot_load()
+    hardware, hardware_meta = _runtime_hardware_snapshot_load()
+    if (
+        not isinstance(hardware, dict)
+        or not hardware
+        or float(hardware_meta.get("age_seconds") or 0.0) >= float(RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS)
+    ):
+        system_task_manager.request_run("hardware_telemetry", reason="hardware-cache-stale")
+    if (
+        not isinstance(runtime_snapshot, dict)
+        or not runtime_snapshot
+        or float(runtime_meta.get("age_seconds") or 0.0) >= float(RUNTIME_MODEL_SNAPSHOT_STALE_SECONDS)
+    ):
+        system_task_manager.request_run("runtime_model_snapshot", reason="runtime-model-cache-stale")
+
+    loaded_models = (
+        dict(runtime_snapshot.get("loaded_models") or {})
+        if isinstance(runtime_snapshot, dict)
+        else {}
+    )
+    if not loaded_models:
+        loaded_models = _runtime_loaded_models_snapshot(
+            include_models=include_models,
+            system_snapshot=hardware if isinstance(hardware, dict) else None,
+        )
+    elif isinstance(hardware, dict) and hardware:
+        loaded_models["system"] = dict(hardware)
+    if not include_models:
+        loaded_models.pop("models", None)
+    return loaded_models
+
+
+def _runtime_cached_context_estimate() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    runtime_snapshot, runtime_meta = _runtime_model_snapshot_load()
+    estimate = (
+        dict(runtime_snapshot.get("chat_context_window") or {})
+        if isinstance(runtime_snapshot, dict)
+        else {}
+    )
+    if not estimate:
+        estimate = _estimate_webui_chat_context_window()
+    return estimate, runtime_meta
+
+
 def _runtime_breakdown_payload() -> Dict[str, Any]:
     hydra_jobs = _chat_job_counts_with_breakdown(include_history=True)
     llm_calls = get_llm_call_runtime_summary(include_history=True)
     vision_calls = get_vision_call_runtime_summary(include_history=True)
-    context_estimate = _estimate_webui_chat_context_window()
-    loaded_models = _runtime_loaded_models_snapshot(include_models=True)
+    context_estimate, _context_meta = _runtime_cached_context_estimate()
+    loaded_models = _runtime_cached_loaded_models(include_models=True)
     return {
         "hydra_jobs": hydra_jobs,
         "chat_jobs": hydra_jobs,  # Backward-compatible key for older clients.
@@ -10895,28 +11341,311 @@ def _dashboard_mark_snapshot_refresh_finished(*, error: str = "") -> None:
         )
 
 
-def _dashboard_schedule_snapshot_refresh(*, reason: str = "dashboard", force: bool = False) -> bool:
-    if not _dashboard_mark_snapshot_refresh_started(reason=reason, force=force):
-        return False
+def _voice_satellite_snapshot_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cached_at = time.time()
+    body = payload if isinstance(payload, dict) else {}
+    with voice_satellite_snapshot_lock:
+        voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": body})
+    try:
+        redis_client.set(
+            VOICE_SATELLITE_SNAPSHOT_KEY,
+            json.dumps(
+                {
+                    "schema_version": VOICE_SATELLITE_SNAPSHOT_SCHEMA_VERSION,
+                    "cached_at": cached_at,
+                    "payload": body,
+                },
+                default=str,
+                separators=(",", ":"),
+            ),
+        )
+    except Exception:
+        logger.debug("[system-tasks] failed saving the satellite UI snapshot", exc_info=True)
+    return {"cached_at": cached_at, "payload": body}
 
-    async def runner() -> None:
-        error = ""
-        try:
-            snapshot = await run_dashboard(_dashboard_build_snapshot)
-            await run_dashboard(_dashboard_save_snapshot, snapshot)
-        except Exception as exc:
-            error = str(exc)
-            logger.info("[dashboard] queued snapshot refresh failed reason=%s: %s", reason, exc)
-        finally:
-            _dashboard_mark_snapshot_refresh_finished(error=error)
+
+def _voice_satellite_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    with voice_satellite_snapshot_lock:
+        memory_payload = voice_satellite_snapshot_state.get("payload")
+        memory_cached_at = float(voice_satellite_snapshot_state.get("cached_at") or 0.0)
+    if isinstance(memory_payload, dict) and memory_cached_at > 0:
+        return memory_payload, {
+            "cached_at": memory_cached_at,
+            "age_seconds": max(0.0, time.time() - memory_cached_at),
+            "source": "memory",
+        }
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        _dashboard_mark_snapshot_refresh_finished(error="dashboard event loop unavailable")
-        return False
-    loop.create_task(runner())
-    return True
+        raw = redis_client.get(VOICE_SATELLITE_SNAPSHOT_KEY)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        row = json.loads(str(raw or "{}"))
+    except Exception:
+        row = {}
+    if not isinstance(row, dict) or int(row.get("schema_version") or 0) != VOICE_SATELLITE_SNAPSHOT_SCHEMA_VERSION:
+        return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "missing"}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else None
+    cached_at = float(row.get("cached_at") or 0.0)
+    if not isinstance(payload, dict) or cached_at <= 0:
+        return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "invalid"}
+    with voice_satellite_snapshot_lock:
+        voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": payload})
+    return payload, {
+        "cached_at": cached_at,
+        "age_seconds": max(0.0, time.time() - cached_at),
+        "source": "redis",
+    }
+
+
+def _voice_satellite_snapshot_build() -> Dict[str, Any]:
+    tab = _esphome_platform_tab_spec()
+    return esphome_home_module.get_runtime_payload(
+        redis_client=redis_client,
+        core_key=str(tab.get("core_key") or "voice"),
+        core_tab=tab,
+        panel="satellites",
+    )
+
+
+async def _system_task_satellite_snapshot(_reason: str = "schedule") -> None:
+    payload = await asyncio.to_thread(_voice_satellite_snapshot_build)
+    await asyncio.to_thread(_voice_satellite_snapshot_save, payload)
+
+
+def _integration_room_media_player_options_save(options: List[Dict[str, str]]) -> Dict[str, Any]:
+    cached_at = time.time()
+    rows = [dict(row) for row in options if isinstance(row, dict)]
+    redis_client.set(
+        INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_KEY,
+        json.dumps(
+            {
+                "schema_version": INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_SCHEMA_VERSION,
+                "cached_at": cached_at,
+                "options": rows,
+            },
+            default=str,
+            separators=(",", ":"),
+        ),
+    )
+    return {"cached_at": cached_at, "options": rows}
+
+
+def _integration_room_media_player_options_load() -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    try:
+        raw = redis_client.get(INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_KEY)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        payload = json.loads(str(raw or "{}"))
+    except Exception:
+        payload = {}
+    if (
+        not isinstance(payload, dict)
+        or int(payload.get("schema_version") or 0) != INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_SCHEMA_VERSION
+    ):
+        return [], {"cached_at": 0.0, "age_seconds": 0.0, "source": "missing"}
+    cached_at = float(payload.get("cached_at") or 0.0)
+    rows = [dict(row) for row in payload.get("options") or [] if isinstance(row, dict)]
+    return rows, {
+        "cached_at": cached_at,
+        "age_seconds": max(0.0, time.time() - cached_at) if cached_at else 0.0,
+        "source": "redis",
+    }
+
+
+async def _system_task_integration_device_registry(reason: str = "schedule") -> None:
+    registry = await integration_runtime_module.refresh_integration_device_registry_runtime_cache(
+        redis_client,
+        source=f"system-task-{str(reason or 'schedule').strip().lower() or 'schedule'}",
+    )
+    options = await asyncio.to_thread(_room_media_player_options, registry)
+    await asyncio.to_thread(_integration_room_media_player_options_save, options)
+
+
+async def _system_task_dashboard_snapshot(reason: str = "schedule") -> None:
+    if not _dashboard_mark_snapshot_refresh_started(reason=f"system-task-{reason}"):
+        return
+    error = ""
+    try:
+        snapshot = await run_dashboard(_dashboard_build_snapshot)
+        await run_dashboard(_dashboard_save_snapshot, snapshot)
+    except Exception as exc:
+        error = str(exc).strip() or exc.__class__.__name__
+        raise
+    finally:
+        _dashboard_mark_snapshot_refresh_finished(error=error)
+
+
+async def _system_task_dashboard_briefs(reason: str = "schedule") -> None:
+    snapshot = await run_dashboard(_dashboard_build_snapshot)
+    await run_dashboard(_dashboard_save_snapshot, snapshot)
+    contexts = _dashboard_brief_contexts(snapshot)
+    cached_rows = await run_dashboard(_dashboard_cache_rows)
+    stale_ids = _dashboard_stale_brief_ids(contexts, cached_rows)
+    manual = str(reason or "").strip().lower() == "manual"
+    selected = contexts if manual else [
+        context
+        for context in contexts
+        if str((context or {}).get("id") or "").strip() in set(stale_ids)
+    ]
+    if selected:
+        await _dashboard_refresh_briefs_job(
+            selected,
+            reason="system-task-manual" if manual else "system-task",
+            force=manual,
+        )
+
+
+def _dashboard_snapshot_task_interval() -> int:
+    with system_task_intervals_lock:
+        return max(0, int(system_task_intervals.get("dashboard_snapshot") or 0))
+
+
+def _dashboard_brief_task_interval() -> int:
+    with system_task_intervals_lock:
+        return max(0, int(system_task_intervals.get("dashboard_briefs") or 0))
+
+
+def _refresh_system_task_intervals() -> None:
+    settings = _dashboard_refresh_settings()
+    snapshot_interval = max(
+        0,
+        _dashboard_safe_int(settings.get("refresh_interval_seconds"), DASHBOARD_SNAPSHOT_STALE_SECONDS),
+    )
+    brief_interval = max(
+        0,
+        _dashboard_safe_int(settings.get("brief_refresh_interval_seconds"), DASHBOARD_BRIEF_TTL_SECONDS),
+    )
+    with system_task_intervals_lock:
+        system_task_intervals.update(
+            {
+                "dashboard_snapshot": snapshot_interval,
+                "dashboard_briefs": brief_interval,
+            }
+        )
+
+
+def _register_system_tasks() -> None:
+    global system_tasks_registered
+    if system_tasks_registered:
+        return
+    system_task_manager.register(
+        "hardware_telemetry",
+        label="Hardware Telemetry",
+        description=(
+            "Refreshes cached CPU, GPU, RAM, and unified or dedicated graphics memory data "
+            "for the top runtime status and statistics popup."
+        ),
+        interval_seconds=RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS,
+        initial_delay_seconds=0,
+        order=5,
+        runner=_system_task_hardware_telemetry,
+    )
+    system_task_manager.register(
+        "runtime_model_snapshot",
+        label="Runtime Model Snapshot",
+        description=(
+            "Refreshes cached loaded-model details and the current chat context estimate "
+            "for Runtime Stats and Model Settings."
+        ),
+        interval_seconds=RUNTIME_MODEL_SNAPSHOT_INTERVAL_SECONDS,
+        initial_delay_seconds=2,
+        order=6,
+        runner=_system_task_runtime_model_snapshot,
+    )
+    system_task_manager.register(
+        "satellite_ui_snapshot",
+        label="Satellite UI Snapshot",
+        description=(
+            "Refreshes satellite cards after connection and settings changes, with a five-minute "
+            "safety refresh so the Voice Satellites tab opens immediately."
+        ),
+        interval_seconds=VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS,
+        initial_delay_seconds=0,
+        order=10,
+        runner=_system_task_satellite_snapshot,
+    )
+    system_task_manager.register(
+        "integration_device_registry",
+        label="Integration Device Registry",
+        description=(
+            "Refreshes integration devices, rooms, and playback destinations in the background "
+            "so the Devices and Organize tabs open immediately."
+        ),
+        interval_seconds=INTEGRATION_DEVICE_REGISTRY_INTERVAL_SECONDS,
+        initial_delay_seconds=0,
+        order=15,
+        runner=_system_task_integration_device_registry,
+    )
+    system_task_manager.register(
+        "dashboard_snapshot",
+        label="Dashboard Snapshot",
+        description="Refreshes the cached status, update, environment, awareness, personal, and voice dashboard data.",
+        interval_seconds=_dashboard_snapshot_task_interval,
+        initial_delay_seconds=2,
+        order=20,
+        runner=_system_task_dashboard_snapshot,
+    )
+    system_task_manager.register(
+        "dashboard_briefs",
+        label="Dashboard Briefs",
+        description="Regenerates dashboard summaries when their configured refresh interval is due.",
+        interval_seconds=_dashboard_brief_task_interval,
+        initial_delay_seconds=DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS,
+        order=30,
+        runner=_system_task_dashboard_briefs,
+    )
+    system_tasks_registered = True
+
+
+def _start_system_task_scheduler() -> None:
+    _refresh_system_task_intervals()
+    _register_system_tasks()
+    system_task_manager.start()
+    native_satellite_module.add_state_change_listener(_handle_native_satellite_state_change)
+    integration_runtime_module.add_device_registry_change_listener(_handle_integration_device_registry_change)
+
+
+async def _stop_system_task_scheduler() -> None:
+    native_satellite_module.remove_state_change_listener(_handle_native_satellite_state_change)
+    integration_runtime_module.remove_device_registry_change_listener(_handle_integration_device_registry_change)
+    await core_task_run_manager.stop()
+    await system_task_manager.stop()
+
+
+def _handle_native_satellite_state_change(event: str, _selector: str = "") -> None:
+    event_token = str(event or "change").strip().lower() or "change"
+    system_task_manager.request_run_debounced(
+        "satellite_ui_snapshot",
+        reason=f"satellite-{event_token}",
+        delay_seconds=VOICE_SATELLITE_SNAPSHOT_DEBOUNCE_SECONDS,
+    )
+    system_task_manager.request_run_debounced(
+        "integration_device_registry",
+        reason=f"satellite-{event_token}",
+        delay_seconds=INTEGRATION_DEVICE_REGISTRY_DEBOUNCE_SECONDS,
+    )
+
+
+def _handle_integration_device_registry_change(event: str, _device_key: str = "") -> None:
+    event_token = str(event or "change").strip().lower() or "change"
+    system_task_manager.request_run_debounced(
+        "integration_device_registry",
+        reason=f"integration-{event_token}",
+        delay_seconds=INTEGRATION_DEVICE_REGISTRY_DEBOUNCE_SECONDS,
+    )
+
+
+def _request_integration_device_registry_refresh(reason: str, *, immediate: bool = False) -> bool:
+    if immediate:
+        return system_task_manager.request_run(
+            "integration_device_registry",
+            reason=str(reason or "refresh").strip() or "refresh",
+        )
+    return system_task_manager.request_run_debounced(
+        "integration_device_registry",
+        reason=str(reason or "refresh").strip() or "refresh",
+        delay_seconds=INTEGRATION_DEVICE_REGISTRY_DEBOUNCE_SECONDS,
+    )
 
 
 def _dashboard_time_greeting(now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -12098,52 +12827,12 @@ def _dashboard_schedule_brief_refresh(
     return True
 
 
-async def _dashboard_brief_scheduler_loop() -> None:
-    await asyncio.sleep(float(DASHBOARD_BRIEF_STARTUP_DELAY_SECONDS))
-    while True:
-        interval = _dashboard_brief_check_interval_seconds()
-        try:
-            if interval > 0:
-                snapshot = await run_dashboard(_dashboard_build_snapshot)
-                await run_dashboard(_dashboard_save_snapshot, snapshot)
-                contexts = _dashboard_brief_contexts(snapshot)
-                cached_rows = await run_dashboard(_dashboard_cache_rows)
-                stale_ids = _dashboard_stale_brief_ids(contexts, cached_rows)
-                if stale_ids:
-                    await _dashboard_refresh_briefs_job(
-                        [context for context in contexts if str(context.get("id") or "").strip() in set(stale_ids)],
-                        reason="scheduler",
-                    )
-                    await run_dashboard(_dashboard_save_snapshot, snapshot)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.debug("[dashboard] brief scheduler tick failed: %s", exc, exc_info=True)
-        await asyncio.sleep(float(max(60, interval or 300)))
-
-
 def _start_dashboard_brief_scheduler() -> None:
-    global dashboard_brief_scheduler_task
-    if dashboard_brief_scheduler_task and not dashboard_brief_scheduler_task.done():
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    dashboard_brief_scheduler_task = loop.create_task(_dashboard_brief_scheduler_loop())
+    _start_system_task_scheduler()
 
 
 async def _stop_dashboard_brief_scheduler() -> None:
-    global dashboard_brief_scheduler_task
-    task = dashboard_brief_scheduler_task
-    dashboard_brief_scheduler_task = None
-    if not task:
-        return
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    await _stop_system_task_scheduler()
 
 
 def _dashboard_build_snapshot() -> Dict[str, Any]:
@@ -12423,10 +13112,11 @@ async def _dashboard_payload(
             snapshot = cached_snapshot
         elif isinstance(cached_snapshot, dict):
             snapshot = cached_snapshot
-            _dashboard_schedule_snapshot_refresh(
-                reason="brief-refresh-stale" if refresh_briefs else "dashboard-stale",
-                force=False,
-            )
+            if _dashboard_snapshot_task_interval() > 0:
+                system_task_manager.request_run(
+                    "dashboard_snapshot",
+                    reason="brief-refresh-stale" if refresh_briefs else "dashboard-stale",
+                )
         else:
             snapshot = await run_dashboard(_dashboard_build_snapshot)
             rebuilt_snapshot = True
@@ -12655,7 +13345,7 @@ def health() -> Dict[str, Any]:
     hydra_job_counts = _chat_job_counts_with_breakdown()
     llm_call_counts = get_llm_call_runtime_summary(include_history=False)
     vision_call_counts = get_vision_call_runtime_summary()
-    loaded_models = _runtime_loaded_models_snapshot(include_models=False)
+    loaded_models = _runtime_cached_loaded_models(include_models=False)
 
     return {
         "ok": redis_ok,
@@ -12706,6 +13396,9 @@ async def dashboard_settings(payload: DashboardSettingsRequest) -> Dict[str, Any
             refresh_interval_seconds=payload.refresh_interval_seconds,
             brief_refresh_interval_seconds=payload.brief_refresh_interval_seconds,
         )
+        _refresh_system_task_intervals()
+        system_task_manager.reschedule("dashboard_snapshot")
+        system_task_manager.reschedule("dashboard_briefs")
     return await _dashboard_payload(refresh_snapshot=True)
 
 
@@ -13018,9 +13711,23 @@ async def close_spudex_session_api(session_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/runtime/breakdown")
-def runtime_breakdown() -> Dict[str, Any]:
+def runtime_breakdown(refresh: bool = False) -> Dict[str, Any]:
+    if refresh:
+        system_task_manager.request_run("hardware_telemetry", reason="runtime-popup")
+        system_task_manager.request_run("runtime_model_snapshot", reason="runtime-popup")
     payload = _runtime_breakdown_payload()
     return {"ok": True, **payload}
+
+
+@app.get("/api/runtime/context-estimate")
+def runtime_context_estimate() -> Dict[str, Any]:
+    estimate, cache_meta = _runtime_cached_context_estimate()
+    system_task_manager.request_run("runtime_model_snapshot", reason="model-settings")
+    return {
+        "ok": True,
+        "chat_context_window": estimate,
+        "cache": cache_meta,
+    }
 
 
 def _require_native_status_token(request: Request) -> None:
@@ -13268,12 +13975,15 @@ def runtime_llm_debug(since_id: int = 0, limit: int = 200) -> Dict[str, Any]:
 @app.post("/api/runtime/local-llm/unload")
 def unload_runtime_local_llm(payload: LocalLlmUnloadRequest) -> Dict[str, Any]:
     try:
-        return unload_local_llm_models(
+        result = unload_local_llm_models(
             provider=payload.provider,
             model=payload.model,
             cache_key=payload.cache_key,
             all_models=bool(payload.unload_all),
         )
+        system_task_manager.request_run("runtime_model_snapshot", reason="local-model-unloaded")
+        system_task_manager.request_run("hardware_telemetry", reason="local-model-unloaded")
+        return result
     except Exception as exc:
         logger.exception("[local-llm] unload failed")
         raise HTTPException(status_code=500, detail=str(exc) or "Failed to unload local model.") from exc
@@ -15891,6 +16601,24 @@ async def run_portal_api(portal_key: str, request: Request, api_path: str = "") 
 @app.get("/api/settings/esphome/runtime", include_in_schema=False)
 def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
     tab = _esphome_platform_tab_spec()
+    panel_token = str(panel or "").strip().lower()
+    runtime_payload: Dict[str, Any]
+    if panel_token == "satellites":
+        cached_payload, cache_meta = _voice_satellite_snapshot_load()
+        if isinstance(cached_payload, dict):
+            runtime_payload = cached_payload
+            if float(cache_meta.get("age_seconds") or 0.0) >= VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS:
+                system_task_manager.request_run("satellite_ui_snapshot", reason="satellites-stale")
+        else:
+            runtime_payload = _voice_satellite_snapshot_build()
+            _voice_satellite_snapshot_save(runtime_payload)
+    else:
+        runtime_payload = esphome_home_module.get_runtime_payload(
+            redis_client=redis_client,
+            core_key=str(tab.get("core_key") or "voice"),
+            core_tab=tab,
+            panel=panel,
+        )
     return {
         "tab": {
             "label": str(tab.get("label") or "Voice"),
@@ -15898,12 +16626,7 @@ def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
             "surface_kind": str(tab.get("surface_kind") or "voice"),
             "running": bool(tab.get("running")),
         },
-        "payload": esphome_home_module.get_runtime_payload(
-            redis_client=redis_client,
-            core_key=str(tab.get("core_key") or "voice"),
-            core_tab=tab,
-            panel=panel,
-        ),
+        "payload": runtime_payload,
     }
 
 
@@ -15911,12 +16634,31 @@ def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
 @app.post("/api/settings/esphome/runtime/action", include_in_schema=False)
 def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
     try:
-        return esphome_home_module.handle_runtime_action(
-            action=str(payload.action or "").strip(),
+        action_name = str(payload.action or "").strip().lower()
+        result = esphome_home_module.handle_runtime_action(
+            action=action_name,
             payload=payload.payload if isinstance(payload.payload, dict) else {},
             redis_client=redis_client,
             core_key="voice",
         )
+        if action_name in {
+            "voice_global_satellite_settings_save",
+            "voice_native_satellite_settings_save",
+            "voice_native_satellite_setup_mode",
+            "voice_satellite_remove",
+            "voice_satellite_save",
+            "voice_settings_reset_defaults",
+            "voice_settings_save",
+            "voice_wake_trainer_link_unlink",
+            "voice_wake_verifier_save",
+            "voice_refresh",
+        }:
+            system_task_manager.request_run_debounced(
+                "satellite_ui_snapshot",
+                reason=f"{action_name}-action",
+                delay_seconds=VOICE_SATELLITE_SNAPSHOT_DEBOUNCE_SECONDS,
+            )
+        return result
     except HTTPException:
         raise
     except ValueError as exc:
@@ -16030,6 +16772,7 @@ def save_portal_settings(portal_key: str, payload: SettingsUpdateRequest) -> Dic
 
 
 def _restart_integration_runtime_if_running() -> str:
+    _request_integration_device_registry_refresh("integration-runtime-changed")
     try:
         running = bool(integration_runtime_status(redis_client).get("running"))
     except Exception:
@@ -16079,6 +16822,7 @@ def install_integration(payload: ShopItemRequest) -> Dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
+    _request_integration_device_registry_refresh("integration-installed")
     return {"ok": True, "message": msg}
 
 
@@ -17743,6 +18487,84 @@ async def get_runtime_tts_named_asset(asset_id: str, filename: str) -> Response:
     return _runtime_tts_asset_response(asset_id)
 
 
+def _runtime_media_proxy_response(asset_id: str, filename: str, request: Request) -> Response:
+    import requests as http_requests
+
+    from media_playback import get_runtime_media_proxy_source
+
+    row = get_runtime_media_proxy_source(asset_id)
+    source_url = str(row.get("source_url") or "").strip() if isinstance(row, dict) else ""
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Runtime media source was not found or expired.")
+    upstream_headers = {
+        "Accept": request.headers.get("accept", "*/*"),
+        "User-Agent": request.headers.get("user-agent", "Tater-Media-Proxy/1.0"),
+    }
+    for header_name in ("range", "if-range", "if-none-match", "if-modified-since"):
+        value = request.headers.get(header_name)
+        if value:
+            upstream_headers["-".join(part.title() for part in header_name.split("-"))] = value
+    try:
+        upstream = http_requests.request(
+            request.method,
+            source_url,
+            headers=upstream_headers,
+            stream=request.method.upper() != "HEAD",
+            allow_redirects=True,
+            timeout=(10, 60),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Runtime media source could not be reached: {exc}") from exc
+    if upstream.status_code >= 400:
+        status_code = int(upstream.status_code)
+        upstream.close()
+        raise HTTPException(status_code=status_code, detail="Runtime media source rejected playback.")
+
+    response_headers: Dict[str, str] = {"Cache-Control": "private, max-age=300"}
+    for header_name in (
+        "Accept-Ranges",
+        "Content-Length",
+        "Content-Range",
+        "ETag",
+        "Last-Modified",
+    ):
+        value = upstream.headers.get(header_name)
+        if value:
+            response_headers[header_name] = value
+    safe_filename = Path(str(row.get("filename") or filename or "media.bin")).name
+    header_filename = "".join(
+        char if 32 <= ord(char) < 127 and char not in {'"', "\\"} else "_"
+        for char in safe_filename
+    ) or "media.bin"
+    response_headers["Content-Disposition"] = f'inline; filename="{header_filename}"'
+    media_type = (
+        str(upstream.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+        or str(row.get("content_type") or "application/octet-stream")
+    )
+    if request.method.upper() == "HEAD":
+        upstream.close()
+        return Response(status_code=upstream.status_code, media_type=media_type, headers=response_headers)
+
+    def _body_iter():
+        try:
+            yield from upstream.iter_content(chunk_size=128 * 1024)
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        _body_iter(),
+        status_code=upstream.status_code,
+        media_type=media_type,
+        headers=response_headers,
+    )
+
+
+@app.get("/api/media/runtime/{asset_id}/{filename:path}")
+@app.head("/api/media/runtime/{asset_id}/{filename:path}")
+async def get_runtime_media_proxy(asset_id: str, filename: str, request: Request) -> Response:
+    return await asyncio.to_thread(_runtime_media_proxy_response, asset_id, filename, request)
+
+
 def _ai_task_background_audio_response(kind: str, filename: str) -> FileResponse:
     clean_kind = str(kind or "").strip().lower()
     clean_filename = Path(str(filename or "").strip()).name
@@ -18166,6 +18988,83 @@ def get_settings_integrations_runtime_events(after_seq: int = 0, limit: int = 20
     return integration_runtime_events(redis_client, after_seq=after_seq, limit=limit)
 
 
+@app.get("/api/settings/system-tasks")
+def get_system_tasks() -> Dict[str, Any]:
+    _register_system_tasks()
+    return _system_tasks_payload()
+
+
+@app.post("/api/settings/system-tasks/{task_id}/run")
+async def run_system_task(task_id: str) -> Dict[str, Any]:
+    _register_system_tasks()
+    token = str(task_id or "").strip().lower()
+    try:
+        queued = await system_task_manager.trigger(token, reason="manual")
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown system task: {token or task_id}")
+    payload = _system_tasks_payload()
+    payload["queued"] = bool(queued)
+    payload["task"] = system_task_manager.get(token)
+    return payload
+
+
+@app.post("/api/settings/core-tasks/{core_key}/{task_id}/run")
+async def run_core_system_task(core_key: str, task_id: str) -> Dict[str, Any]:
+    core_token = str(core_key or "").strip()
+    task_token = _core_task_token(task_id)
+    snapshot = _core_tasks_snapshot()
+    group = next(
+        (row for row in snapshot.get("core_tasks") or [] if str(row.get("core_key") or "") == core_token),
+        None,
+    )
+    task_row = next(
+        (row for row in (group or {}).get("tasks") or [] if str(row.get("id") or "") == task_token),
+        None,
+    )
+    if not isinstance(task_row, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown core task: {core_token}/{task_token or task_id}")
+    if not bool(task_row.get("can_run")):
+        if not bool(task_row.get("manual", True)):
+            detail = "This core task runs automatically."
+        elif bool(task_row.get("requires_running")) and not bool(task_row.get("core_running")):
+            detail = f"Start {str((group or {}).get('label') or core_token)} before running this task."
+        elif not bool(task_row.get("available")):
+            detail = str(
+                task_row.get("unavailable_reason")
+                or task_row.get("last_error")
+                or "This core task is not available until its setup is complete."
+            )
+        else:
+            detail = "This core task is disabled."
+        raise HTTPException(status_code=409, detail=detail)
+
+    try:
+        module = core_runtime._import_module(core_token, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown core: {core_token} ({exc})")
+    runner = getattr(module, "run_core_system_task", None)
+    if not callable(runner):
+        raise HTTPException(status_code=404, detail=f"{core_token} does not expose a core task runner.")
+
+    def invoke() -> Any:
+        return runner(task_id=task_token, redis_client=redis_client, core_key=core_token)
+
+    queued = await core_task_run_manager.trigger(core_token, task_token, invoke)
+    payload = _system_tasks_payload()
+    payload["queued"] = bool(queued)
+    payload["core_task"] = next(
+        (
+            task
+            for task_group in payload.get("core_tasks") or []
+            if str(task_group.get("core_key") or "") == core_token
+            for task in task_group.get("tasks") or []
+            if str(task.get("id") or "") == task_token
+        ),
+        None,
+    )
+    return payload
+
+
 @app.get("/api/settings/logs")
 def get_settings_logs(after_seq: int = 0, limit: int = 300, level: str = "", logger_name: str = "") -> Dict[str, Any]:
     requested_limit = max(1, min(1000, int(limit or 300)))
@@ -18233,7 +19132,32 @@ def get_settings_integrations_devices(capability: str = "", refresh: bool = Fals
 
 @app.get("/api/settings/integrations/device-registry")
 def get_settings_integrations_device_registry(refresh: bool = False) -> Dict[str, Any]:
-    return get_integration_device_registry(redis_client, refresh=refresh)
+    if refresh:
+        return get_integration_device_registry(redis_client, refresh=True)
+    return _settings_cached_integration_device_registry()
+
+
+def _settings_cached_integration_device_registry() -> Dict[str, Any]:
+    registry = get_cached_integration_device_registry(redis_client)
+    if registry:
+        return registry
+    _request_integration_device_registry_refresh("integration-cache-missing", immediate=True)
+    return {
+        "devices": [],
+        "categories": [],
+        "rooms": [],
+        "groups": [],
+        "total": 0,
+        "errors": [],
+        "integration_counts": {},
+        "room_overrides": get_integration_room_overrides(redis_client),
+        "cache": {
+            "cached": False,
+            "source": "building",
+            "generated_at": 0.0,
+            "age_seconds": 0.0,
+        },
+    }
 
 
 def _room_media_player_current_values(registry: Dict[str, Any]) -> List[str]:
@@ -18278,7 +19202,12 @@ def _room_media_player_options(registry: Dict[str, Any]) -> List[Dict[str, str]]
 
 def _settings_integration_rooms_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(registry or {})
-    payload["room_media_player_options"] = _room_media_player_options(payload)
+    options, cache = _integration_room_media_player_options_load()
+    payload["room_media_player_options"] = options
+    payload["room_media_player_options_cache"] = cache
+    registry_cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+    if cache.get("source") == "missing" and registry_cache.get("source") != "building":
+        _request_integration_device_registry_refresh("room-media-options-missing")
     return payload
 
 
@@ -18287,12 +19216,19 @@ def _settings_integration_room_result(result: Dict[str, Any]) -> Dict[str, Any]:
     registry = payload.get("registry") if isinstance(payload.get("registry"), dict) else {}
     if registry:
         payload["registry"] = _settings_integration_rooms_registry(registry)
+    _request_integration_device_registry_refresh("integration-organization-change")
     return payload
 
 
 @app.get("/api/settings/integrations/rooms")
 def get_settings_integrations_rooms(refresh: bool = False) -> Dict[str, Any]:
-    registry = _settings_integration_rooms_registry(get_integration_device_registry(redis_client, refresh=refresh))
+    if refresh:
+        base_registry = get_integration_device_registry(redis_client, refresh=True)
+        options = _room_media_player_options(base_registry)
+        _integration_room_media_player_options_save(options)
+    else:
+        base_registry = _settings_cached_integration_device_registry()
+    registry = _settings_integration_rooms_registry(base_registry)
     return {
         "room_overrides": get_integration_room_overrides(redis_client),
         "registry": registry,
@@ -18367,7 +19303,9 @@ def update_registered_integration_settings(
     payload: IntegrationSettingsRequest,
 ) -> Dict[str, Any]:
     try:
-        return save_registered_integration_settings(integration_id, payload.settings)
+        result = save_registered_integration_settings(integration_id, payload.settings)
+        _request_integration_device_registry_refresh(f"integration-{integration_id}-settings")
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -18383,7 +19321,9 @@ def run_registered_settings_integration_action(
     payload: IntegrationActionRequest,
 ) -> Dict[str, Any]:
     try:
-        return run_registered_integration_action(integration_id, action_id, payload.payload)
+        result = run_registered_integration_action(integration_id, action_id, payload.payload)
+        _request_integration_device_registry_refresh(f"integration-{integration_id}-action")
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -18395,11 +19335,13 @@ def run_registered_settings_integration_action(
 @app.post("/api/settings/hue/link")
 def link_hue_bridge(payload: HueLinkRequest) -> Dict[str, Any]:
     hue_module = _integration_module_or_400("hue", "Hue")
-    return hue_module.pair_hue_bridge(
+    result = hue_module.pair_hue_bridge(
         bridge_host=payload.hue_bridge_host,
         device_type=payload.hue_device_type,
         timeout_seconds=payload.hue_timeout_seconds,
     )
+    _request_integration_device_registry_refresh("integration-hue-linked")
+    return result
 
 
 @app.post("/api/settings/aladdin/test")
@@ -19658,6 +20600,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         cleaned = sorted(set(values))
         redis_client.set(ADMIN_GATE_KEY, json.dumps(cleaned))
 
+    system_task_manager.request_run_debounced(
+        "runtime_model_snapshot",
+        reason="settings-updated",
+        delay_seconds=0.25,
+    )
     return {
         "ok": True,
         "updated": sorted(updates.keys()),

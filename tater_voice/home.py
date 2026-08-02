@@ -78,7 +78,7 @@ def _runtime_panel_token(panel: Any = "") -> str:
 
 def _native_satellite_status_snapshot() -> Dict[str, Any]:
     try:
-        result = native_satellite.run_on_runtime_loop(native_satellite.status(), timeout=3.0)
+        result = native_satellite.status_snapshot_sync()
     except Exception:
         return {}
     return result if isinstance(result, dict) else {}

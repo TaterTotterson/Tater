@@ -27,21 +27,24 @@ async function updateShuffle(event: Event): Promise<void> {
 </script>
 
 <template>
-  <details class="tm-queue" open>
+  <details class="tm-queue">
     <summary>
       <span>
         <strong>{{ item.track_list_label || 'Current Track List' }}</strong>
         <small>{{ item.track_list?.length || 0 }} tracks</small>
       </span>
-      <label class="tm-shuffle" @click.stop>
-        <input
-          type="checkbox"
-          :checked="Boolean(item.track_list_shuffle)"
-          :disabled="busy('shuffle')"
-          @change="updateShuffle"
-        />
-        Shuffle
-      </label>
+      <span class="tm-queue-summary-actions">
+        <label class="tm-shuffle" @click.stop>
+          <input
+            type="checkbox"
+            :checked="Boolean(item.track_list_shuffle)"
+            :disabled="busy('shuffle')"
+            @change="updateShuffle"
+          />
+          Shuffle
+        </label>
+        <span class="tm-queue-chevron" aria-hidden="true">⌄</span>
+      </span>
     </summary>
     <div v-if="item.track_list?.length" class="tm-track-scroll" role="listbox" aria-label="Current track list">
       <button
@@ -56,6 +59,14 @@ async function updateShuffle(event: Event): Promise<void> {
         @dblclick="playTrack(track)"
       >
         <span class="tm-track-position">{{ track.active ? '▶' : track.position }}</span>
+        <img
+          v-if="track.image_src"
+          class="tm-track-art"
+          :src="track.image_src"
+          :alt="track.image_alt || ''"
+          loading="lazy"
+        />
+        <span v-else class="tm-track-art placeholder" aria-hidden="true">♫</span>
         <span class="tm-track-copy">
           <strong>{{ track.title || 'Untitled' }}</strong>
           <small>{{ [track.artist, track.album].filter(Boolean).join(' · ') || 'Unknown artist' }}</small>

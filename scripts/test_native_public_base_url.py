@@ -118,6 +118,71 @@ class NativePublicBaseUrlTests(unittest.TestCase):
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/media/[0-9a-f]+$",
         )
 
+    @staticmethod
+    def _flac_block(block_type: int, body: bytes, *, last: bool = False) -> bytes:
+        header = block_type | (0x80 if last else 0)
+        return bytes([header]) + len(body).to_bytes(3, "big") + body
+
+    def test_native_flac_stream_removes_embedded_picture_and_preserves_audio(self) -> None:
+        stream_info = bytes(range(34))
+        comment = b"artist=Tater"
+        picture = b"\xff\xd8" + (b"cover" * 1000) + b"\xff\xd9"
+        audio_frames = b"\xff\xf8native-flac-audio"
+        original = b"fLaC" + b"".join(
+            (
+                self._flac_block(0, stream_info),
+                self._flac_block(4, comment),
+                self._flac_block(6, picture, last=True),
+                audio_frames,
+            )
+        )
+
+        sanitized, removed = vp._strip_flac_picture_blocks(original)
+
+        self.assertEqual(4 + len(picture), removed)
+        self.assertLess(len(sanitized), len(original))
+        self.assertTrue(sanitized.endswith(audio_frames))
+        self.assertEqual(b"fLaC", sanitized[:4])
+        self.assertEqual(0, sanitized[4] & 0x7F)
+        second_offset = 4 + 4 + len(stream_info)
+        self.assertEqual(4, sanitized[second_offset] & 0x7F)
+        self.assertTrue(sanitized[second_offset] & 0x80)
+        self.assertNotIn(picture, sanitized)
+
+    def test_store_media_url_sanitizes_only_temporary_flac_copy(self) -> None:
+        stream_info = bytes(range(34))
+        picture = b"large-cover"
+        audio_frames = b"\xff\xf8audio"
+        original = (
+            b"fLaC"
+            + self._flac_block(0, stream_info)
+            + self._flac_block(6, picture, last=True)
+            + audio_frames
+        )
+
+        with mock.patch.object(vp, "_service_base_url_for_peer", return_value="http://tater"):
+            url = vp._store_media_url(
+                "native:test",
+                "flac-session",
+                original,
+                media_type="audio/flac",
+                filename="song.flac",
+            )
+
+        stream_id = url.rsplit("/", 1)[-1]
+        with vp._tts_url_store_lock:
+            stored = bytes(vp._tts_url_store[stream_id]["body_bytes"])
+        self.assertNotEqual(stored, original)
+        self.assertIn(picture, original)
+        self.assertTrue(stored.endswith(audio_frames))
+        self.assertNotIn(picture, stored)
+
+    def test_malformed_flac_is_not_rewritten(self) -> None:
+        malformed = b"fLaC" + bytes([0x80]) + b"\x00\x10\x00" + b"short"
+        sanitized, removed = vp._strip_flac_picture_blocks(malformed)
+        self.assertEqual(malformed, sanitized)
+        self.assertEqual(0, removed)
+
     def test_background_audio_download_reads_agent_lab_preset_directly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             preset = (

@@ -168,6 +168,45 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         native_satellite._stereo_adjust_tasks.clear()
         native_satellite._stereo_sessions.clear()
 
+    async def test_group_member_status_separates_ready_offline_and_old_firmware(self) -> None:
+        capabilities = {
+            "audio_session_version": 2,
+            "synchronized_media_sessions": True,
+            "media_playhead_telemetry": True,
+            "media_drift_correction": True,
+        }
+        clients = {
+            "native:kitchen": {
+                "connected": True,
+                "hello": {"payload": {"capabilities": capabilities}},
+            },
+            "native:office": {"connected": False, "hello": {}},
+            "native:garage": {
+                "connected": True,
+                "hello": {
+                    "payload": {
+                        "capabilities": {
+                            **capabilities,
+                            "audio_session_version": 1,
+                        }
+                    }
+                },
+            },
+        }
+
+        with mock.patch.object(native_satellite, "_clients", clients):
+            status = await native_satellite.media_group_member_status(
+                ["native:kitchen", "native:office", "native:garage"]
+            )
+
+        self.assertEqual(status["ready_selectors"], ["native:kitchen"])
+        self.assertEqual(status["disconnected"], ["native:office"])
+        self.assertEqual(status["incompatible"][0]["selector"], "native:garage")
+        self.assertIn(
+            "audio_session_version_2",
+            status["incompatible"][0]["missing_capabilities"],
+        )
+
     async def test_prepare_waits_for_both_then_commits_shared_start(self) -> None:
         calls = []
 
@@ -221,6 +260,58 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         right_start = commit_calls[1][2]["start_at_us"]
         self.assertEqual(right_start - left_start, 4000)
         self.assertIn("bedroom12", native_satellite._stereo_sessions)
+
+    async def test_multi_room_group_prepares_every_member_and_shares_one_start(self) -> None:
+        calls = []
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            calls.append((selector, message_type, dict(payload), timeout_s))
+            return {"ok": True}
+
+        offsets = {
+            "native:kitchen": 1000,
+            "native:office": 2000,
+            "native:bedroom": -500,
+        }
+
+        async def fake_clock(selector):
+            return {"selector": selector, "offset_us": offsets[selector], "round_trip_us": 250}
+
+        members = [
+            {"selector": "native:kitchen", "channel": "mono", "volume_percent": 70},
+            {"selector": "native:office", "channel": "mono", "volume_percent": 70},
+            {"selector": "native:bedroom", "channel": "mono", "volume_percent": 70},
+        ]
+        with (
+            mock.patch.object(
+                native_satellite,
+                "media_group_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(native_satellite, "_stereo_clock_probe", side_effect=fake_clock),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+        ):
+            result = await native_satellite.prepare_group_media_session(
+                members,
+                group_id="whole-home",
+                session_id="music-1",
+                media_url="http://tater/media/song.mp3",
+                start_lead_ms=1200,
+            )
+
+        self.assertTrue(result["group_session_started"])
+        self.assertEqual(result["start_lead_ms"], 1200)
+        prepare_calls = [row for row in calls if row[1] == "media.session.prepare"]
+        commit_calls = [row for row in calls if row[1] == "media.session.commit"]
+        self.assertEqual(len(prepare_calls), 3)
+        self.assertEqual(len(commit_calls), 3)
+        starts = {row[0]: row[2]["start_at_us"] for row in commit_calls}
+        self.assertEqual(starts["native:office"] - starts["native:kitchen"], 1000)
+        self.assertEqual(starts["native:bedroom"] - starts["native:kitchen"], -1500)
+        self.assertEqual(
+            native_satellite._stereo_sessions["whole-home"]["selectors"],
+            ["native:kitchen", "native:office", "native:bedroom"],
+        )
 
     async def test_tts_waits_for_both_members_and_marks_visual_lifecycle(self) -> None:
         calls = []

@@ -8,7 +8,10 @@ const props = defineProps<{
   compact?: boolean;
 }>();
 
-const emit = defineEmits<{ "update:modelValue": [value: unknown] }>();
+const emit = defineEmits<{
+  "update:modelValue": [value: unknown];
+  change: [value: unknown];
+}>();
 
 const fieldType = computed(() => String(props.field.type || "text").toLowerCase());
 const disabled = computed(() => Boolean(props.field.disabled || props.field.read_only));
@@ -31,20 +34,52 @@ function optionValue(option: SelectOption | Primitive): string {
 
 function optionLabel(option: SelectOption | Primitive): string {
   if (option && typeof option === "object") {
-    return String(option.label ?? optionValue(option));
+    const candidates = [
+      option.label,
+      option.title,
+      option.name,
+      option.friendly_name,
+      option.description,
+      option.meta,
+      optionValue(option),
+    ];
+    return candidates.map((value) => String(value ?? "").trim()).find(Boolean) || "Unnamed player";
   }
-  return String(option ?? "");
+  return String(option ?? "").trim() || "Unnamed player";
+}
+
+function optionMeta(option: SelectOption | Primitive): string {
+  if (!option || typeof option !== "object") return "";
+  const label = optionLabel(option);
+  const candidates = [option.description, option.meta, option.room, option.area];
+  return candidates
+    .map((value) => String(value ?? "").trim())
+    .find((value) => Boolean(value) && value !== label) || "";
 }
 
 function updateFromInput(event: Event): void {
   const input = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  let value: unknown;
   if (fieldType.value === "checkbox") {
-    emit("update:modelValue", (input as HTMLInputElement).checked);
+    value = (input as HTMLInputElement).checked;
   } else if (fieldType.value === "number" || fieldType.value === "range") {
-    emit("update:modelValue", Number(input.value));
+    value = Number(input.value);
   } else {
-    emit("update:modelValue", input.value);
+    value = input.value;
   }
+  emit("update:modelValue", value);
+}
+
+function commitInput(event: Event): void {
+  const input = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  const value =
+    fieldType.value === "checkbox"
+      ? (input as HTMLInputElement).checked
+      : fieldType.value === "number" || fieldType.value === "range"
+        ? Number(input.value)
+        : input.value;
+  emit("update:modelValue", value);
+  emit("change", value);
 }
 
 function toggleOption(value: string, checked: boolean): void {
@@ -86,7 +121,10 @@ function toggleOption(value: string, checked: boolean): void {
           :disabled="disabled || !optionValue(option)"
           @change="toggleOption(optionValue(option), ($event.target as HTMLInputElement).checked)"
         />
-        <span>{{ optionLabel(option) }}</span>
+        <span class="tm-option-copy">
+          <strong>{{ optionLabel(option) }}</strong>
+          <small v-if="optionMeta(option)">{{ optionMeta(option) }}</small>
+        </span>
       </label>
     </div>
     <small v-if="field.description">{{ field.description }}</small>
@@ -113,6 +151,7 @@ function toggleOption(value: string, checked: boolean): void {
         :step="field.step ?? 1"
         :disabled="disabled"
         @input="updateFromInput"
+        @change="commitInput"
       />
       <output>{{ numberValue }}{{ field.suffix || '' }}</output>
     </div>

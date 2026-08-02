@@ -13,13 +13,13 @@ export default defineConfig({
     lib: {
       entry: resolve(import.meta.dirname, "src/entry.ts"),
       formats: ["es"],
-      fileName: () => "tater-music-core.js",
+      fileName: () => "tater-ui.js",
     },
     cssCodeSplit: false,
     rollupOptions: {
       output: {
         assetFileNames: (assetInfo) =>
-          assetInfo.name?.endsWith(".css") ? "tater-music-core.css" : "[name][extname]",
+          assetInfo.name?.endsWith(".css") ? "tater-ui.css" : "[name][extname]",
       },
     },
   },

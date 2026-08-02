@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import base64
 import contextlib
-import mimetypes
-import os
 import time
 from typing import Any, Dict, List
 
 from . import native_live_settings
 from . import reply_playback
 from . import runtime as esphome_runtime
-
-_asset_data_url_cache: Dict[str, str] = {}
-
 
 def _vp():
     from . import voice_pipeline as vp
@@ -96,33 +90,15 @@ def _native_popup_fields_from_sections(sections: List[Dict[str, Any]]) -> List[D
     return fields
 
 
-def _asset_data_url(path: str) -> str:
-    token = esphome_runtime.text(path)
-    if not token:
-        return ""
-    cached = _asset_data_url_cache.get(token)
-    if cached:
-        return cached
-    try:
-        with open(token, "rb") as handle:
-            raw = handle.read()
-        mime = mimetypes.guess_type(token)[0] or "application/octet-stream"
-        encoded = base64.b64encode(raw).decode("ascii")
-        value = f"data:{mime};base64,{encoded}"
-        _asset_data_url_cache[token] = value
-        return value
-    except Exception:
-        return ""
-
-
 def _default_satellite_image_src() -> str:
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "images", "tatervoice.png"))
-    return _asset_data_url(path)
+    return _named_satellite_image_src("tatervoice.png")
 
 
 def _named_satellite_image_src(image_name: str) -> str:
-    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "images", image_name))
-    return _asset_data_url(path)
+    filename = esphome_runtime.text(image_name).replace("\\", "/").rsplit("/", 1)[-1]
+    if not filename or filename in {".", ".."}:
+        return ""
+    return f"./static/device-images/{filename}"
 
 
 def _satellite_image_token(value: Any) -> str:

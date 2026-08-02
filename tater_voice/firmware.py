@@ -2142,6 +2142,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 append_device_option(
                     {
                         **device_option,
+                        "template_key": template_key,
                         "unmatched_template": not bool(matched_template_key),
                     },
                     template_key=template_key,
