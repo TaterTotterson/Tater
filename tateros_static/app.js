@@ -9873,9 +9873,30 @@ function renderEspHomeRuntimeStats(stats) {
   `;
 }
 
-function renderEspHomeStatsPanel(sections, tables) {
+function renderEspHomeStatsPanel(sections, tables, controls = {}, coreKey = "voice") {
   const metricSections = Array.isArray(sections) ? sections : [];
   const dataTables = Array.isArray(tables) ? tables : [];
+  const statsControls = controls && typeof controls === "object" ? controls : {};
+  const resetAction = String(statsControls?.reset_action || "").trim();
+  const controlsHtml = resetAction
+    ? `
+      <section class="core-inline-section core-manager-item"
+        data-core-key="${escapeHtml(coreKey)}"
+        data-core-item-id="${escapeHtml(encodeCoreManagerId(String(statsControls?.id || "voice_statistics")))}"
+        data-core-item-group="stats"
+        data-core-reset-action="${escapeHtml(resetAction)}"
+        data-core-reset-confirm="${escapeHtml(String(statsControls?.reset_confirm || "Reset all stored voice statistics?"))}">
+        <div class="small core-inline-section-title">Stored Voice Statistics</div>
+        <div class="small">${escapeHtml(String(statsControls?.description || ""))}</div>
+        <div class="inline-row" style="margin-top:10px;">
+          <button type="button" class="inline-btn danger core-manager-reset-defaults">${escapeHtml(
+            String(statsControls?.reset_label || "Reset Voice Statistics")
+          )}</button>
+          <span class="small core-manager-status"></span>
+        </div>
+      </section>
+    `
+    : "";
   const sectionHtml = metricSections
     .map((section) => {
       const title = String(section?.title || "Stats").trim() || "Stats";
@@ -9920,10 +9941,10 @@ function renderEspHomeStatsPanel(sections, tables) {
       `;
     })
     .join("");
-  if (!sectionHtml && !tableHtml) {
+  if (!controlsHtml && !sectionHtml && !tableHtml) {
     return renderNotice("No native satellite stats yet.");
   }
-  return `${sectionHtml}${tableHtml}`;
+  return `${controlsHtml}${sectionHtml}${tableHtml}`;
 }
 
 async function runEspHomeRefreshAction() {
@@ -12528,6 +12549,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const headerStats = Array.isArray(body.header_stats) ? body.header_stats : [];
       const statsSections = Array.isArray(body.stats_sections) ? body.stats_sections : [];
       const statsTables = Array.isArray(body.stats_tables) ? body.stats_tables : [];
+      const voiceStatsControls = body?.stats_controls && typeof body.stats_controls === "object" ? body.stats_controls : {};
       const firmware = body?.firmware && typeof body.firmware === "object" ? body.firmware : {};
       const displaySensors = body?.display_sensors && typeof body.display_sensors === "object" ? body.display_sensors : {};
       const speakerId = body?.speaker_id && typeof body.speaker_id === "object" ? body.speaker_id : {};
@@ -12584,7 +12606,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         emotionIdHost.innerHTML = renderEspHomeEmotionIdPanel(emotionId, coreKey);
       }
       if (targetPanel === "stats" && statsHost instanceof HTMLElement) {
-        statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables);
+        statsHost.innerHTML = renderEspHomeStatsPanel(statsSections, statsTables, voiceStatsControls, coreKey);
       }
       shell.dataset.runtimeLoaded = "1";
       loadedPanels.add(targetPanel);

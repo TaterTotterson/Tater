@@ -632,6 +632,14 @@ async def _handle_wake_verifier_packet(
         _text(result.get("reason")),
     )
     _queue_command(queue, _envelope("wake.verify.result", result))
+    try:
+        await _vp().run_background(
+            _vp()._voice_metrics_record_wake_verification,
+            selector,
+            result,
+        )
+    except Exception as exc:
+        _vp().logger.debug("[wake-verifier] metrics persist skipped selector=%s: %s", selector, exc)
 
 
 class _NativeVoiceAssistantEventType:
@@ -2142,6 +2150,20 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
     _upsert_registry_from_hello(selector, payload, connected=True)
     _notify_state_change("connected", selector)
     return queue
+
+
+async def reset_wake_verifier_runtime_stats() -> Dict[str, Any]:
+    cleared = 0
+    async with _clients_lock:
+        for row in _clients.values():
+            if not isinstance(row, dict):
+                continue
+            row["wake_verifier_count"] = 0
+            row["wake_verifier_rejections"] = 0
+            row["wake_verifier_last"] = {}
+            cleared += 1
+    _notify_state_change("wake_verifier_stats_reset", "")
+    return {"ok": True, "cleared_clients": cleared}
 
 
 async def _voice_bridge(selector: str) -> Optional[_NativeVoicePipelineBridge]:

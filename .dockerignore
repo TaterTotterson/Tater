@@ -6,8 +6,14 @@ agent_lab/logs/*.log
 agent_lab/workspace/extracted_tmp_archive_*
 tests/
 
-# Native macOS app wrapper and release artifacts are not used by Docker images.
-macos/
+# Native macOS app files are not used by Docker images, except for the small
+# release plist shared by macOS, local command-line runs, and containers.
+macos/*
+!macos/Tater/
+macos/Tater/*
+!macos/Tater/Resources/
+macos/Tater/Resources/*
+!macos/Tater/Resources/Info.plist
 
 # Verba source now lives in the verba store; exclude local verba files from build context.
 verba/*

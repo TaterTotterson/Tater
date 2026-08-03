@@ -236,6 +236,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
                 "tater_voice.voice_pipeline._selected_stt_backend",
                 return_value="faster_whisper",
             ),
+            mock.patch.object(home.esphome_runtime, "voice_metrics_snapshot", return_value={}),
         ):
             card = home._wake_verifier_item_form(native_status)
 
@@ -252,6 +253,89 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(rows[0]["rejected"], 2)
         self.assertEqual(rows[0]["fail_open"], 1)
         self.assertEqual(rows[0]["stt_engine"], "faster_whisper")
+
+    def test_result_card_prefers_persisted_wake_verifier_counters(self) -> None:
+        native_status = {
+            "clients": {
+                "native:test-sat": {
+                    "connected": True,
+                    "device_name": "Test Satellite",
+                    "wake_verifier": {"count": 99, "rejections": 88, "last": {}},
+                    "last_status": {"wake_engine": {"verifier": {"completed": 99, "rejections": 88}}},
+                }
+            }
+        }
+        metrics = {
+            "period_started_ts": 100.0,
+            "retention_days": 30,
+            "devices": {
+                "native:test-sat": {
+                    "wake_verifier_checks": 4,
+                    "wake_verifier_rejections": 1,
+                    "wake_verifier_fail_open": 1,
+                    "wake_verifier_last": {
+                        "accepted": True,
+                        "available": False,
+                        "transcript": "",
+                        "score": 0.0,
+                        "stt_ms": 500.0,
+                        "stt_engine": "parakeet_onnx",
+                        "recorded_at": 120.0,
+                    },
+                }
+            },
+        }
+        with (
+            mock.patch.object(settings, "wake_verifier_mode", return_value="enforce"),
+            mock.patch("tater_voice.voice_pipeline._selected_stt_backend", return_value="parakeet_onnx"),
+            mock.patch.object(home.esphome_runtime, "voice_metrics_snapshot", return_value=metrics),
+        ):
+            card = home._wake_verifier_item_form(native_status)
+
+        self.assertIn("4 checks", card["sections"][0]["fields"][1]["value"])
+        row = card["sections"][1]["fields"][0]["rows"][0]
+        self.assertEqual(row["accepted"], 3)
+        self.assertEqual(row["rejected"], 1)
+        self.assertEqual(row["fail_open"], 1)
+        self.assertEqual(row["last_result"], "Fail-open")
+        self.assertEqual(card["reset_action"], "voice_wake_verifier_stats_reset")
+
+    def test_persisted_wake_stats_remain_visible_while_satellite_is_offline(self) -> None:
+        metrics = {
+            "period_started_ts": 100.0,
+            "retention_days": 30,
+            "devices": {
+                "native:offline": {
+                    "wake_verifier_checks": 6,
+                    "wake_verifier_rejections": 2,
+                    "wake_verifier_fail_open": 0,
+                    "wake_verifier_last": {},
+                }
+            },
+        }
+        with (
+            mock.patch.object(settings, "wake_verifier_mode", return_value="observe"),
+            mock.patch("tater_voice.voice_pipeline._selected_stt_backend", return_value="faster_whisper"),
+            mock.patch.object(home.esphome_runtime, "voice_metrics_snapshot", return_value=metrics),
+            mock.patch.object(
+                home.esphome_runtime,
+                "load_satellite_registry",
+                return_value=[
+                    {
+                        "selector": "native:offline",
+                        "name": "Offline Satellite",
+                        "source": "tater_native",
+                    }
+                ],
+            ),
+        ):
+            card = home._wake_verifier_item_form({"clients": {}})
+
+        row = card["sections"][1]["fields"][0]["rows"][0]
+        self.assertEqual(row["satellite"], "Offline Satellite")
+        self.assertEqual(row["status"], "Offline")
+        self.assertEqual(row["checks"], 6)
+        self.assertEqual(row["rejected"], 2)
 
     def test_save_action_broadcasts_to_all_connected_satellites(self) -> None:
         with (
@@ -272,6 +356,34 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("4 connected satellite(s)", result["message"])
         run_mock.assert_called_once_with("push-all", timeout=10.0)
+
+    def test_reset_action_clears_redis_and_live_wake_counters(self) -> None:
+        with (
+            mock.patch.object(home.esphome_firmware, "handle_runtime_action", return_value=None),
+            mock.patch.object(home, "_runtime_status_with_native", return_value={}),
+            mock.patch.object(home.esphome_speaker_id, "handle_runtime_action", return_value=None),
+            mock.patch.object(home.esphome_emotion_id, "handle_runtime_action", return_value=None),
+            mock.patch.object(
+                home.esphome_runtime,
+                "reset_voice_metrics",
+                return_value={"retention_days": 30},
+            ) as reset_mock,
+            mock.patch.object(home.native_satellite, "reset_wake_verifier_runtime_stats", new=lambda: "reset-live"),
+            mock.patch.object(
+                home.native_satellite,
+                "run_on_runtime_loop",
+                return_value={"ok": True, "cleared_clients": 3},
+            ) as run_mock,
+        ):
+            result = home.handle_runtime_action(
+                action="voice_statistics_reset",
+                payload={},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("new 30-day", result["message"])
+        reset_mock.assert_called_once_with()
+        run_mock.assert_called_once_with("reset-live", timeout=5.0)
 
     def test_global_satellite_save_broadcasts_and_syncs_continued_chat(self) -> None:
         values = {

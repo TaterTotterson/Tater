@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -19,6 +20,16 @@ from . import emotion_id as esphome_emotion_id
 IDENTIFY_SATELLITE_TEXT = (
     "Hey, over here. This is the satellite you're looking for. Yeah, over here. Can you hear me?"
 )
+
+
+def _local_timestamp_label(value: Any) -> str:
+    try:
+        timestamp = float(value or 0.0)
+    except Exception:
+        timestamp = 0.0
+    if timestamp <= 0.0:
+        return "—"
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%b %d, %Y %I:%M %p")
 
 
 def settings_hash_key() -> str:
@@ -339,28 +350,49 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         selected_stt_engine = ""
     clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    voice_metrics = esphome_runtime.voice_metrics_snapshot()
+    metrics_devices = voice_metrics.get("devices") if isinstance(voice_metrics.get("devices"), dict) else {}
+    persistent_period = float(voice_metrics.get("period_started_ts") or 0.0) > 0.0
+    retention_days = int(voice_metrics.get("retention_days") or 30)
+    registry = {
+        esphome_runtime.text(row.get("selector")): row
+        for row in esphome_runtime.load_satellite_registry()
+        if isinstance(row, dict) and _is_native_satellite_row(row) and esphome_runtime.text(row.get("selector"))
+    }
+    selectors = set(clients.keys()) | {
+        esphome_runtime.text(selector)
+        for selector in metrics_devices.keys()
+        if esphome_runtime.text(selector).startswith("native:")
+    }
     rows: List[Dict[str, Any]] = []
     total_checks = 0
     total_rejected = 0
     total_fail_open = 0
 
-    for selector, raw_row in sorted(clients.items(), key=lambda item: esphome_runtime.text(item[0])):
-        if not isinstance(raw_row, dict):
-            continue
+    for selector in sorted(selectors, key=esphome_runtime.text):
+        raw_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
+        saved_row = registry.get(selector) if isinstance(registry.get(selector), dict) else {}
         server = raw_row.get("wake_verifier") if isinstance(raw_row.get("wake_verifier"), dict) else {}
         last = server.get("last") if isinstance(server.get("last"), dict) else {}
         last_status = raw_row.get("last_status") if isinstance(raw_row.get("last_status"), dict) else {}
         wake_engine = last_status.get("wake_engine") if isinstance(last_status.get("wake_engine"), dict) else {}
         device = wake_engine.get("verifier") if isinstance(wake_engine.get("verifier"), dict) else {}
+        persisted = metrics_devices.get(selector) if isinstance(metrics_devices.get(selector), dict) else {}
 
         server_checks = int(server.get("count") or 0)
         server_rejected = int(server.get("rejections") or 0)
         device_checks = int(device.get("completed") or 0)
         device_rejected = int(device.get("rejections") or 0)
-        checks = max(server_checks, device_checks)
-        rejected = min(checks, max(server_rejected, device_rejected))
+        if persistent_period:
+            checks = int(persisted.get("wake_verifier_checks") or 0)
+            rejected = min(checks, int(persisted.get("wake_verifier_rejections") or 0))
+            fail_open = int(persisted.get("wake_verifier_fail_open") or 0)
+            last = persisted.get("wake_verifier_last") if isinstance(persisted.get("wake_verifier_last"), dict) else {}
+        else:
+            checks = max(server_checks, device_checks)
+            rejected = min(checks, max(server_rejected, device_rejected))
+            fail_open = int(device.get("fail_open") or 0)
         accepted = max(0, checks - rejected)
-        fail_open = int(device.get("fail_open") or 0)
         total_checks += checks
         total_rejected += rejected
         total_fail_open += fail_open
@@ -380,7 +412,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 last_result = "Accepted" if bool(last.get("accepted")) else "Rejected"
         else:
-            reason = esphome_runtime.text(device.get("last_reason"))
+            reason = "" if persistent_period else esphome_runtime.text(device.get("last_reason"))
             last_result = reason.replace("_", " ").title() if reason else "—"
 
         transcript = esphome_runtime.text(last.get("transcript")) or "—"
@@ -395,6 +427,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         name = (
             esphome_runtime.text(raw_row.get("device_name"))
             or esphome_runtime.text(raw_row.get("name"))
+            or esphome_runtime.text(saved_row.get("name"))
             or esphome_runtime.text(selector)
         )
         rows.append(
@@ -450,7 +483,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                             f"{total_checks} checks • {accepted_total} accepted • {total_rejected} rejected • "
                             f"{total_fail_open} fail-open"
                         ),
-                        "description": "Counts use each satellite's current firmware uptime and reset when that satellite reboots.",
+                        "description": f"Stored in Redis for a {retention_days}-day statistics period and preserved across Tater and satellite restarts.",
                     },
                     {
                         "key": "wake_verifier_stt_engine",
@@ -491,6 +524,9 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "save_action": "voice_wake_verifier_save",
         "save_label": "Apply To All Satellites",
+        "reset_action": "voice_wake_verifier_stats_reset",
+        "reset_label": "Reset Verification Stats",
+        "reset_confirm": "Reset stored STT wake-verification statistics for every satellite?",
         "remove_action": "",
     }
 
@@ -1120,6 +1156,15 @@ def get_runtime_payload(
         ]
         payload["stats_sections"] = [
             {
+                "title": "Statistics Period",
+                "metrics": [
+                    {"label": "Retention", "value": f"{int(voice_metrics.get('retention_days') or 30)} days"},
+                    {"label": "Started", "value": _local_timestamp_label(voice_metrics.get("period_started_ts"))},
+                    {"label": "Automatic Reset", "value": _local_timestamp_label(voice_metrics.get("period_expires_ts"))},
+                    {"label": "Storage", "value": "Redis"},
+                ],
+            },
+            {
                 "title": "Native Devices",
                 "metrics": [
                     {"label": "Selected", "value": selected},
@@ -1200,6 +1245,13 @@ def get_runtime_payload(
                 "empty_message": "No satellite metrics yet.",
             },
         ]
+        payload["stats_controls"] = {
+            "id": "voice_statistics",
+            "reset_action": "voice_statistics_reset",
+            "reset_label": "Reset All Voice Statistics",
+            "reset_confirm": "Reset all stored voice and STT wake-verification statistics for every satellite?",
+            "description": "Statistics are stored in Redis, survive restarts, and reset automatically after the retention period.",
+        }
     return payload
 
 
@@ -1375,6 +1427,28 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "global_satellite_settings": _global_satellite_settings_item_form(
                 _native_satellite_status_snapshot()
             ),
+        }
+
+    if action_name in {"voice_wake_verifier_stats_reset", "voice_statistics_reset"}:
+        if action_name == "voice_statistics_reset":
+            result = esphome_runtime.reset_voice_metrics()
+            message = "All stored voice statistics were reset. A new 30-day statistics period has started."
+        else:
+            result = esphome_runtime.reset_wake_verifier_metrics()
+            message = "Stored STT wake-verification statistics were reset for every satellite."
+        try:
+            native_reset = native_satellite.run_on_runtime_loop(
+                native_satellite.reset_wake_verifier_runtime_stats(),
+                timeout=5.0,
+            )
+        except Exception:
+            native_reset = {"ok": False, "cleared_clients": 0}
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": message,
+            **result,
+            "native": native_reset,
         }
 
     if action_name == "voice_wake_verifier_save":

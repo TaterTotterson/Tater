@@ -16649,7 +16649,9 @@ def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
             "voice_satellite_save",
             "voice_settings_reset_defaults",
             "voice_settings_save",
+            "voice_statistics_reset",
             "voice_wake_trainer_link_unlink",
+            "voice_wake_verifier_stats_reset",
             "voice_wake_verifier_save",
             "voice_refresh",
         }:

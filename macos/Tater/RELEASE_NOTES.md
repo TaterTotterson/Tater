@@ -1,13 +1,22 @@
-# Tater v99.1
+# Tater v99.2
 
 ## What's Changed
 
-### Persistent Native Satellite Pairing in Docker
+### Persistent Voice Statistics
 
-- Updated both the standard and NVIDIA Docker images to store Tater Native
-  satellite pairing credentials at
-  `/app/.runtime/native_satellite_credentials.json`.
-- Native satellite pairings now survive Docker container rebuilds and image
-  updates when the documented `/app/.runtime` volume is mounted.
-- Clarified the Docker persistence documentation so the runtime volume covers
-  both local runtime settings and native satellite credentials.
+- STT Wake Verification now stores per-satellite checks, rejections,
+  fail-opens, and latest results in Redis instead of losing them when Tater or
+  a satellite restarts.
+- Voice and per-satellite statistics now use a visible 30-day collection
+  period with automatic expiration and a manual reset control.
+- Added a separate reset for wake-verification statistics without clearing the
+  rest of the voice history.
+- Stored wake-verification results remain visible while a satellite is
+  offline.
+
+### Consistent Build Version Display
+
+- Local command-line runs and Docker images now read the same canonical Tater
+  version used by the macOS application.
+- Kept the small release `Info.plist` in Docker build contexts so the sidebar
+  reports the correct build version on every supported installation type.

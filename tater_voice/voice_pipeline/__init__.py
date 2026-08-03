@@ -300,6 +300,8 @@ REDIS_WYOMING_TTS_VOICES_META_KEY = "tater:voice:wyoming:tts_voices:meta:v1"
 REDIS_PIPER_TTS_MODELS_KEY = "tater:voice:piper:tts_models:v1"
 REDIS_PIPER_TTS_MODELS_META_KEY = "tater:voice:piper:tts_models:meta:v1"
 REDIS_VOICE_METRICS_KEY = "tater:voice:metrics:v1"
+VOICE_METRICS_RETENTION_DAYS = 30
+VOICE_METRICS_RETENTION_SECONDS = VOICE_METRICS_RETENTION_DAYS * 24 * 60 * 60
 
 DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
 DEFAULT_WYOMING_STT_PORT = 10300
@@ -577,6 +579,8 @@ _VOICE_OUTCOME_WAKE_NO_SPEECH = "wake_no_speech"
 _VOICE_OUTCOME_LOW_SIGNAL = "low_signal_speech"
 _VOICE_OUTCOME_CLIPPED = "clipped_ambiguous_speech"
 _VOICE_METRICS_TEMPLATE: Dict[str, Any] = {
+    "period_started_ts": 0.0,
+    "period_expires_ts": 0.0,
     "sessions_started": 0,
     "valid_turns": 0,
     "no_op_turns": 0,
@@ -589,6 +593,9 @@ _VOICE_METRICS_TEMPLATE: Dict[str, Any] = {
     "continued_chat_reopens": 0,
     "stt_fallback_count": 0,
     "tts_fallback_count": 0,
+    "wake_verifier_checks": 0,
+    "wake_verifier_rejections": 0,
+    "wake_verifier_fail_open": 0,
     "speech_duration": {"count": 0, "total": 0.0},
     "silence_duration": {"count": 0, "total": 0.0},
     "turn_latency_ms": {"count": 0, "total": 0.0},
@@ -1463,6 +1470,9 @@ def _voice_metrics_merge_row(target: Dict[str, Any], source: Any) -> None:
         "error_count",
         "disconnect_count",
         "reconnect_count",
+        "wake_verifier_checks",
+        "wake_verifier_rejections",
+        "wake_verifier_fail_open",
     ):
         if key in source:
             _voice_metric_merge_counter(target, source, key)
@@ -1477,6 +1487,38 @@ def _voice_metrics_merge_row(target: Dict[str, Any], source: Any) -> None:
                 target[key] = _text(source.get(key))
         if source_seen > 0.0:
             target["last_seen_ts"] = source_seen
+    source_wake = source.get("wake_verifier_last") if isinstance(source.get("wake_verifier_last"), dict) else {}
+    target_wake = target.get("wake_verifier_last") if isinstance(target.get("wake_verifier_last"), dict) else {}
+    if _as_float(source_wake.get("recorded_at"), 0.0) >= _as_float(target_wake.get("recorded_at"), 0.0):
+        if source_wake:
+            target["wake_verifier_last"] = copy.deepcopy(source_wake)
+
+
+def _voice_metrics_reset_locked(*, started_ts: Optional[float] = None) -> None:
+    global _VOICE_METRICS_LOADED
+    now_ts = float(started_ts or _now())
+    _VOICE_METRICS.clear()
+    _VOICE_METRICS.update(json.loads(json.dumps(_VOICE_METRICS_TEMPLATE)))
+    _VOICE_METRICS["period_started_ts"] = now_ts
+    _VOICE_METRICS["period_expires_ts"] = now_ts + float(VOICE_METRICS_RETENTION_SECONDS)
+    _VOICE_METRICS_LOADED = True
+
+
+def _voice_metrics_ensure_period_locked() -> bool:
+    now_ts = _now()
+    started_ts = _as_float(_VOICE_METRICS.get("period_started_ts"), 0.0)
+    expires_ts = _as_float(_VOICE_METRICS.get("period_expires_ts"), 0.0)
+    if started_ts <= 0.0:
+        _VOICE_METRICS["period_started_ts"] = now_ts
+        _VOICE_METRICS["period_expires_ts"] = now_ts + float(VOICE_METRICS_RETENTION_SECONDS)
+        return False
+    if expires_ts <= started_ts:
+        expires_ts = started_ts + float(VOICE_METRICS_RETENTION_SECONDS)
+        _VOICE_METRICS["period_expires_ts"] = expires_ts
+    if now_ts < expires_ts:
+        return False
+    _voice_metrics_reset_locked(started_ts=now_ts)
+    return True
 
 
 def _voice_metrics_load_persisted_locked() -> None:
@@ -1490,6 +1532,7 @@ def _voice_metrics_load_persisted_locked() -> None:
         return
     _VOICE_METRICS_LOADED = True
     if raw in (None, ""):
+        _voice_metrics_ensure_period_locked()
         return
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
@@ -1497,8 +1540,10 @@ def _voice_metrics_load_persisted_locked() -> None:
         saved = json.loads(str(raw))
     except Exception as exc:
         logger.debug("[native-voice] voice metrics payload invalid: %s", exc)
+        _voice_metrics_ensure_period_locked()
         return
     if not isinstance(saved, dict):
+        _voice_metrics_ensure_period_locked()
         return
     _voice_metrics_merge_row(_VOICE_METRICS, saved)
     saved_devices = saved.get("devices") if isinstance(saved.get("devices"), dict) else {}
@@ -1507,11 +1552,25 @@ def _voice_metrics_load_persisted_locked() -> None:
             continue
         row = _voice_device_metrics(_text(selector) or "unknown")
         _voice_metrics_merge_row(row, saved_row)
+    saved_started_ts = _as_float(saved.get("period_started_ts"), 0.0)
+    saved_expires_ts = _as_float(saved.get("period_expires_ts"), 0.0)
+    if saved_started_ts > 0.0:
+        _VOICE_METRICS["period_started_ts"] = saved_started_ts
+    if saved_expires_ts > saved_started_ts:
+        _VOICE_METRICS["period_expires_ts"] = saved_expires_ts
+    if _voice_metrics_ensure_period_locked():
+        _voice_metrics_persist_locked()
 
 
 def _voice_metrics_persist_locked() -> None:
     try:
         redis_client.set(REDIS_VOICE_METRICS_KEY, json.dumps(_VOICE_METRICS, ensure_ascii=False))
+        remaining_s = max(
+            1,
+            int(math.ceil(_as_float(_VOICE_METRICS.get("period_expires_ts"), _now()) - _now())),
+        )
+        with contextlib.suppress(Exception):
+            redis_client.expire(REDIS_VOICE_METRICS_KEY, remaining_s)
     except Exception as exc:
         logger.debug("[native-voice] voice metrics persist skipped: %s", exc)
 
@@ -1552,6 +1611,10 @@ def _voice_device_metrics(selector: str) -> Dict[str, Any]:
             "error_count": 0,
             "disconnect_count": 0,
             "reconnect_count": 0,
+            "wake_verifier_checks": 0,
+            "wake_verifier_rejections": 0,
+            "wake_verifier_fail_open": 0,
+            "wake_verifier_last": {},
             "continued_chat_reopens": 0,
             "speech_duration": {"count": 0, "total": 0.0},
             "silence_duration": {"count": 0, "total": 0.0},
@@ -1575,6 +1638,7 @@ def _voice_metrics_record_session_start(
 ) -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         _VOICE_METRICS["sessions_started"] = int(_VOICE_METRICS.get("sessions_started") or 0) + 1
         if continued_chat_reopen:
             _VOICE_METRICS["continued_chat_reopens"] = int(_VOICE_METRICS.get("continued_chat_reopens") or 0) + 1
@@ -1620,6 +1684,7 @@ def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None
         return
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         device = _voice_device_metrics(selector)
         if token == "disconnect":
             device["disconnect_count"] = int(device.get("disconnect_count") or 0) + 1
@@ -1634,6 +1699,7 @@ def _voice_metrics_record_connection_event(selector: str, *, event: str) -> None
 def _voice_metrics_record_stt(selector: str, backend: str, latency_ms: float) -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         _voice_metric_add(_VOICE_METRICS.setdefault("stt_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
         _voice_metric_add(_voice_backend_bucket("stt_latency_ms", backend), latency_ms)
         device = _voice_device_metrics(selector)
@@ -1645,6 +1711,7 @@ def _voice_metrics_record_stt(selector: str, backend: str, latency_ms: float) ->
 def _voice_metrics_record_stt_fallback(selector: str, reason: str = "") -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         _VOICE_METRICS["stt_fallback_count"] = int(_VOICE_METRICS.get("stt_fallback_count") or 0) + 1
         device = _voice_device_metrics(selector)
         device["last_reason"] = _text(reason) or "stt_fallback"
@@ -1655,6 +1722,7 @@ def _voice_metrics_record_stt_fallback(selector: str, reason: str = "") -> None:
 def _voice_metrics_record_tts(selector: str, backend: str, latency_ms: float) -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         _voice_metric_add(_VOICE_METRICS.setdefault("tts_latency_ms", {"count": 0, "total": 0.0, "by_backend": {}}), latency_ms)
         _voice_metric_add(_voice_backend_bucket("tts_latency_ms", backend), latency_ms)
         device = _voice_device_metrics(selector)
@@ -1674,6 +1742,7 @@ def _voice_metrics_record_turn(
 ) -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         valid = outcome == _VOICE_OUTCOME_VALID
         if valid:
             _VOICE_METRICS["valid_turns"] = int(_VOICE_METRICS.get("valid_turns") or 0) + 1
@@ -1718,16 +1787,80 @@ def _voice_metrics_record_turn(
 def _voice_metrics_record_continued_chat_attempt(selector: str) -> None:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
         _VOICE_METRICS["continued_chat_attempts"] = int(_VOICE_METRICS.get("continued_chat_attempts") or 0) + 1
         device = _voice_device_metrics(selector)
         device["last_seen_ts"] = _now()
         _voice_metrics_persist_locked()
 
 
+def _voice_metrics_record_wake_verification(selector: str, result: Dict[str, Any]) -> None:
+    outcome = dict(result) if isinstance(result, dict) else {}
+    accepted = bool(outcome.get("accepted"))
+    fail_open = not bool(outcome.get("available", True)) or "fail_open" in _text(outcome.get("reason")).lower()
+    recorded_at = _now()
+    outcome["recorded_at"] = recorded_at
+    with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
+        _VOICE_METRICS["wake_verifier_checks"] = int(_VOICE_METRICS.get("wake_verifier_checks") or 0) + 1
+        if not accepted:
+            _VOICE_METRICS["wake_verifier_rejections"] = int(_VOICE_METRICS.get("wake_verifier_rejections") or 0) + 1
+        if fail_open:
+            _VOICE_METRICS["wake_verifier_fail_open"] = int(_VOICE_METRICS.get("wake_verifier_fail_open") or 0) + 1
+        device = _voice_device_metrics(selector)
+        device["wake_verifier_checks"] = int(device.get("wake_verifier_checks") or 0) + 1
+        if not accepted:
+            device["wake_verifier_rejections"] = int(device.get("wake_verifier_rejections") or 0) + 1
+        if fail_open:
+            device["wake_verifier_fail_open"] = int(device.get("wake_verifier_fail_open") or 0) + 1
+        device["wake_verifier_last"] = outcome
+        device["last_seen_ts"] = recorded_at
+        _voice_metrics_persist_locked()
+
+
+def _voice_metrics_reset_wake_verifier() -> Dict[str, Any]:
+    with _VOICE_METRICS_LOCK:
+        _voice_metrics_load_persisted_locked()
+        _voice_metrics_ensure_period_locked()
+        for key in ("wake_verifier_checks", "wake_verifier_rejections", "wake_verifier_fail_open"):
+            _VOICE_METRICS[key] = 0
+        devices = _VOICE_METRICS.get("devices") if isinstance(_VOICE_METRICS.get("devices"), dict) else {}
+        for row in devices.values():
+            if not isinstance(row, dict):
+                continue
+            row["wake_verifier_checks"] = 0
+            row["wake_verifier_rejections"] = 0
+            row["wake_verifier_fail_open"] = 0
+            row["wake_verifier_last"] = {}
+        _voice_metrics_persist_locked()
+        return {
+            "ok": True,
+            "period_started_ts": float(_VOICE_METRICS.get("period_started_ts") or 0.0),
+            "period_expires_ts": float(_VOICE_METRICS.get("period_expires_ts") or 0.0),
+            "retention_days": VOICE_METRICS_RETENTION_DAYS,
+        }
+
+
+def _voice_metrics_reset_all() -> Dict[str, Any]:
+    with _VOICE_METRICS_LOCK:
+        _voice_metrics_reset_locked()
+        _voice_metrics_persist_locked()
+        return {
+            "ok": True,
+            "period_started_ts": float(_VOICE_METRICS.get("period_started_ts") or 0.0),
+            "period_expires_ts": float(_VOICE_METRICS.get("period_expires_ts") or 0.0),
+            "retention_days": VOICE_METRICS_RETENTION_DAYS,
+        }
+
+
 def _voice_metrics_snapshot() -> Dict[str, Any]:
     with _VOICE_METRICS_LOCK:
         _voice_metrics_load_persisted_locked()
+        if _voice_metrics_ensure_period_locked():
+            _voice_metrics_persist_locked()
         metrics = json.loads(json.dumps(_VOICE_METRICS))
+    metrics["retention_days"] = VOICE_METRICS_RETENTION_DAYS
     devices = metrics.get("devices") if isinstance(metrics.get("devices"), dict) else {}
     for row in devices.values():
         if not isinstance(row, dict):
