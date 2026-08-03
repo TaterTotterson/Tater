@@ -301,7 +301,8 @@ Important for Docker persistence:
 - Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
 - Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
 - Add a path mapping for `/app/.runtime` (container) -> `/mnt/user/appdata/tater/runtime` (host example).
-- Without this mapping, local runtime settings can be lost on container rebuilds/updates.
+- Without this mapping, local runtime settings and Tater Native satellite pairing credentials can be lost on container rebuilds/updates.
+- Both Docker images store native satellite credentials at `/app/.runtime/native_satellite_credentials.json`.
 
 ---
 

@@ -4,7 +4,8 @@ FROM python:3.11-slim
 # Prevent some pip noise & keep Python stdout unbuffered
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    TATER_LLAMA_CPP_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server
+    TATER_LLAMA_CPP_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server \
+    TATER_NATIVE_SATELLITE_CREDENTIALS_PATH=/app/.runtime/native_satellite_credentials.json
 
 ARG LLAMA_CPP_REF=master
 
