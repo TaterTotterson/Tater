@@ -8880,10 +8880,15 @@ class SpudLinkMusicActionRequest(BaseModel):
     provider: Optional[str] = Field(default=None, max_length=40)
     query: Optional[str] = Field(default=None, max_length=300)
     track_id: Optional[str] = Field(default=None, max_length=300)
+    track_ids: List[str] = Field(default_factory=list)
+    recommendation_id: Optional[str] = Field(default=None, max_length=300)
+    queue_index: Optional[int] = Field(default=None, ge=0)
+    queue_session_id: Optional[str] = Field(default=None, max_length=200)
     target: Optional[str] = Field(default=None, max_length=500)
     targets: List[str] = Field(default_factory=list)
     shuffle: Optional[bool] = None
     volume_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    position_seconds: Optional[float] = Field(default=None, ge=0)
 
 
 class SpudLinkTtsRequest(BaseModel):
@@ -14942,9 +14947,14 @@ def spud_link_music_action(
         "provider": payload.provider,
         "query": payload.query,
         "track_id": payload.track_id,
+        "track_ids": payload.track_ids[:200],
+        "recommendation_id": payload.recommendation_id,
+        "queue_index": payload.queue_index,
+        "queue_session_id": payload.queue_session_id,
         "targets": payload.targets or ([payload.target] if payload.target else []),
         "shuffle": payload.shuffle,
         "volume_percent": payload.volume_percent,
+        "position_seconds": payload.position_seconds,
     }
     if "little_spud:local" in values["targets"]:
         raise HTTPException(
