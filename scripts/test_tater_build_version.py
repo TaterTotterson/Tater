@@ -49,6 +49,16 @@ class TaterBuildVersionTests(unittest.TestCase):
             "321.7",
         )
 
+    def test_docker_images_keep_the_canonical_release_info_plist(self) -> None:
+        dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("!macos/Tater/", dockerignore)
+        self.assertIn("!macos/Tater/Resources/", dockerignore)
+        self.assertIn("!macos/Tater/Resources/Info.plist", dockerignore)
+
+        for dockerfile_name in ("Dockerfile", "Dockerfile.nvidia"):
+            dockerfile = (REPO_ROOT / dockerfile_name).read_text(encoding="utf-8")
+            self.assertIn("COPY . .", dockerfile)
+
     def test_auth_bootstrap_and_sidebar_display_are_wired(self) -> None:
         backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
         index = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")

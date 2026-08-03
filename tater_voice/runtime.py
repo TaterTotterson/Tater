@@ -51,6 +51,14 @@ def voice_metrics_snapshot() -> Dict[str, Any]:
     return _vp()._voice_metrics_snapshot()
 
 
+def reset_voice_metrics() -> Dict[str, Any]:
+    return _vp()._voice_metrics_reset_all()
+
+
+def reset_wake_verifier_metrics() -> Dict[str, Any]:
+    return _vp()._voice_metrics_reset_wake_verifier()
+
+
 def native_stats() -> Dict[str, Any]:
     return device_runtime.native_stats()
 
