@@ -37,7 +37,7 @@ RUN python -m pip install --upgrade pip \
  && python -c "import onnx_asr, onnxruntime as ort; providers=ort.get_available_providers(); assert 'CPUExecutionProvider' in providers, providers; print('onnx-asr ready providers=' + ','.join(providers))"
 
 RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
- && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release \
+ && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
  && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
  && "$TATER_LLAMA_CPP_SERVER_BIN" --version
 

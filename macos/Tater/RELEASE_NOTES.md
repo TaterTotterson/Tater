@@ -1,26 +1,14 @@
-# Tater v99.3
+# Tater v99.4
 
 ## What's Changed
 
-### Little Spud Music
+### Portable Docker Model Runtime
 
-- Added SpudLink support for Little Spud's persistent bottom music player,
-  expandable current playlist, live progress and seeking, album artwork,
-  volume control, and multi-destination playback.
-- Little Spud can browse Search, Genres, Artists, Albums, and AI-generated
-  Tater Recommendations from the active Music Core provider.
-- Playback destinations can include the iPhone, individual satellites,
-  stereo pairs, Sonos speakers, and supported media-player integrations.
-
-### Music Core 2.7.2
-
-- Exposed the live Music Core queue, progress, artwork, library facets, and
-  Tater Recommendations to trusted native clients without exposing provider
-  credentials.
-- Added native-client controls for recommendation playback, multiple playback
-  destinations, live volume changes, and seeking.
-- Little Spud on-device playback now requests AI-selected continuation batches
-  before its queue ends, with a similarity-ranked fallback so music keeps
-  playing if the AI call is unavailable.
-- Listening on the iPhone now contributes to the shared Music Core history,
-  improving future continuous-radio choices and Tater Recommendations.
+- Built llama.cpp with `GGML_NATIVE=OFF` in both the standard CPU and NVIDIA
+  Docker images so the bundled `llama-server` is portable across supported
+  host processors instead of being optimized for the GitHub Actions runner.
+- Fixed GGUF models failing to load with `llama-server` exit code `-4` on
+  compatible Home Assistant and Docker hosts whose CPUs do not support every
+  instruction exposed by the image build runner.
+- Kept the existing AVX2 CPU optimizations and CUDA acceleration while avoiding
+  host-specific instruction generation.
