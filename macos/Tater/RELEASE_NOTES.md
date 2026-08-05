@@ -1,14 +1,13 @@
-# Tater v99.4
+# Tater v99.5
 
 ## What's Changed
 
-### Portable Docker Model Runtime
+### Wyoming TTS Voice Selection
 
-- Built llama.cpp with `GGML_NATIVE=OFF` in both the standard CPU and NVIDIA
-  Docker images so the bundled `llama-server` is portable across supported
-  host processors instead of being optimized for the GitHub Actions runner.
-- Fixed GGUF models failing to load with `llama-server` exit code `-4` on
-  compatible Home Assistant and Docker hosts whose CPUs do not support every
-  instruction exposed by the image build runner.
-- Kept the existing AVX2 CPU optimizations and CUDA acceleration while avoiding
-  host-specific instruction generation.
+- Fixed Wyoming voices discovered from the configured server being sent as a
+  serialized JSON object instead of the selected voice name, language, and
+  speaker fields.
+- Wyoming Test Voice, broadcasts, announcements, and other shared TTS paths now
+  use the selected server voice correctly.
+- Kept compatibility with older settings that store only a plain Wyoming voice
+  name, along with the server's default voice option.
