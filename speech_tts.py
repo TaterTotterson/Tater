@@ -1278,12 +1278,53 @@ def _voice_selection_to_value(selection: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _voice_selection_from_value(raw: Any) -> Dict[str, str]:
+    if isinstance(raw, dict):
+        source = raw
+    else:
+        token = _text(raw)
+        if not token:
+            return {}
+        source = None
+        with contextlib.suppress(Exception):
+            parsed = json.loads(token)
+            if isinstance(parsed, dict):
+                source = parsed
+        if source is None:
+            # Backward compatibility for settings that stored only a voice name.
+            return {"name": token}
+
+    selection = {
+        "name": _text(source.get("name")),
+        "language": _text(source.get("language")),
+        "speaker": _text(source.get("speaker")),
+    }
+    return {key: value for key, value in selection.items() if value}
+
+
 def _voice_selection_label(selection: Dict[str, Any]) -> str:
     name = _text(selection.get("name"))
     language = _text(selection.get("language"))
     speaker = _text(selection.get("speaker"))
     parts = [part for part in [name, language, speaker] if part]
     return " • ".join(parts) or "Default"
+
+
+def _wyoming_synthesize_event(text: str, voice_value: Any):
+    selected_voice = _voice_selection_from_value(voice_value)
+    if selected_voice and SynthesizeVoice is not None:
+        return Synthesize(
+            text=text,
+            voice=SynthesizeVoice(
+                name=_text(selected_voice.get("name")) or None,
+                language=_text(selected_voice.get("language")) or None,
+                speaker=_text(selected_voice.get("speaker")) or None,
+            ),
+        ).event()
+    if selected_voice:
+        with contextlib.suppress(Exception):
+            return Synthesize(text=text, voice=selected_voice).event()
+    return Synthesize(text=text).event()
 
 
 async def fetch_wyoming_tts_voice_options(
@@ -1739,15 +1780,7 @@ async def _wyoming_synthesize(
         return b"", {}
 
     timeout = _native_wyoming_timeout_s()
-    synth_event = None
-    selected_name = _text(voice_name)
-    if selected_name and SynthesizeVoice is not None:
-        synth_event = Synthesize(text=prompt, voice=SynthesizeVoice(name=selected_name)).event()
-    elif selected_name:
-        with contextlib.suppress(Exception):
-            synth_event = Synthesize(text=prompt, voice={"name": selected_name}).event()
-    if synth_event is None:
-        synth_event = Synthesize(text=prompt).event()
+    synth_event = _wyoming_synthesize_event(prompt, voice_name)
 
     audio_out = bytearray()
     audio_format: Dict[str, Any] = {}
