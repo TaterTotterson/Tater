@@ -330,6 +330,18 @@ LED_ANIMATION_VALUES = {
     )
     for value, _label in rows
 }
+S420_LED_DEFAULTS = {
+    "led_listening_animation": "pulse",
+    "led_thinking_animation": "breathe",
+    "led_tool_call_animation": "heartbeat",
+    "led_replying_animation": "pulse",
+}
+S420_LED_ANIMATIONS = [
+    ("pulse", "Tater Pulse"),
+    ("breathe", "Tater Breathe"),
+    ("heartbeat", "Tater Heartbeat"),
+    ("solid", "Steady Tater Glow"),
+]
 
 
 def _text(value: Any) -> str:
@@ -746,6 +758,30 @@ def _board_supports_led_settings(board: Any = "") -> bool:
     return True
 
 
+def _is_s420_board(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {
+        "s420",
+        "tater-s420",
+        "thirdreality-s420",
+        "third-reality-s420",
+    } or compact == "s420" or compact.startswith(("taters420", "thirdrealitys420"))
+
+
+def _s420_led_animation(value: Any, default_key: str) -> str:
+    token = _lower(value).replace("-", "_")
+    aliases = {
+        "directional": "pulse",
+        "sparkle": "breathe",
+        "ping_pong": "heartbeat",
+        "voice_ring": "pulse",
+    }
+    token = aliases.get(token, token)
+    supported = {value for value, _label in S420_LED_ANIMATIONS}
+    return token if token in supported else S420_LED_DEFAULTS[default_key]
+
+
 def _board_supports_screen_settings(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
@@ -972,6 +1008,9 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
         }
         current = normalize_settings(device_raw, base=global_settings)
     current["wake_verifier_mode"] = _global_wake_verifier_mode()
+    if _is_s420_board(board):
+        for key in S420_LED_DEFAULTS:
+            current[key] = _s420_led_animation(current.get(key), key)
     return current
 
 
@@ -1416,6 +1455,41 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         ]
     if not _board_supports_led_settings(board):
         fields = [field for field in fields if _text(field.get("key")) not in _LED_FIELD_KEYS]
+    elif _is_s420_board(board):
+        fields = [
+            field
+            for field in fields
+            if _text(field.get("key")) not in {"led_tool_call_animation", "led_preview"}
+        ]
+        for field in fields:
+            key = _text(field.get("key"))
+            if key == "led_section":
+                field.update(
+                    {
+                        "label": "Tater S420 Status Light",
+                        "description": "Customize the S420's single top status light. Changes apply live during the voice cycle.",
+                    }
+                )
+            elif key == "led_brightness":
+                field.update(
+                    {
+                        "label": "Status Light Brightness (%)",
+                        "description": "Brightness for the single visible S420 status light.",
+                    }
+                )
+            elif key == "led_color":
+                field.update(
+                    {
+                        "label": "Tater Status Color",
+                        "description": "Shared listening, thinking, and reply color. Setup, mute, error, and OTA colors stay reserved.",
+                    }
+                )
+            elif key in S420_LED_DEFAULTS:
+                field["options"] = [
+                    {"value": value, "label": label}
+                    for value, label in S420_LED_ANIMATIONS
+                ]
+                field["default"] = S420_LED_DEFAULTS[key]
     if not (_selector_token(selector) and _board_supports_screen_settings(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     return fields

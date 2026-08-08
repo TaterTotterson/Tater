@@ -130,6 +130,12 @@ def _exact_satellite_image_src(value: Any) -> str:
         return _named_satellite_image_src("respeaker-xvf3800.png")
     if token in {"koala", "koala-satellite", "koala-voice-satellite"}:
         return _named_satellite_image_src("koala-satellite.png")
+    if token in {"s420", "tater-s420", "thirdreality-s420", "third-reality-s420"} or compact in {
+        "s420",
+        "taters420",
+        "thirdrealitys420",
+    }:
+        return _named_satellite_image_src("thirdreality-s420.png")
     if token in {"taters3box", "tater-s3box", "tater-s3box-display", "s3box", "s3-box", "esp32-s3-box", "esp32-s3-box-3"} or compact in {
         "taters3box",
         "s3box",
@@ -210,6 +216,19 @@ def device_image_src(*name_candidates: Any) -> str:
             )
         ):
             return _named_satellite_image_src("koala-satellite.png")
+        if any(
+            part in token
+            for part in (
+                "thirdreality s420",
+                "thirdreality-s420",
+                "thirdreality_s420",
+                "third reality s420",
+                "tater-s420",
+                "tater s420",
+                "s420",
+            )
+        ):
+            return _named_satellite_image_src("thirdreality-s420.png")
         if any(
             part in token
             for part in (

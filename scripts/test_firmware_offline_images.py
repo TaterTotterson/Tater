@@ -15,6 +15,7 @@ from tater_voice import firmware, home, ui_helpers  # noqa: E402
 
 class FirmwareOfflineImageTests(unittest.TestCase):
     BOARD_CASES = {
+        "thirdreality-s420": ("thirdreality_s420", "thirdreality-s420.png"),
         "voice-pe": ("voicepe", "voicepe.png"),
         "satellite1": ("satellite1", "sat1.png"),
         "respeaker-lite": ("respeaker_lite", "respeaker-lite.png"),
