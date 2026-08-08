@@ -10729,14 +10729,14 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
   const otaActionLabel = nativeFirmware ? "Update Firmware" : "OTA Update";
   const otaWorkingText = nativeFirmware ? "Sending native OTA command..." : "Uploading prebuilt firmware...";
-  const browserActionLabel = amlogicFactoryImage ? "Prepare USB Image" : "Browser USB Flash";
+  const browserActionLabel = amlogicFactoryImage ? "USB Flash S420" : "Browser USB Flash";
   const browserWorkingText = amlogicFactoryImage
-    ? "Preparing verified Amlogic USB image..."
+    ? "Starting the verified S420 USB flash..."
     : nativeFirmware
     ? "Preparing native USB image..."
     : "Preparing prebuilt USB image...";
   const browserSuccessText = amlogicFactoryImage
-    ? "Verified S420 factory image ready."
+    ? "S420 USB flash finished."
     : nativeFirmware
     ? "Native USB image ready."
     : "Prebuilt USB image ready.";
@@ -10865,7 +10865,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           type="button"
           class="action-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_browser_build"
-          data-firmware-title="Preparing Browser USB Flash"
+          data-firmware-title="${amlogicFactoryImage ? "Flashing S420 over USB" : "Preparing Browser USB Flash"}"
           data-firmware-working="${escapeHtml(browserWorkingText)}"
           data-firmware-success="${escapeHtml(browserSuccessText)}"
           data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}
@@ -14761,41 +14761,187 @@ async function prepareAmlogicUsbImage(card, coreKey) {
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
   if (!selector || !templateKey || !coreKey) {
-    showToast("Pick the S420 firmware family before preparing its USB image.", "error", 3200);
+    showToast("Pick the S420 firmware family before starting USB flash.", "error", 3200);
     return;
   }
-  setEspHomeFirmwareCardBusy(card, true);
-  setCoreManagerStatus(card, "Preparing and verifying the S420 factory image...");
-  try {
-    const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
-      id: selector,
-      selector,
-      template_key: templateKey,
-    });
-    const binaryUrl = String(result?.binary_url || "").trim();
-    if (!binaryUrl) {
-      throw new Error("The S420 release did not provide a factory image.");
-    }
-    const link = document.createElement("a");
-    link.href = withBasePath(binaryUrl);
-    link.download = String(result?.binary_name || "tater-thirdreality-s420-factory.img").trim();
-    link.rel = "noopener";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    const instructionsUrl = String(result?.instructions_url || "").trim();
-    if (instructionsUrl) {
-      window.open(instructionsUrl, "_blank", "noopener,noreferrer");
-    }
-    setCoreManagerStatus(card, "Verified S420 image downloaded; follow the Amlogic flashing guide.");
-    showToast("Verified S420 factory image downloaded. Follow the opened flashing guide.", "info", 4200);
-  } catch (error) {
-    const message = String(error?.message || "unknown error");
-    setCoreManagerStatus(card, `Failed: ${message}`);
-    showToast(`S420 image preparation failed: ${message}`, "error", 4800);
-  } finally {
-    setEspHomeFirmwareCardBusy(card, false);
+  const confirmed = window.confirm(
+    "Flash Tater firmware to the ThirdReality S420?\n\n" +
+      "This factory flash erases the device. Connect the ThirdReality debug board, put the S420 in Amlogic USB burn mode, and do not unplug it until Tater reports completion."
+  );
+  if (!confirmed) {
+    return;
   }
+
+  const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const deviceLabel =
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || "ThirdReality S420").trim() || "ThirdReality S420";
+  let stopped = false;
+  let active = false;
+  let sessionId = "";
+  let cursor = 0;
+  let pollTimer = 0;
+  let logConsole = null;
+  let statusNode = null;
+  let modalDialog = null;
+
+  const finish = async (result) => {
+    active = false;
+    sessionId = "";
+    setEspHomeFirmwareCardBusy(card, false);
+    const phase = String(result?.phase || "").trim().toLowerCase();
+    const error = String(result?.error || "").trim();
+    const success = phase === "completed" && !error;
+    const message =
+      String(result?.message || result?.status_text || "").trim() ||
+      (success ? "S420 USB flash completed." : "S420 USB flash failed.");
+    if (statusNode instanceof HTMLElement) {
+      statusNode.textContent = message;
+    }
+    setCoreManagerStatus(card, message);
+    showToast(message, success ? "info" : "error", success ? 4200 : 5200);
+    try {
+      await reloadEspHomeRuntimePayloadOnly();
+    } catch (_error) {
+      // The flash result is still valid if the background card refresh fails.
+    }
+  };
+
+  const poll = () => {
+    if (stopped || !active || !sessionId) {
+      return;
+    }
+    pollTimer = window.setTimeout(async () => {
+      if (stopped || !active || !sessionId) {
+        return;
+      }
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
+          session_id: sessionId,
+          id: sessionId,
+          after_seq: cursor,
+        });
+        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+        cursor = Number(result?.cursor || cursor || 0);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() || "Flashing the S420 over USB...";
+        }
+        if (!boolFromAny(result?.active, true)) {
+          await finish(result);
+          return;
+        }
+        poll();
+      } catch (error) {
+        const message = `S420 USB flash log failed: ${String(error?.message || "unknown error")}`;
+        appendEspHomeFirmwareLog(logConsole, message, "error");
+        await finish({ phase: "failed", error: message, message });
+      }
+    }, 850);
+  };
+
+  const stopFlash = async () => {
+    stopped = true;
+    if (pollTimer) {
+      window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    }
+    if (active && sessionId) {
+      try {
+        await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
+          session_id: sessionId,
+          id: sessionId,
+        });
+      } catch (_error) {
+        // The helper may already have exited while the modal was closing.
+      }
+    }
+    active = false;
+    sessionId = "";
+    setEspHomeFirmwareCardBusy(card, false);
+  };
+
+  setEspHomeFirmwareCardBusy(card, true);
+  setCoreManagerStatus(card, "Checking the S420 debug-board USB connection...");
+  openRuntimeSettingsModal({
+    title: "Flash ThirdReality S420 over USB",
+    meta: `${deviceLabel} • Amlogic AXG factory flash`,
+    fields: [
+      {
+        key: "amlogic_usb_flash_log",
+        label: "S420 USB Flash Log",
+        type: "textarea",
+        value: "",
+        description:
+          "Tater verifies the S420 factory image against its release manifest and uses a pinned, checksum-verified Khadas Amlogic helper. It erases the device, writes every partition through the ThirdReality debug board, and reboots it. Closing this window while flashing cancels the write.",
+      },
+    ],
+    onOpen: async ({ modal, fieldsEl, statusEl }) => {
+      statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+      modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+      modal?.classList.add("voice-log-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-log");
+      fieldsEl?.classList.add("runtime-settings-fields-log");
+      const logArea = fieldsEl?.querySelector('[data-setting-key="amlogic_usb_flash_log"]') || null;
+      if (logArea instanceof HTMLTextAreaElement) {
+        logArea.readOnly = true;
+        logArea.spellcheck = false;
+        logArea.classList.add("voice-log-source-textarea");
+        const label = logArea.closest("label");
+        const consoleEl = document.createElement("div");
+        consoleEl.className = "voice-log-console";
+        consoleEl.setAttribute("role", "log");
+        consoleEl.setAttribute("aria-live", "polite");
+        consoleEl.setAttribute("aria-label", "ThirdReality S420 USB flash log");
+        logConsole = consoleEl;
+        if (label instanceof HTMLElement) {
+          label.classList.add("voice-log-field");
+          label.appendChild(consoleEl);
+        }
+      }
+      if (statusNode instanceof HTMLElement) {
+        statusNode.classList.add("voice-log-status");
+        statusNode.textContent = "Detecting the S420 debug board in Amlogic USB burn mode...";
+      }
+      renderEspHomeFirmwareLogEntries(
+        logConsole,
+        [],
+        true,
+        "Connect the debug board and keep the S420 powered while Tater checks USB burn mode..."
+      );
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_amlogic_flash_start", {
+          id: selector,
+          selector,
+          template_key: templateKey,
+        });
+        sessionId = String(result?.session_id || "").trim();
+        cursor = Number(result?.cursor || 0);
+        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+        if (!sessionId) {
+          throw new Error("The S420 USB flash session did not start.");
+        }
+        active = boolFromAny(result?.active, true);
+        if (statusNode instanceof HTMLElement) {
+          statusNode.textContent =
+            String(result?.status_text || result?.message || "").trim() || "Flashing the S420 over USB...";
+        }
+        poll();
+      } catch (error) {
+        const message = String(error?.message || "unknown error");
+        appendEspHomeFirmwareLog(logConsole, `S420 USB flash could not start: ${message}`, "error");
+        await finish({ phase: "failed", error: message, message: `S420 USB flash could not start: ${message}` });
+      }
+    },
+    onClose: ({ modal, fieldsEl, statusEl }) => {
+      modal?.classList.remove("voice-log-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-log");
+      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      if (statusEl instanceof HTMLElement) {
+        statusEl.classList.remove("voice-log-status");
+      }
+      void stopFlash();
+    },
+  });
 }
 
 function openEspHomeFirmwareOtaLogs(card, coreKey) {
