@@ -10696,6 +10696,8 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const prebuiltArtifacts = prebuilt?.artifacts && typeof prebuilt.artifacts === "object" ? prebuilt.artifacts : {};
   const prebuiltOta = prebuiltArtifacts?.ota && typeof prebuiltArtifacts.ota === "object" ? prebuiltArtifacts.ota : {};
   const prebuiltFactory = prebuiltArtifacts?.factory && typeof prebuiltArtifacts.factory === "object" ? prebuiltArtifacts.factory : {};
+  const factoryFlashTransport = String(prebuiltFactory?.flash_transport || "esp_serial").trim().toLowerCase() || "esp_serial";
+  const amlogicFactoryImage = factoryFlashTransport === "amlogic_usb_burn";
   const prebuiltOtaAvailable = prebuiltAvailable && Boolean(String(prebuiltOta?.path || "").trim());
   const prebuiltFactoryAvailable = prebuiltAvailable && Boolean(String(prebuiltFactory?.path || "").trim());
   const prebuiltError = String(prebuilt?.error || "").trim();
@@ -10727,9 +10729,17 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
   const otaActionLabel = nativeFirmware ? "Update Firmware" : "OTA Update";
   const otaWorkingText = nativeFirmware ? "Sending native OTA command..." : "Uploading prebuilt firmware...";
-  const browserActionLabel = "Browser USB Flash";
-  const browserWorkingText = nativeFirmware ? "Preparing native USB image..." : "Preparing prebuilt USB image...";
-  const browserSuccessText = nativeFirmware ? "Native USB image ready." : "Prebuilt USB image ready.";
+  const browserActionLabel = amlogicFactoryImage ? "Prepare USB Image" : "Browser USB Flash";
+  const browserWorkingText = amlogicFactoryImage
+    ? "Preparing verified Amlogic USB image..."
+    : nativeFirmware
+    ? "Preparing native USB image..."
+    : "Preparing prebuilt USB image...";
+  const browserSuccessText = amlogicFactoryImage
+    ? "Verified S420 factory image ready."
+    : nativeFirmware
+    ? "Native USB image ready."
+    : "Prebuilt USB image ready.";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
   const controlsHtml = `
     <section class="core-inline-section" style="margin-top:12px;">
@@ -10761,7 +10771,9 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           <div class="firmware-prebuilt-kicker">${nativeFirmware ? "Tater Native Firmware" : "Prebuilt Firmware"}</div>
           <strong>${escapeHtml(prebuiltVersion || "Ready")}</strong>
           <span>${
-            nativeFirmware
+            amlogicFactoryImage
+              ? "Tater OTA is automatic after installation; first install uses the verified Amlogic factory image and ThirdReality debug board."
+              : nativeFirmware
               ? "OTA is sent through Tater; USB writes the native factory image and then uses the Tater setup Wi-Fi network."
               : "No local compile. OTA uses the app image; USB uses the factory image with optional Wi-Fi setup."
           }</span>
@@ -10829,6 +10841,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
       data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
       data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}"
+      data-firmware-flash-transport="${escapeHtml(factoryFlashTransport)}"
       data-firmware-native="${nativeFirmware ? "1" : "0"}">
       <div class="card-head">
         <h3 class="card-title">${escapeHtml(title)}</h3>
@@ -13925,6 +13938,10 @@ async function browserUsbWaitForReconnect(previousPort, selector, logConsole, st
 }
 
 async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
+  const flashTransport = String(artifact?.flash_transport || "esp_serial").trim().toLowerCase() || "esp_serial";
+  if (flashTransport !== "esp_serial") {
+    throw new Error(`Browser ESP flashing cannot write ${flashTransport} firmware.`);
+  }
   const module = await ensureEsptoolJsLoaded();
   const { ESPLoader, Transport } = module;
   if (!ESPLoader || !Transport) {
@@ -14737,6 +14754,50 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   });
 }
 
+async function prepareAmlogicUsbImage(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  if (!selector || !templateKey || !coreKey) {
+    showToast("Pick the S420 firmware family before preparing its USB image.", "error", 3200);
+    return;
+  }
+  setEspHomeFirmwareCardBusy(card, true);
+  setCoreManagerStatus(card, "Preparing and verifying the S420 factory image...");
+  try {
+    const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
+      id: selector,
+      selector,
+      template_key: templateKey,
+    });
+    const binaryUrl = String(result?.binary_url || "").trim();
+    if (!binaryUrl) {
+      throw new Error("The S420 release did not provide a factory image.");
+    }
+    const link = document.createElement("a");
+    link.href = withBasePath(binaryUrl);
+    link.download = String(result?.binary_name || "tater-thirdreality-s420-factory.img").trim();
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    const instructionsUrl = String(result?.instructions_url || "").trim();
+    if (instructionsUrl) {
+      window.open(instructionsUrl, "_blank", "noopener,noreferrer");
+    }
+    setCoreManagerStatus(card, "Verified S420 image downloaded; follow the Amlogic flashing guide.");
+    showToast("Verified S420 factory image downloaded. Follow the opened flashing guide.", "info", 4200);
+  } catch (error) {
+    const message = String(error?.message || "unknown error");
+    setCoreManagerStatus(card, `Failed: ${message}`);
+    showToast(`S420 image preparation failed: ${message}`, "error", 4800);
+  } finally {
+    setEspHomeFirmwareCardBusy(card, false);
+  }
+}
+
 function openEspHomeFirmwareOtaLogs(card, coreKey) {
   if (!(card instanceof HTMLElement)) {
     return;
@@ -15485,7 +15546,12 @@ function bindEspHomeFirmwareActions(root = document) {
         return;
       }
       if (action === "voice_firmware_browser_build") {
-        openEspHomeBrowserUsbFlashFlow(card, coreKey);
+        const flashTransport = String(card.dataset?.firmwareFlashTransport || "esp_serial").trim().toLowerCase();
+        if (flashTransport === "amlogic_usb_burn") {
+          void prepareAmlogicUsbImage(card, coreKey);
+        } else {
+          openEspHomeBrowserUsbFlashFlow(card, coreKey);
+        }
         return;
       }
       if (action === "voice_firmware_ota_logs") {

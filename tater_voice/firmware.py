@@ -61,6 +61,23 @@ _NATIVE_FIRMWARE_LATEST_URL = str(
     )
     or ""
 ).strip()
+_S420_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
+_S420_FIRMWARE_GITHUB_REPO = "Tater-ThirdReality-Voice-Firmware"
+_S420_FIRMWARE_GITHUB_REF = "main"
+_S420_FIRMWARE_RAW_BASE_URL = str(
+    os.getenv(
+        "TATER_S420_FIRMWARE_RAW_BASE_URL",
+        f"https://raw.githubusercontent.com/{_S420_FIRMWARE_GITHUB_OWNER}/{_S420_FIRMWARE_GITHUB_REPO}/{_S420_FIRMWARE_GITHUB_REF}",
+    )
+    or ""
+).strip().rstrip("/")
+_S420_FIRMWARE_LATEST_URL = str(
+    os.getenv(
+        "TATER_S420_FIRMWARE_LATEST_URL",
+        f"https://github.com/{_S420_FIRMWARE_GITHUB_OWNER}/{_S420_FIRMWARE_GITHUB_REPO}/releases/latest/download/latest.json",
+    )
+    or ""
+).strip()
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NATIVE_FIRMWARE_LOCAL_ROOTS = tuple(
     root
@@ -84,6 +101,28 @@ _NATIVE_FIRMWARE_LOCAL_LATEST = next(
     if _NATIVE_FIRMWARE_LOCAL_ROOTS
     else _SOURCE_ROOT / "prebuilt_firmware" / "latest.json",
 )
+_S420_FIRMWARE_LOCAL_ROOTS = tuple(
+    root
+    for root in (
+        Path(os.getenv("TATER_S420_FIRMWARE_LOCAL_ROOT", "")).expanduser()
+        if os.getenv("TATER_S420_FIRMWARE_LOCAL_ROOT")
+        else None,
+        _SOURCE_ROOT.parent / "Tater-ThirdReality-Voice-Firmware",
+        Path.home() / "Scripts" / "Tater-ThirdReality-Voice-Firmware",
+        Path.home() / "Tater-ThirdReality-Voice-Firmware",
+    )
+    if isinstance(root, Path)
+)
+_S420_FIRMWARE_LOCAL_LATEST = next(
+    (
+        root / "release_assets" / "latest.json"
+        for root in _S420_FIRMWARE_LOCAL_ROOTS
+        if (root / "release_assets" / "latest.json").is_file()
+    ),
+    (_S420_FIRMWARE_LOCAL_ROOTS[0] / "release_assets" / "latest.json")
+    if _S420_FIRMWARE_LOCAL_ROOTS
+    else _SOURCE_ROOT / "release_assets" / "latest.json",
+)
 _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY = {
     "s3box_display": "s3_box",
 }
@@ -92,6 +131,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
     for template_key, manifest_key in _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY.items()
 }
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
+    "thirdreality_s420",
     "voicepe",
     "satellite1",
     "respeaker_xvf3800",
@@ -153,6 +193,18 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
 }
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
+    {
+        "key": "thirdreality_s420",
+        "label": "Tater ThirdReality S420",
+        "match_tokens": {
+            "s420",
+            "tater-s420",
+            "tater s420",
+            "thirdreality-s420",
+            "thirdreality s420",
+            "third reality s420",
+        },
+    },
     {
         "key": "voicepe",
         "label": "VoicePE",
@@ -834,7 +886,23 @@ def _local_json(path: Path) -> Any:
         raise RuntimeError(f"Local JSON file did not parse: {path}") from exc
 
 
-def _native_firmware_raw_url(path_or_url: Any) -> str:
+def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
+    if _lower(template_key) == "thirdreality_s420":
+        return {
+            "latest_url": _S420_FIRMWARE_LATEST_URL,
+            "raw_base_url": _S420_FIRMWARE_RAW_BASE_URL,
+            "local_latest": _S420_FIRMWARE_LOCAL_LATEST,
+            "local_roots": _S420_FIRMWARE_LOCAL_ROOTS,
+        }
+    return {
+        "latest_url": _NATIVE_FIRMWARE_LATEST_URL,
+        "raw_base_url": _NATIVE_FIRMWARE_RAW_BASE_URL,
+        "local_latest": _NATIVE_FIRMWARE_LOCAL_LATEST,
+        "local_roots": _NATIVE_FIRMWARE_LOCAL_ROOTS,
+    }
+
+
+def _native_firmware_raw_url(path_or_url: Any, *, raw_base_url: str = _NATIVE_FIRMWARE_RAW_BASE_URL) -> str:
     token = _text(path_or_url).strip()
     if not token:
         return ""
@@ -843,10 +911,15 @@ def _native_firmware_raw_url(path_or_url: Any) -> str:
         return token
     clean = token.lstrip("/")
     quoted = "/".join(urllib_parse.quote(part) for part in clean.split("/") if part)
-    return f"{_NATIVE_FIRMWARE_RAW_BASE_URL}/{quoted}"
+    return f"{raw_base_url.rstrip('/')}/{quoted}"
 
 
-def _native_firmware_local_path(path_or_url: Any) -> Optional[Path]:
+def _native_firmware_local_path(
+    path_or_url: Any,
+    *,
+    local_roots: tuple[Path, ...] = _NATIVE_FIRMWARE_LOCAL_ROOTS,
+    local_base: Optional[Path] = None,
+) -> Optional[Path]:
     token = _text(path_or_url).strip()
     if not token:
         return None
@@ -856,11 +929,21 @@ def _native_firmware_local_path(path_or_url: Any) -> Optional[Path]:
     clean = token.lstrip("/")
     if clean.startswith("firmware/native_satellite/"):
         clean = clean[len("firmware/native_satellite/") :]
-    for root in _NATIVE_FIRMWARE_LOCAL_ROOTS:
-        path = root / clean
+    candidates: List[Path] = []
+    if isinstance(local_base, Path):
+        candidates.append(local_base / clean)
+    for root in local_roots:
+        candidates.extend(
+            (
+                root / clean,
+                root / "release_assets" / clean,
+                root / "prebuilt_firmware" / clean,
+            )
+        )
+    for path in candidates:
         if path.is_file():
             return path
-    return (_NATIVE_FIRMWARE_LOCAL_ROOTS[0] / clean) if _NATIVE_FIRMWARE_LOCAL_ROOTS else _SOURCE_ROOT / clean
+    return candidates[0] if candidates else _SOURCE_ROOT / clean
 
 
 def _native_manifest_key_for_template(template_key: Any) -> str:
@@ -873,16 +956,20 @@ def _native_template_key_for_manifest(manifest_key: Any) -> str:
     return _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY.get(token, token)
 
 
-def _load_native_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, Any]:
+def _load_native_firmware_manifest(*, force_refresh: bool = False, template_key: Any = "") -> Dict[str, Any]:
     latest_payload: Any
-    latest_url = _NATIVE_FIRMWARE_LATEST_URL
+    source = _firmware_manifest_source(template_key)
+    latest_url = _text(source.get("latest_url"))
+    local_latest = source.get("local_latest")
+    local_roots = source.get("local_roots") if isinstance(source.get("local_roots"), tuple) else ()
+    raw_base_url = _text(source.get("raw_base_url"))
     try:
         latest_payload = _remote_json(latest_url, force_refresh=force_refresh)
         latest_source = "remote"
     except Exception:
-        latest_payload = _local_json(_NATIVE_FIRMWARE_LOCAL_LATEST)
+        latest_payload = _local_json(local_latest)
         latest_source = "local"
-        latest_url = str(_NATIVE_FIRMWARE_LOCAL_LATEST)
+        latest_url = str(local_latest)
 
     if not isinstance(latest_payload, dict):
         raise RuntimeError("Native firmware latest.json did not parse into an object.")
@@ -891,13 +978,22 @@ def _load_native_firmware_manifest(*, force_refresh: bool = False) -> Dict[str, 
     if not manifest_ref:
         raise RuntimeError("Native firmware latest.json is missing a manifest path.")
 
-    manifest_url = _native_firmware_raw_url(manifest_ref)
+    manifest_url = _native_firmware_raw_url(manifest_ref, raw_base_url=raw_base_url)
     try:
         manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh) if latest_source == "remote" else None
     except Exception:
         manifest_payload = None
     if not isinstance(manifest_payload, dict):
-        local_manifest_path = _native_firmware_local_path(manifest_ref)
+        local_base = (
+            Path(latest_url).parent
+            if latest_source == "local" and not urllib_parse.urlparse(manifest_ref).scheme
+            else None
+        )
+        local_manifest_path = _native_firmware_local_path(
+            manifest_ref,
+            local_roots=local_roots,
+            local_base=local_base,
+        )
         if not isinstance(local_manifest_path, Path):
             raise RuntimeError("Native firmware manifest is unavailable.")
         manifest_payload = _local_json(local_manifest_path)
@@ -927,7 +1023,7 @@ def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> 
     key = _lower(template_key)
     manifest_key = _native_manifest_key_for_template(key)
     try:
-        manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
+        manifest = _load_native_firmware_manifest(force_refresh=force_refresh, template_key=key)
     except Exception as exc:
         return {
             "available": False,
@@ -965,26 +1061,26 @@ def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> 
 
 
 def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
-    try:
-        manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
-    except Exception:
-        return set()
-
-    devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
     keys: set[str] = set()
-    for raw_key, raw_device in devices_by_key.items():
-        key = _lower(raw_key)
-        template_key = _native_template_key_for_manifest(key)
-        device = raw_device if isinstance(raw_device, dict) else {}
-        artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
-        has_artifact = any(
-            isinstance(artifacts.get(kind), dict) and bool(_text(artifacts[kind].get("path")))
-            for kind in ("ota", "factory")
-        )
-        if key and has_artifact:
-            keys.add(key)
-        if template_key and has_artifact:
-            keys.add(template_key)
+    for source_key in ("", "thirdreality_s420"):
+        try:
+            manifest = _load_native_firmware_manifest(force_refresh=force_refresh, template_key=source_key)
+        except Exception:
+            continue
+        devices_by_key = manifest.get("devices_by_key") if isinstance(manifest.get("devices_by_key"), dict) else {}
+        for raw_key, raw_device in devices_by_key.items():
+            key = _lower(raw_key)
+            template_key = _native_template_key_for_manifest(key)
+            device = raw_device if isinstance(raw_device, dict) else {}
+            artifacts = device.get("artifacts") if isinstance(device.get("artifacts"), dict) else {}
+            has_artifact = any(
+                isinstance(artifacts.get(kind), dict) and bool(_text(artifacts[kind].get("path")))
+                for kind in ("ota", "factory")
+            )
+            if key and has_artifact:
+                keys.add(key)
+            if template_key and has_artifact:
+                keys.add(template_key)
     return keys
 
 
@@ -1037,10 +1133,18 @@ def _prebuilt_binary_is_valid(path: Path, artifact: Dict[str, Any]) -> bool:
         return False
     expected_sha = _lower(artifact.get("sha256"))
     if expected_sha:
-        actual_sha = hashlib.sha256(path.read_bytes()).hexdigest().lower()
+        actual_sha = _file_sha256(path)
         if actual_sha != expected_sha:
             return False
     return True
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
 
 
 def _download_prebuilt_firmware_binary(
@@ -1055,8 +1159,17 @@ def _download_prebuilt_firmware_binary(
     native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
     if not native_firmware:
         raise RuntimeError("Only Tater Native firmware artifacts are supported.")
-    url = _native_firmware_raw_url(artifact.get("path"))
-    local_path = _native_firmware_local_path(artifact.get("path"))
+    source = _firmware_manifest_source(context.get("template_key"))
+    url = _native_firmware_raw_url(artifact.get("path"), raw_base_url=_text(source.get("raw_base_url")))
+    local_roots = source.get("local_roots") if isinstance(source.get("local_roots"), tuple) else ()
+    manifest_url = _text(prebuilt.get("manifest_url"))
+    manifest_parsed = urllib_parse.urlparse(manifest_url)
+    local_base = Path(manifest_url).parent if manifest_url and not manifest_parsed.scheme else None
+    local_path = _native_firmware_local_path(
+        artifact.get("path"),
+        local_roots=local_roots,
+        local_base=local_base,
+    )
     if not force_refresh and _prebuilt_binary_is_valid(target_path, artifact):
         return {
             "path": target_path,
@@ -1116,6 +1229,11 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
                 "flash_size": _text(row.get("flash_size")),
                 "flash_mode": _text(row.get("flash_mode")),
                 "flash_freq": _text(row.get("flash_freq")),
+                "flash_transport": _text(row.get("flash_transport")),
+                "soc": _text(row.get("soc")),
+                "requires_debug_board": _as_bool(row.get("requires_debug_board"), False),
+                "browser_flash_supported": _as_bool(row.get("browser_flash_supported"), True),
+                "instructions_url": _text(row.get("instructions_url")),
             }
             for kind, row in artifacts.items()
             if isinstance(row, dict)
@@ -1124,29 +1242,51 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str, Any]:
-    try:
-        native_manifest = _load_native_firmware_manifest(force_refresh=force_refresh)
-    except Exception as exc:
+    manifests: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for source_key in ("", "thirdreality_s420"):
+        try:
+            manifests.append(
+                _load_native_firmware_manifest(
+                    force_refresh=force_refresh,
+                    template_key=source_key,
+                )
+            )
+        except Exception as exc:
+            errors.append(_text(exc) or exc.__class__.__name__)
+    if not manifests:
         return {
             "available": False,
             "version": "",
             "device_count": 0,
             "manifest_url": "",
             "latest_url": _NATIVE_FIRMWARE_LATEST_URL,
-            "error": _text(exc) or exc.__class__.__name__,
+            "error": "; ".join(errors),
             "native": True,
         }
-    native_keys = _native_firmware_device_keys(force_refresh=force_refresh)
-    devices = native_manifest.get("devices") if isinstance(native_manifest.get("devices"), list) else []
-    available_devices = [
-        row for row in devices if isinstance(row, dict) and _lower(row.get("key")) in native_keys
-    ]
+    available_devices: List[Dict[str, Any]] = []
+    versions: List[str] = []
+    for manifest in manifests:
+        version = _text(manifest.get("version"))
+        if version and version not in versions:
+            versions.append(version)
+        devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
+        for row in devices:
+            if not isinstance(row, dict):
+                continue
+            artifacts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
+            if any(
+                isinstance(artifacts.get(kind), dict) and bool(_text(artifacts[kind].get("path")))
+                for kind in ("ota", "factory")
+            ):
+                available_devices.append(row)
+    first_manifest = manifests[0]
     return {
         "available": bool(available_devices),
-        "version": _text(native_manifest.get("version")),
+        "version": versions[0] if len(versions) == 1 else "Multiple versions",
         "device_count": len(available_devices),
-        "manifest_url": _text(native_manifest.get("manifest_url")),
-        "latest_url": _text(native_manifest.get("latest_url")),
+        "manifest_url": _text(first_manifest.get("manifest_url")),
+        "latest_url": _text(first_manifest.get("latest_url")),
         "error": "",
         "native": True,
     }
@@ -1745,6 +1885,10 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _template_key_from_hardware_identity(value: Any) -> str:
     token = _lower(value).replace("_", "-")
     compact = re.sub(r"[^a-z0-9]+", "", token)
+    if token in {"s420", "tater-s420", "thirdreality-s420", "third-reality-s420"} or compact == "s420" or compact.startswith(
+        ("taters420", "thirdrealitys420")
+    ):
+        return "thirdreality_s420"
     if token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact in {
         "s3box",
         "s3box3",
@@ -2267,8 +2411,8 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             "Official native firmware is selected from the matched satellite family; no local compile step is used."
         ),
         "browser_flash_note": (
-            "Browser USB flash writes the native factory image from this browser. After flashing, use the Tater setup Wi-Fi network to provision the satellite. "
-            "Plug the device into this computer and use Chrome or Edge on a secure context."
+            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, Tater downloads and verifies the Amlogic factory image, then opens the debug-board flashing guide. "
+            "After flashing, use the Tater setup Wi-Fi network to provision the satellite."
         ),
     }
     if warnings:
@@ -2295,16 +2439,17 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     artifact_dir = FIRMWARE_WEB_FLASH_ROOT / artifact_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    target_binary_name = "firmware.bin"
+    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
+    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
+    factory_artifact = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
+    flash_transport = _text(factory_artifact.get("flash_transport")) or "esp_serial"
+    target_binary_name = Path(binary_path).name if flash_transport != "esp_serial" else "firmware.bin"
     target_binary_path = artifact_dir / target_binary_name
     shutil.copy2(binary_path, target_binary_path)
 
     template_ctx = context.get("template_ctx") if isinstance(context.get("template_ctx"), dict) else {}
     template_doc = template_ctx.get("template_doc") if isinstance(template_ctx.get("template_doc"), dict) else {}
     esp32_block = template_doc.get("esp32") if isinstance(template_doc.get("esp32"), dict) else {}
-    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
-    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
-    factory_artifact = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
     native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
     base_url = f"/api/settings/voice/firmware-web/{artifact_id}"
     return {
@@ -2322,6 +2467,10 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
         "flash_freq": _text(factory_artifact.get("flash_freq")) or "40m",
         "native_firmware": native_firmware,
         "native_setup_ap": bool(native_firmware),
+        "flash_transport": flash_transport,
+        "browser_flash_supported": _as_bool(factory_artifact.get("browser_flash_supported"), flash_transport == "esp_serial"),
+        "requires_debug_board": _as_bool(factory_artifact.get("requires_debug_board"), False),
+        "instructions_url": _text(factory_artifact.get("instructions_url")),
     }
 
 
@@ -2554,6 +2703,7 @@ def _create_native_ota_artifact(context: Dict[str, Any], binary_path: Path) -> D
         "firmware_version": _text(context.get("firmware_version")),
         "source_binary": str(binary_path),
         "binary_size": int(target_binary_path.stat().st_size),
+        "sha256": _file_sha256(target_binary_path),
     }
 
 
@@ -2966,6 +3116,8 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
             return
         selector = _text(session.get("selector"))
         ota_url = _text(session.get("ota_url"))
+        ota_sha256 = _text(session.get("binary_sha256"))
+        ota_size = _as_int(session.get("binary_size"), 0, minimum=0)
         display_name = _text(session.get("display_name")) or selector or "device"
         _set_session_phase_locked(session, "uploading")
         _append_session_entry_locked(
@@ -2990,7 +3142,11 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         from . import native_satellite
 
         result = native_satellite.run_on_runtime_loop(
-            native_satellite.send_command(selector, "ota.url", {"url": ota_url}),
+            native_satellite.send_command(
+                selector,
+                "ota.url",
+                {"url": ota_url, "sha256": ota_sha256, "size_bytes": ota_size},
+            ),
             timeout=5.0,
         )
         if not isinstance(result, dict) or not bool(result.get("ok")):
@@ -3200,6 +3356,7 @@ def _start_flash_session(
         "binary_url": _text(ota_artifact.get("ota_url")),
         "binary_name": _text(ota_artifact.get("binary_name")),
         "binary_size": int(ota_artifact.get("binary_size") or Path(prebuilt_binary["path"]).stat().st_size),
+        "binary_sha256": _text(ota_artifact.get("sha256")),
         "created_ts": time.time(),
         "updated_ts": time.time(),
         "cursor": 0,
@@ -3459,7 +3616,15 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
             from . import native_satellite
 
             native_satellite.run_on_runtime_loop(
-                native_satellite.send_command(selector, "ota.url", {"url": _text(ota_artifact.get("ota_url"))}),
+                native_satellite.send_command(
+                    selector,
+                    "ota.url",
+                    {
+                        "url": _text(ota_artifact.get("ota_url")),
+                        "sha256": _text(ota_artifact.get("sha256")),
+                        "size_bytes": _as_int(ota_artifact.get("binary_size"), 0, minimum=0),
+                    },
+                ),
                 timeout=5.0,
             )
         except Exception as exc:
