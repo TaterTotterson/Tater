@@ -31,7 +31,7 @@ class AmlogicUsbFlashTests(unittest.TestCase):
             path.chmod(0o755)
         return flash_tool
 
-    def test_helper_is_validated_and_axg_command_is_fixed(self) -> None:
+    def test_helper_is_validated_and_s420_runner_is_fixed(self) -> None:
         from tater_voice import amlogic_usb
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -43,11 +43,10 @@ class AmlogicUsbFlashTests(unittest.TestCase):
                 info = amlogic_usb.inspect_flash_tool(flash_tool)
             self.assertTrue(info["available"])
             command = amlogic_usb.flash_command(info, image)
-            self.assertIn(f"--img={image.resolve()}", command)
-            self.assertIn("--parts=all", command)
-            self.assertIn("--wipe", command)
-            self.assertIn("--soc=axg", command)
-            self.assertIn("--reset=y", command)
+            self.assertEqual(command[0], sys.executable)
+            self.assertEqual(pathlib.Path(command[1]).name, "amlogic_s420_flash.py")
+            self.assertEqual(command[command.index("--tool-root") + 1], str(info["root"]))
+            self.assertEqual(command[command.index("--image") + 1], str(image.resolve()))
 
     def test_incomplete_helper_is_rejected(self) -> None:
         from tater_voice import amlogic_usb
@@ -89,7 +88,7 @@ class AmlogicUsbFlashTests(unittest.TestCase):
         app_source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
         self.assertIn('"voice_firmware_amlogic_flash_start"', firmware_source)
         self.assertIn('operation": "amlogic_usb_factory_flash"', firmware_source)
-        self.assertIn('"--soc=axg"', (REPO_ROOT / "tater_voice" / "amlogic_usb.py").read_text(encoding="utf-8"))
+        self.assertIn('"--soc=axg"', (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"))
         self.assertIn('runCoreManagerAction(card, coreKey, "voice_firmware_amlogic_flash_start"', app_source)
         self.assertIn('flash_transport != "esp_serial"', firmware_source)
 

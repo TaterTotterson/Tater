@@ -101,6 +101,28 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertIn("continued_chat", global_field_keys)
         self.assertNotIn("led_color", global_field_keys)
 
+    def test_shared_wake_settings_are_split_from_voice_runtime_settings(self) -> None:
+        model_sections = native_live_settings.global_model_settings_sections()
+        runtime_sections = native_live_settings.global_voice_runtime_settings_sections()
+
+        self.assertEqual([section["label"] for section in model_sections], ["Wake Word", "Trainer Feedback"])
+        self.assertEqual([section["label"] for section in runtime_sections], ["Wake Sound & Conversation"])
+
+        model_keys = {
+            str(field.get("key") or "")
+            for section in model_sections
+            for field in section.get("fields") or []
+        }
+        runtime_keys = {
+            str(field.get("key") or "")
+            for section in runtime_sections
+            for field in section.get("fields") or []
+        }
+        self.assertIn("wake_word", model_keys)
+        self.assertIn("capture_wake_audio", model_keys)
+        self.assertIn("continued_chat", runtime_keys)
+        self.assertTrue(model_keys.isdisjoint(runtime_keys))
+
     def test_led_brightness_is_a_percentage(self) -> None:
         normalized = native_live_settings.normalize_settings({"led_brightness": 255})
         brightness_field = next(

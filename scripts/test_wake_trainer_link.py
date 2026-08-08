@@ -176,6 +176,8 @@ class WakeTrainerLinkTests(unittest.TestCase):
         styles = (REPO_ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("wakeTrainerLink: wakeTrainerLinkItem", app_js)
+        self.assertIn('id="settings-models-wake-satellite-settings"', app_js)
+        self.assertIn('=== "global_satellite_model_settings"', app_js)
         self.assertIn("trainer-feedback-section", app_js)
         self.assertNotIn('id="settings-esphome-runtime-wake-trainer-link"', app_js)
         self.assertIn(".wake-trainer-link-panel", styles)

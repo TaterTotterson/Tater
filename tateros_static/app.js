@@ -11613,8 +11613,8 @@ function bindModelSettingsTabs(root = document) {
     panels.forEach((panel) => {
       panel.classList.toggle("active", panel.dataset.modelsPanel === normalized);
     });
-    if (load && ["speakerid", "emotionid"].includes(normalized)) {
-      void ensureEspHomeRuntimeLoaded({ panel: normalized });
+    if (load && ["wake", "speakerid", "emotionid"].includes(normalized)) {
+      void ensureEspHomeRuntimeLoaded({ panel: normalized === "wake" ? "satellites" : normalized });
     }
     if (normalized !== "routing") {
       clearLlmDebugPollTimer();
@@ -12439,6 +12439,9 @@ function getActiveModelsRuntimePanel() {
   const shell = document.getElementById("settings-models-shell");
   const activeButton = shell?.querySelector?.(".settings-subtab-btn.active[data-models-tab]");
   const panel = String(activeButton?.dataset?.modelsTab || shell?.dataset?.modelsActiveTab || "").trim().toLowerCase();
+  if (panel === "wake") {
+    return "satellites";
+  }
   return ["speakerid", "emotionid"].includes(panel) ? panel : "";
 }
 
@@ -12468,6 +12471,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const shell = document.getElementById("settings-esphome-shell");
   const head = document.getElementById("settings-esphome-runtime-head");
   const globalSatelliteSettingsHost = document.getElementById("settings-esphome-runtime-global-satellite-settings");
+  const globalSatelliteModelSettingsHost = document.getElementById("settings-models-wake-satellite-settings");
   const wakeVerifierHost = document.getElementById("settings-esphome-runtime-wake-verifier");
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
@@ -12480,6 +12484,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
     !(shell instanceof HTMLElement) ||
     !(head instanceof HTMLElement) ||
     !(globalSatelliteSettingsHost instanceof HTMLElement) ||
+    !(globalSatelliteModelSettingsHost instanceof HTMLElement) ||
     !(wakeVerifierHost instanceof HTMLElement) ||
     !(satellitesHost instanceof HTMLElement) ||
     !(addHost instanceof HTMLElement) ||
@@ -12516,6 +12521,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   shell.dataset.runtimePanel = targetPanel;
   head.innerHTML = renderNotice(force ? "Refreshing Voice runtime..." : "Loading Voice runtime...");
   globalSatelliteSettingsHost.innerHTML = renderNotice("Loading shared satellite voice settings...");
+  globalSatelliteModelSettingsHost.innerHTML = renderNotice("Loading shared wake word settings...");
   wakeVerifierHost.innerHTML = renderNotice("Loading wake verification...");
   if (targetPanel === "satellites") {
     satellitesHost.innerHTML = renderNotice("Loading satellites...");
@@ -12548,6 +12554,8 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const itemForms = Array.isArray(ui?.item_forms) ? ui.item_forms : [];
       const globalSatelliteSettingsItem =
         itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "global_satellite_settings") || null;
+      const globalSatelliteModelSettingsItem =
+        itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "global_satellite_model_settings") || null;
       const wakeTrainerLinkItem =
         itemForms.find((item) => String(item?.group || "").trim().toLowerCase() === "wake_trainer_link") || null;
       const wakeVerifierItem =
@@ -12577,12 +12585,15 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
         coreKey,
       });
       globalSatelliteSettingsHost.innerHTML = globalSatelliteSettingsItem
-        ? renderEspHomeSettingsCard(globalSatelliteSettingsItem, coreKey, {
+        ? renderEspHomeSettingsCard(globalSatelliteSettingsItem, coreKey)
+        : renderNotice("Shared satellite voice settings are unavailable.");
+      globalSatelliteModelSettingsHost.innerHTML = globalSatelliteModelSettingsItem
+        ? renderEspHomeSettingsCard(globalSatelliteModelSettingsItem, coreKey, {
             wakeTrainerLink: wakeTrainerLinkItem,
           })
         : wakeTrainerLinkItem
           ? renderWakeTrainerLinkCard(wakeTrainerLinkItem, coreKey)
-          : renderNotice("Shared satellite voice settings are unavailable.");
+          : renderNotice("Shared wake word settings are unavailable.");
       wakeVerifierHost.innerHTML = wakeVerifierItem
         ? renderEspHomeSettingsCard(wakeVerifierItem, coreKey)
         : renderNotice("Wake verification settings are unavailable.");
@@ -12633,6 +12644,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
       const message = error instanceof Error ? error.message : String(error || "Failed to load Voice runtime.");
       head.innerHTML = renderNotice(message);
       globalSatelliteSettingsHost.innerHTML = renderNotice(message);
+      globalSatelliteModelSettingsHost.innerHTML = renderNotice(message);
       wakeVerifierHost.innerHTML = renderNotice(message);
       if (targetPanel === "satellites") {
         satellitesHost.innerHTML = renderNotice(message);
@@ -22315,7 +22327,7 @@ async function loadSettingsView() {
 	    <div class="hydra-model-panel is-active voice-model-settings-panel">
 	      <div class="hydra-model-panel-title">Tater Native microWakeWord</div>
 	      <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-	        Wake detection runs on each Tater Native satellite with local int8 microWakeWord models. Choose built-in, trainer, or custom JSON wake words from each satellite's settings popup.
+	        Wake detection runs on each Tater Native satellite with local int8 microWakeWord models. Configure the shared wake model and trainer feedback below; device-specific tuning remains in each satellite's settings popup.
 	      </div>
 	      <div class="inline-row" style="grid-column: 1 / -1;">
 	        <button type="button" class="inline-btn" data-settings-tab-target="esphome">Open Satellites</button>
@@ -22968,6 +22980,9 @@ async function loadSettingsView() {
 
 	              <div class="settings-subpanel" data-models-panel="wake">
 	              ${nativeMicroWakeWordHtml}
+	              <div id="settings-models-wake-satellite-settings">
+	                ${renderNotice("Open Wake Word to load shared satellite wake settings.")}
+	              </div>
 	              ${voiceVadSettingsHtml}
 	              </div>
 
@@ -24364,8 +24379,8 @@ async function loadSettingsView() {
     } else if (normalizedTab === "models") {
       const modelsShell = document.getElementById("settings-models-shell");
       const activeModelsPanel = String(modelsShell?.dataset?.modelsActiveTab || "").trim();
-      if (["speakerid", "emotionid"].includes(activeModelsPanel)) {
-        void ensureEspHomeRuntimeLoaded({ panel: activeModelsPanel });
+      if (["wake", "speakerid", "emotionid"].includes(activeModelsPanel)) {
+        void ensureEspHomeRuntimeLoaded({ panel: activeModelsPanel === "wake" ? "satellites" : activeModelsPanel });
       }
     } else {
       clearLlmDebugPollTimer();

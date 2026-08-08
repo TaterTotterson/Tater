@@ -1515,29 +1515,12 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
     return fields
 
 
-def global_settings_sections() -> List[Dict[str, Any]]:
+def _global_settings_sections(groups: List[tuple[str, str, tuple[str, ...]]]) -> List[Dict[str, Any]]:
     fields = {
         _text(field.get("key")): field
         for field in settings_fields()
         if isinstance(field, dict) and _text(field.get("key"))
     }
-    groups = [
-        (
-            "Wake Word",
-            "",
-            ("wake_engine", "wake_word", "wake_word_url"),
-        ),
-        (
-            "Trainer Feedback",
-            "Choose which wake clips Tater sends for model improvement, and manage the secure trainer connection that receives them.",
-            ("capture_wake_audio", "capture_close_misses", "trainer_app_url"),
-        ),
-        (
-            "Wake Sound & Conversation",
-            "",
-            ("wake_sound_enabled", "wake_sound", "wake_sound_url", "continued_chat", "barge_in_enabled"),
-        ),
-    ]
     return [
         {
             "label": label,
@@ -1546,6 +1529,58 @@ def global_settings_sections() -> List[Dict[str, Any]]:
         }
         for label, description, keys in groups
     ]
+
+
+def global_model_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "Wake Word",
+                "",
+                ("wake_engine", "wake_word", "wake_word_url"),
+            ),
+            (
+                "Trainer Feedback",
+                "Choose which wake clips Tater sends for model improvement, and manage the secure trainer connection that receives them.",
+                ("capture_wake_audio", "capture_close_misses", "trainer_app_url"),
+            ),
+        ]
+    )
+
+
+def global_voice_runtime_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "Wake Sound & Conversation",
+                "",
+                ("wake_sound_enabled", "wake_sound", "wake_sound_url", "continued_chat", "barge_in_enabled"),
+            ),
+        ]
+    )
+
+
+def global_settings_sections() -> List[Dict[str, Any]]:
+    """Return every shared satellite setting section for compatibility callers."""
+    return _global_settings_sections(
+        [
+            (
+                "Wake Word",
+                "",
+                ("wake_engine", "wake_word", "wake_word_url"),
+            ),
+            (
+                "Trainer Feedback",
+                "Choose which wake clips Tater sends for model improvement, and manage the secure trainer connection that receives them.",
+                ("capture_wake_audio", "capture_close_misses", "trainer_app_url"),
+            ),
+            (
+                "Wake Sound & Conversation",
+                "",
+                ("wake_sound_enabled", "wake_sound", "wake_sound_url", "continued_chat", "barge_in_enabled"),
+            ),
+        ]
+    )
 
 
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:

@@ -2414,7 +2414,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             "Official native firmware is selected from the matched satellite family; no local compile step is used."
         ),
         "browser_flash_note": (
-            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, Tater verifies the Amlogic factory image and writes it through the ThirdReality debug board with the native AXG USB helper. "
+            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, connect both debug-board USB cables and leave the board powered on; Tater verifies the factory image, reboots the verified S420 console into Amlogic burn mode, and writes it with the native AXG USB helper. "
             "After flashing, use the Tater setup Wi-Fi network to provision the satellite."
         ),
     }
@@ -2873,7 +2873,7 @@ def _phase_status_text(phase: str, display_name: str = "") -> str:
     if token == "uploading":
         return f"Uploading firmware to {name}..."
     if token == "usb_detecting":
-        return f"Checking the S420 USB burn connection for {name}..."
+        return f"Verifying the S420 debug console and preparing USB burn mode for {name}..."
     if token == "usb_flashing":
         return f"Writing Tater firmware to {name}. Do not disconnect it..."
     if token == "awaiting_device_logs":
@@ -3378,6 +3378,8 @@ def _prebuilt_ota_session_worker(session_id: str) -> None:
 
 
 def _amlogic_usb_session_worker(session_id: str) -> None:
+    from . import amlogic_usb
+
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_id)
         if not isinstance(session, dict):
@@ -3386,15 +3388,18 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
         working_dir = _text(session.get("working_dir"))
         staging_dir = _text(session.get("staging_dir"))
         display_name = _text(session.get("display_name")) or "ThirdReality S420"
-        _set_session_phase_locked(session, "usb_flashing")
+        tool_info = dict(session.get("amlogic_tool_info") or {})
         _append_session_entry_locked(
             session,
             level="warn",
-            message="Factory flashing erases the S420. Keep the debug board and USB cable connected until Tater reports completion.",
+            message="Factory flashing erases the S420. Keep both debug-board USB cables connected until Tater reports completion.",
             source="session",
         )
 
     if not command:
+        if staging_dir:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(staging_dir)
         with _FIRMWARE_SESSION_LOCK:
             session = _FIRMWARE_SESSIONS.get(session_id)
             if isinstance(session, dict):
@@ -3404,6 +3409,52 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
                 session["message"] = "S420 USB flash failed."
                 _set_session_phase_locked(session, "failed")
         return
+
+    burn_mode = amlogic_usb.prepare_device(tool_info, timeout=20.0)
+    if not bool(burn_mode.get("connected")):
+        if staging_dir:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(staging_dir)
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = _text(burn_mode.get("error")) or "Could not enter S420 USB burn mode."
+                session["message"] = "S420 USB flash failed before writing began."
+                _set_session_phase_locked(session, "failed")
+                _append_session_entry_locked(
+                    session,
+                    level="error",
+                    message=session["error"],
+                    source="session",
+                )
+        return
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            if staging_dir:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(staging_dir)
+            return
+        if bool(session.get("stop_requested")):
+            if staging_dir:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(staging_dir)
+            session["active"] = False
+            session["returncode"] = 0
+            session["message"] = "S420 USB flash stopped before NAND writing began."
+            _set_session_phase_locked(session, "cancelled")
+            return
+        debug_port = _text(burn_mode.get("debug_port"))
+        detection_message = (
+            f"Verified the S420 on {debug_port}, rebooted it through the debug console, and caught Amlogic USB burn mode."
+            if bool(burn_mode.get("auto_rebooted")) and debug_port
+            else "Detected the S420 in Amlogic USB burn mode."
+        )
+        _append_session_entry_locked(session, level="info", message=detection_message, source="session")
+        _set_session_phase_locked(session, "usb_flashing")
 
     try:
         process = subprocess.Popen(
@@ -3540,10 +3591,6 @@ def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
     tool_info = amlogic_usb.ensure_flash_tool()
     if not bool(tool_info.get("available")):
         raise RuntimeError(_text(tool_info.get("error")) or "The Amlogic USB helper is unavailable.")
-    probe = amlogic_usb.probe_device(tool_info)
-    if not bool(probe.get("connected")):
-        detail = _text(probe.get("error")) or "S420 debug board was not detected in USB burn mode."
-        raise RuntimeError(detail)
 
     factory_binary = _download_prebuilt_firmware_binary(context, "factory")
     image_path = Path(factory_binary["path"]).resolve()
@@ -3569,6 +3616,7 @@ def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
         "context": context,
         "command": command,
         "working_dir": _text(tool_info.get("root")),
+        "amlogic_tool_info": dict(tool_info),
         "staging_dir": str(staging_dir),
         "source_binary": str(image_path),
         "binary_name": image_path.name,
@@ -3605,7 +3653,7 @@ def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
         _append_session_entry_locked(
             session,
             level="info",
-            message="Detected the S420 debug board in Amlogic USB burn mode.",
+            message="Looking for the S420 debug console and Amlogic USB-burn interface.",
             source="session",
         )
         _append_session_entry_locked(

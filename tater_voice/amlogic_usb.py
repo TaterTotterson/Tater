@@ -3,8 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import plistlib
+import re
+import select
 import shutil
 import subprocess
+import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,6 +35,9 @@ _HELPER_SHA256 = {
     "tools/datas/usbbl2runpara_ddrinit.bin": "683421dc5900f8b6b10105f2a6d541fa35eab1d58555b7478ebadbec0948e850",
     "tools/datas/usbbl2runpara_runfipimg.bin": "39996bded3c2977384ae21cba323b4849d4b223f5ae0b2b3176d8e0c71198da1",
 }
+_CH340_VENDOR_ID = 0x1A86
+_CH340_PRODUCT_IDS = {0x5523, 0x7523}
+_S420_DTB_PATTERN = re.compile(r"axg_s420_[A-Za-z0-9_-]*trspk", re.IGNORECASE)
 
 
 def _file_sha256(path: Path) -> str:
@@ -216,20 +225,244 @@ def probe_device(tool_info: Dict[str, Any], *, timeout: float = 8.0) -> Dict[str
     return {"connected": False, "error": error, "output": output}
 
 
+def _integer_property(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _registry_callout_devices(node: Any) -> List[str]:
+    if not isinstance(node, dict):
+        return []
+    devices: List[str] = []
+    callout = str(node.get("IOCalloutDevice") or "").strip()
+    if callout:
+        devices.append(callout)
+    for child in node.get("IORegistryEntryChildren") or []:
+        devices.extend(_registry_callout_devices(child))
+    return devices
+
+
+def _macos_ch340_ports() -> List[str]:
+    ioreg = shutil.which("ioreg") or "/usr/sbin/ioreg"
+    try:
+        result = subprocess.run(
+            [ioreg, "-r", "-c", "IOUserSerial", "-l", "-a"],
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+        services = plistlib.loads(result.stdout) if result.returncode == 0 and result.stdout else []
+    except Exception:
+        return []
+
+    ports: List[str] = []
+    for service in services if isinstance(services, list) else []:
+        if not isinstance(service, dict):
+            continue
+        personality = service.get("IOMatchedPersonality")
+        personality = personality if isinstance(personality, dict) else {}
+        vendor = _integer_property(service.get("idVendor") or personality.get("idVendor"))
+        product = _integer_property(service.get("idProduct") or personality.get("idProduct"))
+        if vendor != _CH340_VENDOR_ID or product not in _CH340_PRODUCT_IDS:
+            continue
+        ports.extend(_registry_callout_devices(service))
+        suffix = str(service.get("IOTTYSuffix") or "").strip()
+        if suffix:
+            ports.append(f"/dev/cu.usbserial-{suffix}")
+    return sorted({port for port in ports if Path(port).exists()})
+
+
+def _linux_ch340_ports() -> List[str]:
+    ports: List[str] = []
+    for sys_tty in sorted(Path("/sys/class/tty").glob("ttyUSB*")):
+        current = (sys_tty / "device").resolve()
+        for parent in (current, *current.parents):
+            vendor_path = parent / "idVendor"
+            product_path = parent / "idProduct"
+            if not vendor_path.is_file() or not product_path.is_file():
+                continue
+            try:
+                vendor = int(vendor_path.read_text(encoding="ascii").strip(), 16)
+                product = int(product_path.read_text(encoding="ascii").strip(), 16)
+            except (OSError, ValueError):
+                break
+            if vendor == _CH340_VENDOR_ID and product in _CH340_PRODUCT_IDS:
+                device = Path("/dev") / sys_tty.name
+                if device.exists():
+                    ports.append(str(device))
+            break
+    return sorted(set(ports))
+
+
+def find_debug_serial_ports() -> List[str]:
+    configured = str(os.getenv("TATER_S420_DEBUG_PORT", "") or "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        return [str(configured_path)] if configured_path.exists() else []
+    system = platform.system().lower()
+    if system == "darwin":
+        return _macos_ch340_ports()
+    if system == "linux":
+        return _linux_ch340_ports()
+    return []
+
+
+def _open_verified_s420_console(port: str, *, timeout: float = 2.5) -> tuple[int, str]:
+    # termios is intentionally imported lazily so this module remains importable
+    # on unsupported platforms and can still return a useful platform error.
+    import termios
+
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[0] = 0
+        attrs[1] = 0
+        attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attrs[3] = 0
+        attrs[4] = termios.B115200
+        attrs[5] = termios.B115200
+        attrs[6][termios.VMIN] = 0
+        attrs[6][termios.VTIME] = 1
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        query = (
+            b"\rprintf '__TATER_DTB_BEGIN__'; "
+            b"tr -d '\\000' </proc/device-tree/amlogic-dt-id 2>/dev/null; "
+            b"printf '__TATER_DTB_END__\\n'\r"
+        )
+        os.write(fd, query)
+        output = bytearray()
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], min(0.2, max(0.0, deadline - time.monotonic())))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 8192)
+            except BlockingIOError:
+                continue
+            if chunk:
+                output.extend(chunk)
+        text = output.decode("utf-8", errors="replace").replace("\x00", "")
+        matches = re.findall(r"__TATER_DTB_BEGIN__(.*?)__TATER_DTB_END__", text, flags=re.DOTALL)
+        if not any(_S420_DTB_PATTERN.search(match) for match in matches):
+            raise RuntimeError(
+                f"The CH340 adapter at {port} did not identify an S420 console. "
+                "Close any serial terminal and verify the debug-board ribbon connection."
+            )
+        return fd, text
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def prepare_device(tool_info: Dict[str, Any], *, timeout: float = 20.0) -> Dict[str, Any]:
+    """Enter the S420's short U-Boot USB-burn window through its debug UART."""
+    initial = probe_device(tool_info, timeout=min(2.0, max(1.0, float(timeout))))
+    if bool(initial.get("connected")):
+        return {**initial, "already_in_burn_mode": True, "auto_rebooted": False}
+
+    ports = find_debug_serial_ports()
+    if not ports:
+        return {
+            "connected": False,
+            "error": (
+                "The S420 CH340 debug console was not found. Connect the debug-board USB cable, "
+                "leave the board powered on, and try again."
+            ),
+        }
+    if len(ports) > 1:
+        return {
+            "connected": False,
+            "error": (
+                "More than one CH340 debug adapter is connected. Disconnect the unrelated adapter "
+                f"and try again: {', '.join(ports)}"
+            ),
+        }
+
+    port = ports[0]
+    try:
+        serial_fd, console_output = _open_verified_s420_console(port)
+    except Exception as exc:
+        return {"connected": False, "error": str(exc) or exc.__class__.__name__, "debug_port": port}
+
+    stop_event = threading.Event()
+    ready_event = threading.Event()
+    connected_event = threading.Event()
+    detected: Dict[str, Any] = {}
+
+    def detector() -> None:
+        ready_event.set()
+        deadline = time.monotonic() + max(3.0, float(timeout))
+        while not stop_event.is_set() and time.monotonic() < deadline:
+            result = probe_device(tool_info, timeout=1.0)
+            if bool(result.get("connected")):
+                detected.update(result)
+                connected_event.set()
+                return
+
+    worker = threading.Thread(target=detector, name="tater-s420-usb-detector", daemon=True)
+    worker.start()
+    try:
+        if not ready_event.wait(timeout=1.0):
+            raise RuntimeError("The S420 USB detector did not start.")
+        os.write(serial_fd, b"sync; reboot\r")
+        deadline = time.monotonic() + max(3.0, float(timeout))
+        while not connected_event.is_set() and time.monotonic() < deadline:
+            try:
+                ready, _, _ = select.select([serial_fd], [], [], 0.1)
+                if ready:
+                    os.read(serial_fd, 8192)
+            except (OSError, ValueError):
+                # The UART can briefly disappear while USB re-enumerates.
+                pass
+    except Exception as exc:
+        stop_event.set()
+        worker.join(timeout=2.0)
+        return {"connected": False, "error": str(exc) or exc.__class__.__name__, "debug_port": port}
+    finally:
+        try:
+            os.close(serial_fd)
+        except OSError:
+            pass
+
+    stop_event.set()
+    worker.join(timeout=2.0)
+    if connected_event.is_set():
+        return {
+            **detected,
+            "connected": True,
+            "already_in_burn_mode": False,
+            "auto_rebooted": True,
+            "debug_port": port,
+            "console_output": console_output,
+        }
+    return {
+        "connected": False,
+        "debug_port": port,
+        "error": (
+            "Tater verified the S420 debug console and rebooted it, but did not catch the short "
+            "Amlogic USB-burn window. Keep both USB cables connected and try again."
+        ),
+    }
+
+
 def flash_command(tool_info: Dict[str, Any], image_path: Path) -> List[str]:
     if not bool(tool_info.get("available")):
         raise RuntimeError(str(tool_info.get("error") or "Amlogic USB helper is unavailable."))
     image = Path(image_path).expanduser().resolve()
     if not image.is_file():
         raise RuntimeError(f"S420 factory image is missing: {image.name}")
-    shell = shutil.which("bash") or "/bin/bash"
+    runner = Path(__file__).with_name("amlogic_s420_flash.py")
+    if not runner.is_file():
+        raise RuntimeError("The Tater S420 raw-NAND flash backend is missing.")
     return [
-        shell,
-        str(tool_info["path"]),
-        f"--img={image}",
-        "--parts=all",
-        "--wipe",
-        "--soc=axg",
-        "--reset=y",
-        "--debug",
+        sys.executable,
+        str(runner),
+        "--tool-root",
+        str(tool_info["root"]),
+        "--image",
+        str(image),
     ]

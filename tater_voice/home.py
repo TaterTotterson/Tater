@@ -107,12 +107,36 @@ def _global_satellite_settings_item_form(native_status: Dict[str, Any]) -> Dict[
     return {
         "id": "voice_global_satellite_settings",
         "group": "global_satellite_settings",
-        "title": "Satellite Voice Settings",
+        "title": "Voice Runtime Settings",
         "subtitle": (
             "Shared by every Tater Native satellite. Saving applies these settings immediately "
             f"to all connected satellites ({connected} connected)."
         ),
-        "sections": native_live_settings.global_settings_sections(),
+        "sections": native_live_settings.global_voice_runtime_settings_sections(),
+        "save_action": "voice_global_satellite_settings_save",
+        "save_label": "Apply To All Satellites",
+        "remove_action": "",
+    }
+
+
+def _global_satellite_model_settings_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    connected = len(
+        [
+            row
+            for row in clients.values()
+            if isinstance(row, dict) and bool(row.get("connected"))
+        ]
+    )
+    return {
+        "id": "voice_global_satellite_model_settings",
+        "group": "global_satellite_model_settings",
+        "title": "Wake Word",
+        "subtitle": (
+            "Shared by every Tater Native satellite. Saving applies the wake model and trainer settings immediately "
+            f"to all connected satellites ({connected} connected)."
+        ),
+        "sections": native_live_settings.global_model_settings_sections(),
         "save_action": "voice_global_satellite_settings_save",
         "save_label": "Apply To All Satellites",
         "remove_action": "",
@@ -1064,6 +1088,7 @@ def get_runtime_payload(
     }
     item_forms = [
         _global_satellite_settings_item_form(native_status),
+        _global_satellite_model_settings_item_form(native_status),
         _wake_trainer_link_item_form(),
         _wake_verifier_item_form(native_status),
     ]
@@ -1425,6 +1450,9 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "message": f"Applied shared voice settings to {pushed_count} connected satellite(s).",
             **(result if isinstance(result, dict) else {}),
             "global_satellite_settings": _global_satellite_settings_item_form(
+                _native_satellite_status_snapshot()
+            ),
+            "global_satellite_model_settings": _global_satellite_model_settings_item_form(
                 _native_satellite_status_snapshot()
             ),
         }
