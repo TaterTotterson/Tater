@@ -8061,6 +8061,280 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   height: min(94vh, 1040px);
 }
 
+.runtime-settings-dialog.runtime-settings-dialog-firmware-progress {
+  width: min(720px, 95vw);
+  height: auto;
+  max-height: min(90vh, 820px);
+  overflow: hidden;
+}
+
+.runtime-settings-fields.runtime-settings-fields-firmware-progress {
+  overflow: auto;
+  padding: 2px 3px 4px;
+}
+
+.firmware-progress-modal #runtime-settings-status {
+  display: none;
+}
+
+.firmware-progress-field {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.firmware-progress-view {
+  display: grid;
+  gap: 15px;
+  padding: 18px;
+  border: 1px solid rgba(240, 131, 69, 0.3);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 8% 5%, rgba(255, 154, 78, 0.2), transparent 32%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.018));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 16px 42px rgba(0, 0, 0, 0.18);
+  transition: border-color 180ms ease, background 180ms ease;
+}
+
+.firmware-progress-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 13px;
+  align-items: center;
+}
+
+.firmware-progress-device {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 157, 82, 0.42);
+  border-radius: 15px;
+  background: linear-gradient(145deg, rgba(255, 151, 69, 0.2), rgba(214, 90, 31, 0.08));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.firmware-progress-device::before,
+.firmware-progress-device::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 19px;
+  height: 13px;
+  border: 2px solid rgba(255, 184, 126, 0.88);
+  border-radius: 4px;
+  transform: translate(-50%, -62%);
+}
+
+.firmware-progress-device::after {
+  top: 34px;
+  width: 9px;
+  height: 2px;
+  border-width: 0 4px;
+  border-radius: 1px;
+  transform: translateX(-50%);
+}
+
+.firmware-progress-device-dot {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ffad68;
+  box-shadow: 0 0 0 4px rgba(255, 143, 57, 0.12), 0 0 14px rgba(255, 143, 57, 0.7);
+  animation: firmware-progress-pulse 1.6s ease-in-out infinite;
+}
+
+.firmware-progress-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.firmware-progress-kicker {
+  color: #ffb478;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.firmware-progress-target {
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.firmware-progress-message {
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.38;
+  overflow-wrap: anywhere;
+}
+
+.firmware-progress-percent {
+  min-width: 54px;
+  color: #ffd8b8;
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.firmware-progress-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 11px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.3);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.32);
+}
+
+.firmware-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #d65a1f, #ff9a4b, #ffd09c);
+  box-shadow: 0 0 18px rgba(255, 139, 61, 0.46);
+  transition: width 240ms ease;
+}
+
+.firmware-progress-stages {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.firmware-progress-stage {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 7px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 0.72rem;
+  font-weight: 700;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.firmware-progress-stage-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.firmware-progress-stage.is-active {
+  border-color: rgba(255, 153, 75, 0.38);
+  color: #ffd1ac;
+  background: rgba(214, 90, 31, 0.11);
+}
+
+.firmware-progress-stage.is-active .firmware-progress-stage-dot {
+  background: #ff9b50;
+  box-shadow: 0 0 10px rgba(255, 145, 66, 0.65);
+}
+
+.firmware-progress-stage.is-complete {
+  color: #a6eec8;
+  border-color: rgba(92, 214, 178, 0.24);
+  background: rgba(92, 214, 178, 0.08);
+}
+
+.firmware-progress-stage.is-complete .firmware-progress-stage-dot {
+  background: #5cd6b2;
+}
+
+.firmware-progress-hint {
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: #bac7dc;
+  background: rgba(0, 0, 0, 0.17);
+  font-size: 0.78rem;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.firmware-progress-view.is-success {
+  border-color: rgba(92, 214, 178, 0.38);
+  background:
+    radial-gradient(circle at 8% 5%, rgba(92, 214, 178, 0.17), transparent 32%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018));
+}
+
+.firmware-progress-view.is-success .firmware-progress-fill {
+  background: linear-gradient(90deg, #2f9f81, #5cd6b2, #b7f4db);
+}
+
+.firmware-progress-view.is-success .firmware-progress-device-dot {
+  background: #5cd6b2;
+  animation: none;
+}
+
+.firmware-progress-view.is-error {
+  border-color: rgba(255, 104, 104, 0.38);
+}
+
+.firmware-progress-view.is-error .firmware-progress-fill,
+.firmware-progress-view.is-error .firmware-progress-device-dot {
+  background: #ff6868;
+  animation: none;
+}
+
+.firmware-progress-view.is-error .firmware-progress-percent {
+  color: #ffc1c1;
+}
+
+@keyframes firmware-progress-pulse {
+  0%, 100% { transform: scale(0.82); opacity: 0.72; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (max-width: 560px) {
+  .firmware-progress-view {
+    padding: 14px;
+  }
+
+  .firmware-progress-hero {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .firmware-progress-percent {
+    grid-column: 1 / -1;
+    min-width: 0;
+    text-align: left;
+  }
+
+  .firmware-progress-stages {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .firmware-progress-device-dot {
+    animation: none;
+  }
+
+  .firmware-progress-fill {
+    transition: none;
+  }
+}
+
 .runtime-settings-form {
   margin-top: 8px;
   display: flex;

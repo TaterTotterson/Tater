@@ -3,14 +3,23 @@ import { computed, ref, watch } from "vue";
 import DynamicField from "./DynamicField.vue";
 import type { ManagerGroup, MusicField, MusicItem } from "../types";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   groups: ManagerGroup[];
   items: MusicItem[];
   busy: (key: string) => boolean;
   run: (action: string, payload: Record<string, unknown>, busyKey?: string) => Promise<boolean>;
+  selectedGroup?: string;
+  showNavigation?: boolean;
+}>(), {
+  selectedGroup: "",
+  showNavigation: true,
+});
+
+const emit = defineEmits<{
+  "update:selectedGroup": [value: string];
 }>();
 
-const selectedGroup = ref(props.groups[0]?.key || "search");
+const activeGroupKey = ref(props.selectedGroup || props.groups[0]?.key || "search");
 const pages = ref<Record<string, number>>({});
 const searchValues = ref<Record<string, unknown>>({});
 
@@ -18,12 +27,20 @@ watch(
   () => props.groups,
   (groups) => {
     if (!groups.some((group) => group.key === selectedGroup.value)) {
-      selectedGroup.value = groups[0]?.key || "search";
+      selectGroup(groups[0]?.key || "search");
     }
   },
   { deep: true },
 );
 
+watch(
+  () => props.selectedGroup,
+  (group) => {
+    if (group && group !== activeGroupKey.value) activeGroupKey.value = group;
+  },
+);
+
+const selectedGroup = computed(() => activeGroupKey.value);
 const activeGroup = computed(() => props.groups.find((group) => group.key === selectedGroup.value));
 const groupItems = computed(() => {
   const itemGroup = activeGroup.value?.item_group || activeGroup.value?.key;
@@ -62,6 +79,11 @@ function setPage(next: number): void {
   };
 }
 
+function selectGroup(group: string): void {
+  activeGroupKey.value = group;
+  emit("update:selectedGroup", group);
+}
+
 function setSearchValue(field: MusicField, value: unknown): void {
   searchValues.value = { ...searchValues.value, [field.key]: value };
 }
@@ -80,13 +102,13 @@ async function runItem(item: MusicItem): Promise<void> {
 
 <template>
   <section class="tm-library">
-    <nav class="tm-subtabs" aria-label="Browse music library">
+    <nav v-if="showNavigation" class="tm-subtabs" aria-label="Browse music library">
       <button
         v-for="group in groups"
         :key="group.key"
         type="button"
         :class="{ active: selectedGroup === group.key }"
-        @click="selectedGroup = group.key"
+        @click="selectGroup(group.key)"
       >
         {{ group.label || group.key }}
       </button>

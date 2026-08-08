@@ -10,6 +10,15 @@ const props = defineProps<{
 
 const overview = computed(() => props.items.find((item) => item.card_variant === "recommendations_intro"));
 const playlists = computed(() => props.items.filter((item) => item.card_variant === "recommendation_playlist"));
+const assistantName = computed(() => String(overview.value?.assistant_name || "Tater").trim() || "Tater");
+const assistantPossessive = computed(() =>
+  assistantName.value.toLocaleLowerCase().endsWith("s")
+    ? `${assistantName.value}'`
+    : `${assistantName.value}'s`,
+);
+const recommendationsTitle = computed(() =>
+  overview.value?.title || `${assistantPossessive.value} Recommendations`,
+);
 
 async function refreshRecommendations(): Promise<void> {
   const item = overview.value;
@@ -24,11 +33,11 @@ async function playPlaylist(item: MusicItem): Promise<void> {
 </script>
 
 <template>
-  <section class="tm-recommendations" aria-label="Tater Recommendations">
+  <section class="tm-recommendations" :aria-label="recommendationsTitle">
     <header class="tm-recommendations-heading">
       <div>
         <div class="tm-eyebrow">Made for your ears</div>
-        <h2>{{ overview?.title || 'Tater Recommendations' }}</h2>
+        <h2>{{ recommendationsTitle }}</h2>
         <p>{{ overview?.subtitle || 'Named playlists shaped by what you listen to.' }}</p>
         <small v-if="overview?.detail">{{ overview.detail }}</small>
       </div>
@@ -38,7 +47,7 @@ async function playPlaylist(item: MusicItem): Promise<void> {
         :disabled="!overview?.refresh_available || busy('recommendations:refresh') || overview?.refresh_running"
         @click="refreshRecommendations"
       >
-        {{ busy('recommendations:refresh') || overview?.refresh_running ? 'Tater is mixing…' : overview?.run_label || 'Refresh Recommendations' }}
+        {{ busy('recommendations:refresh') || overview?.refresh_running ? `${assistantName} is mixing…` : overview?.run_label || 'Refresh Recommendations' }}
       </button>
     </header>
 
@@ -64,8 +73,8 @@ async function playPlaylist(item: MusicItem): Promise<void> {
         </div>
 
         <div class="tm-recommendation-copy">
-          <div class="tm-eyebrow">Tater mix</div>
-          <h3>{{ playlist.title || 'Tater Mix' }}</h3>
+          <div class="tm-eyebrow">{{ assistantName }} mix</div>
+          <h3>{{ playlist.title || `${assistantName} Mix` }}</h3>
           <p>{{ playlist.subtitle }}</p>
         </div>
 
@@ -98,7 +107,7 @@ async function playPlaylist(item: MusicItem): Promise<void> {
 
     <div v-else class="tm-empty tm-recommendations-empty">
       <strong>No mixes yet</strong>
-      <span>{{ overview?.detail || 'Play some music and Tater will start learning your taste.' }}</span>
+      <span>{{ overview?.detail || `Play some music and ${assistantName} will start learning your taste.` }}</span>
     </div>
   </section>
 </template>

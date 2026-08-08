@@ -27,6 +27,10 @@ const managerTabs = computed(() => ui.value.manager_tabs || []);
 const activeManagerTab = computed(() =>
   managerTabs.value.find((tab) => tab.key === selectedTab.value) || managerTabs.value[0],
 );
+const activeLibraryGroups = computed(() =>
+  activeManagerTab.value?.source === "grouped_items" ? activeManagerTab.value.groups || [] : [],
+);
+const selectedLibraryGroup = ref("");
 const activeItems = computed(() => {
   const tab = activeManagerTab.value;
   if (!tab || tab.source === "grouped_items") return [];
@@ -39,6 +43,16 @@ watch(
     if (!tabs.some((tab) => tab.key === selectedTab.value)) {
       const preferred = String(ui.value.default_tab || "");
       selectedTab.value = tabs.some((tab) => tab.key === preferred) ? preferred : tabs[0]?.key || "";
+    }
+  },
+  { immediate: true, deep: true },
+);
+
+watch(
+  activeLibraryGroups,
+  (groups) => {
+    if (!groups.some((group) => group.key === selectedLibraryGroup.value)) {
+      selectedLibraryGroup.value = groups[0]?.key || "";
     }
   },
   { immediate: true, deep: true },
@@ -133,19 +147,33 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <MusicPlayer v-if="player" :item="player" :busy="isBusy" :run="run" />
+      <section class="tm-playback-dock" :class="{ 'has-player': player }" aria-label="Playback and navigation">
+        <MusicPlayer v-if="player" :item="player" :busy="isBusy" :run="run" />
 
-      <nav class="tm-tabs" aria-label="Music Core sections">
-        <button
-          v-for="tab in managerTabs"
-          :key="tab.key"
-          type="button"
-          :class="{ active: selectedTab === tab.key }"
-          @click="selectedTab = tab.key"
-        >
-          {{ tab.label || tab.key }}
-        </button>
-      </nav>
+        <nav class="tm-tabs" aria-label="Music Core sections">
+          <button
+            v-for="tab in managerTabs"
+            :key="tab.key"
+            type="button"
+            :class="{ active: selectedTab === tab.key }"
+            @click="selectedTab = tab.key"
+          >
+            {{ tab.label || tab.key }}
+          </button>
+        </nav>
+
+        <nav v-if="activeLibraryGroups.length" class="tm-subtabs tm-dock-subtabs" aria-label="Browse music library">
+          <button
+            v-for="group in activeLibraryGroups"
+            :key="group.key"
+            type="button"
+            :class="{ active: selectedLibraryGroup === group.key }"
+            @click="selectedLibraryGroup = group.key"
+          >
+            {{ group.label || group.key }}
+          </button>
+        </nav>
+      </section>
 
       <LibraryBrowser
         v-if="activeManagerTab?.source === 'grouped_items'"
@@ -153,6 +181,9 @@ onBeforeUnmount(() => {
         :items="items"
         :busy="isBusy"
         :run="run"
+        :selected-group="selectedLibraryGroup"
+        :show-navigation="false"
+        @update:selected-group="selectedLibraryGroup = $event"
       />
       <RecommendationsBrowser
         v-else-if="activeManagerTab?.key === 'recommendations'"

@@ -158,3 +158,24 @@ def remove_pair(selector_or_id: Any) -> Dict[str, Any]:
     if removed:
         _save_document({"version": 1, "pairs": kept})
     return {"ok": True, "removed": removed, "id": wanted, "selector": pair_selector(wanted)}
+
+
+def migrate_member_selector(old_selector: Any, new_selector: Any) -> bool:
+    """Update saved stereo pairs after a native board identity correction."""
+    old_token = _native_selector(old_selector)
+    new_token = _native_selector(new_selector)
+    if not old_token or not new_token or old_token == new_token:
+        return False
+    document = _load_document()
+    changed = False
+    rows: List[Dict[str, Any]] = []
+    for raw in document.get("pairs", []):
+        row = dict(raw) if isinstance(raw, dict) else {}
+        for key in ("left_selector", "right_selector"):
+            if _text(row.get(key)) == old_token:
+                row[key] = new_token
+                changed = True
+        rows.append(row)
+    if changed:
+        _save_document({"version": 1, "pairs": rows})
+    return changed

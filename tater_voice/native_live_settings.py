@@ -654,6 +654,26 @@ def _raw_settings(selector: Any = "") -> Dict[str, Any]:
         return {}
 
 
+def migrate_selector(old_selector: Any, new_selector: Any) -> bool:
+    """Move device-scoped settings when firmware corrects a device selector."""
+    old_token = _selector_token(old_selector)
+    new_token = _selector_token(new_selector)
+    if not old_token or not new_token or old_token == new_token:
+        return False
+    try:
+        old_key = settings_hash_key(old_token)
+        new_key = settings_hash_key(new_token)
+        old_values = dict(redis_client.hgetall(old_key) or {})
+        if not old_values:
+            return False
+        new_values = dict(redis_client.hgetall(new_key) or {})
+        redis_client.hset(new_key, mapping={**old_values, **new_values})
+        redis_client.delete(old_key)
+        return True
+    except Exception:
+        return False
+
+
 def _global_settings_with_migration() -> Dict[str, Any]:
     existing = _raw_settings()
     if _as_bool(existing.get(GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY), False):
