@@ -9,7 +9,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -2411,7 +2414,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             "Official native firmware is selected from the matched satellite family; no local compile step is used."
         ),
         "browser_flash_note": (
-            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, Tater downloads and verifies the Amlogic factory image, then opens the debug-board flashing guide. "
+            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, Tater verifies the Amlogic factory image and writes it through the ThirdReality debug board with the native AXG USB helper. "
             "After flashing, use the Tater setup Wi-Fi network to provision the satellite."
         ),
     }
@@ -2854,6 +2857,10 @@ def _phase_status_text(phase: str, display_name: str = "") -> str:
         return f"Building firmware for {name}..."
     if token == "uploading":
         return f"Uploading firmware to {name}..."
+    if token == "usb_detecting":
+        return f"Checking the S420 USB burn connection for {name}..."
+    if token == "usb_flashing":
+        return f"Writing Tater firmware to {name}. Do not disconnect it..."
     if token == "awaiting_device_logs":
         return f"Upload finished. Waiting for {name} to reconnect for live logs..."
     if token == "live_logs":
@@ -2881,10 +2888,11 @@ def _final_session_phase(session: Dict[str, Any]) -> str:
         return phase
     if phase == "live_logs":
         return "live_logs" if bool(session.get("active")) else "completed"
-    if int(session.get("returncode") or 0) == 0:
-        return "completed"
     if bool(session.get("stop_requested")):
         return "cancelled"
+    returncode = session.get("returncode")
+    if returncode is not None and int(returncode) == 0:
+        return "completed"
     return "failed"
 
 
@@ -3305,6 +3313,252 @@ def _prebuilt_ota_session_worker(session_id: str) -> None:
         )
 
 
+def _amlogic_usb_session_worker(session_id: str) -> None:
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        command = [str(item) for item in list(session.get("command") or [])]
+        working_dir = _text(session.get("working_dir"))
+        staging_dir = _text(session.get("staging_dir"))
+        display_name = _text(session.get("display_name")) or "ThirdReality S420"
+        _set_session_phase_locked(session, "usb_flashing")
+        _append_session_entry_locked(
+            session,
+            level="warn",
+            message="Factory flashing erases the S420. Keep the debug board and USB cable connected until Tater reports completion.",
+            source="session",
+        )
+
+    if not command:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = "Amlogic flash command is missing."
+                session["message"] = "S420 USB flash failed."
+                _set_session_phase_locked(session, "failed")
+        return
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=working_dir or None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        if staging_dir:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(staging_dir)
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = _text(exc) or exc.__class__.__name__
+                session["message"] = "S420 USB flash failed to start."
+                _set_session_phase_locked(session, "failed")
+                _append_session_entry_locked(
+                    session,
+                    level="error",
+                    message=f"Could not start the Amlogic USB helper: {_text(exc) or exc.__class__.__name__}.",
+                    source="session",
+                )
+        return
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            with contextlib.suppress(Exception):
+                process.terminate()
+            if staging_dir:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(staging_dir)
+            return
+        session["process"] = process
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Amlogic AXG factory flash started for {display_name}.",
+            source="session",
+        )
+
+    output = process.stdout
+    if output is not None:
+        for line in iter(output.readline, ""):
+            cleaned = _clean_terminal_text(line)
+            if cleaned:
+                lowered = cleaned.lower()
+                level = "error" if "[ko]" in lowered or "error" in lowered or "not found" in lowered else "info"
+                with _FIRMWARE_SESSION_LOCK:
+                    live = _FIRMWARE_SESSIONS.get(session_id)
+                    if isinstance(live, dict):
+                        _append_session_entry_locked(live, level=level, message=cleaned, source="amlogic")
+            with _FIRMWARE_SESSION_LOCK:
+                live = _FIRMWARE_SESSIONS.get(session_id)
+                should_stop = not isinstance(live, dict) or bool(live.get("stop_requested"))
+            if should_stop and process.poll() is None:
+                with contextlib.suppress(Exception):
+                    os.killpg(process.pid, signal.SIGTERM)
+                break
+        with contextlib.suppress(Exception):
+            output.close()
+
+    returncode = process.wait()
+    if staging_dir:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(staging_dir)
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        session["process"] = None
+        session["active"] = False
+        session["returncode"] = int(returncode)
+        if bool(session.get("stop_requested")):
+            session["error"] = ""
+            session["message"] = "S420 USB flash stopped. The device may need to be flashed again before it can boot."
+            _set_session_phase_locked(session, "cancelled")
+            _append_session_entry_locked(
+                session,
+                level="warn",
+                message=session["message"],
+                source="session",
+            )
+            return
+        if returncode != 0:
+            session["error"] = "The Amlogic USB helper did not complete successfully. Check the burn log above."
+            session["message"] = "S420 USB flash failed."
+            _set_session_phase_locked(session, "failed")
+            _append_session_entry_locked(
+                session,
+                level="error",
+                message=session["error"],
+                source="session",
+            )
+            return
+        _save_recorded_firmware_version(
+            session.get("selector"),
+            session.get("template_key"),
+            session.get("firmware_version"),
+            display_name=session.get("display_name"),
+            source="amlogic_usb_factory_flash",
+        )
+        session["message"] = "S420 USB flash completed. The device is rebooting into Tater firmware."
+        _set_session_phase_locked(session, "completed")
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=session["message"],
+            source="session",
+        )
+
+
+def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
+    from . import amlogic_usb
+
+    _prune_firmware_sessions()
+    selector = _text(context.get("selector"))
+    if _lower(context.get("template_key")) != "thirdreality_s420":
+        raise RuntimeError("Amlogic USB flashing is only enabled for the ThirdReality S420 firmware family.")
+    active_session = _active_flash_for_selector(selector)
+    if isinstance(active_session, dict):
+        raise RuntimeError("An S420 USB flash session is already active.")
+
+    tool_info = amlogic_usb.ensure_flash_tool()
+    if not bool(tool_info.get("available")):
+        raise RuntimeError(_text(tool_info.get("error")) or "The Amlogic USB helper is unavailable.")
+    probe = amlogic_usb.probe_device(tool_info)
+    if not bool(probe.get("connected")):
+        detail = _text(probe.get("error")) or "S420 debug board was not detected in USB burn mode."
+        raise RuntimeError(detail)
+
+    factory_binary = _download_prebuilt_firmware_binary(context, "factory")
+    image_path = Path(factory_binary["path"]).resolve()
+    staging_dir = Path(tempfile.mkdtemp(prefix="tater-s420-usb-"))
+    staged_image = staging_dir / "factory.img"
+    try:
+        staged_image.symlink_to(image_path)
+        command = amlogic_usb.flash_command(tool_info, staged_image)
+    except Exception:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(staging_dir)
+        raise
+    session_id = f"fw_{uuid.uuid4().hex}"
+    target_label = _text(context.get("display_name")) or "ThirdReality S420"
+    session = {
+        "id": session_id,
+        "selector": selector,
+        "template_key": _text(context.get("template_key")),
+        "firmware_version": _text(context.get("firmware_version")),
+        "display_name": target_label,
+        "host": "usb",
+        "operation": "amlogic_usb_factory_flash",
+        "context": context,
+        "command": command,
+        "working_dir": _text(tool_info.get("root")),
+        "staging_dir": str(staging_dir),
+        "source_binary": str(image_path),
+        "binary_name": image_path.name,
+        "binary_size": int(image_path.stat().st_size),
+        "created_ts": time.time(),
+        "updated_ts": time.time(),
+        "cursor": 0,
+        "entries": [],
+        "phase": "usb_detecting",
+        "status_text": _phase_status_text("usb_detecting", target_label),
+        "active": True,
+        "error": "",
+        "message": f"Streaming S420 USB flash progress for {target_label}.",
+        "returncode": None,
+        "stop_requested": False,
+        "follow_logs": False,
+        "device_logs_started": False,
+        "process": None,
+    }
+    with _FIRMWARE_SESSION_LOCK:
+        _FIRMWARE_SESSIONS[session_id] = session
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=(
+                f"Verified Tater S420 factory image {image_path.name} "
+                f"({image_path.stat().st_size} bytes)."
+            ),
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message="Detected the S420 debug board in Amlogic USB burn mode.",
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="debug",
+            message=(
+                "Using the pinned, checksum-verified Khadas Amlogic USB helper"
+                f" ({_text(tool_info.get('source_url')) or 'local installation'})."
+            ),
+            source="session",
+        )
+
+    worker = threading.Thread(target=_amlogic_usb_session_worker, args=(session_id,), daemon=True)
+    with _FIRMWARE_SESSION_LOCK:
+        session["worker"] = worker
+    worker.start()
+    with _FIRMWARE_SESSION_LOCK:
+        live_session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(live_session, dict):
+            raise RuntimeError("S420 USB flash session was not created.")
+        return _session_payload_locked(live_session, after_seq=0)
+
+
 def _start_flash_session(
     context: Dict[str, Any],
     *,
@@ -3443,6 +3697,8 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
     _prune_firmware_sessions()
     session_token = _text(session_id)
     selector = ""
+    operation = ""
+    process: Any = None
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_token)
         if not isinstance(session, dict):
@@ -3450,15 +3706,24 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         session["stop_requested"] = True
         session["active"] = False
         selector = _text(session.get("selector"))
+        operation = _lower(session.get("operation"))
+        process = session.get("process")
         _set_session_phase_locked(session, _final_session_phase(session))
         _append_session_entry_locked(
             session,
             level="info",
-            message="Firmware log viewer closed.",
+            message=(
+                "Stopping the Amlogic USB flash. The S420 may need to be flashed again before it can boot."
+                if operation == "amlogic_usb_factory_flash"
+                else "Firmware log viewer closed."
+            ),
             source="session",
         )
 
-    if selector:
+    if operation == "amlogic_usb_factory_flash" and process is not None:
+        with contextlib.suppress(Exception):
+            os.killpg(int(process.pid), signal.SIGTERM)
+    elif selector:
         with contextlib.suppress(Exception):
             esphome_runtime.logs_stop(selector, force=False, timeout=20.0)
 
@@ -3539,6 +3804,7 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         }
 
     if action_name not in {
+        "voice_firmware_amlogic_flash_start",
         "voice_firmware_browser_build",
         "voice_firmware_flash",
         "voice_firmware_flash_start",
@@ -3592,6 +3858,11 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
             context,
             follow_logs=_as_bool(body.get("follow_logs"), True),
         )
+        result["action"] = action_name
+        return result
+
+    if action_name == "voice_firmware_amlogic_flash_start":
+        result = _start_amlogic_usb_flash_session(context)
         result["action"] = action_name
         return result
 

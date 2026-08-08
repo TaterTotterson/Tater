@@ -150,6 +150,8 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('flash_transport != "esp_serial"', firmware_source)
         self.assertIn('factoryFlashTransport === "amlogic_usb_burn"', app_source)
         self.assertIn("prepareAmlogicUsbImage(card, coreKey)", app_source)
+        self.assertIn('"voice_firmware_amlogic_flash_start"', firmware_source)
+        self.assertIn('"USB Flash S420"', app_source)
         self.assertIn("Browser ESP flashing cannot write", app_source)
 
     def test_native_ota_sends_manifest_integrity_fields(self) -> None:
