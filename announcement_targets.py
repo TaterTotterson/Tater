@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 
 from helpers import redis_client
 from tateros import integration_store as integration_store_module
@@ -12,6 +13,7 @@ HOMEASSISTANT_TARGET_PREFIX = "ha:"
 VOICE_CORE_TARGET_PREFIX = "voice_core:"
 UNIFI_PROTECT_TARGET_PREFIX = "unifi:"
 SONOS_TARGET_PREFIX = "sonos:"
+AIRPLAY_TARGET_PREFIX = "airplay:"
 INTEGRATION_TARGET_PREFIX = "integration:"
 
 
@@ -108,6 +110,23 @@ def resolve_sonos_target(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def airplay_target_id(value: Any) -> str:
+    try:
+        from airplay_bridge import normalize_airplay_id
+
+        return normalize_airplay_id(value)
+    except Exception:
+        token = _text(value)
+        if token.lower().startswith(AIRPLAY_TARGET_PREFIX):
+            token = token[len(AIRPLAY_TARGET_PREFIX) :]
+        return "".join(character for character in token.lower() if character.isalnum())
+
+
+def airplay_target_value(value: Any) -> str:
+    device_id = airplay_target_id(value)
+    return f"{AIRPLAY_TARGET_PREFIX}{device_id}" if device_id else ""
+
+
 def list_unifi_cameras(*args, **kwargs):
     fn = _integration_function("unifi_protect", "list_unifi_cameras")
     return fn(*args, **kwargs) if fn else []
@@ -174,6 +193,8 @@ def _normalize_voice_target(raw: Any) -> str:
     if lower.startswith(SONOS_TARGET_PREFIX):
         speaker_ref = sonos_target_id(token)
         return f"{SONOS_TARGET_PREFIX}{speaker_ref}" if speaker_ref else ""
+    if lower.startswith(AIRPLAY_TARGET_PREFIX):
+        return airplay_target_value(token)
     if lower.startswith(INTEGRATION_TARGET_PREFIX):
         parsed = parse_integration_target(token)
         return integration_target_value(parsed.get("integration_id"), parsed.get("device_id")) if parsed else ""
@@ -216,6 +237,7 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
     voice_core_selectors: List[str] = []
     unifi_protect_cameras: List[str] = []
     sonos_speakers: List[str] = []
+    airplay_players: List[str] = []
     integration_devices: List[Dict[str, str]] = []
 
     for target in normalize_announcement_targets(value):
@@ -235,6 +257,11 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
             if speaker_ref:
                 sonos_speakers.append(speaker_ref)
             continue
+        if lower.startswith(AIRPLAY_TARGET_PREFIX):
+            player_ref = airplay_target_id(target)
+            if player_ref:
+                airplay_players.append(player_ref)
+            continue
         if lower.startswith(INTEGRATION_TARGET_PREFIX):
             parsed = parse_integration_target(target)
             if parsed:
@@ -251,6 +278,7 @@ def split_announcement_targets(value: Any) -> Dict[str, List[str]]:
         "voice_core_selectors": voice_core_selectors,
         "unifi_protect_cameras": unifi_protect_cameras,
         "sonos_speakers": sonos_speakers,
+        "airplay_players": airplay_players,
         "integration_devices": integration_devices,
     }
 
@@ -553,8 +581,49 @@ def _sonos_speaker_label(row: Dict[str, Any], speaker_id: str) -> str:
     return f"Sonos: {name} ({suffix})" if suffix else f"Sonos: {name}"
 
 
-def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
+def _row_values(row: Dict[str, Any], key: str) -> List[str]:
+    details = _device_details(row)
+    raw = row.get(key)
+    if raw in (None, ""):
+        raw = details.get(key)
+    values = list(raw) if isinstance(raw, (list, tuple, set)) else [raw]
+    return [_text(value) for value in values if _text(value)]
+
+
+def _host_token(value: Any) -> str:
+    token = _text(value).lower()
+    if not token:
+        return ""
+    parsed = urlparse(token if "://" in token else f"//{token}")
+    return _text(parsed.hostname).lower()
+
+
+def _sonos_bridge_match_tokens(row: Dict[str, Any], speaker_id: str) -> Dict[str, List[str]]:
+    ids = set()
+    hosts = set()
+    for value in [speaker_id, *_row_values(row, "member_ids"), *_row_values(row, "aliases")]:
+        match = re.search(r"rincon[_:-]?([0-9a-f]{12})", _text(value), flags=re.IGNORECASE)
+        if match:
+            ids.add(match.group(1).lower())
+    for key in ("host", "root_url", "location", "member_hosts", "member_root_urls"):
+        for value in _row_values(row, key):
+            host = _host_token(value)
+            if host:
+                hosts.add(host)
+    return {"ids": sorted(ids), "hosts": sorted(hosts)}
+
+
+def _airplay_bridge_match_tokens(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    device_id = airplay_target_id(row.get("id") or row.get("target"))
+    host = _host_token(row.get("host"))
+    return {
+        "ids": [device_id] if device_id else [],
+        "hosts": [host] if host else [],
+    }
+
+
+def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     seen = set()
 
     registry_rows = _integration_registry_devices("media_player", integration_id="sonos")
@@ -569,7 +638,16 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
         if value in seen:
             continue
         seen.add(value)
-        rows.append({"value": value, "label": _sonos_speaker_label(item, speaker_id)})
+        match_tokens = _sonos_bridge_match_tokens(item, speaker_id)
+        rows.append(
+            {
+                "value": value,
+                "label": _sonos_speaker_label(item, speaker_id),
+                "sonos_device_id": speaker_id,
+                "bridge_match_ids": match_tokens["ids"],
+                "bridge_match_hosts": match_tokens["hosts"],
+            }
+        )
 
     for value in normalize_announcement_targets(current_values):
         if not value.startswith(SONOS_TARGET_PREFIX) or value in seen:
@@ -583,7 +661,16 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
             resolved_value = f"{SONOS_TARGET_PREFIX}{resolved_id}" if resolved_id else ""
             label = _sonos_speaker_label(resolved, resolved_id or speaker_ref)
             if resolved_value == value:
-                rows.append({"value": value, "label": f"{label} (saved)"})
+                match_tokens = _sonos_bridge_match_tokens(resolved, resolved_id or speaker_ref)
+                rows.append(
+                    {
+                        "value": value,
+                        "label": f"{label} (saved)",
+                        "sonos_device_id": resolved_id or speaker_ref,
+                        "bridge_match_ids": match_tokens["ids"],
+                        "bridge_match_hosts": match_tokens["hosts"],
+                    }
+                )
             else:
                 rows.append({"value": value, "label": f"{label} (saved paired member)"})
         else:
@@ -594,8 +681,167 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
     return rows
 
 
+def fetch_airplay_target_options(*, current_values: Any = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    try:
+        from airplay_bridge import discover_airplay_devices, resolve_airplay_target
+
+        discovered = discover_airplay_devices()
+    except Exception:
+        discovered = []
+        resolve_airplay_target = None
+
+    def add_row(item: Dict[str, Any], *, saved: bool = False) -> None:
+        device_id = airplay_target_id(item.get("id") or item.get("target"))
+        value = airplay_target_value(device_id)
+        if not value or value in seen:
+            return
+        seen.add(value)
+        name = _text(item.get("name")) or device_id
+        details = []
+        manufacturer = _text(item.get("manufacturer"))
+        model = _text(item.get("model"))
+        host = _text(item.get("host"))
+        if manufacturer and manufacturer.casefold() not in name.casefold():
+            details.append(manufacturer)
+        if model and model.casefold() not in name.casefold():
+            details.append(model)
+        if host:
+            details.append(host)
+        if saved and not bool(item.get("available", False)):
+            details.append("offline")
+        suffix = f" ({' • '.join(details)})" if details else ""
+        match_tokens = _airplay_bridge_match_tokens(item)
+        rows.append(
+            {
+                "value": value,
+                "label": f"AirPlay Bridge: {name}{suffix}",
+                "description": "Wall-clock scheduled through Tater AirPlay Bridge",
+                "airplay_device_id": device_id,
+                "bridge_match_ids": match_tokens["ids"],
+                "bridge_match_hosts": match_tokens["hosts"],
+            }
+        )
+
+    for item in discovered:
+        if isinstance(item, dict):
+            add_row(item)
+
+    for value in normalize_announcement_targets(current_values):
+        if not value.startswith(AIRPLAY_TARGET_PREFIX) or value in seen:
+            continue
+        resolved: Dict[str, Any] = {}
+        if callable(resolve_airplay_target):
+            try:
+                resolved = resolve_airplay_target(value)
+            except Exception:
+                resolved = {}
+        if resolved:
+            add_row(resolved, saved=True)
+        else:
+            device_id = airplay_target_id(value)
+            rows.append(
+                {
+                    "value": value,
+                    "label": f"AirPlay Bridge: {device_id} (saved • offline)",
+                    "description": "Wall-clock scheduled through Tater AirPlay Bridge",
+                }
+            )
+            seen.add(value)
+
+    rows.sort(key=lambda row: _text(row.get("label")).lower())
+    return rows
+
+
+def merge_sonos_airplay_target_options(
+    sonos_rows: List[Dict[str, Any]],
+    airplay_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collapse a Sonos receiver and its AirPlay endpoint into one player option."""
+    used_airplay_values = set()
+    merged: List[Dict[str, Any]] = []
+    for raw_sonos in sonos_rows:
+        sonos = dict(raw_sonos)
+        sonos_ids = set(_row_values(sonos, "bridge_match_ids"))
+        sonos_hosts = set(_row_values(sonos, "bridge_match_hosts"))
+        match: Dict[str, Any] = {}
+        for airplay in airplay_rows:
+            value = _text(airplay.get("value"))
+            if not value or value in used_airplay_values:
+                continue
+            airplay_ids = set(_row_values(airplay, "bridge_match_ids"))
+            airplay_hosts = set(_row_values(airplay, "bridge_match_hosts"))
+            if (sonos_ids and airplay_ids and sonos_ids & airplay_ids) or (
+                sonos_hosts and airplay_hosts and sonos_hosts & airplay_hosts
+            ):
+                match = dict(airplay)
+                break
+        if match:
+            bridge_target = _text(match.get("value"))
+            used_airplay_values.add(bridge_target)
+            sonos.update(
+                {
+                    "airplay_bridge_target": bridge_target,
+                    "target_aliases": [bridge_target],
+                    "transport_options": [
+                        {"value": "auto", "label": "Automatic"},
+                        {"value": "native", "label": "Native Sonos"},
+                        {"value": "airplay", "label": "AirPlay Bridge"},
+                    ],
+                    "description": (
+                        "Automatic uses AirPlay Bridge with Tater sats and native Sonos "
+                        "for Sonos-only playback."
+                    ),
+                }
+            )
+        sonos.pop("bridge_match_ids", None)
+        sonos.pop("bridge_match_hosts", None)
+        merged.append(sonos)
+
+    for raw_airplay in airplay_rows:
+        if _text(raw_airplay.get("value")) in used_airplay_values:
+            continue
+        airplay = dict(raw_airplay)
+        airplay.pop("bridge_match_ids", None)
+        airplay.pop("bridge_match_hosts", None)
+        merged.append(airplay)
+    return merged
+
+
+def resolve_sonos_airplay_target(value: Any) -> str:
+    """Return the matching AirPlay target for a Sonos target, if one is available."""
+    speaker_id = sonos_target_id(value)
+    if not speaker_id:
+        return ""
+    speaker = resolve_sonos_target(speaker_id)
+    sonos_tokens = _sonos_bridge_match_tokens(
+        speaker if isinstance(speaker, dict) else {},
+        speaker_id,
+    )
+    if not sonos_tokens["ids"] and not sonos_tokens["hosts"]:
+        return ""
+    sonos_ids = set(sonos_tokens["ids"])
+    sonos_hosts = set(sonos_tokens["hosts"])
+    try:
+        from airplay_bridge import discover_airplay_devices
+
+        devices = discover_airplay_devices()
+    except Exception:
+        devices = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        airplay_tokens = _airplay_bridge_match_tokens(device)
+        if (sonos_ids and set(airplay_tokens["ids"]) & sonos_ids) or (
+            sonos_hosts and set(airplay_tokens["hosts"]) & sonos_hosts
+        ):
+            return airplay_target_value(device.get("id") or device.get("target"))
+    return ""
+
+
 def fetch_unifi_protect_camera_target_options(*, current_values: Any = None) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Any]] = []
     seen = set()
 
     def add_row(camera_ref: Any, label: Any = "") -> None:
@@ -710,12 +956,13 @@ def build_announcement_target_options(
     include_homeassistant: bool = False,
     homeassistant_platforms: Any = None,
     include_sonos: bool = True,
+    include_airplay: bool = False,
     include_unifi_protect: bool = False,
     include_voice_core: bool = True,
     include_integrations: bool = False,
     current_values: Any = None,
-) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     if include_homeassistant:
         rows.extend(
             fetch_homeassistant_media_player_target_options(
@@ -727,8 +974,21 @@ def build_announcement_target_options(
         )
     if include_voice_core:
         rows.extend(get_voice_core_satellite_target_options(current_values=current_values))
-    if include_sonos:
-        rows.extend(fetch_sonos_speaker_target_options(current_values=current_values))
+    sonos_rows = (
+        fetch_sonos_speaker_target_options(current_values=current_values)
+        if include_sonos
+        else []
+    )
+    airplay_rows = (
+        fetch_airplay_target_options(current_values=current_values)
+        if include_airplay
+        else []
+    )
+    if include_sonos and include_airplay:
+        rows.extend(merge_sonos_airplay_target_options(sonos_rows, airplay_rows))
+    else:
+        rows.extend(sonos_rows)
+        rows.extend(airplay_rows)
     if include_unifi_protect:
         rows.extend(fetch_unifi_protect_camera_target_options(current_values=current_values))
     if include_integrations:

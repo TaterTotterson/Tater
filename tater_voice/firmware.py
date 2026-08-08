@@ -2848,6 +2848,21 @@ def _native_ota_terminal_status(entries: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _native_ota_progress(entries: List[Dict[str, Any]]) -> Optional[float]:
+    progress: Optional[float] = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+        raw_progress = payload.get("progress")
+        if raw_progress is None:
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            value = float(raw_progress)
+            progress = max(0.0, min(100.0, value))
+    return progress
+
+
 def _phase_status_text(phase: str, display_name: str = "") -> str:
     name = _text(display_name) or "device"
     token = _lower(phase)
@@ -2879,6 +2894,37 @@ def _set_session_phase_locked(session: Dict[str, Any], phase: str) -> None:
     if token:
         session["phase"] = token
     session["status_text"] = _phase_status_text(_text(session.get("phase")), _text(session.get("display_name")))
+    phase_progress = {
+        "starting": 4.0,
+        "building": 8.0,
+        "uploading": 12.0,
+        "usb_detecting": 6.0,
+        "usb_flashing": 14.0,
+        "awaiting_device_logs": 16.0,
+        "live_logs": 18.0,
+        "completed": 100.0,
+    }.get(_lower(session.get("phase")))
+    if phase_progress is not None:
+        session["progress_percent"] = max(float(session.get("progress_percent") or 0.0), phase_progress)
+    session["updated_ts"] = time.time()
+
+
+def _set_session_progress_locked(
+    session: Dict[str, Any],
+    percent: Any,
+    *,
+    completed_bytes: Any = None,
+    total_bytes: Any = None,
+) -> None:
+    with contextlib.suppress(TypeError, ValueError):
+        value = max(0.0, min(100.0, float(percent)))
+        session["progress_percent"] = max(float(session.get("progress_percent") or 0.0), value)
+    with contextlib.suppress(TypeError, ValueError):
+        if completed_bytes is not None:
+            session["progress_bytes"] = max(0, int(completed_bytes))
+    with contextlib.suppress(TypeError, ValueError):
+        if total_bytes is not None:
+            session["progress_total_bytes"] = max(0, int(total_bytes))
     session["updated_ts"] = time.time()
 
 
@@ -2911,6 +2957,9 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "operation": _text(session.get("operation")),
         "phase": phase,
         "status_text": _text(session.get("status_text")) or _phase_status_text(phase, _text(session.get("display_name"))),
+        "progress_percent": round(max(0.0, min(100.0, float(session.get("progress_percent") or 0.0))), 1),
+        "progress_bytes": int(session.get("progress_bytes") or 0),
+        "progress_total_bytes": int(session.get("progress_total_bytes") or 0),
         "active": active,
         "completed": not active and final_phase in {"completed", "failed", "cancelled"},
         "cursor": int(session.get("cursor") or 0),
@@ -3033,6 +3082,13 @@ def _pump_session_device_logs(session_id: str) -> None:
                     )
                     for entry in entries:
                         _append_session_passthrough_locked(session, entry, source="device")
+                    native_progress = (
+                        _native_ota_progress(entries)
+                        if _lower(session.get("operation")) == "native_tater_ota"
+                        else None
+                    )
+                    if native_progress is not None:
+                        _set_session_progress_locked(session, native_progress)
                     terminal_status = (
                         _native_ota_terminal_status(entries)
                         if _lower(session.get("operation")) == "native_tater_ota"
@@ -3093,6 +3149,13 @@ def _pump_session_device_logs(session_id: str) -> None:
         entries = [entry for entry in list(result.get("entries") or []) if isinstance(entry, dict)]
         for entry in entries:
             _append_session_passthrough_locked(session, entry, source="device")
+        native_progress = (
+            _native_ota_progress(entries)
+            if _lower(session.get("operation")) == "native_tater_ota"
+            else None
+        )
+        if native_progress is not None:
+            _set_session_progress_locked(session, native_progress)
         terminal_status = (
             _native_ota_terminal_status(entries)
             if _lower(session.get("operation")) == "native_tater_ota"
@@ -3225,6 +3288,7 @@ def _prebuilt_ota_session_worker(session_id: str) -> None:
             if not isinstance(live, dict):
                 return
             _set_session_phase_locked(live, "uploading")
+            _set_session_progress_locked(live, percent, completed_bytes=sent, total_bytes=total)
             _append_session_entry_locked(
                 live,
                 level="info",
@@ -3398,6 +3462,9 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
                 with _FIRMWARE_SESSION_LOCK:
                     live = _FIRMWARE_SESSIONS.get(session_id)
                     if isinstance(live, dict):
+                        percent_match = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", cleaned)
+                        if percent_match:
+                            _set_session_progress_locked(live, percent_match.group(1))
                         _append_session_entry_locked(live, level=level, message=cleaned, source="amlogic")
             with _FIRMWARE_SESSION_LOCK:
                 live = _FIRMWARE_SESSIONS.get(session_id)
@@ -3512,6 +3579,9 @@ def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
         "entries": [],
         "phase": "usb_detecting",
         "status_text": _phase_status_text("usb_detecting", target_label),
+        "progress_percent": 6.0,
+        "progress_bytes": 0,
+        "progress_total_bytes": int(image_path.stat().st_size),
         "active": True,
         "error": "",
         "message": f"Streaming S420 USB flash progress for {target_label}.",
@@ -3617,6 +3687,9 @@ def _start_flash_session(
         "entries": [],
         "phase": "starting",
         "status_text": _phase_status_text("starting", target_label),
+        "progress_percent": 4.0,
+        "progress_bytes": 0,
+        "progress_total_bytes": int(ota_artifact.get("binary_size") or Path(prebuilt_binary["path"]).stat().st_size),
         "active": True,
         "error": "",
         "message": (

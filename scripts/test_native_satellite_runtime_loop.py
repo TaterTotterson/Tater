@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
+from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 from tater_voice import native_satellite
 
@@ -85,6 +87,35 @@ class NativeSatelliteRuntimeLoopTests(unittest.TestCase):
 
         result = asyncio.run_coroutine_threadsafe(call_from_owner(), self.loop).result(2.0)
         self.assertEqual("ok", result)
+
+
+class NativeSatelliteWebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stubborn_child_task_cannot_block_websocket_cleanup(self) -> None:
+        release = asyncio.Event()
+
+        async def stubborn_task() -> None:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        task = asyncio.create_task(stubborn_task())
+        await asyncio.sleep(0)
+        logger = mock.Mock()
+        with (
+            mock.patch.object(native_satellite, "NATIVE_WEBSOCKET_TASK_CANCEL_TIMEOUT_S", 0.01),
+            mock.patch.object(native_satellite, "_vp", return_value=SimpleNamespace(logger=logger)),
+        ):
+            await native_satellite._cancel_websocket_tasks(
+                (task,),
+                selector="native:test",
+                label="test task",
+            )
+
+        self.assertFalse(task.done())
+        logger.warning.assert_called_once()
+        release.set()
+        await asyncio.wait_for(task, timeout=1.0)
 
 
 if __name__ == "__main__":

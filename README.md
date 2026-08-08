@@ -52,6 +52,8 @@ Some Portals are paired with companion repos/apps that complete the end-user int
 | [HomeKit Shortcuts](https://taterassistant.com/portals/homekit.html) | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
 | [Meshtastic Bridge](https://github.com/TaterTotterson/tater_meshtastic_bridge) | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
 | [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) | Native firmware for Tater voice satellites and related hardware. |
+| [Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite) | Native Tater voice and persistent-music satellite runtime for Linux computers, Raspberry Pi, and robots. |
+| [ThirdReality S420 Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware) | Tater-native firmware, provisioning, signed OTA, and recovery images for the ThirdReality Voice & Music Assistant. |
 | [Tater Wake Words](https://github.com/TaterTotterson/Tater-Wake-Words) | Wake-word catalog for Tater Native satellites, including issue-based `mww:` requests for generating new wake words. |
 | [WakeWord Trainer for macOS](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon) | Apple Silicon trainer app for creating custom wake words, reviewing satellite capture clips, and flashing Tater Native firmware. |
 | [WakeWord Trainer for NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing. |
@@ -292,6 +294,7 @@ docker pull ghcr.io/tatertotterson/tater:latest
 
 Recommended Docker networking:
 - Use `--network host` so Tater shares the host network directly.
+- Add `--cap-add NET_BIND_SERVICE` so Tater's shared AirPlay PTP clock can bind UDP 319/320 without requiring a privileged container user.
 - This avoids managing a growing list of `-p` mappings for WebUI, voice, and other runtime surfaces.
 - With host networking, Tater listens on the host directly, so you do not need to publish Tater ports manually.
 - To change the WebUI port, set `HTMLUI_PORT`, for example `-e HTMLUI_PORT=8601`.
@@ -310,6 +313,7 @@ Example: Docker setup
 ```
 docker run -d --name tater_webui \
   --network host \
+  --cap-add NET_BIND_SERVICE \
   -e TZ=America/Chicago \
   -e HTMLUI_PORT=8501 \
   -v /etc/localtime:/etc/localtime:ro \
@@ -403,4 +407,4 @@ Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Bea
 
 - Local context length is configured in **Settings -> Models -> LLM / Vision**.
 - Thinking suppression is enabled by default for local providers when supported.
-- `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request log spam.
+- `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request log spam. Shutdown waits at most eight seconds for long-lived WebSocket and event-stream connections before cancelling them, so a stale satellite or browser connection cannot block a restart. Set `HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS` to override that connection-drain deadline.

@@ -799,12 +799,38 @@ async def native_satellite_play_group(
     media_start_position_ms = max(0, int(vp._as_float(payload.get("start_position_ms"), 0.0)))
     media_loop = vp._as_bool(payload.get("loop"), False)
     start_lead_ms = max(250, min(5000, int(vp._as_float(payload.get("start_lead_ms"), 750.0))))
+    raw_player_settings = payload.get("player_settings")
+    player_settings = raw_player_settings if isinstance(raw_player_settings, dict) else {}
+
+    def destination_setting(selector: str) -> Dict[str, int]:
+        raw = player_settings.get(selector)
+        values = raw if isinstance(raw, dict) else {}
+        return {
+            "volume_percent": max(
+                0,
+                min(100, int(vp._as_float(values.get("volume_percent"), media_volume_percent))),
+            ),
+            "sync_offset_ms": max(
+                -1000,
+                min(1000, int(vp._as_float(values.get("sync_offset_ms"), 0.0))),
+            ),
+        }
+
+    destination_settings = {
+        selector: destination_setting(selector) for selector in requested_selectors
+    }
+    minimum_sync_offset_ms = min(
+        setting["sync_offset_ms"] for setting in destination_settings.values()
+    )
 
     member_rows: list[Dict[str, Any]] = []
     destination_members: Dict[str, list[str]] = {}
     skipped_destinations: list[Dict[str, Any]] = []
     seen_members: set[str] = set()
     for selector in requested_selectors:
+        setting = destination_settings[selector]
+        destination_delay_ms = setting["sync_offset_ms"] - minimum_sync_offset_ms
+        destination_volume_percent = setting["volume_percent"]
         if stereo_pairs.is_stereo_selector(selector):
             pair = stereo_pairs.get_pair(selector)
             if not isinstance(pair, dict) or not pair:
@@ -838,7 +864,7 @@ async def native_satellite_play_group(
                 seen_members.add(member)
                 calibrated_volume = int(
                     round(
-                        media_volume_percent
+                        destination_volume_percent
                         * max(0, min(100, int(vp._as_float(relative_volume, 100.0))))
                         / 100.0
                     )
@@ -847,7 +873,14 @@ async def native_satellite_play_group(
                     {
                         "selector": member,
                         "channel": channel,
-                        "delay_ms": max(0, min(250, int(vp._as_float(delay_ms, 0.0)))),
+                        "delay_ms": max(
+                            0,
+                            min(
+                                2000,
+                                destination_delay_ms
+                                + max(0, min(250, int(vp._as_float(delay_ms, 0.0)))),
+                            ),
+                        ),
                         "volume_percent": calibrated_volume,
                         "destination_selector": selector,
                     }
@@ -863,8 +896,8 @@ async def native_satellite_play_group(
             {
                 "selector": selector,
                 "channel": "mono",
-                "delay_ms": 0,
-                "volume_percent": media_volume_percent,
+                "delay_ms": destination_delay_ms,
+                "volume_percent": destination_volume_percent,
                 "destination_selector": selector,
             }
         )

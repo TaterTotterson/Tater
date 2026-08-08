@@ -13411,6 +13411,112 @@ function setEspHomeFirmwareCardBusy(card, busy) {
   });
 }
 
+function createFirmwareProgressView(container, options = {}) {
+  if (!(container instanceof HTMLElement)) {
+    return null;
+  }
+  const transport = String(options?.transport || "ota").trim().toLowerCase() || "ota";
+  const stages = Array.isArray(options?.stages) && options.stages.length
+    ? options.stages.map((stage) => String(stage || "").trim()).filter(Boolean)
+    : transport === "usb"
+    ? ["Prepare", "Connect", "Write", "Finish"]
+    : ["Prepare", "Transfer", "Restart", "Finish"];
+  const target = String(options?.target || "Firmware device").trim() || "Firmware device";
+  const method = String(options?.method || transport.toUpperCase()).trim() || transport.toUpperCase();
+  const hint = String(
+    options?.hint ||
+      (transport === "usb"
+        ? "Keep the USB cable connected until the update is complete."
+        : "Keep Tater open and leave the device powered on during the update.")
+  ).trim();
+  const root = document.createElement("section");
+  root.className = "firmware-progress-view";
+  root.setAttribute("aria-live", "polite");
+  root.innerHTML = `
+    <div class="firmware-progress-hero">
+      <div class="firmware-progress-device" aria-hidden="true">
+        <span class="firmware-progress-device-dot"></span>
+      </div>
+      <div class="firmware-progress-copy">
+        <div class="firmware-progress-kicker">${escapeHtml(method)} firmware update</div>
+        <strong class="firmware-progress-target">${escapeHtml(target)}</strong>
+        <span class="firmware-progress-message">Preparing the update...</span>
+      </div>
+      <strong class="firmware-progress-percent">0%</strong>
+    </div>
+    <div class="firmware-progress-track" role="progressbar" aria-label="Firmware update progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <span class="firmware-progress-fill"></span>
+    </div>
+    <div class="firmware-progress-stages">
+      ${stages
+        .map(
+          (stage, index) => `
+            <div class="firmware-progress-stage" data-stage-index="${index}">
+              <span class="firmware-progress-stage-dot"></span>
+              <span>${escapeHtml(stage)}</span>
+            </div>`
+        )
+        .join("")}
+    </div>
+    <div class="firmware-progress-hint">${escapeHtml(hint)}</div>
+  `;
+  container.appendChild(root);
+
+  const track = root.querySelector(".firmware-progress-track");
+  const fill = root.querySelector(".firmware-progress-fill");
+  const percentNode = root.querySelector(".firmware-progress-percent");
+  const messageNode = root.querySelector(".firmware-progress-message");
+  const hintNode = root.querySelector(".firmware-progress-hint");
+  let currentPercent = 0;
+
+  const phaseStage = (phase) => {
+    const token = String(phase || "").trim().toLowerCase();
+    if (["completed", "complete"].includes(token)) return stages.length - 1;
+    if (["awaiting_device_logs", "live_logs", "restarting", "provisioning"].includes(token)) return Math.min(2, stages.length - 1);
+    if (token === "uploading") return Math.min(transport === "usb" ? 2 : 1, stages.length - 1);
+    if (["usb_flashing", "flashing", "writing"].includes(token)) return Math.min(2, stages.length - 1);
+    if (["usb_detecting", "connecting", "downloading"].includes(token)) return Math.min(1, stages.length - 1);
+    return 0;
+  };
+
+  const update = (payload = {}) => {
+    const tone = String(payload?.tone || "active").trim().toLowerCase() || "active";
+    const phase = String(payload?.phase || "").trim().toLowerCase();
+    const requested = Number(payload?.percent);
+    if (Number.isFinite(requested)) {
+      currentPercent = tone === "error"
+        ? Math.max(0, Math.min(100, requested))
+        : Math.max(currentPercent, Math.max(0, Math.min(100, requested)));
+    }
+    if (tone === "success" || phase === "completed") {
+      currentPercent = 100;
+    }
+    const rounded = Math.round(currentPercent);
+    root.classList.toggle("is-success", tone === "success" || phase === "completed");
+    root.classList.toggle("is-error", tone === "error" || phase === "failed" || phase === "cancelled");
+    if (fill instanceof HTMLElement) fill.style.width = `${rounded}%`;
+    if (percentNode instanceof HTMLElement) percentNode.textContent = `${rounded}%`;
+    if (messageNode instanceof HTMLElement && String(payload?.message || "").trim()) {
+      messageNode.textContent = String(payload.message).trim();
+    }
+    if (hintNode instanceof HTMLElement && String(payload?.hint || "").trim()) {
+      hintNode.textContent = String(payload.hint).trim();
+    }
+    if (track instanceof HTMLElement) track.setAttribute("aria-valuenow", String(rounded));
+    const explicitStage = Number(payload?.stage);
+    const activeStage = Number.isFinite(explicitStage)
+      ? Math.max(0, Math.min(stages.length - 1, Math.floor(explicitStage)))
+      : phaseStage(phase);
+    root.querySelectorAll(".firmware-progress-stage").forEach((stageNode, index) => {
+      stageNode.classList.toggle("is-complete", index < activeStage || currentPercent >= 100);
+      stageNode.classList.toggle("is-active", index === activeStage && currentPercent < 100);
+    });
+  };
+
+  update({ percent: Number(options?.percent || 0), phase: "starting", message: options?.message || "Preparing the update..." });
+  return { root, update };
+}
+
 function openEspHomeFirmwareFlashViewer(card, coreKey) {
   if (!(card instanceof HTMLElement)) {
     return;
@@ -13431,105 +13537,15 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   }
 
   setEspHomeFirmwareCardBusy(card, true);
-  setCoreManagerStatus(card, "Opening firmware flash log...");
+  setCoreManagerStatus(card, "Opening firmware update...");
 
   let stopped = false;
   let sessionId = "";
   let cursor = 0;
   let pollTimer = 0;
-  let logConsole = null;
   let statusNode = null;
   let modalDialog = null;
-
-  const deriveLogTone = (entry) => {
-    const explicitLevel = String(entry?.level || "").trim().toLowerCase();
-    if (explicitLevel) {
-      if (["error", "err", "danger"].includes(explicitLevel)) {
-        return "error";
-      }
-      if (["warn", "warning"].includes(explicitLevel)) {
-        return "warn";
-      }
-      if (["debug", "trace", "verbose", "very_verbose"].includes(explicitLevel)) {
-        return "debug";
-      }
-      if (["config", "info"].includes(explicitLevel)) {
-        return "info";
-      }
-    }
-    const text = String(entry?.message || entry?.display || "").trim();
-    const bracketMatch = text.match(/^\[[^\]]+\]\[([A-Z])\]/);
-    const token = bracketMatch?.[1] || "";
-    if (token === "E") {
-      return "error";
-    }
-    if (token === "W") {
-      return "warn";
-    }
-    if (token === "D" || token === "V") {
-      return "debug";
-    }
-    return "info";
-  };
-
-  const renderConsoleLine = (entry) => {
-    if (!(logConsole instanceof HTMLElement)) {
-      return;
-    }
-    const lineEl = document.createElement("div");
-    const tone = deriveLogTone(entry);
-    lineEl.className = `voice-log-line tone-${tone}`;
-    const timeText = String(entry?.time || "").trim();
-    if (timeText) {
-      const timeEl = document.createElement("span");
-      timeEl.className = "voice-log-time";
-      timeEl.textContent = timeText;
-      lineEl.appendChild(timeEl);
-    }
-    const levelToken = (() => {
-      const explicitLevel = String(entry?.level || "").trim().toLowerCase();
-      if (explicitLevel) {
-        return explicitLevel.replace(/_/g, " ").toUpperCase();
-      }
-      return tone.toUpperCase();
-    })();
-    const levelEl = document.createElement("span");
-    levelEl.className = `voice-log-level tone-${tone}`;
-    levelEl.textContent = levelToken;
-    lineEl.appendChild(levelEl);
-
-    const messageEl = document.createElement("span");
-    messageEl.className = "voice-log-message";
-    messageEl.textContent = String(entry?.display || entry?.message || "").trim();
-    lineEl.appendChild(messageEl);
-    logConsole.appendChild(lineEl);
-  };
-
-  const renderEntries = (entries, reset = false) => {
-    if (!(logConsole instanceof HTMLElement)) {
-      return;
-    }
-    const rows = Array.isArray(entries)
-      ? entries.filter((entry) => String(entry?.display || entry?.message || "").trim())
-      : [];
-    const shouldStick =
-      reset ||
-      logConsole.scrollHeight - logConsole.scrollTop - logConsole.clientHeight < 28;
-    if (reset) {
-      logConsole.innerHTML = "";
-    }
-    if (!rows.length && reset) {
-      const emptyEl = document.createElement("div");
-      emptyEl.className = "voice-log-empty";
-      emptyEl.textContent = "Waiting for OTA upload output...";
-      logConsole.appendChild(emptyEl);
-    } else if (rows.length) {
-      rows.forEach((entry) => renderConsoleLine(entry));
-    }
-    if (shouldStick) {
-      logConsole.scrollTop = logConsole.scrollHeight;
-    }
-  };
+  let progressView = null;
 
   const refreshBehindModal = async () => {
     try {
@@ -13577,23 +13593,44 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
           id: sessionId,
           after_seq: cursor,
         });
-        const entries = Array.isArray(result?.entries) ? result.entries : [];
-        if (entries.length) {
-          renderEntries(entries, false);
-        }
         cursor = Number(result?.cursor || cursor || 0);
+        progressView?.update({
+          percent: Number(result?.progress_percent || 0),
+          phase: result?.phase,
+          message:
+            String(result?.status_text || result?.message || "").trim() ||
+            `Updating ${deviceLabel}...`,
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
         }
         if (!boolFromAny(result?.active, true)) {
           const message = String(result?.message || result?.status_text || "").trim();
+          const phase = String(result?.phase || "").trim().toLowerCase();
+          const error = String(result?.error || "").trim();
+          const success = phase === "completed" && !error;
+          progressView?.update({
+            percent: success ? 100 : Number(result?.progress_percent || 0),
+            phase,
+            tone: success ? "success" : "error",
+            message: message || (success ? "Firmware update complete." : "Firmware update failed."),
+            hint: success ? `${deviceLabel} is ready to reconnect.` : error || "Open OTA Logs for diagnostic details.",
+          });
+          sessionId = "";
+          setEspHomeFirmwareCardBusy(card, false);
           setCoreManagerStatus(card, message || "Firmware session finished.");
+          showToast(message || (success ? "Firmware update complete." : "Firmware update failed."), success ? "info" : "error", 4200);
+          void refreshBehindModal();
           return;
         }
         const phase = String(result?.phase || "").trim();
         schedulePoll(phase === "awaiting_device_logs" ? 1500 : 1100);
       } catch (error) {
+        progressView?.update({
+          message: `Reconnecting to firmware update: ${String(error?.message || "unknown error")}`,
+          hint: "The update is still running. Tater will keep checking its status.",
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent = `Firmware log error: ${String(error?.message || "unknown error")}`;
         }
@@ -13608,35 +13645,34 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
     fields: [
       {
         key: "live_log_feed",
-        label: "Firmware Log",
+        label: "Firmware Update",
         type: "textarea",
         value: "",
         description: nativeFirmware
-          ? "Native OTA progress and live device logs stay in this window."
-          : "Prebuilt OTA upload progress and live device logs stay in this window.",
+          ? "Tater sends the prebuilt firmware directly to this satellite and follows its restart."
+          : "Tater sends the matching prebuilt firmware directly to this device.",
       },
     ],
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
       statusNode = statusEl instanceof HTMLElement ? statusEl : null;
       modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
-      modal?.classList.add("voice-log-modal");
-      modalDialog?.classList.add("runtime-settings-dialog-log");
-      fieldsEl?.classList.add("runtime-settings-fields-log");
+      modal?.classList.add("firmware-progress-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
       const logArea = fieldsEl?.querySelector('[data-setting-key="live_log_feed"]') || null;
       if (logArea instanceof HTMLTextAreaElement) {
         logArea.readOnly = true;
         logArea.spellcheck = false;
         logArea.classList.add("voice-log-source-textarea");
         const label = logArea.closest("label");
-        const consoleEl = document.createElement("div");
-        consoleEl.className = "voice-log-console";
-        consoleEl.setAttribute("role", "log");
-        consoleEl.setAttribute("aria-live", "polite");
-        consoleEl.setAttribute("aria-label", `${deviceLabel} firmware log`);
-        logConsole = consoleEl;
         if (label instanceof HTMLElement) {
-          label.classList.add("voice-log-field");
-          label.appendChild(consoleEl);
+          label.classList.add("firmware-progress-field");
+          progressView = createFirmwareProgressView(label, {
+            transport: "ota",
+            method: nativeFirmware ? "Native OTA" : "OTA",
+            target: deviceLabel,
+            message: `Preparing firmware for ${deviceLabel}...`,
+          });
         }
       }
       if (statusNode instanceof HTMLElement) {
@@ -13650,10 +13686,17 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
           id: selector,
           selector,
           template_key: templateKey,
+          follow_logs: nativeFirmware,
         });
         sessionId = String(result?.session_id || "").trim();
         cursor = Number(result?.cursor || 0);
-        renderEntries(Array.isArray(result?.entries) ? result.entries : [], true);
+        progressView?.update({
+          percent: Number(result?.progress_percent || 4),
+          phase: result?.phase,
+          message:
+            String(result?.status_text || result?.message || "").trim() ||
+            `Updating ${deviceLabel}...`,
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || `Streaming firmware logs for ${deviceLabel}.`;
@@ -13662,7 +13705,12 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
         schedulePoll(900);
       } catch (error) {
         const message = String(error?.message || "unknown error");
-        renderEntries([{ display: `Failed to start firmware flash: ${message}`, level: "error" }], true);
+        progressView?.update({
+          tone: "error",
+          phase: "failed",
+          message: `Firmware update could not start: ${message}`,
+          hint: "Check that the device is online, then try again. OTA Logs has more detail.",
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent = `Firmware flash failed to start: ${message}`;
         }
@@ -13672,9 +13720,9 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
       }
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
-      modal?.classList.remove("voice-log-modal");
-      modalDialog?.classList.remove("runtime-settings-dialog-log");
-      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      modal?.classList.remove("firmware-progress-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
       if (statusEl instanceof HTMLElement) {
         statusEl.classList.remove("voice-log-status");
       }
@@ -13937,7 +13985,12 @@ async function browserUsbWaitForReconnect(previousPort, selector, logConsole, st
   throw new Error("The device rebooted, but Chrome did not expose the reconnected USB serial device. Click Select USB Device again and retry Wi-Fi setup.");
 }
 
-async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
+async function flashBrowserUsbPort(port, artifact, logConsole, statusNode, onProgress = null) {
+  const reportUpdate = (payload) => {
+    if (typeof onProgress === "function") {
+      onProgress(payload && typeof payload === "object" ? payload : {});
+    }
+  };
   const flashTransport = String(artifact?.flash_transport || "esp_serial").trim().toLowerCase() || "esp_serial";
   if (flashTransport !== "esp_serial") {
     throw new Error(`Browser ESP flashing cannot write ${flashTransport} firmware.`);
@@ -13972,6 +14025,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
   });
   let lastProgress = -1;
   try {
+    reportUpdate({ percent: 8, phase: "connecting", stage: 1, message: "Connecting to the selected USB device..." });
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = "Connecting to selected USB device...";
     }
@@ -13979,6 +14033,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     const chipName = await loader.main();
     appendEspHomeFirmwareLog(logConsole, `Connected to ${chipName || "ESP device"}.`, "info");
 
+    reportUpdate({ percent: 14, phase: "downloading", stage: 1, message: "Downloading the verified firmware image..." });
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = "Downloading prebuilt firmware from Tater...";
     }
@@ -13994,6 +14049,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     if (eraseAll) {
       appendEspHomeFirmwareLog(logConsole, "Erasing flash first so stale recovery state is cleared.", "info");
     }
+    reportUpdate({ percent: 20, phase: "writing", stage: 2, message: eraseAll ? "Erasing the device and writing firmware..." : "Writing firmware over USB..." });
     const flashOptions = {
       fileArray: [{ data: firmwareData, address: 0 }],
       flashMode: String(artifact?.flash_mode || "dio"),
@@ -14005,6 +14061,12 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
         const pct = total > 0 ? Math.floor((written / total) * 100) : 0;
         if (pct >= lastProgress + 5 || pct === 100) {
           lastProgress = pct;
+          reportUpdate({
+            percent: 20 + pct * 0.72,
+            phase: "writing",
+            stage: 2,
+            message: `Writing firmware over USB... ${pct}%`,
+          });
           appendEspHomeFirmwareLog(logConsole, `Flash progress: ${pct}% (${written}/${total} bytes)`, "info");
           if (statusNode instanceof HTMLElement) {
             statusNode.textContent = `Flashing firmware over browser USB... ${pct}%`;
@@ -14031,6 +14093,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
       });
     }
     appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
+    reportUpdate({ percent: 96, phase: "restarting", stage: 3, message: "Firmware written. Restarting the device..." });
     const resetWorked = await browserUsbHardResetAfterFlash(transport, loader, port, logConsole);
     if (!resetWorked) {
       appendEspHomeFirmwareLog(
@@ -14042,6 +14105,7 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode) {
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = "Browser USB flash finished.";
     }
+    reportUpdate({ percent: 98, phase: "restarting", stage: 3, message: "Firmware is installed. Finishing setup..." });
   } finally {
     try {
       await transport.disconnect();
@@ -14449,7 +14513,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   }
 
   setEspHomeFirmwareCardBusy(card, true);
-  setCoreManagerStatus(card, "Opening browser USB flash log...");
+  setCoreManagerStatus(card, "Opening USB firmware update...");
 
   let stopped = false;
   let selectedPort = null;
@@ -14463,6 +14527,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   let wifiSsidInput = null;
   let wifiPasswordInput = null;
   let modalDialog = null;
+  let progressView = null;
 
   const updateSelectedPort = () => {
     if (selectedNode instanceof HTMLElement) {
@@ -14527,7 +14592,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     if (!selectedPort) {
       throw new Error("Select a USB device first.");
     }
-    await flashBrowserUsbPort(selectedPort, artifact, logConsole, statusNode);
+    await flashBrowserUsbPort(selectedPort, artifact, logConsole, statusNode, (payload) => progressView?.update(payload));
     try {
       await runCoreManagerAction(card, coreKey, "voice_firmware_mark_installed", {
         selector: String(artifact?.selector || selector || "").trim(),
@@ -14542,6 +14607,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     const artifactNative = boolFromAny(artifact?.native_firmware ?? nativeFirmware, false);
     const wifiEnabled = !artifactNative && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
     if (wifiEnabled) {
+      progressView?.update({
+        percent: 98,
+        phase: "provisioning",
+        stage: 3,
+        message: "Firmware installed. Reconnecting to set up Wi-Fi...",
+      });
       selectedPort = await browserUsbWaitForReconnect(selectedPort, selector, logConsole, statusNode);
       updateSelectedPort();
       await setupImprovWifi(
@@ -14568,6 +14639,15 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     setEspHomeFirmwareCardBusy(card, false);
     updateSelectedPort();
     setCoreManagerStatus(card, "Browser USB flash finished.");
+    progressView?.update({
+      percent: 100,
+      phase: "completed",
+      tone: "success",
+      message: "Firmware update complete.",
+      hint: artifactNative
+        ? "Connect to Tater-Setup to add this satellite."
+        : "The device is restarting with its new firmware.",
+    });
     showToast("Browser USB flash finished.");
   };
 
@@ -14590,6 +14670,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       selectButton.disabled = true;
     }
     setCoreManagerStatus(card, nativeFirmware ? "Preparing native USB firmware..." : "Preparing prebuilt USB firmware...");
+    progressView?.update({
+      percent: 3,
+      phase: "starting",
+      stage: 0,
+      message: nativeFirmware ? "Preparing the native firmware image..." : "Preparing the verified firmware image...",
+    });
     if (selectedPort) {
       appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
     }
@@ -14609,6 +14695,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     } catch (error) {
       const message = String(error?.message || "unknown error");
       appendEspHomeFirmwareLog(logConsole, `Browser USB flash failed: ${message}`, "error");
+      progressView?.update({
+        tone: "error",
+        phase: "failed",
+        message: `USB firmware update failed: ${message}`,
+        hint: "Keep the device connected and try again. USB Logs has diagnostic details.",
+      });
       if (statusNode instanceof HTMLElement) {
         statusNode.textContent = `Browser USB flash failed: ${message}`;
       }
@@ -14630,7 +14722,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     fields: [
       {
         key: "browser_flash_log",
-        label: "Firmware Log",
+        label: "USB Firmware Update",
         type: "textarea",
         value: "",
         description: nativeFirmware
@@ -14641,9 +14733,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
       statusNode = statusEl instanceof HTMLElement ? statusEl : null;
       modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
-      modal?.classList.add("voice-log-modal");
-      modalDialog?.classList.add("runtime-settings-dialog-log");
-      fieldsEl?.classList.add("runtime-settings-fields-log");
+      modal?.classList.add("firmware-progress-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
       const logArea = fieldsEl?.querySelector('[data-setting-key="browser_flash_log"]') || null;
       if (logArea instanceof HTMLTextAreaElement) {
         logArea.readOnly = true;
@@ -14683,16 +14775,15 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
             </div>
           </section>
         `;
-        const consoleEl = document.createElement("div");
-        consoleEl.className = "voice-log-console";
-        consoleEl.setAttribute("role", "log");
-        consoleEl.setAttribute("aria-live", "polite");
-        consoleEl.setAttribute("aria-label", `${deviceLabel} browser USB flash log`);
-        logConsole = consoleEl;
         if (label instanceof HTMLElement) {
-          label.classList.add("voice-log-field");
+          label.classList.add("firmware-progress-field");
           label.appendChild(controls);
-          label.appendChild(consoleEl);
+          progressView = createFirmwareProgressView(label, {
+            transport: "usb",
+            method: "Browser USB",
+            target: deviceLabel,
+            message: "Select the USB device to begin.",
+          });
         }
         selectButton = controls.querySelector(".esphome-browser-usb-select");
         buildButton = controls.querySelector(".esphome-browser-usb-build");
@@ -14706,12 +14797,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         statusNode.textContent = "Select the USB device to continue.";
         statusNode.classList.add("voice-log-status");
       }
-      renderEspHomeFirmwareLogEntries(
-        logConsole,
-        [],
-        true,
-        "Select a USB device to start."
-      );
       updateSelectedPort();
       try {
         await renderAuthorizedPorts();
@@ -14727,6 +14812,12 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
             await renderAuthorizedPorts();
           } catch (error) {
             appendEspHomeFirmwareLog(logConsole, `USB selection failed: ${String(error?.message || "unknown error")}`, "error");
+            progressView?.update({
+              tone: "error",
+              phase: "failed",
+              message: `USB device selection failed: ${String(error?.message || "unknown error")}`,
+              hint: "Allow USB access in the browser and select the device again.",
+            });
           }
         });
       }
@@ -14743,9 +14834,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       }
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
-      modal?.classList.remove("voice-log-modal");
-      modalDialog?.classList.remove("runtime-settings-dialog-log");
-      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      modal?.classList.remove("firmware-progress-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
       if (statusEl instanceof HTMLElement) {
         statusEl.classList.remove("voice-log-status");
       }
@@ -14783,6 +14874,7 @@ async function prepareAmlogicUsbImage(card, coreKey) {
   let logConsole = null;
   let statusNode = null;
   let modalDialog = null;
+  let progressView = null;
 
   const finish = async (result) => {
     active = false;
@@ -14794,6 +14886,15 @@ async function prepareAmlogicUsbImage(card, coreKey) {
     const message =
       String(result?.message || result?.status_text || "").trim() ||
       (success ? "S420 USB flash completed." : "S420 USB flash failed.");
+    progressView?.update({
+      percent: success ? 100 : Number(result?.progress_percent || 0),
+      phase,
+      tone: success ? "success" : "error",
+      message,
+      hint: success
+        ? "The S420 is restarting into Tater firmware."
+        : error || "Keep the debug board connected and open USB Logs for diagnostic details.",
+    });
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = message;
     }
@@ -14822,6 +14923,13 @@ async function prepareAmlogicUsbImage(card, coreKey) {
         });
         renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
         cursor = Number(result?.cursor || cursor || 0);
+        progressView?.update({
+          percent: Number(result?.progress_percent || 0),
+          phase: result?.phase,
+          message:
+            String(result?.status_text || result?.message || "").trim() ||
+            "Flashing the S420 over USB...",
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || "Flashing the S420 over USB...";
@@ -14868,7 +14976,7 @@ async function prepareAmlogicUsbImage(card, coreKey) {
     fields: [
       {
         key: "amlogic_usb_flash_log",
-        label: "S420 USB Flash Log",
+        label: "S420 USB Firmware Update",
         type: "textarea",
         value: "",
         description:
@@ -14878,36 +14986,30 @@ async function prepareAmlogicUsbImage(card, coreKey) {
     onOpen: async ({ modal, fieldsEl, statusEl }) => {
       statusNode = statusEl instanceof HTMLElement ? statusEl : null;
       modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
-      modal?.classList.add("voice-log-modal");
-      modalDialog?.classList.add("runtime-settings-dialog-log");
-      fieldsEl?.classList.add("runtime-settings-fields-log");
+      modal?.classList.add("firmware-progress-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
       const logArea = fieldsEl?.querySelector('[data-setting-key="amlogic_usb_flash_log"]') || null;
       if (logArea instanceof HTMLTextAreaElement) {
         logArea.readOnly = true;
         logArea.spellcheck = false;
         logArea.classList.add("voice-log-source-textarea");
         const label = logArea.closest("label");
-        const consoleEl = document.createElement("div");
-        consoleEl.className = "voice-log-console";
-        consoleEl.setAttribute("role", "log");
-        consoleEl.setAttribute("aria-live", "polite");
-        consoleEl.setAttribute("aria-label", "ThirdReality S420 USB flash log");
-        logConsole = consoleEl;
         if (label instanceof HTMLElement) {
-          label.classList.add("voice-log-field");
-          label.appendChild(consoleEl);
+          label.classList.add("firmware-progress-field");
+          progressView = createFirmwareProgressView(label, {
+            transport: "usb",
+            method: "Amlogic USB",
+            target: deviceLabel,
+            message: "Checking the debug-board USB connection...",
+            hint: "Keep the debug board, USB cable, and S420 power connected until completion.",
+          });
         }
       }
       if (statusNode instanceof HTMLElement) {
         statusNode.classList.add("voice-log-status");
         statusNode.textContent = "Detecting the S420 debug board in Amlogic USB burn mode...";
       }
-      renderEspHomeFirmwareLogEntries(
-        logConsole,
-        [],
-        true,
-        "Connect the debug board and keep the S420 powered while Tater checks USB burn mode..."
-      );
       try {
         const result = await runCoreManagerAction(card, coreKey, "voice_firmware_amlogic_flash_start", {
           id: selector,
@@ -14921,6 +15023,13 @@ async function prepareAmlogicUsbImage(card, coreKey) {
           throw new Error("The S420 USB flash session did not start.");
         }
         active = boolFromAny(result?.active, true);
+        progressView?.update({
+          percent: Number(result?.progress_percent || 6),
+          phase: result?.phase,
+          message:
+            String(result?.status_text || result?.message || "").trim() ||
+            "Flashing the S420 over USB...",
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() || "Flashing the S420 over USB...";
@@ -14933,9 +15042,9 @@ async function prepareAmlogicUsbImage(card, coreKey) {
       }
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
-      modal?.classList.remove("voice-log-modal");
-      modalDialog?.classList.remove("runtime-settings-dialog-log");
-      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      modal?.classList.remove("firmware-progress-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
       if (statusEl instanceof HTMLElement) {
         statusEl.classList.remove("voice-log-status");
       }
@@ -15410,6 +15519,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
   let statusNode = null;
   let modalDialog = null;
 
+  let progressView = null;
+
   const setBusy = (busy) => {
     if (trigger instanceof HTMLButtonElement && document.body.contains(trigger)) {
       trigger.disabled = Boolean(busy);
@@ -15453,6 +15564,14 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     const summary = failed
       ? `${singleUpdate ? "Firmware task" : "Firmware batch"} finished: ${completed} ${actionPast}, ${failed} failed.`
       : `${singleUpdate ? "Firmware task" : "Firmware batch"} finished: ${completed} ${actionPast}.`;
+    progressView?.update({
+      percent: 100,
+      phase: failed ? "failed" : "completed",
+      tone: failed ? "error" : "success",
+      stage: 3,
+      message: summary,
+      hint: failed ? "Open OTA Logs for the device that failed, then retry it." : "All selected firmware devices are up to date.",
+    });
     if (statusNode instanceof HTMLElement) {
       statusNode.classList.add("voice-log-status");
       statusNode.textContent = summary;
@@ -15478,6 +15597,17 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         });
         renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
         cursor = Number(result?.cursor || cursor || 0);
+        const currentProgress = Math.max(0, Math.min(100, Number(result?.progress_percent || 0)));
+        const overallProgress = ((Math.max(0, index - 1) + currentProgress / 100) / updates.length) * 100;
+        progressView?.update({
+          percent: overallProgress,
+          phase: result?.phase,
+          stage: index >= updates.length ? 2 : 1,
+          message:
+            String(result?.status_text || result?.message || "").trim() ||
+            `${actionProgress} ${row.title} (${index}/${updates.length})...`,
+          hint: `${completed + failed} of ${updates.length} finished. Tater updates one device at a time for reliability.`,
+        });
         if (statusNode instanceof HTMLElement) {
           statusNode.textContent =
             String(result?.status_text || result?.message || "").trim() ||
@@ -15494,6 +15624,13 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
             appendBatchLine(`${row.title} ${actionPast}.`, "info");
           }
           currentSessionId = "";
+          progressView?.update({
+            percent: (index / updates.length) * 100,
+            phase: index >= updates.length ? "restarting" : "uploading",
+            stage: index >= updates.length ? 2 : 1,
+            message: `${row.title} ${phase === "failed" || phase === "cancelled" || error ? "failed" : actionPast}.`,
+            hint: `${completed + failed} of ${updates.length} finished.`,
+          });
           window.setTimeout(startNext, 900);
           return;
         }
@@ -15501,6 +15638,11 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       } catch (error) {
         failed += 1;
         appendBatchLine(`${row.title} log polling failed: ${String(error?.message || "unknown error")}`, "error");
+        progressView?.update({
+          percent: (index / updates.length) * 100,
+          message: `${row.title} could not be updated. Moving to the next device...`,
+          hint: String(error?.message || "Unknown firmware error"),
+        });
         await stopCurrentSession();
         window.setTimeout(startNext, 900);
       }
@@ -15520,6 +15662,13 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     cursor = 0;
     currentSessionId = "";
     appendBatchLine(`Starting ${row.title} (${index}/${updates.length})...`, "info");
+    progressView?.update({
+      percent: ((index - 1) / updates.length) * 100,
+      phase: "starting",
+      stage: index === 1 ? 0 : 1,
+      message: `Preparing ${row.title} (${index}/${updates.length})...`,
+      hint: `${completed + failed} of ${updates.length} finished. Keep every device powered on.`,
+    });
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = `Starting ${row.title} (${index}/${updates.length})...`;
     }
@@ -15533,6 +15682,14 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       currentSessionId = String(result?.session_id || "").trim();
       cursor = Number(result?.cursor || 0);
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
+      progressView?.update({
+        percent: (((index - 1) + Number(result?.progress_percent || 4) / 100) / updates.length) * 100,
+        phase: result?.phase,
+        stage: index === 1 ? 0 : 1,
+        message:
+          String(result?.status_text || result?.message || "").trim() ||
+          `${actionProgress} ${row.title}...`,
+      });
       if (!currentSessionId) {
         throw new Error("Firmware session did not start.");
       }
@@ -15540,6 +15697,11 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     } catch (error) {
       failed += 1;
       appendBatchLine(`${row.title} failed to start: ${String(error?.message || "unknown error")}`, "error");
+      progressView?.update({
+        percent: (index / updates.length) * 100,
+        message: `${row.title} could not start. Moving to the next device...`,
+        hint: String(error?.message || "Unknown firmware error"),
+      });
       window.setTimeout(startNext, 900);
     }
   };
@@ -15565,7 +15727,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     fields: [
       {
         key: "firmware_update_all_log",
-        label: singleUpdate ? "Firmware Update Log" : "Batch Firmware Log",
+        label: singleUpdate ? "Firmware Update" : "Firmware Updates",
         type: "textarea",
         value: "",
         description: singleUpdate
@@ -15581,27 +15743,27 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         statusNode.classList.add("voice-log-status");
       }
       modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
-      modal?.classList.add("voice-log-modal");
-      modalDialog?.classList.add("runtime-settings-dialog-log");
-      fieldsEl?.classList.add("runtime-settings-fields-log");
+      modal?.classList.add("firmware-progress-modal");
+      modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
       const logArea = fieldsEl?.querySelector('[data-setting-key="firmware_update_all_log"]') || null;
       if (logArea instanceof HTMLTextAreaElement) {
         logArea.readOnly = true;
         logArea.spellcheck = false;
         logArea.classList.add("voice-log-source-textarea");
         const label = logArea.closest("label");
-        const consoleEl = document.createElement("div");
-        consoleEl.className = "voice-log-console";
-        consoleEl.setAttribute("role", "log");
-        consoleEl.setAttribute("aria-live", "polite");
-        consoleEl.setAttribute("aria-label", singleUpdate ? "Firmware update log" : "Batch firmware update log");
-        logConsole = consoleEl;
         if (label instanceof HTMLElement) {
-          label.classList.add("voice-log-field");
-          label.appendChild(consoleEl);
+          label.classList.add("firmware-progress-field");
+          progressView = createFirmwareProgressView(label, {
+            transport: "ota",
+            method: singleUpdate ? "OTA" : "Batch OTA",
+            target: singleUpdate ? updates[0].title : `${updates.length} firmware devices`,
+            stages: singleUpdate ? ["Prepare", "Transfer", "Restart", "Finish"] : ["Queue", "Update", "Restart", "Finish"],
+            message: singleUpdate ? `Preparing ${updates[0].title}...` : `Preparing ${updates.length} firmware updates...`,
+            hint: "Tater updates one device at a time so each update can finish safely.",
+          });
         }
       }
-      renderEspHomeFirmwareLogEntries(logConsole, [], true, flashAllMode ? "Waiting to start firmware flash..." : "Waiting to start firmware updates...");
       appendBatchLine(
         `Queued ${updates.length} firmware ${flashAllMode ? "flash target" : "update"}${updates.length === 1 ? "" : "s"}.`,
         "info"
@@ -15609,9 +15771,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       await startNext();
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
-      modal?.classList.remove("voice-log-modal");
-      modalDialog?.classList.remove("runtime-settings-dialog-log");
-      fieldsEl?.classList.remove("runtime-settings-fields-log");
+      modal?.classList.remove("firmware-progress-modal");
+      modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+      fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
       if (statusEl instanceof HTMLElement) {
         statusEl.classList.remove("voice-log-status");
       }

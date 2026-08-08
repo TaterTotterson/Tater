@@ -434,6 +434,12 @@ DASHBOARD_AWARENESS_CAMERA_SUMMARY_REQUEST = (
     "Ignore simple sensor-only events unless they help explain the camera activity."
 )
 runtime_context_estimate_cache: Dict[str, Any] = {"updated_at": 0.0, "payload": {}}
+native_mascot_hydra_recent_lock = threading.RLock()
+native_mascot_hydra_recent_cache: Dict[str, Any] = {
+    "updated_at": 0.0,
+    "recent_seconds": 0,
+    "payload": {},
+}
 runtime_hardware_snapshot_lock = threading.RLock()
 runtime_hardware_snapshot_state: Dict[str, Any] = {
     "cached_at": 0.0,
@@ -9442,6 +9448,13 @@ async def _shutdown_event() -> None:
             timeout=10.0,
         )
         await _run_shutdown_step("Tater Voice runtime", esphome_home_module.shutdown, timeout=10.0)
+        await _run_shutdown_step(
+            "AirPlay bridge runtime",
+            lambda: asyncio.to_thread(
+                __import__("airplay_bridge").shutdown_airplay_bridge_runtime
+            ),
+            timeout=6.0,
+        )
         await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
         await _run_shutdown_step(
             "core runtime",
@@ -9633,7 +9646,12 @@ def _runtime_platform_label(platform: Any) -> str:
 def _load_chat_job_history_rows(max_items: int = 5000) -> List[Dict[str, Any]]:
     max_rows = max(200, min(int(max_items or 0), 20000))
     try:
-        keys = sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*"))
+        # Redis-py's default SCAN count is only 10. With a mature Tater database
+        # that turns one history refresh into hundreds of socket round trips.
+        keys = sorted(
+            str(k)
+            for k in redis_client.scan_iter(match="tater:hydra:ledger:*", count=1000)
+        )
     except Exception:
         keys = []
 
@@ -13799,11 +13817,36 @@ def _native_mascot_response_text(responses: Any, *, error: str = "") -> str:
 
 def _native_mascot_hydra_recent(*, recent_seconds: int = 300) -> Dict[str, Any]:
     now = time.time()
-    try:
-        rows = _load_chat_job_history_rows(max_items=1000)
-    except Exception:
-        logger.exception("Failed to load hydra ledger rows for native mascot status")
-        return {}
+    recent_window = max(1, int(recent_seconds or 0))
+    with native_mascot_hydra_recent_lock:
+        cached_at = float(native_mascot_hydra_recent_cache.get("updated_at") or 0.0)
+        cached_window = int(native_mascot_hydra_recent_cache.get("recent_seconds") or 0)
+        cached_payload = native_mascot_hydra_recent_cache.get("payload")
+        if now - cached_at < 2.0 and cached_window == recent_window:
+            return dict(cached_payload) if isinstance(cached_payload, dict) else {}
+
+        # This endpoint is polled by the native title bar. It only needs the
+        # newest completed turn, not up to 1,000 entries from every platform.
+        # Reading a small tail also prevents status polling from competing with
+        # real-time satellite media delivery for the Python GIL and Redis socket.
+        rows: List[Dict[str, Any]] = []
+        try:
+            keys = sorted(
+                str(key)
+                for key in redis_client.scan_iter(match="tater:hydra:ledger:*", count=1000)
+            )
+            for key in keys:
+                for raw in redis_client.lrange(key, -8, -1) or []:
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(item, dict):
+                        rows.append(dict(item))
+        except Exception:
+            logger.exception("Failed to load hydra ledger rows for native mascot status")
+            rows = []
+        rows.sort(key=lambda row: float(row.get("timestamp") or 0.0), reverse=True)
 
     for row in rows:
         if not isinstance(row, dict):
@@ -13812,7 +13855,7 @@ def _native_mascot_hydra_recent(*, recent_seconds: int = 300) -> Dict[str, Any]:
         if completed_at <= 0:
             continue
         age = now - completed_at
-        if age < 0 or age > max(1, int(recent_seconds or 0)):
+        if age < 0 or age > recent_window:
             continue
 
         outcome = str(row.get("outcome") or "").strip().lower()
@@ -13838,7 +13881,7 @@ def _native_mascot_hydra_recent(*, recent_seconds: int = 300) -> Dict[str, Any]:
 
         platform = normalize_platform(row.get("platform")) or "unknown"
         user_message = str(row.get("user_message") or "").strip()
-        return {
+        payload = {
             "job_id": str(row.get("turn_id") or ""),
             "status": "error" if outcome in {"blocked", "failed"} else "done",
             "outcome": outcome,
@@ -13849,6 +13892,21 @@ def _native_mascot_hydra_recent(*, recent_seconds: int = 300) -> Dict[str, Any]:
             "completed_age_seconds": max(0, int(age)),
             "response": response_text,
         }
+        native_mascot_hydra_recent_cache.update(
+            {
+                "updated_at": now,
+                "recent_seconds": recent_window,
+                "payload": dict(payload),
+            }
+        )
+        return payload
+    native_mascot_hydra_recent_cache.update(
+        {
+            "updated_at": now,
+            "recent_seconds": recent_window,
+            "payload": {},
+        }
+    )
     return {}
 
 
@@ -16391,6 +16449,16 @@ async def _maybe_await_result(result: Any) -> Any:
     return result
 
 
+async def _call_surface_handler(handler: Callable[..., Any], **kwargs: Any) -> Any:
+    """Keep synchronous extension handlers from blocking Uvicorn's event loop."""
+    if inspect.iscoroutinefunction(handler):
+        return await handler(**kwargs)
+    result = await asyncio.to_thread(handler, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
 def _coerce_surface_result(result: Any) -> Any:
     if result is None:
         return {"ok": True}
@@ -16492,7 +16560,8 @@ async def run_core_webhook(core_key: str, webhook_name: str, request: Request) -
 
     query = dict(request.query_params)
     try:
-        result = handler(
+        result = await _call_surface_handler(
+            handler,
             webhook=hook,
             payload=payload,
             query=query,
@@ -17483,7 +17552,12 @@ def _hydra_ledger_keys_for_platform(platform: str) -> List[str]:
     if plat == "all":
         keys: List[str] = []
         try:
-            keys.extend(sorted(str(k) for k in redis_client.scan_iter(match="tater:hydra:ledger:*")))
+            keys.extend(
+                sorted(
+                    str(k)
+                    for k in redis_client.scan_iter(match="tater:hydra:ledger:*", count=1000)
+                )
+            )
         except Exception:
             pass
         deduped: List[str] = []

@@ -35,6 +35,11 @@ _RUNTIME_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _DEVICE_REGISTRY_CACHE_LOOP_ENABLED = True
 _DEVICE_REGISTRY_CHANGE_LOCK = threading.RLock()
 _DEVICE_REGISTRY_CHANGE_LISTENERS: List[Callable[[str, str], Any]] = []
+_EVENT_HISTORY_CACHE_LOCK = threading.RLock()
+_EVENT_HISTORY_CACHE: Dict[str, Any] = {
+    "loaded_at": 0.0,
+    "rows": [],
+}
 _GENERIC_RUNTIME_CURSOR: Dict[str, Any] = {}
 _GENERIC_RUNTIME_NEXT_POLL: Dict[str, float] = {}
 _RUNTIME_PROVIDER_OWNER = {
@@ -293,8 +298,20 @@ def _publish_event(client: Any, provider: str, kind: str, payload: Dict[str, Any
         "kind": _text(kind),
         "payload": payload if isinstance(payload, dict) else {},
     }
-    redis_obj.lpush(INTEGRATION_RUNTIME_EVENTS_KEY, json.dumps(record, separators=(",", ":"), default=str))
+    serialized_record = json.dumps(record, separators=(",", ":"), default=str)
+    redis_obj.lpush(INTEGRATION_RUNTIME_EVENTS_KEY, serialized_record)
     redis_obj.ltrim(INTEGRATION_RUNTIME_EVENTS_KEY, 0, _event_max() - 1)
+    with _EVENT_HISTORY_CACHE_LOCK:
+        cached_rows = _EVENT_HISTORY_CACHE.get("rows")
+        if isinstance(cached_rows, list) and float(
+            _EVENT_HISTORY_CACHE.get("loaded_at") or 0.0
+        ) > 0.0:
+            _EVENT_HISTORY_CACHE.update(
+                {
+                    "loaded_at": time.monotonic(),
+                    "rows": [serialized_record, *cached_rows][:_event_max()],
+                }
+            )
     _status_set(
         redis_obj,
         last_event_seq=seq,
@@ -1812,7 +1829,23 @@ def integration_runtime_events(client: Any = None, *, after_seq: Any = 0, limit:
     redis_obj = _runtime_client(client)
     after = _as_int(after_seq, 0, minimum=0)
     max_rows = _as_int(limit, 200, minimum=1, maximum=_event_max())
-    rows = redis_obj.lrange(INTEGRATION_RUNTIME_EVENTS_KEY, 0, _event_max() - 1) if redis_obj else []
+    rows: List[Any] = []
+    if redis_obj:
+        now = time.monotonic()
+        with _EVENT_HISTORY_CACHE_LOCK:
+            cached_rows = _EVENT_HISTORY_CACHE.get("rows")
+            if isinstance(cached_rows, list) and now - float(
+                _EVENT_HISTORY_CACHE.get("loaded_at") or 0.0
+            ) < 2.0:
+                rows = list(cached_rows)
+            else:
+                rows = list(
+                    redis_obj.lrange(INTEGRATION_RUNTIME_EVENTS_KEY, 0, _event_max() - 1)
+                    or []
+                )
+                _EVENT_HISTORY_CACHE.update(
+                    {"loaded_at": now, "rows": list(rows)}
+                )
     events: List[Dict[str, Any]] = []
     for raw in rows or []:
         event = _json_loads(raw)

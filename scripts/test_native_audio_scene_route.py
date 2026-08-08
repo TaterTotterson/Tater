@@ -340,6 +340,29 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(kwargs["start_lead_ms"], 1125)
         self.assertTrue(kwargs["compatibility_checked"])
 
+    def test_multi_satellite_music_route_applies_per_destination_calibration(self) -> None:
+        payload = {
+            "selectors": ["native:kitchen", "native:office"],
+            "audio_b64": base64.b64encode(b"music").decode("ascii"),
+            "media_type": "audio/mpeg",
+            "media_content_type": "music",
+            "filename": "song.mp3",
+            "volume_percent": 65,
+            "player_settings": {
+                "native:kitchen": {"volume_percent": 41, "sync_offset_ms": -200},
+                "native:office": {"volume_percent": 72, "sync_offset_ms": 100},
+            },
+        }
+
+        asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        members, _kwargs = self.group_calls[0]
+        by_selector = {row["selector"]: row for row in members}
+        self.assertEqual(by_selector["native:kitchen"]["volume_percent"], 41)
+        self.assertEqual(by_selector["native:kitchen"]["delay_ms"], 0)
+        self.assertEqual(by_selector["native:office"]["volume_percent"], 72)
+        self.assertEqual(by_selector["native:office"]["delay_ms"], 300)
+
     def test_multi_satellite_music_route_skips_an_offline_member(self) -> None:
         self.unavailable_group_members = {"native:office": "offline"}
         payload = {

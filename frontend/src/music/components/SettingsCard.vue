@@ -14,6 +14,7 @@ const dirty = new Set<string>();
 const fieldGrid = ref<HTMLElement | null>(null);
 let fieldLayoutFrame = 0;
 let fieldResizeObserver: ResizeObserver | null = null;
+let fieldLayoutSignature = "";
 
 function layoutFields(): void {
   fieldLayoutFrame = 0;
@@ -52,15 +53,40 @@ function copyFieldValue(value: unknown): unknown {
   return value;
 }
 
+function layoutSignature(fields: MusicField[]): string {
+  return JSON.stringify(
+    (fields || []).map((field) => ({
+      key: field.key,
+      type: field.type,
+      label: field.label,
+      description: field.description,
+      placeholder: field.placeholder,
+      compact: field.compact,
+      disabled: field.disabled,
+      read_only: field.read_only,
+      required: field.required,
+      min: field.min,
+      max: field.max,
+      step: field.step,
+      suffix: field.suffix,
+      options: field.options,
+    })),
+  );
+}
+
 watch(
   () => props.item.fields,
   (fields) => {
     for (const field of fields || []) {
       if (!dirty.has(field.key)) values[field.key] = copyFieldValue(field.value);
     }
-    void nextTick().then(observeFields);
+    const nextLayoutSignature = layoutSignature(fields || []);
+    if (nextLayoutSignature !== fieldLayoutSignature) {
+      fieldLayoutSignature = nextLayoutSignature;
+      void nextTick().then(observeFields);
+    }
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 );
 
 onMounted(() => void nextTick().then(observeFields));

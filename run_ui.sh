@@ -18,6 +18,7 @@ fi
 
 HTMLUI_HOST="${HTMLUI_HOST:-0.0.0.0}"
 HTMLUI_PORT="${HTMLUI_PORT:-8501}"
+HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS="${HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS:-8}"
 TATER_PYTHON="${TATER_PYTHON:-}"
 TATER_VENV_DIR="${TATER_VENV_DIR:-.venv}"
 OBJC_DISABLE_INITIALIZE_FORK_SAFETY="${OBJC_DISABLE_INITIALIZE_FORK_SAFETY:-YES}"
@@ -45,6 +46,11 @@ if [ -z "${TATER_PYTHON}" ]; then
   fi
 fi
 
-set -- "${TATER_PYTHON}" -m uvicorn tateros_app:app --host "${HTMLUI_HOST}" --port "${HTMLUI_PORT}" --no-access-log
+set -- \
+  "${TATER_PYTHON}" -m uvicorn tateros_app:app \
+  --host "${HTMLUI_HOST}" \
+  --port "${HTMLUI_PORT}" \
+  --timeout-graceful-shutdown "${HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS}" \
+  --no-access-log
 
 exec "$@"

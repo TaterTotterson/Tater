@@ -29,6 +29,7 @@ class SonosMusicGroupTests(unittest.TestCase):
             },
         }
         set_uris = []
+        volumes = []
         played = []
 
         def set_uri(root_url, source_url, *, timeout_s):
@@ -41,12 +42,24 @@ class SonosMusicGroupTests(unittest.TestCase):
             mock.patch.object(sonos, "resolve_sonos_target", side_effect=lambda target: speakers[target]),
             mock.patch.object(sonos, "_sonos_snapshot_player", return_value={"media": {"CurrentURI": ""}}),
             mock.patch.object(sonos, "_sonos_set_transport_uri", side_effect=set_uri),
+            mock.patch.object(
+                sonos,
+                "_sonos_set_volume",
+                side_effect=lambda root_url, value, *, timeout_s: volumes.append(
+                    (root_url, value, timeout_s)
+                ),
+            ),
             mock.patch.object(sonos, "sonos_play_url_sync", side_effect=play_url),
         ):
             result = sonos.sonos_play_media_sync(
                 speakers=["RINCON_LIVING", "RINCON_KITCHEN"],
                 source_url="http://tater.local:8501/api/media/runtime/asset/song.mp3",
                 media_content_type="music",
+                volume_percent=50,
+                volume_by_speaker={
+                    "RINCON_LIVING": 38,
+                    "RINCON_KITCHEN": 67,
+                },
             )
 
         self.assertTrue(result["ok"])
@@ -54,6 +67,7 @@ class SonosMusicGroupTests(unittest.TestCase):
         self.assertEqual(set_uris[0][1], "x-rincon:RINCON_LIVING")
         self.assertEqual(played[0]["speaker"]["id"], "RINCON_LIVING")
         self.assertEqual(result["group"]["joined_count"], 1)
+        self.assertEqual([row[1] for row in volumes], [38, 67])
 
     def test_stop_restores_temporarily_joined_sonos_zone(self) -> None:
         sonos._sonos_music_groups["session-1"] = {

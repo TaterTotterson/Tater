@@ -75,6 +75,20 @@ export interface MusicPlaybackState {
   seek_step_seconds?: number;
 }
 
+export interface MusicPlayerRow {
+  target: string;
+  label?: string;
+  meta?: string;
+  selected?: boolean;
+  kind?: string;
+  sync_quality?: "precise" | "automatic" | "bridge" | "best_effort" | string;
+  volume_percent?: number;
+  sync_offset_ms?: number;
+  transport_mode?: "auto" | "native" | "airplay" | string;
+  transport_options?: Array<{ value: string; label: string }>;
+  airplay_bridge_target?: string;
+}
+
 export interface MusicRecommendationEntry {
   id?: string;
   type?: "album" | "song" | string;
@@ -91,6 +105,7 @@ export interface MusicItem {
   id: string;
   group?: string;
   card_variant?: string;
+  assistant_name?: string;
   title?: string;
   subtitle?: string;
   detail?: string;
@@ -100,6 +115,8 @@ export interface MusicItem {
   summary_rows?: MusicSummaryRow[];
   fields?: MusicField[];
   popup_fields?: MusicField[];
+  player_rows?: MusicPlayerRow[];
+  test_sync_action?: string;
   settings_title?: string;
   settings_label?: string;
   settings_aria_label?: string;

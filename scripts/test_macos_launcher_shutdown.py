@@ -7,12 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER_SOURCE = ROOT / "macos" / "Tater" / "Sources" / "TaterAssistant" / "main.swift"
+RUN_UI_SOURCE = ROOT / "run_ui.sh"
 
 
 class MacOSLauncherShutdownTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = LAUNCHER_SOURCE.read_text(encoding="utf-8")
+        cls.run_ui_source = RUN_UI_SOURCE.read_text(encoding="utf-8")
+
+    def test_uvicorn_connection_drain_has_a_bounded_timeout(self) -> None:
+        self.assertIn(
+            'HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS="${HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS:-8}"',
+            self.run_ui_source,
+        )
+        self.assertIn(
+            '--timeout-graceful-shutdown "${HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS}"',
+            self.run_ui_source,
+        )
 
     def test_backend_output_handler_detaches_at_eof(self) -> None:
         self.assertRegex(
