@@ -44,6 +44,12 @@
 
 ### Firmware Updates
 
+- Updated Sat1's bundled XMOS firmware to 1.1.0 with four-tap
+  fractional-delay beamforming, per-microphone calibration, unhealthy-microphone
+  fallback, and expanded direction diagnostics. When a voice session begins,
+  XMOS holds the initial speaker direction so the beamformer stays focused
+  instead of chasing reflections or background noise; Sat1's directional LED
+  shows where that active microphone beam is aimed.
 - Replaced command-terminal firmware windows with a focused OTA/USB update
   popup showing real progress, friendly status messages, update stages, and
   clear success or error states. Dedicated OTA and USB logs remain available
