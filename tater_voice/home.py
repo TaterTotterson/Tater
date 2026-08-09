@@ -1421,7 +1421,9 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         }
 
     if action_name == "voice_global_satellite_settings_save":
-        values = esphome_runtime.payload_values(body)
+        values = native_live_settings.resolve_wake_word_source_values(
+            esphome_runtime.payload_values(body)
+        )
         allowed_values = {
             key: value
             for key, value in values.items()

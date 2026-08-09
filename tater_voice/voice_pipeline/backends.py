@@ -2031,7 +2031,16 @@ async def _native_synthesize_text(
 
     selection = _tts_selection_from_values(values)
     selected_backend = vp._normalize_tts_backend(vp._text(session.tts_backend if isinstance(session, VoiceSessionRuntime) else "") or selection.get("backend"))
-    effective_backend = vp._normalize_tts_backend(vp._text(session.tts_backend_effective if isinstance(session, VoiceSessionRuntime) else ""))
+    effective_backend_value = vp._text(
+        session.tts_backend_effective
+        if isinstance(session, VoiceSessionRuntime)
+        else ""
+    )
+    effective_backend = (
+        vp._normalize_tts_backend(effective_backend_value)
+        if effective_backend_value
+        else ""
+    )
     backend_note = ""
     if not effective_backend:
         effective_backend, backend_note = _resolve_tts_backend(values)

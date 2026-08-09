@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 from helpers import redis_client
 
+from . import wake_word_catalog
+
 SETTINGS_HASH_KEY = "voice_native_satellite_live_settings"
 DEVICE_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:device:"
 GLOBAL_VOICE_SETTINGS_HASH_KEY = "voice_core_settings"
@@ -136,6 +138,7 @@ GLOBAL_WAKE_PROFILE_KEYS = (
 GLOBAL_SATELLITE_PERSISTED_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | set(GLOBAL_WAKE_PROFILE_KEYS)
 GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
     "wake_section",
+    "wake_word_catalog_url",
     "wake_profile_name",
     "training_section",
     "playback_section",
@@ -191,6 +194,11 @@ WAKE_ENVIRONMENT_ALIASES = {
 }
 WAKE_WORD_ROWS = [
     ("hey_tater", "Hey Tater"),
+    ("custom_url", "Custom URL"),
+]
+WAKE_WORD_SOURCE_ROWS = [
+    ("hey_tater", "Built-in Hey Tater"),
+    ("catalog", "Tater Wake Word Catalog"),
     ("custom_url", "Custom URL"),
 ]
 BUILTIN_WAKE_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -1071,6 +1079,18 @@ def _profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Di
 
 def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, Any]]:
     current = settings_snapshot(selector, board=board)
+    catalog_selected = current["wake_word"] == "custom_url" and wake_word_catalog.is_catalog_url(
+        current["wake_word_url"]
+    )
+    catalog_field = (
+        wake_word_catalog.field_payload(
+            current_url=current["wake_word_url"],
+            current_label=current["wake_profile_name"],
+        )
+        if not _selector_token(selector)
+        else {"options": [], "selected_url": "", "description": ""}
+    )
+    wake_word_source = "catalog" if catalog_selected else current["wake_word"]
     fields = [
         {
             "key": "wake_section",
@@ -1095,10 +1115,20 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "key": "wake_word",
             "label": "Wake Word",
             "type": "select",
-            "value": current["wake_word"],
+            "value": wake_word_source,
             "default": DEFAULTS["wake_word"],
-            "options": [{"value": value, "label": row["label"]} for value, row in WAKE_WORDS.items()],
-            "description": "Use the built-in Tater model or load a trainer/GitHub microWakeWord JSON package.",
+            "options": [{"value": value, "label": label} for value, label in WAKE_WORD_SOURCE_ROWS],
+            "description": "Use Tater's built-in model, choose a versioned model from the official catalog, or provide a custom microWakeWord JSON package.",
+        },
+        {
+            "key": "wake_word_catalog_url",
+            "label": "Wake Word Catalog",
+            "type": "select",
+            "value": catalog_field.get("selected_url") or "",
+            "default": "",
+            "options": catalog_field.get("options") if isinstance(catalog_field.get("options"), list) else [],
+            "show_when": {"source_key": "wake_word", "equals": "catalog"},
+            "description": _text(catalog_field.get("description")),
         },
         {
             "key": "wake_word_url",
@@ -1537,7 +1567,7 @@ def global_model_settings_sections() -> List[Dict[str, Any]]:
             (
                 "Wake Word",
                 "",
-                ("wake_engine", "wake_word", "wake_word_url"),
+                ("wake_engine", "wake_word", "wake_word_catalog_url", "wake_word_url"),
             ),
             (
                 "Trainer Feedback",
@@ -1567,7 +1597,7 @@ def global_settings_sections() -> List[Dict[str, Any]]:
             (
                 "Wake Word",
                 "",
-                ("wake_engine", "wake_word", "wake_word_url"),
+                ("wake_engine", "wake_word", "wake_word_catalog_url", "wake_word_url"),
             ),
             (
                 "Trainer Feedback",
@@ -1581,6 +1611,18 @@ def global_settings_sections() -> List[Dict[str, Any]]:
             ),
         ]
     )
+
+
+def resolve_wake_word_source_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    resolved = dict(values or {})
+    source = _lower(resolved.get("wake_word"))
+    if source == "catalog":
+        resolved["wake_word"] = "custom_url"
+        resolved["wake_word_url"] = wake_word_catalog.require_catalog_url(
+            resolved.get("wake_word_catalog_url")
+        )
+    resolved.pop("wake_word_catalog_url", None)
+    return resolved
 
 
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:
