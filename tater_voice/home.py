@@ -383,10 +383,34 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         for row in esphome_runtime.load_satellite_registry()
         if isinstance(row, dict) and _is_native_satellite_row(row) and esphome_runtime.text(row.get("selector"))
     }
-    selectors = set(clients.keys()) | {
+    client_selectors = {
         esphome_runtime.text(selector)
-        for selector in metrics_devices.keys()
+        for selector, row in clients.items()
+        if esphome_runtime.text(selector)
+        and isinstance(row, dict)
+        and (
+            bool(row.get("connected"))
+            or (
+                isinstance(row.get("wake_verifier"), dict)
+                and (
+                    int(row["wake_verifier"].get("count") or 0) > 0
+                    or int(row["wake_verifier"].get("rejections") or 0) > 0
+                    or bool(row["wake_verifier"].get("last"))
+                )
+            )
+        )
+    }
+    selectors = client_selectors | {
+        esphome_runtime.text(selector)
+        for selector, row in metrics_devices.items()
         if esphome_runtime.text(selector).startswith("native:")
+        and isinstance(row, dict)
+        and (
+            int(row.get("wake_verifier_checks") or 0) > 0
+            or int(row.get("wake_verifier_rejections") or 0) > 0
+            or int(row.get("wake_verifier_fail_open") or 0) > 0
+            or bool(row.get("wake_verifier_last"))
+        )
     }
     rows: List[Dict[str, Any]] = []
     total_checks = 0
@@ -550,7 +574,10 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         "save_label": "Apply To All Satellites",
         "reset_action": "voice_wake_verifier_stats_reset",
         "reset_label": "Reset Verification Stats",
-        "reset_confirm": "Reset stored STT wake-verification statistics for every satellite?",
+        "reset_confirm": (
+            "Reset stored STT wake-verification statistics for every satellite and clear disconnected "
+            "satellites from this table?"
+        ),
         "remove_action": "",
     }
 
@@ -1465,7 +1492,10 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             message = "All stored voice statistics were reset. A new 30-day statistics period has started."
         else:
             result = esphome_runtime.reset_wake_verifier_metrics()
-            message = "Stored STT wake-verification statistics were reset for every satellite."
+            message = (
+                "Stored STT wake-verification statistics were reset and disconnected satellites were "
+                "cleared from the results table."
+            )
         try:
             native_reset = native_satellite.run_on_runtime_loop(
                 native_satellite.reset_wake_verifier_runtime_stats(),
@@ -1632,8 +1662,25 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         selector = esphome_runtime.payload_selector(body)
         if not selector:
             raise ValueError("selector is required")
-        removed = esphome_runtime.remove_satellite(selector)
-        return {"ok": True, "action": action_name, "selector": selector, "removed": bool(removed), "message": "Satellite removed." if removed else "Satellite was already absent.", "status": esphome_runtime.status()}
+        native_cleanup: Dict[str, Any] = {}
+        if esphome_runtime.lower(selector).startswith("native:"):
+            result = native_satellite.run_on_runtime_loop(
+                native_satellite.forget(selector),
+                timeout=5.0,
+            )
+            native_cleanup = result if isinstance(result, dict) else {}
+            removed = bool(native_cleanup.get("removed"))
+        else:
+            removed = esphome_runtime.remove_satellite(selector)
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "removed": bool(removed),
+            "native_cleanup": native_cleanup,
+            "message": "Satellite forgotten." if removed else "Satellite was already absent.",
+            "status": esphome_runtime.status(),
+        }
 
     if action_name == "voice_satellite_identify":
         selector = esphome_runtime.payload_selector(body)

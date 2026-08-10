@@ -123,6 +123,17 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertIn("continued_chat", runtime_keys)
         self.assertTrue(model_keys.isdisjoint(runtime_keys))
 
+    def test_wake_verification_card_is_below_shared_wake_settings(self) -> None:
+        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        shared_wake_host = 'id="settings-models-wake-satellite-settings"'
+        wake_verifier_host = 'id="settings-models-wake-verifier"'
+
+        self.assertIn('getElementById("settings-models-wake-verifier")', app_js)
+        self.assertIn(shared_wake_host, app_js)
+        self.assertIn(wake_verifier_host, app_js)
+        self.assertLess(app_js.index(shared_wake_host), app_js.index(wake_verifier_host))
+        self.assertNotIn('id="settings-esphome-runtime-wake-verifier"', app_js)
+
     def test_led_brightness_is_a_percentage(self) -> None:
         normalized = native_live_settings.normalize_settings({"led_brightness": 255})
         brightness_field = next(
@@ -359,6 +370,58 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(row["checks"], 6)
         self.assertEqual(row["rejected"], 2)
 
+    def test_cleared_wake_stats_hide_offline_satellites_but_keep_connected_satellites(self) -> None:
+        cleared_metrics = {
+            "period_started_ts": 100.0,
+            "retention_days": 30,
+            "devices": {
+                "native:offline": {
+                    "wake_verifier_checks": 0,
+                    "wake_verifier_rejections": 0,
+                    "wake_verifier_fail_open": 0,
+                    "wake_verifier_last": {},
+                    "voice_sessions": 12,
+                },
+                "native:connected": {
+                    "wake_verifier_checks": 0,
+                    "wake_verifier_rejections": 0,
+                    "wake_verifier_fail_open": 0,
+                    "wake_verifier_last": {},
+                },
+            },
+        }
+        native_status = {
+            "clients": {
+                "native:offline": {
+                    "connected": False,
+                    "device_name": "Offline Satellite",
+                    "wake_verifier": {"count": 0, "rejections": 0, "last": {}},
+                },
+                "native:connected": {
+                    "connected": True,
+                    "device_name": "Connected Satellite",
+                }
+            }
+        }
+        with (
+            mock.patch.object(settings, "wake_verifier_mode", return_value="observe"),
+            mock.patch("tater_voice.voice_pipeline._selected_stt_backend", return_value="faster_whisper"),
+            mock.patch.object(home.esphome_runtime, "voice_metrics_snapshot", return_value=cleared_metrics),
+            mock.patch.object(
+                home.esphome_runtime,
+                "load_satellite_registry",
+                return_value=[
+                    {"selector": "native:offline", "name": "Offline Satellite", "source": "tater_native"},
+                    {"selector": "native:connected", "name": "Connected Satellite", "source": "tater_native"},
+                ],
+            ),
+        ):
+            card = home._wake_verifier_item_form(native_status)
+
+        rows = card["sections"][1]["fields"][0]["rows"]
+        self.assertEqual([row["satellite"] for row in rows], ["Connected Satellite"])
+        self.assertEqual(rows[0]["status"], "No verifier firmware")
+
     def test_save_action_broadcasts_to_all_connected_satellites(self) -> None:
         with (
             mock.patch.object(home.esphome_firmware, "handle_runtime_action", return_value=None),
@@ -406,6 +469,32 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertIn("new 30-day", result["message"])
         reset_mock.assert_called_once_with()
         run_mock.assert_called_once_with("reset-live", timeout=5.0)
+
+    def test_wake_verifier_reset_reports_that_disconnected_rows_are_cleared(self) -> None:
+        with (
+            mock.patch.object(home.esphome_firmware, "handle_runtime_action", return_value=None),
+            mock.patch.object(home, "_runtime_status_with_native", return_value={}),
+            mock.patch.object(home.esphome_speaker_id, "handle_runtime_action", return_value=None),
+            mock.patch.object(home.esphome_emotion_id, "handle_runtime_action", return_value=None),
+            mock.patch.object(
+                home.esphome_runtime,
+                "reset_wake_verifier_metrics",
+                return_value={"retention_days": 30},
+            ),
+            mock.patch.object(home.native_satellite, "reset_wake_verifier_runtime_stats", new=lambda: "reset-live"),
+            mock.patch.object(
+                home.native_satellite,
+                "run_on_runtime_loop",
+                return_value={"ok": True, "cleared_clients": 1},
+            ),
+        ):
+            result = home.handle_runtime_action(
+                action="voice_wake_verifier_stats_reset",
+                payload={},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("disconnected satellites", result["message"])
 
     def test_global_satellite_save_broadcasts_and_syncs_continued_chat(self) -> None:
         values = {

@@ -89,8 +89,46 @@ class AmlogicUsbFlashTests(unittest.TestCase):
         self.assertIn('"voice_firmware_amlogic_flash_start"', firmware_source)
         self.assertIn('operation": "amlogic_usb_factory_flash"', firmware_source)
         self.assertIn('"--soc=axg"', (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"))
+        self.assertIn(
+            '[str(update), "bulkcmd", "burn_complete 1"]',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '[str(update), "partition", partition, str(source), "normal"]',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'command.extend(["--debug-port", debug_port])',
+            firmware_source,
+        )
+        self.assertIn(
+            '"setenv upgrade_step 1"',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '"setenv upgrade_step 2"',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '[str(update), "bulkcmd", "echo 12345"]',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '"save"',
+            (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
+        )
         self.assertIn('runCoreManagerAction(card, coreKey, "voice_firmware_amlogic_flash_start"', app_source)
         self.assertIn('flash_transport != "esp_serial"', firmware_source)
+
+    def test_s420_progress_ignores_amlogic_chunk_percentages(self) -> None:
+        import re
+
+        progress_pattern = re.compile(r"\((\d{1,3}(?:\.\d+)?)\s*%\)\.?$")
+        self.assertIsNone(progress_pattern.search("[ 93%/ 12MB]"))
+        self.assertEqual(
+            progress_pattern.search("boot: verified 4194304/13465600 bytes (21.1%).").group(1),
+            "21.1",
+        )
 
 
 if __name__ == "__main__":

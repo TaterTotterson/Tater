@@ -229,6 +229,34 @@ def _save_selector_alias(old_selector: Any, new_selector: Any) -> None:
         _vp().redis_client.set(NATIVE_SELECTOR_ALIASES_KEY, json.dumps(aliases, ensure_ascii=False))
 
 
+def _remove_selector_aliases(selector: Any) -> int:
+    token = _text(selector)
+    if not token:
+        return 0
+    aliases = _load_selector_aliases()
+    remove_keys: set[str] = set()
+    for alias in aliases:
+        current = alias
+        seen: set[str] = set()
+        while current and current not in seen:
+            if current == token:
+                remove_keys.add(alias)
+                break
+            seen.add(current)
+            current = _text(aliases.get(current))
+    if not remove_keys:
+        return 0
+    cleaned = {key: value for key, value in aliases.items() if key not in remove_keys}
+    try:
+        _vp().redis_client.set(
+            NATIVE_SELECTOR_ALIASES_KEY,
+            json.dumps(cleaned, ensure_ascii=False),
+        )
+    except Exception:
+        return 0
+    return len(remove_keys)
+
+
 def _canonical_selector(selector: Any) -> str:
     token = _text(selector)
     aliases = _load_selector_aliases()
@@ -528,6 +556,28 @@ def _save_device_credential(selector: str, payload: Dict[str, Any], device_token
             row["created_ts"] = existing.get("created_ts")
         devices[selector] = row
         _save_credentials_unlocked(data)
+
+
+def _remove_device_credentials(selector: Any) -> int:
+    token = _text(selector)
+    if not token:
+        return 0
+    with _pairing_lock:
+        data = _load_credentials_unlocked()
+        devices = data.get("devices") if isinstance(data.get("devices"), dict) else {}
+        remove_keys = [
+            key
+            for key, row in devices.items()
+            if _text(key) == token
+            or (isinstance(row, dict) and _text(row.get("selector")) == token)
+        ]
+        if not remove_keys:
+            return 0
+        for key in remove_keys:
+            devices.pop(key, None)
+        data["devices"] = devices
+        _save_credentials_unlocked(data)
+        return len(remove_keys)
 
 
 def _valid_device_credential(token: str, selector: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1305,6 +1355,53 @@ def status_snapshot_sync() -> Dict[str, Any]:
         if isinstance(row, dict)
     }
     return {"ok": True, "protocol": PROTOCOL_VERSION, "clients": clients, "count": len(clients)}
+
+
+async def forget(selector: str) -> Dict[str, Any]:
+    token = _text(selector)
+    if not token:
+        raise ValueError("selector is required")
+    if not token.startswith("native:"):
+        raise ValueError("Only Tater Native satellites can be forgotten here.")
+
+    pending_futures: list[asyncio.Future] = []
+    async with _clients_lock:
+        row = _clients.get(token)
+        if isinstance(row, dict) and bool(row.get("connected")):
+            raise RuntimeError(f"Connected native satellite cannot be forgotten: {token}")
+        removed_runtime = _clients.pop(token, None) is not None
+        pending = row.get("pending_requests") if isinstance(row, dict) else None
+        if isinstance(pending, dict):
+            pending_futures = [
+                future
+                for future in pending.values()
+                if isinstance(future, asyncio.Future) and not future.done()
+            ]
+            pending.clear()
+
+    for future in pending_futures:
+        future.set_exception(RuntimeError(f"Native satellite forgotten: {token}"))
+
+    removed_registry = bool(_vp()._remove_satellite(token))
+    removed_credentials = _remove_device_credentials(token)
+    removed_aliases = _remove_selector_aliases(token)
+    removed = bool(
+        removed_runtime
+        or removed_registry
+        or removed_credentials
+        or removed_aliases
+    )
+    if removed:
+        _notify_state_change("forgotten", token)
+    return {
+        "ok": True,
+        "selector": token,
+        "removed": removed,
+        "runtime_removed": removed_runtime,
+        "registry_removed": removed_registry,
+        "credentials_removed": removed_credentials,
+        "aliases_removed": removed_aliases,
+    }
 
 
 async def client_has_capability(selector: str, capability: str) -> bool:

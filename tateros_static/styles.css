@@ -9533,6 +9533,298 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
     0 12px 28px rgba(0, 0, 0, 0.18);
 }
 
+.firmware-overview-card,
+.firmware-flasher-card {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(240, 131, 69, 0.24);
+  background:
+    radial-gradient(circle at 92% 4%, rgba(240, 131, 69, 0.13), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.14)),
+    rgba(17, 18, 20, 0.96);
+}
+
+.firmware-overview-card::before,
+.firmware-flasher-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, #ff9a57, rgba(240, 131, 69, 0.08));
+  pointer-events: none;
+}
+
+.firmware-release-pill,
+.firmware-transport-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid rgba(240, 131, 69, 0.35);
+  border-radius: 999px;
+  color: #ffd0ae;
+  background: rgba(240, 131, 69, 0.11);
+  font-size: 0.76rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.firmware-overview-copy {
+  max-width: 72ch;
+  margin: 8px 0 0;
+  color: #e7ded5;
+  line-height: 1.5;
+}
+
+.firmware-overview-meta,
+.firmware-overview-warning {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.firmware-overview-warning {
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 186, 92, 0.3);
+  border-radius: 8px;
+  color: #f3d8a6;
+  background: rgba(245, 186, 92, 0.08);
+}
+
+.firmware-manual-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.firmware-manual-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 3px;
+}
+
+.firmware-manual-heading h3 {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-size: 1.18rem;
+}
+
+.firmware-manual-heading > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.firmware-flasher-card > .card-head {
+  margin-bottom: 14px;
+}
+
+.firmware-flasher-controls {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background:
+    linear-gradient(145deg, rgba(240, 131, 69, 0.055), transparent 54%),
+    rgba(0, 0, 0, 0.18);
+}
+
+.firmware-flasher-step-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.firmware-flasher-step-head > span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #ffbd8b;
+  background: rgba(240, 131, 69, 0.13);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.firmware-flasher-step-head > strong {
+  color: #f6eee6;
+  font-size: 0.88rem;
+}
+
+.firmware-transport-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.firmware-transport-option {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.17);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    transform 150ms ease;
+}
+
+.firmware-transport-option:hover {
+  border-color: rgba(240, 131, 69, 0.35);
+  background: rgba(240, 131, 69, 0.08);
+  transform: translateY(-1px);
+}
+
+.firmware-transport-option.is-active {
+  border-color: rgba(240, 131, 69, 0.66);
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.18), rgba(240, 131, 69, 0.055)),
+    rgba(0, 0, 0, 0.16);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 177, 119, 0.07),
+    0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.firmware-transport-number {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(240, 131, 69, 0.28);
+  border-radius: 8px;
+  color: #ffb47c;
+  background: rgba(240, 131, 69, 0.08);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.firmware-transport-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.firmware-transport-copy strong {
+  color: #f8f0e8;
+  font-size: 0.88rem;
+}
+
+.firmware-transport-copy small {
+  color: var(--muted);
+  font-size: 0.73rem;
+  line-height: 1.32;
+}
+
+.firmware-flasher-picker {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.firmware-flasher-picker-field > label,
+.firmware-flasher-picker-field .settings-dropdown {
+  margin-top: 0;
+}
+
+.firmware-flasher-empty {
+  display: grid;
+  gap: 4px;
+  padding: 11px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.firmware-flasher-empty strong {
+  color: #eee5dc;
+}
+
+.firmware-flasher-empty span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.firmware-selected-target-title {
+  margin: 0 0 5px;
+  color: #f8efe7;
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.firmware-flasher-card .core-satellite-summary {
+  margin-top: 12px;
+}
+
+.firmware-flasher-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+  padding: 12px;
+  border: 1px solid rgba(240, 131, 69, 0.2);
+  border-radius: 9px;
+  background: rgba(240, 131, 69, 0.055);
+}
+
+.firmware-flasher-action-row,
+.firmware-flasher-utility {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.firmware-flasher-primary {
+  min-width: 190px;
+}
+
+.firmware-flasher-action-copy {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.firmware-flasher-utility {
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+@media (max-width: 760px) {
+  .firmware-transport-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .firmware-manual-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .firmware-flasher-action-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .firmware-flasher-action-row .action-btn,
+  .firmware-flasher-action-row .inline-btn,
+  .firmware-flasher-primary {
+    width: 100%;
+  }
+}
+
 .firmware-prebuilt-strip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

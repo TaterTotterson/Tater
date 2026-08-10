@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import platform
 import plistlib
 import re
 import select
+import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -38,6 +41,160 @@ _HELPER_SHA256 = {
 _CH340_VENDOR_ID = 0x1A86
 _CH340_PRODUCT_IDS = {0x5523, 0x7523}
 _S420_DTB_PATTERN = re.compile(r"axg_s420_[A-Za-z0-9_-]*trspk", re.IGNORECASE)
+_S420_UBOOT_PROMPT = re.compile(r"axg_s420_[A-Za-z0-9_-]*trspk#", re.IGNORECASE)
+_S420_PASSIVE_BOOT_GRACE_SECONDS = 20.0
+
+
+def _posix_spawn_capture(
+    command: List[str],
+    *,
+    timeout: float,
+    text: bool,
+) -> subprocess.CompletedProcess:
+    """Capture a command without forking Tater's multithreaded macOS process."""
+    argv = [str(item) for item in command]
+    if not argv or not Path(argv[0]).is_absolute():
+        raise ValueError("posix_spawn requires an absolute executable path")
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        stdout_fd = stdout_file.fileno()
+        stderr_fd = stderr_file.fileno()
+        file_actions = [
+            (os.POSIX_SPAWN_DUP2, stdout_fd, 1),
+            (os.POSIX_SPAWN_DUP2, stderr_fd, 2),
+            (os.POSIX_SPAWN_CLOSE, stdout_fd),
+            (os.POSIX_SPAWN_CLOSE, stderr_fd),
+        ]
+        pid = os.posix_spawn(argv[0], argv, dict(os.environ), file_actions=file_actions)
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        returncode: Optional[int] = None
+        while returncode is None:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+            if waited_pid == pid:
+                returncode = os.waitstatus_to_exitcode(status)
+                break
+            if time.monotonic() >= deadline:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+                _, status = os.waitpid(pid, 0)
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout_data = stdout_file.read()
+                stderr_data = stderr_file.read()
+                raise subprocess.TimeoutExpired(
+                    argv,
+                    timeout,
+                    output=stdout_data.decode("utf-8", errors="replace") if text else stdout_data,
+                    stderr=stderr_data.decode("utf-8", errors="replace") if text else stderr_data,
+                )
+            time.sleep(0.01)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout_data = stdout_file.read()
+        stderr_data = stderr_file.read()
+    if text:
+        stdout_value: Any = stdout_data.decode("utf-8", errors="replace")
+        stderr_value: Any = stderr_data.decode("utf-8", errors="replace")
+    else:
+        stdout_value = stdout_data
+        stderr_value = stderr_data
+    return subprocess.CompletedProcess(argv, int(returncode), stdout_value, stderr_value)
+
+
+def _run_capture(
+    command: List[str],
+    *,
+    timeout: float,
+    text: bool,
+    cwd: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    if platform.system().lower() == "darwin":
+        # The identify and ioreg commands use absolute paths and do not depend
+        # on cwd. os.posix_spawn avoids macOS fork-pre-exec crashes after Tater
+        # has initialized Network.framework, Torch, and its worker threads.
+        return _posix_spawn_capture(command, timeout=timeout, text=text)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=text,
+        timeout=max(0.1, float(timeout)),
+        check=False,
+    )
+
+
+class _PosixSpawnProcess:
+    """Small Popen-compatible wrapper for the macOS S420 flash runner."""
+
+    def __init__(self, command: List[str]) -> None:
+        argv = [str(item) for item in command]
+        if not argv or not Path(argv[0]).is_absolute():
+            raise ValueError("posix_spawn requires an absolute executable path")
+        read_fd, write_fd = os.pipe()
+        file_actions = [
+            (os.POSIX_SPAWN_DUP2, write_fd, 1),
+            (os.POSIX_SPAWN_DUP2, write_fd, 2),
+            (os.POSIX_SPAWN_CLOSE, read_fd),
+            (os.POSIX_SPAWN_CLOSE, write_fd),
+        ]
+        environment = dict(os.environ)
+        environment["PYTHONUNBUFFERED"] = "1"
+        try:
+            self.pid = os.posix_spawn(
+                argv[0],
+                argv,
+                environment,
+                file_actions=file_actions,
+                setpgroup=0,
+            )
+        except Exception:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise
+        os.close(write_fd)
+        self.stdout = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace", buffering=1)
+        self.returncode: Optional[int] = None
+        self._wait_lock = threading.Lock()
+
+    def poll(self) -> Optional[int]:
+        with self._wait_lock:
+            if self.returncode is not None:
+                return self.returncode
+            waited_pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if waited_pid == self.pid:
+                self.returncode = os.waitstatus_to_exitcode(status)
+            return self.returncode
+
+    def wait(self, timeout: Optional[float] = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        while True:
+            returncode = self.poll()
+            if returncode is not None:
+                return returncode
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(self.pid, timeout)
+            time.sleep(0.02)
+
+    def terminate(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self.pid, signal.SIGKILL)
+
+
+def launch_flash_process(command: List[str], *, working_dir: Optional[str] = None) -> Any:
+    if platform.system().lower() == "darwin":
+        return _PosixSpawnProcess(command)
+    return subprocess.Popen(
+        command,
+        cwd=working_dir or None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
 
 
 def _file_sha256(path: Path) -> str:
@@ -203,13 +360,11 @@ def probe_device(tool_info: Dict[str, Any], *, timeout: float = 8.0) -> Dict[str
         return {"connected": False, "error": str(tool_info.get("error") or "Amlogic USB helper is unavailable.")}
     update_path = str(tool_info.get("update_path") or "").strip()
     try:
-        result = subprocess.run(
+        result = _run_capture(
             [update_path, "identify", "7"],
             cwd=str(tool_info.get("root") or "") or None,
-            capture_output=True,
             text=True,
             timeout=max(1.0, float(timeout)),
-            check=False,
         )
     except Exception as exc:
         return {"connected": False, "error": str(exc) or exc.__class__.__name__}
@@ -247,11 +402,10 @@ def _registry_callout_devices(node: Any) -> List[str]:
 def _macos_ch340_ports() -> List[str]:
     ioreg = shutil.which("ioreg") or "/usr/sbin/ioreg"
     try:
-        result = subprocess.run(
+        result = _run_capture(
             [ioreg, "-r", "-c", "IOUserSerial", "-l", "-a"],
-            capture_output=True,
+            text=False,
             timeout=5.0,
-            check=False,
         )
         services = plistlib.loads(result.stdout) if result.returncode == 0 and result.stdout else []
     except Exception:
@@ -328,42 +482,170 @@ def _open_verified_s420_console(port: str, *, timeout: float = 2.5) -> tuple[int
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
         termios.tcflush(fd, termios.TCIFLUSH)
         query = (
-            b"\rprintf '__TATER_DTB_BEGIN__'; "
+            b"printf '__TATER_DTB_BEGIN__'; "
             b"tr -d '\\000' </proc/device-tree/amlogic-dt-id 2>/dev/null; "
             b"printf '__TATER_DTB_END__\\n'\r"
         )
         os.write(fd, query)
         output = bytearray()
-        deadline = time.monotonic() + max(0.5, float(timeout))
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([fd], [], [], min(0.2, max(0.0, deadline - time.monotonic())))
-            if not ready:
-                continue
-            try:
-                chunk = os.read(fd, 8192)
-            except BlockingIOError:
-                continue
-            if chunk:
-                output.extend(chunk)
-        text = output.decode("utf-8", errors="replace").replace("\x00", "")
-        matches = re.findall(r"__TATER_DTB_BEGIN__(.*?)__TATER_DTB_END__", text, flags=re.DOTALL)
-        if not any(_S420_DTB_PATTERN.search(match) for match in matches):
-            raise RuntimeError(
-                f"The CH340 adapter at {port} did not identify an S420 console. "
-                "Close any serial terminal and verify the debug-board ribbon connection."
-            )
-        return fd, text
+        for attempt in range(3):
+            if attempt:
+                os.write(fd, b"\r")
+                time.sleep(0.2)
+                os.write(fd, query)
+            deadline = time.monotonic() + max(0.5, float(timeout))
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([fd], [], [], min(0.2, max(0.0, deadline - time.monotonic())))
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 8192)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    output.extend(chunk)
+            text = output.decode("utf-8", errors="replace").replace("\x00", "")
+            matches = re.findall(r"__TATER_DTB_BEGIN__(.*?)__TATER_DTB_END__", text, flags=re.DOTALL)
+            if any(_S420_DTB_PATTERN.search(match) for match in matches):
+                return fd, text
+            # A failed boot or an interrupted countdown can leave this exact
+            # board at its U-Boot prompt. It is still positively identifiable
+            # and can enter USB burn mode directly without booting Linux first.
+            if _S420_UBOOT_PROMPT.search(text):
+                return fd, text
+        raise RuntimeError(
+            f"The CH340 adapter at {port} answered, but did not identify an S420 console after three tries. "
+            "Close any serial terminal and verify the debug-board ribbon connection."
+        )
     except Exception:
         os.close(fd)
         raise
 
 
+def _firmware_version_from_console(text: str) -> str:
+    for body in re.findall(r"__TATER_FW_BEGIN__(.*?)__TATER_FW_END__", text, flags=re.DOTALL):
+        match = re.search(r"(?:^|\s)firmware_version=([^\s]+)", body)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _normalized_s420_firmware_version(value: str) -> str:
+    version = str(value or "").strip()
+    lowered = version.lower()
+    for prefix in ("tater-thirdreality-s420-", "tater-thirdreality-"):
+        if lowered.startswith(prefix):
+            return version[len(prefix) :]
+    return version
+
+
+def _tater_runtime_from_console(text: str) -> str:
+    for body in re.findall(r"__TATER_FW_BEGIN__(.*?)__TATER_FW_END__", text, flags=re.DOTALL):
+        version_match = re.search(r"(?:^|\s)firmware_version=([^\s]+)", body)
+        if not version_match:
+            continue
+        # UART line wrapping can split the echoed closing marker. In that case
+        # the captured body also contains the shell command, including its
+        # literal fallback tater_runtime=missing. Only accept runtime tokens
+        # reported after the device's real firmware_version field.
+        matches = re.findall(
+            r"(?:^|\s)tater_runtime=([^\s]+)",
+            body[version_match.end() :],
+        )
+        if matches:
+            return matches[-1].strip().lower()
+    return ""
+
+
+def verify_tater_boot(
+    port: str,
+    expected_version: str,
+    *,
+    timeout: float = 90.0,
+    boot_grace: float = _S420_PASSIVE_BOOT_GRACE_SECONDS,
+) -> Dict[str, Any]:
+    """Wait for the flashed S420 to boot Linux and report the expected Tater version."""
+    expected = str(expected_version or "").strip()
+    deadline = time.monotonic() + max(5.0, float(timeout))
+    # The S420 treats any UART byte during its one-second U-Boot countdown as
+    # a request to stop autoboot. Do not even probe the console until the board
+    # has had enough time to enter Linux after burn_complete resets it.
+    grace = min(max(0.0, float(boot_grace)), max(0.0, deadline - time.monotonic()))
+    if grace:
+        time.sleep(grace)
+    last_error = "The S420 debug console has not reached Linux yet."
+    query = (
+        b"printf '__TATER_FW_BEGIN__'; "
+        b"cat /proc/cmdline 2>/dev/null; "
+        b"if [ -x /usr/bin/tater-provisioning ] && [ -x /etc/init.d/S99tater-satellite ]; "
+        b"then printf ' tater_runtime=ready'; else printf ' tater_runtime=missing'; fi; "
+        b"printf '\\n__TATER_FW_END__\\n'\r"
+    )
+    while time.monotonic() < deadline:
+        fd = -1
+        try:
+            fd, identity_output = _open_verified_s420_console(port, timeout=1.0)
+            if _S420_UBOOT_PROMPT.search(identity_output):
+                last_error = "The S420 returned to U-Boot instead of starting Linux."
+                continue
+            os.write(fd, query)
+            output = bytearray()
+            read_deadline = min(deadline, time.monotonic() + 3.0)
+            while time.monotonic() < read_deadline:
+                ready, _, _ = select.select(
+                    [fd],
+                    [],
+                    [],
+                    min(0.2, max(0.0, read_deadline - time.monotonic())),
+                )
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 8192)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    output.extend(chunk)
+                    decoded = output.decode("utf-8", errors="replace").replace("\x00", "")
+                    actual = _firmware_version_from_console(decoded)
+                    if actual:
+                        runtime = _tater_runtime_from_console(decoded)
+                        if runtime != "ready":
+                            raise RuntimeError(
+                                "Linux started, but the flashed S420 system partition does not contain "
+                                "the Tater runtime."
+                            )
+                        if expected and _normalized_s420_firmware_version(
+                            actual
+                        ) != _normalized_s420_firmware_version(expected):
+                            raise RuntimeError(
+                                f"The S420 booted firmware {actual}, but Tater flashed {expected}."
+                            )
+                        return {
+                            "connected": True,
+                            "debug_port": port,
+                            "firmware_version": actual,
+                            "output": decoded,
+                        }
+            last_error = "Linux started, but the S420 did not report its firmware version."
+        except RuntimeError as exc:
+            if "but Tater flashed" in str(exc):
+                raise
+            last_error = str(exc) or exc.__class__.__name__
+        except Exception as exc:
+            last_error = str(exc) or exc.__class__.__name__
+        finally:
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        if time.monotonic() < deadline:
+            time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"Tater could not verify the S420 after reboot: {last_error}")
+
+
 def prepare_device(tool_info: Dict[str, Any], *, timeout: float = 20.0) -> Dict[str, Any]:
     """Enter the S420's short U-Boot USB-burn window through its debug UART."""
     initial = probe_device(tool_info, timeout=min(2.0, max(1.0, float(timeout))))
-    if bool(initial.get("connected")):
-        return {**initial, "already_in_burn_mode": True, "auto_rebooted": False}
-
     ports = find_debug_serial_ports()
     if not ports:
         return {
@@ -383,6 +665,14 @@ def prepare_device(tool_info: Dict[str, Any], *, timeout: float = 20.0) -> Dict[
         }
 
     port = ports[0]
+    if bool(initial.get("connected")):
+        return {
+            **initial,
+            "already_in_burn_mode": True,
+            "auto_rebooted": False,
+            "debug_port": port,
+        }
+
     try:
         serial_fd, console_output = _open_verified_s420_console(port)
     except Exception as exc:
@@ -392,29 +682,58 @@ def prepare_device(tool_info: Dict[str, Any], *, timeout: float = 20.0) -> Dict[
     ready_event = threading.Event()
     connected_event = threading.Event()
     detected: Dict[str, Any] = {}
+    detector_state: Dict[str, Any] = {
+        "probe_count": 0,
+        "longest_probe_seconds": 0.0,
+        "last_probe_output": "",
+    }
+    boot_output = bytearray()
+    reboot_started_at: Optional[float] = None
 
     def detector() -> None:
-        ready_event.set()
-        deadline = time.monotonic() + max(3.0, float(timeout))
+        # Allow the host scanner to finish a real no-device probe before the
+        # reboot. Merely starting this thread is not enough to prove that the
+        # Amlogic helper is polling yet.
+        deadline = time.monotonic() + max(5.0, float(timeout) + 2.0)
         while not stop_event.is_set() and time.monotonic() < deadline:
+            probe_started_at = time.monotonic()
             result = probe_device(tool_info, timeout=1.0)
+            probe_seconds = time.monotonic() - probe_started_at
+            detector_state["probe_count"] = int(detector_state["probe_count"]) + 1
+            detector_state["longest_probe_seconds"] = max(
+                float(detector_state["longest_probe_seconds"]),
+                probe_seconds,
+            )
+            detector_state["last_probe_output"] = str(result.get("output") or "")
+            ready_event.set()
             if bool(result.get("connected")):
                 detected.update(result)
+                if reboot_started_at is not None:
+                    detector_state["detection_seconds"] = time.monotonic() - reboot_started_at
                 connected_event.set()
                 return
 
     worker = threading.Thread(target=detector, name="tater-s420-usb-detector", daemon=True)
     worker.start()
+    reboot_requested = False
+    console_is_uboot = bool(_S420_UBOOT_PROMPT.search(console_output))
     try:
-        if not ready_event.wait(timeout=1.0):
-            raise RuntimeError("The S420 USB detector did not start.")
-        os.write(serial_fd, b"sync; reboot\r")
+        if not ready_event.wait(timeout=2.0):
+            raise RuntimeError("The S420 USB detector did not complete its initial scan.")
+        if not connected_event.is_set():
+            reboot_started_at = time.monotonic()
+            os.write(serial_fd, b"update 1000\r" if console_is_uboot else b"reboot\r")
+            reboot_requested = True
         deadline = time.monotonic() + max(3.0, float(timeout))
         while not connected_event.is_set() and time.monotonic() < deadline:
             try:
                 ready, _, _ = select.select([serial_fd], [], [], 0.1)
                 if ready:
-                    os.read(serial_fd, 8192)
+                    chunk = os.read(serial_fd, 8192)
+                    if chunk:
+                        boot_output.extend(chunk)
+                        if len(boot_output) > 128 * 1024:
+                            del boot_output[: len(boot_output) - (128 * 1024)]
             except (OSError, ValueError):
                 # The UART can briefly disappear while USB re-enumerates.
                 pass
@@ -435,17 +754,40 @@ def prepare_device(tool_info: Dict[str, Any], *, timeout: float = 20.0) -> Dict[
             **detected,
             "connected": True,
             "already_in_burn_mode": False,
-            "auto_rebooted": True,
+            "auto_rebooted": reboot_requested,
+            "entered_from_uboot": console_is_uboot,
             "debug_port": port,
             "console_output": console_output,
+            **detector_state,
         }
+    decoded_boot_output = boot_output.decode("utf-8", errors="replace").replace("\x00", "")
+    burn_seen_on_uart = "InUsbBurn" in decoded_boot_output
+    error = (
+        "The S420 reported USB burn mode on its debug console, but macOS did not expose the "
+        "Amlogic WorldCup interface. Keep both USB cables connected and try again."
+        if burn_seen_on_uart
+        else (
+            (
+                "Tater verified the S420 U-Boot console and requested USB burn mode, but the "
+                "Amlogic WorldCup interface did not appear. Keep both USB cables connected and try again."
+                if console_is_uboot
+                else
+                "Tater verified the S420 debug console and rebooted it, but the Amlogic WorldCup "
+                "interface did not appear. Keep both USB cables connected and try again."
+            )
+        )
+    )
     return {
         "connected": False,
         "debug_port": port,
-        "error": (
-            "Tater verified the S420 debug console and rebooted it, but did not catch the short "
-            "Amlogic USB-burn window. Keep both USB cables connected and try again."
-        ),
+        "error": error,
+        "reason": "burn_window_not_detected",
+        "retryable": True,
+        "auto_rebooted": reboot_requested,
+        "entered_from_uboot": console_is_uboot,
+        "burn_seen_on_uart": burn_seen_on_uart,
+        "boot_output": decoded_boot_output,
+        **detector_state,
     }
 
 

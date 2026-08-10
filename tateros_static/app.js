@@ -119,6 +119,7 @@ const state = {
     templateKey: "",
     selector: "",
   },
+  esphomeFirmwareTransport: "ota",
   esphomeDisplaySensorTarget: "",
   esphomeBrowserUsbPorts: {},
   esptoolJsModule: null,
@@ -5251,7 +5252,7 @@ function ensureRuntimeSettingsModal() {
   return modal;
 }
 
-function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetLabel, resetConfirm, modalClass, onOpen, onClose }) {
+function openRuntimeSettingsModal({ title, meta, fields, onSave, saveLabel, onReset, resetLabel, resetConfirm, modalClass, onOpen, onClose }) {
   const modal = ensureRuntimeSettingsModal();
   const titleEl = document.getElementById("runtime-settings-title");
   const metaEl = document.getElementById("runtime-settings-meta");
@@ -5294,6 +5295,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, onReset, resetL
   }
   if (saveBtn) {
     saveBtn.disabled = false;
+    saveBtn.textContent = String(saveLabel || "Save Settings").trim() || "Save Settings";
     saveBtn.style.display = typeof state.runtimeSettingsSaveHandler === "function" ? "" : "none";
   }
   if (resetBtn) {
@@ -10667,10 +10669,78 @@ function resolveEspHomeFirmwareVariant(firmware, templateKey = "", selector = ""
   return selector && templateMap[selector] && typeof templateMap[selector] === "object" ? templateMap[selector] : null;
 }
 
+function espHomeFirmwareFactoryTransport(firmware, templateKey = "") {
+  const variant = resolveEspHomeFirmwareVariant(firmware, templateKey, "__usb_recovery__");
+  const prebuilt = variant?.prebuilt_firmware && typeof variant.prebuilt_firmware === "object" ? variant.prebuilt_firmware : {};
+  const artifacts = prebuilt?.artifacts && typeof prebuilt.artifacts === "object" ? prebuilt.artifacts : {};
+  const factory = artifacts?.factory && typeof artifacts.factory === "object" ? artifacts.factory : {};
+  if (!String(factory?.path || "").trim()) {
+    return "";
+  }
+  return String(factory?.flash_transport || "esp_serial").trim().toLowerCase() || "esp_serial";
+}
+
+function espHomeFirmwareTemplatesForTransport(firmware, transport = "") {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const token = String(transport || "").trim().toLowerCase();
+  const templates = Array.isArray(body?.templates) ? body.templates : [];
+  return templates.filter((row) => {
+    const templateKey = String(row?.value || "").trim();
+    const factoryTransport = espHomeFirmwareFactoryTransport(body, templateKey);
+    if (token === "local_usb") {
+      return ["amlogic_usb_burn", "esp_serial"].includes(factoryTransport);
+    }
+    if (token === "browser_usb") {
+      return factoryTransport === "esp_serial";
+    }
+    return false;
+  });
+}
+
+function espHomeFirmwareConnectedDevices(firmware) {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  return espHomeFirmwareAllDevices(body).filter((row) => {
+    const selector = String(row?.value || "").trim();
+    if (!selector || selector === "__usb_recovery__" || !boolFromAny(row?.connected, false)) {
+      return false;
+    }
+    const templateKey = String(row?.template_key || espHomeFirmwareTemplateForSelector(body, selector)).trim();
+    const variant = resolveEspHomeFirmwareVariant(body, templateKey, selector);
+    return Boolean(templateKey && variant && !boolFromAny(variant?.unmatched_template ?? row?.unmatched_template, false));
+  });
+}
+
+function normalizeEspHomeFirmwareTransportSelection(firmware) {
+  const body = firmware && typeof firmware === "object" ? firmware : {};
+  const base = normalizeEspHomeFirmwareSelection(body);
+  const requestedTransport = String(state.esphomeFirmwareTransport || "ota").trim().toLowerCase();
+  const transport = ["ota", "local_usb", "browser_usb"].includes(requestedTransport) ? requestedTransport : "ota";
+  if (transport === "ota") {
+    const devices = espHomeFirmwareConnectedDevices(body);
+    const selectors = devices.map((row) => String(row?.value || "").trim()).filter(Boolean);
+    const requestedSelector = String(state.esphomeFirmwareSelection?.selector || base.selector || "").trim();
+    const selector = selectors.includes(requestedSelector) ? requestedSelector : selectors[0] || "";
+    const templateKey = espHomeFirmwareTemplateForSelector(body, selector) || base.templateKey;
+    return { transport, templateKey, selector };
+  }
+
+  const templates = espHomeFirmwareTemplatesForTransport(body, transport);
+  const templateKeys = templates.map((row) => String(row?.value || "").trim()).filter(Boolean);
+  const requestedTemplate = String(state.esphomeFirmwareSelection?.templateKey || base.templateKey || "").trim();
+  return {
+    transport,
+    templateKey: templateKeys.includes(requestedTemplate) ? requestedTemplate : templateKeys[0] || "",
+    selector: templateKeys.length ? "__usb_recovery__" : "",
+  };
+}
+
 function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const body = firmware && typeof firmware === "object" ? firmware : {};
   const templates = Array.isArray(body?.templates) ? body.templates : [];
-  const selection = normalizeEspHomeFirmwareSelection(body);
+  const selection = normalizeEspHomeFirmwareTransportSelection(body);
+  const connectedDevices = espHomeFirmwareConnectedDevices(body);
+  const transportTemplates =
+    selection.transport === "ota" ? [] : espHomeFirmwareTemplatesForTransport(body, selection.transport);
   const devices = espHomeFirmwareAllDevices(body);
   const selectedTemplate =
     templates.find((row) => String(row?.value || "").trim() === selection.templateKey) || {};
@@ -10727,40 +10797,115 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const otaLogsDisabledAttr = variantAvailable && targetConnected ? "" : " disabled";
   const browserFlashDisabledAttr = prebuiltFactoryAvailable && variantAvailable ? "" : " disabled";
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
-  const otaActionLabel = nativeFirmware ? "Update Firmware" : "OTA Update";
+  const otaActionLabel = "Flash Latest OTA";
   const otaWorkingText = nativeFirmware ? "Sending native OTA command..." : "Uploading prebuilt firmware...";
-  const browserActionLabel = amlogicFactoryImage ? "USB Flash S420" : "Browser USB Flash";
-  const browserWorkingText = amlogicFactoryImage
-    ? "Starting the verified S420 USB flash..."
-    : nativeFirmware
-    ? "Preparing native USB image..."
-    : "Preparing prebuilt USB image...";
-  const browserSuccessText = amlogicFactoryImage
-    ? "S420 USB flash finished."
-    : nativeFirmware
-    ? "Native USB image ready."
-    : "Prebuilt USB image ready.";
+  const browserActionLabel = selection.transport === "local_usb" ? "Start Local USB Flash" : "Open Browser USB Flash";
+  const browserWorkingText =
+    selection.transport === "local_usb"
+      ? amlogicFactoryImage
+        ? "Starting the verified S420 USB flash..."
+        : "Starting the verified ESP serial flash..."
+      : nativeFirmware
+      ? "Preparing native USB image..."
+      : "Preparing prebuilt USB image...";
+  const browserSuccessText =
+    selection.transport === "local_usb"
+      ? amlogicFactoryImage
+        ? "S420 Local USB flash finished."
+        : "ESP Local USB flash finished."
+      : nativeFirmware
+      ? "Native USB image ready."
+      : "Prebuilt USB image ready.";
   const itemId = escapeHtml(encodeCoreManagerId(selection.selector));
-  const controlsHtml = `
-    <section class="core-inline-section" style="margin-top:12px;">
-      <div class="small core-inline-section-title">Target</div>
-      <div class="form-grid two-col">
-        ${renderCoreManagerField({
+  const transportSpecs = [
+    {
+      key: "ota",
+      step: "01",
+      label: "OTA",
+      detail: "Update a connected satellite over your network.",
+    },
+    {
+      key: "local_usb",
+      step: "02",
+      label: "Local USB",
+      detail: "Flash directly through the Tater app without Web Serial.",
+    },
+    {
+      key: "browser_usb",
+      step: "03",
+      label: "Browser USB",
+      detail: "Flash supported ESP satellites with Web Serial.",
+    },
+  ];
+  const transportLabel =
+    transportSpecs.find((row) => row.key === selection.transport)?.label || "OTA";
+  const pickerHtml =
+    selection.transport === "ota"
+      ? connectedDevices.length
+        ? renderCoreManagerField({
+            key: "selector",
+            label: "Connected Satellite",
+            type: "select",
+            value: selection.selector,
+            options: connectedDevices,
+            description: "Only connected satellites are listed. Tater automatically matches the correct firmware family.",
+          })
+        : `
+          <div class="firmware-flasher-empty">
+            <strong>No connected satellites</strong>
+            <span>Connect a Tater satellite to make it available for OTA flashing.</span>
+          </div>
+        `
+      : transportTemplates.length
+      ? renderCoreManagerField({
           key: "template_key",
-          label: "Firmware Family",
+          label: "Device",
           type: "select",
           value: selection.templateKey,
-          options: templates,
-          description: "Matched from the native device board/model for connected satellites. Use Browser USB Recovery to pick a firmware family manually.",
-        })}
-        ${renderCoreManagerField({
-          key: "selector",
-          label: "Firmware Target",
-          type: "select",
-          value: selection.selector,
-          options: devices,
-          description: "Choose a live device for OTA, or Browser USB Recovery when the device is blank.",
-        })}
+          options: transportTemplates,
+          description:
+            selection.transport === "local_usb"
+              ? "ESP satellites use Tater’s bundled Espressif flasher; the ThirdReality S420 uses its debug board."
+              : "Browser USB lists ESP-based satellites that support direct Web Serial flashing.",
+        })
+      : `
+        <div class="firmware-flasher-empty">
+          <strong>No compatible devices</strong>
+          <span>No firmware families currently support this flashing method.</span>
+        </div>
+      `;
+  const controlsHtml = `
+    <section class="firmware-flasher-controls">
+      <div class="firmware-flasher-step-head">
+        <span>Step 1</span>
+        <strong>Choose how you want to flash</strong>
+      </div>
+      <div class="firmware-transport-grid" role="radiogroup" aria-label="Firmware flashing method">
+        ${transportSpecs
+          .map(
+            (row) => `
+              <button
+                type="button"
+                class="firmware-transport-option${selection.transport === row.key ? " is-active" : ""}"
+                data-firmware-transport="${escapeHtml(row.key)}"
+                role="radio"
+                aria-checked="${selection.transport === row.key ? "true" : "false"}">
+                <span class="firmware-transport-number">${escapeHtml(row.step)}</span>
+                <span class="firmware-transport-copy">
+                  <strong>${escapeHtml(row.label)}</strong>
+                  <small>${escapeHtml(row.detail)}</small>
+                </span>
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+      <div class="firmware-flasher-picker">
+        <div class="firmware-flasher-step-head">
+          <span>Step 2</span>
+          <strong>${selection.transport === "ota" ? "Choose a connected satellite" : "Choose the device firmware"}</strong>
+        </div>
+        <div class="firmware-flasher-picker-field">${pickerHtml}</div>
       </div>
     </section>
   `;
@@ -10800,6 +10945,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       <div class="core-satellite-summary">
         <div class="core-satellite-image-wrap"><img class="core-satellite-image" src="${escapeHtml(heroImageSrc)}" alt="${escapeHtml(heroImageAlt)}" loading="lazy" /></div>
         <div class="core-satellite-summary-main">
+          <h4 class="firmware-selected-target-title">${escapeHtml(title)}</h4>
           ${
             heroBadges.length
               ? `
@@ -10827,34 +10973,19 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       </div>
     `
     : `
+      <h4 class="firmware-selected-target-title">${escapeHtml(title)}</h4>
       ${subtitle ? `<div class="small">${escapeHtml(subtitle)}</div>` : ""}
       ${detail ? `<div class="small" style="margin-top:6px;">${escapeHtml(detail)}</div>` : ""}
       ${firmwareStatus ? `<div class="small" style="margin-top:6px;">Firmware: ${escapeHtml(firmwareStatus)}</div>` : ""}
     `;
 
-  return `
-    <article class="card core-manager-item esphome-firmware-card"
-      data-core-key="${escapeHtml(coreKey)}"
-      data-core-item-id="${itemId}"
-      data-firmware-selector="${escapeHtml(selection.selector)}"
-      data-firmware-template-key="${escapeHtml(selection.templateKey)}"
-      data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
-      data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
-      data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}"
-      data-firmware-flash-transport="${escapeHtml(factoryFlashTransport)}"
-      data-firmware-native="${nativeFirmware ? "1" : "0"}">
-      <div class="card-head">
-        <h3 class="card-title">${escapeHtml(title)}</h3>
-        <span class="small">${escapeHtml(templateLabel)}</span>
-      </div>
-      ${targetSummaryHtml}
-      ${prebuiltSummaryHtml}
-      ${linksHtml}
-      ${controlsHtml}
-      <div class="inline-row" style="margin-top:12px;">
+  const browserCapability = browserUsbCapability();
+  const flashActionHtml =
+    selection.transport === "ota"
+      ? `
         <button
           type="button"
-          class="action-btn esphome-firmware-action"
+          class="action-btn firmware-flasher-primary esphome-firmware-action"
           data-firmware-action="voice_firmware_flash_start"
           data-firmware-title="Updating Firmware"
           data-firmware-working="${escapeHtml(otaWorkingText)}"
@@ -10863,34 +10994,95 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
         >${escapeHtml(otaActionLabel)}</button>
         <button
           type="button"
-          class="action-btn esphome-firmware-action"
-          data-firmware-action="voice_firmware_browser_build"
-          data-firmware-title="${amlogicFactoryImage ? "Flashing S420 over USB" : "Preparing Browser USB Flash"}"
-          data-firmware-working="${escapeHtml(browserWorkingText)}"
-          data-firmware-success="${escapeHtml(browserSuccessText)}"
-          data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}
-        >${escapeHtml(browserActionLabel)}</button>
-        <button
-          type="button"
-          class="action-btn esphome-firmware-action"
+          class="inline-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_ota_logs"
           data-firmware-title="Opening OTA Logs"
           data-firmware-working="Opening OTA logs..."
           data-firmware-success="OTA logs opened."
           data-firmware-error="OTA logs failed"${otaLogsDisabledAttr}
-        >OTA Logs</button>
+        >OTA Device Logs</button>
+      `
+      : selection.transport === "local_usb"
+      ? `
         <button
           type="button"
-          class="action-btn esphome-firmware-action"
-          data-firmware-action="voice_firmware_browser_logs"
-          data-firmware-title="Opening USB Logs"
-          data-firmware-working="Opening browser USB logs..."
-          data-firmware-success="USB logs opened."
-          data-firmware-error="USB logs failed"${browserLogsDisabledAttr}
+          class="action-btn firmware-flasher-primary esphome-firmware-action"
+          data-firmware-action="voice_firmware_local_usb_start"
+          data-firmware-title="Flashing with Local USB"
+          data-firmware-working="${escapeHtml(browserWorkingText)}"
+          data-firmware-success="${escapeHtml(browserSuccessText)}"
+          data-firmware-error="Local USB flash failed"${browserFlashDisabledAttr}
+        >${escapeHtml(browserActionLabel)}</button>
+        <button
+          type="button"
+          class="inline-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_local_usb_logs"
+          data-firmware-title="Opening Local USB Logs"
+          data-firmware-working="Opening Local USB logs..."
+          data-firmware-success="Local USB logs opened."
+          data-firmware-error="Local USB logs failed"${browserLogsDisabledAttr}
         >USB Logs</button>
+      `
+      : `
         <button
           type="button"
-          class="action-btn esphome-firmware-action"
+          class="action-btn firmware-flasher-primary esphome-firmware-action"
+          data-firmware-action="voice_firmware_browser_build"
+          data-firmware-title="Preparing Browser USB Flash"
+          data-firmware-working="${escapeHtml(browserWorkingText)}"
+          data-firmware-success="${escapeHtml(browserSuccessText)}"
+          data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}${browserCapability.available ? "" : " disabled"}
+        >${escapeHtml(browserActionLabel)}</button>
+        <button
+          type="button"
+          class="inline-btn esphome-firmware-action"
+          data-firmware-action="voice_firmware_browser_logs"
+          data-firmware-title="Opening Browser USB Logs"
+          data-firmware-working="Opening Browser USB logs..."
+          data-firmware-success="Browser USB logs opened."
+          data-firmware-error="Browser USB logs failed"${browserLogsDisabledAttr}${browserCapability.available ? "" : " disabled"}
+        >Browser USB Logs</button>
+      `;
+  const transportHint =
+    selection.transport === "ota"
+      ? "Tater sends the latest matching firmware directly to the selected online satellite."
+      : selection.transport === "local_usb"
+      ? amlogicFactoryImage
+        ? "Use the ThirdReality debug board to flash the S420 or passively view its boot and Linux console output."
+        : "Choose the connected serial port to flash the ESP satellite or passively view its USB serial output."
+      : browserCapability.message;
+
+  return `
+    <article class="card core-manager-item esphome-firmware-card firmware-flasher-card"
+      data-core-key="${escapeHtml(coreKey)}"
+      data-core-item-id="${itemId}"
+      data-firmware-selector="${escapeHtml(selection.selector)}"
+      data-firmware-template-key="${escapeHtml(selection.templateKey)}"
+      data-firmware-transport="${escapeHtml(selection.transport)}"
+      data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
+      data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
+      data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}"
+      data-firmware-flash-transport="${escapeHtml(factoryFlashTransport)}"
+      data-firmware-native="${nativeFirmware ? "1" : "0"}">
+      <div class="card-head">
+        <div>
+          <div class="firmware-prebuilt-kicker">Manual Firmware Flash</div>
+          <h3 class="card-title">Choose a flash method</h3>
+        </div>
+        <span class="firmware-transport-pill">${escapeHtml(transportLabel)}</span>
+      </div>
+      ${controlsHtml}
+      ${targetSummaryHtml}
+      ${prebuiltSummaryHtml}
+      ${linksHtml}
+      <div class="firmware-flasher-actions">
+        <div class="firmware-flasher-action-row">${flashActionHtml}</div>
+        <div class="firmware-flasher-action-copy">${escapeHtml(transportHint)}</div>
+      </div>
+      <div class="firmware-flasher-utility">
+        <button
+          type="button"
+          class="inline-btn esphome-firmware-action"
           data-firmware-action="voice_firmware_clean"
           data-firmware-title="Cleaning Firmware Cache"
           data-firmware-working="Cleaning firmware cache..."
@@ -11239,39 +11431,49 @@ function renderEspHomeFirmwarePanel(firmware, coreKey = "voice") {
   const prebuiltVersion = String(prebuilt?.version || "").trim();
   const prebuiltDeviceCount = Number(prebuilt?.device_count || 0);
   const prebuiltError = String(prebuilt?.error || "").trim();
-  const wifiNote = String(body?.wifi_note || "").trim();
-  const browserFlashNote = String(body?.browser_flash_note || "").trim();
   const emptyMessage =
     String(body?.empty_message || "No connected native satellites are available for firmware actions.").trim() ||
     "No connected native satellites are available for firmware actions.";
 
   return `
-    <div class="card">
+    <div class="card firmware-overview-card">
       <div class="card-head">
-        <h3 class="card-title">Firmware Flasher</h3>
-        <span class="small">${escapeHtml(coreKey)}</span>
+        <div>
+          <div class="firmware-prebuilt-kicker">Tater Satellites</div>
+          <h3 class="card-title">Firmware</h3>
+        </div>
+        <span class="firmware-release-pill">${
+          prebuiltAvailable ? escapeHtml(prebuiltVersion || "Latest ready") : "Manifest unavailable"
+        }</span>
       </div>
-      <div class="small">
-        Select a connected Tater satellite, let Tater match the firmware, then update by native OTA or Browser USB without compiling.
-      </div>
-      <div class="small" style="margin-top:8px;">
+      <p class="firmware-overview-copy">
+        Keep connected satellites current from the update alerts below, or use the manual flasher for OTA and USB installation.
+      </p>
+      <div class="firmware-overview-meta">
         ${
           prebuiltAvailable
-            ? `Tater Native firmware: ${escapeHtml(prebuiltVersion || "available")} for ${escapeHtml(String(prebuiltDeviceCount || ""))} device${prebuiltDeviceCount === 1 ? "" : "s"}`
+            ? `Latest Tater Native firmware is ready for ${escapeHtml(String(prebuiltDeviceCount || 0))} device famil${prebuiltDeviceCount === 1 ? "y" : "ies"}.`
             : `Tater Native firmware: ${prebuiltError ? escapeHtml(prebuiltError) : "unavailable"}`
         }
       </div>
-      ${wifiNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(wifiNote)}</div>` : ""}
-      ${browserFlashNote ? `<div class="small" style="margin-top:8px;">${escapeHtml(browserFlashNote)}</div>` : ""}
       ${
         warnings.length
-          ? `<div class="small" style="margin-top:8px;">${warnings.map((warning) => escapeHtml(String(warning || "").trim())).filter(Boolean).join("<br>")}</div>`
+          ? `<div class="firmware-overview-warning">${warnings.map((warning) => escapeHtml(String(warning || "").trim())).filter(Boolean).join("<br>")}</div>`
           : ""
       }
       ${renderEspHomeFirmwareUpdatePanel(firmwareUpdates, coreKey)}
       ${renderEspHomeFirmwareFlashAllPanel(firmwareFlashTargets, coreKey)}
     </div>
-    ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
+    <div class="firmware-manual-section">
+      <div class="firmware-manual-heading">
+        <div>
+          <div class="firmware-prebuilt-kicker">Install or Recover</div>
+          <h3>Manual flasher</h3>
+        </div>
+        <span>OTA · Local USB · Browser USB</span>
+      </div>
+      ${devices.length ? renderEspHomeFirmwareCard(body, coreKey) : renderNotice(emptyMessage)}
+    </div>
   `;
 }
 
@@ -12472,7 +12674,7 @@ async function ensureEspHomeRuntimeLoaded({ force = false, panel = "" } = {}) {
   const head = document.getElementById("settings-esphome-runtime-head");
   const globalSatelliteSettingsHost = document.getElementById("settings-esphome-runtime-global-satellite-settings");
   const globalSatelliteModelSettingsHost = document.getElementById("settings-models-wake-satellite-settings");
-  const wakeVerifierHost = document.getElementById("settings-esphome-runtime-wake-verifier");
+  const wakeVerifierHost = document.getElementById("settings-models-wake-verifier");
   const satellitesHost = document.getElementById("settings-esphome-runtime-satellites");
   const addHost = document.getElementById("settings-esphome-runtime-add");
   const firmwareHost = document.getElementById("settings-esphome-runtime-firmware");
@@ -13280,6 +13482,30 @@ function rerenderEspHomeFirmwarePanel(root = document) {
 }
 
 function bindEspHomeFirmwareSelectors(root = document) {
+  root.querySelectorAll(".firmware-transport-option[data-firmware-transport]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareTransportBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareTransportBound = "1";
+    button.addEventListener("click", () => {
+      const transport = String(button.dataset.firmwareTransport || "ota").trim().toLowerCase();
+      if (!["ota", "local_usb", "browser_usb"].includes(transport)) {
+        return;
+      }
+      state.esphomeFirmwareTransport = transport;
+      const firmware =
+        state.esphomeFirmwarePayload && typeof state.esphomeFirmwarePayload === "object"
+          ? state.esphomeFirmwarePayload
+          : {};
+      const selection = normalizeEspHomeFirmwareTransportSelection(firmware);
+      state.esphomeFirmwareSelection = {
+        templateKey: selection.templateKey,
+        selector: selection.selector,
+      };
+      rerenderEspHomeFirmwarePanel(document);
+    });
+  });
+
   root.querySelectorAll(".esphome-firmware-card select[data-core-field-key]").forEach((input) => {
     if (!(input instanceof HTMLSelectElement)) {
       return;
@@ -13297,6 +13523,9 @@ function bindEspHomeFirmwareSelectors(root = document) {
     input.dataset.esphomeFirmwareSelectBound = "1";
     input.addEventListener("change", () => {
       const card = input.closest(".esphome-firmware-card");
+      const transport = String(card?.dataset?.firmwareTransport || state.esphomeFirmwareTransport || "ota")
+        .trim()
+        .toLowerCase();
       const templateInput = card?.querySelector?.('select[data-core-field-key="template_key"]');
       const selectorInput = card?.querySelector?.('select[data-core-field-key="selector"]');
       const firmware =
@@ -13305,20 +13534,10 @@ function bindEspHomeFirmwareSelectors(root = document) {
           : {};
       let templateKey = String(templateInput?.value || "").trim();
       let selector = String(selectorInput?.value || "").trim();
-      if (key === "selector") {
+      if (transport === "ota" && key === "selector") {
         templateKey = espHomeFirmwareTemplateForSelector(firmware, selector) || templateKey;
-      } else if (key === "template_key" && selector !== "__usb_recovery__") {
-        const familyDevices = espHomeFirmwareDevicesForTemplate(firmware, templateKey);
-        const selectedBelongsToFamily = familyDevices.some(
-          (row) =>
-            String(row?.value || "").trim() === selector &&
-            !boolFromAny(row?.unmatched_template, false)
-        );
-        if (!selectedBelongsToFamily) {
-          const familyTarget =
-            familyDevices.find((row) => String(row?.value || "").trim() !== "__usb_recovery__") || familyDevices[0];
-          selector = String(familyTarget?.value || selector || "").trim();
-        }
+      } else if (["local_usb", "browser_usb"].includes(transport) && key === "template_key") {
+        selector = "__usb_recovery__";
       }
       state.esphomeFirmwareSelection = { templateKey, selector };
       rerenderEspHomeFirmwarePanel(document);
@@ -13541,7 +13760,8 @@ function openEspHomeFirmwareFlashViewer(card, coreKey) {
   const templateLabel =
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(selectorSelect?.selectedOptions?.[0]?.textContent || templateLabel || selector || "ESP Satellite").trim() ||
+    "ESP Satellite";
   const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltOta || "").trim() === "1";
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before flashing.", "error", 3200);
@@ -13833,9 +14053,30 @@ function browserUsbPortLabel(port) {
   return `USB ${hex(vendor)}:${hex(product)}`;
 }
 
+function browserUsbCapability() {
+  if (typeof window === "undefined" || !window.isSecureContext) {
+    return {
+      available: false,
+      message: "Browser USB needs a secure Tater page opened over HTTPS or localhost.",
+    };
+  }
+  if (typeof navigator === "undefined" || !navigator.serial) {
+    return {
+      available: false,
+      message:
+        "This browser session does not expose Web Serial. Open Tater’s localhost page in a Web Serial browser and allow USB access.",
+    };
+  }
+  return {
+    available: true,
+    message: "Web Serial is ready. The browser will ask you to choose the connected ESP satellite.",
+  };
+}
+
 async function browserUsbSelectPort(selector = "") {
-  if (!window.isSecureContext || !navigator.serial) {
-    throw new Error("Browser USB needs Chrome or Edge on HTTPS or localhost.");
+  const capability = browserUsbCapability();
+  if (!capability.available) {
+    throw new Error(capability.message);
   }
   const port = await navigator.serial.requestPort();
   const key = String(selector || "default").trim() || "default";
@@ -13987,14 +14228,14 @@ async function browserUsbWaitForReconnect(previousPort, selector, logConsole, st
     }
     if (Date.now() - lastLogAt > 2500) {
       lastLogAt = Date.now();
-      appendEspHomeFirmwareLog(logConsole, "Waiting for Chrome to expose the rebooted USB serial device...", "debug");
+      appendEspHomeFirmwareLog(logConsole, "Waiting for the browser to expose the rebooted USB serial device...", "debug");
       if (statusNode instanceof HTMLElement) {
         statusNode.textContent = "Waiting for the rebooted USB device...";
       }
     }
     await sleep(750);
   }
-  throw new Error("The device rebooted, but Chrome did not expose the reconnected USB serial device. Click Select USB Device again and retry Wi-Fi setup.");
+  throw new Error("The device rebooted, but the browser did not expose the reconnected USB serial device. Click Select USB Device again and retry Wi-Fi setup.");
 }
 
 async function flashBrowserUsbPort(port, artifact, logConsole, statusNode, onProgress = null) {
@@ -14529,7 +14770,6 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
 
   let stopped = false;
   let selectedPort = null;
-  let logConsole = null;
   let statusNode = null;
   let buildButton = null;
   let selectButton = null;
@@ -14711,7 +14951,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         tone: "error",
         phase: "failed",
         message: `USB firmware update failed: ${message}`,
-        hint: "Keep the device connected and try again. USB Logs has diagnostic details.",
+        hint: "Keep the device connected and try again. Browser USB Logs has diagnostic details.",
       });
       if (statusNode instanceof HTMLElement) {
         statusNode.textContent = `Browser USB flash failed: ${message}`;
@@ -14868,16 +15108,21 @@ async function prepareAmlogicUsbImage(card, coreKey) {
     return;
   }
   const confirmed = window.confirm(
-    "Flash Tater firmware to the ThirdReality S420?\n\n" +
-      "This factory flash erases the device. Connect the ThirdReality debug board, put the S420 in Amlogic USB burn mode, and do not unplug it until Tater reports completion."
+    "Flash Tater firmware to the ThirdReality S420 with Local USB?\n\n" +
+      "This factory flash erases the device. Keep the S420 power cable and debug-board USB cable connected. Tater will verify the console, enter Amlogic burn mode, and handle the reboot automatically."
   );
   if (!confirmed) {
     return;
   }
 
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || "ThirdReality S420").trim() || "ThirdReality S420";
+    String(
+      selectorSelect?.selectedOptions?.[0]?.textContent ||
+        templateSelect?.selectedOptions?.[0]?.textContent ||
+        "ThirdReality S420"
+    ).trim() || "ThirdReality S420";
   let stopped = false;
   let active = false;
   let sessionId = "";
@@ -14905,7 +15150,7 @@ async function prepareAmlogicUsbImage(card, coreKey) {
       message,
       hint: success
         ? "The S420 is restarting into Tater firmware."
-        : error || "Keep the debug board connected and open USB Logs for diagnostic details.",
+        : error || "Keep the debug board connected and try the Local USB flash again.",
     });
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = message;
@@ -14933,7 +15178,6 @@ async function prepareAmlogicUsbImage(card, coreKey) {
           id: sessionId,
           after_seq: cursor,
         });
-        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
         cursor = Number(result?.cursor || cursor || 0);
         progressView?.update({
           percent: Number(result?.progress_percent || 0),
@@ -14952,8 +15196,7 @@ async function prepareAmlogicUsbImage(card, coreKey) {
         }
         poll();
       } catch (error) {
-        const message = `S420 USB flash log failed: ${String(error?.message || "unknown error")}`;
-        appendEspHomeFirmwareLog(logConsole, message, "error");
+        const message = `S420 USB flash status check failed: ${String(error?.message || "unknown error")}`;
         await finish({ phase: "failed", error: message, message });
       }
     }, 850);
@@ -14983,12 +15226,12 @@ async function prepareAmlogicUsbImage(card, coreKey) {
   setEspHomeFirmwareCardBusy(card, true);
   setCoreManagerStatus(card, "Checking the S420 debug-board USB connection...");
   openRuntimeSettingsModal({
-    title: "Flash ThirdReality S420 over USB",
-    meta: `${deviceLabel} • Amlogic AXG factory flash`,
+    title: "ThirdReality S420 Local USB Flash",
+    meta: `${deviceLabel} • Tater desktop helper`,
     fields: [
       {
         key: "amlogic_usb_flash_log",
-        label: "S420 USB Firmware Update",
+        label: "Firmware Update",
         type: "textarea",
         value: "",
         description:
@@ -15011,7 +15254,7 @@ async function prepareAmlogicUsbImage(card, coreKey) {
           label.classList.add("firmware-progress-field");
           progressView = createFirmwareProgressView(label, {
             transport: "usb",
-            method: "Amlogic USB",
+            method: "Local USB",
             target: deviceLabel,
             message: "Checking the debug-board USB connection...",
             hint: "Keep the debug board, USB cable, and S420 power connected until completion.",
@@ -15030,7 +15273,6 @@ async function prepareAmlogicUsbImage(card, coreKey) {
         });
         sessionId = String(result?.session_id || "").trim();
         cursor = Number(result?.cursor || 0);
-        renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
         if (!sessionId) {
           throw new Error("The S420 USB flash session did not start.");
         }
@@ -15049,7 +15291,6 @@ async function prepareAmlogicUsbImage(card, coreKey) {
         poll();
       } catch (error) {
         const message = String(error?.message || "unknown error");
-        appendEspHomeFirmwareLog(logConsole, `S420 USB flash could not start: ${message}`, "error");
         await finish({ phase: "failed", error: message, message: `S420 USB flash could not start: ${message}` });
       }
     },
@@ -15061,6 +15302,510 @@ async function prepareAmlogicUsbImage(card, coreKey) {
         statusEl.classList.remove("voice-log-status");
       }
       void stopFlash();
+    },
+  });
+}
+
+async function openEspHomeLocalEspUsbFlashFlow(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
+  const deviceLabel =
+    String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "ESP Satellite").trim() || "ESP Satellite";
+  if (!selector || !templateKey || !coreKey) {
+    showToast("Pick an ESP firmware family before starting Local USB flash.", "error", 3200);
+    return;
+  }
+
+  setCoreManagerStatus(card, "Looking for local ESP USB serial ports...");
+  let portResult;
+  try {
+    portResult = await runCoreManagerAction(card, coreKey, "voice_firmware_esp_usb_ports", {
+      id: selector,
+      selector,
+      template_key: templateKey,
+    });
+  } catch (error) {
+    const message = `Local ESP USB detection failed: ${String(error?.message || "unknown error")}`;
+    setCoreManagerStatus(card, message);
+    showToast(message, "error", 4800);
+    return;
+  }
+  const toolAvailable = boolFromAny(portResult?.available, false);
+  const toolError = String(portResult?.tool?.error || portResult?.message || "").trim();
+  if (!toolAvailable) {
+    const message = toolError || "Tater's local ESP USB helper is unavailable.";
+    setCoreManagerStatus(card, message);
+    showToast(message, "error", 5200);
+    return;
+  }
+  const ports = (Array.isArray(portResult?.ports) ? portResult.ports : [])
+    .map((row) => ({
+      value: String(row?.value || row?.path || "").trim(),
+      label: String(row?.label || row?.path || row?.value || "USB serial").trim(),
+    }))
+    .filter((row) => row.value);
+  if (!ports.length) {
+    const message = "No local ESP USB serial device was found. Connect the satellite with a data cable and try again.";
+    setCoreManagerStatus(card, message);
+    showToast(message, "error", 4800);
+    return;
+  }
+
+  const openProgressViewer = (initialResult, serialPort) => {
+    let stopped = false;
+    let active = boolFromAny(initialResult?.active, true);
+    let sessionId = String(initialResult?.session_id || "").trim();
+    let cursor = Number(initialResult?.cursor || 0);
+    let pollTimer = 0;
+    let statusNode = null;
+    let modalDialog = null;
+    let progressView = null;
+
+    const finish = async (result) => {
+      active = false;
+      const phase = String(result?.phase || "").trim().toLowerCase();
+      const error = String(result?.error || "").trim();
+      const success = phase === "completed" && !error;
+      const message =
+        String(result?.message || result?.status_text || "").trim() ||
+        (success ? "Local ESP USB flash completed." : "Local ESP USB flash failed.");
+      progressView?.update({
+        percent: success ? 100 : Number(result?.progress_percent || 0),
+        phase,
+        tone: success ? "success" : "error",
+        message,
+        hint: success
+          ? "The satellite is rebooting. Use its Tater setup hotspot if Wi-Fi provisioning is needed."
+          : error || "Keep the satellite connected and try the Local USB flash again.",
+      });
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = message;
+      }
+      setEspHomeFirmwareCardBusy(card, false);
+      setCoreManagerStatus(card, message);
+      showToast(message, success ? "info" : "error", success ? 4200 : 5400);
+      try {
+        await reloadEspHomeRuntimePayloadOnly();
+      } catch (_error) {
+        // The completed flash remains valid if the card refresh fails.
+      }
+    };
+
+    const poll = () => {
+      if (stopped || !active || !sessionId) {
+        return;
+      }
+      pollTimer = window.setTimeout(async () => {
+        if (stopped || !active || !sessionId) {
+          return;
+        }
+        try {
+          const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
+            session_id: sessionId,
+            id: sessionId,
+            after_seq: cursor,
+          });
+          cursor = Number(result?.cursor || cursor || 0);
+          const status =
+            String(result?.status_text || result?.message || "").trim() || "Flashing the ESP satellite with Local USB...";
+          progressView?.update({
+            percent: Number(result?.progress_percent || 0),
+            phase: result?.phase,
+            message: status,
+          });
+          if (statusNode instanceof HTMLElement) {
+            statusNode.textContent = status;
+          }
+          if (!boolFromAny(result?.active, true)) {
+            await finish(result);
+            return;
+          }
+          poll();
+        } catch (error) {
+          const message = `Local ESP USB status check failed: ${String(error?.message || "unknown error")}`;
+          await finish({ phase: "failed", error: message, message });
+        }
+      }, 700);
+    };
+
+    const stopFlash = async () => {
+      stopped = true;
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+        pollTimer = 0;
+      }
+      if (active && sessionId) {
+        try {
+          await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
+            session_id: sessionId,
+            id: sessionId,
+          });
+        } catch (_error) {
+          // The helper may already have exited while the modal was closing.
+        }
+      }
+      active = false;
+      sessionId = "";
+      setEspHomeFirmwareCardBusy(card, false);
+    };
+
+    openRuntimeSettingsModal({
+      title: `${deviceLabel} Local USB Flash`,
+      meta: `${serialPort} • Espressif esptool`,
+      fields: [
+        {
+          key: "esp_local_usb_flash_log",
+          label: "Firmware Update",
+          type: "textarea",
+          value: "",
+          description:
+            "Tater verifies the released factory image, erases the ESP32-S3, writes and verifies the complete image at 0x0, then hard-resets the satellite. Closing this window while flashing cancels the write.",
+        },
+      ],
+      onOpen: async ({ modal, fieldsEl, statusEl }) => {
+        statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+        modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+        modal?.classList.add("firmware-progress-modal");
+        modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+        fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
+        const logArea = fieldsEl?.querySelector('[data-setting-key="esp_local_usb_flash_log"]') || null;
+        if (logArea instanceof HTMLTextAreaElement) {
+          logArea.readOnly = true;
+          logArea.spellcheck = false;
+          logArea.classList.add("voice-log-source-textarea");
+          const label = logArea.closest("label");
+          if (label instanceof HTMLElement) {
+            label.classList.add("firmware-progress-field");
+            progressView = createFirmwareProgressView(label, {
+              transport: "usb",
+              method: "Local USB",
+              target: deviceLabel,
+              percent: Number(initialResult?.progress_percent || 4),
+              message:
+                String(initialResult?.status_text || initialResult?.message || "").trim() ||
+                "Starting the local ESP serial flash...",
+              hint: `Keep ${serialPort} connected until Tater reports completion.`,
+            });
+          }
+        }
+        if (statusNode instanceof HTMLElement) {
+          statusNode.classList.add("voice-log-status");
+          statusNode.textContent =
+            String(initialResult?.status_text || initialResult?.message || "").trim() ||
+            "Starting the local ESP serial flash...";
+        }
+        if (!sessionId) {
+          await finish({ phase: "failed", error: "The Local ESP USB flash session did not start." });
+          return;
+        }
+        progressView?.update({
+          percent: Number(initialResult?.progress_percent || 4),
+          phase: initialResult?.phase,
+          message:
+            String(initialResult?.status_text || initialResult?.message || "").trim() ||
+            "Flashing the ESP satellite with Local USB...",
+        });
+        if (!active) {
+          await finish(initialResult);
+          return;
+        }
+        poll();
+      },
+      onClose: ({ modal, fieldsEl, statusEl }) => {
+        modal?.classList.remove("firmware-progress-modal");
+        modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+        fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
+        if (statusEl instanceof HTMLElement) {
+          statusEl.classList.remove("voice-log-status");
+        }
+        void stopFlash();
+      },
+    });
+  };
+
+  setCoreManagerStatus(card, `Select the USB serial port connected to ${deviceLabel}.`);
+  openRuntimeSettingsModal({
+    title: `${deviceLabel} Local USB`,
+    meta: "Tater desktop serial flasher",
+    fields: [
+      {
+        key: "serial_port",
+        label: "Connected USB Serial Device",
+        type: "select",
+        value: ports[0].value,
+        options: ports,
+        description:
+          "Choose the port for the satellite you want to erase and flash. Unplug unrelated serial devices if you are unsure which port is correct.",
+      },
+    ],
+    saveLabel: "Start Local USB Flash",
+    onSave: async (values) => {
+      const serialPort = String(values?.serial_port || "").trim();
+      if (!serialPort) {
+        throw new Error("Select a connected ESP USB serial device.");
+      }
+      const confirmed = window.confirm(
+        `Flash Tater firmware to ${deviceLabel} on ${serialPort}?\n\n` +
+          "This factory flash erases the ESP satellite. Keep its data USB cable connected until Tater reports completion."
+      );
+      if (!confirmed) {
+        setEspHomeFirmwareCardBusy(card, false);
+        return { message: "Local USB flash cancelled." };
+      }
+      setEspHomeFirmwareCardBusy(card, true);
+      setCoreManagerStatus(card, `Preparing the verified factory image for ${deviceLabel}...`);
+      try {
+        const result = await runCoreManagerAction(card, coreKey, "voice_firmware_esp_usb_flash_start", {
+          id: selector,
+          selector,
+          template_key: templateKey,
+          serial_port: serialPort,
+        });
+        window.setTimeout(() => openProgressViewer(result, serialPort), 0);
+        return { message: `Local USB flash started for ${deviceLabel}.` };
+      } catch (error) {
+        setEspHomeFirmwareCardBusy(card, false);
+        const message = String(error?.message || "unknown error");
+        setCoreManagerStatus(card, `Local ESP USB flash failed to start: ${message}`);
+        throw error;
+      }
+    },
+  });
+}
+
+async function openEspHomeLocalUsbLogs(card, coreKey) {
+  if (!(card instanceof HTMLElement)) {
+    return;
+  }
+  const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  const flashTransport = String(card.dataset?.firmwareFlashTransport || "esp_serial").trim().toLowerCase();
+  const s420Console = flashTransport === "amlogic_usb_burn" || templateKey === "thirdreality_s420";
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
+  const deviceLabel =
+    String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "USB Satellite").trim() || "USB Satellite";
+  if (!selector || !templateKey || !coreKey) {
+    showToast("Pick a Local USB firmware family before opening USB logs.", "error", 3200);
+    return;
+  }
+
+  setCoreManagerStatus(card, s420Console ? "Looking for the S420 debug-board console..." : "Looking for USB serial devices...");
+  let portResult;
+  try {
+    portResult = await runCoreManagerAction(card, coreKey, "voice_firmware_local_usb_log_ports", {
+      id: selector,
+      selector,
+      template_key: templateKey,
+    });
+  } catch (error) {
+    const message = `Local USB log detection failed: ${String(error?.message || "unknown error")}`;
+    setCoreManagerStatus(card, message);
+    showToast(message, "error", 4800);
+    return;
+  }
+
+  const ports = (Array.isArray(portResult?.ports) ? portResult.ports : [])
+    .map((row) => ({
+      value: String(row?.value || row?.path || "").trim(),
+      label: String(row?.label || row?.path || row?.value || "USB serial").trim(),
+    }))
+    .filter((row) => row.value);
+  if (!ports.length) {
+    const message =
+      String(portResult?.message || "").trim() ||
+      (s420Console
+        ? "Connect the S420 CH340 debug-board USB cable and try again."
+        : "Connect the ESP satellite with a data USB cable and try again.");
+    setCoreManagerStatus(card, message);
+    showToast(message, "error", 4800);
+    return;
+  }
+
+  const openViewer = (initialResult, serialPort) => {
+    let stopped = false;
+    let sessionId = String(initialResult?.session_id || "").trim();
+    let cursor = Number(initialResult?.cursor || 0);
+    let pollTimer = 0;
+    let logConsole = null;
+    let statusNode = null;
+    let modalDialog = null;
+
+    const stopViewer = async () => {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+        pollTimer = 0;
+      }
+      try {
+        if (sessionId) {
+          await runCoreManagerAction(card, coreKey, "voice_firmware_flash_stop", {
+            session_id: sessionId,
+            id: sessionId,
+          });
+        }
+      } catch (_error) {
+        // The serial device may already have disconnected.
+      }
+      sessionId = "";
+      setEspHomeFirmwareCardBusy(card, false);
+      setCoreManagerStatus(card, "Local USB log viewer closed.");
+    };
+
+    const schedulePoll = (delayMs = 500) => {
+      if (stopped || !sessionId) {
+        return;
+      }
+      pollTimer = window.setTimeout(async () => {
+        if (stopped || !sessionId) {
+          return;
+        }
+        try {
+          const result = await runCoreManagerAction(card, coreKey, "voice_firmware_flash_poll", {
+            session_id: sessionId,
+            id: sessionId,
+            after_seq: cursor,
+          });
+          const entries = Array.isArray(result?.entries) ? result.entries : [];
+          if (entries.length) {
+            renderEspHomeFirmwareLogEntries(logConsole, entries, false);
+          }
+          cursor = Number(result?.cursor || cursor || 0);
+          const error = String(result?.error || "").trim();
+          const active = boolFromAny(result?.active, false);
+          if (statusNode instanceof HTMLElement) {
+            statusNode.textContent = active
+              ? s420Console
+                ? `Streaming the S420 debug console from ${serialPort}.`
+                : `Streaming 115200-baud USB serial logs from ${serialPort}.`
+              : error || String(result?.message || "Local USB log stream ended.").trim();
+            statusNode.classList.toggle("error", Boolean(error));
+          }
+          if (!active) {
+            setEspHomeFirmwareCardBusy(card, false);
+            setCoreManagerStatus(card, error || "Local USB log stream ended.");
+            return;
+          }
+          schedulePoll(500);
+        } catch (error) {
+          if (statusNode instanceof HTMLElement) {
+            statusNode.textContent = `Local USB log error: ${String(error?.message || "unknown error")}`;
+            statusNode.classList.add("error");
+          }
+          schedulePoll(1800);
+        }
+      }, delayMs);
+    };
+
+    openRuntimeSettingsModal({
+      title: s420Console ? `${deviceLabel} Debug Console` : `${deviceLabel} USB Logs`,
+      meta: `${serialPort} • 115200 baud • passive`,
+      fields: [
+        {
+          key: "local_usb_log_feed",
+          label: s420Console ? "S420 Debug Console" : "Live USB Log",
+          type: "textarea",
+          value: "",
+          description: s420Console
+            ? "Passive output from the ThirdReality CH340 debug board, including boot, U-Boot, and Linux console messages. Tater sends no commands."
+            : "Passive USB serial output from the ESP satellite. Tater keeps reset and boot-control lines released.",
+        },
+      ],
+      onOpen: ({ modal, fieldsEl, statusEl }) => {
+        statusNode = statusEl instanceof HTMLElement ? statusEl : null;
+        modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
+        modal?.classList.add("voice-log-modal");
+        modalDialog?.classList.add("runtime-settings-dialog-log");
+        fieldsEl?.classList.add("runtime-settings-fields-log");
+        const logArea = fieldsEl?.querySelector('[data-setting-key="local_usb_log_feed"]') || null;
+        if (logArea instanceof HTMLTextAreaElement) {
+          logArea.readOnly = true;
+          logArea.spellcheck = false;
+          logArea.classList.add("voice-log-source-textarea");
+          const label = logArea.closest("label");
+          const consoleEl = document.createElement("div");
+          consoleEl.className = "voice-log-console";
+          consoleEl.setAttribute("role", "log");
+          consoleEl.setAttribute("aria-live", "polite");
+          consoleEl.setAttribute("aria-label", `${deviceLabel} Local USB logs`);
+          logConsole = consoleEl;
+          if (label instanceof HTMLElement) {
+            label.classList.add("voice-log-field");
+            label.appendChild(consoleEl);
+          }
+        }
+        renderEspHomeFirmwareLogEntries(
+          logConsole,
+          Array.isArray(initialResult?.entries) ? initialResult.entries : [],
+          true,
+          s420Console ? "Waiting for S420 debug-console output..." : "Waiting for USB serial output..."
+        );
+        if (statusNode instanceof HTMLElement) {
+          statusNode.classList.add("voice-log-status");
+          statusNode.textContent = s420Console
+            ? `Opening the S420 debug console on ${serialPort}...`
+            : `Opening USB serial logs on ${serialPort}...`;
+        }
+        if (!sessionId) {
+          renderEspHomeFirmwareLogEntries(
+            logConsole,
+            [{ display: "The Local USB log session did not start.", level: "error" }],
+            true
+          );
+          setEspHomeFirmwareCardBusy(card, false);
+          return;
+        }
+        setEspHomeFirmwareCardBusy(card, true);
+        schedulePoll(250);
+      },
+      onClose: ({ modal, fieldsEl, statusEl }) => {
+        modal?.classList.remove("voice-log-modal");
+        modalDialog?.classList.remove("runtime-settings-dialog-log");
+        fieldsEl?.classList.remove("runtime-settings-fields-log");
+        if (statusEl instanceof HTMLElement) {
+          statusEl.classList.remove("voice-log-status", "error");
+        }
+        void stopViewer();
+      },
+    });
+  };
+
+  openRuntimeSettingsModal({
+    title: s420Console ? `${deviceLabel} Debug Console` : `${deviceLabel} USB Logs`,
+    meta: s420Console ? "ThirdReality debug-board USB" : "Tater desktop serial viewer",
+    fields: [
+      {
+        key: "serial_port",
+        label: s420Console ? "CH340 Debug Console" : "Connected USB Serial Device",
+        type: "select",
+        value: ports[0].value,
+        options: ports,
+        description: s420Console
+          ? "The ThirdReality device uses its debug-board CH340 connection for passive console output."
+          : "Choose the USB data port for the satellite whose logs you want to view.",
+      },
+    ],
+    saveLabel: "Open USB Logs",
+    onSave: async (values) => {
+      const serialPort = String(values?.serial_port || "").trim();
+      if (!serialPort) {
+        throw new Error("Select a connected Local USB serial device.");
+      }
+      setCoreManagerStatus(card, `Opening Local USB logs for ${deviceLabel}...`);
+      const result = await runCoreManagerAction(card, coreKey, "voice_firmware_local_usb_log_start", {
+        id: selector,
+        selector,
+        template_key: templateKey,
+        serial_port: serialPort,
+      });
+      window.setTimeout(() => openViewer(result, serialPort), 0);
+      return { message: `Local USB logs opened for ${deviceLabel}.` };
     },
   });
 }
@@ -15207,8 +15952,14 @@ function openEspHomeBrowserUsbLogs(card) {
   }
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
+  const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const deviceLabel =
-    String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
+    String(
+      selectorSelect?.selectedOptions?.[0]?.textContent ||
+        templateSelect?.selectedOptions?.[0]?.textContent ||
+        selector ||
+        "ESP Satellite"
+    ).trim() || "ESP Satellite";
 
   let port = browserUsbStoredPort(selector);
   let stopped = false;
@@ -15863,6 +16614,19 @@ function bindEspHomeFirmwareActions(root = document) {
 
       if (action === "voice_firmware_flash_start") {
         openEspHomeFirmwareFlashViewer(card, coreKey);
+        return;
+      }
+      if (action === "voice_firmware_local_usb_start") {
+        const flashTransport = String(card.dataset?.firmwareFlashTransport || "esp_serial").trim().toLowerCase();
+        if (flashTransport === "amlogic_usb_burn") {
+          void prepareAmlogicUsbImage(card, coreKey);
+        } else {
+          void openEspHomeLocalEspUsbFlashFlow(card, coreKey);
+        }
+        return;
+      }
+      if (action === "voice_firmware_local_usb_logs") {
+        void openEspHomeLocalUsbLogs(card, coreKey);
         return;
       }
       if (action === "voice_firmware_browser_build") {
@@ -22983,6 +23747,9 @@ async function loadSettingsView() {
 	              <div id="settings-models-wake-satellite-settings">
 	                ${renderNotice("Open Wake Word to load shared satellite wake settings.")}
 	              </div>
+	              <div id="settings-models-wake-verifier" style="margin-top:16px;">
+	                ${renderNotice("Open Wake Word to load wake verification settings.")}
+	              </div>
 	              ${voiceVadSettingsHtml}
 	              </div>
 
@@ -23525,10 +24292,6 @@ async function loadSettingsView() {
               )}
               <div id="settings-esphome-runtime-global-satellite-settings">
                 ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load shared satellite voice settings.`)}
-              </div>
-
-              <div id="settings-esphome-runtime-wake-verifier" style="margin-top:16px;">
-                ${renderNotice(`Open the ${taterVoiceSettingsLabel} tab to load wake verification.`)}
               </div>
 
               <div id="settings-esphome-form">

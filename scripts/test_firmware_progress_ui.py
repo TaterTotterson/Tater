@@ -31,7 +31,8 @@ class FirmwareProgressUiTests(unittest.TestCase):
         flows = (
             ("openEspHomeFirmwareFlashViewer", "esphomeFirmwareLogTone"),
             ("openEspHomeBrowserUsbFlashFlow", "prepareAmlogicUsbImage"),
-            ("prepareAmlogicUsbImage", "openEspHomeFirmwareOtaLogs"),
+            ("prepareAmlogicUsbImage", "openEspHomeLocalEspUsbFlashFlow"),
+            ("openEspHomeLocalEspUsbFlashFlow", "openEspHomeLocalUsbLogs"),
             ("openEspHomeFirmwareUpdateAllFlow", "bindEspHomeFirmwareActions"),
         )
         for name, next_name in flows:
@@ -40,6 +41,27 @@ class FirmwareProgressUiTests(unittest.TestCase):
                 self.assertIn("createFirmwareProgressView", source)
                 self.assertIn("firmware-progress-modal", source)
                 self.assertNotIn('consoleEl.className = "voice-log-console"', source)
+
+    def test_local_esp_usb_flow_selects_a_port_without_showing_a_console(self) -> None:
+        source = _function_source(self.app_source, "openEspHomeLocalEspUsbFlashFlow", "openEspHomeLocalUsbLogs")
+        self.assertIn('"voice_firmware_esp_usb_ports"', source)
+        self.assertIn('"voice_firmware_esp_usb_flash_start"', source)
+        self.assertIn("createFirmwareProgressView", source)
+        self.assertNotIn('consoleEl.className = "voice-log-console"', source)
+        self.assertNotIn("Local USB Flash Log", source)
+        self.assertIn("Connected USB Serial Device", source)
+
+    def test_local_usb_logs_support_esp_and_s420_without_writing(self) -> None:
+        source = _function_source(self.app_source, "openEspHomeLocalUsbLogs", "openEspHomeFirmwareOtaLogs")
+        backend = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
+
+        self.assertIn('data-firmware-action="voice_firmware_local_usb_logs"', self.app_source)
+        self.assertIn('"voice_firmware_local_usb_log_ports"', source)
+        self.assertIn('"voice_firmware_local_usb_log_start"', source)
+        self.assertIn("S420 Debug Console", source)
+        self.assertIn('consoleEl.className = "voice-log-console"', source)
+        self.assertIn('"voice_firmware_local_usb_log_ports"', backend)
+        self.assertIn('"voice_firmware_local_usb_log_start"', backend)
 
     def test_browser_usb_uses_esptool_write_progress(self) -> None:
         source = _function_source(self.app_source, "flashBrowserUsbPort", "sleep")

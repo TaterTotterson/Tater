@@ -123,14 +123,143 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
+    def test_transport_picker_separates_connected_local_and_browser_targets(self) -> None:
+        script = textwrap.dedent(
+            r"""
+            const assert = require("assert");
+            const fs = require("fs");
+            const vm = require("vm");
+            const source = fs.readFileSync(process.argv[1], "utf8");
+
+            function extractFunction(name) {
+              const start = source.indexOf(`function ${name}(`);
+              assert.notStrictEqual(start, -1, `Missing ${name}`);
+              const bodyStart = source.indexOf("{", start);
+              let depth = 0;
+              for (let index = bodyStart; index < source.length; index += 1) {
+                if (source[index] === "{") depth += 1;
+                if (source[index] === "}") depth -= 1;
+                if (depth === 0) return source.slice(start, index + 1);
+              }
+              throw new Error(`Unterminated ${name}`);
+            }
+
+            const context = {
+              state: {
+                esphomeFirmwareSelection: { templateKey: "", selector: "" },
+                esphomeFirmwareTransport: "ota",
+              },
+              boolFromAny(value, fallback = false) {
+                if (value === undefined || value === null || value === "") return fallback;
+                if (typeof value === "string") return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+                return Boolean(value);
+              },
+            };
+            vm.createContext(context);
+            vm.runInContext([
+              extractFunction("espHomeFirmwareDevicesForTemplate"),
+              extractFunction("espHomeFirmwareAllDevices"),
+              extractFunction("espHomeFirmwareTemplateForSelector"),
+              extractFunction("normalizeEspHomeFirmwareSelection"),
+              extractFunction("resolveEspHomeFirmwareVariant"),
+              extractFunction("espHomeFirmwareFactoryTransport"),
+              extractFunction("espHomeFirmwareTemplatesForTransport"),
+              extractFunction("espHomeFirmwareConnectedDevices"),
+              extractFunction("normalizeEspHomeFirmwareTransportSelection"),
+            ].join("\n"), context);
+
+            const recoveryVariant = (transport, path) => ({
+              prebuilt_firmware: {
+                artifacts: { factory: { path, flash_transport: transport } },
+              },
+            });
+            const payload = {
+              active_template_key: "voicepe",
+              active_selector: "native:office",
+              templates: [
+                { value: "thirdreality_s420", label: "ThirdReality S420" },
+                { value: "voicepe", label: "Voice PE" },
+                { value: "satellite1", label: "Satellite1" },
+              ],
+              devices: [
+                { value: "native:office", template_key: "voicepe", connected: true, unmatched_template: false },
+                { value: "native:kitchen", template_key: "satellite1", connected: false, unmatched_template: false },
+              ],
+              devices_by_template: {
+                thirdreality_s420: [{ value: "__usb_recovery__", template_key: "thirdreality_s420" }],
+                voicepe: [
+                  { value: "native:office", template_key: "voicepe", connected: true, unmatched_template: false },
+                  { value: "__usb_recovery__", template_key: "voicepe" },
+                ],
+                satellite1: [
+                  { value: "native:kitchen", template_key: "satellite1", connected: false, unmatched_template: false },
+                  { value: "__usb_recovery__", template_key: "satellite1" },
+                ],
+              },
+              variants: {
+                thirdreality_s420: {
+                  "__usb_recovery__": recoveryVariant("amlogic_usb_burn", "s420.img"),
+                },
+                voicepe: {
+                  "native:office": { template_key: "voicepe", connected: true, unmatched_template: false },
+                  "__usb_recovery__": recoveryVariant("esp_serial", "voicepe.bin"),
+                },
+                satellite1: {
+                  "native:kitchen": { template_key: "satellite1", connected: false, unmatched_template: false },
+                  "__usb_recovery__": recoveryVariant("esp_serial", "satellite1.bin"),
+                },
+              },
+            };
+
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.espHomeFirmwareConnectedDevices(payload).map((row) => row.value))),
+              ["native:office"]
+            );
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.espHomeFirmwareTemplatesForTransport(payload, "local_usb").map((row) => row.value))),
+              ["thirdreality_s420", "voicepe", "satellite1"]
+            );
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.espHomeFirmwareTemplatesForTransport(payload, "browser_usb").map((row) => row.value))),
+              ["voicepe", "satellite1"]
+            );
+
+            context.state.esphomeFirmwareTransport = "local_usb";
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.normalizeEspHomeFirmwareTransportSelection(payload))),
+              { transport: "local_usb", templateKey: "voicepe", selector: "__usb_recovery__" }
+            );
+            context.state.esphomeFirmwareTransport = "browser_usb";
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.normalizeEspHomeFirmwareTransportSelection(payload))),
+              { transport: "browser_usb", templateKey: "voicepe", selector: "__usb_recovery__" }
+            );
+            context.state.esphomeFirmwareTransport = "ota";
+            assert.deepStrictEqual(
+              JSON.parse(JSON.stringify(context.normalizeEspHomeFirmwareTransportSelection(payload))),
+              { transport: "ota", templateKey: "voicepe", selector: "native:office" }
+            );
+            """
+        )
+
+        result = subprocess.run(
+            ["node", "-e", script, str(APP_JS)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
     def test_all_satellites_are_available_in_the_target_selector(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderEspHomeFirmwareCard")
         end = source.index("\nfunction renderEspHomeFirmwarePanel", start)
         render_source = source[start:end]
 
-        self.assertIn("const devices = espHomeFirmwareAllDevices(body);", render_source)
-        self.assertIn("options: devices", render_source)
+        self.assertIn("const connectedDevices = espHomeFirmwareConnectedDevices(body);", render_source)
+        self.assertIn("options: connectedDevices", render_source)
+        self.assertIn("options: transportTemplates", render_source)
 
     def test_payload_identifies_each_matched_devices_family(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
@@ -151,8 +280,15 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('factoryFlashTransport === "amlogic_usb_burn"', app_source)
         self.assertIn("prepareAmlogicUsbImage(card, coreKey)", app_source)
         self.assertIn('"voice_firmware_amlogic_flash_start"', firmware_source)
-        self.assertIn('"USB Flash S420"', app_source)
+        self.assertIn('"Start Local USB Flash"', app_source)
         self.assertIn("Browser ESP flashing cannot write", app_source)
+        self.assertIn("This browser session does not expose Web Serial", app_source)
+        self.assertNotIn('label: "Local USB Flash Log"', app_source)
+        self.assertIn("createFirmwareProgressView", app_source)
+        self.assertIn("Browser USB Logs", app_source)
+        self.assertIn('"voice_firmware_esp_usb_flash_start"', firmware_source)
+        self.assertIn('"voice_firmware_esp_usb_ports"', firmware_source)
+        self.assertIn("openEspHomeLocalEspUsbFlashFlow", app_source)
 
     def test_native_ota_sends_manifest_integrity_fields(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")

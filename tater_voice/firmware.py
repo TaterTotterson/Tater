@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ from tater_paths import agent_lab_path
 from . import display_bus
 from . import runtime as esphome_runtime
 from . import ui_helpers as esphome_ui_helpers
+
+logger = logging.getLogger(__name__)
 
 FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
@@ -2414,7 +2417,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             "Official native firmware is selected from the matched satellite family; no local compile step is used."
         ),
         "browser_flash_note": (
-            "ESP satellites can be written directly from Chrome or Edge. For the ThirdReality S420, connect both debug-board USB cables and leave the board powered on; Tater verifies the factory image, reboots the verified S420 console into Amlogic burn mode, and writes it with the native AXG USB helper. "
+            "ESP satellites can be written with Browser USB when the current browser session exposes Web Serial. For the ThirdReality S420, connect both debug-board USB cables and leave the board powered on; Tater verifies the factory image, reboots the verified S420 console into Amlogic burn mode, and writes it with the native AXG USB helper. "
             "After flashing, use the Tater setup Wi-Fi network to provision the satellite."
         ),
     }
@@ -2932,6 +2935,8 @@ def _final_session_phase(session: Dict[str, Any]) -> str:
     phase = _lower(session.get("phase"))
     if phase in {"failed", "cancelled"}:
         return phase
+    if phase == "completed":
+        return "completed"
     if phase == "live_logs":
         return "live_logs" if bool(session.get("active")) else "completed"
     if bool(session.get("stop_requested")):
@@ -2978,6 +2983,9 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "flash_size": _text(session.get("flash_size")),
         "flash_mode": _text(session.get("flash_mode")),
         "flash_freq": _text(session.get("flash_freq")),
+        "serial_port": _text(session.get("serial_port")),
+        "serial_kind": _text(session.get("serial_kind")),
+        "baudrate": int(session.get("baudrate") or 0),
     }
 
 
@@ -3036,6 +3044,8 @@ def _pump_session_device_logs(session_id: str) -> None:
         if not isinstance(session, dict):
             return
         if not bool(session.get("active")):
+            return
+        if _lower(session.get("operation")) in {"esp_usb_serial_log", "s420_usb_serial_log"}:
             return
         phase = _lower(session.get("phase"))
         if phase not in {"awaiting_device_logs", "live_logs"}:
@@ -3377,6 +3387,234 @@ def _prebuilt_ota_session_worker(session_id: str) -> None:
         )
 
 
+def _local_usb_log_session_worker(session_id: str) -> None:
+    from . import usb_serial_logs
+
+    handle: Any = None
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        serial_port = _text(session.get("serial_port"))
+        baudrate = _as_int(session.get("baudrate"), 115200, minimum=1200)
+        display_name = _text(session.get("display_name")) or "USB device"
+
+    try:
+        handle = usb_serial_logs.open_serial(serial_port, baudrate=baudrate)
+    except Exception as exc:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                error = _text(exc) or exc.__class__.__name__
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = error
+                session["message"] = f"Local USB logs could not open: {error}"
+                _set_session_phase_locked(session, "failed")
+                _append_session_entry_locked(session, level="error", message=session["message"], source="session")
+        return
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            with contextlib.suppress(Exception):
+                handle.close()
+            return
+        session["serial_handle"] = handle
+        session["message"] = f"Streaming Local USB logs from {display_name}."
+        _set_session_phase_locked(session, "live_logs")
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Opened passive {baudrate}-baud Local USB logs on {serial_port}.",
+            source="session",
+        )
+
+    failure = ""
+    try:
+        while True:
+            with _FIRMWARE_SESSION_LOCK:
+                session = _FIRMWARE_SESSIONS.get(session_id)
+                should_stop = not isinstance(session, dict) or bool(session.get("stop_requested")) or not bool(session.get("active"))
+            if should_stop:
+                break
+            line = usb_serial_logs.read_line(handle)
+            cleaned = _clean_terminal_text(line)
+            if not cleaned:
+                continue
+            with _FIRMWARE_SESSION_LOCK:
+                session = _FIRMWARE_SESSIONS.get(session_id)
+                if isinstance(session, dict) and bool(session.get("active")):
+                    _append_session_entry_locked(
+                        session,
+                        level=usb_serial_logs.log_level(cleaned),
+                        message=cleaned,
+                        source="usb_serial",
+                    )
+    except Exception as exc:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            stopped = not isinstance(session, dict) or bool(session.get("stop_requested"))
+        if not stopped:
+            failure = _text(exc) or exc.__class__.__name__
+    finally:
+        with contextlib.suppress(Exception):
+            handle.close()
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        session["serial_handle"] = None
+        session["active"] = False
+        if failure:
+            session["returncode"] = 1
+            session["error"] = failure
+            session["message"] = f"Local USB log stream ended: {failure}"
+            _set_session_phase_locked(session, "failed")
+            _append_session_entry_locked(session, level="error", message=session["message"], source="session")
+        else:
+            session["returncode"] = 0
+            session["error"] = ""
+            session["message"] = "Local USB log viewer closed."
+            _set_session_phase_locked(session, "completed")
+
+
+def _esp_usb_session_worker(session_id: str) -> None:
+    from . import amlogic_usb, esp_usb
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        command = [str(item) for item in list(session.get("command") or [])]
+        display_name = _text(session.get("display_name")) or "ESP satellite"
+        serial_port = _text(session.get("serial_port"))
+        _set_session_phase_locked(session, "usb_flashing")
+        _append_session_entry_locked(
+            session,
+            level="warn",
+            message=(
+                f"Local USB will erase {display_name} on {serial_port} and write the verified Tater factory image. "
+                "Keep the USB cable connected until Tater reports completion."
+            ),
+            source="session",
+        )
+
+    if not command:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = "The local ESP USB flash command is missing."
+                session["message"] = "Local ESP USB flash failed."
+                _set_session_phase_locked(session, "failed")
+        return
+
+    try:
+        process = amlogic_usb.launch_flash_process(command)
+    except Exception as exc:
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                session["active"] = False
+                session["returncode"] = 1
+                session["error"] = _text(exc) or exc.__class__.__name__
+                session["message"] = "Local ESP USB flash failed to start."
+                _set_session_phase_locked(session, "failed")
+                _append_session_entry_locked(
+                    session,
+                    level="error",
+                    message=f"Could not start Espressif esptool: {_text(exc) or exc.__class__.__name__}.",
+                    source="session",
+                )
+        return
+
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            with contextlib.suppress(Exception):
+                process.terminate()
+            return
+        session["process"] = process
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Espressif esptool started for {display_name} on {serial_port}.",
+            source="session",
+        )
+
+    output = process.stdout
+    if output is not None:
+        for line in iter(output.readline, ""):
+            cleaned = _clean_terminal_text(line)
+            if cleaned:
+                lowered = cleaned.lower()
+                level = (
+                    "error"
+                    if "fatal error" in lowered
+                    or "traceback" in lowered
+                    or lowered.startswith("error:")
+                    or "failed to connect" in lowered
+                    else "info"
+                )
+                if level == "error":
+                    logger.error("[esp-usb] %s", cleaned)
+                else:
+                    logger.info("[esp-usb] %s", cleaned)
+                with _FIRMWARE_SESSION_LOCK:
+                    live = _FIRMWARE_SESSIONS.get(session_id)
+                    if isinstance(live, dict):
+                        live["last_esp_line"] = cleaned
+                        progress = esp_usb.progress_percent(cleaned)
+                        if progress is not None:
+                            _set_session_progress_locked(live, progress)
+                        _append_session_entry_locked(live, level=level, message=cleaned, source="esptool")
+            with _FIRMWARE_SESSION_LOCK:
+                live = _FIRMWARE_SESSIONS.get(session_id)
+                should_stop = not isinstance(live, dict) or bool(live.get("stop_requested"))
+            if should_stop and process.poll() is None:
+                with contextlib.suppress(Exception):
+                    process.terminate()
+                break
+        with contextlib.suppress(Exception):
+            output.close()
+
+    returncode = process.wait()
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(session, dict):
+            return
+        session["process"] = None
+        session["active"] = False
+        session["returncode"] = int(returncode)
+        if bool(session.get("stop_requested")):
+            session["error"] = ""
+            session["message"] = "Local ESP USB flash stopped. The satellite may need to be flashed again before it can boot."
+            _set_session_phase_locked(session, "cancelled")
+            _append_session_entry_locked(session, level="warn", message=session["message"], source="session")
+            return
+        if returncode != 0:
+            last_line = _text(session.get("last_esp_line"))
+            session["error"] = "Espressif esptool did not complete successfully."
+            if last_line:
+                session["error"] += f" Last helper message: {last_line}"
+            session["message"] = "Local ESP USB flash failed."
+            _set_session_phase_locked(session, "failed")
+            _append_session_entry_locked(session, level="error", message=session["error"], source="session")
+            return
+        version = _text(session.get("firmware_version"))
+        session["message"] = (
+            f"Local ESP USB flash completed. {display_name} rebooted into Tater firmware {version}."
+            if version
+            else f"Local ESP USB flash completed. {display_name} rebooted into Tater firmware."
+        )
+        _set_session_progress_locked(session, 100.0)
+        _set_session_phase_locked(session, "completed")
+        _append_session_entry_locked(session, level="info", message=session["message"], source="session")
+
+
 def _amlogic_usb_session_worker(session_id: str) -> None:
     from . import amlogic_usb
 
@@ -3388,6 +3626,7 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
         working_dir = _text(session.get("working_dir"))
         staging_dir = _text(session.get("staging_dir"))
         display_name = _text(session.get("display_name")) or "ThirdReality S420"
+        expected_version = _text(session.get("firmware_version"))
         tool_info = dict(session.get("amlogic_tool_info") or {})
         _append_session_entry_locked(
             session,
@@ -3410,7 +3649,28 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
                 _set_session_phase_locked(session, "failed")
         return
 
+    preparation_attempt = 1
     burn_mode = amlogic_usb.prepare_device(tool_info, timeout=20.0)
+    if not bool(burn_mode.get("connected")) and _text(burn_mode.get("reason")) == "burn_window_not_detected":
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(session, dict):
+                _append_session_entry_locked(
+                    session,
+                    level="warn",
+                    message=(
+                        "The first automatic S420 reboot returned without a detectable Amlogic interface. "
+                        "Tater is retrying the verified serial handoff once."
+                    ),
+                    source="session",
+                )
+        preparation_attempt = 2
+        burn_mode = amlogic_usb.prepare_device(tool_info, timeout=35.0)
+        if not bool(burn_mode.get("connected")) and _text(burn_mode.get("reason")) == "burn_window_not_detected":
+            burn_mode["error"] = (
+                "Tater automatically rebooted the verified S420 twice, but the Amlogic WorldCup "
+                "interface did not appear. Both attempts completed before any firmware was written."
+            )
     if not bool(burn_mode.get("connected")):
         if staging_dir:
             with contextlib.suppress(Exception):
@@ -3448,8 +3708,18 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             _set_session_phase_locked(session, "cancelled")
             return
         debug_port = _text(burn_mode.get("debug_port"))
+        if debug_port:
+            command.extend(["--debug-port", debug_port])
+        detection_seconds = burn_mode.get("detection_seconds")
+        timing = (
+            f" after {float(detection_seconds):.1f} seconds"
+            if isinstance(detection_seconds, (int, float))
+            else ""
+        )
+        attempt = f" on automatic attempt {preparation_attempt}" if preparation_attempt > 1 else ""
         detection_message = (
-            f"Verified the S420 on {debug_port}, rebooted it through the debug console, and caught Amlogic USB burn mode."
+            f"Verified the S420 on {debug_port}, rebooted it through the debug console, "
+            f"and caught Amlogic USB burn mode{timing}{attempt}."
             if bool(burn_mode.get("auto_rebooted")) and debug_port
             else "Detected the S420 in Amlogic USB burn mode."
         )
@@ -3457,14 +3727,9 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
         _set_session_phase_locked(session, "usb_flashing")
 
     try:
-        process = subprocess.Popen(
+        process = amlogic_usb.launch_flash_process(
             command,
-            cwd=working_dir or None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
+            working_dir=working_dir or None,
         )
     except Exception as exc:
         if staging_dir:
@@ -3510,10 +3775,20 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             if cleaned:
                 lowered = cleaned.lower()
                 level = "error" if "[ko]" in lowered or "error" in lowered or "not found" in lowered else "info"
+                if level == "error":
+                    logger.error("[s420-usb] %s", cleaned)
+                else:
+                    logger.info("[s420-usb] %s", cleaned)
                 with _FIRMWARE_SESSION_LOCK:
                     live = _FIRMWARE_SESSIONS.get(session_id)
                     if isinstance(live, dict):
-                        percent_match = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", cleaned)
+                        live["last_amlogic_line"] = cleaned
+                        # Only the S420 runner's top-level milestones end in a
+                        # parenthesized percentage. The Amlogic helper also
+                        # prints transfer-local values such as ``[93%/12MB]``;
+                        # treating those as overall progress makes an early
+                        # boot-partition failure appear to happen at 93%.
+                        percent_match = re.search(r"\((\d{1,3}(?:\.\d+)?)\s*%\)\.?$", cleaned)
                         if percent_match:
                             _set_session_progress_locked(live, percent_match.group(1))
                         _append_session_entry_locked(live, level=level, message=cleaned, source="amlogic")
@@ -3528,6 +3803,30 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             output.close()
 
     returncode = process.wait()
+    boot_verification: Dict[str, Any] = {}
+    boot_verification_error = ""
+    if returncode == 0:
+        with _FIRMWARE_SESSION_LOCK:
+            live = _FIRMWARE_SESSIONS.get(session_id)
+            if isinstance(live, dict):
+                _set_session_progress_locked(live, 99.0)
+                _append_session_entry_locked(
+                    live,
+                    level="info",
+                    message=(
+                        f"Factory write finished. Waiting for {display_name} to boot "
+                        f"Tater firmware {expected_version or 'from the verified image'}..."
+                    ),
+                    source="session",
+                )
+        try:
+            boot_verification = amlogic_usb.verify_tater_boot(
+                debug_port,
+                expected_version,
+                timeout=90.0,
+            )
+        except Exception as exc:
+            boot_verification_error = _text(exc) or exc.__class__.__name__
     if staging_dir:
         with contextlib.suppress(Exception):
             shutil.rmtree(staging_dir)
@@ -3550,13 +3849,28 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             )
             return
         if returncode != 0:
-            session["error"] = "The Amlogic USB helper did not complete successfully. Check the burn log above."
+            last_line = _text(session.get("last_amlogic_line"))
+            session["error"] = "The Amlogic USB helper did not complete successfully."
+            if last_line:
+                session["error"] += f" Last helper message: {last_line}"
             session["message"] = "S420 USB flash failed."
             _set_session_phase_locked(session, "failed")
             _append_session_entry_locked(
                 session,
                 level="error",
                 message=session["error"],
+                source="session",
+            )
+            return
+        if boot_verification_error:
+            session["returncode"] = 1
+            session["error"] = boot_verification_error
+            session["message"] = "S420 firmware was written, but its Tater boot could not be verified."
+            _set_session_phase_locked(session, "failed")
+            _append_session_entry_locked(
+                session,
+                level="error",
+                message=boot_verification_error,
                 source="session",
             )
             return
@@ -3567,7 +3881,15 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             display_name=session.get("display_name"),
             source="amlogic_usb_factory_flash",
         )
-        session["message"] = "S420 USB flash completed. The device is rebooting into Tater firmware."
+        verified_version = _text(boot_verification.get("firmware_version")) or _text(
+            session.get("firmware_version")
+        )
+        session["message"] = (
+            f"S420 USB flash completed and Tater firmware {verified_version} booted successfully."
+            if verified_version
+            else "S420 USB flash completed and Tater firmware booted successfully."
+        )
+        _set_session_progress_locked(session, 100.0)
         _set_session_phase_locked(session, "completed")
         _append_session_entry_locked(
             session,
@@ -3575,6 +3897,183 @@ def _amlogic_usb_session_worker(session_id: str) -> None:
             message=session["message"],
             source="session",
         )
+
+
+def _start_local_usb_log_session(context: Dict[str, Any], serial_port: str) -> Dict[str, Any]:
+    from . import usb_serial_logs
+
+    _prune_firmware_sessions()
+    selector = _text(context.get("selector"))
+    template_key = _text(context.get("template_key"))
+    active_session = _active_flash_for_selector(selector)
+    if isinstance(active_session, dict):
+        raise RuntimeError("A Local USB flash or log session is already active. Close it before opening another USB connection.")
+
+    port_info = usb_serial_logs.resolve_serial_port(template_key, serial_port)
+    port_path = _text(port_info.get("path"))
+    s420_console = usb_serial_logs.is_s420(template_key)
+    target_label = _text(context.get("template_label")) or _text(context.get("display_name")) or "USB device"
+    operation = "s420_usb_serial_log" if s420_console else "esp_usb_serial_log"
+    session_id = f"fw_{uuid.uuid4().hex}"
+    session = {
+        "id": session_id,
+        "selector": selector,
+        "template_key": template_key,
+        "firmware_version": _text(context.get("firmware_version")),
+        "display_name": target_label,
+        "host": "usb",
+        "operation": operation,
+        "context": context,
+        "serial_port": port_path,
+        "serial_kind": _text(port_info.get("kind")),
+        "baudrate": _as_int(port_info.get("baudrate"), 115200, minimum=1200),
+        "created_ts": time.time(),
+        "updated_ts": time.time(),
+        "cursor": 0,
+        "entries": [],
+        "phase": "starting",
+        "status_text": f"Opening Local USB logs for {target_label}...",
+        "progress_percent": 0.0,
+        "progress_bytes": 0,
+        "progress_total_bytes": 0,
+        "active": True,
+        "error": "",
+        "message": f"Opening Local USB logs on {port_path}.",
+        "returncode": None,
+        "stop_requested": False,
+        "follow_logs": False,
+        "device_logs_started": False,
+        "serial_handle": None,
+    }
+    with _FIRMWARE_SESSION_LOCK:
+        _FIRMWARE_SESSIONS[session_id] = session
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=(
+                f"Opening the S420 debug-board console on {port_path}. This viewer is passive and sends no commands."
+                if s420_console
+                else f"Opening the ESP USB serial console on {port_path}. Reset and boot-control lines remain released."
+            ),
+            source="session",
+        )
+
+    worker = threading.Thread(target=_local_usb_log_session_worker, args=(session_id,), daemon=True)
+    with _FIRMWARE_SESSION_LOCK:
+        session["worker"] = worker
+    worker.start()
+    with _FIRMWARE_SESSION_LOCK:
+        live_session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(live_session, dict):
+            raise RuntimeError("Local USB log session was not created.")
+        return _session_payload_locked(live_session, after_seq=0)
+
+
+def _start_esp_usb_flash_session(context: Dict[str, Any], serial_port: str) -> Dict[str, Any]:
+    from . import esp_usb
+
+    _prune_firmware_sessions()
+    selector = _text(context.get("selector"))
+    if _lower(context.get("template_key")) == "thirdreality_s420":
+        raise RuntimeError("The ThirdReality S420 uses Tater's Amlogic Local USB helper, not Espressif esptool.")
+    active_session = _active_flash_for_selector(selector)
+    if isinstance(active_session, dict):
+        raise RuntimeError("A Local USB firmware flash session is already active.")
+
+    tool_info = esp_usb.inspect_esptool()
+    if not bool(tool_info.get("available")):
+        raise RuntimeError(_text(tool_info.get("error")) or "Tater's local ESP USB helper is unavailable.")
+    port_info = esp_usb.resolve_serial_port(serial_port)
+
+    prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
+    artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
+    factory = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
+    flash_transport = _lower(factory.get("flash_transport")) or "esp_serial"
+    if flash_transport != "esp_serial":
+        raise RuntimeError(f"{_text(context.get('template_label')) or 'This firmware'} is not an ESP serial image.")
+
+    factory_binary = _download_prebuilt_firmware_binary(context, "factory")
+    image_path = Path(factory_binary["path"]).resolve()
+    command = esp_usb.flash_command(
+        _text(port_info.get("path")),
+        image_path,
+        flash_size=_text(factory.get("flash_size")) or "16MB",
+        flash_mode=_text(factory.get("flash_mode")) or "dio",
+        flash_freq=_text(factory.get("flash_freq")) or "40m",
+        python_executable=_text(tool_info.get("python")),
+    )
+    session_id = f"fw_{uuid.uuid4().hex}"
+    target_label = _text(context.get("display_name")) or _text(context.get("template_label")) or "ESP satellite"
+    session = {
+        "id": session_id,
+        "selector": selector,
+        "template_key": _text(context.get("template_key")),
+        "firmware_version": _text(context.get("firmware_version")),
+        "display_name": target_label,
+        "host": "usb",
+        "operation": "esp_usb_factory_flash",
+        "context": context,
+        "command": command,
+        "serial_port": _text(port_info.get("path")),
+        "source_binary": str(image_path),
+        "binary_name": image_path.name,
+        "binary_size": int(image_path.stat().st_size),
+        "flash_size": _text(factory.get("flash_size")) or "16MB",
+        "flash_mode": _text(factory.get("flash_mode")) or "dio",
+        "flash_freq": _text(factory.get("flash_freq")) or "40m",
+        "erase_all": True,
+        "created_ts": time.time(),
+        "updated_ts": time.time(),
+        "cursor": 0,
+        "entries": [],
+        "phase": "starting",
+        "status_text": _phase_status_text("starting", target_label),
+        "progress_percent": 4.0,
+        "progress_bytes": 0,
+        "progress_total_bytes": int(image_path.stat().st_size),
+        "active": True,
+        "error": "",
+        "message": f"Preparing Local USB flash for {target_label} on {_text(port_info.get('path'))}.",
+        "returncode": None,
+        "stop_requested": False,
+        "follow_logs": False,
+        "device_logs_started": False,
+        "process": None,
+    }
+    with _FIRMWARE_SESSION_LOCK:
+        _FIRMWARE_SESSIONS[session_id] = session
+        cached_text = "cached" if bool(factory_binary.get("cached")) else "downloaded"
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=(
+                f"Verified Tater {_text(context.get('template_label')) or 'ESP'} factory image "
+                f"{image_path.name} ({image_path.stat().st_size} bytes, {cached_text})."
+            ),
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Selected local serial port: {_text(port_info.get('label')) or _text(port_info.get('path'))}.",
+            source="session",
+        )
+        _append_session_entry_locked(
+            session,
+            level="debug",
+            message=f"Using Espressif esptool {_text(tool_info.get('version')) or 'installed'} from Tater's private runtime.",
+            source="session",
+        )
+
+    worker = threading.Thread(target=_esp_usb_session_worker, args=(session_id,), daemon=True)
+    with _FIRMWARE_SESSION_LOCK:
+        session["worker"] = worker
+    worker.start()
+    with _FIRMWARE_SESSION_LOCK:
+        live_session = _FIRMWARE_SESSIONS.get(session_id)
+        if not isinstance(live_session, dict):
+            raise RuntimeError("Local ESP USB flash session was not created.")
+        return _session_payload_locked(live_session, after_seq=0)
 
 
 def _start_amlogic_usb_flash_session(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -3820,6 +4319,7 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
     selector = ""
     operation = ""
     process: Any = None
+    serial_handle: Any = None
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_token)
         if not isinstance(session, dict):
@@ -3829,13 +4329,23 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         selector = _text(session.get("selector"))
         operation = _lower(session.get("operation"))
         process = session.get("process")
-        _set_session_phase_locked(session, _final_session_phase(session))
+        serial_handle = session.get("serial_handle")
+        if operation in {"esp_usb_serial_log", "s420_usb_serial_log"}:
+            session["returncode"] = 0
+            session["message"] = "Local USB log viewer closed."
+            _set_session_phase_locked(session, "completed")
+        else:
+            _set_session_phase_locked(session, _final_session_phase(session))
         _append_session_entry_locked(
             session,
             level="info",
             message=(
                 "Stopping the Amlogic USB flash. The S420 may need to be flashed again before it can boot."
                 if operation == "amlogic_usb_factory_flash"
+                else "Stopping the local ESP USB flash. The satellite may need to be flashed again before it can boot."
+                if operation == "esp_usb_factory_flash"
+                else "Closing the Local USB log viewer."
+                if operation in {"esp_usb_serial_log", "s420_usb_serial_log"}
                 else "Firmware log viewer closed."
             ),
             source="session",
@@ -3844,6 +4354,12 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
     if operation == "amlogic_usb_factory_flash" and process is not None:
         with contextlib.suppress(Exception):
             os.killpg(int(process.pid), signal.SIGTERM)
+    elif operation == "esp_usb_factory_flash" and process is not None:
+        with contextlib.suppress(Exception):
+            process.terminate()
+    elif operation in {"esp_usb_serial_log", "s420_usb_serial_log"} and serial_handle is not None:
+        with contextlib.suppress(Exception):
+            serial_handle.close()
     elif selector:
         with contextlib.suppress(Exception):
             esphome_runtime.logs_stop(selector, force=False, timeout=20.0)
@@ -3853,7 +4369,11 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
         if not isinstance(session, dict):
             return {"ok": True, "session_id": session_token, "stopped": True}
         session["device_logs_started"] = False
-        if _lower(session.get("phase")) not in {"failed", "cancelled"}:
+        if operation in {"esp_usb_serial_log", "s420_usb_serial_log"}:
+            session["returncode"] = 0
+            session["message"] = "Local USB log viewer closed."
+            _set_session_phase_locked(session, "completed")
+        elif _lower(session.get("phase")) not in {"failed", "cancelled"}:
             _set_session_phase_locked(session, _final_session_phase(session))
         if _lower(session.get("phase")) == "completed":
             session["message"] = "Firmware flash completed."
@@ -3894,6 +4414,49 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         result["action"] = action_name
         return result
 
+    if action_name == "voice_firmware_esp_usb_ports":
+        from . import esp_usb
+
+        tool_info = esp_usb.inspect_esptool()
+        return {
+            "ok": True,
+            "action": action_name,
+            "available": bool(tool_info.get("available")),
+            "tool": tool_info,
+            "ports": esp_usb.serial_ports(),
+            "message": (
+                "Select the local serial port connected to the ESP satellite."
+                if bool(tool_info.get("available"))
+                else _text(tool_info.get("error")) or "Tater's local ESP USB helper is unavailable."
+            ),
+        }
+
+    if action_name == "voice_firmware_local_usb_log_ports":
+        from . import usb_serial_logs
+
+        body = payload if isinstance(payload, dict) else {}
+        template_key = _text(body.get("template_key"))
+        if not template_key:
+            raise ValueError("template_key is required")
+        ports = usb_serial_logs.serial_ports(template_key)
+        s420_console = usb_serial_logs.is_s420(template_key)
+        return {
+            "ok": True,
+            "action": action_name,
+            "available": bool(ports),
+            "mode": "s420_debug_console" if s420_console else "esp_serial",
+            "ports": ports,
+            "message": (
+                "Select the ThirdReality CH340 debug-board console."
+                if s420_console and ports
+                else "Connect the S420 debug board and try again."
+                if s420_console
+                else "Select the local USB serial port connected to the ESP satellite."
+                if ports
+                else "Connect the ESP satellite with a data USB cable and try again."
+            ),
+        }
+
     if action_name == "voice_display_sensors_save":
         return _save_display_sensor_profile(payload if isinstance(payload, dict) else {})
 
@@ -3926,6 +4489,8 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
 
     if action_name not in {
         "voice_firmware_amlogic_flash_start",
+        "voice_firmware_esp_usb_flash_start",
+        "voice_firmware_local_usb_log_start",
         "voice_firmware_browser_build",
         "voice_firmware_flash",
         "voice_firmware_flash_start",
@@ -3984,6 +4549,16 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
 
     if action_name == "voice_firmware_amlogic_flash_start":
         result = _start_amlogic_usb_flash_session(context)
+        result["action"] = action_name
+        return result
+
+    if action_name == "voice_firmware_esp_usb_flash_start":
+        result = _start_esp_usb_flash_session(context, _text(body.get("serial_port") or body.get("port")))
+        result["action"] = action_name
+        return result
+
+    if action_name == "voice_firmware_local_usb_log_start":
+        result = _start_local_usb_log_session(context, _text(body.get("serial_port") or body.get("port")))
         result["action"] = action_name
         return result
 
