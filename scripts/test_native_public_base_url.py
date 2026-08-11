@@ -118,6 +118,40 @@ class NativePublicBaseUrlTests(unittest.TestCase):
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/media/[0-9a-f]+$",
         )
 
+    def test_remote_music_url_is_eligible_for_persistent_passthrough(self) -> None:
+        url = "http://10.4.20.204:4229/api/tater/local/stream?profile=audio_sync"
+        self.assertEqual(
+            vp._native_persistent_media_source_url(
+                url,
+                media_content_type="music",
+            ),
+            url,
+        )
+
+    def test_tts_loopback_and_resumed_music_stay_on_preload_path(self) -> None:
+        self.assertEqual(
+            vp._native_persistent_media_source_url(
+                "https://tube.test/stream",
+                media_content_type="tts",
+            ),
+            "",
+        )
+        self.assertEqual(
+            vp._native_persistent_media_source_url(
+                "http://127.0.0.1:8501/media/song.wav",
+                media_content_type="music",
+            ),
+            "",
+        )
+        self.assertEqual(
+            vp._native_persistent_media_source_url(
+                "https://tube.test/stream",
+                media_content_type="music",
+                start_position_ms=30000,
+            ),
+            "",
+        )
+
     @staticmethod
     def _flac_block(block_type: int, body: bytes, *, last: bool = False) -> bytes:
         header = block_type | (0x80 if last else 0)

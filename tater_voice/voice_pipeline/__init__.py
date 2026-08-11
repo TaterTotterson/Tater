@@ -4869,6 +4869,28 @@ def _local_ai_task_background_audio(source_url: str) -> Optional[Tuple[Path, str
     return candidate, content_type
 
 
+def _native_persistent_media_source_url(
+    source_url: str,
+    *,
+    media_content_type: str,
+    start_position_ms: int = 0,
+) -> str:
+    """Return a satellite-reachable music URL that can remain a live stream."""
+    url = _text(source_url).strip()
+    if _lower(media_content_type) != "music" or not url or int(start_position_ms or 0) > 0:
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return ""
+    hostname = _lower(parsed.hostname)
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return ""
+    if hostname in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    return url
+
+
 async def _download_media_source(source_url: str) -> Tuple[bytes, str]:
     url = _text(source_url).strip()
     if not url:

@@ -975,6 +975,15 @@ async def native_satellite_play_group(
         for row in member_rows
     ]
 
+    passthrough_url = (
+        ""
+        if audio_b64
+        else vp._native_persistent_media_source_url(
+            source_url,
+            media_content_type=media_content_type,
+            start_position_ms=media_start_position_ms,
+        )
+    )
     fetched_media_type = ""
     if audio_b64:
         try:
@@ -983,14 +992,14 @@ async def native_satellite_play_group(
             raise HTTPException(status_code=400, detail=f"audio_b64 is invalid: {exc}") from exc
         if not media_bytes:
             raise HTTPException(status_code=400, detail="audio_b64 decoded to empty content")
-    else:
+    elif not passthrough_url:
         try:
             media_bytes, fetched_media_type = await vp._download_media_source(source_url)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
     media_type = requested_media_type or fetched_media_type or "application/octet-stream"
     playback_id = uuid.uuid4().hex
-    playback_url = vp._store_media_url(
+    playback_url = passthrough_url or vp._store_media_url(
         playback_members[0]["selector"],
         playback_id,
         media_bytes,
@@ -1024,6 +1033,7 @@ async def native_satellite_play_group(
         "skipped_destinations": skipped_destinations,
         "source_url": source_url,
         "playback_url": playback_url,
+        "source_passthrough": bool(passthrough_url),
         "media_type": media_type,
         "media_content_type": media_content_type,
         "start_position_ms": media_start_position_ms,
@@ -1084,6 +1094,15 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     if not source_url and not audio_b64:
         raise HTTPException(status_code=400, detail="source_url or audio_b64 is required")
 
+    passthrough_url = (
+        ""
+        if audio_b64 or respect_reply_playback or audio_scene or not persistent_media_requested
+        else vp._native_persistent_media_source_url(
+            source_url,
+            media_content_type=media_content_type or "music",
+            start_position_ms=media_start_position_ms,
+        )
+    )
     fetched_media_type = ""
     media_bytes = b""
     if audio_b64:
@@ -1093,7 +1112,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
             raise HTTPException(status_code=400, detail=f"audio_b64 is invalid: {exc}") from exc
         if not media_bytes:
             raise HTTPException(status_code=400, detail="audio_b64 decoded to empty content")
-    else:
+    elif not passthrough_url:
         try:
             media_bytes, fetched_media_type = await vp._download_media_source(source_url)
         except Exception as exc:
@@ -1172,7 +1191,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         }
 
     playback_id = uuid.uuid4().hex
-    playback_url = vp._store_media_url(
+    playback_url = passthrough_url or vp._store_media_url(
         selector,
         playback_id,
         media_bytes,
@@ -1411,6 +1430,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         "selector": selector,
         "source_url": source_url,
         "playback_url": playback_url,
+        "source_passthrough": bool(passthrough_url),
         "media_type": media_type,
         "media_content_type": media_content_type,
         "start_position_ms": media_start_position_ms,

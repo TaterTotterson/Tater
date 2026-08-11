@@ -37,6 +37,7 @@ class FakeVoicePipeline:
         self.reply_playback = FakeReplyPlayback()
         self.logger = FakeLogger()
         self.stored = []
+        self.downloaded = []
 
     @staticmethod
     def _require_api_auth(_token):
@@ -72,7 +73,20 @@ class FakeVoicePipeline:
 
     async def _download_media_source(self, source_url):
         self.background_source_url = source_url
+        self.downloaded.append(source_url)
         return b"background", "audio/mpeg"
+
+    @staticmethod
+    def _native_persistent_media_source_url(
+        source_url,
+        *,
+        media_content_type,
+        start_position_ms=0,
+    ):
+        url = str(source_url or "").strip()
+        if media_content_type != "music" or start_position_ms or "localhost" in url:
+            return ""
+        return url if url.startswith(("http://", "https://")) else ""
 
     def _store_media_url(self, selector, session_id, media_bytes, *, media_type, filename):
         self.stored.append(
@@ -340,6 +354,41 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(kwargs["start_lead_ms"], 1125)
         self.assertTrue(kwargs["compatibility_checked"])
 
+    def test_multi_satellite_music_keeps_remote_source_as_live_stream(self) -> None:
+        source_url = "http://tube.test/api/tater/local/stream?transcode=1&profile=audio_sync"
+        payload = {
+            "selectors": ["native:kitchen", "native:office"],
+            "source_url": source_url,
+            "media_type": "audio/wav",
+            "media_content_type": "music",
+            "filename": "song.sync.wav",
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        self.assertTrue(result["source_passthrough"])
+        self.assertEqual(result["playback_url"], source_url)
+        self.assertEqual(self.group_calls[0][1]["media_url"], source_url)
+        self.assertEqual(self.vp.downloaded, [])
+        self.assertEqual(self.vp.stored, [])
+
+    def test_resumed_group_music_is_preloaded_for_seekable_playback(self) -> None:
+        source_url = "http://tube.test/api/tater/local/stream?transcode=1&profile=audio_sync"
+        payload = {
+            "selectors": ["native:kitchen", "native:office"],
+            "source_url": source_url,
+            "media_type": "audio/wav",
+            "media_content_type": "music",
+            "filename": "song.sync.wav",
+            "start_position_ms": 30000,
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        self.assertFalse(result["source_passthrough"])
+        self.assertEqual(self.vp.downloaded, [source_url])
+        self.assertEqual(len(self.vp.stored), 1)
+
     def test_multi_satellite_music_route_applies_per_destination_calibration(self) -> None:
         payload = {
             "selectors": ["native:kitchen", "native:office"],
@@ -433,6 +482,26 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             "http://voice-core/media/foreground",
         )
         self.assertEqual(self.commands[0][2]["media"]["start_position_ms"], 37500)
+
+    def test_single_satellite_music_keeps_remote_source_as_live_stream(self) -> None:
+        source_url = "http://tube.test/api/tater/local/stream?transcode=1&profile=audio_sync"
+        payload = {
+            "selector": "native:kitchen",
+            "source_url": source_url,
+            "media_type": "audio/wav",
+            "media_content_type": "music",
+            "playback_role": "media",
+            "filename": "song.sync.wav",
+            "respect_reply_playback": False,
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play(payload, None))
+
+        self.assertTrue(result["source_passthrough"])
+        self.assertEqual(result["playback_url"], source_url)
+        self.assertEqual(self.commands[0][2]["media"]["url"], source_url)
+        self.assertEqual(self.vp.downloaded, [])
+        self.assertEqual(self.vp.stored, [])
 
     def test_tts_uses_overlay_when_media_session_is_active(self) -> None:
         self.media_session_active = True

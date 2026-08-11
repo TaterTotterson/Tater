@@ -60,6 +60,31 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_firmware_receives_gradual_slew_request(self) -> None:
         now_us = 5_000_000
+        clock = {"now": now_us}
+        native_satellite._stereo_sessions["group-1"] = self._session(now_us)
+        native_satellite._clients["native:sat1-right"] = {
+            "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
+        }
+        with mock.patch.object(native_satellite, "_monotonic_us", side_effect=lambda: clock["now"]), mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request:
+            await native_satellite._adjust_stereo_session("group-1")
+            send_request.assert_not_awaited()
+            clock["now"] += int(native_satellite.STEREO_ADJUST_INTERVAL_S * 1_000_000) + 1
+            for row in native_satellite._stereo_sessions["group-1"]["playheads"].values():
+                row["satellite_time_us"] = clock["now"]
+            await native_satellite._adjust_stereo_session("group-1")
+
+        send_request.assert_awaited_once()
+        payload = send_request.await_args.args[2]
+        self.assertEqual(payload["correction_frames"], 96)
+        self.assertEqual(payload["mode"], "slew")
+        self.assertEqual(payload["settle_ms"], 4000)
+
+    async def test_one_jittery_phase_sample_does_not_change_follower_speed(self) -> None:
+        now_us = 5_000_000
         native_satellite._stereo_sessions["group-1"] = self._session(now_us)
         native_satellite._clients["native:sat1-right"] = {
             "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
@@ -71,11 +96,72 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
         ) as send_request:
             await native_satellite._adjust_stereo_session("group-1")
 
-        send_request.assert_awaited_once()
-        payload = send_request.await_args.args[2]
-        self.assertEqual(payload["correction_frames"], 48)
-        self.assertEqual(payload["mode"], "slew")
-        self.assertEqual(payload["settle_ms"], 1000)
+        send_request.assert_not_awaited()
+
+    async def test_rendered_audio_clock_wins_over_jittery_source_timeline(self) -> None:
+        now_us = 5_000_000
+        clock = {"now": now_us}
+        session = self._session(now_us)
+        session["use_rendered_clock"] = True
+        session["playheads"]["native:sat1-left"].update(
+            {"source_frames": 5000, "rendered_frames": 1000}
+        )
+        session["playheads"]["native:sat1-right"].update(
+            {"source_frames": 900, "rendered_frames": 970}
+        )
+        native_satellite._stereo_sessions["group-1"] = session
+        with mock.patch.object(native_satellite, "_monotonic_us", side_effect=lambda: clock["now"]), mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request:
+            await native_satellite._adjust_stereo_session("group-1")
+            clock["now"] += int(native_satellite.STEREO_ADJUST_INTERVAL_S * 1_000_000) + 1
+            for row in native_satellite._stereo_sessions["group-1"]["playheads"].values():
+                row["satellite_time_us"] = clock["now"]
+            await native_satellite._adjust_stereo_session("group-1")
+
+        send_request.assert_not_awaited()
+
+    async def test_mixed_firmware_group_uses_one_common_source_clock(self) -> None:
+        now_us = 5_000_000
+        clock = {"now": now_us}
+        session = self._session(now_us)
+        session["use_rendered_clock"] = False
+        session["playheads"]["native:sat1-left"].update(
+            {"source_frames": 1000, "rendered_frames": 5000}
+        )
+        session["playheads"]["native:sat1-right"].update(
+            {"source_frames": 970, "rendered_frames": 900}
+        )
+        native_satellite._stereo_sessions["group-1"] = session
+        with mock.patch.object(native_satellite, "_monotonic_us", side_effect=lambda: clock["now"]), mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request:
+            await native_satellite._adjust_stereo_session("group-1")
+            clock["now"] += int(native_satellite.STEREO_ADJUST_INTERVAL_S * 1_000_000) + 1
+            for row in native_satellite._stereo_sessions["group-1"]["playheads"].values():
+                row["satellite_time_us"] = clock["now"]
+            await native_satellite._adjust_stereo_session("group-1")
+
+        send_request.assert_not_awaited()
+
+    async def test_rendered_clock_group_waits_for_every_rendered_playhead(self) -> None:
+        now_us = 5_000_000
+        session = self._session(now_us)
+        session["use_rendered_clock"] = True
+        session["playheads"]["native:sat1-left"]["rendered_frames"] = 1000
+        native_satellite._stereo_sessions["group-1"] = session
+        with mock.patch.object(native_satellite, "_monotonic_us", return_value=now_us), mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request:
+            await native_satellite._adjust_stereo_session("group-1")
+
+        send_request.assert_not_awaited()
 
     async def test_drift_adjustment_waits_for_underrun_rejoin(self) -> None:
         now_us = 5_000_000
@@ -92,6 +178,34 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
             ) as send_request:
                 await native_satellite._adjust_stereo_session("group-1")
             send_request.assert_not_awaited()
+
+    async def test_rebuffer_telemetry_is_logged_without_breaking_playhead_recording(self) -> None:
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": ["native:sat1-left"],
+            "playheads": {},
+        }
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline):
+            native_satellite._record_stereo_playhead(
+                "native:sat1-left",
+                {
+                    "session_id": "session-1",
+                    "group_id": "group-1",
+                    "source_frames": 48000,
+                    "sample_rate_hz": 48000,
+                    "satellite_time_us": 5_000_000,
+                    "buffered_frames": 96000,
+                    "rebuffering": True,
+                    "underrun_events": 1,
+                },
+            )
+
+        self.assertTrue(
+            native_satellite._stereo_sessions["group-1"]["playheads"]["native:sat1-left"]["rebuffering"]
+        )
+        voice_pipeline.logger.warning.assert_called_once()
 
     async def test_member_disconnect_aborts_group_and_stops_remaining_satellite(self) -> None:
         completion = asyncio.get_running_loop().create_future()

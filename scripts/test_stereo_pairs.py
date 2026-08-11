@@ -282,7 +282,15 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             {"selector": "native:office", "channel": "mono", "volume_percent": 70},
             {"selector": "native:bedroom", "channel": "mono", "volume_percent": 70},
         ]
+        clients = {
+            selector: {
+                "connected": True,
+                "hello": {"payload": {"capabilities": {"media_render_clock": True}}},
+            }
+            for selector in offsets
+        }
         with (
+            mock.patch.object(native_satellite, "_clients", clients),
             mock.patch.object(
                 native_satellite,
                 "media_group_compatibility",
@@ -300,6 +308,7 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result["group_session_started"])
+        self.assertTrue(result["use_rendered_clock"])
         self.assertEqual(result["start_lead_ms"], 1200)
         prepare_calls = [row for row in calls if row[1] == "media.session.prepare"]
         commit_calls = [row for row in calls if row[1] == "media.session.commit"]
@@ -312,6 +321,59 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             native_satellite._stereo_sessions["whole-home"]["selectors"],
             ["native:kitchen", "native:office", "native:bedroom"],
         )
+        self.assertTrue(
+            native_satellite._stereo_sessions["whole-home"]["use_rendered_clock"]
+        )
+
+    async def test_mixed_render_clock_support_falls_back_for_entire_group(self) -> None:
+        members = [
+            {"selector": "native:left", "channel": "left"},
+            {"selector": "native:right", "channel": "right"},
+        ]
+        clients = {
+            "native:left": {
+                "connected": True,
+                "hello": {"payload": {"capabilities": {"media_render_clock": True}}},
+            },
+            "native:right": {
+                "connected": True,
+                "hello": {"payload": {"capabilities": {"media_render_clock": False}}},
+            },
+        }
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            return {"ok": True}
+
+        async def fake_clock(selector):
+            return {"selector": selector, "offset_us": 0, "round_trip_us": 100}
+
+        with (
+            mock.patch.object(native_satellite, "_clients", clients),
+            mock.patch.object(
+                native_satellite,
+                "media_group_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(native_satellite, "_stereo_clock_probe", side_effect=fake_clock),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+            mock.patch.object(
+                native_satellite,
+                "_vp",
+                return_value=mock.Mock(logger=mock.Mock()),
+            ) as voice_pipeline,
+        ):
+            result = await native_satellite.prepare_group_media_session(
+                members,
+                group_id="mixed-clocks",
+                session_id="music-mixed",
+                media_url="http://tater/media/song.wav",
+            )
+
+        self.assertFalse(result["use_rendered_clock"])
+        self.assertFalse(
+            native_satellite._stereo_sessions["mixed-clocks"]["use_rendered_clock"]
+        )
+        voice_pipeline.return_value.logger.warning.assert_called_once()
 
     async def test_tts_waits_for_both_members_and_marks_visual_lifecycle(self) -> None:
         calls = []
@@ -414,6 +476,12 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True}
 
         with mock.patch.object(native_satellite, "send_request", side_effect=fake_request):
+            await native_satellite._adjust_stereo_session("pair1")
+            self.assertEqual(sent, [])
+            later_us = now_us + int(native_satellite.STEREO_ADJUST_INTERVAL_S * 1_000_000) + 1
+            native_satellite._stereo_sessions["pair1"]["last_phase_sample_server_us"] = 0
+            for row in native_satellite._stereo_sessions["pair1"]["playheads"].values():
+                row["satellite_time_us"] = later_us
             await native_satellite._adjust_stereo_session("pair1")
 
         self.assertEqual(sent[0][0], "native:right")

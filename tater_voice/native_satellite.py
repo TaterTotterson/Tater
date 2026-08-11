@@ -61,9 +61,12 @@ NATIVE_SELECTOR_ALIASES_KEY = "tater:voice:native_selector_aliases:v1"
 STEREO_CLOCK_PROBE_COUNT = 5
 STEREO_START_LEAD_MS = 750
 STEREO_CLOCK_REFRESH_S = 60.0
-STEREO_ADJUST_INTERVAL_S = 1.0
-STEREO_ADJUST_THRESHOLD_FRAMES = 24
-STEREO_ADJUST_MAX_FRAMES = 48
+STEREO_ADJUST_INTERVAL_S = 2.0
+STEREO_ADJUST_THRESHOLD_FRAMES = 48
+STEREO_ADJUST_MAX_FRAMES = 96
+STEREO_ADJUST_SETTLE_MS = 4000
+STEREO_PHASE_EMA_ALPHA = 0.25
+STEREO_PHASE_STABLE_SAMPLES = 2
 
 
 def _vp():
@@ -1846,6 +1849,25 @@ async def prepare_group_media_session(
         compatibility = await media_group_compatibility(selectors)
         if not compatibility.get("ok"):
             raise RuntimeError(_text(compatibility.get("error")) or "The synchronized media group is unavailable.")
+    async with _clients_lock:
+        render_clock_support = {}
+        for selector in selectors:
+            row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            render_clock_support[selector] = bool(
+                _capabilities(_message_payload(hello)).get("media_render_clock")
+            )
+    use_rendered_clock = bool(selectors) and all(render_clock_support.values())
+    if any(render_clock_support.values()) and not use_rendered_clock:
+        _vp().logger.warning(
+            "[native-media] synchronized group uses the common source clock because "
+            "rendered-clock support is mixed group=%s members=%s",
+            _text(group_id) or "pending",
+            ",".join(
+                f"{selector}:{'rendered' if supported else 'source'}"
+                for selector, supported in render_clock_support.items()
+            ),
+        )
     group_token = _text(group_id) or uuid.uuid4().hex[:12]
     group_session_id = _text(session_id)
     if not group_session_id or not _text(media_url):
@@ -1935,7 +1957,13 @@ async def prepare_group_media_session(
         "member_delays_ms": {member["selector"]: int(member.get("delay_ms") or 0) for member in member_rows},
         "clock_sync_server_us": _monotonic_us(),
         "playheads": {},
+        "phase_error_ema_frames": {},
+        "phase_error_directions": {},
+        "phase_error_stable_samples": {},
+        "phase_sample_times_us": {},
+        "last_phase_sample_server_us": 0,
         "last_adjust_server_us": 0,
+        "use_rendered_clock": use_rendered_clock,
         "created_server_us": _monotonic_us(),
         "loop": bool(loop),
         "content_type": media_content_type,
@@ -1953,6 +1981,7 @@ async def prepare_group_media_session(
         "start_server_us": start_server_us,
         "start_unix_ms": start_unix_ms,
         "start_lead_ms": lead_ms,
+        "use_rendered_clock": use_rendered_clock,
         "clock_samples": clocks,
         "playback_completed": False,
     }
@@ -2274,8 +2303,13 @@ async def _adjust_stereo_session(group_id: str) -> None:
             for row in [reference_row, *follower_rows.values()]
         ):
             return
-        if now_us - int(session.get("last_adjust_server_us") or 0) < int(
+        if now_us - int(session.get("last_phase_sample_server_us") or 0) < int(
             STEREO_ADJUST_INTERVAL_S * 1_000_000
+        ):
+            return
+        use_rendered_clock = _as_bool(session.get("use_rendered_clock"), False)
+        if use_rendered_clock and any(
+            "rendered_frames" not in row for row in [reference_row, *follower_rows.values()]
         ):
             return
 
@@ -2286,8 +2320,17 @@ async def _adjust_stereo_session(group_id: str) -> None:
             satellite_time_us = _as_int(row.get("satellite_time_us"), 0)
             server_event_us = satellite_time_us - _as_int(offsets.get(selector), 0)
             age_us = max(0, min(2_000_000, now_us - server_event_us))
-            return float(_as_int(row.get("source_frames"), 0)) + (
-                float(age_us) * float(sample_rate) / 1_000_000.0
+            reported_frames = _as_int(
+                row.get("rendered_frames") if use_rendered_clock else row.get("source_frames"),
+                0,
+            )
+            try:
+                playback_rate = float(row.get("playback_rate") or 1.0)
+            except (TypeError, ValueError):
+                playback_rate = 1.0
+            playback_rate = max(0.98, min(1.02, playback_rate))
+            return float(reported_frames) + (
+                float(age_us) * float(sample_rate) * playback_rate / 1_000_000.0
             )
 
         reference_frames = _projected_source_frames(reference, reference_row)
@@ -2297,11 +2340,46 @@ async def _adjust_stereo_session(group_id: str) -> None:
             else {}
         )
         sample_rate = max(1, _as_int(reference_row.get("sample_rate_hz"), 48000))
+        phase_ema = session.setdefault("phase_error_ema_frames", {})
+        phase_directions = session.setdefault("phase_error_directions", {})
+        phase_stable_samples = session.setdefault("phase_error_stable_samples", {})
+        phase_sample_times = session.setdefault("phase_sample_times_us", {})
+        if not isinstance(phase_ema, dict):
+            phase_ema = {}
+            session["phase_error_ema_frames"] = phase_ema
+        if not isinstance(phase_directions, dict):
+            phase_directions = {}
+            session["phase_error_directions"] = phase_directions
+        if not isinstance(phase_stable_samples, dict):
+            phase_stable_samples = {}
+            session["phase_error_stable_samples"] = phase_stable_samples
+        if not isinstance(phase_sample_times, dict):
+            phase_sample_times = {}
+            session["phase_sample_times_us"] = phase_sample_times
         corrections: Dict[str, int] = {}
         phase_errors: Dict[str, float] = {}
+        raw_phase_errors: Dict[str, float] = {}
+        sampled_phase = False
         for follower, follower_row in follower_rows.items():
             if _as_bool(follower_row.get("rebuffering"), False):
                 continue
+            reference_sample_us = _as_int(reference_row.get("satellite_time_us"), 0)
+            follower_sample_us = _as_int(follower_row.get("satellite_time_us"), 0)
+            previous_sample = (
+                phase_sample_times.get(follower)
+                if isinstance(phase_sample_times.get(follower), dict)
+                else {}
+            )
+            if previous_sample and (
+                reference_sample_us <= _as_int(previous_sample.get("reference"), 0)
+                or follower_sample_us <= _as_int(previous_sample.get("follower"), 0)
+            ):
+                continue
+            phase_sample_times[follower] = {
+                "reference": reference_sample_us,
+                "follower": follower_sample_us,
+            }
+            sampled_phase = True
             follower_frames = _projected_source_frames(follower, follower_row)
             target_delta_frames = (
                 (_as_int(member_delays.get(follower), 0) - _as_int(member_delays.get(reference), 0))
@@ -2309,14 +2387,39 @@ async def _adjust_stereo_session(group_id: str) -> None:
                 / 1000.0
             )
             phase_error_frames = (reference_frames - follower_frames) - target_delta_frames
-            correction = int(round(phase_error_frames))
-            if abs(correction) < STEREO_ADJUST_THRESHOLD_FRAMES:
+            try:
+                previous_ema = float(phase_ema.get(follower, phase_error_frames))
+            except (TypeError, ValueError):
+                previous_ema = phase_error_frames
+            smoothed_error_frames = (
+                (1.0 - STEREO_PHASE_EMA_ALPHA) * previous_ema
+                + STEREO_PHASE_EMA_ALPHA * phase_error_frames
+            )
+            phase_ema[follower] = smoothed_error_frames
+            if abs(smoothed_error_frames) < STEREO_ADJUST_THRESHOLD_FRAMES:
+                phase_directions[follower] = 0
+                phase_stable_samples[follower] = 0
                 continue
+            direction = 1 if smoothed_error_frames > 0 else -1
+            previous_direction = _as_int(phase_directions.get(follower), 0)
+            stable_samples = (
+                _as_int(phase_stable_samples.get(follower), 0) + 1
+                if direction == previous_direction
+                else 1
+            )
+            phase_directions[follower] = direction
+            phase_stable_samples[follower] = stable_samples
+            if stable_samples < STEREO_PHASE_STABLE_SAMPLES:
+                continue
+            correction = int(round(smoothed_error_frames))
             corrections[follower] = max(
                 -STEREO_ADJUST_MAX_FRAMES,
                 min(STEREO_ADJUST_MAX_FRAMES, correction),
             )
-            phase_errors[follower] = phase_error_frames
+            phase_errors[follower] = smoothed_error_frames
+            raw_phase_errors[follower] = phase_error_frames
+        if sampled_phase:
+            session["last_phase_sample_server_us"] = now_us
         if not corrections:
             return
 
@@ -2332,7 +2435,7 @@ async def _adjust_stereo_session(group_id: str) -> None:
                     "group_id": group_id,
                     "correction_frames": correction,
                     "mode": "slew" if supports_slew else "legacy",
-                    "settle_ms": 1000 if supports_slew else 0,
+                    "settle_ms": STEREO_ADJUST_SETTLE_MS if supports_slew else 0,
                     "reference_selector": reference,
                 },
                 timeout_s=2.0,
@@ -2355,6 +2458,11 @@ async def _adjust_stereo_session(group_id: str) -> None:
             session["last_correction_frames"] = applied
             session["last_phase_error_frames"] = {
                 selector: phase_errors[selector] for selector in applied if selector in phase_errors
+            }
+            session["last_raw_phase_error_frames"] = {
+                selector: raw_phase_errors[selector]
+                for selector in applied
+                if selector in raw_phase_errors
             }
     finally:
         _stereo_adjust_tasks.pop(group_id, None)
@@ -2392,7 +2500,7 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         or current_health["rejoin_count"] > _as_int(previous.get("rejoin_count"), 0)
     )
     if health_changed:
-        logger.warning(
+        _vp().logger.warning(
             "[native-media] playback recovery selector=%s group=%s buffered_frames=%d "
             "rebuffering=%s underruns=%d rejoins=%d rejoin_frames=%d correction_frames=%d",
             selector,
