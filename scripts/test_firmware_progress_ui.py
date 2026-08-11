@@ -78,7 +78,8 @@ class FirmwareProgressUiTests(unittest.TestCase):
     def test_backend_exposes_real_ota_progress(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
         self.assertIn("def _native_ota_progress", source)
-        self.assertIn('_set_session_progress_locked(session, native_progress)', source)
+        self.assertIn('_set_session_progress_locked(session, min(progress, 99.0))', source)
+        self.assertIn('actual_version == expected_version', source)
         self.assertIn('_set_session_progress_locked(live, percent, completed_bytes=sent, total_bytes=total)', source)
         self.assertIn('"progress_percent": round(', source)
         self.assertIn('"progress_bytes": int(session.get("progress_bytes") or 0)', source)

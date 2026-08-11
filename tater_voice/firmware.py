@@ -45,6 +45,7 @@ _TATER_SENSOR_OPTIONS_LOCK = threading.Lock()
 _FIRMWARE_SESSION_MAX_ENTRIES = 4000
 _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
+_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 10 * 60.0
 _FIRMWARE_USB_RECOVERY_SELECTOR = "__usb_recovery__"
 _FIRMWARE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _FIRMWARE_SESSION_LOCK = threading.Lock()
@@ -2838,17 +2839,29 @@ def _native_logs_fetch(selector: str, *, after_seq: int = 0, start: bool = False
     }
 
 
+def _native_client_status(selector: str) -> Dict[str, Any]:
+    from . import native_satellite
+
+    result = native_satellite.run_on_runtime_loop(native_satellite.status(), timeout=5.0)
+    if not isinstance(result, dict):
+        return {"connected": False}
+    clients = result.get("clients") if isinstance(result.get("clients"), dict) else {}
+    client = clients.get(_text(selector)) if isinstance(clients, dict) else None
+    return dict(client) if isinstance(client, dict) else {"connected": False}
+
+
 def _native_ota_terminal_status(entries: List[Dict[str, Any]]) -> str:
+    terminal_status = ""
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         status = _lower(payload.get("status"))
         if status in {"rebooting", "complete", "completed"}:
-            return "completed"
-        if status == "error" or _lower(entry.get("level")) == "error":
-            return "failed"
-    return ""
+            terminal_status = "rebooting"
+        elif status == "error" or _lower(entry.get("level")) == "error":
+            terminal_status = "failed"
+    return terminal_status
 
 
 def _native_ota_progress(entries: List[Dict[str, Any]]) -> Optional[float]:
@@ -2864,6 +2877,19 @@ def _native_ota_progress(entries: List[Dict[str, Any]]) -> Optional[float]:
             value = float(raw_progress)
             progress = max(0.0, min(100.0, value))
     return progress
+
+
+def _native_ota_error_message(entries: List[Dict[str, Any]]) -> str:
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+        if _lower(payload.get("status")) != "error" and _lower(entry.get("level")) != "error":
+            continue
+        message = _text(payload.get("message") or entry.get("message"))
+        if message:
+            return message
+    return "Native OTA failed."
 
 
 def _phase_status_text(phase: str, display_name: str = "") -> str:
@@ -2929,6 +2955,92 @@ def _set_session_progress_locked(
         if total_bytes is not None:
             session["progress_total_bytes"] = max(0, int(total_bytes))
     session["updated_ts"] = time.time()
+
+
+def _fail_native_ota_locked(session: Dict[str, Any], message: str) -> None:
+    error = _text(message) or "Native OTA failed."
+    session["active"] = False
+    session["returncode"] = 1
+    session["error"] = error
+    session["message"] = error
+    _set_session_phase_locked(session, "failed")
+
+
+def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) -> None:
+    version = _text(actual_version) or _text(session.get("firmware_version"))
+    session["active"] = False
+    session["returncode"] = 0
+    session["error"] = ""
+    session["message"] = f"Native OTA verified after reboot. The satellite is running {version}."
+    _set_session_phase_locked(session, "completed")
+    _save_recorded_firmware_version(
+        session.get("selector"),
+        session.get("template_key"),
+        version,
+        display_name=session.get("display_name"),
+        source="native_tater_ota",
+    )
+
+
+def _apply_native_ota_update_locked(
+    session: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    client_status: Optional[Dict[str, Any]],
+    *,
+    status_error: str = "",
+) -> None:
+    if _lower(session.get("operation")) != "native_tater_ota" or not bool(session.get("active")):
+        return
+
+    progress = _native_ota_progress(entries)
+    if progress is not None:
+        # The final 100% belongs to post-reboot version verification. Older
+        # satellites may still report 100 while merely arming recovery.
+        _set_session_progress_locked(session, min(progress, 99.0))
+
+    terminal_status = _native_ota_terminal_status(entries)
+    if terminal_status == "failed":
+        _fail_native_ota_locked(session, _native_ota_error_message(entries))
+        return
+    if terminal_status == "rebooting":
+        session["ota_reboot_requested"] = True
+        session["ota_verify_deadline_ts"] = time.time() + _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS
+
+    if isinstance(client_status, dict):
+        connected = bool(client_status.get("connected"))
+        if not connected:
+            session["ota_disconnect_seen"] = True
+        elif bool(session.get("ota_reboot_requested")):
+            initial_connected_ts = float(session.get("ota_initial_connected_ts") or 0.0)
+            current_connected_ts = float(client_status.get("connected_ts") or 0.0)
+            reconnected = bool(session.get("ota_disconnect_seen")) or (
+                initial_connected_ts > 0.0 and current_connected_ts > initial_connected_ts
+            )
+            if reconnected:
+                expected_version = _text(session.get("firmware_version"))
+                actual_version = _text(client_status.get("firmware_version"))
+                if expected_version and actual_version == expected_version:
+                    _complete_native_ota_locked(session, actual_version)
+                    return
+                if actual_version:
+                    _fail_native_ota_locked(
+                        session,
+                        f"The satellite reconnected on {actual_version}, but Tater expected {expected_version or 'the new firmware'}.",
+                    )
+                    return
+
+    deadline = float(session.get("ota_verify_deadline_ts") or 0.0)
+    if deadline > 0.0 and time.time() >= deadline:
+        detail = f" Last status check: {_text(status_error)}." if status_error else ""
+        _fail_native_ota_locked(
+            session,
+            "Timed out waiting for the satellite to reboot and report the expected firmware version." + detail,
+        )
+        return
+
+    if bool(session.get("ota_reboot_requested")):
+        session["message"] = "Firmware verified and recovery started. Waiting for the satellite to reconnect on the new version."
+        _set_session_phase_locked(session, "awaiting_device_logs")
 
 
 def _final_session_phase(session: Dict[str, Any]) -> str:
@@ -3039,6 +3151,7 @@ def _pump_session_device_logs(session_id: str) -> None:
     should_start = False
     should_poll = False
     retry_ts = 0.0
+    native_ota = False
     with _FIRMWARE_SESSION_LOCK:
         session = _FIRMWARE_SESSIONS.get(session_id)
         if not isinstance(session, dict):
@@ -3055,14 +3168,23 @@ def _pump_session_device_logs(session_id: str) -> None:
         retry_ts = float(session.get("device_log_next_retry_ts") or 0.0)
         should_poll = bool(session.get("device_logs_started"))
         should_start = not should_poll and time.time() >= retry_ts
+        native_ota = _lower(session.get("operation")) == "native_tater_ota"
 
     if not start_selector:
         return
 
+    native_client: Optional[Dict[str, Any]] = None
+    native_status_error = ""
+    if native_ota:
+        try:
+            native_client = _native_client_status(start_selector)
+        except Exception as exc:  # pylint: disable=broad-except
+            native_status_error = _text(exc) or exc.__class__.__name__
+
     if should_start:
         try:
             if _is_native_selector(start_selector):
-                result = _native_logs_fetch(start_selector, start=True)
+                result = _native_logs_fetch(start_selector, after_seq=start_after_seq, start=True)
             else:
                 result = esphome_runtime.logs_start(start_selector, timeout=20.0)
         except Exception as exc:
@@ -3092,35 +3214,12 @@ def _pump_session_device_logs(session_id: str) -> None:
                     )
                     for entry in entries:
                         _append_session_passthrough_locked(session, entry, source="device")
-                    native_progress = (
-                        _native_ota_progress(entries)
-                        if _lower(session.get("operation")) == "native_tater_ota"
-                        else None
+                    _apply_native_ota_update_locked(
+                        session,
+                        entries,
+                        native_client,
+                        status_error=native_status_error,
                     )
-                    if native_progress is not None:
-                        _set_session_progress_locked(session, native_progress)
-                    terminal_status = (
-                        _native_ota_terminal_status(entries)
-                        if _lower(session.get("operation")) == "native_tater_ota"
-                        else ""
-                    )
-                    if terminal_status == "completed":
-                        session["active"] = False
-                        session["returncode"] = 0
-                        session["message"] = "Native OTA accepted. Device is rebooting into updated firmware."
-                        _set_session_phase_locked(session, "completed")
-                        _save_recorded_firmware_version(
-                            session.get("selector"),
-                            session.get("template_key"),
-                            session.get("firmware_version"),
-                            display_name=session.get("display_name"),
-                            source="native_tater_ota",
-                        )
-                    elif terminal_status == "failed":
-                        session["active"] = False
-                        session["returncode"] = 1
-                        session["message"] = "Native OTA failed."
-                        _set_session_phase_locked(session, "failed")
             return
 
     if not should_poll:
@@ -3159,35 +3258,12 @@ def _pump_session_device_logs(session_id: str) -> None:
         entries = [entry for entry in list(result.get("entries") or []) if isinstance(entry, dict)]
         for entry in entries:
             _append_session_passthrough_locked(session, entry, source="device")
-        native_progress = (
-            _native_ota_progress(entries)
-            if _lower(session.get("operation")) == "native_tater_ota"
-            else None
+        _apply_native_ota_update_locked(
+            session,
+            entries,
+            native_client,
+            status_error=native_status_error,
         )
-        if native_progress is not None:
-            _set_session_progress_locked(session, native_progress)
-        terminal_status = (
-            _native_ota_terminal_status(entries)
-            if _lower(session.get("operation")) == "native_tater_ota"
-            else ""
-        )
-        if terminal_status == "completed":
-            session["active"] = False
-            session["returncode"] = 0
-            session["message"] = "Native OTA accepted. Device is rebooting into updated firmware."
-            _set_session_phase_locked(session, "completed")
-            _save_recorded_firmware_version(
-                session.get("selector"),
-                session.get("template_key"),
-                session.get("firmware_version"),
-                display_name=session.get("display_name"),
-                source="native_tater_ota",
-            )
-        elif terminal_status == "failed":
-            session["active"] = False
-            session["returncode"] = 1
-            session["message"] = "Native OTA failed."
-            _set_session_phase_locked(session, "failed")
 
 
 def _native_tater_ota_session_worker(session_id: str) -> None:
@@ -3221,6 +3297,22 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
 
     try:
         from . import native_satellite
+
+        initial_client = _native_client_status(selector)
+        if not bool(initial_client.get("connected")):
+            raise RuntimeError("The native satellite disconnected before Tater could start OTA.")
+        baseline_logs = _native_logs_fetch(selector)
+        with _FIRMWARE_SESSION_LOCK:
+            session = _FIRMWARE_SESSIONS.get(session_id)
+            if not isinstance(session, dict):
+                return
+            session["ota_initial_firmware_version"] = _text(initial_client.get("firmware_version"))
+            session["ota_initial_connected_ts"] = float(initial_client.get("connected_ts") or 0.0)
+            session["ota_command_sent"] = False
+            session["ota_reboot_requested"] = False
+            session["ota_disconnect_seen"] = False
+            session["ota_verify_deadline_ts"] = time.time() + _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS
+            session["device_log_cursor"] = int(baseline_logs.get("cursor") or 0)
 
         result = native_satellite.run_on_runtime_loop(
             native_satellite.send_command(
@@ -3264,7 +3356,8 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
             message="Native OTA command sent. The satellite will download firmware from Tater and report progress.",
             source="session",
         )
-        session["returncode"] = 0
+        session["returncode"] = None
+        session["ota_command_sent"] = True
         session["message"] = "Native OTA command sent. Waiting for device OTA progress."
         session["device_log_next_retry_ts"] = time.time()
         session["device_log_retry_count"] = 0

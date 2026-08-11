@@ -1,43 +1,41 @@
-# Tater v1.0.4
+# Tater v1.0.5
 
-Tater v1.0.4 is a full release for Docker and macOS. The release tag publishes
+Tater v1.0.5 is a full release for Docker and macOS. The release tag publishes
 the multi-architecture CPU image and NVIDIA image in addition to the macOS app.
 
 ## What's Changed
 
-### Synchronized Satellite Music
+### Verified Native Satellite OTA
 
-- Tater now preserves remote music sources as live satellite streams instead of
-  downloading the entire synchronized track and re-hosting it locally. Tater
-  Tube can therefore display the active stream for each playing satellite.
-- Voice replies, local-only sources, embedded audio, and resumed playback remain
-  preloaded through Tater where that behavior is required.
-- Improved native stereo and multi-room correction using a rendered-audio clock,
-  jitter smoothing, consistent-direction confirmation, and a slower four-second
-  rate adjustment. This avoids reacting to MPV timeline jitter as real speaker
-  drift.
-- Rendered-clock correction is enabled only when every member of a playback
-  group supports it. Mixed or older firmware groups consistently use the legacy
-  source clock instead of comparing incompatible measurements.
-- Fixed native playback recovery logging so an underrun or rebuffer event is
-  recorded correctly for troubleshooting.
+- Native satellite OTA updates are no longer reported as successful when the
+  satellite merely accepts the update and starts recovery. Tater now waits for
+  the satellite to disconnect, reboot, reconnect, and report the exact expected
+  firmware version before completing the progress window.
+- OTA progress remains below 100% until that post-reboot verification succeeds.
+  A recovery error, unexpected firmware version, or verification timeout is now
+  shown as a failure instead of a false success.
+- Tater starts each OTA check from a fresh device-log cursor so messages left by
+  an earlier update cannot complete a new update incorrectly.
 
 ### ThirdReality S420 Firmware
 
-- ThirdReality stereo pairs should update both speakers to Tater S420 firmware
-  `0.2.2`. That firmware reports MPV's rendered-audio position, disables the
-  audible pitch-correction filter during synchronized playback, and applies the
-  gentler drift requests sent by Tater v1.0.4.
-- Tater S420 firmware `0.2.2` remains compatible with older Tater versions, but
-  the new synchronization behavior requires both firmware `0.2.2` and Tater
-  v1.0.4.
+- Tater S420 firmware `0.2.3` corrected the signed recovery-installer handoff so
+  OTA updates actually write the downloaded firmware instead of stopping after
+  the initial reboot request.
+- Tater S420 firmware `0.2.4` preserves Wi-Fi, Tater pairing, room assignment,
+  and device settings during routine OTA updates. Routine OTA now updates only
+  the system components it needs and keeps persistent device data and the
+  bootloader environment intact.
+- S420 factory flashing through Local USB remains a clean reset by design. S420
+  units still on firmware `0.2.2` or earlier need one Local USB update to the
+  latest firmware before subsequent OTA updates can use the corrected installer.
 
 ## Updating
 
-- macOS users already running v1.0.1 through v1.0.3 can install v1.0.4 through
+- macOS users already running v1.0.1 through v1.0.4 can install v1.0.5 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.0.4` or `latest` for the CPU image and
-  `v1.0.4-nvidia` or `nvidia` for the NVIDIA image.
+- Docker users can pull `v1.0.5` or `latest` for the CPU image and
+  `v1.0.5-nvidia` or `nvidia` for the NVIDIA image.
