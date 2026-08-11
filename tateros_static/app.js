@@ -13748,6 +13748,184 @@ function createFirmwareProgressView(container, options = {}) {
   return { root, update };
 }
 
+function createFirmwareBatchProgressView(container, firmwareRows = [], options = {}) {
+  if (!(container instanceof HTMLElement)) {
+    return null;
+  }
+  const rows = (Array.isArray(firmwareRows) ? firmwareRows : [])
+    .map((row, index) => {
+      const title = String(row?.title || row?.selector || `Satellite ${index + 1}`).trim() || `Satellite ${index + 1}`;
+      const templateLabel = String(row?.template_label || row?.templateLabel || row?.template_key || "Tater Firmware").trim();
+      const installed = String(row?.installed || "").trim();
+      const latest = String(row?.latest || "").trim();
+      const versionLabel = installed && latest
+        ? `${installed} → ${latest}`
+        : latest
+        ? `Update to ${latest}`
+        : installed
+        ? `Reinstall ${installed}`
+        : "Matching firmware selected";
+      return {
+        title,
+        detail: [templateLabel, versionLabel].filter(Boolean).join(" • "),
+      };
+    });
+  if (!rows.length) {
+    return null;
+  }
+
+  const total = rows.length;
+  const method = String(options?.method || "Batch OTA").trim() || "Batch OTA";
+  const root = document.createElement("section");
+  root.className = "firmware-batch-progress-view";
+  root.setAttribute("aria-live", "polite");
+  root.innerHTML = `
+    <div class="firmware-batch-progress-hero">
+      <div class="firmware-batch-progress-icon" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      <div class="firmware-progress-copy">
+        <div class="firmware-progress-kicker">${escapeHtml(method)} update crew</div>
+        <strong class="firmware-progress-target">${escapeHtml(total)} satellite${total === 1 ? "" : "s"} queued</strong>
+        <span class="firmware-batch-progress-message">Preparing the update queue...</span>
+      </div>
+      <strong class="firmware-batch-progress-percent">0%</strong>
+    </div>
+    <div class="firmware-batch-progress-track" role="progressbar" aria-label="Overall firmware update progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <span class="firmware-batch-progress-fill"></span>
+    </div>
+    <div class="firmware-batch-progress-summary" aria-label="Firmware update summary">
+      <span data-batch-summary="finished"><strong>0</strong> finished</span>
+      <span data-batch-summary="active"><strong>0</strong> active</span>
+      <span data-batch-summary="queued"><strong>${escapeHtml(total)}</strong> queued</span>
+      <span data-batch-summary="failed"><strong>0</strong> failed</span>
+    </div>
+    <div class="firmware-batch-device-list">
+      ${rows
+        .map(
+          (row, index) => `
+            <article class="firmware-batch-device is-pending" data-batch-device-index="${index}">
+              <span class="firmware-batch-device-number">${index + 1}</span>
+              <div class="firmware-batch-device-copy">
+                <strong>${escapeHtml(row.title)}</strong>
+                <span>${escapeHtml(row.detail)}</span>
+                <span class="firmware-batch-device-track" aria-hidden="true"><i></i></span>
+              </div>
+              <span class="firmware-batch-device-state">Queued</span>
+            </article>`
+        )
+        .join("")}
+    </div>
+    <div class="firmware-batch-progress-hint">${escapeHtml(
+      String(options?.hint || "Tater updates one device at a time so every satellite can finish safely.").trim()
+    )}</div>
+  `;
+  container.appendChild(root);
+
+  const track = root.querySelector(".firmware-batch-progress-track");
+  const fill = root.querySelector(".firmware-batch-progress-fill");
+  const percentNode = root.querySelector(".firmware-batch-progress-percent");
+  const messageNode = root.querySelector(".firmware-batch-progress-message");
+  const hintNode = root.querySelector(".firmware-batch-progress-hint");
+  const deviceStates = rows.map(() => ({ state: "pending", percent: 0 }));
+  let currentPercent = 0;
+
+  const stateLabel = (state) => {
+    if (state === "preparing") return "Preparing";
+    if (state === "active") return "Updating";
+    if (state === "success") return "Updated";
+    if (state === "error") return "Failed";
+    return "Queued";
+  };
+
+  const setDevice = (deviceIndex, payload = {}) => {
+    const normalizedIndex = Number(deviceIndex);
+    if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= deviceStates.length) {
+      return;
+    }
+    const previous = deviceStates[normalizedIndex];
+    const requestedState = String(payload?.state || previous.state || "pending").trim().toLowerCase();
+    const state = ["pending", "preparing", "active", "success", "error"].includes(requestedState)
+      ? requestedState
+      : previous.state;
+    const requestedPercent = Number(payload?.percent);
+    let devicePercent = previous.percent;
+    if (Number.isFinite(requestedPercent)) {
+      devicePercent = Math.max(devicePercent, Math.max(0, Math.min(100, requestedPercent)));
+    }
+    if (state === "success" || state === "error") {
+      devicePercent = 100;
+    }
+    deviceStates[normalizedIndex] = { state, percent: devicePercent };
+
+    const row = root.querySelector(`[data-batch-device-index="${normalizedIndex}"]`);
+    if (!(row instanceof HTMLElement)) {
+      return;
+    }
+    row.classList.remove("is-pending", "is-preparing", "is-active", "is-success", "is-error");
+    row.classList.add(`is-${state}`);
+    const stateNode = row.querySelector(".firmware-batch-device-state");
+    const deviceFill = row.querySelector(".firmware-batch-device-track i");
+    if (stateNode instanceof HTMLElement) {
+      stateNode.textContent = String(payload?.label || stateLabel(state)).trim() || stateLabel(state);
+    }
+    if (deviceFill instanceof HTMLElement) {
+      deviceFill.style.width = `${Math.round(devicePercent)}%`;
+    }
+  };
+
+  const updateSummary = () => {
+    const finished = deviceStates.filter((row) => row.state === "success").length;
+    const active = deviceStates.filter((row) => row.state === "active" || row.state === "preparing").length;
+    const failed = deviceStates.filter((row) => row.state === "error").length;
+    const queued = Math.max(0, total - finished - active - failed);
+    const counts = { finished, active, queued, failed };
+    Object.entries(counts).forEach(([key, value]) => {
+      const node = root.querySelector(`[data-batch-summary="${key}"] strong`);
+      if (node instanceof HTMLElement) {
+        node.textContent = String(value);
+      }
+    });
+    root.classList.toggle("has-failures", failed > 0);
+  };
+
+  const update = (payload = {}) => {
+    const activeIndex = Number(payload?.activeIndex);
+    if (Number.isInteger(activeIndex) && activeIndex >= 0) {
+      setDevice(activeIndex, {
+        state: payload?.deviceState,
+        percent: payload?.devicePercent,
+        label: payload?.deviceLabel,
+      });
+    }
+    const requested = Number(payload?.percent);
+    if (Number.isFinite(requested)) {
+      currentPercent = Math.max(currentPercent, Math.max(0, Math.min(100, requested)));
+    }
+    const batchComplete = Boolean(payload?.batchComplete);
+    if (batchComplete) {
+      currentPercent = 100;
+    }
+    const rounded = Math.round(currentPercent);
+    const tone = String(payload?.tone || "active").trim().toLowerCase();
+    root.classList.toggle("is-success", batchComplete && tone !== "error");
+    root.classList.toggle("is-error", batchComplete && tone === "error");
+    if (fill instanceof HTMLElement) fill.style.width = `${rounded}%`;
+    if (percentNode instanceof HTMLElement) percentNode.textContent = `${rounded}%`;
+    if (messageNode instanceof HTMLElement && String(payload?.message || "").trim()) {
+      messageNode.textContent = String(payload.message).trim();
+    }
+    if (hintNode instanceof HTMLElement && String(payload?.hint || "").trim()) {
+      hintNode.textContent = String(payload.hint).trim();
+    }
+    if (track instanceof HTMLElement) track.setAttribute("aria-valuenow", String(rounded));
+    updateSummary();
+  };
+
+  update({ percent: 0, message: options?.message || "Preparing the update queue..." });
+  return { root, update, setDevice };
+}
+
 function openEspHomeFirmwareFlashViewer(card, coreKey) {
   if (!(card instanceof HTMLElement)) {
     return;
@@ -16267,10 +16445,6 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     return;
   }
   const singleUpdate = updates.length === 1;
-  const allPrebuilt = updates.every((row) =>
-    boolFromAny(row?.prebuilt_firmware_ota_available ?? row?.prebuilt_firmware_available ?? row?.prebuilt, false)
-  );
-
   let stopped = false;
   let currentSessionId = "";
   let cursor = 0;
@@ -16331,6 +16505,7 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       percent: 100,
       phase: failed ? "failed" : "completed",
       tone: failed ? "error" : "success",
+      batchComplete: !singleUpdate,
       stage: 3,
       message: summary,
       hint: failed ? "Open OTA Logs for the device that failed, then retry it." : "All selected firmware devices are up to date.",
@@ -16365,6 +16540,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         progressView?.update({
           percent: overallProgress,
           phase: result?.phase,
+          activeIndex: index - 1,
+          deviceState: "active",
+          devicePercent: currentProgress,
           stage: index >= updates.length ? 2 : 1,
           message:
             String(result?.status_text || result?.message || "").trim() ||
@@ -16379,7 +16557,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         if (!boolFromAny(result?.active, true)) {
           const phase = String(result?.phase || "").trim().toLowerCase();
           const error = String(result?.error || "").trim();
-          if (phase === "failed" || phase === "cancelled" || error) {
+          const rowFailed = phase === "failed" || phase === "cancelled" || Boolean(error);
+          if (rowFailed) {
             failed += 1;
             appendBatchLine(`${row.title} failed${error ? `: ${error}` : "."}`, "error");
           } else {
@@ -16390,8 +16569,12 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
           progressView?.update({
             percent: (index / updates.length) * 100,
             phase: index >= updates.length ? "restarting" : "uploading",
+            activeIndex: index - 1,
+            deviceState: rowFailed ? "error" : "success",
+            devicePercent: 100,
+            deviceLabel: rowFailed ? "Failed" : flashAllMode ? "Flashed" : "Updated",
             stage: index >= updates.length ? 2 : 1,
-            message: `${row.title} ${phase === "failed" || phase === "cancelled" || error ? "failed" : actionPast}.`,
+            message: `${row.title} ${rowFailed ? "failed" : actionPast}.`,
             hint: `${completed + failed} of ${updates.length} finished.`,
           });
           window.setTimeout(startNext, 900);
@@ -16403,6 +16586,10 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         appendBatchLine(`${row.title} log polling failed: ${String(error?.message || "unknown error")}`, "error");
         progressView?.update({
           percent: (index / updates.length) * 100,
+          activeIndex: index - 1,
+          deviceState: "error",
+          devicePercent: 100,
+          deviceLabel: "Log failed",
           message: `${row.title} could not be updated. Moving to the next device...`,
           hint: String(error?.message || "Unknown firmware error"),
         });
@@ -16428,6 +16615,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     progressView?.update({
       percent: ((index - 1) / updates.length) * 100,
       phase: "starting",
+      activeIndex: index - 1,
+      deviceState: "preparing",
+      devicePercent: 0,
       stage: index === 1 ? 0 : 1,
       message: `Preparing ${row.title} (${index}/${updates.length})...`,
       hint: `${completed + failed} of ${updates.length} finished. Keep every device powered on.`,
@@ -16448,6 +16638,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       progressView?.update({
         percent: (((index - 1) + Number(result?.progress_percent || 4) / 100) / updates.length) * 100,
         phase: result?.phase,
+        activeIndex: index - 1,
+        deviceState: "active",
+        devicePercent: Number(result?.progress_percent || 4),
         stage: index === 1 ? 0 : 1,
         message:
           String(result?.status_text || result?.message || "").trim() ||
@@ -16462,6 +16655,10 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       appendBatchLine(`${row.title} failed to start: ${String(error?.message || "unknown error")}`, "error");
       progressView?.update({
         percent: (index / updates.length) * 100,
+        activeIndex: index - 1,
+        deviceState: "error",
+        devicePercent: 100,
+        deviceLabel: "Could not start",
         message: `${row.title} could not start. Moving to the next device...`,
         hint: String(error?.message || "Unknown firmware error"),
       });
@@ -16508,6 +16705,10 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
       modalDialog = modal?.querySelector(".runtime-settings-dialog") || null;
       modal?.classList.add("firmware-progress-modal");
       modalDialog?.classList.add("runtime-settings-dialog-firmware-progress");
+      if (!singleUpdate) {
+        modal?.classList.add("firmware-batch-progress-modal");
+        modalDialog?.classList.add("runtime-settings-dialog-firmware-batch");
+      }
       fieldsEl?.classList.add("runtime-settings-fields-firmware-progress");
       const logArea = fieldsEl?.querySelector('[data-setting-key="firmware_update_all_log"]') || null;
       if (logArea instanceof HTMLTextAreaElement) {
@@ -16517,14 +16718,20 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         const label = logArea.closest("label");
         if (label instanceof HTMLElement) {
           label.classList.add("firmware-progress-field");
-          progressView = createFirmwareProgressView(label, {
-            transport: "ota",
-            method: singleUpdate ? "OTA" : "Batch OTA",
-            target: singleUpdate ? updates[0].title : `${updates.length} firmware devices`,
-            stages: singleUpdate ? ["Prepare", "Transfer", "Restart", "Finish"] : ["Queue", "Update", "Restart", "Finish"],
-            message: singleUpdate ? `Preparing ${updates[0].title}...` : `Preparing ${updates.length} firmware updates...`,
-            hint: "Tater updates one device at a time so each update can finish safely.",
-          });
+          progressView = singleUpdate
+            ? createFirmwareProgressView(label, {
+                transport: "ota",
+                method: "OTA",
+                target: updates[0].title,
+                stages: ["Prepare", "Transfer", "Restart", "Finish"],
+                message: `Preparing ${updates[0].title}...`,
+                hint: "Keep Tater open and leave the satellite powered on during the update.",
+              })
+            : createFirmwareBatchProgressView(label, updates, {
+                method: flashAllMode ? "Batch flash" : "Batch OTA",
+                message: `Preparing ${updates.length} firmware ${flashAllMode ? "flashes" : "updates"}...`,
+                hint: "Tater updates one satellite at a time. Overall progress advances across the entire queue.",
+              });
         }
       }
       appendBatchLine(
@@ -16535,7 +16742,9 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
       modal?.classList.remove("firmware-progress-modal");
+      modal?.classList.remove("firmware-batch-progress-modal");
       modalDialog?.classList.remove("runtime-settings-dialog-firmware-progress");
+      modalDialog?.classList.remove("runtime-settings-dialog-firmware-batch");
       fieldsEl?.classList.remove("runtime-settings-fields-firmware-progress");
       if (statusEl instanceof HTMLElement) {
         statusEl.classList.remove("voice-log-status");

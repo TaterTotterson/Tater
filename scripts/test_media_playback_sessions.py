@@ -224,6 +224,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 "sent_count": 1,
                 "media_session_sent_count": 1,
                 "start_unix_ms": 2000000000000,
+                "audible_start_unix_ms": 2000000000125,
             }
 
         def prime(**kwargs):
@@ -268,7 +269,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertNotIn("airplay_proxy_used", result)
         self.assertEqual(order[0][1]["targets"], ["804af2c57d78"])
         self.assertEqual(order[2][1]["start_lead_ms"], 750)
-        self.assertEqual(order[3][1]["start_unix_ms"], 2000000000000)
+        self.assertEqual(order[3][1]["start_unix_ms"], 2000000000125)
         self.assertEqual(order[3][1]["reference_sync_offset_ms"], -80)
         self.assertEqual(
             order[3][1]["target_sync_offset_ms"],

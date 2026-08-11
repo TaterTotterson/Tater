@@ -57,6 +57,7 @@ _stereo_adjust_tasks: Dict[str, asyncio.Task] = {}
 _media_disconnect_tasks: Dict[str, asyncio.Task] = {}
 
 NATIVE_SELECTOR_ALIASES_KEY = "tater:voice:native_selector_aliases:v1"
+NATIVE_MEDIA_RENDER_LATENCY_KEY = "tater:voice:native_media_render_latency:v1"
 
 STEREO_CLOCK_PROBE_COUNT = 5
 STEREO_START_LEAD_MS = 750
@@ -65,8 +66,16 @@ STEREO_ADJUST_INTERVAL_S = 2.0
 STEREO_ADJUST_THRESHOLD_FRAMES = 48
 STEREO_ADJUST_MAX_FRAMES = 96
 STEREO_ADJUST_SETTLE_MS = 4000
+STEREO_STARTUP_ADJUST_WINDOW_S = 10.0
+STEREO_STARTUP_ADJUST_THRESHOLD_FRAMES = 24
+STEREO_STARTUP_ADJUST_MAX_FRAMES = 240
+STEREO_STARTUP_ADJUST_SETTLE_MS = 2000
 STEREO_PHASE_EMA_ALPHA = 0.25
 STEREO_PHASE_STABLE_SAMPLES = 2
+MEDIA_RENDER_START_GUARD_MS = 250
+MEDIA_RENDER_LATENCY_EMA_ALPHA = 0.25
+MEDIA_RENDER_LATENCY_MAX_FRAMES = 24_000
+MEDIA_RENDER_LATENCY_LEARN_SAMPLES = 3
 
 
 def _vp():
@@ -230,6 +239,69 @@ def _save_selector_alias(old_selector: Any, new_selector: Any) -> None:
     aliases[old_token] = new_token
     with contextlib.suppress(Exception):
         _vp().redis_client.set(NATIVE_SELECTOR_ALIASES_KEY, json.dumps(aliases, ensure_ascii=False))
+
+
+def _load_media_render_latencies() -> Dict[str, Dict[str, Any]]:
+    try:
+        raw = _vp().redis_client.get(NATIVE_MEDIA_RENDER_LATENCY_KEY)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        parsed = json.loads(str(raw)) if raw else {}
+    except Exception:
+        parsed = {}
+    return {
+        _text(selector): {
+            "frames": max(
+                0,
+                min(
+                    MEDIA_RENDER_LATENCY_MAX_FRAMES,
+                    _as_int(row.get("frames"), 0),
+                ),
+            ),
+            "samples": max(0, _as_int(row.get("samples"), 0)),
+            "updated_ts": float(row.get("updated_ts") or 0.0),
+        }
+        for selector, row in (parsed.items() if isinstance(parsed, dict) else [])
+        if _text(selector) and isinstance(row, dict)
+    }
+
+
+def _learned_media_render_latency_frames(selector: Any) -> int:
+    row = _load_media_render_latencies().get(_canonical_selector(selector), {})
+    if not isinstance(row, dict) or _as_int(row.get("samples"), 0) <= 0:
+        return 0
+    return max(
+        0,
+        min(MEDIA_RENDER_LATENCY_MAX_FRAMES, _as_int(row.get("frames"), 0)),
+    )
+
+
+def _record_media_render_latency(selector: Any, observed_frames: int) -> int:
+    token = _canonical_selector(selector)
+    observed = max(0, min(MEDIA_RENDER_LATENCY_MAX_FRAMES, int(observed_frames)))
+    if not token or observed <= 0:
+        return 0
+    profiles = _load_media_render_latencies()
+    previous = profiles.get(token) if isinstance(profiles.get(token), dict) else {}
+    previous_samples = max(0, _as_int(previous.get("samples"), 0))
+    previous_frames = max(0, _as_int(previous.get("frames"), observed))
+    learned = observed if previous_samples <= 0 else int(
+        round(
+            ((1.0 - MEDIA_RENDER_LATENCY_EMA_ALPHA) * previous_frames)
+            + (MEDIA_RENDER_LATENCY_EMA_ALPHA * observed)
+        )
+    )
+    profiles[token] = {
+        "frames": max(0, min(MEDIA_RENDER_LATENCY_MAX_FRAMES, learned)),
+        "samples": previous_samples + 1,
+        "updated_ts": _now(),
+    }
+    with contextlib.suppress(Exception):
+        _vp().redis_client.set(
+            NATIVE_MEDIA_RENDER_LATENCY_KEY,
+            json.dumps(profiles, ensure_ascii=False, separators=(",", ":")),
+        )
+    return learned
 
 
 def _remove_selector_aliases(selector: Any) -> int:
@@ -1851,11 +1923,23 @@ async def prepare_group_media_session(
             raise RuntimeError(_text(compatibility.get("error")) or "The synchronized media group is unavailable.")
     async with _clients_lock:
         render_clock_support = {}
+        capability_latency_frames: Dict[str, int] = {}
+        capability_sample_rates: Dict[str, int] = {}
         for selector in selectors:
             row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
             hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
-            render_clock_support[selector] = bool(
-                _capabilities(_message_payload(hello)).get("media_render_clock")
+            capabilities = _capabilities(_message_payload(hello))
+            render_clock_support[selector] = bool(capabilities.get("media_render_clock"))
+            capability_latency_frames[selector] = max(
+                0,
+                min(
+                    MEDIA_RENDER_LATENCY_MAX_FRAMES,
+                    _as_int(capabilities.get("media_output_latency_frames"), 0),
+                ),
+            )
+            capability_sample_rates[selector] = max(
+                1,
+                _as_int(capabilities.get("media_sample_rate_hz"), 48000),
             )
     use_rendered_clock = bool(selectors) and all(render_clock_support.values())
     if any(render_clock_support.values()) and not use_rendered_clock:
@@ -1913,7 +1997,48 @@ async def prepare_group_media_session(
 
     try:
         prepared = await asyncio.gather(*(_prepare(member) for member in member_rows))
-        lead_ms = max(250, min(5000, _as_int(start_lead_ms, STEREO_START_LEAD_MS)))
+        prepared_by_selector = {
+            member["selector"]: result
+            for member, result in zip(member_rows, prepared)
+            if isinstance(result, dict)
+        }
+        render_latency_frames: Dict[str, int] = {}
+        render_sample_rates: Dict[str, int] = {}
+        render_latency_us: Dict[str, int] = {}
+        for member in member_rows:
+            selector = member["selector"]
+            prepared_row = prepared_by_selector.get(selector, {})
+            sample_rate = max(
+                1,
+                _as_int(
+                    prepared_row.get("sample_rate_hz"),
+                    capability_sample_rates.get(selector, 48000),
+                ),
+            )
+            reported_frames = max(
+                0,
+                min(
+                    MEDIA_RENDER_LATENCY_MAX_FRAMES,
+                    _as_int(prepared_row.get("output_latency_frames"), 0),
+                ),
+            )
+            learned_frames = _learned_media_render_latency_frames(selector)
+            latency_frames = (
+                learned_frames
+                or reported_frames
+                or capability_latency_frames.get(selector, 0)
+            ) if use_rendered_clock else 0
+            render_sample_rates[selector] = sample_rate
+            render_latency_frames[selector] = latency_frames
+            render_latency_us[selector] = int(round(latency_frames * 1_000_000.0 / sample_rate))
+
+        requested_lead_ms = max(
+            250,
+            min(5000, _as_int(start_lead_ms, STEREO_START_LEAD_MS)),
+        )
+        required_lead_ms = max(render_latency_us.values(), default=0) // 1000
+        lead_ms = max(requested_lead_ms, required_lead_ms + MEDIA_RENDER_START_GUARD_MS)
+        lead_ms = min(5000, lead_ms)
         start_server_us = _monotonic_us() + (lead_ms * 1000)
         start_unix_ms = int(
             round((time.time() * 1000.0) + ((start_server_us - _monotonic_us()) / 1000.0))
@@ -1921,14 +2046,26 @@ async def prepare_group_media_session(
 
         async def _commit(member: Dict[str, Any]) -> Dict[str, Any]:
             clock = clock_by_selector[member["selector"]]
-            start_at_us = start_server_us + int(clock["offset_us"]) + (int(member["delay_ms"]) * 1000)
+            selector = member["selector"]
+            start_at_us = (
+                start_server_us
+                + int(clock["offset_us"])
+                + (int(member["delay_ms"]) * 1000)
+                - render_latency_us.get(selector, 0)
+            )
             result = await send_request(
-                member["selector"],
+                selector,
                 "media.session.commit",
                 {
                     "session_id": group_session_id,
                     "group_id": group_token,
                     "start_at_us": start_at_us,
+                    "audible_start_at_us": (
+                        start_server_us
+                        + int(clock["offset_us"])
+                        + (int(member["delay_ms"]) * 1000)
+                    ),
+                    "output_latency_frames": render_latency_frames.get(selector, 0),
                 },
                 timeout_s=3.0,
             )
@@ -1955,6 +2092,22 @@ async def prepare_group_media_session(
             selector: int(row.get("round_trip_us") or 0) for selector, row in clock_by_selector.items()
         },
         "member_delays_ms": {member["selector"]: int(member.get("delay_ms") or 0) for member in member_rows},
+        "render_latency_frames": dict(render_latency_frames),
+        "render_sample_rates": dict(render_sample_rates),
+        "audible_start_server_us": start_server_us,
+        "start_position_frames": {
+            selector: int(
+                round(
+                    max(0, _as_int(start_position_ms, 0))
+                    * render_sample_rates.get(selector, 48000)
+                    / 1000.0
+                )
+            )
+            for selector in selectors
+        },
+        "actual_starts_us": {},
+        "latency_learning_samples": {},
+        "observed_render_latency_frames": {},
         "clock_sync_server_us": _monotonic_us(),
         "playheads": {},
         "phase_error_ema_frames": {},
@@ -1980,6 +2133,13 @@ async def prepare_group_media_session(
         "committed": committed,
         "start_server_us": start_server_us,
         "start_unix_ms": start_unix_ms,
+        "audible_start_server_us": start_server_us,
+        "audible_start_unix_ms": start_unix_ms,
+        "render_latency_frames": dict(render_latency_frames),
+        "render_latency_ms": {
+            selector: round(render_latency_us.get(selector, 0) / 1000.0, 3)
+            for selector in selectors
+        },
         "start_lead_ms": lead_ms,
         "use_rendered_clock": use_rendered_clock,
         "clock_samples": clocks,
@@ -2272,6 +2432,185 @@ async def _refresh_stereo_clocks(session: Dict[str, Any]) -> None:
         session["clock_sync_server_us"] = _monotonic_us()
 
 
+async def _adjust_audible_timeline_session(
+    group_id: str,
+    session: Dict[str, Any],
+    *,
+    now_us: int,
+) -> None:
+    """Keep every rendered playhead on Tater's server-owned audible timeline."""
+    selectors = _session_members(session)
+    playheads = session.get("playheads") if isinstance(session.get("playheads"), dict) else {}
+    if not selectors or any(
+        not isinstance(playheads.get(selector), dict) for selector in selectors
+    ):
+        return
+    if now_us - int(session.get("last_phase_sample_server_us") or 0) < int(
+        STEREO_ADJUST_INTERVAL_S * 1_000_000
+    ):
+        return
+
+    offsets = session.get("clock_offsets_us") if isinstance(session.get("clock_offsets_us"), dict) else {}
+    member_delays = (
+        session.get("member_delays_ms")
+        if isinstance(session.get("member_delays_ms"), dict)
+        else {}
+    )
+    start_positions = (
+        session.get("start_position_frames")
+        if isinstance(session.get("start_position_frames"), dict)
+        else {}
+    )
+    audible_start_server_us = _as_int(session.get("audible_start_server_us"), 0)
+    if audible_start_server_us <= 0:
+        return
+
+    phase_ema = session.setdefault("phase_error_ema_frames", {})
+    phase_directions = session.setdefault("phase_error_directions", {})
+    phase_stable_samples = session.setdefault("phase_error_stable_samples", {})
+    phase_sample_times = session.setdefault("phase_sample_times_us", {})
+    if not isinstance(phase_ema, dict):
+        phase_ema = {}
+        session["phase_error_ema_frames"] = phase_ema
+    if not isinstance(phase_directions, dict):
+        phase_directions = {}
+        session["phase_error_directions"] = phase_directions
+    if not isinstance(phase_stable_samples, dict):
+        phase_stable_samples = {}
+        session["phase_error_stable_samples"] = phase_stable_samples
+    if not isinstance(phase_sample_times, dict):
+        phase_sample_times = {}
+        session["phase_sample_times_us"] = phase_sample_times
+
+    startup = now_us - audible_start_server_us < int(
+        STEREO_STARTUP_ADJUST_WINDOW_S * 1_000_000
+    )
+    threshold_frames = (
+        STEREO_STARTUP_ADJUST_THRESHOLD_FRAMES
+        if startup
+        else STEREO_ADJUST_THRESHOLD_FRAMES
+    )
+    maximum_frames = (
+        STEREO_STARTUP_ADJUST_MAX_FRAMES
+        if startup
+        else STEREO_ADJUST_MAX_FRAMES
+    )
+    settle_ms = (
+        STEREO_STARTUP_ADJUST_SETTLE_MS
+        if startup
+        else STEREO_ADJUST_SETTLE_MS
+    )
+    corrections: Dict[str, int] = {}
+    phase_errors: Dict[str, float] = {}
+    raw_phase_errors: Dict[str, float] = {}
+    sampled_phase = False
+    for selector in selectors:
+        row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
+        if (
+            not row
+            or _as_bool(row.get("rebuffering"), False)
+            or _text(row.get("session_id")) != _text(session.get("session_id"))
+            or "rendered_frames" not in row
+        ):
+            continue
+        satellite_time_us = _as_int(row.get("satellite_time_us"), 0)
+        if satellite_time_us <= _as_int(phase_sample_times.get(selector), 0):
+            continue
+        phase_sample_times[selector] = satellite_time_us
+        sampled_phase = True
+
+        sample_rate = max(1, _as_int(row.get("sample_rate_hz"), 48000))
+        event_server_us = satellite_time_us - _as_int(offsets.get(selector), 0)
+        audible_member_start_us = (
+            audible_start_server_us
+            + (_as_int(member_delays.get(selector), 0) * 1000)
+        )
+        elapsed_us = max(0, event_server_us - audible_member_start_us)
+        expected_frames = float(_as_int(start_positions.get(selector), 0)) + (
+            float(elapsed_us) * float(sample_rate) / 1_000_000.0
+        )
+        rendered_frames = float(max(0, _as_int(row.get("rendered_frames"), 0)))
+        phase_error_frames = expected_frames - rendered_frames
+        try:
+            previous_ema = float(phase_ema.get(selector, phase_error_frames))
+        except (TypeError, ValueError):
+            previous_ema = phase_error_frames
+        smoothed_error_frames = (
+            ((1.0 - STEREO_PHASE_EMA_ALPHA) * previous_ema)
+            + (STEREO_PHASE_EMA_ALPHA * phase_error_frames)
+        )
+        phase_ema[selector] = smoothed_error_frames
+        if abs(smoothed_error_frames) < threshold_frames:
+            phase_directions[selector] = 0
+            phase_stable_samples[selector] = 0
+            continue
+        direction = 1 if smoothed_error_frames > 0 else -1
+        previous_direction = _as_int(phase_directions.get(selector), 0)
+        stable_samples = (
+            _as_int(phase_stable_samples.get(selector), 0) + 1
+            if direction == previous_direction
+            else 1
+        )
+        phase_directions[selector] = direction
+        phase_stable_samples[selector] = stable_samples
+        if stable_samples < STEREO_PHASE_STABLE_SAMPLES:
+            continue
+        correction = int(round(smoothed_error_frames))
+        corrections[selector] = max(-maximum_frames, min(maximum_frames, correction))
+        phase_errors[selector] = smoothed_error_frames
+        raw_phase_errors[selector] = phase_error_frames
+
+    if sampled_phase:
+        session["last_phase_sample_server_us"] = now_us
+    if not corrections:
+        return
+
+    async def _adjust(selector: str, correction: int) -> tuple[str, int, Dict[str, Any]]:
+        row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
+        hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+        supports_slew = bool(_capabilities(_message_payload(hello)).get("media_rate_slew"))
+        result = await send_request(
+            selector,
+            "media.session.adjust",
+            {
+                "session_id": _text(session.get("session_id")),
+                "group_id": group_id,
+                "correction_frames": correction,
+                "mode": "slew" if supports_slew else "legacy",
+                "settle_ms": settle_ms if supports_slew else 0,
+                "reference_selector": "tater:audible-timeline",
+                "audible_start_server_us": audible_start_server_us,
+            },
+            timeout_s=2.0,
+        )
+        return selector, correction, result
+
+    results = await asyncio.gather(
+        *(_adjust(selector, correction) for selector, correction in corrections.items()),
+        return_exceptions=True,
+    )
+    applied = {
+        selector: correction
+        for row in results
+        if isinstance(row, tuple) and len(row) == 3
+        for selector, correction, result in [row]
+        if _as_bool(result.get("ok"), False)
+    }
+    if applied:
+        session["last_adjust_server_us"] = now_us
+        session["last_correction_frames"] = applied
+        session["last_phase_error_frames"] = {
+            selector: phase_errors[selector]
+            for selector in applied
+            if selector in phase_errors
+        }
+        session["last_raw_phase_error_frames"] = {
+            selector: raw_phase_errors[selector]
+            for selector in applied
+            if selector in raw_phase_errors
+        }
+
+
 async def _adjust_stereo_session(group_id: str) -> None:
     try:
         session = _stereo_sessions.get(group_id)
@@ -2285,6 +2624,13 @@ async def _adjust_stereo_session(group_id: str) -> None:
 
         playheads = session.get("playheads") if isinstance(session.get("playheads"), dict) else {}
         selectors = _session_members(session)
+        if _as_bool(session.get("use_rendered_clock"), False):
+            await _adjust_audible_timeline_session(
+                group_id,
+                session,
+                now_us=now_us,
+            )
+            return
         if len(selectors) < 2:
             return
         reference = _text(session.get("reference_selector")) or selectors[0]
@@ -2480,6 +2826,49 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         playheads = {}
         session["playheads"] = playheads
     playheads[selector] = {**dict(payload), "received_server_us": _monotonic_us()}
+    learning_samples = session.setdefault("latency_learning_samples", {})
+    observed_latencies = session.setdefault("observed_render_latency_frames", {})
+    actual_starts = session.get("actual_starts_us") if isinstance(session.get("actual_starts_us"), dict) else {}
+    start_positions = session.get("start_position_frames") if isinstance(session.get("start_position_frames"), dict) else {}
+    learned_sample_count = (
+        _as_int(learning_samples.get(selector), 0)
+        if isinstance(learning_samples, dict)
+        else 0
+    )
+    actual_start_us = _as_int(actual_starts.get(selector), 0)
+    satellite_time_us = _as_int(payload.get("satellite_time_us"), 0)
+    sample_rate = max(1, _as_int(payload.get("sample_rate_hz"), 48000))
+    if (
+        _as_bool(session.get("use_rendered_clock"), False)
+        and isinstance(learning_samples, dict)
+        and isinstance(observed_latencies, dict)
+        and learned_sample_count < MEDIA_RENDER_LATENCY_LEARN_SAMPLES
+        and not _as_bool(payload.get("rebuffering"), False)
+        and _as_int(session.get("last_adjust_server_us"), 0) <= 0
+        and actual_start_us > 0
+        and satellite_time_us > actual_start_us
+        and "rendered_frames" in payload
+    ):
+        elapsed_frames = int(
+            round((satellite_time_us - actual_start_us) * sample_rate / 1_000_000.0)
+        )
+        rendered_elapsed_frames = max(
+            0,
+            _as_int(payload.get("rendered_frames"), 0)
+            - _as_int(start_positions.get(selector), 0),
+        )
+        observed_frames = elapsed_frames - rendered_elapsed_frames
+        if 0 < observed_frames <= MEDIA_RENDER_LATENCY_MAX_FRAMES:
+            previous_observed = _as_int(observed_latencies.get(selector), observed_frames)
+            smoothed_observed = observed_frames if learned_sample_count <= 0 else int(
+                round(
+                    ((1.0 - MEDIA_RENDER_LATENCY_EMA_ALPHA) * previous_observed)
+                    + (MEDIA_RENDER_LATENCY_EMA_ALPHA * observed_frames)
+                )
+            )
+            observed_latencies[selector] = smoothed_observed
+            learning_samples[selector] = learned_sample_count + 1
+            _record_media_render_latency(selector, smoothed_observed)
     health_rows = session.setdefault("playhead_health", {})
     if not isinstance(health_rows, dict):
         health_rows = {}
@@ -2492,6 +2881,15 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         "rejoin_frames": max(0, _as_int(payload.get("rejoin_frames"), 0)),
         "correction_frames": _as_int(payload.get("correction_frames"), 0),
         "buffered_frames": max(0, _as_int(payload.get("buffered_frames"), 0)),
+        "output_latency_frames": max(
+            0,
+            _as_int(
+                payload.get("output_latency_frames"),
+                (observed_latencies.get(selector) or 0)
+                if isinstance(observed_latencies, dict)
+                else 0,
+            ),
+        ),
     }
     health_rows[selector] = current_health
     health_changed = (
@@ -2512,15 +2910,28 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
             current_health["rejoin_frames"],
             current_health["correction_frames"],
         )
-    # A mixed AirPlay + one-satellite route still uses a native group session
-    # for its common wall-clock anchor, but it has no second native playhead to
-    # correct. Avoid creating a no-op adjustment task for every telemetry tick.
-    if len(_session_members(session)) < 2:
+    # Render-clock sessions follow Tater's audible timeline even when AirPlay is
+    # the only other destination. Source-clock compatibility sessions still
+    # need a second native playhead because they compare members to each other.
+    if (
+        len(_session_members(session)) < 2
+        and not _as_bool(session.get("use_rendered_clock"), False)
+    ):
         return
     task = _stereo_adjust_tasks.get(group_id)
     if isinstance(task, asyncio.Task) and not task.done():
         return
     _stereo_adjust_tasks[group_id] = asyncio.create_task(_adjust_stereo_session(group_id))
+
+
+def _record_stereo_started(selector: str, payload: Dict[str, Any]) -> None:
+    group_id = _text(payload.get("group_id"))
+    session = _stereo_sessions.get(group_id)
+    if not group_id or not isinstance(session, dict) or selector not in set(_session_members(session)):
+        return
+    actual_starts = session.setdefault("actual_starts_us", {})
+    if isinstance(actual_starts, dict):
+        actual_starts[selector] = _as_int(payload.get("actual_start_us"), 0)
 
 
 def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:
@@ -2794,6 +3205,7 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
                 "late_by_us": _as_int(payload.get("late_by_us"), 0),
                 "started_ts": _now(),
             }
+            _record_stereo_started(selector, payload)
         elif msg_type == "media.session.playhead":
             previous = row.get("media_session") if isinstance(row.get("media_session"), dict) else {}
             row["media_session"] = {

@@ -8068,6 +8068,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   overflow: hidden;
 }
 
+.runtime-settings-dialog.runtime-settings-dialog-firmware-batch {
+  width: min(860px, 96vw);
+  max-height: min(92vh, 900px);
+}
+
 .runtime-settings-fields.runtime-settings-fields-firmware-progress {
   overflow: auto;
   padding: 2px 3px 4px;
@@ -8300,6 +8305,329 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   color: #ffc1c1;
 }
 
+.firmware-batch-progress-view {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(240, 131, 69, 0.34);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 7% 0%, rgba(255, 157, 80, 0.22), transparent 30%),
+    radial-gradient(circle at 100% 100%, rgba(118, 74, 45, 0.14), transparent 38%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.068), rgba(255, 255, 255, 0.016));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 18px 48px rgba(0, 0, 0, 0.22);
+  transition: border-color 180ms ease, background 180ms ease;
+}
+
+.firmware-batch-progress-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.firmware-batch-progress-icon {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  width: 56px;
+  height: 52px;
+  padding: 10px 8px;
+  border: 1px solid rgba(255, 157, 82, 0.42);
+  border-radius: 17px;
+  background:
+    radial-gradient(circle at 50% 115%, rgba(255, 166, 91, 0.28), transparent 54%),
+    linear-gradient(145deg, rgba(255, 151, 69, 0.2), rgba(214, 90, 31, 0.07));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.firmware-batch-progress-icon::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  width: 12px;
+  height: 8px;
+  border-top: 2px solid #9ad5a7;
+  border-left: 2px solid #9ad5a7;
+  border-radius: 9px 0 0;
+  transform: rotate(22deg) translateX(-42%);
+  transform-origin: bottom center;
+}
+
+.firmware-batch-progress-icon span {
+  display: block;
+  width: 11px;
+  height: 18px;
+  border: 1px solid rgba(255, 195, 145, 0.76);
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(255, 184, 125, 0.38), rgba(214, 90, 31, 0.16));
+  box-shadow: 0 0 12px rgba(255, 139, 61, 0.14);
+}
+
+.firmware-batch-progress-icon span:nth-child(2) {
+  height: 24px;
+  border-color: rgba(255, 206, 164, 0.94);
+  background: linear-gradient(180deg, rgba(255, 187, 130, 0.55), rgba(214, 90, 31, 0.22));
+  animation: firmware-progress-pulse 1.6s ease-in-out infinite;
+}
+
+.firmware-batch-progress-message {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.firmware-batch-progress-percent {
+  min-width: 62px;
+  color: #ffd8b8;
+  font-size: 1.45rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.firmware-batch-progress-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 13px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background:
+    repeating-linear-gradient(90deg, transparent 0, transparent calc(25% - 1px), rgba(255, 255, 255, 0.08) 25%),
+    rgba(0, 0, 0, 0.32);
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.firmware-batch-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #c94e18, #f08345 62%, #ffd09c);
+  box-shadow: 0 0 20px rgba(255, 139, 61, 0.5);
+  transition: width 260ms ease;
+}
+
+.firmware-batch-progress-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.firmware-batch-progress-summary > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.16);
+  font-size: 0.71rem;
+  font-weight: 750;
+}
+
+.firmware-batch-progress-summary strong {
+  color: #f8e8da;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.firmware-batch-progress-summary [data-batch-summary="finished"] strong {
+  color: #8ee0bd;
+}
+
+.firmware-batch-progress-summary [data-batch-summary="active"] strong {
+  color: #ffb57d;
+}
+
+.firmware-batch-progress-summary [data-batch-summary="failed"] strong {
+  color: #ff9c9c;
+}
+
+.firmware-batch-device-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(42vh, 380px);
+  overflow: auto;
+  padding-right: 3px;
+  scrollbar-color: rgba(240, 131, 69, 0.45) rgba(0, 0, 0, 0.12);
+}
+
+.firmware-batch-device {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 13px;
+  background: rgba(0, 0, 0, 0.17);
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.firmware-batch-device-number {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  color: #b9b0a8;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 0.72rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.firmware-batch-device-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.firmware-batch-device-copy > strong {
+  color: #f7eee6;
+  font-size: 0.88rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.firmware-batch-device-copy > span:not(.firmware-batch-device-track) {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+}
+
+.firmware-batch-device-track {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.firmware-batch-device-track i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #ef8749;
+  transition: width 220ms ease;
+}
+
+.firmware-batch-device-state {
+  min-width: 78px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: #a9a199;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 0.68rem;
+  font-weight: 850;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.firmware-batch-device.is-preparing,
+.firmware-batch-device.is-active {
+  border-color: rgba(240, 131, 69, 0.42);
+  background:
+    linear-gradient(135deg, rgba(240, 131, 69, 0.12), transparent 58%),
+    rgba(0, 0, 0, 0.17);
+  transform: translateX(2px);
+}
+
+.firmware-batch-device.is-preparing .firmware-batch-device-number,
+.firmware-batch-device.is-active .firmware-batch-device-number,
+.firmware-batch-device.is-preparing .firmware-batch-device-state,
+.firmware-batch-device.is-active .firmware-batch-device-state {
+  border-color: rgba(240, 131, 69, 0.35);
+  color: #ffd0ad;
+  background: rgba(240, 131, 69, 0.11);
+}
+
+.firmware-batch-device.is-success {
+  border-color: rgba(92, 214, 178, 0.25);
+  background: rgba(92, 214, 178, 0.07);
+}
+
+.firmware-batch-device.is-success .firmware-batch-device-number,
+.firmware-batch-device.is-success .firmware-batch-device-state {
+  border-color: rgba(92, 214, 178, 0.28);
+  color: #a8efd0;
+  background: rgba(92, 214, 178, 0.09);
+}
+
+.firmware-batch-device.is-success .firmware-batch-device-track i {
+  background: #5cd6b2;
+}
+
+.firmware-batch-device.is-error {
+  border-color: rgba(255, 104, 104, 0.3);
+  background: rgba(255, 104, 104, 0.065);
+}
+
+.firmware-batch-device.is-error .firmware-batch-device-number,
+.firmware-batch-device.is-error .firmware-batch-device-state {
+  border-color: rgba(255, 104, 104, 0.32);
+  color: #ffc1c1;
+  background: rgba(255, 104, 104, 0.09);
+}
+
+.firmware-batch-device.is-error .firmware-batch-device-track i {
+  background: #ff6868;
+}
+
+.firmware-batch-progress-hint {
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  border-radius: 12px;
+  color: #bac7dc;
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.firmware-batch-progress-view.is-success {
+  border-color: rgba(92, 214, 178, 0.4);
+  background:
+    radial-gradient(circle at 7% 0%, rgba(92, 214, 178, 0.17), transparent 30%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.058), rgba(255, 255, 255, 0.016));
+}
+
+.firmware-batch-progress-view.is-success .firmware-batch-progress-fill {
+  background: linear-gradient(90deg, #2f9f81, #5cd6b2, #b7f4db);
+}
+
+.firmware-batch-progress-view.is-error {
+  border-color: rgba(255, 104, 104, 0.4);
+}
+
+.firmware-batch-progress-view.is-error .firmware-batch-progress-fill {
+  background: linear-gradient(90deg, #c84545, #ff6868, #ffb0a8);
+}
+
+.firmware-batch-progress-view.is-error .firmware-batch-progress-percent {
+  color: #ffc1c1;
+}
+
 @keyframes firmware-progress-pulse {
   0%, 100% { transform: scale(0.82); opacity: 0.72; }
   50% { transform: scale(1); opacity: 1; }
@@ -8323,6 +8651,33 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   .firmware-progress-stages {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .firmware-batch-progress-view {
+    padding: 14px;
+  }
+
+  .firmware-batch-progress-hero {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .firmware-batch-progress-percent {
+    grid-column: 1 / -1;
+    min-width: 0;
+    text-align: left;
+  }
+
+  .firmware-batch-progress-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .firmware-batch-device {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .firmware-batch-device-state {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -8331,6 +8686,15 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   }
 
   .firmware-progress-fill {
+    transition: none;
+  }
+
+  .firmware-batch-progress-icon span:nth-child(2) {
+    animation: none;
+  }
+
+  .firmware-batch-progress-fill,
+  .firmware-batch-device-track i {
     transition: none;
   }
 }

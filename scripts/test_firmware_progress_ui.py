@@ -75,6 +75,46 @@ class FirmwareProgressUiTests(unittest.TestCase):
         self.assertIn(".runtime-settings-dialog.runtime-settings-dialog-firmware-progress", self.style_source)
         self.assertIn("@media (max-width: 560px)", self.style_source)
 
+    def test_update_all_uses_aggregate_progress_and_per_device_states(self) -> None:
+        batch_view = _function_source(
+            self.app_source,
+            "createFirmwareBatchProgressView",
+            "openEspHomeFirmwareFlashViewer",
+        )
+        update_flow = _function_source(
+            self.app_source,
+            "openEspHomeFirmwareUpdateAllFlow",
+            "bindEspHomeFirmwareActions",
+        )
+        single_ota_flow = _function_source(
+            self.app_source,
+            "openEspHomeFirmwareFlashViewer",
+            "esphomeFirmwareLogTone",
+        )
+        browser_usb_flow = _function_source(
+            self.app_source,
+            "openEspHomeBrowserUsbFlashFlow",
+            "prepareAmlogicUsbImage",
+        )
+
+        self.assertIn("Overall firmware update progress", batch_view)
+        self.assertIn("firmware-batch-device-list", batch_view)
+        self.assertIn('Boolean(payload?.batchComplete)', batch_view)
+        self.assertNotIn('phase === "completed"', batch_view)
+        self.assertIn("createFirmwareBatchProgressView", update_flow)
+        self.assertIn("activeIndex: index - 1", update_flow)
+        self.assertIn('deviceState: rowFailed ? "error" : "success"', update_flow)
+        self.assertIn("batchComplete: !singleUpdate", update_flow)
+        self.assertIn("firmware-batch-progress-modal", update_flow)
+        self.assertNotIn("firmware-batch-progress-modal", single_ota_flow)
+        self.assertNotIn("firmware-batch-progress-modal", browser_usb_flow)
+
+        self.assertIn(".firmware-batch-progress-view", self.style_source)
+        self.assertIn(".firmware-batch-device.is-active", self.style_source)
+        self.assertIn(".firmware-batch-device.is-success", self.style_source)
+        self.assertIn(".firmware-batch-device.is-error", self.style_source)
+        self.assertIn(".runtime-settings-dialog.runtime-settings-dialog-firmware-batch", self.style_source)
+
     def test_backend_exposes_real_ota_progress(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
         self.assertIn("def _native_ota_progress", source)

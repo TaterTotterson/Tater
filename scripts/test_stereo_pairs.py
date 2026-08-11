@@ -375,6 +375,75 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         voice_pipeline.return_value.logger.warning.assert_called_once()
 
+    async def test_render_latency_moves_engine_starts_onto_one_audible_anchor(self) -> None:
+        offsets = {"native:esp": 1000, "native:linux": 2000}
+        clients = {
+            "native:esp": {
+                "connected": True,
+                "hello": {
+                    "payload": {
+                        "capabilities": {
+                            "media_render_clock": True,
+                            "media_sample_rate_hz": 48000,
+                            "media_output_latency_frames": 960,
+                        }
+                    }
+                },
+            },
+            "native:linux": {
+                "connected": True,
+                "hello": {
+                    "payload": {
+                        "capabilities": {
+                            "media_render_clock": True,
+                            "media_sample_rate_hz": 48000,
+                            "media_output_latency_frames": 6000,
+                        }
+                    }
+                },
+            },
+        }
+        calls = []
+
+        async def fake_clock(selector):
+            return {"selector": selector, "offset_us": offsets[selector], "round_trip_us": 100}
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            calls.append((selector, message_type, dict(payload)))
+            return {"ok": True, "sample_rate_hz": 48000}
+
+        with (
+            mock.patch.object(native_satellite, "_clients", clients),
+            mock.patch.object(
+                native_satellite,
+                "media_group_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(native_satellite, "_stereo_clock_probe", side_effect=fake_clock),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+            mock.patch.object(native_satellite, "_learned_media_render_latency_frames", return_value=0),
+        ):
+            result = await native_satellite.prepare_group_media_session(
+                [
+                    {"selector": "native:esp", "channel": "mono"},
+                    {"selector": "native:linux", "channel": "mono"},
+                ],
+                group_id="mixed-audible",
+                session_id="mixed-session",
+                media_url="http://tater/media/song.wav",
+            )
+
+        commit_calls = [row for row in calls if row[1] == "media.session.commit"]
+        starts = {row[0]: row[2]["start_at_us"] for row in commit_calls}
+        self.assertEqual(starts["native:linux"] - starts["native:esp"], -104000)
+        self.assertEqual(result["render_latency_frames"]["native:esp"], 960)
+        self.assertEqual(result["render_latency_frames"]["native:linux"], 6000)
+        self.assertEqual(result["audible_start_unix_ms"], result["start_unix_ms"])
+        self.assertEqual(
+            commit_calls[0][2]["audible_start_at_us"] - offsets[commit_calls[0][0]],
+            commit_calls[1][2]["audible_start_at_us"] - offsets[commit_calls[1][0]],
+        )
+
     async def test_tts_waits_for_both_members_and_marks_visual_lifecycle(self) -> None:
         calls = []
 
@@ -487,6 +556,75 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0][0], "native:right")
         self.assertEqual(sent[0][1], "media.session.adjust")
         self.assertEqual(sent[0][2]["correction_frames"], 48)
+
+    async def test_rendered_playheads_follow_server_timeline_not_first_member(self) -> None:
+        now_us = native_satellite._monotonic_us()
+        selectors = ["native:linux", "native:esp"]
+        native_satellite._stereo_sessions["mixed"] = {
+            "group_id": "mixed",
+            "session_id": "session-mixed",
+            "selectors": selectors,
+            "clock_offsets_us": {selector: 0 for selector in selectors},
+            "clock_sync_server_us": now_us,
+            "last_adjust_server_us": 0,
+            "last_phase_sample_server_us": 0,
+            "use_rendered_clock": True,
+            "audible_start_server_us": now_us - 1_000_000,
+            "member_delays_ms": {selector: 0 for selector in selectors},
+            "start_position_frames": {selector: 0 for selector in selectors},
+            "phase_error_ema_frames": {},
+            "phase_error_directions": {},
+            "phase_error_stable_samples": {},
+            "phase_sample_times_us": {},
+            "playheads": {
+                "native:linux": {
+                    "session_id": "session-mixed",
+                    "sample_rate_hz": 48000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 48240,
+                },
+                "native:esp": {
+                    "session_id": "session-mixed",
+                    "sample_rate_hz": 48000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 47520,
+                },
+            },
+        }
+        clients = {
+            selector: {
+                "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
+            }
+            for selector in selectors
+        }
+        sent = []
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            sent.append((selector, message_type, dict(payload)))
+            return {"ok": True}
+
+        with (
+            mock.patch.object(native_satellite, "_clients", clients),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+        ):
+            await native_satellite._adjust_stereo_session("mixed")
+            self.assertEqual(sent, [])
+            later_us = now_us + int(native_satellite.STEREO_ADJUST_INTERVAL_S * 1_000_000) + 1
+            session = native_satellite._stereo_sessions["mixed"]
+            session["last_phase_sample_server_us"] = 0
+            session["playheads"]["native:linux"].update(
+                {"satellite_time_us": later_us, "rendered_frames": 144240}
+            )
+            session["playheads"]["native:esp"].update(
+                {"satellite_time_us": later_us, "rendered_frames": 143520}
+            )
+            await native_satellite._adjust_stereo_session("mixed")
+
+        corrections = {row[0]: row[2]["correction_frames"] for row in sent}
+        self.assertEqual(corrections, {"native:linux": -240, "native:esp": 240})
+        self.assertTrue(
+            all(row[2]["reference_selector"] == "tater:audible-timeline" for row in sent)
+        )
 
     async def test_scheduled_overlay_uses_pair_calibration_and_stops_scene_media(self) -> None:
         now_us = native_satellite._monotonic_us()

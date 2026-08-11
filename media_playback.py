@@ -339,7 +339,12 @@ def _voice_core_play_media_sync(
                     "synchronized_group": True,
                     "start_lead_ms": int(response_payload.get("start_lead_ms") or group_payload["start_lead_ms"]),
                 }
-                for timing_key in ("start_server_us", "start_unix_ms"):
+                for timing_key in (
+                    "start_server_us",
+                    "start_unix_ms",
+                    "audible_start_server_us",
+                    "audible_start_unix_ms",
+                ):
                     if response_payload.get(timing_key) is not None:
                         result[timing_key] = int(response_payload[timing_key])
                 skipped_destinations = [
@@ -1152,7 +1157,11 @@ def play_media_url_targets(
 
     if airplay_prepared.get("ok"):
         group_id = _text(airplay_prepared.get("group_id"))
-        native_anchor_ms = int(voice_result.get("start_unix_ms") or 0)
+        native_anchor_ms = int(
+            voice_result.get("audible_start_unix_ms")
+            or voice_result.get("start_unix_ms")
+            or 0
+        )
         if native_anchor_ms > 0:
             start_unix_ms = native_anchor_ms
             reference_offset_ms = native_reference_offset_ms
