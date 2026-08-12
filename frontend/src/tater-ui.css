@@ -450,6 +450,22 @@
 .view-root[data-view="settings"].settings-vue-ready .settings-subtab-btn.active { border-color: color-mix(in srgb, var(--tv-accent) 32%, transparent); color: var(--tv-text); background: var(--tv-accent-soft); box-shadow: none; }
 .view-root[data-view="settings"].settings-vue-ready label { min-width: 0; padding: 7px 0; border: 0; border-radius: 0; color: var(--tv-muted); background: transparent; box-shadow: none; }
 .view-root[data-view="settings"].settings-vue-ready label:hover { border-color: transparent; background: transparent; box-shadow: none; }
+.tcx-legacy-host .core-settings-manager-awareness .core-stats-controls-form { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px !important; }
+.tcx-legacy-host .core-settings-manager-awareness label.core-stats-control-toggle { display: inline-flex; grid-template-columns: none; width: auto; min-width: 0; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--tv-border); border-radius: 999px; color: var(--tv-muted); background: var(--tv-surface); font-size: .68rem; font-weight: 740; line-height: 1; }
+.tcx-legacy-host .core-settings-manager-awareness label.core-stats-control-toggle:hover { border-color: color-mix(in srgb, var(--tv-accent) 42%, var(--tv-border)); background: var(--tv-accent-soft); }
+.tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input { grid-column: auto; grid-row: auto; width: 30px; min-width: 30px; height: 17px; min-height: 17px; flex: 0 0 30px; margin: 0; padding: 0; }
+.tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input::before { width: 11px; height: 11px; left: 2px; top: 2px; }
+.tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input:checked::before { transform: translateX(13px); }
+.tcx-legacy-host .core-settings-manager-awareness .core-tab-items.core-tab-items-group-event_list { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list { padding: 9px 11px; border-radius: 10px; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .card-head { margin: 0; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .card-head > .small { display: none; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .card-title { font-size: .9rem; line-height: 1.2; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-summary { grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 5px; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-summary.no-image { grid-template-columns: minmax(0, 1fr); }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-image-wrap { aspect-ratio: 16 / 9; border-radius: 7px; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-subtitle { margin-bottom: 3px; font-size: .66rem; line-height: 1.25; }
+.tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-detail { display: -webkit-box; margin: 0; overflow: hidden; font-size: .72rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .view-root[data-view="settings"].settings-vue-ready input:not([type="checkbox"]):not([type="radio"]),
 .view-root[data-view="settings"].settings-vue-ready select,
 .view-root[data-view="settings"].settings-vue-ready textarea { width: 100%; min-width: 0; border-color: var(--line, #2a2c30); border-radius: 9px; color: var(--tv-text); background: color-mix(in srgb, var(--bg, #111213) 74%, var(--tv-surface-strong)); }

@@ -64,6 +64,26 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".tcx-repo-form { display: grid;", styles)
         self.assertIn(".tcx-legacy-host", styles)
 
+    def test_awareness_controls_and_event_list_have_scoped_layouts(self) -> None:
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            ".core-settings-manager-awareness label.core-stats-control-toggle { display: inline-flex;",
+            styles,
+        )
+        self.assertIn(
+            ".core-settings-manager-awareness .core-stats-control-toggle .toggle-input { grid-column: auto;",
+            styles,
+        )
+        self.assertIn(
+            ".core-settings-manager-awareness .core-tab-items.core-tab-items-group-event_list { grid-template-columns: minmax(0, 1fr);",
+            styles,
+        )
+        self.assertIn(
+            ".core-settings-manager-awareness .core-manager-item-variant-event_list .core-satellite-summary { grid-template-columns: 96px minmax(0, 1fr);",
+            styles,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
