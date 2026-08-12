@@ -1832,6 +1832,9 @@ async def prepare_stereo_media_session(
     start_position_ms: int = 0,
     loop: bool = False,
     content_type: str = "music",
+    title: str = "",
+    artist: str = "",
+    album: str = "",
     channel_mode: str = "stereo",
     wait_for_completion: bool = False,
     completion_timeout_s: float = 180.0,
@@ -1875,6 +1878,9 @@ async def prepare_stereo_media_session(
         start_position_ms=start_position_ms,
         loop=loop,
         content_type=content_type,
+        title=title,
+        artist=artist,
+        album=album,
         channel_mode="mono" if mono else "stereo",
         compatibility_checked=True,
         wait_for_completion=wait_for_completion,
@@ -1894,6 +1900,9 @@ async def prepare_group_media_session(
     start_position_ms: int = 0,
     loop: bool = False,
     content_type: str = "music",
+    title: str = "",
+    artist: str = "",
+    album: str = "",
     channel_mode: str = "mono",
     start_lead_ms: int = STEREO_START_LEAD_MS,
     compatibility_checked: bool = False,
@@ -1972,6 +1981,9 @@ async def prepare_group_media_session(
                 "start_position_ms": max(0, _as_int(start_position_ms, 0)),
                 "loop": bool(loop),
                 "content_type": media_content_type,
+                "title": _text(title),
+                "artist": _text(artist),
+                "album": _text(album),
             },
             "routing": {
                 "channel": member["channel"],
@@ -3292,10 +3304,21 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             result,
             message_id=_text(message.get("id")),
         )
+    if msg_type == "music.reaction.request":
+        from . import reachy_music
+
+        result = reachy_music.schedule(selector, payload)
+        return _envelope(
+            "music.reaction.ack",
+            result,
+            message_id=_text(message.get("id")),
+        )
     if msg_type in {"voice.start", "audio.start"}:
         from . import reachy_ambient
+        from . import reachy_music
 
         reachy_ambient.cancel(selector)
+        reachy_music.cancel(selector)
         bridge = await _voice_bridge(selector)
         if bridge is None:
             raise RuntimeError(f"Native satellite voice bridge unavailable: {selector}")

@@ -793,6 +793,9 @@ async def native_satellite_play_group(
     if not source_url and not audio_b64:
         raise HTTPException(status_code=400, detail="source_url or audio_b64 is required")
     filename = vp._text(payload.get("filename")) or "audio.bin"
+    title = vp._text(payload.get("title"))
+    artist = vp._text(payload.get("artist"))
+    album = vp._text(payload.get("album"))
     requested_media_type = vp._text(payload.get("media_type")).split(";", 1)[0].strip().lower()
     media_content_type = vp._text(payload.get("media_content_type")).lower() or "music"
     media_volume_percent = max(0, min(100, int(vp._as_float(payload.get("volume_percent"), 100.0))))
@@ -1020,6 +1023,9 @@ async def native_satellite_play_group(
             start_position_ms=media_start_position_ms,
             loop=media_loop,
             content_type=media_content_type,
+            title=title,
+            artist=artist,
+            album=album,
             channel_mode="mixed" if any(row.get("channel") != "mono" for row in playback_members) else "mono",
             start_lead_ms=start_lead_ms,
             compatibility_checked=True,
@@ -1068,6 +1074,9 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     respect_reply_playback = vp._as_bool(payload.get("respect_reply_playback"), True)
     conversation_id = vp._text(payload.get("conversation_id"))
     filename = vp._text(payload.get("filename")) or "audio.bin"
+    title = vp._text(payload.get("title"))
+    artist = vp._text(payload.get("artist"))
+    album = vp._text(payload.get("album"))
     requested_media_type = vp._text(payload.get("media_type")).split(";", 1)[0].strip().lower()
     media_content_type = vp._text(payload.get("media_content_type")).lower()
     playback_role = vp._text(payload.get("playback_role")).lower()
@@ -1270,6 +1279,9 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     start_position_ms=media_start_position_ms,
                     loop=media_loop,
                     content_type=media_content_type or "music",
+                    title=title,
+                    artist=artist,
+                    album=album,
                     channel_mode="stereo",
                 )
                 media_session_started = True
@@ -1368,6 +1380,9 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                         "start_position_ms": media_start_position_ms,
                         "loop": media_loop,
                         "content_type": media_content_type or "music",
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
                     },
                 }
                 result = await native_satellite.send_command(

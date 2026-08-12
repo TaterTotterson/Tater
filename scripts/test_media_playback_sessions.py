@@ -77,6 +77,9 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 source_url="https://example.test/song.mp3",
                 media_type="audio/mpeg",
                 media_content_type="music",
+                title="Billie Jean",
+                artist="Michael Jackson",
+                album="Thriller",
                 volume_percent=64,
                 start_position_seconds=37.25,
             )
@@ -98,6 +101,9 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertEqual(payload["media_content_type"], "music")
         self.assertEqual(payload["volume_percent"], 64)
         self.assertEqual(payload["start_position_ms"], 37250)
+        self.assertEqual(payload["title"], "Billie Jean")
+        self.assertEqual(payload["artist"], "Michael Jackson")
+        self.assertEqual(payload["album"], "Thriller")
 
     def test_multiple_satellites_use_one_synchronized_group_request(self) -> None:
         with (
