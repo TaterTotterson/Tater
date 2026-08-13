@@ -84,6 +84,88 @@ class VueCoresTests(unittest.TestCase):
             styles,
         )
 
+    def test_automation_enabled_toggle_uses_compact_scoped_layout(self) -> None:
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '.core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"] { grid-column: auto;',
+            styles,
+        )
+        self.assertIn(
+            '.core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"]:checked::before { transform: translateX(13px);',
+            styles,
+        )
+
+    def test_music_player_selectors_group_targets_and_use_friendly_names(self) -> None:
+        display = (REPO_ROOT / "frontend" / "src" / "music" / "playerDisplay.ts").read_text(
+            encoding="utf-8"
+        )
+        dynamic = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "DynamicField.vue"
+        ).read_text(encoding="utf-8")
+        player = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
+        ).read_text(encoding="utf-8")
+
+        for heading in ("Tater Native Sats", "Tater Stereo Pairs", "AirPlay Devices"):
+            self.assertIn(heading, display)
+        self.assertIn("groupPlayerTargets", dynamic)
+        self.assertIn("optionDisplayName", dynamic)
+        self.assertIn("groupPlayerTargets", player)
+        self.assertIn("playerDisplayName", player)
+        self.assertNotIn('<strong>Audio sync</strong>', player)
+        self.assertNotIn('class="tm-player-row-control tm-sync-control"', player)
+        self.assertIn("sync_offset_ms: clampNumber", player)
+
+    def test_webui_assets_are_cache_busted_by_the_current_build(self) -> None:
+        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        native = (
+            REPO_ROOT / "macos" / "Tater" / "Sources" / "TaterAssistant" / "main.swift"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('searchParams.get("v")', app_js)
+        self.assertIn("def _webui_asset_version()", backend)
+        self.assertIn('"X-Tater-Asset-Version": version', backend)
+        self.assertIn("reloadIgnoringLocalAndRemoteCacheData", native)
+
+    def test_music_uses_one_slim_player_and_a_playlist_tab(self) -> None:
+        app = (REPO_ROOT / "frontend" / "src" / "music" / "MusicCoreApp.vue").read_text(
+            encoding="utf-8"
+        )
+        player = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
+        ).read_text(encoding="utf-8")
+        track_list = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "TrackList.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("activeManagerTab?.source === 'player_queue'", app)
+        self.assertIn("<TrackList", app)
+        self.assertNotIn("tm-player-size-toggle", player)
+        self.assertNotIn("is-collapsed", player)
+        self.assertIn("progressStyle", player)
+        self.assertIn("tm-player-volume", player)
+        self.assertIn("selectedPlayerCount", player)
+        self.assertIn("tm-queue-tab", track_list)
+
+    def test_music_play_triangle_uses_geometric_centering(self) -> None:
+        player = (
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
+        ).read_text(encoding="utf-8")
+        styles = (
+            REPO_ROOT / "frontend" / "src" / "music" / "music-core.css"
+        ).read_text(encoding="utf-8")
+
+        # The SVG remains proportional to the button, while its path centroid
+        # sits slightly down/right of the mathematical center for optical balance.
+        self.assertIn('viewBox="0 0 24 24"', player)
+        self.assertIn('<path d="M10 6.5 22 13.5 10 20.5Z" />', player)
+        self.assertNotIn('return "▶"', player)
+        self.assertIn(".tm-transport-play-icon {", styles)
+        self.assertIn("width: 44%;", styles)
+        self.assertNotIn("button.is-play .tm-transport-glyph", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

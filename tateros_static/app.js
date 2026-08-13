@@ -9322,6 +9322,17 @@ function disposeCoreVueControllers(tabName = "") {
 }
 
 function taterVueAssetVersion() {
+  const entryScript = Array.from(document.scripts || []).find((script) =>
+    String(script.src || "").includes("/static/app.js")
+  );
+  if (entryScript?.src) {
+    try {
+      const buildVersion = new URL(entryScript.src, window.location.href).searchParams.get("v");
+      if (buildVersion) return buildVersion;
+    } catch (_error) {
+      // Fall through to the released Tater version for older entry pages.
+    }
+  }
   return String(state.auth?.appVersion || state.auth?.appVersionLabel || "").trim().replace(/^v/i, "");
 }
 

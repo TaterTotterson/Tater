@@ -70,7 +70,7 @@ dotenv.load_dotenv()
 from tateros import integration_store as integration_store_module
 
 from fastapi import Cookie, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
@@ -9340,6 +9340,38 @@ app.mount(
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.get("/api/external-audio/v1/streams/{session_id}/live.wav")
+def external_audio_live_stream(
+    session_id: str,
+    token: str = "",
+    cursor: int = 0,
+) -> StreamingResponse:
+    """Serve one tokenized cursor in the shared live PCM timeline.
+
+    Native satellites cannot attach the Tater API header to media URLs, so
+    each live session uses an unguessable, short-lived query token instead.
+    """
+    try:
+        from external_audio import stream_external_audio_wav
+
+        body = stream_external_audio_wav(session_id, token, cursor)
+    except Exception as exc:
+        from external_audio import ExternalAudioStreamError
+
+        if isinstance(exc, ExternalAudioStreamError):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=f"External audio is unavailable: {exc}") from exc
+    return StreamingResponse(
+        body,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.on_event("startup")
 async def _startup_event() -> None:
     set_main_loop(asyncio.get_running_loop())
@@ -9455,6 +9487,13 @@ async def _shutdown_event() -> None:
             ),
             timeout=6.0,
         )
+        await _run_shutdown_step(
+            "external audio input runtime",
+            lambda: asyncio.to_thread(
+                __import__("external_audio").shutdown_external_audio_runtime
+            ),
+            timeout=6.0,
+        )
         await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
         await _run_shutdown_step(
             "core runtime",
@@ -9499,9 +9538,41 @@ async def _redis_error_handler(_request: Request, exc: RedisError):
     )
 
 
+def _webui_asset_version() -> str:
+    candidates = (
+        STATIC_DIR / "app.js",
+        STATIC_DIR / "styles.css",
+        STATIC_DIR / "ui" / "tater-ui.js",
+        STATIC_DIR / "ui" / "tater-ui.css",
+    )
+    versions = []
+    for path in candidates:
+        try:
+            versions.append(path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return str(max(versions, default=0))
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    version = _webui_asset_version()
+    html = html.replace(
+        'href="./static/styles.css"',
+        f'href="./static/styles.css?v={version}"',
+    ).replace(
+        'src="./static/app.js"',
+        f'src="./static/app.js?v={version}"',
+    )
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Tater-Asset-Version": version,
+        },
+    )
 
 
 @app.middleware("http")
@@ -9514,6 +9585,10 @@ async def _webui_auth_middleware(request: Request, call_next):
     if path.startswith("/api/speech/tts/runtime/"):
         return await call_next(request)
     if path.startswith("/api/media/runtime/"):
+        return await call_next(request)
+    if path.startswith("/api/external-audio/v1/streams/"):
+        # Live external-audio URLs carry their own short-lived, unguessable
+        # session token because Native satellites cannot send the WebUI cookie.
         return await call_next(request)
     if path.startswith("/api/tater/satellite/"):
         return await call_next(request)

@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import DynamicField from "./DynamicField.vue";
-import TrackList from "./TrackList.vue";
 import PopupTransition from "../../shared/PopupTransition.vue";
 import type { MusicField, MusicItem, MusicPlayerRow } from "../types";
+import {
+  groupPlayerTargets,
+  playerFriendlyName,
+  playerSecondaryText,
+  playerTargetKind,
+} from "../playerDisplay";
 
 type PlayerSetting = {
   volume_percent: number;
@@ -23,7 +27,6 @@ const speakerValues = ref<Record<string, unknown>>({});
 const playerSettings = ref<Record<string, PlayerSetting>>({});
 const position = ref(0);
 const seeking = ref(false);
-const collapsed = ref(false);
 const speakersDirty = ref(false);
 const volumeEditing = ref(false);
 let progressTimer: number | undefined;
@@ -31,9 +34,17 @@ let progressTimer: number | undefined;
 const volumeField = computed(() => props.item.fields?.find((field) => field.key === "volume_percent"));
 const popupFields = computed(() => props.item.popup_fields || []);
 const playerRows = computed(() => props.item.player_rows || []);
+const playerSections = computed(() => groupPlayerTargets(playerRows.value, (row) => row.target));
 const playback = computed(() => props.item.playback || {});
 const duration = computed(() => Math.max(0, Number(playback.value.duration_seconds || 0)));
 const canSeek = computed(() => Boolean(playback.value.seekable && duration.value > 0));
+const progressStyle = computed<Record<string, string>>(() => ({
+  "--tm-progress-percent": `${duration.value > 0 ? Math.min(100, (position.value / duration.value) * 100) : 0}%`,
+}));
+const volumeStyle = computed<Record<string, string>>(() => ({
+  "--tm-volume-percent": `${Math.max(0, Math.min(100, volume.value))}%`,
+}));
+const selectedPlayerCount = computed(() => selectedTargets().length);
 
 function copyFieldValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((entry) => (entry && typeof entry === "object" ? { ...entry } : entry));
@@ -146,40 +157,21 @@ function updateTransportMode(target: string, event: Event): void {
   speakersDirty.value = true;
 }
 
-function updatePlayerSetting(
-  target: string,
-  key: "volume_percent" | "sync_offset_ms",
-  value: unknown,
-): void {
+function updatePlayerVolumeFromEvent(target: string, event: Event): void {
   const current = playerSetting(target);
   playerSettings.value = {
     ...playerSettings.value,
     [target]: {
       ...current,
-      [key]: key === "volume_percent"
-        ? clampNumber(value, current.volume_percent, 0, 100)
-        : clampNumber(value, current.sync_offset_ms, -1000, 1000),
+      volume_percent: clampNumber(
+        (event.target as HTMLInputElement).value,
+        current.volume_percent,
+        0,
+        100,
+      ),
     },
   };
   speakersDirty.value = true;
-}
-
-function updatePlayerSettingFromEvent(
-  target: string,
-  key: "volume_percent" | "sync_offset_ms",
-  event: Event,
-): void {
-  updatePlayerSetting(target, key, (event.target as HTMLInputElement).value);
-}
-
-function nudgePlayer(target: string, delta: number): void {
-  updatePlayerSetting(target, "sync_offset_ms", playerSetting(target).sync_offset_ms + delta);
-}
-
-function offsetLabel(value: unknown): string {
-  const offset = clampNumber(value, 0, -1000, 1000);
-  if (offset === 0) return "In sync";
-  return `${Math.abs(offset)} ms ${offset < 0 ? "earlier" : "later"}`;
 }
 
 function syncQualityLabel(row: MusicPlayerRow): string {
@@ -203,6 +195,28 @@ function syncQualityTitle(row: MusicPlayerRow): string {
   return "Timing depends on the external player";
 }
 
+function playerKind(row: MusicPlayerRow): string {
+  return playerTargetKind(row.target);
+}
+
+function playerDisplayName(row: MusicPlayerRow): string {
+  return playerFriendlyName(row.label, row.target);
+}
+
+function playerDisplayMeta(row: MusicPlayerRow): string {
+  return playerSecondaryText(row.label, row.meta, row.target);
+}
+
+function playerGlyph(row: MusicPlayerRow): string {
+  const kind = playerKind(row);
+  if (kind === "stereo") return "T²";
+  if (kind === "satellite") return "T";
+  if (kind === "airplay") return "△";
+  if (kind === "sonos") return "S";
+  if (kind === "home") return "H";
+  return "♪";
+}
+
 function openSpeakers(): void {
   syncSpeakerValues();
   speakersDirty.value = false;
@@ -223,7 +237,6 @@ function controlClass(action: string): string {
 
 function actionGlyph(action: string, fallback: string): string {
   if (action.endsWith("_previous")) return "⏮";
-  if (action.endsWith("_play")) return "▶";
   if (action.endsWith("_pause")) return "⏸";
   if (action.endsWith("_stop")) return "■";
   if (action.endsWith("_next")) return "⏭";
@@ -254,6 +267,10 @@ function updateVolume(value: unknown): void {
   volumeEditing.value = true;
 }
 
+function updateVolumeFromEvent(event: Event): void {
+  updateVolume((event.target as HTMLInputElement).value);
+}
+
 function formatTime(value: number): string {
   const seconds = Math.max(0, Math.round(Number(value) || 0));
   const hours = Math.floor(seconds / 3600);
@@ -282,21 +299,6 @@ async function commitSeek(event: Event): Promise<void> {
     "seek",
   );
   seeking.value = false;
-  if (!moved) refreshProgress();
-}
-
-async function seekRelative(direction: number): Promise<void> {
-  if (!canSeek.value) return;
-  const step = Math.max(1, Number(playback.value.seek_step_seconds || 15));
-  const delta = direction * step;
-  position.value = Math.max(0, Math.min(duration.value, position.value + delta));
-  const action = playback.value.seek_relative_action;
-  if (!action) return;
-  const moved = await props.run(
-    action,
-    { id: props.item.id, values: { delta_seconds: delta } },
-    "seek",
-  );
   if (!moved) refreshProgress();
 }
 
@@ -336,26 +338,7 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
 </script>
 
 <template>
-  <section class="tm-player" :class="{ 'is-collapsed': collapsed }" aria-label="Music player">
-    <button
-      type="button"
-      class="tm-player-size-toggle"
-      :aria-label="collapsed ? 'Expand music player' : 'Switch to mini player'"
-      :title="collapsed ? 'Expand music player' : 'Switch to mini player'"
-      :aria-expanded="!collapsed"
-      aria-controls="tm-player-details"
-      @click="collapsed = !collapsed"
-    >
-      <svg
-        class="tm-player-size-icon"
-        :class="{ 'is-up': !collapsed }"
-        viewBox="0 0 16 16"
-        aria-hidden="true"
-      >
-        <path d="m3.5 6 4.5 4 4.5-4" />
-      </svg>
-    </button>
-
+  <section class="tm-player" aria-label="Music player">
     <div id="tm-player-details" class="tm-player-main">
       <div class="tm-art-wrap">
         <img v-if="item.hero_image_src" class="tm-art" :src="item.hero_image_src" :alt="item.hero_image_alt || ''" />
@@ -363,88 +346,82 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
       </div>
 
       <div class="tm-now-playing">
-        <div class="tm-eyebrow">Now playing</div>
         <h2>{{ item.title || 'Music Player' }}</h2>
         <p>{{ item.subtitle || item.detail }}</p>
-        <div class="tm-progress" :class="{ disabled: !canSeek }">
+      </div>
+
+      <div class="tm-transport" aria-label="Playback controls">
+        <button
+          v-for="entry in item.actions || []"
+          :key="entry.action"
+          type="button"
+          :class="[controlClass(entry.action), { 'is-play': entry.action.endsWith('_play') }]"
+          :disabled="busy('transport')"
+          :aria-label="entry.aria_label || entry.label"
+          :title="entry.tooltip || entry.label"
+          @click="runTransport(entry.action)"
+        >
+          <svg
+            v-if="entry.action.endsWith('_play')"
+            class="tm-transport-play-icon"
+            viewBox="0 0 24 24"
+            focusable="false"
+            aria-hidden="true"
+          >
+            <path d="M10 6.5 22 13.5 10 20.5Z" />
+          </svg>
+          <span v-else class="tm-transport-glyph" aria-hidden="true">
+            {{ actionGlyph(entry.action, entry.label || 'Run') }}
+          </span>
+        </button>
+      </div>
+
+      <div class="tm-player-utility">
+        <label v-if="volumeField" class="tm-player-volume" :style="volumeStyle">
+          <span aria-hidden="true">♪</span>
           <input
             type="range"
             min="0"
-            :max="duration || 0"
+            max="100"
             step="1"
-            :value="position"
-            :disabled="!canSeek || busy('seek')"
-            aria-label="Track position"
-            @input="updateSeekPreview"
-            @change="commitSeek"
-          />
-          <div class="tm-progress-times" aria-live="off">
-            <span>{{ formatTime(position) }}</span>
-            <span>{{ formatTime(duration) }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="tm-player-controls">
-        <div class="tm-seek-controls" aria-label="Seek controls">
-          <button
-            type="button"
-            :disabled="!canSeek || busy('seek')"
-            aria-label="Rewind 15 seconds"
-            title="Rewind 15 seconds"
-            @click="seekRelative(-1)"
-          >
-            ↶ <span>15</span>
-          </button>
-          <button
-            type="button"
-            :disabled="!canSeek || busy('seek')"
-            aria-label="Forward 15 seconds"
-            title="Forward 15 seconds"
-            @click="seekRelative(1)"
-          >
-            ↷ <span>15</span>
-          </button>
-        </div>
-        <div class="tm-transport" aria-label="Playback controls">
-          <button
-            v-for="entry in item.actions || []"
-            :key="entry.action"
-            type="button"
-            :class="controlClass(entry.action)"
-            :disabled="busy('transport')"
-            :aria-label="entry.aria_label || entry.label"
-            :title="entry.tooltip || entry.label"
-            @click="runTransport(entry.action)"
-          >
-            {{ actionGlyph(entry.action, entry.label || 'Run') }}
-          </button>
-        </div>
-
-        <div class="tm-volume-speakers">
-          <DynamicField
-            v-if="volumeField"
-            :field="volumeField"
-            :model-value="volume"
-            compact
-            @update:model-value="updateVolume"
+            :value="volume"
+            :disabled="busy('volume')"
+            aria-label="Music volume"
+            @input="updateVolumeFromEvent"
             @change="setVolume"
           />
-          <button
-            type="button"
-            class="tm-speaker-button"
-            :aria-label="item.settings_aria_label || 'Choose speakers and players'"
-            title="Choose speakers and players"
-            @click="openSpeakers"
-          >
-            <span aria-hidden="true">🔊</span>
-            <span class="tm-speaker-label">Players</span>
-          </button>
-        </div>
+          <output>{{ volume }}%</output>
+        </label>
+        <button
+          type="button"
+          class="tm-speaker-button"
+          :aria-label="item.settings_aria_label || 'Choose speakers and players'"
+          title="Choose speakers and players"
+          @click="openSpeakers"
+        >
+          <span aria-hidden="true">🔊</span>
+          <span class="tm-speaker-label">
+            {{ selectedPlayerCount ? `${selectedPlayerCount} Player${selectedPlayerCount === 1 ? '' : 's'}` : 'Players' }}
+          </span>
+        </button>
+      </div>
+
+      <div class="tm-progress" :class="{ disabled: !canSeek }" :style="progressStyle">
+        <span class="tm-progress-time">{{ formatTime(position) }}</span>
+        <input
+          type="range"
+          min="0"
+          :max="duration || 0"
+          step="1"
+          :value="position"
+          :disabled="!canSeek || busy('seek')"
+          aria-label="Track position"
+          @input="updateSeekPreview"
+          @change="commitSeek"
+        />
+        <span class="tm-progress-time">{{ formatTime(duration) }}</span>
       </div>
     </div>
-
-    <TrackList v-if="!collapsed" :item="item" :busy="busy" :run="run" />
 
     <PopupTransition :open="speakersOpen" backdrop-class="tm-modal-backdrop" @close="closeSpeakers">
         <section class="tm-modal" role="dialog" aria-modal="true" aria-labelledby="tm-speaker-title">
@@ -457,25 +434,35 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
           </header>
           <div class="tm-modal-body">
             <div v-if="playerRows.length" class="tm-player-rows">
-              <p class="tm-player-calibration-help">
-                Select players, set each volume, then move Audio sync toward Earlier or Later until the test clicks line up.
-              </p>
-              <article
-                v-for="row in playerRows"
-                :key="row.target"
-                class="tm-player-row"
-                :class="{ 'is-selected': isPlayerSelected(row.target) }"
-              >
-                <header>
+              <div class="tm-player-picker-intro">
+                <p class="tm-player-calibration-help">
+                  Pick any combination of Tater sats and external speakers. Selected players expand for playback route and volume.
+                </p>
+                <strong>{{ selectedTargets().length }} selected</strong>
+              </div>
+              <section v-for="section in playerSections" :key="section.key" class="tm-player-section">
+                <h4>{{ section.label }}</h4>
+                <div class="tm-player-section-list">
+                  <article
+                    v-for="row in section.items"
+                    :key="row.target"
+                    class="tm-player-row"
+                    :class="[
+                      `kind-${playerKind(row)}`,
+                      { 'is-selected': isPlayerSelected(row.target) },
+                    ]"
+                  >
+                  <header>
                   <label class="tm-player-row-select">
                     <input
                       type="checkbox"
                       :checked="isPlayerSelected(row.target)"
                       @change="setPlayerSelected(row.target, ($event.target as HTMLInputElement).checked)"
                     />
-                    <span>
-                      <strong>{{ row.label || row.target }}</strong>
-                      <small v-if="row.meta">{{ row.meta }}</small>
+                    <span class="tm-player-row-icon" aria-hidden="true">{{ playerGlyph(row) }}</span>
+                    <span class="tm-player-row-copy">
+                      <strong>{{ playerDisplayName(row) }}</strong>
+                      <small v-if="playerDisplayMeta(row)">{{ playerDisplayMeta(row) }}</small>
                     </span>
                   </label>
                   <span
@@ -488,9 +475,9 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
                 </header>
 
                 <div
+                  v-if="isPlayerSelected(row.target)"
                   class="tm-player-row-controls"
                   :class="{
-                    disabled: !isPlayerSelected(row.target),
                     'has-transport': Boolean(row.transport_options?.length),
                   }"
                 >
@@ -523,58 +510,13 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
                       :value="playerSetting(row.target).volume_percent"
                       :disabled="!isPlayerSelected(row.target)"
                       :aria-label="`${row.label || row.target} volume`"
-                      @input="updatePlayerSettingFromEvent(row.target, 'volume_percent', $event)"
+                      @input="updatePlayerVolumeFromEvent(row.target, $event)"
                     />
                   </label>
-
-                  <div class="tm-player-row-control tm-sync-control">
-                    <span>
-                      <strong>Audio sync</strong>
-                      <output>{{ offsetLabel(playerSetting(row.target).sync_offset_ms) }}</output>
-                    </span>
-                    <input
-                      type="range"
-                      min="-1000"
-                      max="1000"
-                      step="10"
-                      :value="playerSetting(row.target).sync_offset_ms"
-                      :disabled="!isPlayerSelected(row.target)"
-                      :aria-label="`${row.label || row.target} audio sync offset`"
-                      @input="updatePlayerSettingFromEvent(row.target, 'sync_offset_ms', $event)"
-                    />
-                    <div class="tm-sync-nudges">
-                      <button
-                        type="button"
-                        :disabled="!isPlayerSelected(row.target)"
-                        :aria-label="`Move ${row.label || row.target} 10 milliseconds earlier`"
-                        @click="nudgePlayer(row.target, -10)"
-                      >−10 ms</button>
-                      <input
-                        type="number"
-                        min="-1000"
-                        max="1000"
-                        step="10"
-                        :value="playerSetting(row.target).sync_offset_ms"
-                        :disabled="!isPlayerSelected(row.target)"
-                        :aria-label="`${row.label || row.target} offset in milliseconds`"
-                        @input="updatePlayerSettingFromEvent(row.target, 'sync_offset_ms', $event)"
-                      />
-                      <button
-                        type="button"
-                        :disabled="!isPlayerSelected(row.target)"
-                        :aria-label="`Move ${row.label || row.target} 10 milliseconds later`"
-                        @click="nudgePlayer(row.target, 10)"
-                      >+10 ms</button>
-                      <button
-                        type="button"
-                        class="tm-sync-reset"
-                        :disabled="!isPlayerSelected(row.target) || playerSetting(row.target).sync_offset_ms === 0"
-                        @click="updatePlayerSetting(row.target, 'sync_offset_ms', 0)"
-                      >Reset</button>
-                    </div>
-                  </div>
                 </div>
-              </article>
+                  </article>
+                </div>
+              </section>
             </div>
             <template v-else>
               <DynamicField

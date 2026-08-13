@@ -523,6 +523,31 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(self.commands[0][1], "audio.overlay.start")
         self.assertEqual(self.commands[0][2]["ducking"]["target_percent"], 28)
 
+    def test_active_stereo_reply_propagates_exact_completion_wait(self) -> None:
+        self.stereo_pair = {
+            "id": "bedroom12",
+            "selector": "stereo:bedroom12",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        self.media_session_active = True
+        payload = {
+            "selector": "stereo:bedroom12",
+            "audio_b64": base64.b64encode(b"stereo speech").decode("ascii"),
+            "media_type": "audio/wav",
+            "filename": "tts.wav",
+            "respect_reply_playback": False,
+            "wait_for_completion": True,
+            "timeout_s": 42,
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play(payload, None))
+
+        self.assertTrue(result["audio_overlay_started"])
+        overlay = self.stereo_calls[0][2]
+        self.assertTrue(overlay["wait_for_completion"])
+        self.assertEqual(overlay["completion_timeout_s"], 42)
+
     def test_stereo_pair_music_uses_synchronized_session(self) -> None:
         self.stereo_pair = {
             "id": "bedroom12",

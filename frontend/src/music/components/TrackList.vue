@@ -27,10 +27,10 @@ async function updateShuffle(event: Event): Promise<void> {
 </script>
 
 <template>
-  <details class="tm-queue">
-    <summary>
+  <section class="tm-queue tm-queue-tab" aria-label="Current playlist">
+    <header class="tm-queue-header">
       <span>
-        <strong>{{ item.track_list_label || 'Current Track List' }}</strong>
+        <strong>{{ item.track_list_label || 'Playlist' }}</strong>
         <small>{{ item.track_list?.length || 0 }} tracks</small>
       </span>
       <span class="tm-queue-summary-actions">
@@ -43,9 +43,8 @@ async function updateShuffle(event: Event): Promise<void> {
           />
           Shuffle
         </label>
-        <span class="tm-queue-chevron" aria-hidden="true">⌄</span>
       </span>
-    </summary>
+    </header>
     <div v-if="item.track_list?.length" class="tm-track-scroll" role="listbox" aria-label="Current track list">
       <button
         v-for="track in item.track_list"
@@ -75,5 +74,5 @@ async function updateShuffle(event: Event): Promise<void> {
       </button>
     </div>
     <div v-else class="tm-empty compact">Play an album, artist, genre, or search to create a track list.</div>
-  </details>
+  </section>
 </template>

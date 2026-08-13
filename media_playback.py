@@ -220,6 +220,97 @@ def _runtime_media_proxy_source_url(
     return f"{base_url}/api/media/runtime/{asset_id}/{quote(safe_filename)}"
 
 
+def _voice_session_owner_map(sessions: Any) -> Dict[str, str]:
+    owners: Dict[str, str] = {}
+    for raw in list(sessions or []):
+        row = raw if isinstance(raw, dict) else {}
+        session_id = _text(row.get("session_id"))
+        if not session_id:
+            continue
+        members = list(row.get("selectors") or [])
+        if not members and _text(row.get("target")):
+            members = [row.get("target")]
+        for member in members:
+            selector = _text(member)
+            if selector:
+                owners[selector] = session_id
+    return owners
+
+
+def _voice_core_selector_members(selectors: Iterable[Any]) -> Dict[str, List[str]]:
+    result: Dict[str, List[str]] = {}
+    try:
+        from tater_voice import stereo_pairs
+
+        for raw_selector in selectors:
+            selector = _text(raw_selector)
+            if not selector:
+                continue
+            pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
+            members = (
+                [_text(pair.get("left_selector")), _text(pair.get("right_selector"))]
+                if isinstance(pair, dict) and pair
+                else [selector]
+            )
+            result[selector] = [member for member in members if member]
+    except Exception:
+        result = {
+            _text(selector): [_text(selector)]
+            for selector in selectors
+            if _text(selector)
+        }
+    return result
+
+
+def _voice_core_handoff_media_sync(
+    selectors: List[str],
+    *,
+    target_volume_percent: Dict[str, Any] | None,
+    volume_percent: int,
+) -> Dict[str, Any]:
+    try:
+        from tater_voice import native_satellite
+
+        result = native_satellite.run_on_runtime_loop(
+            native_satellite.handoff_media_sessions(
+                selectors,
+                target_volume_percent=target_volume_percent,
+                volume_percent=volume_percent,
+                fade_ms=180,
+                reason="newer_playback",
+            ),
+            timeout=12.0,
+        )
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        logger.warning("[media_playback] playback handoff was unavailable: %s", exc)
+        return {"ok": False, "error": _text(exc), "selectors": [], "sessions": []}
+
+
+def _voice_core_fade_in_media_sync(
+    sessions: Any,
+    *,
+    target_volume_percent: Dict[str, Any] | None,
+    volume_percent: int,
+) -> Dict[str, Any]:
+    try:
+        from tater_voice import native_satellite
+
+        result = native_satellite.run_on_runtime_loop(
+            native_satellite.fade_media_sessions_if_matches(
+                sessions,
+                target_volume_percent=target_volume_percent,
+                volume_percent=volume_percent,
+                fade_ms=180,
+            ),
+            timeout=10.0,
+        )
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        logger.warning("[media_playback] replacement fade-in was unavailable: %s", exc)
+        return {"ok": False, "error": _text(exc)}
+
+
 def _voice_core_play_media_sync(
     *,
     selectors: List[str],
@@ -239,10 +330,63 @@ def _voice_core_play_media_sync(
     start_lead_ms: int = 0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
+    source_owner: str = "media_playback",
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
     if not clean_selectors:
         return {"ok": False, "sent_count": 0, "error": "No Voice Core satellites selected."}
+
+    handoff = _voice_core_handoff_media_sync(
+        clean_selectors,
+        target_volume_percent=target_volume_percent,
+        volume_percent=volume_percent,
+    )
+    replaced_members = {
+        _text(selector)
+        for selector in list(handoff.get("selectors") or [])
+        if _text(selector)
+    }
+    selector_members = _voice_core_selector_members(clean_selectors)
+    replaced_destinations = {
+        selector
+        for selector, members in selector_members.items()
+        if any(member in replaced_members for member in members)
+    }
+    if _text(source_owner) != "external_audio" and handoff.get("sessions"):
+        with contextlib.suppress(Exception):
+            import external_audio
+
+            external_audio.release_external_audio_sessions(handoff.get("sessions"))
+
+    def destination_volume(selector: str) -> int:
+        desired = max(
+            0,
+            min(
+                100,
+                int(_target_setting(target_volume_percent, selector, default=volume_percent)),
+            ),
+        )
+        return 0 if selector in replaced_destinations else desired
+
+    def finish_handoff(result: Dict[str, Any]) -> Dict[str, Any]:
+        if not replaced_destinations or not result.get("voice_core_sessions"):
+            return result
+        fade = _voice_core_fade_in_media_sync(
+            result.get("voice_core_sessions"),
+            target_volume_percent=target_volume_percent,
+            volume_percent=volume_percent,
+        )
+        result["playback_handoff"] = {
+            "replaced_selectors": sorted(replaced_members),
+            "fade_out_ms": 180,
+            "fade_in_ms": 180,
+            "fade_in_ok": bool(fade.get("ok")),
+        }
+        if not fade.get("ok") and _text(fade.get("error")):
+            result.setdefault("warnings", []).append(
+                f"Playback handoff fade-in: {_text(fade.get('error'))}"
+            )
+        return result
 
     payload_template = {
         "source_url": _text(source_url),
@@ -283,13 +427,7 @@ def _voice_core_play_media_sync(
                     0,
                     min(
                         100,
-                        int(
-                            _target_setting(
-                                target_volume_percent,
-                                selector,
-                                default=volume_percent,
-                            )
-                        ),
+                        destination_volume(selector),
                     ),
                 ),
                 "sync_offset_ms": max(
@@ -375,7 +513,7 @@ def _voice_core_play_media_sync(
                             "selectors": members or played_selectors or clean_selectors,
                         }
                     ]
-                return result
+                return finish_handoff(result)
             detail = _text(response_payload.get("detail") or response_payload.get("error"))
             if response.status_code not in {404, 405}:
                 return {
@@ -389,13 +527,7 @@ def _voice_core_play_media_sync(
     for selector in clean_selectors:
         payload = dict(payload_template)
         payload["selector"] = selector
-        payload["volume_percent"] = max(
-            0,
-            min(
-                100,
-                int(_target_setting(target_volume_percent, selector, default=volume_percent)),
-            ),
-        )
+        payload["volume_percent"] = destination_volume(selector)
         payload["sync_offset_ms"] = max(
             -1000,
             min(1000, int(_target_setting(target_sync_offset_ms, selector, default=0))),
@@ -469,17 +601,27 @@ def _voice_core_play_media_sync(
             result["media_session_warnings"] = media_session_warnings
         if failures:
             result["warnings"] = failures
-        return result
+        return finish_handoff(result)
     return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Voice Core playback failed."}
 
 
-def _voice_core_stop_media_sync(selectors: Iterable[Any]) -> List[str]:
+def _voice_core_stop_media_sync(
+    selectors: Iterable[Any],
+    *,
+    expected_sessions: Any = None,
+    reason: str = "synchronized_route_abort",
+    fade_ms: int = 120,
+) -> List[str]:
     warnings: List[str] = []
     try:
         from tater_voice import native_satellite, stereo_pairs
 
+        expected_owners = _voice_session_owner_map(expected_sessions)
         members: List[str] = []
-        for raw_selector in selectors:
+        raw_selectors = list(selectors or [])
+        if expected_sessions is not None:
+            raw_selectors.extend(expected_owners)
+        for raw_selector in raw_selectors:
             selector = _text(raw_selector)
             if not selector:
                 continue
@@ -494,14 +636,28 @@ def _voice_core_stop_media_sync(selectors: Iterable[Any]) -> List[str]:
                     members.append(member)
         for member in members:
             try:
-                native_satellite.run_on_runtime_loop(
-                    native_satellite.send_command(
-                        member,
-                        "media.session.stop",
-                        {"reason": "synchronized_route_abort"},
-                    ),
-                    timeout=8.0,
-                )
+                if expected_sessions is not None:
+                    expected_session_id = _text(expected_owners.get(member))
+                    if not expected_session_id:
+                        continue
+                    native_satellite.run_on_runtime_loop(
+                        native_satellite.fade_and_stop_media_session_if_matches(
+                            member,
+                            expected_session_id,
+                            fade_ms=fade_ms,
+                            reason=reason,
+                        ),
+                        timeout=8.0,
+                    )
+                else:
+                    native_satellite.run_on_runtime_loop(
+                        native_satellite.send_command(
+                            member,
+                            "media.session.stop",
+                            {"reason": reason},
+                        ),
+                        timeout=8.0,
+                    )
             except Exception as exc:
                 warnings.append(f"{member}: {exc}")
     except Exception as exc:
@@ -705,8 +861,10 @@ def play_media_url_targets(
     target_sync_offset_ms: Dict[str, Any] | None = None,
     target_transport_mode: Dict[str, Any] | None = None,
     airplay_group_id: str = "",
+    minimum_native_start_lead_ms: int = 0,
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
+    source_owner: str = "media_playback",
     _resume_fallback_attempted: bool = False,
 ) -> Dict[str, Any]:
     grouped = split_announcement_targets(targets)
@@ -740,6 +898,11 @@ def play_media_url_targets(
             if bridge_id and bridge_id not in airplay_players:
                 airplay_players.append(bridge_id)
             sonos_airplay_routes[sonos_target] = bridge_target
+            continue
+        if transport_mode == "airplay" and _text(source_owner) == "external_audio":
+            routing_warnings.append(
+                f"{sonos_target} has no available AirPlay endpoint and was skipped to preserve sync."
+            )
             continue
         direct_sonos_speakers.append(speaker)
         if transport_mode == "airplay":
@@ -781,6 +944,8 @@ def play_media_url_targets(
     }
     if target_count <= 0:
         result.update({"ok": False, "sent_count": 0, "error": "No media playback targets selected."})
+        if routing_warnings:
+            result["warnings"] = list(routing_warnings)
         return result
 
     clean_media_type = _text(media_type).split(";", 1)[0].strip().lower() or "audio/mpeg"
@@ -1030,7 +1195,10 @@ def play_media_url_targets(
 
     voice_result: Dict[str, Any] = {}
     if voice_core_selectors and (not airplay_players or airplay_prepared.get("ok")):
-        native_start_lead_ms = NATIVE_GROUP_START_LEAD_MS if len(voice_core_selectors) > 1 else 0
+        native_start_lead_ms = max(
+            NATIVE_GROUP_START_LEAD_MS if len(voice_core_selectors) > 1 else 0,
+            min(5000, max(0, int(minimum_native_start_lead_ms or 0))),
+        )
         if sonos_speakers:
             adjustment_ms = max(-750, min(3000, int(_as_float(mixed_sync_adjustment_ms, 0.0))))
             native_offsets = [
@@ -1099,6 +1267,7 @@ def play_media_url_targets(
             start_lead_ms=native_start_lead_ms,
             timeout_s=timeout_s,
             respect_reply_playback=respect_reply_playback,
+            source_owner=source_owner,
         )
         result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
         result["media_session_sent_count"] = int(voice_result.get("media_session_sent_count") or 0)
@@ -1150,6 +1319,7 @@ def play_media_url_targets(
                 target_transport_mode=target_transport_mode,
                 timeout_s=timeout_s,
                 respect_reply_playback=respect_reply_playback,
+                source_owner=source_owner,
                 _resume_fallback_attempted=True,
             )
             retry_result["resume_fallback_used"] = True

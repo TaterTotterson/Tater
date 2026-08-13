@@ -5,6 +5,7 @@ import LibraryBrowser from "./components/LibraryBrowser.vue";
 import MusicPlayer from "./components/MusicPlayer.vue";
 import RecommendationsBrowser from "./components/RecommendationsBrowser.vue";
 import SettingsCard from "./components/SettingsCard.vue";
+import TrackList from "./components/TrackList.vue";
 import type { CoreTabPayload, MusicCoreMountOptions, MusicItem } from "./types";
 
 const props = defineProps<{
@@ -188,6 +189,12 @@ onBeforeUnmount(() => {
       <RecommendationsBrowser
         v-else-if="activeManagerTab?.key === 'recommendations'"
         :items="activeItems"
+        :busy="isBusy"
+        :run="run"
+      />
+      <TrackList
+        v-else-if="activeManagerTab?.source === 'player_queue' && player"
+        :item="player"
         :busy="isBusy"
         :run="run"
       />

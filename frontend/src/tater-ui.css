@@ -456,6 +456,9 @@
 .tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input { grid-column: auto; grid-row: auto; width: 30px; min-width: 30px; height: 17px; min-height: 17px; flex: 0 0 30px; margin: 0; padding: 0; }
 .tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input::before { width: 11px; height: 11px; left: 2px; top: 2px; }
 .tcx-legacy-host .core-settings-manager-awareness .core-stats-control-toggle .toggle-input:checked::before { transform: translateX(13px); }
+.tcx-legacy-host .core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"] { grid-column: auto; grid-row: auto; width: 30px; min-width: 30px; height: 17px; min-height: 17px; flex: 0 0 30px; margin: 0; padding: 0; }
+.tcx-legacy-host .core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"]::before { width: 11px; height: 11px; left: 2px; top: 2px; }
+.tcx-legacy-host .core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"]:checked::before { transform: translateX(13px); }
 .tcx-legacy-host .core-settings-manager-awareness .core-tab-items.core-tab-items-group-event_list { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list { padding: 9px 11px; border-radius: 10px; }
 .tcx-legacy-host .core-settings-manager-awareness .core-manager-item-variant-event_list .card-head { margin: 0; }

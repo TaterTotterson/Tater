@@ -965,6 +965,15 @@ def _session_reply_playback_target(selector: str, session: "VoiceSessionRuntime"
     return reply_playback.resolve_reply_playback_target(row, client_row=client_row)
 
 
+def _device_reopen_on_intent_end(
+    *,
+    continue_conversation: bool,
+    reply_playback_on_device: bool,
+) -> bool:
+    """Only local playback may let firmware own the initial mic reopen."""
+    return bool(continue_conversation and reply_playback_on_device)
+
+
 async def _play_reply_on_external_target(
     *,
     selector: str,
@@ -4307,10 +4316,16 @@ async def _play_live_tool_progress_for_session(
                 _text((external_result or {}).get("error") if isinstance(external_result, dict) else ""),
             )
         playback_delay_s = max(0.25, min(8.0, _estimate_pcm_duration_s(audio_bytes, audio_format) + 0.2))
-        await asyncio.sleep(playback_delay_s if external_ok else 0.25)
+        playback_completed = bool(
+            external_result.get("voice_core_playback_completed")
+            if isinstance(external_result, dict)
+            else False
+        )
+        if not playback_completed:
+            await asyncio.sleep(playback_delay_s if external_ok else 0.25)
         _native_debug(
             f"live tool progress external playback selector={selector} target={reply_playback_target} "
-            f"ok={external_ok} session_id={session.session_id} text={spoken!r}"
+            f"ok={external_ok} completed={playback_completed} session_id={session.session_id} text={spoken!r}"
         )
     else:
         url = _store_tts_url(selector, session.session_id, audio_bytes, audio_format)
@@ -4979,6 +4994,17 @@ async def _send_followup_reopen_marker(
     marker_url = _store_tts_url(selector, session.session_id, marker_audio, audio_format)
     if not marker_url:
         return ""
+
+    # External playback (including a stereo pair containing the listening
+    # satellite) must not arm device-side continued chat until every target
+    # has actually finished. Otherwise the originating member can reopen its
+    # microphone as soon as its own overlay ends while its partner still talks.
+    await _send_voice_intent_end(
+        client,
+        module,
+        session=session,
+        continue_conversation=True,
+    )
 
     timeout_s = max(1.0, min(3.0, _run_end_timeout_s(marker_audio, audio_format)))
     lock = runtime.get("lock")
@@ -6507,7 +6533,10 @@ async def _finalize_session(
                 client,
                 module,
                 session=session,
-                continue_conversation=continue_conversation,
+                continue_conversation=_device_reopen_on_intent_end(
+                    continue_conversation=continue_conversation,
+                    reply_playback_on_device=reply_playback_on_device,
+                ),
             )
             spoken_tts_text = _continued_chat_spoken_reply_text(
                 spoken_response_text,

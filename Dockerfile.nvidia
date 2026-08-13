@@ -40,11 +40,14 @@ ENV PIP_NO_CACHE_DIR=1 \
     TATER_NATIVE_SATELLITE_CREDENTIALS_PATH=/app/.runtime/native_satellite_credentials.json \
     TATER_RUNTIME_DIR=/app/.runtime \
     TATER_AIRPLAY_CLI_PATH=/usr/local/bin/cliairplay \
+    TATER_SHAIRPORT_SYNC_PATH=/usr/local/bin/shairport-sync \
     TATER_FFMPEG_PATH=/usr/bin/ffmpeg \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
 
 ARG TARGETARCH
 ARG AIRPLAY_CLI_VERSION=0.4.12
+ARG SHAIRPORT_SYNC_VERSION=5.2.1
+ARG SHAIRPORT_SYNC_SOURCE_SHA256=8f97d1a6e045bc3765b10d0cd64abe467eba343af89fa1e158f7fa28b73c4ab6
 
 WORKDIR /app
 
@@ -62,11 +65,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     cmake \
     pkg-config \
+    autoconf \
+    automake \
+    libtool \
+    patch \
+    libssl-dev \
+    libconfig-dev \
+    libpopt-dev \
+    libsoxr-dev \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Bake Tater's pinned AirPlay sender into the image so playback does not need
 # an internet download after the container starts.
+COPY scripts/shairport_sync_configured_port.patch /tmp/shairport-sync-configured-port.patch
 RUN set -eu; \
     image_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "${image_arch}" in \
@@ -83,6 +95,24 @@ RUN set -eu; \
     echo "${checksum}  ${TATER_AIRPLAY_CLI_PATH}" | sha256sum -c -; \
     chmod 0755 "${TATER_AIRPLAY_CLI_PATH}"; \
     "${TATER_AIRPLAY_CLI_PATH}" --check
+
+RUN set -eu; \
+    wget -q -O /tmp/shairport-sync.tar.gz \
+      "https://codeload.github.com/mikebrady/shairport-sync/tar.gz/refs/tags/${SHAIRPORT_SYNC_VERSION}"; \
+    echo "${SHAIRPORT_SYNC_SOURCE_SHA256}  /tmp/shairport-sync.tar.gz" | sha256sum -c -; \
+    mkdir -p /tmp/shairport-sync-source; \
+    tar -xzf /tmp/shairport-sync.tar.gz -C /tmp/shairport-sync-source --strip-components=1; \
+    patch -d /tmp/shairport-sync-source -p1 < /tmp/shairport-sync-configured-port.patch; \
+    cd /tmp/shairport-sync-source; \
+    autoreconf -fi; \
+    ./configure --prefix=/usr/local --with-ssl=openssl --with-tinysvcmdns \
+      --with-soxr --with-stdout --with-metadata --with-metadata-multicast; \
+    make -j 4; \
+    make install; \
+    shairport-sync -V 2>&1 | grep -q "^${SHAIRPORT_SYNC_VERSION}-"; \
+    shairport-sync -h 2>&1 | grep -q -- "--service-type"; \
+    shairport-sync -h 2>&1 | grep -q -- "stdout"; \
+    rm -rf /tmp/shairport-sync.tar.gz /tmp/shairport-sync-source /tmp/shairport-sync-configured-port.patch
 
 COPY requirements.txt .
 

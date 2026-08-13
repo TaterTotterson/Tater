@@ -144,6 +144,67 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             },
         )
 
+    def test_overlapping_destination_starts_silent_then_fades_without_muting_disjoint_target(self) -> None:
+        prior_sessions = [
+            {
+                "selector": "native:kitchen",
+                "session_id": "airplay-session-1",
+            }
+        ]
+        replacement_sessions = [
+            {
+                "target": "multi-1",
+                "session_id": "music-group-1",
+                "selectors": ["native:kitchen", "native:office"],
+            }
+        ]
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_handoff_media_sync",
+                return_value={
+                    "ok": True,
+                    "selectors": ["native:kitchen"],
+                    "sessions": prior_sessions,
+                },
+            ),
+            mock.patch.object(
+                media_playback,
+                "_voice_core_fade_in_media_sync",
+                return_value={"ok": True},
+            ) as fade_in,
+            mock.patch.object(media_playback, "_voice_core_base_url", return_value="http://127.0.0.1:8501"),
+            mock.patch.object(media_playback, "_voice_core_auth_headers", return_value={}),
+            mock.patch.object(media_playback.requests, "post", return_value=_GroupResponse()) as post,
+        ):
+            result = media_playback._voice_core_play_media_sync(
+                selectors=["native:kitchen", "native:office"],
+                source_url="https://example.test/song.mp3",
+                volume_percent=60,
+                target_volume_percent={
+                    "voice_core:native:kitchen": 42,
+                    "voice_core:native:office": 73,
+                },
+                start_lead_ms=750,
+            )
+
+        settings = post.call_args.kwargs["json"]["player_settings"]
+        self.assertEqual(settings["native:kitchen"]["volume_percent"], 0)
+        self.assertEqual(settings["native:office"]["volume_percent"], 73)
+        fade_in.assert_called_once_with(
+            replacement_sessions,
+            target_volume_percent={
+                "voice_core:native:kitchen": 42,
+                "voice_core:native:office": 73,
+            },
+            volume_percent=60,
+        )
+        self.assertEqual(
+            result["playback_handoff"]["replaced_selectors"],
+            ["native:kitchen"],
+        )
+        self.assertTrue(result["playback_handoff"]["fade_in_ok"])
+
     def test_synchronized_group_reports_only_online_destinations_as_sent(self) -> None:
         with (
             mock.patch.object(media_playback, "_voice_core_base_url", return_value="http://127.0.0.1:8501"),
@@ -210,6 +271,22 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertIn("/api/media/runtime/", order[1][1]["source_url"])
         self.assertTrue(result["sonos_proxy_used"])
 
+    def test_live_source_can_request_extra_native_start_runway(self) -> None:
+        with mock.patch.object(
+            media_playback,
+            "_voice_core_play_media_sync",
+            return_value={"ok": True, "sent_count": 2, "media_session_sent_count": 2},
+        ) as voice:
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:office-left", "voice_core:native:office-right"],
+                "http://tater.local:8501/live.wav",
+                media_type="audio/wav",
+                minimum_native_start_lead_ms=2500,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(voice.call_args.kwargs["start_lead_ms"], 2500)
+
     def test_airplay_bridge_uses_the_native_group_wall_clock_anchor(self) -> None:
         import airplay_bridge
 
@@ -256,6 +333,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 ["voice_core:native:kitchen", "airplay:804af2c57d78"],
                 "https://provider.test/song.mp3",
                 filename="song.mp3",
+                source_owner="external_audio",
                 target_volume_percent={
                     "voice_core:native:kitchen": 52,
                     "airplay:804af2c57d78": 64,
@@ -275,6 +353,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertNotIn("airplay_proxy_used", result)
         self.assertEqual(order[0][1]["targets"], ["804af2c57d78"])
         self.assertEqual(order[2][1]["start_lead_ms"], 750)
+        self.assertEqual(order[2][1]["source_owner"], "external_audio")
         self.assertEqual(order[3][1]["start_unix_ms"], 2000000000125)
         self.assertEqual(order[3][1]["reference_sync_offset_ms"], -80)
         self.assertEqual(
@@ -492,6 +571,77 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         resolve_bridge.assert_not_called()
         sonos.assert_called_once()
         self.assertEqual(sonos.call_args.kwargs["speakers"], ["RINCON_KITCHEN"])
+
+    def test_external_audio_sonos_only_route_is_forced_through_airplay(self) -> None:
+        import airplay_bridge
+        import announcement_targets
+
+        order = []
+
+        def prepare(**kwargs):
+            order.append(("prepare", kwargs))
+            return {"ok": True, "group_id": "airplay-sonos-live", "prepared_count": 1}
+
+        def prime(**kwargs):
+            order.append(("prime", kwargs))
+            return {"ok": True, "group_id": kwargs["group_id"], "primed_count": 1}
+
+        def commit(**kwargs):
+            order.append(("commit", kwargs))
+            return {
+                "ok": True,
+                "sent_count": 1,
+                "group_id": kwargs["group_id"],
+                "start_unix_ms": kwargs["start_unix_ms"],
+            }
+
+        with (
+            mock.patch.object(
+                announcement_targets,
+                "resolve_sonos_airplay_target",
+                return_value="airplay:804af2c57d78",
+            ),
+            mock.patch.object(airplay_bridge, "prepare_airplay_group_sync", side_effect=prepare),
+            mock.patch.object(airplay_bridge, "prime_airplay_group_sync", side_effect=prime),
+            mock.patch.object(airplay_bridge, "commit_airplay_group_sync", side_effect=commit),
+            mock.patch.object(media_playback, "_sonos_playback_sync") as sonos,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["sonos:RINCON_KITCHEN"],
+                "https://provider.test/live.wav",
+                target_transport_mode={"sonos:RINCON_KITCHEN": "airplay"},
+                source_owner="external_audio",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([entry[0] for entry in order], ["prepare", "prime", "commit"])
+        self.assertEqual(
+            result["sonos_airplay_routes"],
+            {"sonos:RINCON_KITCHEN": "airplay:804af2c57d78"},
+        )
+        sonos.assert_not_called()
+
+    def test_external_audio_skips_sonos_when_its_airplay_endpoint_is_missing(self) -> None:
+        import announcement_targets
+
+        with (
+            mock.patch.object(
+                announcement_targets,
+                "resolve_sonos_airplay_target",
+                return_value="",
+            ),
+            mock.patch.object(media_playback, "_sonos_playback_sync") as sonos,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["sonos:RINCON_KITCHEN"],
+                "https://provider.test/live.wav",
+                target_transport_mode={"sonos:RINCON_KITCHEN": "airplay"},
+                source_owner="external_audio",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("skipped to preserve sync", result["warnings"][0])
+        sonos.assert_not_called()
 
     def test_mixed_airplay_group_primes_before_satellite_and_aborts_when_satellite_fails(self) -> None:
         import airplay_bridge

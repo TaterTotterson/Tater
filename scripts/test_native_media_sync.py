@@ -83,6 +83,171 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["mode"], "slew")
         self.assertEqual(payload["settle_ms"], 4000)
 
+    async def test_handoff_stops_only_the_session_that_currently_owns_the_satellite(self) -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        native_satellite._clients["native:kitchen"] = {
+            "connected": True,
+            "queue": queue,
+            "media_session": {"active": True, "session_id": "airplay-1"},
+        }
+
+        result = await native_satellite.handoff_media_sessions(
+            ["native:kitchen"],
+            fade_ms=0,
+        )
+
+        self.assertEqual(result["selectors"], ["native:kitchen"])
+        self.assertEqual(result["stopped_selectors"], ["native:kitchen"])
+        message = queue.get_nowait()
+        self.assertEqual(message["type"], "media.session.stop")
+        self.assertEqual(message["payload"]["session_id"], "airplay-1")
+
+    async def test_handoff_expands_a_stereo_destination_to_both_owned_members(self) -> None:
+        queues = {
+            "native:office-left": asyncio.Queue(),
+            "native:office-right": asyncio.Queue(),
+        }
+        for selector, queue in queues.items():
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "queue": queue,
+                "media_session": {"active": True, "session_id": "airplay-pair-1"},
+            }
+
+        with mock.patch(
+            "tater_voice.stereo_pairs.is_stereo_selector",
+            return_value=True,
+        ), mock.patch(
+            "tater_voice.stereo_pairs.get_pair",
+            return_value={
+                "left_selector": "native:office-left",
+                "right_selector": "native:office-right",
+            },
+        ):
+            result = await native_satellite.handoff_media_sessions(
+                ["stereo:office"],
+                fade_ms=0,
+            )
+
+        self.assertEqual(
+            result["stopped_selectors"],
+            ["native:office-left", "native:office-right"],
+        )
+        for queue in queues.values():
+            self.assertEqual(queue.get_nowait()["payload"]["session_id"], "airplay-pair-1")
+
+    async def test_stale_cleanup_cannot_stop_a_newer_session(self) -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        native_satellite._clients["native:kitchen"] = {
+            "connected": True,
+            "queue": queue,
+            "media_session": {"active": True, "session_id": "music-2"},
+        }
+
+        result = await native_satellite.fade_and_stop_media_session_if_matches(
+            "native:kitchen",
+            "airplay-1",
+            fade_ms=0,
+        )
+
+        self.assertFalse(result["stopped"])
+        self.assertTrue(queue.empty())
+
+    async def test_replacement_session_fades_from_silence_to_target_volume(self) -> None:
+        native_satellite._clients["native:kitchen"] = {
+            "connected": True,
+            "queue": asyncio.Queue(),
+            "media_session": {"active": True, "session_id": "music-2"},
+        }
+        with mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request, mock.patch.object(
+            native_satellite.asyncio,
+            "sleep",
+            new=mock.AsyncMock(),
+        ):
+            result = await native_satellite.fade_media_sessions_if_matches(
+                [
+                    {
+                        "session_id": "music-2",
+                        "selectors": ["native:kitchen"],
+                    }
+                ],
+                target_volume_percent={"voice_core:native:kitchen": 60},
+                fade_ms=180,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call.args[2]["volume_percent"] for call in send_request.await_args_list],
+            [20, 40, 60],
+        )
+
+    async def test_owned_stereo_members_receive_the_same_live_group_volume(self) -> None:
+        for selector in ("native:office-left", "native:office-right"):
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "queue": asyncio.Queue(),
+                "media_session": {"active": True, "session_id": "airplay-pair-1"},
+            }
+        with mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request:
+            result = await native_satellite.set_media_sessions_volume_if_matches(
+                [
+                    {
+                        "session_id": "airplay-pair-1",
+                        "selectors": ["native:office-left", "native:office-right"],
+                    }
+                ],
+                target_volume_percent={
+                    "native:office-left": 100,
+                    "native:office-right": 100,
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call.args[2]["volume_percent"] for call in send_request.await_args_list],
+            [100, 100],
+        )
+        self.assertEqual(
+            native_satellite._clients["native:office-left"]["media_session"]["volume_percent"],
+            100,
+        )
+        self.assertEqual(
+            native_satellite._clients["native:office-right"]["media_session"]["volume_percent"],
+            100,
+        )
+
+    async def test_live_volume_update_cannot_change_a_replacement_session(self) -> None:
+        native_satellite._clients["native:kitchen"] = {
+            "connected": True,
+            "queue": asyncio.Queue(),
+            "media_session": {"active": True, "session_id": "music-2"},
+        }
+        with mock.patch.object(
+            native_satellite,
+            "send_request",
+            new=mock.AsyncMock(return_value={"ok": True}),
+        ) as send_request, mock.patch.object(
+            native_satellite.asyncio,
+            "sleep",
+            new=mock.AsyncMock(),
+        ):
+            result = await native_satellite.set_media_sessions_volume_if_matches(
+                [{"session_id": "airplay-1", "selectors": ["native:kitchen"]}],
+                volume_percent=100,
+                wait_timeout_s=0.1,
+            )
+
+        self.assertFalse(result["ok"])
+        send_request.assert_not_awaited()
+
     async def test_one_jittery_phase_sample_does_not_change_follower_speed(self) -> None:
         now_us = 5_000_000
         native_satellite._stereo_sessions["group-1"] = self._session(now_us)

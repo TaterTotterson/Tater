@@ -1261,6 +1261,8 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     ducking=dict(audio_scene.get("ducking") or {}),
                     start_server_us=int(background_result.get("start_server_us") or 0),
                     stop_media_when_finished=True,
+                    wait_for_completion=wait_for_completion,
+                    completion_timeout_s=timeout_s,
                 )
                 result = {
                     **background_result,
@@ -1292,6 +1294,8 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     foreground_url=playback_url,
                     foreground_kind=tts_kind or "tts",
                     ducking=ducking,
+                    wait_for_completion=wait_for_completion,
+                    completion_timeout_s=timeout_s,
                 )
                 audio_overlay_started = True
             else:

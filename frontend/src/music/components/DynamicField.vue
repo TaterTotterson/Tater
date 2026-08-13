@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { MusicField, Primitive, SelectOption } from "../types";
+import {
+  groupPlayerTargets,
+  playerFriendlyName,
+  playerSecondaryText,
+  playerTargetKind,
+} from "../playerDisplay";
 
 const props = defineProps<{
   field: MusicField;
@@ -14,6 +20,7 @@ const emit = defineEmits<{
 }>();
 
 const fieldType = computed(() => String(props.field.type || "text").toLowerCase());
+const targetMultiselect = computed(() => fieldType.value === "player_multiselect");
 const disabled = computed(() => Boolean(props.field.disabled || props.field.read_only));
 const stringValue = computed(() => String(props.modelValue ?? ""));
 const numberValue = computed(() => Number(props.modelValue ?? 0));
@@ -23,6 +30,9 @@ const selectedValues = computed(() =>
       .map((value) => String(value ?? ""))
       .filter(Boolean),
   ),
+);
+const optionSections = computed(() =>
+  groupPlayerTargets(props.field.options || [], (option) => optionValue(option)),
 );
 
 function optionValue(option: SelectOption | Primitive): string {
@@ -48,6 +58,10 @@ function optionLabel(option: SelectOption | Primitive): string {
   return String(option ?? "").trim() || "Unnamed player";
 }
 
+function optionDisplayName(option: SelectOption | Primitive): string {
+  return playerFriendlyName(optionLabel(option), optionValue(option));
+}
+
 function optionMeta(option: SelectOption | Primitive): string {
   if (!option || typeof option !== "object") return "";
   const label = optionLabel(option);
@@ -55,6 +69,24 @@ function optionMeta(option: SelectOption | Primitive): string {
   return candidates
     .map((value) => String(value ?? "").trim())
     .find((value) => Boolean(value) && value !== label) || "";
+}
+
+function optionDisplayMeta(option: SelectOption | Primitive): string {
+  return playerSecondaryText(optionLabel(option), optionMeta(option), optionValue(option));
+}
+
+function optionKind(option: SelectOption | Primitive): string {
+  return playerTargetKind(optionValue(option));
+}
+
+function optionGlyph(option: SelectOption | Primitive): string {
+  const kind = optionKind(option);
+  if (kind === "stereo") return "T²";
+  if (kind === "satellite") return "T";
+  if (kind === "airplay") return "△";
+  if (kind === "sonos") return "S";
+  if (kind === "home") return "H";
+  return "♪";
 }
 
 function updateFromInput(event: Event): void {
@@ -111,10 +143,50 @@ function toggleOption(value: string, checked: boolean): void {
     </span>
   </label>
 
-  <fieldset v-else-if="fieldType === 'multiselect'" class="tm-field tm-multiselect" :class="{ compact }">
+  <fieldset
+    v-else-if="fieldType === 'multiselect' || fieldType === 'player_multiselect'"
+    class="tm-field tm-multiselect"
+    :class="{ compact, 'tm-target-multiselect': targetMultiselect }"
+  >
     <legend>{{ field.label || field.key }}</legend>
-    <div class="tm-option-grid">
-      <label v-for="option in field.options || []" :key="optionValue(option)" class="tm-option">
+    <div v-if="targetMultiselect" class="tm-option-sections">
+      <section v-for="section in optionSections" :key="section.key" class="tm-option-section">
+        <h4>{{ section.label }}</h4>
+        <div class="tm-option-grid">
+          <label
+            v-for="option in section.items"
+            :key="optionValue(option)"
+            class="tm-option"
+            :class="[
+              `kind-${optionKind(option)}`,
+              { 'is-selected': selectedValues.has(optionValue(option)) },
+            ]"
+          >
+            <input
+              type="checkbox"
+              :checked="selectedValues.has(optionValue(option))"
+              :disabled="disabled || !optionValue(option)"
+              @change="toggleOption(optionValue(option), ($event.target as HTMLInputElement).checked)"
+            />
+            <span class="tm-option-icon" aria-hidden="true">{{ optionGlyph(option) }}</span>
+            <span class="tm-option-copy">
+              <strong>{{ optionDisplayName(option) }}</strong>
+              <small v-if="optionDisplayMeta(option)">{{ optionDisplayMeta(option) }}</small>
+            </span>
+          </label>
+        </div>
+      </section>
+    </div>
+    <div v-else class="tm-option-grid">
+      <label
+        v-for="option in field.options || []"
+        :key="optionValue(option)"
+        class="tm-option"
+        :class="[
+          `kind-${optionKind(option)}`,
+          { 'is-selected': selectedValues.has(optionValue(option)) },
+        ]"
+      >
         <input
           type="checkbox"
           :checked="selectedValues.has(optionValue(option))"

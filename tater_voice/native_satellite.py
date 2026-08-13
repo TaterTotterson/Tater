@@ -1612,6 +1612,301 @@ async def send_request(
             future.cancel()
 
 
+def _media_session_members(selectors: Any) -> list[str]:
+    """Expand Native stereo destinations into their physical members."""
+    from . import stereo_pairs
+
+    members: list[str] = []
+    raw_selectors = [selectors] if isinstance(selectors, str) else list(selectors or [])
+    for raw_selector in raw_selectors:
+        selector = _canonical_selector(raw_selector)
+        if not selector:
+            continue
+        pair = stereo_pairs.get_pair(selector) if stereo_pairs.is_stereo_selector(selector) else {}
+        candidates = (
+            [_text(pair.get("left_selector")), _text(pair.get("right_selector"))]
+            if isinstance(pair, dict) and pair
+            else [selector]
+        )
+        for candidate in candidates:
+            member = _canonical_selector(candidate)
+            if member and member not in members:
+                members.append(member)
+    return members
+
+
+def _media_target_setting(
+    settings: Optional[Dict[str, Any]],
+    selector: str,
+    default: int,
+) -> int:
+    source = settings if isinstance(settings, dict) else {}
+    aliases = [selector, f"voice_core:{selector}"]
+    for alias in aliases:
+        if alias in source:
+            return max(0, min(100, _as_int(source.get(alias), default)))
+    return max(0, min(100, _as_int(default, 100)))
+
+
+async def _current_media_session(selector: str) -> Dict[str, Any]:
+    token = _canonical_selector(selector)
+    async with _clients_lock:
+        row = _clients.get(token) if token else {}
+        session = row.get("media_session") if isinstance(row, dict) else {}
+        return dict(session) if isinstance(session, dict) else {}
+
+
+async def _queue_media_stop_if_matches(
+    selector: str,
+    session_id: str,
+    *,
+    reason: str,
+) -> bool:
+    """Atomically queue an unconditional firmware stop only for its owner."""
+    token = _canonical_selector(selector)
+    expected = _text(session_id)
+    if not token or not expected:
+        return False
+    async with _clients_lock:
+        row = _clients.get(token)
+        session = row.get("media_session") if isinstance(row, dict) else {}
+        if (
+            not isinstance(row, dict)
+            or not bool(row.get("connected"))
+            or not isinstance(session, dict)
+            or not bool(session.get("active"))
+            or _text(session.get("session_id")) != expected
+        ):
+            return False
+        queue = row.get("queue")
+        if not isinstance(queue, asyncio.Queue):
+            return False
+        queue.put_nowait(
+            _envelope(
+                "media.session.stop",
+                {"session_id": expected, "reason": _text(reason)},
+            )
+        )
+        return True
+
+
+async def fade_and_stop_media_session_if_matches(
+    selector: str,
+    session_id: str,
+    *,
+    volume_percent: int = 100,
+    fade_ms: int = 180,
+    reason: str = "playback_handoff",
+) -> Dict[str, Any]:
+    """Fade and stop a session without touching a newer replacement."""
+    token = _canonical_selector(selector)
+    expected = _text(session_id)
+    current = await _current_media_session(token)
+    if (
+        not token
+        or not expected
+        or not bool(current.get("active"))
+        or _text(current.get("session_id")) != expected
+    ):
+        return {"ok": True, "selector": token, "session_id": expected, "stopped": False}
+
+    duration_ms = max(0, min(750, _as_int(fade_ms, 180)))
+    start_volume = max(0, min(100, _as_int(volume_percent, 100)))
+    steps = 3 if duration_ms > 0 and start_volume > 0 else 0
+    if steps:
+        step_delay = duration_ms / steps / 1000.0
+        for remaining in range(steps - 1, -1, -1):
+            value = int(round(start_volume * remaining / steps))
+            try:
+                result = await send_request(
+                    token,
+                    "media.session.volume",
+                    {"session_id": expected, "volume_percent": value},
+                    timeout_s=1.5,
+                )
+            except Exception:
+                break
+            if not _as_bool(result.get("ok"), False):
+                break
+            if step_delay > 0:
+                await asyncio.sleep(step_delay)
+
+    stopped = await _queue_media_stop_if_matches(token, expected, reason=reason)
+    return {
+        "ok": True,
+        "selector": token,
+        "session_id": expected,
+        "stopped": stopped,
+    }
+
+
+async def handoff_media_sessions(
+    selectors: Any,
+    *,
+    target_volume_percent: Optional[Dict[str, Any]] = None,
+    volume_percent: int = 100,
+    fade_ms: int = 180,
+    reason: str = "newer_playback",
+) -> Dict[str, Any]:
+    """Relinquish active sessions on the requested physical satellites."""
+    members = _media_session_members(selectors)
+    owners: list[Dict[str, Any]] = []
+    for member in members:
+        session = await _current_media_session(member)
+        session_id = _text(session.get("session_id"))
+        if bool(session.get("active")) and session_id:
+            owners.append({"selector": member, "session_id": session_id})
+
+    results = await asyncio.gather(
+        *(
+            fade_and_stop_media_session_if_matches(
+                owner["selector"],
+                owner["session_id"],
+                volume_percent=_media_target_setting(
+                    target_volume_percent,
+                    owner["selector"],
+                    volume_percent,
+                ),
+                fade_ms=fade_ms,
+                reason=reason,
+            )
+            for owner in owners
+        )
+    )
+    return {
+        "ok": True,
+        "selectors": [owner["selector"] for owner in owners],
+        "sessions": owners,
+        "stopped_selectors": [
+            _text(result.get("selector"))
+            for result in results
+            if isinstance(result, dict) and bool(result.get("stopped"))
+        ],
+    }
+
+
+async def fade_media_sessions_if_matches(
+    sessions: Any,
+    *,
+    target_volume_percent: Optional[Dict[str, Any]] = None,
+    volume_percent: int = 100,
+    fade_ms: int = 180,
+    wait_timeout_s: float = 2.5,
+) -> Dict[str, Any]:
+    """Fade newly-started owned sessions from silence to their target volume."""
+    owners: list[Dict[str, str]] = []
+    for raw in list(sessions or []):
+        row = raw if isinstance(raw, dict) else {}
+        session_id = _text(row.get("session_id"))
+        for member in _media_session_members(row.get("selectors") or [row.get("target")]):
+            if session_id and not any(owner["selector"] == member for owner in owners):
+                owners.append({"selector": member, "session_id": session_id})
+
+    async def fade(owner: Dict[str, str]) -> Dict[str, Any]:
+        deadline = time.monotonic() + max(0.1, min(5.0, float(wait_timeout_s or 2.5)))
+        while time.monotonic() < deadline:
+            current = await _current_media_session(owner["selector"])
+            if (
+                bool(current.get("active"))
+                and _text(current.get("session_id")) == owner["session_id"]
+            ):
+                break
+            await asyncio.sleep(0.025)
+        else:
+            return {**owner, "ok": False, "error": "replacement session did not start"}
+
+        target = _media_target_setting(
+            target_volume_percent,
+            owner["selector"],
+            volume_percent,
+        )
+        duration_ms = max(0, min(750, _as_int(fade_ms, 180)))
+        steps = 3 if duration_ms > 0 and target > 0 else 1
+        for index in range(1, steps + 1):
+            value = int(round(target * index / steps))
+            result = await send_request(
+                owner["selector"],
+                "media.session.volume",
+                {"session_id": owner["session_id"], "volume_percent": value},
+                timeout_s=1.5,
+            )
+            if not _as_bool(result.get("ok"), False):
+                return {**owner, "ok": False, "error": _text(result.get("error"))}
+            if duration_ms > 0:
+                await asyncio.sleep(duration_ms / steps / 1000.0)
+        return {**owner, "ok": True, "volume_percent": target}
+
+    results = await asyncio.gather(*(fade(owner) for owner in owners))
+    return {
+        "ok": all(bool(result.get("ok")) for result in results),
+        "sessions": results,
+    }
+
+
+async def set_media_sessions_volume_if_matches(
+    sessions: Any,
+    *,
+    target_volume_percent: Optional[Dict[str, Any]] = None,
+    volume_percent: int = 100,
+    wait_timeout_s: float = 2.5,
+) -> Dict[str, Any]:
+    """Set one owned media group volume without touching replacement sessions."""
+    owners: list[Dict[str, str]] = []
+    for raw in list(sessions or []):
+        row = raw if isinstance(raw, dict) else {}
+        session_id = _text(row.get("session_id"))
+        for member in _media_session_members(row.get("selectors") or [row.get("target")]):
+            if session_id and not any(owner["selector"] == member for owner in owners):
+                owners.append({"selector": member, "session_id": session_id})
+
+    async def set_volume(owner: Dict[str, str]) -> Dict[str, Any]:
+        deadline = time.monotonic() + max(0.1, min(5.0, float(wait_timeout_s or 2.5)))
+        while time.monotonic() < deadline:
+            current = await _current_media_session(owner["selector"])
+            if (
+                bool(current.get("active"))
+                and _text(current.get("session_id")) == owner["session_id"]
+            ):
+                break
+            await asyncio.sleep(0.025)
+        else:
+            return {**owner, "ok": False, "error": "media session is no longer active"}
+
+        target = _media_target_setting(
+            target_volume_percent,
+            owner["selector"],
+            volume_percent,
+        )
+        result = await send_request(
+            owner["selector"],
+            "media.session.volume",
+            {"session_id": owner["session_id"], "volume_percent": target},
+            timeout_s=1.5,
+        )
+        updated = _as_bool(result.get("ok"), False)
+        if updated:
+            async with _clients_lock:
+                row = _clients.get(owner["selector"])
+                session = row.get("media_session") if isinstance(row, dict) else {}
+                if (
+                    isinstance(session, dict)
+                    and _text(session.get("session_id")) == owner["session_id"]
+                ):
+                    session["volume_percent"] = target
+        return {
+            **owner,
+            "ok": updated,
+            "volume_percent": target,
+            "error": _text(result.get("error")),
+        }
+
+    results = await asyncio.gather(*(set_volume(owner) for owner in owners))
+    return {
+        "ok": all(bool(result.get("ok")) for result in results),
+        "sessions": results,
+    }
+
+
 def _monotonic_us() -> int:
     return int(time.monotonic_ns() // 1000)
 
@@ -2199,6 +2494,8 @@ async def start_stereo_overlay(
     ducking: Optional[Dict[str, Any]] = None,
     start_server_us: int = 0,
     stop_media_when_finished: bool = False,
+    wait_for_completion: bool = False,
+    completion_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
     pair_row = pair if isinstance(pair, dict) else {}
     left = _text(pair_row.get("left_selector"))
@@ -2218,6 +2515,33 @@ async def start_stereo_overlay(
     )
     if not isinstance(session, dict):
         raise RuntimeError("The stereo pair does not have an active synchronized media session.")
+
+    overlay_token = _text(overlay_id)
+    if not overlay_token:
+        raise ValueError("overlay_id is required")
+    previous_future = session.get("overlay_completion_future")
+    if isinstance(previous_future, asyncio.Future) and not previous_future.done():
+        previous_future.set_result(
+            {
+                "ok": False,
+                "members": sorted(_session_members(session)),
+                "overlay_id": _text(session.get("active_overlay_id")),
+                "group_id": _text(session.get("group_id")),
+                "error": "The stereo overlay was replaced by a newer reply.",
+            }
+        )
+    completion_future = (
+        asyncio.get_running_loop().create_future()
+        if wait_for_completion
+        else None
+    )
+    session["active_overlay_id"] = overlay_token
+    session["overlay_finished_selectors"] = []
+    session["overlay_finished_ok"] = {}
+    session["overlay_completion_future"] = completion_future
+    session["overlay_stop_media_when_finished"] = bool(stop_media_when_finished)
+    session["stop_on_overlay_id"] = overlay_token if stop_media_when_finished else ""
+    session["stop_requested"] = False
 
     requested_start_server_us = _as_int(start_server_us, 0)
     minimum_start_server_us = _monotonic_us() + 100_000
@@ -2277,20 +2601,50 @@ async def start_stereo_overlay(
         )
         return {**result, "start_at_us": start_at_us}
 
-    members = await asyncio.gather(*(_start(clock) for clock in clocks))
-    if stop_media_when_finished:
-        session["stop_on_overlay_id"] = _text(overlay_id)
-        session["overlay_finished_selectors"] = []
-        session["stop_requested"] = False
-    return {
+    try:
+        members = await asyncio.gather(*(_start(clock) for clock in clocks))
+    except Exception:
+        if _text(session.get("active_overlay_id")) == overlay_token:
+            session["active_overlay_id"] = ""
+            session["overlay_completion_future"] = None
+            session["overlay_stop_media_when_finished"] = False
+            session["stop_on_overlay_id"] = ""
+        if isinstance(completion_future, asyncio.Future) and not completion_future.done():
+            completion_future.cancel()
+        raise
+
+    result = {
         "ok": True,
         "stereo_overlay_started": True,
-        "overlay_id": _text(overlay_id),
+        "overlay_id": overlay_token,
         "group_id": _text(session.get("group_id")),
         "start_server_us": synchronized_start_server_us,
         "stop_media_when_finished": bool(stop_media_when_finished),
         "members": members,
+        "playback_completed": False,
     }
+    if wait_for_completion and isinstance(completion_future, asyncio.Future):
+        timeout_s = max(1.0, min(600.0, float(completion_timeout_s or 180.0)))
+        try:
+            completion = await asyncio.wait_for(
+                asyncio.shield(completion_future),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            if _text(session.get("active_overlay_id")) == overlay_token:
+                session["active_overlay_id"] = ""
+                session["overlay_completion_future"] = None
+                session["overlay_stop_media_when_finished"] = False
+                session["stop_on_overlay_id"] = ""
+            if not completion_future.done():
+                completion_future.cancel()
+            raise RuntimeError(
+                "Timed out waiting for both stereo speakers to finish the reply."
+            ) from exc
+        result["playback_completed"] = True
+        result["playback_ok"] = _as_bool((completion or {}).get("ok"), False)
+        result["finished_members"] = list((completion or {}).get("members") or [])
+    return result
 
 
 def _session_members(session: Dict[str, Any]) -> list[str]:
@@ -2400,6 +2754,18 @@ async def _abort_media_groups_for_disconnect(selector: str, *, reason: str) -> i
                     "group_id": group_id,
                     "disconnected_selector": token,
                     "error": f"{token} disconnected during synchronized playback.",
+                }
+            )
+        overlay_future = session.get("overlay_completion_future")
+        if isinstance(overlay_future, asyncio.Future) and not overlay_future.done():
+            overlay_future.set_result(
+                {
+                    "ok": False,
+                    "members": sorted(_session_members(session)),
+                    "overlay_id": _text(session.get("active_overlay_id")),
+                    "group_id": group_id,
+                    "disconnected_selector": token,
+                    "error": f"{token} disconnected during stereo reply playback.",
                 }
             )
         aborted.append((group_id, session, remaining))
@@ -2973,6 +3339,17 @@ def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:
             }
             if isinstance(completion_future, asyncio.Future) and not completion_future.done():
                 completion_future.set_result(completion)
+            overlay_future = session.get("overlay_completion_future")
+            if isinstance(overlay_future, asyncio.Future) and not overlay_future.done():
+                overlay_future.set_result(
+                    {
+                        "ok": False,
+                        "members": sorted(members),
+                        "overlay_id": _text(session.get("active_overlay_id")),
+                        "group_id": group_id,
+                        "error": "The stereo media session ended before its reply overlay completed.",
+                    }
+                )
             _stereo_sessions.pop(group_id, None)
             task = _stereo_adjust_tasks.pop(group_id, None)
             if isinstance(task, asyncio.Task) and not task.done():
@@ -2984,7 +3361,9 @@ def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> N
     if not overlay_id:
         return
     for session in list(_stereo_sessions.values()):
-        if not isinstance(session, dict) or _text(session.get("stop_on_overlay_id")) != overlay_id:
+        if not isinstance(session, dict) or _text(
+            session.get("active_overlay_id") or session.get("stop_on_overlay_id")
+        ) != overlay_id:
             continue
         members = set(_session_members(session))
         if selector not in members:
@@ -2995,17 +3374,37 @@ def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> N
             session["overlay_finished_selectors"] = finished
         if selector not in finished:
             finished.append(selector)
-        if members and members.issubset(set(finished)) and not _as_bool(
-            session.get("stop_requested"),
-            False,
-        ):
-            session["stop_requested"] = True
-            asyncio.create_task(
-                _stop_stereo_members(
-                    sorted(members),
-                    session_id=_text(session.get("session_id")),
-                )
+        finished_ok = session.setdefault("overlay_finished_ok", {})
+        if not isinstance(finished_ok, dict):
+            finished_ok = {}
+            session["overlay_finished_ok"] = finished_ok
+        finished_ok[selector] = _as_bool(payload.get("ok"), False)
+        if members and members.issubset(set(finished)):
+            completion = {
+                "ok": all(_as_bool(finished_ok.get(member), False) for member in members),
+                "members": sorted(members),
+                "overlay_id": overlay_id,
+                "group_id": _text(session.get("group_id")),
+            }
+            completion_future = session.get("overlay_completion_future")
+            if isinstance(completion_future, asyncio.Future) and not completion_future.done():
+                completion_future.set_result(completion)
+            should_stop_media = _as_bool(
+                session.get("overlay_stop_media_when_finished"),
+                False,
             )
+            if should_stop_media and not _as_bool(session.get("stop_requested"), False):
+                session["stop_requested"] = True
+                asyncio.create_task(
+                    _stop_stereo_members(
+                        sorted(members),
+                        session_id=_text(session.get("session_id")),
+                    )
+                )
+            session["active_overlay_id"] = ""
+            session["overlay_completion_future"] = None
+            session["overlay_stop_media_when_finished"] = False
+            session["stop_on_overlay_id"] = ""
 
 
 async def push_live_settings(selector: str = "") -> Dict[str, Any]:

@@ -1,9 +1,14 @@
 .DS_Store
+.git/
+.runtime/
 __pycache__/
 *.py[cod]
 
-agent_lab/logs/*.log
-agent_lab/workspace/extracted_tmp_archive_*
+# Local runtime state and downloaded models are mounted or recreated in the
+# container; never send user data or model caches in the Docker build context.
+agent_lab/
+wav2vec2_checkpoints/
+frontend/node_modules/
 tests/
 
 # Native macOS app files are not used by Docker images, except for the small

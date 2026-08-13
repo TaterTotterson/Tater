@@ -693,6 +693,64 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 session_id="background-1",
             )
 
+    async def test_stereo_overlay_waits_for_both_members_before_completing_reply(self) -> None:
+        native_satellite._stereo_sessions["pair1"] = {
+            "group_id": "pair1",
+            "pair_selector": "stereo:pair1",
+            "session_id": "music-1",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+            "clock_offsets_us": {"native:left": 0, "native:right": 0},
+        }
+        pair = {
+            "id": "pair1",
+            "selector": "stereo:pair1",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+
+        async def fake_command(_selector, _message_type, _payload):
+            return {"ok": True}
+
+        with (
+            mock.patch.object(
+                native_satellite,
+                "stereo_pair_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(native_satellite, "send_command", side_effect=fake_command),
+        ):
+            playback = asyncio.create_task(
+                native_satellite.start_stereo_overlay(
+                    pair,
+                    overlay_id="reply-1",
+                    foreground_url="http://tater/media/reply.wav",
+                    start_server_us=native_satellite._monotonic_us() + 500_000,
+                    wait_for_completion=True,
+                    completion_timeout_s=2.0,
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.done())
+
+            native_satellite._record_stereo_overlay_finished(
+                "native:left",
+                {"overlay_id": "reply-1", "ok": True},
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.done())
+
+            native_satellite._record_stereo_overlay_finished(
+                "native:right",
+                {"overlay_id": "reply-1", "ok": True},
+            )
+            result = await playback
+
+        self.assertTrue(result["playback_completed"])
+        self.assertTrue(result["playback_ok"])
+        self.assertEqual(result["finished_members"], ["native:left", "native:right"])
+        self.assertIn("pair1", native_satellite._stereo_sessions)
+
 
 if __name__ == "__main__":
     unittest.main()

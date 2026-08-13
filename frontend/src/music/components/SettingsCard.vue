@@ -114,7 +114,10 @@ async function runAction(entry: MusicAction): Promise<void> {
 </script>
 
 <template>
-  <article class="tm-settings-card">
+  <article
+    class="tm-settings-card"
+    :class="item.card_variant ? `variant-${item.card_variant}` : ''"
+  >
     <header>
       <div>
         <h3>{{ item.title || item.id }}</h3>
@@ -127,6 +130,12 @@ async function runAction(entry: MusicAction): Promise<void> {
       </div>
     </header>
     <p v-if="item.detail" class="tm-card-detail">{{ item.detail }}</p>
+    <dl v-if="item.summary_rows?.length" class="tm-settings-summary">
+      <div v-for="row in item.summary_rows" :key="row.label">
+        <dt>{{ row.label }}</dt>
+        <dd>{{ row.value ?? '—' }}</dd>
+      </div>
+    </dl>
 
     <details v-if="item.fields_dropdown && item.fields?.length" class="tm-settings-fields" @toggle="scheduleFieldLayout">
       <summary>Connection settings</summary>

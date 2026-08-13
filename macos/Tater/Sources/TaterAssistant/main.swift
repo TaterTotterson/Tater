@@ -2389,7 +2389,13 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
     }
 
     func load(url: URL) {
-        webView.load(URLRequest(url: url))
+        var request = URLRequest(
+            url: url,
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+            timeoutInterval: 30.0
+        )
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        webView.load(request)
     }
 
     func webView(

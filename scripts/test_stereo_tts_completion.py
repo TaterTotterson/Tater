@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import types
 import unittest
 from unittest import mock
 
 import speech_tts
+from tater_voice import voice_pipeline
 
 
 class _CompletedResponse:
@@ -19,6 +22,54 @@ class _CompletedResponse:
 
 
 class StereoTtsCompletionTests(unittest.IsolatedAsyncioTestCase):
+    def test_external_pair_defers_device_reopen_until_group_completion(self) -> None:
+        self.assertFalse(
+            voice_pipeline._device_reopen_on_intent_end(
+                continue_conversation=True,
+                reply_playback_on_device=False,
+            )
+        )
+        self.assertTrue(
+            voice_pipeline._device_reopen_on_intent_end(
+                continue_conversation=True,
+                reply_playback_on_device=True,
+            )
+        )
+
+    async def test_followup_marker_rearms_device_after_external_playback(self) -> None:
+        order = []
+        runtime = {"lock": asyncio.Lock(), "announcement_task": None}
+        session = types.SimpleNamespace(
+            session_id="voice-1",
+            conversation_id="conversation-1",
+            intent_active=False,
+        )
+
+        async def fake_intent_end(*_args, **kwargs):
+            order.append(("intent_end", kwargs.get("continue_conversation")))
+
+        async def fake_event(*_args, **_kwargs):
+            order.append(("tts_end", True))
+
+        with (
+            mock.patch.object(voice_pipeline, "_store_tts_url", return_value="http://tater/reopen.wav"),
+            mock.patch.object(voice_pipeline, "_send_voice_intent_end", side_effect=fake_intent_end),
+            mock.patch.object(voice_pipeline, "_esphome_send_event", side_effect=fake_event),
+            mock.patch.object(voice_pipeline, "_schedule_announcement_timeout"),
+        ):
+            marker = await voice_pipeline._send_followup_reopen_marker(
+                "native:office",
+                object(),
+                object(),
+                runtime=runtime,
+                session=session,
+                audio_format={"rate": 16000, "width": 2, "channels": 1},
+                reason="stereo_complete",
+            )
+
+        self.assertEqual(marker, "http://tater/reopen.wav")
+        self.assertEqual(order, [("intent_end", True), ("tts_end", True)])
+
     def test_voice_core_request_propagates_completion_wait(self) -> None:
         with (
             mock.patch.object(speech_tts, "_voice_core_base_url", return_value="http://127.0.0.1:8501"),

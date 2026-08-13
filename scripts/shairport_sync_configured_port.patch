@@ -1,0 +1,18 @@
+--- a/shairport.c
++++ b/shairport.c
+@@ -2675,10 +2675,10 @@
++  // Preserve a non-zero port supplied by the configuration file or command line.
++  // Version 5.2.1 otherwise overwrites it with the default after parsing.
++  if (config.port == 0) {
+ #ifdef CONFIG_AIRPLAY_2
+-  if (config.service_type == APST_airplay2) {
+-    config.port = 7000;
+-  } else {
+-    config.port = 5000;
+-  }
++    config.port = config.service_type == APST_airplay2 ? 7000 : 5000;
+ #else
+-  config.port = 5000;
++    config.port = 5000;
+ #endif
++  }
