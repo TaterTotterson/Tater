@@ -343,6 +343,9 @@
 }
 
 .tm-transport button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   padding: 0;
   line-height: 1;
 }
@@ -354,8 +357,8 @@
 
 .tm-transport-play-icon {
   display: block;
-  width: 44%;
-  height: 44%;
+  width: 14px;
+  height: 14px;
   fill: currentColor;
 }
 
@@ -367,6 +370,9 @@
 }
 
 .tm-transport button.primary {
+  width: 36px;
+  height: 36px;
+  flex-basis: 36px;
   min-width: 36px;
   min-height: 36px;
   margin: -3px 1px;
@@ -1620,8 +1626,8 @@
   .tm-art-wrap { width: 40px; height: 40px; }
   .tm-badges { display: none; }
   .tm-transport { gap: 3px; }
-  .tm-transport button { min-width: 28px; min-height: 28px; }
-  .tm-transport button.primary { min-width: 32px; min-height: 32px; }
+  .tm-transport button { width: 28px; height: 28px; min-width: 28px; min-height: 28px; flex-basis: 28px; }
+  .tm-transport button.primary { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-basis: 32px; }
   .tm-transport button.stop { display: none; }
   .tm-player-utility { gap: 6px; }
   .tm-player-volume { flex: 1 1 auto; grid-template-columns: 12px minmax(50px, 1fr) 29px; }

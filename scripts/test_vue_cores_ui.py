@@ -157,13 +157,18 @@ class VueCoresTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "music" / "music-core.css"
         ).read_text(encoding="utf-8")
 
-        # The SVG remains proportional to the button, while its path centroid
-        # sits slightly down/right of the mathematical center for optical balance.
+        # Keep both the circle and SVG explicitly sized. Percentage-sized SVGs
+        # can contribute their 300px intrinsic width to an auto-sized button in
+        # WebKit and blow out the slim player layout.
         self.assertIn('viewBox="0 0 24 24"', player)
         self.assertIn('<path d="M10 6.5 22 13.5 10 20.5Z" />', player)
         self.assertNotIn('return "▶"', player)
         self.assertIn(".tm-transport-play-icon {", styles)
-        self.assertIn("width: 44%;", styles)
+        self.assertIn("width: 14px;", styles)
+        self.assertIn("height: 14px;", styles)
+        self.assertIn("flex: 0 0 30px;", styles)
+        self.assertIn("flex-basis: 36px;", styles)
+        self.assertNotIn("width: 44%;", styles)
         self.assertNotIn("button.is-play .tm-transport-glyph", styles)
 
 
