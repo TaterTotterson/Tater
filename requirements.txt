@@ -51,6 +51,8 @@ mlx-lm; platform_system == "Darwin" and platform_machine == "arm64"
 mlx-vlm; platform_system == "Darwin" and platform_machine == "arm64"
 outlines; platform_system == "Darwin" and platform_machine == "arm64"
 outlines-core==0.1.26; platform_system == "Darwin" and platform_machine == "arm64"
+dill==0.4.1; platform_system == "Darwin" and platform_machine == "arm64"
+xxhash==3.8.1; platform_system == "Darwin" and platform_machine == "arm64"
 faster-whisper
 vosk
 pykokoro

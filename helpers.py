@@ -3659,13 +3659,16 @@ def _mlx_engine_import_helpers() -> Dict[str, Any]:
         _mlx_engine_patch_gemma4_blockwise_overlay()
         _mlx_engine_patch_batched_vision_loader()
     except Exception as exc:
-        hint = (
-            "Install/update the MLX engine dependencies with setup_tater.sh so the MLX provider can run."
+        repair = (
+            "Restart Tater to let the macOS app repair its private runtime. "
+            "Source installs should rerun setup_tater.sh."
         )
+        detail = f"{type(exc).__name__}: {exc}"
+        hint = f"MLX engine could not start ({detail}). {repair}"
         if checkout and not os.path.isdir(os.path.join(checkout, "mlx_engine")):
             hint = f"MLX engine checkout was not found at {checkout}. {hint}"
-        elif "outlines_core" in str(exc):
-            hint = f"MLX engine needs outlines-core==0.1.26. {hint}"
+        elif isinstance(exc, ModuleNotFoundError) and exc.name:
+            hint = f"MLX engine is missing Python dependency '{exc.name}'. {repair}"
         raise RuntimeError(hint) from exc
     return {
         "load_model": load_model,

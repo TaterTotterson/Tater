@@ -612,6 +612,7 @@ verify_install() {
 import importlib.util
 import os
 import platform
+import sys
 from pathlib import Path
 
 required = ["fastapi", "uvicorn", "redis", "redislite"]
@@ -684,7 +685,7 @@ if require_local_llm:
     llm_modules = ["transformers", "accelerate"]
     is_apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
     if is_apple_silicon:
-        llm_modules.extend(["mlx_lm", "mlx_vlm", "outlines"])
+        llm_modules.extend(["mlx_lm", "mlx_vlm", "outlines", "outlines_core", "dill", "xxhash"])
     missing_llm = [name for name in llm_modules if importlib.util.find_spec(name) is None]
     if missing_llm:
         raise SystemExit("Missing required local LLM packages: " + ", ".join(missing_llm))
@@ -693,7 +694,13 @@ if require_local_llm:
         mlx_engine = os.getenv("TATER_MLX_ENGINE_PATH") or str(Path(os.getenv("TATER_RUNTIME_DIR", ".runtime")) / "mlx-engine")
         if not (Path(mlx_engine) / "mlx_engine").is_dir():
             raise SystemExit(f"Missing required MLX engine checkout: {mlx_engine}")
-        print(f"mlx_engine={mlx_engine}")
+        if mlx_engine not in sys.path:
+            sys.path.insert(0, mlx_engine)
+        try:
+            from mlx_engine.generate import create_generator, load_model, tokenize
+        except Exception as exc:
+            raise SystemExit(f"MLX engine import failed: {type(exc).__name__}: {exc}") from exc
+        print(f"mlx_engine_imports ok path={mlx_engine}")
 
 for name in ("mlx_whisper", "kokoro"):
     try:

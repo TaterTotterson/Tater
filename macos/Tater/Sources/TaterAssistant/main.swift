@@ -562,15 +562,16 @@ private final class BackendManager {
     private func localLLMPythonDependenciesReady(using python: URL) -> Bool {
         var modules = ["transformers", "accelerate"]
         if isAppleSilicon {
-            modules.append(contentsOf: ["mlx_lm", "mlx_vlm", "outlines"])
+            modules.append(contentsOf: ["mlx_lm", "mlx_vlm", "outlines", "outlines_core", "dill", "xxhash"])
         }
 
         let process = Process()
         process.executableURL = python
         process.arguments = [
             "-c",
-            "import importlib.util, sys\nmissing=[name for name in sys.argv[1:] if importlib.util.find_spec(name) is None]\nprint('\\n'.join(missing))\nsys.exit(1 if missing else 0)"
+            "import importlib.util, os, sys\nissues=[name for name in sys.argv[1:] if importlib.util.find_spec(name) is None]\nengine=os.getenv('TATER_MLX_ENGINE_PATH', '')\nif not issues and engine:\n    sys.path.insert(0, engine)\n    try:\n        from mlx_engine.generate import create_generator, load_model, tokenize\n    except Exception as exc:\n        issues.append(f'mlx_engine: {type(exc).__name__}: {exc}')\nprint('\\n'.join(issues))\nsys.exit(1 if issues else 0)"
         ] + modules
+        process.environment = backendEnvironment()
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -591,7 +592,7 @@ private final class BackendManager {
                 .map(String.init)
                 .filter { !$0.isEmpty }
                 .joined(separator: ", ")
-            appendLog("Private runtime is missing local LLM Python dependencies: \(missing.isEmpty ? modules.joined(separator: ", ") : missing).\n")
+            appendLog("Private runtime has incomplete local LLM Python dependencies: \(missing.isEmpty ? modules.joined(separator: ", ") : missing).\n")
             return false
         }
         return true
