@@ -16,6 +16,21 @@ if str(REPO_ROOT) not in sys.path:
 
 
 class TaterBuildVersionTests(unittest.TestCase):
+    def test_macos_app_declares_local_network_usage(self) -> None:
+        info_plist = REPO_ROOT / "macos" / "Tater" / "Resources" / "Info.plist"
+        with info_plist.open("rb") as handle:
+            info = plistlib.load(handle)
+
+        self.assertEqual(
+            info["NSLocalNetworkUsageDescription"],
+            "Tater uses your local network to find and communicate with speakers, "
+            "satellites, smart-home devices, and other Tater services.",
+        )
+        self.assertEqual(
+            info["NSBonjourServices"],
+            ["_airplay._tcp", "_raop._tcp"],
+        )
+
     def test_source_version_comes_from_release_info_plist(self) -> None:
         from tater_version import resolve_tater_version
 

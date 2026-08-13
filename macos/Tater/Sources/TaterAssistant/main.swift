@@ -61,6 +61,8 @@ private final class BackendManager {
     private var externalBackendPID: pid_t?
     private let gracefulStopTimeout: TimeInterval = 35
     private let descendantExitGrace: TimeInterval = 3
+    private let lifecycleLock = NSLock()
+    private var lifecycleOperationInProgress = false
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -76,9 +78,15 @@ private final class BackendManager {
     }
 
     func start() {
+        guard beginLifecycleOperation() else {
+            appendLauncherLog("Start requested; another bootstrap or launch operation is already in progress.\n")
+            return
+        }
+
         if isManagedProcessRunning() {
             appendLauncherLog("Start requested; backend process is already running.\n")
             state = .running
+            endLifecycleOperation()
             return
         }
 
@@ -86,6 +94,9 @@ private final class BackendManager {
         state = .bootstrapping
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            defer {
+                self.endLifecycleOperation()
+            }
             do {
                 self.appendLauncherLog("Ensuring private folders.\n")
                 try self.ensurePrivateFolders()
@@ -173,9 +184,6 @@ private final class BackendManager {
     func recoverIfBackendMissing() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            guard self.setupProcess == nil else {
-                return
-            }
             if self.isWebReady() {
                 if self.state != .running {
                     self.appendLauncherLog("Recovery found web UI ready; marking running.\n")
@@ -183,7 +191,21 @@ private final class BackendManager {
                 }
                 return
             }
-            guard self.process == nil else {
+            switch self.state {
+            case .bootstrapping, .starting:
+                break
+            case .stopped, .running, .failed:
+                return
+            }
+
+            guard self.beginLifecycleOperation() else {
+                return
+            }
+            defer {
+                self.endLifecycleOperation()
+            }
+
+            guard self.setupProcess == nil, self.process == nil else {
                 return
             }
             switch self.state {
@@ -207,6 +229,24 @@ private final class BackendManager {
                 return
             }
         }
+    }
+
+    private func beginLifecycleOperation() -> Bool {
+        lifecycleLock.lock()
+        defer {
+            lifecycleLock.unlock()
+        }
+        guard !lifecycleOperationInProgress else {
+            return false
+        }
+        lifecycleOperationInProgress = true
+        return true
+    }
+
+    private func endLifecycleOperation() {
+        lifecycleLock.lock()
+        lifecycleOperationInProgress = false
+        lifecycleLock.unlock()
     }
 
     func recentLogText(maxBytes: Int = 180_000) -> String {

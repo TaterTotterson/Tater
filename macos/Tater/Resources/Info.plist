@@ -20,13 +20,20 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.11</string>
+  <string>1.0.12</string>
   <key>CFBundleVersion</key>
-  <string>151</string>
+  <string>152</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_airplay._tcp</string>
+    <string>_raop._tcp</string>
+  </array>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Tater uses your local network to find and communicate with speakers, satellites, smart-home devices, and other Tater services.</string>
   <key>TaterUpdateManifestURL</key>
   <string>https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/update-manifest.json</string>
 </dict>

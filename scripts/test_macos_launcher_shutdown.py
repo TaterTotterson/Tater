@@ -80,6 +80,24 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         record = implementation.index("try recordRuntimeRequirementsFingerprint()")
         self.assertLess(status_guard, record)
 
+    def test_bootstrap_and_recovery_share_one_lifecycle_gate(self) -> None:
+        start = self.source.index("func start()")
+        restart = self.source.index("func restart()", start)
+        start_implementation = self.source[start:restart]
+        self.assertIn("guard beginLifecycleOperation() else", start_implementation)
+        self.assertIn("self.endLifecycleOperation()", start_implementation)
+
+        recovery = self.source.index("func recoverIfBackendMissing()")
+        recent_logs = self.source.index("func recentLogText", recovery)
+        recovery_implementation = self.source[recovery:recent_logs]
+        gate = recovery_implementation.index("guard self.beginLifecycleOperation() else")
+        setup_guard = recovery_implementation.index("guard self.setupProcess == nil, self.process == nil")
+        launch = recovery_implementation.index("try self.launchBackend()")
+        self.assertLess(gate, setup_guard)
+        self.assertLess(setup_guard, launch)
+        self.assertIn("self.endLifecycleOperation()", recovery_implementation)
+        self.assertIn("private let lifecycleLock = NSLock()", self.source)
+
     def test_mlx_engine_runtime_dependencies_are_installed_and_import_verified(self) -> None:
         self.assertIn('dill==0.4.1; platform_system == "Darwin"', self.requirements)
         self.assertIn('xxhash==3.8.1; platform_system == "Darwin"', self.requirements)
