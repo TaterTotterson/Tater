@@ -7997,6 +7997,69 @@ function renderCoreManagerField(field) {
     `);
   }
 
+  if (type === "image_checklist") {
+    const options = Array.isArray(field?.options) ? field.options : [];
+    const selectedValues = new Set(
+      (Array.isArray(field?.value) ? field.value : [field?.value])
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    );
+    const rows = options
+      .map((raw, index) => {
+        if (!raw || typeof raw !== "object") {
+          return null;
+        }
+        const value = String(raw.value ?? raw.id ?? "").trim();
+        const src = String(raw.src ?? raw.url ?? "").trim();
+        if (!src) {
+          return null;
+        }
+        return {
+          value,
+          src,
+          alt: String(raw.alt || `${label} image ${index + 1}`).trim() || `${label} image ${index + 1}`,
+          caption: String(raw.caption || "").trim(),
+          meta: String(raw.meta || raw.description || "").trim(),
+          selectable: boolFromAny(raw.selectable, Boolean(value)) && Boolean(value),
+        };
+      })
+      .filter(Boolean);
+    const selectableRows = rows.filter((row) => row.selectable);
+    const optionHtml = selectableRows
+      .map((row) => `<option value="${escapeHtml(row.value)}"${selectedValues.has(row.value) ? " selected" : ""}>${escapeHtml(row.caption || row.value)}</option>`)
+      .join("");
+    const galleryHtml = rows
+      .map((row) => {
+        const selected = row.selectable && selectedValues.has(row.value);
+        return `
+          <label class="core-image-check-card${selected ? " selected" : ""}${row.selectable ? "" : " read-only"}">
+            ${
+              row.selectable
+                ? `<input type="checkbox" data-core-image-check-value="${escapeHtml(row.value)}"${selected ? " checked" : ""}${disabledAttr} aria-label="Select ${escapeHtml(row.caption || row.alt)}" />`
+                : `<span class="core-image-check-legacy">View only</span>`
+            }
+            <img src="${escapeHtml(row.src)}" alt="${escapeHtml(row.alt)}" loading="lazy" />
+            <span class="core-image-check-copy">
+              ${row.caption ? `<strong>${escapeHtml(row.caption)}</strong>` : ""}
+              ${row.meta ? `<small>${escapeHtml(row.meta)}</small>` : ""}
+            </span>
+          </label>
+        `;
+      })
+      .join("");
+    return wrapField(`
+      <div class="core-image-checklist" data-core-image-checklist>
+        <div class="core-image-checklist-head">
+          <strong>${escapeHtml(label)}</strong>
+          <span class="small">${rows.length} image${rows.length === 1 ? "" : "s"}</span>
+        </div>
+        <select multiple class="core-image-check-select" data-core-field-key="${escapeHtml(key)}" data-core-field-type="multiselect"${disabledAttr}>${optionHtml}</select>
+        <div class="core-image-check-grid">${galleryHtml || `<div class="small">No saved images are available.</div>`}</div>
+        ${descHtml}
+      </div>
+    `);
+  }
+
   if (type === "image") {
     const src = String(field?.src ?? field?.url ?? "").trim();
     if (!src) {
@@ -8037,8 +8100,11 @@ function renderCoreManagerField(field) {
 
   if (type === "checkbox") {
     const checked = boolFromAny(field?.value, false) ? "checked" : "";
+    const compactToggleClass = presentation === "compact_toggle" || presentation === "compact"
+      ? " class=\"core-compact-toggle-field\""
+      : "";
     return wrapField(`
-      <label>
+      <label${compactToggleClass}>
         ${escapeHtml(label)}
         ${renderToggleRow(
           `<input class="toggle-input" type="checkbox" data-core-field-key="${escapeHtml(
@@ -8454,6 +8520,9 @@ function renderCoreSettingsManager(body, tabSpec) {
       .toLowerCase()
       .replace(/[^a-z0-9_-]/g, "");
     const itemVariantClass = itemVariantToken ? ` core-manager-item-variant-${itemVariantToken}` : "";
+    const selectable = boolFromAny(item?.selectable, false);
+    const selectionLabel = String(item?.selection_label || `Select ${title}`).trim() || `Select ${title}`;
+    const clickOpensFields = boolFromAny(item?.click_opens_fields, false);
     const itemFields = Array.isArray(item?.fields) ? item.fields : [];
     const sections = Array.isArray(item?.sections) ? item.sections : [];
     const explicitPopupFields = Array.isArray(item?.popup_fields) ? item.popup_fields : [];
@@ -8814,6 +8883,13 @@ function renderCoreSettingsManager(body, tabSpec) {
       `
       : "";
 
+    const itemSelectionHtml = selectable
+      ? `<label class="core-manager-item-selection" title="${escapeHtml(selectionLabel)}">
+          <input type="checkbox" class="toggle-input" data-core-bulk-item value="${encodedId}" aria-label="${escapeHtml(selectionLabel)}" />
+          <span>Select</span>
+        </label>`
+      : "";
+
     return `
       <article class="card core-manager-item${itemGroupClass}${itemVariantClass}"
         data-core-key="${safeCoreKey}"
@@ -8829,10 +8905,11 @@ function renderCoreSettingsManager(body, tabSpec) {
         data-core-item-popup-fields="${escapeHtml(popupFieldsEncoded)}"
         data-core-item-popup-mode="${escapeHtml(popupMode)}"
         data-core-item-popup-config="${escapeHtml(popupConfigEncoded)}"
-        data-core-item-popup-title="${escapeHtml(popupTitle)}"${pageAttr}${pageStyle}>
+        data-core-item-popup-title="${escapeHtml(popupTitle)}"
+        data-core-click-opens-fields="${clickOpensFields ? "1" : "0"}"${clickOpensFields ? ' tabindex="0"' : ""}${pageAttr}${pageStyle}>
         <div class="card-head">
           <h3 class="card-title">${escapeHtml(title)}</h3>
-          <span class="small">${safeCoreKey}</span>
+          <div class="core-manager-card-tools">${itemSelectionHtml}<span class="small">${safeCoreKey}</span></div>
         </div>
         ${summaryBlockHtml}
         ${trackListHtml}
@@ -9076,6 +9153,24 @@ function renderCoreSettingsManager(body, tabSpec) {
         selector: boolFromAny(raw?.selector, false),
         selectorLabel: String(raw?.selector_label || "Select Item").trim() || "Select Item",
         groups: Array.isArray(raw?.groups) ? raw.groups : [],
+        bulkActions: (Array.isArray(raw?.bulk_actions) ? raw.bulk_actions : [])
+          .map((entry) => {
+            const action = String(entry?.action || "").trim();
+            if (!action) {
+              return null;
+            }
+            const minimumRaw = Number(entry?.minimum_selected ?? 1);
+            return {
+              action,
+              label: String(entry?.label || "Apply to Selected").trim() || "Apply to Selected",
+              confirm: String(entry?.confirm || "").trim(),
+              workingText: String(entry?.working_text || "Working...").trim() || "Working...",
+              successText: String(entry?.success_text || "Done.").trim() || "Done.",
+              tone: String(entry?.tone || "").trim().toLowerCase(),
+              minimumSelected: Number.isFinite(minimumRaw) ? Math.max(1, Math.floor(minimumRaw)) : 1,
+            };
+          })
+          .filter(Boolean),
         pageSize: (() => {
           const parsed = Number(raw?.page_size ?? 0);
           return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
@@ -9112,6 +9207,35 @@ function renderCoreSettingsManager(body, tabSpec) {
     })
     .filter(Boolean);
 
+  function renderManagerTabBulkActions(tab) {
+    const actions = Array.isArray(tab?.bulkActions) ? tab.bulkActions : [];
+    if (!actions.length) {
+      return "";
+    }
+    const buttons = actions
+      .map((entry) => {
+        const toneClass = entry.tone === "danger" ? "inline-btn danger" : "action-btn";
+        return `<button type="button" class="${toneClass} core-manager-bulk-action"
+          data-core-bulk-action="${escapeHtml(entry.action)}"
+          data-core-bulk-minimum="${entry.minimumSelected}"
+          data-core-bulk-confirm="${escapeHtml(entry.confirm)}"
+          data-core-bulk-working="${escapeHtml(entry.workingText)}"
+          data-core-bulk-success="${escapeHtml(entry.successText)}" disabled>${escapeHtml(entry.label)}</button>`;
+      })
+      .join("");
+    return `
+      <div class="core-manager-bulk-toolbar" data-core-key="${safeCoreKey}" data-core-item-group="${escapeHtml(tab?.itemGroup || "")}">
+        <label class="core-manager-bulk-select-all">
+          <input type="checkbox" class="toggle-input" data-core-bulk-select-all />
+          <span>Select all</span>
+        </label>
+        <span class="small" data-core-bulk-count>0 selected</span>
+        <div class="core-manager-bulk-buttons">${buttons}</div>
+        <span class="small core-manager-status"></span>
+      </div>
+    `;
+  }
+
   function renderManagerTabContent(tab) {
     if (!tab || typeof tab !== "object") {
       return renderNotice("Invalid tab configuration.");
@@ -9123,7 +9247,7 @@ function renderCoreSettingsManager(body, tabSpec) {
       return renderCoreManagerGroupedItems(tab.groups, tab.emptyMessage || emptyMessage);
     }
     const rows = tab.itemGroup ? filterCoreManagerItemsByGroup(tab.itemGroup) : itemForms;
-    return renderCoreManagerItemsContent(rows, {
+    const content = renderCoreManagerItemsContent(rows, {
       selector: tab.selector,
       selector_label: tab.selectorLabel,
       item_group: tab.itemGroup,
@@ -9131,6 +9255,7 @@ function renderCoreSettingsManager(body, tabSpec) {
       server_pagination: tab.serverPagination,
       empty_message: tab.emptyMessage || emptyMessage,
     });
+    return `${renderManagerTabBulkActions(tab)}${content}`;
   }
 
   let managerInnerHtml = "";
@@ -12377,6 +12502,171 @@ function bindCoreManagerChoiceCards() {
       });
     }
     refreshCoreChoiceCards(selectEl);
+  });
+}
+
+function bindCoreManagerImageChecklists() {
+  document.querySelectorAll("[data-core-image-checklist]").forEach((field) => {
+    if (!(field instanceof HTMLElement) || field.dataset.coreImageChecklistBound === "1") {
+      return;
+    }
+    const select = field.querySelector("select.core-image-check-select[data-core-field-key]");
+    if (!(select instanceof HTMLSelectElement)) {
+      return;
+    }
+    const refresh = () => {
+      const selected = new Set(Array.from(select.selectedOptions || []).map((option) => String(option.value || "")));
+      field.querySelectorAll("[data-core-image-check-value]").forEach((input) => {
+        if (!(input instanceof HTMLInputElement)) {
+          return;
+        }
+        input.checked = selected.has(String(input.dataset.coreImageCheckValue || ""));
+        input.closest(".core-image-check-card")?.classList.toggle("selected", input.checked);
+      });
+    };
+    field.addEventListener("change", (event) => {
+      const input = event.target?.closest?.("[data-core-image-check-value]");
+      if (!(input instanceof HTMLInputElement) || input.disabled) {
+        return;
+      }
+      const value = String(input.dataset.coreImageCheckValue || "");
+      const option = Array.from(select.options || []).find((row) => String(row.value || "") === value);
+      if (!(option instanceof HTMLOptionElement)) {
+        return;
+      }
+      option.selected = input.checked;
+      refresh();
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    field.dataset.coreImageChecklistBound = "1";
+    refresh();
+  });
+}
+
+function bindCoreManagerClickOpenCards() {
+  document.querySelectorAll(".core-manager-item[data-core-click-opens-fields='1']").forEach((card) => {
+    if (!(card instanceof HTMLElement) || card.dataset.coreClickOpenBound === "1") {
+      return;
+    }
+    const toggle = () => {
+      const details = Array.from(card.children).find(
+        (child) => child instanceof HTMLDetailsElement && child.classList.contains("settings-dropdown")
+      );
+      if (details instanceof HTMLDetailsElement) {
+        details.open = !details.open;
+      }
+    };
+    card.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      if (target.closest("button, input, select, textarea, a, label, summary, details")) {
+        return;
+      }
+      toggle();
+    });
+    card.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && event.target === card) {
+        event.preventDefault();
+        toggle();
+      }
+    });
+    card.dataset.coreClickOpenBound = "1";
+  });
+}
+
+function bindCoreManagerBulkActions() {
+  document.querySelectorAll(".core-manager-bulk-toolbar[data-core-key]").forEach((toolbar) => {
+    if (!(toolbar instanceof HTMLElement) || toolbar.dataset.coreBulkBound === "1") {
+      return;
+    }
+    const panel = toolbar.closest(".core-manager-tab-panel") || toolbar.parentElement;
+    const group = String(toolbar.dataset.coreItemGroup || "").trim().toLowerCase();
+    const selector = group
+      ? `.core-manager-item[data-core-item-group='${CSS.escape(group)}'] [data-core-bulk-item]`
+      : ".core-manager-item [data-core-bulk-item]";
+    const itemInputs = () => Array.from(panel?.querySelectorAll(selector) || []).filter((row) => row instanceof HTMLInputElement);
+    const selectAll = toolbar.querySelector("[data-core-bulk-select-all]");
+    const count = toolbar.querySelector("[data-core-bulk-count]");
+    const refresh = () => {
+      const inputs = itemInputs();
+      const selected = inputs.filter((input) => input.checked);
+      if (count) {
+        count.textContent = `${selected.length} selected`;
+      }
+      if (selectAll instanceof HTMLInputElement) {
+        selectAll.checked = Boolean(inputs.length) && selected.length === inputs.length;
+        selectAll.indeterminate = selected.length > 0 && selected.length < inputs.length;
+      }
+      toolbar.querySelectorAll("[data-core-bulk-action]").forEach((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+        const minimum = Math.max(1, Number(button.dataset.coreBulkMinimum || 1));
+        button.disabled = selected.length < minimum;
+      });
+    };
+    if (selectAll instanceof HTMLInputElement) {
+      selectAll.addEventListener("change", () => {
+        itemInputs().forEach((input) => {
+          input.checked = selectAll.checked;
+        });
+        refresh();
+      });
+    }
+    itemInputs().forEach((input) => input.addEventListener("change", refresh));
+    toolbar.querySelectorAll("[data-core-bulk-action]").forEach((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
+      }
+      button.addEventListener("click", async () => {
+        const ids = itemInputs()
+          .filter((input) => input.checked)
+          .map((input) => decodeCoreManagerId(input.value || ""))
+          .filter(Boolean);
+        const minimum = Math.max(1, Number(button.dataset.coreBulkMinimum || 1));
+        if (ids.length < minimum) {
+          showToast(`Select at least ${minimum} items.`, "error", 2600);
+          return;
+        }
+        const confirmText = String(button.dataset.coreBulkConfirm || "").trim();
+        if (confirmText && !window.confirm(confirmText)) {
+          return;
+        }
+        const action = String(button.dataset.coreBulkAction || "").trim();
+        const coreKey = String(toolbar.dataset.coreKey || "").trim();
+        const workingText = String(button.dataset.coreBulkWorking || "Working...").trim() || "Working...";
+        const successText = String(button.dataset.coreBulkSuccess || "Done.").trim() || "Done.";
+        if (!action || !coreKey) {
+          return;
+        }
+        button.disabled = true;
+        setCoreManagerStatus(toolbar, workingText);
+        try {
+          const activeTab = persistCoreTabFromNode(toolbar);
+          const result = await runActionWithProgress(
+            {
+              title: "Updating selected items",
+              detail: `${ids.length} selected`,
+              workingText,
+              successText,
+              errorPrefix: "Bulk action failed",
+            },
+            () => runCoreManagerAction(toolbar, coreKey, action, { ids, values: { identity_ids: ids } })
+          );
+          await refreshCoreManagerInPlace(toolbar, activeTab);
+          state.notice = String(result?.message || successText);
+          showToast(state.notice);
+        } catch (error) {
+          button.disabled = false;
+          setCoreManagerStatus(toolbar, `Failed: ${error.message}`);
+          showToast(`Failed: ${error.message}`, "error", 3600);
+        }
+      });
+    });
+    toolbar.dataset.coreBulkBound = "1";
+    refresh();
   });
 }
 
@@ -17091,6 +17381,9 @@ function bindCoreTabManagers() {
   bindCoreManagerSelectors();
   bindCoreManagerPagination();
   bindCoreManagerChoiceCards();
+  bindCoreManagerImageChecklists();
+  bindCoreManagerClickOpenCards();
+  bindCoreManagerBulkActions();
   bindCoreManagerConditionalFields();
   bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
@@ -21890,7 +22183,7 @@ function renderPeopleSummaryMetrics(metrics = []) {
     return "";
   }
   return `
-    <div class="core-manager-summary-grid">
+    <div class="core-manager-summary-grid people-summary-grid">
       ${rows
         .map(
           (row) => `
@@ -21903,6 +22196,42 @@ function renderPeopleSummaryMetrics(metrics = []) {
         .join("")}
     </div>
   `;
+}
+
+function peopleTimeRank(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 100000000000 ? value : value * 1000;
+  }
+  const token = String(value || "").trim();
+  if (!token) {
+    return 0;
+  }
+  const numeric = Number(token);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric > 100000000000 ? numeric : numeric * 1000;
+  }
+  const parsed = Date.parse(token);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function peopleTimeLabel(value) {
+  const timestamp = peopleTimeRank(value);
+  if (!timestamp) {
+    return "Not seen yet";
+  }
+  const date = new Date(timestamp);
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfSeenDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const dayOffset = Math.round((startOfToday - startOfSeenDay) / 86400000);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (dayOffset === 0) {
+    return `Today at ${time}`;
+  }
+  if (dayOffset === 1) {
+    return `Yesterday at ${time}`;
+  }
+  return date.toLocaleString([], { month: "short", day: "numeric", year: date.getFullYear() === now.getFullYear() ? undefined : "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function renderPeoplePersonOptions(people = [], selectedId = "") {
@@ -21921,47 +22250,191 @@ function renderPeopleAliasList(person) {
   const personId = String(person?.id || "").trim();
   const aliases = Array.isArray(person?.aliases) ? person.aliases : [];
   if (!aliases.length) {
-    return `<div class="small">No linked identities yet.</div>`;
+    return `<div class="people-empty-inline">No identities linked to this person yet.</div>`;
   }
   return `
-    <div class="core-data-table-wrap">
-      <table class="core-data-table">
-        <thead>
-          <tr><th>Platform</th><th>Identity</th><th>Type</th><th></th></tr>
-        </thead>
-        <tbody>
-          ${aliases
-            .map((alias) => {
-              const platform = String(alias?.platform || "").trim();
-              const portalLabel = hydraPlatformLabel(platform) || platform;
-              const externalId = String(alias?.external_id || "").trim();
-              const label = String(alias?.label || externalId || "").trim();
-              const kind = String(alias?.kind || "user").trim() || "user";
-              return `
-                <tr>
-                  <td>${escapeHtml(portalLabel)}</td>
-                  <td>
-                    <strong>${escapeHtml(`${portalLabel}: ${label || externalId}`)}</strong>
-                    <div class="small">${escapeHtml(externalId)}</div>
-                  </td>
-                  <td>${escapeHtml(kind)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      class="inline-btn danger people-alias-detach"
-                      data-person-id="${escapeHtml(personId)}"
-                      data-platform="${escapeHtml(platform)}"
-                      data-external-id="${escapeHtml(externalId)}"
-                    >Unlink</button>
-                  </td>
-                </tr>
-              `;
-            })
-            .join("")}
-        </tbody>
-      </table>
+    <div class="people-alias-list">
+      ${aliases
+        .map((alias) => {
+          const platform = String(alias?.platform || "").trim();
+          const portalLabel = hydraPlatformLabel(platform) || platform;
+          const externalId = String(alias?.external_id || "").trim();
+          const label = String(alias?.label || externalId || "").trim();
+          const kind = String(alias?.kind || "user").trim() || "user";
+          return `
+            <div class="people-alias-row">
+              <span class="people-platform-mark" aria-hidden="true">${escapeHtml(_avatarInitial(portalLabel, "I"))}</span>
+              <div class="people-alias-copy">
+                <strong>${escapeHtml(label || externalId)}</strong>
+                <span>${escapeHtml(portalLabel)} • ${escapeHtml(kind.replaceAll("_", " "))}</span>
+                <small>${escapeHtml(externalId)}</small>
+              </div>
+              <button
+                type="button"
+                class="inline-btn danger people-alias-detach"
+                data-person-id="${escapeHtml(personId)}"
+                data-platform="${escapeHtml(platform)}"
+                data-external-id="${escapeHtml(externalId)}"
+              >Unlink</button>
+            </div>
+          `;
+        })
+        .join("")}
     </div>
   `;
+}
+
+function renderPeoplePersonEditor(person) {
+  const displayName = String(person?.display_name || "Person").trim() || "Person";
+  const isAdmin = boolFromAny(person?.is_admin, false);
+  const instructions = String(person?.instructions || "").trim();
+  return `
+    <div class="people-person-manage-body">
+      <div class="people-edit-grid">
+        <label class="people-field">Display Name
+          <input type="text" data-people-field="display_name" value="${escapeHtml(displayName)}" />
+        </label>
+        <label class="people-admin-field">
+          <span>
+            <strong>Admin access</strong>
+            <small>Allow admin-only tools from linked identities.</small>
+          </span>
+          ${renderToggleRow(
+            `<input class="toggle-input" type="checkbox" data-people-field="is_admin" ${isAdmin ? "checked" : ""} />`,
+            isAdmin ? "Admin" : "Standard"
+          )}
+        </label>
+      </div>
+      <label class="people-field people-instructions-field">
+        Response Instructions
+        <textarea data-people-field="instructions" rows="3" placeholder="Always call this person sir.">${escapeHtml(
+          instructions
+        )}</textarea>
+        <small>Used only when Tater resolves the current user to this person.</small>
+      </label>
+      <div class="people-person-actions">
+        <button type="button" class="action-btn people-person-save">Save Person</button>
+        <button type="button" class="inline-btn danger people-person-delete">Delete</button>
+        <span class="small core-manager-status"></span>
+      </div>
+      <section class="people-linked-section">
+        <div class="people-section-label">Linked Identities</div>
+        ${renderPeopleAliasList(person)}
+      </section>
+    </div>
+  `;
+}
+
+function renderPeoplePersonCard(person) {
+  const personId = String(person?.id || "").trim();
+  const displayName = String(person?.display_name || "Person").trim() || "Person";
+  const isAdmin = boolFromAny(person?.is_admin, false);
+  const aliases = Array.isArray(person?.aliases) ? person.aliases : [];
+  const face = person?.face_id && typeof person.face_id === "object" ? person.face_id : {};
+  const faceLinked = boolFromAny(face.linked, false);
+  const imageSrc = String(face.image_src || "").trim();
+  const lastSeen = String(face.last_seen || "").trim();
+  const lastSeenRank = peopleTimeRank(lastSeen);
+  const camera = String(face.last_seen_camera || face.camera_target || "").trim();
+  const captureCountRaw = Number(face.capture_count || 0);
+  const captureCount = Number.isFinite(captureCountRaw) ? Math.max(0, Math.floor(captureCountRaw)) : 0;
+  const identityCountRaw = Number(face.identity_count || 0);
+  const identityCount = Number.isFinite(identityCountRaw) ? Math.max(0, Math.floor(identityCountRaw)) : 0;
+  const sightingText = lastSeen
+    ? `${camera ? `Last seen at ${camera}` : "Last seen by Face ID"} • ${peopleTimeLabel(lastSeen)}`
+    : faceLinked
+      ? "Face ID linked • Waiting for the next sighting"
+      : "No Face ID profile linked";
+  const imageHtml = imageSrc
+    ? `<img src="${escapeHtml(imageSrc)}" alt="${escapeHtml(displayName)} Face ID profile" loading="lazy" />`
+    : `<span aria-hidden="true">${escapeHtml(_avatarInitial(displayName, "P"))}</span>`;
+  return `
+    <article
+      class="card people-person-card"
+      data-person-id="${escapeHtml(personId)}"
+      data-people-sort-name="${escapeHtml(displayName.toLocaleLowerCase())}"
+      data-people-last-seen="${lastSeenRank}"
+      data-people-face-linked="${faceLinked ? "1" : "0"}"
+    >
+      <div class="people-person-card-main" data-people-person-open role="button" tabindex="0" aria-label="Manage ${escapeHtml(displayName)}">
+        <div class="people-person-avatar ${imageSrc ? "has-image" : ""}">${imageHtml}</div>
+        <div class="people-person-card-copy">
+          <div class="card-head people-person-card-head">
+            <div>
+              <h3 class="card-title">${escapeHtml(displayName)}</h3>
+              <div class="people-person-badges">
+                ${faceLinked ? '<span class="people-badge face">Face ID</span>' : '<span class="people-badge muted">No Face ID</span>'}
+                ${isAdmin ? '<span class="people-badge admin">Admin</span>' : ""}
+              </div>
+            </div>
+          </div>
+          <div class="people-last-seen ${lastSeen ? "is-seen" : ""}">
+            <span class="people-presence-dot" aria-hidden="true"></span>
+            <span>${escapeHtml(sightingText)}</span>
+          </div>
+          <div class="people-person-stats">
+            <span><strong>${aliases.length}</strong> linked ${aliases.length === 1 ? "identity" : "identities"}</span>
+            <span><strong>${identityCount}</strong> face ${identityCount === 1 ? "profile" : "profiles"}</span>
+            <span><strong>${captureCount}</strong> face ${captureCount === 1 ? "capture" : "captures"}</span>
+          </div>
+        </div>
+      </div>
+      <div class="people-person-card-footer">
+        <button type="button" class="people-person-open" data-people-person-open>Manage Person</button>
+      </div>
+      <template class="people-person-editor-template">${renderPeoplePersonEditor(person)}</template>
+    </article>
+  `;
+}
+
+function ensurePeoplePersonModal() {
+  let modal = document.getElementById("people-person-modal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="people-person-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card people-person-dialog people-person-editor" role="dialog" aria-modal="true" aria-labelledby="people-person-modal-title">
+          <div class="card-head people-person-modal-head">
+            <div>
+              <div class="small">Tater Person</div>
+              <h3 id="people-person-modal-title" class="card-title">Manage Person</h3>
+            </div>
+            <button type="button" id="people-person-modal-close" class="inline-btn">Close</button>
+          </div>
+          <div id="people-person-modal-body" class="cerb-modal-body people-person-modal-body"></div>
+        </div>
+      </div>
+    `
+  );
+  modal = document.getElementById("people-person-modal");
+  const close = () => closePopupModal(modal);
+  document.getElementById("people-person-modal-close")?.addEventListener("click", close);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.classList.contains("active")) close();
+  });
+  return modal;
+}
+
+function openPeoplePersonModal(card) {
+  if (!(card instanceof HTMLElement)) return;
+  const modal = ensurePeoplePersonModal();
+  const dialog = modal?.querySelector(".people-person-dialog");
+  const body = modal?.querySelector("#people-person-modal-body");
+  const title = modal?.querySelector("#people-person-modal-title");
+  const template = card.querySelector(".people-person-editor-template");
+  const personId = String(card.dataset.personId || "").trim();
+  const displayName = String(card.querySelector(".card-title")?.textContent || "Person").trim() || "Person";
+  if (!(dialog instanceof HTMLElement) || !(body instanceof HTMLElement) || !(template instanceof HTMLTemplateElement)) return;
+  dialog.dataset.personId = personId;
+  if (title) title.textContent = displayName;
+  body.innerHTML = template.innerHTML;
+  openPopupModal(modal);
+  bindSettingsPeopleActions();
+  window.setTimeout(() => body.querySelector("[data-people-field='display_name']")?.focus(), 40);
 }
 
 function renderPeopleSettingsPanel(peoplePayload = {}) {
@@ -21969,148 +22442,119 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
   const people = Array.isArray(payload.people) ? payload.people : [];
   const identities = Array.isArray(payload.identities) ? payload.identities : [];
   const personOptions = renderPeoplePersonOptions(people);
+  const defaultSort = ["recent", "name", "face"].includes(safeStorageGet("tater_people_sort", "recent"))
+    ? safeStorageGet("tater_people_sort", "recent")
+    : "recent";
+  const activePeopleTab = ["people", "identities"].includes(safeStorageGet("tater_people_tab", "people"))
+    ? safeStorageGet("tater_people_tab", "people")
+    : "people";
   const peopleHtml = people.length
-    ? people
-        .map((person) => {
-          const personId = String(person?.id || "").trim();
-          const displayName = String(person?.display_name || "Person").trim() || "Person";
-          const isAdmin = boolFromAny(person?.is_admin, false);
-          const instructions = String(person?.instructions || "").trim();
-          return `
-            <article class="card core-manager-item people-person-card" data-person-id="${escapeHtml(personId)}">
-              <div class="card-head">
-                <h3 class="card-title">${escapeHtml(displayName)}</h3>
-              </div>
-              <div class="form-grid">
-                <label>Display Name
-                  <input type="text" data-people-field="display_name" value="${escapeHtml(displayName)}" />
-                </label>
-              </div>
-              <label style="margin-top:12px;">
-                Instructions
-                <textarea data-people-field="instructions" rows="4" placeholder="Always call this person sir.">${escapeHtml(
-                  instructions
-                )}</textarea>
-                <div class="small">Applied as response instructions only when this person is resolved from a linked identity.</div>
-              </label>
-              <label style="margin-top:12px;">
-                Admin
-                ${renderToggleRow(
-                  `<input class="toggle-input" type="checkbox" data-people-field="is_admin" ${isAdmin ? "checked" : ""} />`
-                )}
-                <div class="small">Admin people can run admin-only tools from any linked portal identity.</div>
-              </label>
-              <div class="inline-row" style="margin-top:12px;">
-                <button type="button" class="action-btn people-person-save">Save Person</button>
-                <button type="button" class="inline-btn danger people-person-delete">Delete</button>
-                <span class="small core-manager-status"></span>
-              </div>
-              <section class="core-inline-section" style="margin-top:12px;">
-                <div class="small core-inline-section-title">Linked Identities</div>
-                ${renderPeopleAliasList(person)}
-              </section>
-            </article>
-          `;
-        })
-        .join("")
+    ? people.map((person) => renderPeoplePersonCard(person)).join("")
     : renderNotice("No people yet. Create a person, then link portal or voice identities to them.");
 
   const identitiesHtml = identities.length
-    ? `
-        <div class="core-data-table-wrap">
-          <table class="core-data-table">
-            <thead>
-              <tr><th>Platform</th><th>Identity</th><th>Linked Person</th><th>Actions</th></tr>
-            </thead>
-            <tbody>
-              ${identities
-                .map((identity) => {
-                  const platform = String(identity?.platform || "").trim();
-                  const portalLabel = hydraPlatformLabel(platform) || platform;
-                  const externalId = String(identity?.external_id || "").trim();
-                  const label = String(identity?.label || externalId || "").trim();
-                  const kind = String(identity?.kind || "user").trim() || "user";
-                  const source = String(identity?.source || "").trim();
-                  const factCountRaw = Number(identity?.fact_count ?? 0);
-                  const factCount = Number.isFinite(factCountRaw) ? Math.max(0, Math.floor(factCountRaw)) : 0;
-                  const personId = String(identity?.person_id || "").trim();
-                  const personName = String(identity?.person_name || "").trim();
-                  const forgettable = boolFromAny(identity?.forgettable, false) && !personId;
-                  const metaParts = [kind, source, factCount > 0 ? `${factCount} facts` : ""].filter(Boolean);
-                  return `
-                    <tr
-                      class="people-identity-row"
-                      data-platform="${escapeHtml(platform)}"
-                      data-external-id="${escapeHtml(externalId)}"
-                      data-label="${escapeHtml(label)}"
-                      data-kind="${escapeHtml(kind)}"
-                    >
-                      <td>${escapeHtml(portalLabel)}</td>
-                      <td>
-                        <strong>${escapeHtml(`${portalLabel}: ${label || externalId}`)}</strong>
-                        <div class="small">${escapeHtml(externalId)}${metaParts.length ? ` • ${escapeHtml(metaParts.join(" • "))}` : ""}</div>
-                      </td>
-                      <td>${personName ? escapeHtml(personName) : '<span class="small">Unlinked</span>'}</td>
-                      <td>
-                        <div class="inline-row">
-                          <select class="people-identity-person-select">
-                            <option value="">Choose person...</option>
-                            ${renderPeoplePersonOptions(people, personId)}
-                          </select>
-                          <button type="button" class="inline-btn people-identity-attach" ${people.length ? "" : "disabled"}>Link</button>
-                          ${
-                            forgettable
-                              ? `<button type="button" class="inline-btn danger people-identity-forget">Forget</button>`
-                              : ""
-                          }
-                        </div>
-                      </td>
-                    </tr>
-                  `;
-                })
-                .join("")}
-            </tbody>
-          </table>
-        </div>
-      `
+    ? `<div class="people-identity-list">
+        ${identities
+          .map((identity) => {
+            const platform = String(identity?.platform || "").trim();
+            const portalLabel = hydraPlatformLabel(platform) || platform;
+            const externalId = String(identity?.external_id || "").trim();
+            const label = String(identity?.label || externalId || "").trim();
+            const kind = String(identity?.kind || "user").trim() || "user";
+            const source = String(identity?.source || "").trim();
+            const factCountRaw = Number(identity?.fact_count ?? 0);
+            const factCount = Number.isFinite(factCountRaw) ? Math.max(0, Math.floor(factCountRaw)) : 0;
+            const personId = String(identity?.person_id || "").trim();
+            const personName = String(identity?.person_name || "").trim();
+            const forgettable = boolFromAny(identity?.forgettable, false) && !personId;
+            const metaParts = [portalLabel, kind.replaceAll("_", " "), source, factCount > 0 ? `${factCount} facts` : ""].filter(Boolean);
+            return `
+              <article
+                class="people-identity-card people-identity-row"
+                data-platform="${escapeHtml(platform)}"
+                data-external-id="${escapeHtml(externalId)}"
+                data-label="${escapeHtml(label)}"
+                data-kind="${escapeHtml(kind)}"
+              >
+                <span class="people-platform-mark" aria-hidden="true">${escapeHtml(_avatarInitial(portalLabel, "I"))}</span>
+                <div class="people-identity-copy">
+                  <div class="people-identity-title-row">
+                    <strong>${escapeHtml(label || externalId)}</strong>
+                    <span class="people-badge ${personId ? "linked" : "muted"}">${personId ? `Linked to ${escapeHtml(personName)}` : "Unlinked"}</span>
+                  </div>
+                  <span>${escapeHtml(metaParts.join(" • "))}</span>
+                  <small>${escapeHtml(externalId)}</small>
+                </div>
+                <div class="people-identity-actions">
+                  <select class="people-identity-person-select" aria-label="Person for ${escapeHtml(label || externalId)}">
+                    <option value="">Choose person...</option>
+                    ${renderPeoplePersonOptions(people, personId)}
+                  </select>
+                  <button type="button" class="inline-btn people-identity-attach" ${people.length ? "" : "disabled"}>${personId ? "Update Link" : "Link"}</button>
+                  ${forgettable ? `<button type="button" class="inline-btn danger people-identity-forget">Forget</button>` : ""}
+                </div>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>`
     : renderNotice("No portal or voice identities discovered yet.");
 
   return `
-    <section class="settings-tab-panel" data-settings-panel="people">
+    <section class="settings-tab-panel people-settings-panel" data-settings-panel="people">
       ${renderSettingsSectionIntro(
         "People",
-        "Map portal users and voice speakers to one person so memory, personal tools, and multi-user verbs can share the right context.",
+        "Bring Face ID, portal users, and voice speakers together so Tater recognizes the same person everywhere.",
         "ID"
       )}
-      <div class="form-grid">
-        <section class="core-inline-section">
-          <div class="small core-inline-section-title">Identity Resolution</div>
+      <section class="people-overview">
+        <div class="people-overview-copy">
+          <span class="people-overview-kicker">Identity Directory</span>
+          <h3>Everyone Tater knows, in one place.</h3>
+          <p>Face ID photos and recent camera sightings appear automatically when an Awareness face is linked to a Tater Person.</p>
+        </div>
+        <div class="people-overview-metrics">
           ${renderPeopleSummaryMetrics(Array.isArray(payload.summary_metrics) ? payload.summary_metrics : [])}
-          <div class="small" style="margin-top:12px;">
-            Tater auto-discovers portal and voice identities, but only resolves a Person from identities you explicitly link from the discovered list.
-          </div>
-        </section>
-
-        <section class="core-inline-section">
-          <div class="small core-inline-section-title">Create Person</div>
-          <div class="form-grid two-col">
-            <label>Display Name
-              <input id="people_create_display_name" type="text" placeholder="Tater" />
+        </div>
+      </section>
+      <div class="people-tabs-shell">
+        <div class="core-manager-subtabs people-subtabs" data-people-tabs>
+          <button type="button" class="core-manager-subtab-btn ${activePeopleTab === "people" ? "active" : ""}" data-people-tab="people">People</button>
+          <button type="button" class="core-manager-subtab-btn ${activePeopleTab === "identities" ? "active" : ""}" data-people-tab="identities">Identities</button>
+        </div>
+        <section class="people-tab-panel ${activePeopleTab === "people" ? "active" : ""}" data-people-tab-panel="people">
+          <div class="people-panel-head">
+            <div>
+              <h3>People Directory</h3>
+              <p>Open a card to rename a person, manage access, or review linked identities.</p>
+            </div>
+            <label class="people-directory-sort">Sort
+              <select data-people-directory-sort>
+                <option value="recent" ${defaultSort === "recent" ? "selected" : ""}>Recently Seen</option>
+                <option value="name" ${defaultSort === "name" ? "selected" : ""}>Name</option>
+                <option value="face" ${defaultSort === "face" ? "selected" : ""}>Face ID Linked</option>
+              </select>
             </label>
           </div>
-          <div class="inline-row" style="margin-top:12px;">
-            <button type="button" id="people-create-person" class="action-btn">Create Person</button>
-            <span class="small core-manager-status"></span>
+          <details class="people-create-panel">
+            <summary>Add a Person</summary>
+            <div class="people-create-body">
+              <label class="people-field">Display Name
+                <input id="people_create_display_name" type="text" placeholder="Fred" />
+              </label>
+              <button type="button" id="people-create-person" class="action-btn">Create Person</button>
+              <span class="small core-manager-status"></span>
+            </div>
+          </details>
+          <div class="people-directory-grid" data-people-directory>${peopleHtml}</div>
+        </section>
+        <section class="people-tab-panel ${activePeopleTab === "identities" ? "active" : ""}" data-people-tab-panel="identities">
+          <div class="people-panel-head">
+            <div>
+              <h3>Discovered Identities</h3>
+              <p>Link portal, voice, memory, and Face ID identities to the correct person.</p>
+            </div>
           </div>
-        </section>
-
-        <section class="core-inline-section">
-          <div class="small core-inline-section-title">People</div>
-          <div class="core-tab-items">${peopleHtml}</div>
-        </section>
-
-        <section class="core-inline-section">
-          <div class="small core-inline-section-title">Discovered Identities</div>
           ${identitiesHtml}
         </section>
       </div>
@@ -22119,8 +22563,69 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
 }
 
 function bindSettingsPeopleActions() {
-  const runPeopleAction = async (host, action, payload, fallbackMessage = "People updated.") => {
+  document.querySelectorAll("[data-people-person-open]").forEach((trigger) => {
+    if (trigger.dataset.peoplePersonOpenBound === "1") return;
+    trigger.dataset.peoplePersonOpenBound = "1";
+    const open = () => openPeoplePersonModal(trigger.closest(".people-person-card"));
+    trigger.addEventListener("click", open);
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-people-tabs]").forEach((tabsRoot) => {
+    if (tabsRoot.dataset.peopleTabsBound === "1") return;
+    tabsRoot.dataset.peopleTabsBound = "1";
+    const buttons = Array.from(tabsRoot.querySelectorAll("[data-people-tab]"));
+    const shell = tabsRoot.closest(".people-tabs-shell");
+    const panels = Array.from(shell?.querySelectorAll("[data-people-tab-panel]") || []);
+    const activate = (tabName) => {
+      const normalized = ["people", "identities"].includes(String(tabName || "")) ? String(tabName) : "people";
+      buttons.forEach((button) => button.classList.toggle("active", button.dataset.peopleTab === normalized));
+      panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.peopleTabPanel === normalized));
+      safeStorageSet("tater_people_tab", normalized);
+    };
+    buttons.forEach((button) => button.addEventListener("click", () => activate(button.dataset.peopleTab)));
+  });
+
+  document.querySelectorAll("[data-people-directory-sort]").forEach((select) => {
+    if (select.dataset.peopleSortBound === "1") return;
+    select.dataset.peopleSortBound = "1";
+    const applySort = () => {
+      const directory = select.closest("[data-people-tab-panel]")?.querySelector("[data-people-directory]");
+      if (!directory) return;
+      const mode = ["recent", "name", "face"].includes(String(select.value || "")) ? String(select.value) : "recent";
+      const cards = Array.from(directory.querySelectorAll(".people-person-card"));
+      cards.sort((left, right) => {
+        const leftName = String(left.dataset.peopleSortName || "");
+        const rightName = String(right.dataset.peopleSortName || "");
+        const nameOrder = leftName.localeCompare(rightName, undefined, { sensitivity: "base" });
+        const seenOrder = Number(right.dataset.peopleLastSeen || 0) - Number(left.dataset.peopleLastSeen || 0);
+        const faceOrder = Number(right.dataset.peopleFaceLinked || 0) - Number(left.dataset.peopleFaceLinked || 0);
+        if (mode === "name") return nameOrder;
+        if (mode === "face") return faceOrder || seenOrder || nameOrder;
+        return seenOrder || nameOrder;
+      });
+      cards.forEach((card) => directory.appendChild(card));
+      safeStorageSet("tater_people_sort", mode);
+    };
+    select.addEventListener("change", applySort);
+    applySort();
+  });
+
+  const runPeopleAction = async (
+    host,
+    action,
+    payload,
+    fallbackMessage = "People updated.",
+    { keepPersonModalOpen = false } = {}
+  ) => {
     const statusHost = host instanceof HTMLElement ? host : null;
+    const modal = statusHost?.closest?.(".cerb-modal");
+    const openPersonId = keepPersonModalOpen ? String(statusHost?.dataset?.personId || "").trim() : "";
     setCoreManagerStatus(statusHost, "Working...");
     try {
       const result = await api("/api/settings/people/action", {
@@ -22129,7 +22634,18 @@ function bindSettingsPeopleActions() {
       });
       state.settingsTab = "people";
       showToast(String(result?.message || fallbackMessage).trim() || fallbackMessage);
+      if (modal && !keepPersonModalOpen) closePopupModal(modal);
       await loadSettingsView();
+      if (modal && keepPersonModalOpen && openPersonId) {
+        const refreshedCard = Array.from(document.querySelectorAll(".people-person-card")).find(
+          (candidate) => String(candidate?.dataset?.personId || "").trim() === openPersonId
+        );
+        if (refreshedCard) {
+          openPeoplePersonModal(refreshedCard);
+        } else {
+          closePopupModal(modal);
+        }
+      }
       return result;
     } catch (error) {
       const message = String(error?.message || "People action failed.");
@@ -22153,14 +22669,14 @@ function bindSettingsPeopleActions() {
   if (createButton && createButton.dataset.peopleActionBound !== "1") {
     createButton.dataset.peopleActionBound = "1";
     createButton.addEventListener("click", async (event) => {
-      const host = event.currentTarget?.closest?.(".core-inline-section");
+      const host = event.currentTarget?.closest?.(".people-create-panel");
       const displayName = String(document.getElementById("people_create_display_name")?.value || "").trim();
       await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
     });
   }
 
   bindPeopleButton(".people-person-save", async (event) => {
-    const card = event.currentTarget?.closest?.(".people-person-card");
+    const card = event.currentTarget?.closest?.(".people-person-editor");
     const personId = String(card?.dataset?.personId || "").trim();
     const values = {};
     card?.querySelectorAll?.("[data-people-field]").forEach((input) => {
@@ -22173,7 +22689,7 @@ function bindSettingsPeopleActions() {
   });
 
   bindPeopleButton(".people-person-delete", async (event) => {
-    const card = event.currentTarget?.closest?.(".people-person-card");
+    const card = event.currentTarget?.closest?.(".people-person-editor");
     const personId = String(card?.dataset?.personId || "").trim();
     const title = String(card?.querySelector?.(".card-title")?.textContent || "this person").trim() || "this person";
     if (!personId || !window.confirm(`Delete ${title}? Identity links will be removed.`)) {
@@ -22187,8 +22703,14 @@ function bindSettingsPeopleActions() {
     const personId = String(buttonEl?.dataset?.personId || "").trim();
     const platform = String(buttonEl?.dataset?.platform || "").trim();
     const externalId = String(buttonEl?.dataset?.externalId || "").trim();
-    const host = buttonEl?.closest?.(".people-person-card");
-    await runPeopleAction(host, "people_alias_detach", { person_id: personId, platform, external_id: externalId }, "Identity unlinked.");
+    const host = buttonEl?.closest?.(".people-person-editor");
+    await runPeopleAction(
+      host,
+      "people_alias_detach",
+      { person_id: personId, platform, external_id: externalId },
+      "Identity unlinked.",
+      { keepPersonModalOpen: Boolean(host?.closest?.(".cerb-modal")) }
+    );
   });
 
   bindPeopleButton(".people-identity-attach", async (event) => {
@@ -22413,6 +22935,7 @@ async function loadSettingsView() {
   const hydraDefaults =
     settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
   const peoplePayload = settings?.people && typeof settings.people === "object" ? settings.people : {};
+  const faceIdSettings = settings?.face_id && typeof settings.face_id === "object" ? settings.face_id : {};
   const normalizeHydraBaseProvider = (value) => {
     const token = String(value || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
     if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
@@ -23462,7 +23985,7 @@ async function loadSettingsView() {
         <section class="settings-tab-panel" data-settings-panel="models">
           ${renderSettingsSectionIntro(
             "Models",
-            "Shared model routing for LLM, vision, wake words, speech, speaker identity, and emotion hints.",
+            "Shared model routing for LLM, vision, wake words, speech, speaker identity, face identity, and emotion hints.",
             "AI"
           )}
           <div
@@ -23479,6 +24002,7 @@ async function loadSettingsView() {
                 <button type="button" class="settings-subtab-btn" data-models-tab="wake">Wake Word</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="speakerid">Speaker ID</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="emotionid">Emotion ID</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="faceid">Face ID</button>
               </div>
 
               <div class="settings-subpanel active" data-models-panel="routing">
@@ -24453,6 +24977,50 @@ async function loadSettingsView() {
                 )}
                 <div id="settings-esphome-runtime-emotionid">
                   ${renderNotice("Open Emotion ID to load voice emotion controls.")}
+                </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="faceid">
+                ${renderSettingsSectionIntro(
+                  "Face ID",
+                  "Locally recognize faces found by Awareness camera bursts and attach known people to event history.",
+                  "FACE",
+                  "subtle"
+                )}
+                <div class="hydra-model-panel is-active" style="grid-column: 1 / -1;">
+                  <div class="hydra-model-panel-title">DeepFace Runtime</div>
+                  <div class="small hydra-model-panel-note">
+                    Face images and identity embeddings stay in your Tater data. Disabling Face ID unloads the model and stops Awareness burst captures.
+                  </div>
+                  <div class="hydra-model-mode" style="grid-column: 1 / -1;">
+                    <div>
+                      <div class="small hydra-model-mode-label">Enable Face ID</div>
+                      <div class="small">Loads ${escapeHtml(faceIdSettings.model || "Facenet512")} only while this feature is enabled.</div>
+                    </div>
+                    ${renderToggleRow(
+                      `<input id="set_face_id_enabled" class="toggle-input" type="checkbox" ${
+                        faceIdSettings.enabled ? "checked" : ""
+                      } />`
+                    )}
+                  </div>
+                  <div class="core-metric-row" style="grid-column: 1 / -1;">
+                    <div class="core-metric-pill">
+                      <div class="small">Model</div>
+                      <div>${escapeHtml(faceIdSettings.model || "Facenet512")}</div>
+                    </div>
+                    <div class="core-metric-pill">
+                      <div class="small">Processing</div>
+                      <div id="settings-face-id-processing">Detecting</div>
+                    </div>
+                    <div class="core-metric-pill">
+                      <div class="small">Awareness Burst</div>
+                      <div>5 frames / 4 sec</div>
+                    </div>
+                  </div>
+                  <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                    <button type="button" id="settings-face-id-save" class="action-btn model-save-btn">Apply Face ID</button>
+                    <span id="settings-face-id-status" class="small"></span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -29465,6 +30033,70 @@ async function loadSettingsView() {
     speech_announcement_chatterbox_tts_language: getChatterboxTtsValue("language", "announcement"),
     esphome_settings: collectVoiceModelSettings(),
   });
+  const readFaceIdSettingsPayload = () => ({
+    face_id_enabled: Boolean(document.getElementById("set_face_id_enabled")?.checked),
+  });
+  const faceIdStatusEl = document.getElementById("settings-face-id-status");
+  const faceIdProcessingEl = document.getElementById("settings-face-id-processing");
+  let faceIdStatusPollTimer = null;
+  const renderFaceIdRuntimeStatus = (runtime) => {
+    if (!(faceIdStatusEl instanceof HTMLElement)) {
+      return;
+    }
+    const value = runtime && typeof runtime === "object" ? runtime : {};
+    const stateToken = String(value.state || (value.enabled ? "idle" : "disabled")).trim().toLowerCase();
+    const accelerator = String(value.accelerator || "").trim().toLowerCase();
+    if (faceIdProcessingEl instanceof HTMLElement) {
+      if (accelerator === "metal") {
+        faceIdProcessingEl.textContent = "GPU · Apple Metal";
+      } else if (accelerator === "cuda") {
+        faceIdProcessingEl.textContent = "GPU · NVIDIA CUDA";
+      } else if (accelerator === "cpu") {
+        faceIdProcessingEl.textContent = "CPU";
+      } else if (stateToken === "disabled") {
+        const target = String(value.accelerator_target || "cpu").trim().toLowerCase();
+        faceIdProcessingEl.textContent = target === "metal" ? "Apple Metal when enabled" : target === "cuda" ? "NVIDIA CUDA when enabled" : "CPU";
+      } else {
+        faceIdProcessingEl.textContent = "Detecting";
+      }
+    }
+    if (stateToken === "ready" || value.loaded) {
+      const device = String(value.device_name || "").trim();
+      const warning = String(value.accelerator_warning || "").trim();
+      faceIdStatusEl.textContent = warning || `${String(value.model || "Facenet512")} is loaded and ready${device ? ` on ${device}` : ""}.`;
+      return;
+    }
+    if (stateToken === "error") {
+      faceIdStatusEl.textContent = `Face ID load failed: ${String(value.error || "unknown error")}`;
+      return;
+    }
+    if (["installing", "loading"].includes(stateToken) || value.loading) {
+      faceIdStatusEl.textContent = String(
+        value.message || "Loading Face ID locally. The first load also installs the private model pack..."
+      );
+      return;
+    }
+    faceIdStatusEl.textContent = "Face ID is disabled and the model is unloaded.";
+  };
+  const pollFaceIdRuntimeStatus = async () => {
+    if (faceIdStatusPollTimer) {
+      window.clearTimeout(faceIdStatusPollTimer);
+      faceIdStatusPollTimer = null;
+    }
+    if (!(faceIdStatusEl instanceof HTMLElement) || !faceIdStatusEl.isConnected) {
+      return;
+    }
+    try {
+      const runtime = await api("/api/settings/face-id/status", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
+      renderFaceIdRuntimeStatus(runtime);
+      if (runtime?.loading || String(runtime?.state || "").toLowerCase() === "loading") {
+        faceIdStatusPollTimer = window.setTimeout(pollFaceIdRuntimeStatus, 1000);
+      }
+    } catch (error) {
+      faceIdStatusEl.textContent = `Face ID status failed: ${error.message}`;
+    }
+  };
+  renderFaceIdRuntimeStatus(faceIdSettings);
   const saveModelSettings = async (scope = "all", { loadLocalModels = false } = {}) => {
     const normalizedScope = String(scope || "all").trim() || "all";
     const labelMap = {
@@ -29474,6 +30106,7 @@ async function loadSettingsView() {
       vision: "Vision model settings",
       beast: "Beast routing settings",
       speech: "Voice model settings",
+      faceid: "Face ID settings",
     };
     const label = labelMap[normalizedScope] || "Model settings";
     let payload = {};
@@ -29529,6 +30162,9 @@ async function loadSettingsView() {
     if (normalizedScope === "all" || normalizedScope === "speech") {
       payload = { ...payload, ...readSpeechModelSettingsPayload() };
     }
+    if (normalizedScope === "all" || normalizedScope === "faceid") {
+      payload = { ...payload, ...readFaceIdSettingsPayload() };
+    }
 
     loadTargets = dedupeLocalLoadTargets(loadTargets);
     if (normalizedScope !== "speech") {
@@ -29567,6 +30203,7 @@ async function loadSettingsView() {
       });
       const warmup = saveResult?.speech_warmup && typeof saveResult.speech_warmup === "object" ? saveResult.speech_warmup : null;
       const hfWarmup = saveResult?.hf_llm_warmup && typeof saveResult.hf_llm_warmup === "object" ? saveResult.hf_llm_warmup : null;
+      const faceIdRuntime = saveResult?.face_id && typeof saveResult.face_id === "object" ? saveResult.face_id : null;
       let message = `${label} saved.`;
       if (warmup?.started && hfWarmup?.started) {
         message = `${label} saved. Warming voice models and refreshing running cores/portals after the selected local LLM loads.`;
@@ -29590,6 +30227,12 @@ async function loadSettingsView() {
         maybeOpenHfLlmWarmupModal(hfWarmup);
       }
       showToast(message);
+      if (faceIdRuntime) {
+        renderFaceIdRuntimeStatus(faceIdRuntime);
+        if (faceIdRuntime.loading || String(faceIdRuntime.state || "").toLowerCase() === "loading") {
+          void pollFaceIdRuntimeStatus();
+        }
+      }
     } catch (error) {
       statusEl.textContent = `${label} save failed: ${error.message}`;
       const activeModal = document.getElementById("hf-llm-warmup-modal");
@@ -29638,6 +30281,9 @@ async function loadSettingsView() {
   });
   document.getElementById("settings-speech-model-save")?.addEventListener("click", () => {
     void saveModelSettings("speech");
+  });
+  document.getElementById("settings-face-id-save")?.addEventListener("click", () => {
+    void saveModelSettings("faceid");
   });
   document.getElementById("settings-hydra-model-save")?.addEventListener("click", () => {
     void saveModelSettings("all");

@@ -5,6 +5,7 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from verba_kernel import normalize_platform
@@ -14,6 +15,9 @@ PEOPLE_STORE_KEY = "tater:people:v1"
 DISCOVERY_MAX_KEYS = 200
 DISCOVERY_MAX_ROWS_PER_KEY = 200
 PERSON_INSTRUCTIONS_MAX_CHARS = 2000
+FACE_IDENTITIES_KEY = "awareness:face_identities"
+INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
+PEOPLE_FACE_EVENT_SCAN_LIMIT = 1000
 PORTAL_HISTORY_PATTERNS_BY_PLATFORM = {
     "discord": (
         "tater:channel:*:history",
@@ -784,12 +788,137 @@ def discovered_identities(redis_client: Any = None) -> List[Dict[str, Any]]:
     )
 
 
+def _json_object(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    with contextlib.suppress(Exception):
+        parsed = json.loads(_text(raw))
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _time_rank(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    token = _text(value)
+    if not token:
+        return 0.0
+    with contextlib.suppress(Exception):
+        return float(token)
+    with contextlib.suppress(Exception):
+        return datetime.fromisoformat(token.replace("Z", "+00:00")).timestamp()
+    return 0.0
+
+
+def _nonnegative_int(value: Any) -> int:
+    with contextlib.suppress(Exception):
+        return max(0, int(value or 0))
+    return 0
+
+
+def _face_identities_by_person(redis_client: Any) -> Dict[str, List[Dict[str, Any]]]:
+    raw_rows: Dict[Any, Any] = {}
+    with contextlib.suppress(Exception):
+        result = redis_client.hgetall(FACE_IDENTITIES_KEY) or {}
+        if isinstance(result, dict):
+            raw_rows = result
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for raw_identity_id, raw_payload in raw_rows.items():
+        identity = _json_object(raw_payload)
+        identity_id = _text(raw_identity_id) or _text(identity.get("id"))
+        person_id = _text(identity.get("person_id"))
+        if not identity_id or not person_id:
+            continue
+        identity["id"] = identity_id
+        grouped.setdefault(person_id, []).append(identity)
+    for rows in grouped.values():
+        rows.sort(
+            key=lambda row: (
+                _time_rank(row.get("last_seen")),
+                float(row.get("best_quality") or 0.0),
+                _text(row.get("id")),
+            ),
+            reverse=True,
+        )
+    return grouped
+
+
+def _recognized_person_events(redis_client: Any) -> Dict[str, Dict[str, Any]]:
+    raw_rows: List[Any] = []
+    with contextlib.suppress(Exception):
+        raw_rows = list(redis_client.lrange(INTEGRATION_RUNTIME_EVENTS_KEY, 0, PEOPLE_FACE_EVENT_SCAN_LIMIT - 1) or [])
+    latest: Dict[str, Dict[str, Any]] = {}
+    for raw in raw_rows:
+        event = _json_object(raw)
+        if _text(event.get("provider")) != "awareness" or _text(event.get("kind")) != "recognized_person":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        person_id = _text(payload.get("person_id"))
+        if not person_id:
+            continue
+        candidate = {
+            "seen_at": _text(payload.get("recognized_at")) or event.get("ts") or "",
+            "camera": _text(payload.get("area") or payload.get("camera_target") or payload.get("camera_id")),
+            "camera_target": _text(payload.get("camera_target") or payload.get("camera_id")),
+            "camera_provider": _text(payload.get("camera_provider")),
+            "event_id": _text(payload.get("event_id")),
+        }
+        current = latest.get(person_id)
+        if current is None or _time_rank(candidate.get("seen_at")) > _time_rank(current.get("seen_at")):
+            latest[person_id] = candidate
+    return latest
+
+
+def _people_with_face_context(people: List[Dict[str, Any]], redis_client: Any) -> List[Dict[str, Any]]:
+    face_rows = _face_identities_by_person(redis_client)
+    last_seen_events = _recognized_person_events(redis_client)
+    enriched: List[Dict[str, Any]] = []
+    for raw_person in people:
+        person = dict(raw_person)
+        person_id = _text(person.get("id"))
+        identities = face_rows.get(person_id, [])
+        event = last_seen_events.get(person_id, {})
+        image_identity = max(
+            (row for row in identities if _text(row.get("face_b64"))),
+            key=lambda row: (
+                float(row.get("best_quality") or 0.0),
+                _time_rank(row.get("last_seen")),
+            ),
+            default={},
+        )
+        identity_last_seen = max(
+            (_text(row.get("last_seen")) for row in identities),
+            key=_time_rank,
+            default="",
+        )
+        event_last_seen = event.get("seen_at") or ""
+        last_seen = event_last_seen if _time_rank(event_last_seen) >= _time_rank(identity_last_seen) else identity_last_seen
+        face_b64 = _text(image_identity.get("face_b64"))
+        content_type = _text(image_identity.get("face_content_type")) or "image/jpeg"
+        person["face_id"] = {
+            "linked": bool(identities),
+            "identity_count": len(identities),
+            "capture_count": sum(_nonnegative_int(row.get("observation_count")) for row in identities),
+            "image_src": f"data:{content_type};base64,{face_b64}" if face_b64 else "",
+            "last_seen": last_seen,
+            "last_seen_camera": _text(event.get("camera")),
+            "camera_target": _text(event.get("camera_target")),
+            "camera_provider": _text(event.get("camera_provider")),
+            "event_id": _text(event.get("event_id")),
+        }
+        enriched.append(person)
+    return enriched
+
+
 def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
-    store = load_store(redis_client)
-    people = list(store.get("people") or [])
-    identities = discovered_identities(redis_client)
+    client = _client(redis_client)
+    store = load_store(client)
+    people = _people_with_face_context(list(store.get("people") or []), client)
+    identities = discovered_identities(client)
     linked_count = len([row for row in identities if _text(row.get("person_id"))])
     admin_count = len([person for person in people if _as_bool(person.get("is_admin"), False)])
+    face_linked_count = len([person for person in people if bool((person.get("face_id") or {}).get("linked"))])
     return {
         "settings": dict(store.get("settings") or {}),
         "summary_metrics": [
@@ -797,10 +926,7 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
             {"label": "Admins", "value": admin_count},
             {"label": "Linked Identities", "value": linked_count},
             {"label": "Discovered Identities", "value": len(identities)},
-            {
-                "label": "Matching",
-                "value": "Manual links only",
-            },
+            {"label": "Face ID Linked", "value": face_linked_count},
         ],
         "people": people,
         "identities": identities,

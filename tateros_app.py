@@ -76,6 +76,7 @@ from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
+import face_id_runtime
 import integration_runtime as integration_runtime_module
 import people as people_module
 import verba_registry as verba_registry_module
@@ -471,6 +472,7 @@ voice_satellite_snapshot_lock = threading.RLock()
 voice_satellite_snapshot_state: Dict[str, Any] = {
     "cached_at": 0.0,
     "payload": None,
+    "generation": 0,
 }
 system_tasks_registered = False
 system_task_intervals_lock = threading.RLock()
@@ -8350,6 +8352,8 @@ def _replay_startup_after_redis_configure() -> Dict[str, Any]:
         )
         _request_integration_device_registry_refresh("runtime-bootstrap", immediate=True)
         result["local_llm_warmup"] = _start_local_llm_warmup_for_startup(reason="runtime-bootstrap")
+        if face_id_runtime.is_enabled(redis_client):
+            result["face_id"] = face_id_runtime.start_model_load(redis_client)
         _start_builtin_esphome()
         if _speech_model_warmup_on_startup_enabled():
             result["speech_warmup"] = _start_speech_model_warmup(
@@ -9042,6 +9046,7 @@ class AppSettingsRequest(BaseModel):
     vision_provider: Optional[str] = None
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
+    face_id_enabled: Optional[bool] = None
     speech_stt_backend: Optional[str] = None
     speech_acceleration: Optional[str] = None
     speech_wyoming_stt_host: Optional[str] = None
@@ -9420,6 +9425,8 @@ async def _startup_event() -> None:
         start_integration_runtime(redis_client, manage_device_registry_cache=False)
         local_warmup = _start_local_llm_warmup_for_startup(reason="startup")
         logger.info("[local-llm-warmup] startup scheduled: %s", local_warmup)
+        if face_id_runtime.is_enabled(redis_client):
+            logger.info("[face-id] startup load scheduled: %s", face_id_runtime.start_model_load(redis_client))
         await esphome_home_module.startup()
         if _speech_model_warmup_on_startup_enabled():
             warmup = _start_speech_model_warmup(get_shared_speech_settings(), reason="startup")
@@ -9508,6 +9515,11 @@ async def _shutdown_event() -> None:
         await _run_shutdown_step(
             "local LLM models",
             lambda: asyncio.to_thread(unload_local_llm_models, all_models=True),
+            timeout=12.0,
+        )
+        await _run_shutdown_step(
+            "Face ID model",
+            lambda: asyncio.to_thread(face_id_runtime.shutdown),
             timeout=12.0,
         )
         await _run_shutdown_step("shared async HTTP", close_shared_async_http_client, timeout=5.0)
@@ -11439,31 +11451,61 @@ def _dashboard_mark_snapshot_refresh_finished(*, error: str = "") -> None:
         )
 
 
-def _voice_satellite_snapshot_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _voice_satellite_snapshot_save(
+    payload: Dict[str, Any],
+    *,
+    expected_generation: Optional[int] = None,
+) -> Dict[str, Any]:
     cached_at = time.time()
     body = payload if isinstance(payload, dict) else {}
     with voice_satellite_snapshot_lock:
+        generation = int(voice_satellite_snapshot_state.get("generation") or 0)
+        if expected_generation is not None and generation != int(expected_generation):
+            return {
+                "cached_at": 0.0,
+                "payload": body,
+                "saved": False,
+                "generation": generation,
+            }
         voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": body})
-    try:
-        redis_client.set(
-            VOICE_SATELLITE_SNAPSHOT_KEY,
-            json.dumps(
-                {
-                    "schema_version": VOICE_SATELLITE_SNAPSHOT_SCHEMA_VERSION,
-                    "cached_at": cached_at,
-                    "payload": body,
-                },
-                default=str,
-                separators=(",", ":"),
-            ),
+        try:
+            redis_client.set(
+                VOICE_SATELLITE_SNAPSHOT_KEY,
+                json.dumps(
+                    {
+                        "schema_version": VOICE_SATELLITE_SNAPSHOT_SCHEMA_VERSION,
+                        "cached_at": cached_at,
+                        "payload": body,
+                    },
+                    default=str,
+                    separators=(",", ":"),
+                ),
+            )
+        except Exception:
+            logger.debug("[system-tasks] failed saving the satellite UI snapshot", exc_info=True)
+    return {"cached_at": cached_at, "payload": body, "saved": True, "generation": generation}
+
+
+def _voice_satellite_snapshot_invalidate() -> int:
+    with voice_satellite_snapshot_lock:
+        generation = int(voice_satellite_snapshot_state.get("generation") or 0) + 1
+        voice_satellite_snapshot_state.update(
+            {
+                "cached_at": 0.0,
+                "payload": None,
+                "generation": generation,
+            }
         )
-    except Exception:
-        logger.debug("[system-tasks] failed saving the satellite UI snapshot", exc_info=True)
-    return {"cached_at": cached_at, "payload": body}
+        try:
+            redis_client.delete(VOICE_SATELLITE_SNAPSHOT_KEY)
+        except Exception:
+            logger.debug("[system-tasks] failed invalidating the satellite UI snapshot", exc_info=True)
+    return generation
 
 
 def _voice_satellite_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     with voice_satellite_snapshot_lock:
+        generation = int(voice_satellite_snapshot_state.get("generation") or 0)
         memory_payload = voice_satellite_snapshot_state.get("payload")
         memory_cached_at = float(voice_satellite_snapshot_state.get("cached_at") or 0.0)
     if isinstance(memory_payload, dict) and memory_cached_at > 0:
@@ -11487,6 +11529,8 @@ def _voice_satellite_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str
     if not isinstance(payload, dict) or cached_at <= 0:
         return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "invalid"}
     with voice_satellite_snapshot_lock:
+        if int(voice_satellite_snapshot_state.get("generation") or 0) != generation:
+            return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "invalidated"}
         voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": payload})
     return payload, {
         "cached_at": cached_at,
@@ -11506,8 +11550,14 @@ def _voice_satellite_snapshot_build() -> Dict[str, Any]:
 
 
 async def _system_task_satellite_snapshot(_reason: str = "schedule") -> None:
+    with voice_satellite_snapshot_lock:
+        generation = int(voice_satellite_snapshot_state.get("generation") or 0)
     payload = await asyncio.to_thread(_voice_satellite_snapshot_build)
-    await asyncio.to_thread(_voice_satellite_snapshot_save, payload)
+    await asyncio.to_thread(
+        _voice_satellite_snapshot_save,
+        payload,
+        expected_generation=generation,
+    )
 
 
 def _integration_room_media_player_options_save(options: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -16809,6 +16859,10 @@ def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
             "voice_wake_verifier_save",
             "voice_refresh",
         }:
+            # The Satellites panel is served from a cached UI snapshot. Clear it
+            # before returning so the save-triggered redraw cannot restore the
+            # previous form values while the debounced rebuild is still pending.
+            _voice_satellite_snapshot_invalidate()
             system_task_manager.request_run_debounced(
                 "satellite_ui_snapshot",
                 reason=f"{action_name}-action",
@@ -18039,6 +18093,11 @@ def get_people_settings() -> Dict[str, Any]:
     return people_module.panel_payload(redis_client)
 
 
+@app.get("/api/settings/face-id/status")
+def get_face_id_status() -> Dict[str, Any]:
+    return face_id_runtime.status(redis_client)
+
+
 @app.post("/api/settings/people/action")
 def run_people_settings_action(payload: PeopleActionRequest) -> Dict[str, Any]:
     try:
@@ -18272,6 +18331,7 @@ def get_settings() -> Dict[str, Any]:
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
+        "face_id": face_id_runtime.settings_payload(redis_client),
         "speech_stt_backend": str(speech_settings.get("stt_backend") or ""),
         "speech_acceleration": str(speech_settings.get("acceleration") or ""),
         "speech_wyoming_stt_host": str(speech_settings.get("wyoming_stt_host") or ""),
@@ -19525,6 +19585,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     hf_llm_warmup_result: Dict[str, Any] = {}
     stt_reload_result: Dict[str, Any] = {}
     tts_reload_result: Dict[str, Any] = {}
+    face_id_result: Dict[str, Any] = {}
 
     def _bounded_int(
         value: Any,
@@ -20761,6 +20822,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         cleaned = sorted(set(values))
         redis_client.set(ADMIN_GATE_KEY, json.dumps(cleaned))
 
+    if "face_id_enabled" in updates:
+        face_id_result = face_id_runtime.set_enabled(
+            redis_client,
+            _as_bool_flag(updates.get("face_id_enabled"), default=False),
+        )
+
     system_task_manager.request_run_debounced(
         "runtime_model_snapshot",
         reason="settings-updated",
@@ -20774,4 +20841,5 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "tts_reload": tts_reload_result,
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
         "hf_llm_warmup": hf_llm_warmup_result or _hf_llm_warmup_snapshot(),
+        "face_id": face_id_result or face_id_runtime.status(redis_client),
     }

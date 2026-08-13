@@ -980,6 +980,11 @@ def _merge_saved_native_satellites(status: Dict[str, Any]) -> Dict[str, Any]:
         current_info = current.get("device_info") if isinstance(current.get("device_info"), dict) else {}
 
         metadata = {**saved_meta, **current_meta}
+        # Live device metadata is authoritative for hardware/runtime details,
+        # but these two values are user preferences managed by this card.
+        for preference_key in ("area_name", "reply_playback_target"):
+            if preference_key in saved_meta:
+                metadata[preference_key] = saved_meta[preference_key]
         if saved_board and not _has_specific_native_board(metadata.get("board")):
             metadata["board"] = saved_board
         metadata.setdefault("native_selected", True)

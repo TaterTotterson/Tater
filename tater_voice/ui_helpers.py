@@ -332,9 +332,15 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
             or ("" if native_device else esphome_runtime.satellite_host_from_selector(token))
         )
         meta = dict(current.get("metadata") if isinstance(current.get("metadata"), dict) else {})
+        saved_preferences = {
+            key: meta[key]
+            for key in ("area_name", "reply_playback_target")
+            if key in meta
+        }
         client_meta = client_row.get("metadata") if isinstance(client_row.get("metadata"), dict) else {}
         if native_device:
             meta.update({key: value for key, value in client_meta.items() if esphome_runtime.text(value) or isinstance(value, bool)})
+            meta.update(saved_preferences)
         rows_by_selector[token] = {
             "selector": token,
             "host": host,
