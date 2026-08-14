@@ -542,6 +542,7 @@ HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_co
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
 HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_tokens"
 HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY = "tater:hydra:llm:llama_cpp_mtp_draft_model"
+HYDRA_LLAMA_CPP_SPECULATIVE_METHOD_KEY = "tater:hydra:llm:llama_cpp_speculative_method"
 HYDRA_LLAMA_CPP_N_BATCH_KEY = "tater:hydra:llm:llama_cpp_n_batch"
 HYDRA_LLAMA_CPP_N_UBATCH_KEY = "tater:hydra:llm:llama_cpp_n_ubatch"
 HYDRA_LLAMA_CPP_FLASH_ATTN_KEY = "tater:hydra:llm:llama_cpp_flash_attn"
@@ -570,6 +571,8 @@ DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_MTP_ENABLED = False
 DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS = 3
 DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL = ""
+DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD = "draft-mtp"
+LLAMA_CPP_SPECULATIVE_METHODS = ("draft-mtp", "draft-dflash", "draft-dspark")
 DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS = 256
@@ -1640,23 +1643,37 @@ def _llama_cpp_mtp_draft_tokens() -> int:
 
 def _llama_cpp_mtp_draft_model() -> str:
     raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY)
-    if raw is None:
+    if not raw:
         raw = str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_MODEL") or DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL).strip()
     return str(raw or "").strip()
 
 
 def _llama_cpp_mtp_spec_type() -> str:
-    token = str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or "draft-mtp").strip().lower()
-    return token or "draft-mtp"
+    raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_SPECULATIVE_METHOD_KEY)
+    if not raw:
+        raw = str(
+            os.getenv("TATER_LLAMA_CPP_SPECULATIVE_METHOD")
+            or os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE")
+            or DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD
+        ).strip()
+    token = str(raw or DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD).strip().lower()
+    aliases = {
+        "mtp": "draft-mtp",
+        "dflash": "draft-dflash",
+        "dspark": "draft-dspark",
+    }
+    token = aliases.get(token, token)
+    return token if token in LLAMA_CPP_SPECULATIVE_METHODS else DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD
 
 
 def _llama_cpp_mtp_single_slot_workaround(
     model_identifier: Any,
     *,
     mtp_enabled: bool,
+    spec_type: str = DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
 ) -> bool:
     """Protect affected Qwen hybrid MTP models from Metal parallel-slot stalls."""
-    if not mtp_enabled:
+    if not mtp_enabled or str(spec_type or "").strip().lower() != "draft-mtp":
         return False
     if platform.system().lower() != "darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
         return False
@@ -1674,10 +1691,12 @@ def _llama_cpp_mtp_stall_timeout_seconds(
     model_identifier: Any,
     *,
     mtp_enabled: bool,
+    spec_type: str = DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
 ) -> float:
     if not _llama_cpp_mtp_single_slot_workaround(
         model_identifier,
         mtp_enabled=mtp_enabled,
+        spec_type=spec_type,
     ):
         return 0.0
     raw = str(
@@ -2948,8 +2967,12 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "offload_kqv": _llama_cpp_offload_kqv_enabled(),
         "mtp_enabled": _llama_cpp_mtp_enabled(),
         "mtp_spec_type": _llama_cpp_mtp_spec_type(),
+        "speculative_enabled": _llama_cpp_mtp_enabled(),
+        "speculative_method": _llama_cpp_mtp_spec_type(),
         "mtp_draft_tokens": _llama_cpp_mtp_draft_tokens(),
         "mtp_draft_model": _llama_cpp_mtp_draft_model(),
+        "speculative_draft_tokens": _llama_cpp_mtp_draft_tokens(),
+        "speculative_draft_model": _llama_cpp_mtp_draft_model(),
         "env": {
             "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
             "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
@@ -2967,6 +2990,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             "TATER_LLAMA_CPP_MTP_ENABLED": str(os.getenv("TATER_LLAMA_CPP_MTP_ENABLED") or ""),
             "TATER_LLAMA_CPP_MTP_DRAFT_TOKENS": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_TOKENS") or ""),
             "TATER_LLAMA_CPP_MTP_SPEC_TYPE": str(os.getenv("TATER_LLAMA_CPP_MTP_SPEC_TYPE") or ""),
+            "TATER_LLAMA_CPP_SPECULATIVE_METHOD": str(os.getenv("TATER_LLAMA_CPP_SPECULATIVE_METHOD") or ""),
             "TATER_LLAMA_CPP_MTP_DRAFT_MODEL": str(os.getenv("TATER_LLAMA_CPP_MTP_DRAFT_MODEL") or ""),
             "TATER_LLAMA_CPP_MTP_SINGLE_SLOT": str(os.getenv("TATER_LLAMA_CPP_MTP_SINGLE_SLOT") or ""),
             "TATER_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS": str(
@@ -6604,6 +6628,12 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "mtp_requested",
         "mtp_enabled",
         "mtp_spec_type",
+        "speculative_requested",
+        "speculative_enabled",
+        "speculative_method",
+        "speculative_draft_tokens",
+        "speculative_draft_model",
+        "speculative_draft_model_path",
         "mtp_draft_tokens",
         "mtp_draft_model",
         "mtp_draft_model_path",
@@ -6714,6 +6744,7 @@ def _llama_cpp_native_server_command(
     n_gpu_layers = _llama_cpp_n_gpu_layers()
     configured_slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
+    speculative_method = _llama_cpp_mtp_spec_type()
     model_identity = " ".join(
         (
             str(model_path or ""),
@@ -6723,11 +6754,13 @@ def _llama_cpp_native_server_command(
     mtp_single_slot_workaround = _llama_cpp_mtp_single_slot_workaround(
         model_identity,
         mtp_enabled=mtp_requested,
+        spec_type=speculative_method,
     )
     slot_count = 1 if mtp_single_slot_workaround else configured_slot_count
     mtp_stall_timeout_seconds = _llama_cpp_mtp_stall_timeout_seconds(
         model_identity,
         mtp_enabled=mtp_requested,
+        spec_type=speculative_method,
     )
     base_slot = _llama_cpp_slot_id("base")
     if base_slot >= slot_count:
@@ -6740,6 +6773,9 @@ def _llama_cpp_native_server_command(
     mtp_draft_model_path = ""
     if mtp_requested and mtp_draft_model:
         mtp_draft_model_path = _download_llama_cpp_model(mtp_draft_model)
+    if mtp_requested and speculative_method in {"draft-dflash", "draft-dspark"} and not mtp_draft_model_path:
+        method_label = "DFlash" if speculative_method == "draft-dflash" else "DSpark"
+        raise RuntimeError(f"{method_label} speculative decoding requires a matching draft-model GGUF.")
 
     cmd = [
         server_bin,
@@ -6799,7 +6835,7 @@ def _llama_cpp_native_server_command(
         cmd.extend(
             [
                 "--spec-type",
-                _llama_cpp_mtp_spec_type(),
+                speculative_method,
                 "--spec-draft-n-max",
                 str(int(_llama_cpp_mtp_draft_tokens())),
             ]
@@ -6821,10 +6857,16 @@ def _llama_cpp_native_server_command(
         "offload_kqv": bool(_llama_cpp_offload_kqv_enabled()),
         "mtp_requested": bool(mtp_requested),
         "mtp_enabled": bool(mtp_requested),
-        "mtp_spec_type": _llama_cpp_mtp_spec_type() if mtp_requested else "",
+        "mtp_spec_type": speculative_method if mtp_requested else "",
         "mtp_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
         "mtp_draft_model": mtp_draft_model,
         "mtp_draft_model_path": mtp_draft_model_path,
+        "speculative_requested": bool(mtp_requested),
+        "speculative_enabled": bool(mtp_requested),
+        "speculative_method": speculative_method if mtp_requested else "",
+        "speculative_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
+        "speculative_draft_model": mtp_draft_model,
+        "speculative_draft_model_path": mtp_draft_model_path,
         "mtp_single_slot_workaround": bool(mtp_single_slot_workaround),
         "mtp_stall_timeout_seconds": float(mtp_stall_timeout_seconds),
         "mtp_warning": (
@@ -7482,6 +7524,11 @@ def preload_llama_cpp_llm_model(
         "mtp_draft_tokens": int(bundle.get("mtp_draft_tokens") or 0),
         "mtp_draft_model": str(bundle.get("mtp_draft_model") or ""),
         "mtp_draft_model_path": str(bundle.get("mtp_draft_model_path") or ""),
+        "speculative_enabled": bool(bundle.get("speculative_enabled", bundle.get("mtp_enabled"))),
+        "speculative_method": str(bundle.get("speculative_method") or bundle.get("mtp_spec_type") or ""),
+        "speculative_draft_tokens": int(bundle.get("speculative_draft_tokens") or bundle.get("mtp_draft_tokens") or 0),
+        "speculative_draft_model": str(bundle.get("speculative_draft_model") or bundle.get("mtp_draft_model") or ""),
+        "speculative_draft_model_path": str(bundle.get("speculative_draft_model_path") or bundle.get("mtp_draft_model_path") or ""),
         "mtp_single_slot_workaround": bool(bundle.get("mtp_single_slot_workaround")),
         "mtp_stall_timeout_seconds": float(bundle.get("mtp_stall_timeout_seconds") or 0.0),
         "mmproj_path": str(bundle.get("mmproj_path") or ""),

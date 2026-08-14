@@ -4184,7 +4184,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   gap: 8px;
 }
 
-.hydra-mtp-extra {
+.hydra-speculative-extra {
   display: grid;
   gap: 12px;
   padding: 12px;
@@ -4193,7 +4193,7 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   background: rgba(255, 151, 83, 0.08);
 }
 
-.hydra-mtp-extra[hidden] {
+.hydra-speculative-extra[hidden] {
   display: none !important;
 }
 

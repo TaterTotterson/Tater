@@ -87,6 +87,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
                 mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_mtp_spec_type", return_value="draft-mtp"),
                 mock.patch.object(helpers, "_llama_cpp_mtp_draft_tokens", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
                 mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
@@ -120,6 +121,85 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(metadata["slot_count"], 2)
         self.assertFalse(metadata["mtp_single_slot_workaround"])
         self.assertTrue(metadata["mtp_enabled"])
+        self.assertEqual(metadata["speculative_method"], "draft-mtp")
+
+    def test_speculative_method_aliases_are_normalized(self):
+        for configured, expected in (
+            ("mtp", "draft-mtp"),
+            ("dflash", "draft-dflash"),
+            ("dspark", "draft-dspark"),
+            ("unsupported", "draft-mtp"),
+        ):
+            with self.subTest(configured=configured):
+                with mock.patch.object(helpers, "_safe_redis_text_get", return_value=configured):
+                    self.assertEqual(helpers._llama_cpp_mtp_spec_type(), expected)
+
+    def test_speculative_method_uses_environment_when_setting_is_unset(self):
+        with (
+            mock.patch.object(helpers, "_safe_redis_text_get", return_value=""),
+            mock.patch.dict(
+                helpers.os.environ,
+                {
+                    "TATER_LLAMA_CPP_SPECULATIVE_METHOD": "dspark",
+                    "TATER_LLAMA_CPP_MTP_SPEC_TYPE": "",
+                },
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_mtp_spec_type(), "draft-dspark")
+
+    def test_speculative_draft_model_uses_environment_when_setting_is_unset(self):
+        with (
+            mock.patch.object(helpers, "_safe_redis_text_get", return_value=""),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_MTP_DRAFT_MODEL": "org/draft:model.gguf"},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_mtp_draft_model(), "org/draft:model.gguf")
+
+    def test_dflash_uses_selected_method_and_matching_draft_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(helpers, "_llama_cpp_n_ctx", return_value=4096),
+                mock.patch.object(helpers, "_llama_cpp_n_batch", return_value=512),
+                mock.patch.object(helpers, "_llama_cpp_n_ubatch", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_cache_reuse_tokens", return_value=256),
+                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+                mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_mtp_spec_type", return_value="draft-dflash"),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_tokens", return_value=15),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value="org/model:dflash"),
+                mock.patch.object(helpers, "_download_llama_cpp_model", return_value="/tmp/dflash.gguf"),
+                mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_offload_kqv_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_chat_template_override_text", return_value=""),
+                mock.patch.dict(
+                    helpers.os.environ,
+                    {
+                        "TATER_LLAMA_CPP_CHAT_FORMAT": "",
+                        "TATER_LLAMA_CPP_USE_MLOCK": "0",
+                    },
+                    clear=False,
+                ),
+            ):
+                command, metadata = helpers._llama_cpp_native_server_command(
+                    server_bin="/tmp/llama-server",
+                    model_path="/tmp/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf",
+                    mmproj_path="",
+                    temp_dir=temp_dir,
+                )
+
+        self.assertEqual(command[command.index("--spec-type") + 1], "draft-dflash")
+        self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "15")
+        self.assertEqual(command[command.index("--model-draft") + 1], "/tmp/dflash.gguf")
+        self.assertEqual(command[command.index("--parallel") + 1], "2")
+        self.assertEqual(metadata["speculative_method"], "draft-dflash")
+        self.assertEqual(metadata["speculative_draft_model_path"], "/tmp/dflash.gguf")
+        self.assertFalse(metadata["mtp_single_slot_workaround"])
 
     def test_qwen_hybrid_mtp_uses_single_slot_on_apple_silicon(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -134,6 +214,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
                 mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_mtp_spec_type", return_value="draft-mtp"),
                 mock.patch.object(helpers, "_llama_cpp_mtp_draft_tokens", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
                 mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
@@ -229,6 +310,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
                 mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=False),
+                mock.patch.object(helpers, "_llama_cpp_mtp_spec_type", return_value="draft-mtp"),
                 mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
                 mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=True),
                 mock.patch.object(helpers, "_llama_cpp_offload_kqv_enabled", return_value=True),

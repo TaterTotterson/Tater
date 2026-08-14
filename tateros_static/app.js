@@ -24278,23 +24278,31 @@ async function loadSettingsView() {
                   )}
                   <div class="small hydra-context-hint">Keeps attention/KV work on the GPU when llama.cpp supports it.</div>
                 </label>
-                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Multi-Token Prediction
+                <label class="hydra-context-field" data-hydra-provider-field="llama_cpp">Speculative Decoding
                   ${renderToggleRow(
                     `<input id="set_hydra_llama_cpp_mtp_enabled" class="toggle-input" type="checkbox" ${
                       settings.hydra_llama_cpp_mtp_enabled ? "checked" : ""
                     } />`,
-                    "Enable MTP"
+                    "Enable"
                   )}
-                  <div class="small hydra-context-hint">Uses native llama.cpp draft-mtp when enabled.</div>
+                  <div class="small hydra-context-hint">Uses a fast draft method to propose tokens that the main model verifies.</div>
                 </label>
-                <div id="hydra-llama-mtp-extra" class="hydra-mtp-extra" data-hydra-provider-field="llama_cpp" ${
+                <div id="hydra-llama-speculative-extra" class="hydra-speculative-extra" data-hydra-provider-field="llama_cpp" ${
                   settings.hydra_llama_cpp_mtp_enabled ? "" : "hidden"
                 }>
-                  <label class="hydra-context-field">MTP Draft Model
-                    <select id="set_hydra_llama_cpp_mtp_draft_model"></select>
-                    <div id="hydra-llama-mtp-draft-model-status" class="small hydra-context-hint">Optional assistant GGUF. Save & Load restarts llama.cpp with the selected model pair.</div>
+                  <label class="hydra-context-field">Method
+                    <select id="set_hydra_llama_cpp_speculative_method">
+                      <option value="draft-mtp" ${settings.hydra_llama_cpp_speculative_method === "draft-mtp" ? "selected" : ""}>Multi-Token Prediction (MTP)</option>
+                      <option value="draft-dflash" ${settings.hydra_llama_cpp_speculative_method === "draft-dflash" ? "selected" : ""}>DFlash</option>
+                      <option value="draft-dspark" ${settings.hydra_llama_cpp_speculative_method === "draft-dspark" ? "selected" : ""}>DSpark</option>
+                    </select>
+                    <div id="hydra-llama-speculative-method-hint" class="small hydra-context-hint"></div>
                   </label>
-                  <label class="hydra-context-field">MTP Draft Tokens
+                  <label class="hydra-context-field">Draft Model (GGUF)
+                    <select id="set_hydra_llama_cpp_mtp_draft_model"></select>
+                    <div id="hydra-llama-mtp-draft-model-status" class="small hydra-context-hint">Select a matching draft or sidecar GGUF. Save & Load restarts llama.cpp with the selected model pair.</div>
+                  </label>
+                  <label class="hydra-context-field">Maximum Draft Tokens
                     <div class="hydra-context-control hydra-mtp-control">
                       <input id="set_hydra_llama_cpp_mtp_draft_tokens_range" type="range" min="1" max="16" step="1" value="${escapeHtml(
                         settings.hydra_llama_cpp_mtp_draft_tokens || "3"
@@ -26102,8 +26110,8 @@ async function loadSettingsView() {
   const hydraLocalModelStatusEl = document.getElementById("hydra-local-model-status");
   const llamaChatTemplateEditEl = document.getElementById("settings-llama-chat-template-edit");
   const llamaChatTemplateStatusEl = document.getElementById("settings-llama-chat-template-status");
-  const llamaCppMtpDraftModelSelectEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_model");
-  const llamaCppMtpDraftModelStatusEl = document.getElementById("hydra-llama-mtp-draft-model-status");
+  const llamaCppSpeculativeDraftModelSelectEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_model");
+  const llamaCppSpeculativeDraftModelStatusEl = document.getElementById("hydra-llama-mtp-draft-model-status");
   const contextControlConfig = {
     hf_transformers: {
       min: 256,
@@ -26320,32 +26328,68 @@ async function loadSettingsView() {
     });
     config.numberEl?.addEventListener("blur", () => syncHydraContextControl(provider));
   });
-  const llamaCppMtpEnabledEl = document.getElementById("set_hydra_llama_cpp_mtp_enabled");
-  const llamaCppMtpExtraEl = document.getElementById("hydra-llama-mtp-extra");
+  const llamaCppSpeculativeEnabledEl = document.getElementById("set_hydra_llama_cpp_mtp_enabled");
+  const llamaCppSpeculativeMethodEl = document.getElementById("set_hydra_llama_cpp_speculative_method");
+  const llamaCppSpeculativeExtraEl = document.getElementById("hydra-llama-speculative-extra");
+  const llamaCppSpeculativeMethodHintEl = document.getElementById("hydra-llama-speculative-method-hint");
   const llamaCppSlotCountEl = document.getElementById("set_hydra_llama_cpp_slot_count");
   const llamaCppBaseSlotEl = document.getElementById("set_hydra_llama_cpp_base_slot");
-  const syncLlamaCppMtpExtra = () => {
-    if (llamaCppMtpExtraEl) {
-      llamaCppMtpExtraEl.hidden = !Boolean(llamaCppMtpEnabledEl?.checked);
-    }
+  const llamaCppSpeculativeDraftRangeEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens_range");
+  const llamaCppSpeculativeDraftNumberEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens");
+  const llamaCppSpeculativeDefaults = {
+    "draft-mtp": 3,
+    "draft-dflash": 15,
+    "draft-dspark": 7,
   };
-  llamaCppMtpEnabledEl?.addEventListener("change", syncLlamaCppMtpExtra);
-  syncLlamaCppMtpExtra();
-  const llamaCppMtpDraftRangeEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens_range");
-  const llamaCppMtpDraftNumberEl = document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens");
-  const syncLlamaCppMtpDraftControl = (sourceEl = null) => {
-    if (!llamaCppMtpDraftRangeEl || !llamaCppMtpDraftNumberEl) {
+  const llamaCppSpeculativeHints = {
+    "draft-mtp": "Uses Multi-Token Prediction heads from a sidecar GGUF, or embedded heads when the target model provides them. Recommended maximum: 3.",
+    "draft-dflash": "Uses llama.cpp's DFlash decoder. A matching DFlash draft GGUF is required. Recommended maximum: 15.",
+    "draft-dspark": "Uses llama.cpp's DSpark decoder. A matching DSpark draft GGUF is required. Recommended maximum: 7.",
+  };
+  const selectedLlamaCppSpeculativeMethod = () => {
+    const method = String(llamaCppSpeculativeMethodEl?.value || "draft-mtp").trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(llamaCppSpeculativeDefaults, method) ? method : "draft-mtp";
+  };
+  const syncLlamaCppSpeculativeDraftControl = (sourceEl = null, fallback = null) => {
+    if (!llamaCppSpeculativeDraftRangeEl || !llamaCppSpeculativeDraftNumberEl) {
       return;
     }
-    const raw = Number(sourceEl?.value || llamaCppMtpDraftNumberEl.value || llamaCppMtpDraftRangeEl.value || 3);
-    const value = Math.max(1, Math.min(16, Number.isFinite(raw) ? Math.round(raw) : 3));
-    llamaCppMtpDraftRangeEl.value = String(value);
-    llamaCppMtpDraftNumberEl.value = String(value);
+    const methodDefault = llamaCppSpeculativeDefaults[selectedLlamaCppSpeculativeMethod()] || 3;
+    const resolvedFallback = fallback !== null && fallback !== undefined && Number.isFinite(Number(fallback))
+      ? Number(fallback)
+      : methodDefault;
+    const raw = Number(sourceEl?.value || llamaCppSpeculativeDraftNumberEl.value || llamaCppSpeculativeDraftRangeEl.value || resolvedFallback);
+    const value = Math.max(1, Math.min(16, Number.isFinite(raw) ? Math.round(raw) : resolvedFallback));
+    llamaCppSpeculativeDraftRangeEl.value = String(value);
+    llamaCppSpeculativeDraftNumberEl.value = String(value);
   };
-  llamaCppMtpDraftRangeEl?.addEventListener("input", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftRangeEl));
-  llamaCppMtpDraftNumberEl?.addEventListener("input", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
-  llamaCppMtpDraftNumberEl?.addEventListener("blur", () => syncLlamaCppMtpDraftControl(llamaCppMtpDraftNumberEl));
-  syncLlamaCppMtpDraftControl();
+  const syncLlamaCppSpeculativeControls = ({ applyMethodDefault = false } = {}) => {
+    if (llamaCppSpeculativeExtraEl) {
+      llamaCppSpeculativeExtraEl.hidden = !Boolean(llamaCppSpeculativeEnabledEl?.checked);
+    }
+    const method = selectedLlamaCppSpeculativeMethod();
+    if (llamaCppSpeculativeMethodEl && llamaCppSpeculativeMethodEl.value !== method) {
+      llamaCppSpeculativeMethodEl.value = method;
+    }
+    if (llamaCppSpeculativeMethodHintEl) {
+      llamaCppSpeculativeMethodHintEl.textContent = llamaCppSpeculativeHints[method];
+    }
+    if (applyMethodDefault && llamaCppSpeculativeDraftRangeEl && llamaCppSpeculativeDraftNumberEl) {
+      const value = llamaCppSpeculativeDefaults[method];
+      llamaCppSpeculativeDraftRangeEl.value = String(value);
+      llamaCppSpeculativeDraftNumberEl.value = String(value);
+    }
+  };
+  llamaCppSpeculativeEnabledEl?.addEventListener("change", () => syncLlamaCppSpeculativeControls());
+  llamaCppSpeculativeMethodEl?.addEventListener("change", () => {
+    syncLlamaCppSpeculativeControls({ applyMethodDefault: true });
+    populateLlamaCppSpeculativeDraftModelSelect("");
+  });
+  llamaCppSpeculativeDraftRangeEl?.addEventListener("input", () => syncLlamaCppSpeculativeDraftControl(llamaCppSpeculativeDraftRangeEl));
+  llamaCppSpeculativeDraftNumberEl?.addEventListener("input", () => syncLlamaCppSpeculativeDraftControl(llamaCppSpeculativeDraftNumberEl));
+  llamaCppSpeculativeDraftNumberEl?.addEventListener("blur", () => syncLlamaCppSpeculativeDraftControl(llamaCppSpeculativeDraftNumberEl));
+  syncLlamaCppSpeculativeControls();
+  syncLlamaCppSpeculativeDraftControl();
   const syncPairedIntegerControl = ({ rangeEl, numberEl, fallback = 0, min = 0, max = 8192, step = 1 }) => {
     if (!rangeEl || !numberEl) {
       return;
@@ -26588,31 +26632,36 @@ async function loadSettingsView() {
       syncContext: true,
     });
   };
-  const populateLlamaCppMtpDraftModelSelect = (preferredModel = null) => {
-    if (!llamaCppMtpDraftModelSelectEl) {
+  const populateLlamaCppSpeculativeDraftModelSelect = (preferredModel = null) => {
+    if (!llamaCppSpeculativeDraftModelSelectEl) {
       return;
     }
+    const method = selectedLlamaCppSpeculativeMethod();
+    const methodLabel = method === "draft-dflash" ? "DFlash" : method === "draft-dspark" ? "DSpark" : "MTP";
+    const requiresDraftModel = method !== "draft-mtp";
     const rows = localLlmModelsForProvider("llama_cpp");
     const preferred = String(
       preferredModel !== null && preferredModel !== undefined
         ? preferredModel
-        : llamaCppMtpDraftModelSelectEl.value || settings.hydra_llama_cpp_mtp_draft_model || ""
+        : llamaCppSpeculativeDraftModelSelectEl.value || settings.hydra_llama_cpp_mtp_draft_model || ""
     ).trim();
     const resolved = resolveLocalLlmModelValue("llama_cpp", rows, preferred);
     const preserveMissing = Boolean(preferred && !resolved);
-    llamaCppMtpDraftModelSelectEl.innerHTML = [
-      `<option value="">No draft model</option>`,
+    llamaCppSpeculativeDraftModelSelectEl.innerHTML = [
+      `<option value="">${requiresDraftModel ? "Select a draft model" : "No separate draft model"}</option>`,
       ...rows.map((row) => `<option value="${escapeHtml(row.model)}">${escapeHtml(row.model)}</option>`),
       preserveMissing ? `<option value="${escapeHtml(preferred)}">Current: ${escapeHtml(preferred)}</option>` : "",
     ].join("");
-    llamaCppMtpDraftModelSelectEl.value = resolved || (preserveMissing ? preferred : "");
-    if (llamaCppMtpDraftModelStatusEl) {
+    llamaCppSpeculativeDraftModelSelectEl.value = resolved || (preserveMissing ? preferred : "");
+    if (llamaCppSpeculativeDraftModelStatusEl) {
       if (!rows.length) {
-        llamaCppMtpDraftModelStatusEl.textContent = "No downloaded llama.cpp models yet. Download a draft GGUF from the Hugging Face tab.";
+        llamaCppSpeculativeDraftModelStatusEl.textContent = requiresDraftModel
+          ? `${methodLabel} requires a matching draft GGUF. Download one from the Hugging Face tab.`
+          : "No downloaded llama.cpp models yet. An MTP model with embedded prediction heads can run without a sidecar.";
       } else if (preserveMissing) {
-        llamaCppMtpDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available. Current draft model is not in the local list.`;
+        llamaCppSpeculativeDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available. Current ${methodLabel} draft model is not in the local list.`;
       } else {
-        llamaCppMtpDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available for MTP draft selection.`;
+        llamaCppSpeculativeDraftModelStatusEl.textContent = `${rows.length} downloaded llama.cpp model${rows.length === 1 ? "" : "s"} available for ${methodLabel} draft selection.${requiresDraftModel ? " A compatible draft GGUF is required." : " A sidecar is optional when prediction heads are embedded."}`;
       }
     }
   };
@@ -26703,7 +26752,7 @@ async function loadSettingsView() {
         }
       });
       syncHydraAdditionalBaseRowsProviders();
-      populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
+      populateLlamaCppSpeculativeDraftModelSelect(llamaCppSpeculativeDraftModelSelectEl ? llamaCppSpeculativeDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       renderLocalModelManager();
     } catch (error) {
       if (hydraLocalModelStatusEl && isHydraLocalProvider(hydraBaseProviderEl?.value || "")) {
@@ -26722,8 +26771,8 @@ async function loadSettingsView() {
         localModelManagerStatusEl.classList.add("error");
         localModelManagerStatusEl.classList.remove("success");
       }
-      if (llamaCppMtpDraftModelStatusEl) {
-        llamaCppMtpDraftModelStatusEl.textContent = `Downloaded llama.cpp model list failed: ${error.message}`;
+      if (llamaCppSpeculativeDraftModelStatusEl) {
+        llamaCppSpeculativeDraftModelStatusEl.textContent = `Downloaded llama.cpp model list failed: ${error.message}`;
       }
     }
   };
@@ -27182,7 +27231,7 @@ async function loadSettingsView() {
     });
   });
   syncHydraPrimaryProviderFields();
-  populateLlamaCppMtpDraftModelSelect(settings.hydra_llama_cpp_mtp_draft_model || "");
+  populateLlamaCppSpeculativeDraftModelSelect(settings.hydra_llama_cpp_mtp_draft_model || "");
   if (state.hydraContextEstimateRuntimeListener) {
     document.removeEventListener("tater:runtime-breakdown-updated", state.hydraContextEstimateRuntimeListener);
   }
@@ -27850,7 +27899,7 @@ async function loadSettingsView() {
       syncHydraPrimaryProviderFields();
       hydraRouteControls.forEach((control) => syncHydraRouteControl(control));
       syncSpudexLlmModeFields();
-      populateLlamaCppMtpDraftModelSelect(llamaCppMtpDraftModelSelectEl ? llamaCppMtpDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
+      populateLlamaCppSpeculativeDraftModelSelect(llamaCppSpeculativeDraftModelSelectEl ? llamaCppSpeculativeDraftModelSelectEl.value : settings.hydra_llama_cpp_mtp_draft_model || "");
       if (localModelManagerStatusEl) {
         localModelManagerStatusEl.textContent = `${modelId} deleted.`;
         localModelManagerStatusEl.classList.add("success");
@@ -29825,9 +29874,10 @@ async function loadSettingsView() {
     const hfTransformersAttnImplementation = String(document.getElementById("set_hydra_hf_transformers_attn_implementation")?.value || "auto").trim();
     const hfTransformersTrustRemoteCode = Boolean(document.getElementById("set_hydra_hf_transformers_trust_remote_code")?.checked);
     const llamaCppContextTokens = String(document.getElementById("set_hydra_llama_cpp_context_tokens")?.value || "").trim();
-    const llamaCppMtpEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
-    const llamaCppMtpDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
-    const llamaCppMtpDraftModel = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_model")?.value || "").trim();
+    const llamaCppSpeculativeEnabled = Boolean(document.getElementById("set_hydra_llama_cpp_mtp_enabled")?.checked);
+    const llamaCppSpeculativeMethod = String(document.getElementById("set_hydra_llama_cpp_speculative_method")?.value || "draft-mtp").trim();
+    const llamaCppSpeculativeDraftTokens = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_tokens")?.value || "3").trim();
+    const llamaCppSpeculativeDraftModel = String(document.getElementById("set_hydra_llama_cpp_mtp_draft_model")?.value || "").trim();
     const llamaCppNBatch = String(document.getElementById("set_hydra_llama_cpp_n_batch")?.value || "512").trim();
     const llamaCppNUbatch = String(document.getElementById("set_hydra_llama_cpp_n_ubatch")?.value || "0").trim();
     const llamaCppFlashAttn = Boolean(document.getElementById("set_hydra_llama_cpp_flash_attn")?.checked);
@@ -29882,9 +29932,10 @@ async function loadSettingsView() {
         hydra_hf_transformers_attn_implementation: hfTransformersAttnImplementation,
         hydra_hf_transformers_trust_remote_code: hfTransformersTrustRemoteCode,
         hydra_llama_cpp_context_tokens: llamaCppContextTokens,
-        hydra_llama_cpp_mtp_enabled: llamaCppMtpEnabled,
-        hydra_llama_cpp_mtp_draft_tokens: llamaCppMtpDraftTokens,
-        hydra_llama_cpp_mtp_draft_model: llamaCppMtpDraftModel,
+        hydra_llama_cpp_mtp_enabled: llamaCppSpeculativeEnabled,
+        hydra_llama_cpp_speculative_method: llamaCppSpeculativeMethod,
+        hydra_llama_cpp_mtp_draft_tokens: llamaCppSpeculativeDraftTokens,
+        hydra_llama_cpp_mtp_draft_model: llamaCppSpeculativeDraftModel,
         hydra_llama_cpp_n_batch: llamaCppNBatch,
         hydra_llama_cpp_n_ubatch: llamaCppNUbatch,
         hydra_llama_cpp_flash_attn: llamaCppFlashAttn,

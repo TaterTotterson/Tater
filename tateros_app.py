@@ -119,6 +119,7 @@ from helpers import (
     DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
     DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_ENABLED,
+    DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
     DEFAULT_LLAMA_CPP_N_BATCH,
     DEFAULT_LLAMA_CPP_N_UBATCH,
     DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
@@ -145,6 +146,7 @@ from helpers import (
     HYDRA_LLAMA_CPP_MTP_DRAFT_MODEL_KEY,
     HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
     HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
+    HYDRA_LLAMA_CPP_SPECULATIVE_METHOD_KEY,
     HYDRA_LLAMA_CPP_N_BATCH_KEY,
     HYDRA_LLAMA_CPP_N_UBATCH_KEY,
     HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY,
@@ -159,6 +161,7 @@ from helpers import (
     HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
     HYDRA_MLX_LM_LAZY_LOAD_KEY,
     HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
+    LLAMA_CPP_SPECULATIVE_METHODS,
     HfLlmDownloadCancelled,
     decrypt_current_redis_snapshot,
     download_hf_transformers_llm_model,
@@ -804,6 +807,9 @@ def _read_text_choice_setting(
                 break
     token = str(raw or default or "").strip().lower()
     aliases = {
+        "mtp": "draft-mtp",
+        "dflash": "draft-dflash",
+        "dspark": "draft-dspark",
         "fp16": "float16",
         "half": "float16",
         "bf16": "bfloat16",
@@ -9113,6 +9119,7 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_context_tokens: Optional[Any] = None
     hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_enabled: Optional[bool] = None
+    hydra_llama_cpp_speculative_method: Optional[str] = None
     hydra_llama_cpp_mtp_draft_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_draft_model: Optional[str] = None
     hydra_llama_cpp_n_batch: Optional[Any] = None
@@ -18254,6 +18261,7 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_context_tokens": str(DEFAULT_LLAMA_CPP_CONTEXT_TOKENS),
         "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
         "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
+        "hydra_llama_cpp_speculative_method": DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
         "hydra_llama_cpp_mtp_draft_tokens": str(DEFAULT_LLAMA_CPP_MTP_DRAFT_TOKENS),
         "hydra_llama_cpp_mtp_draft_model": DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
         "hydra_llama_cpp_n_batch": str(DEFAULT_LLAMA_CPP_N_BATCH),
@@ -18459,6 +18467,12 @@ def get_settings() -> Dict[str, Any]:
             HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
             ("TATER_LLAMA_CPP_MTP_ENABLED",),
             DEFAULT_LLAMA_CPP_MTP_ENABLED,
+        ),
+        "hydra_llama_cpp_speculative_method": _read_text_choice_setting(
+            HYDRA_LLAMA_CPP_SPECULATIVE_METHOD_KEY,
+            ("TATER_LLAMA_CPP_SPECULATIVE_METHOD", "TATER_LLAMA_CPP_MTP_SPEC_TYPE"),
+            DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
+            allowed=LLAMA_CPP_SPECULATIVE_METHODS,
         ),
         "hydra_llama_cpp_mtp_draft_tokens": _read_bounded_int_setting(
             HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,
@@ -19680,6 +19694,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             return
         token = str(updates.get(payload_key) or default or "").strip().lower()
         aliases = {
+            "mtp": "draft-mtp",
+            "dflash": "draft-dflash",
+            "dspark": "draft-dspark",
             "fp16": "float16",
             "half": "float16",
             "bf16": "bfloat16",
@@ -19851,6 +19868,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_hf_transformers_trust_remote_code",
         "hydra_llama_cpp_context_tokens",
         "hydra_llama_cpp_mtp_enabled",
+        "hydra_llama_cpp_speculative_method",
         "hydra_llama_cpp_mtp_draft_tokens",
         "hydra_llama_cpp_mtp_draft_model",
         "hydra_llama_cpp_n_batch",
@@ -19998,6 +20016,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_mtp_enabled",
         HYDRA_LLAMA_CPP_MTP_ENABLED_KEY,
         default=DEFAULT_LLAMA_CPP_MTP_ENABLED,
+    )
+    _save_text_choice_setting(
+        "hydra_llama_cpp_speculative_method",
+        HYDRA_LLAMA_CPP_SPECULATIVE_METHOD_KEY,
+        allowed=LLAMA_CPP_SPECULATIVE_METHODS,
+        default=DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
     )
     _save_bounded_int_setting(
         "hydra_llama_cpp_mtp_draft_tokens",
