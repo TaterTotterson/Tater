@@ -9,12 +9,6 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-<p>
-  <a href="https://tatertotterson.github.io/TaterBench/">
-    <img alt="View Tater Bench model results" src="https://img.shields.io/badge/Tater%20Bench-View%20Model%20Results-FF7A18?style=for-the-badge&logo=githubpages&logoColor=white" />
-  </a>
-</p>
-
 ---
 
 ## Little Spud Companion App
@@ -24,6 +18,18 @@ Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notification
 <p>
   <a href="https://apps.apple.com/app/little-spud/id6781400718">
     <img alt="Download Little Spud on the App Store" src="https://img.shields.io/badge/App%20Store-Download%20Little%20Spud-0D96F6?style=for-the-badge&logo=apple&logoColor=white" />
+  </a>
+</p>
+
+---
+
+## Tater Bench
+
+Tater Bench compares local models using repeatable Tater-style accuracy and performance tests across engines, speculative decoding modes, and hardware.
+
+<p>
+  <a href="https://tatertotterson.github.io/TaterBench/">
+    <img alt="View Tater Bench model results" src="https://img.shields.io/badge/Tater%20Bench-View%20Model%20Results-FF7A18?style=for-the-badge&logo=githubpages&logoColor=white" />
   </a>
 </p>
 
