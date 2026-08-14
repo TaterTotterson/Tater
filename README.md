@@ -132,9 +132,9 @@ Lightweight browser client for chatting with a paired Tater Spud Hub, including 
 
 ### Little Spud App
 
-Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub.
+Native Little Spud companion apps for connecting iOS and Android devices to a paired Tater Spud Hub. Both mobile apps are maintained in the same repository.
 
-<p><a href="https://github.com/TaterTotterson/Little-Spud-App"><img alt="View Little Spud App" src="https://img.shields.io/badge/Little%20Spud%20App-View%20Repository-FF7A18?style=for-the-badge&logo=apple&logoColor=white" /></a></p>
+<p><a href="https://github.com/TaterTotterson/Little-Spud-App"><img alt="View Little Spud iOS and Android apps" src="https://img.shields.io/badge/Little%20Spud%20Apps-iOS%20%26%20Android-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
 
 ### Reachy Tater Satellite
 
