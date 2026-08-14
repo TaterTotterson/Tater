@@ -68,19 +68,18 @@ jobs:
           shasum -a 256 "${zip_path}" "${dmg_path}" "macos/Tater/update-manifest.json"
 
       - name: Upload workflow artifacts
-        if: ${{ vars.TATER_UPLOAD_WORKFLOW_ARTIFACTS == '1' }}
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: Tater-macOS-${{ steps.meta.outputs.version_label }}
           if-no-files-found: error
           compression-level: 0
+          retention-days: 1
           path: |
             ${{ steps.meta.outputs.zip_path }}
             ${{ steps.meta.outputs.dmg_path }}
             ${{ steps.meta.outputs.manifest_path }}
 
-      - name: Commit updater files to main
+      - name: Commit updater manifest to main
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
@@ -92,15 +91,12 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            "${{ steps.meta.outputs.zip_path }}" \
-            "${{ steps.meta.outputs.dmg_path }}" \
-            "${{ steps.meta.outputs.manifest_path }}"
+          git add "${{ steps.meta.outputs.manifest_path }}"
           if git diff --cached --quiet; then
-            echo "No generated release changes to commit."
+            echo "No updater manifest changes to commit."
             exit 0
           fi
-          git commit -m "Add macOS release ${{ steps.meta.outputs.version_label }}"
+          git commit -m "Update macOS release manifest for ${{ steps.meta.outputs.version_label }}"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               exit 0
@@ -108,7 +104,7 @@ jobs:
             echo "Generated release commit push failed on attempt ${attempt}; retrying..." >&2
             sleep 10
           done
-          echo "::warning::Generated release files were built, but pushing them to main timed out. Continuing so GitHub Release assets can publish."
+          echo "::warning::The updater manifest was built, but pushing it to main timed out. Continuing so GitHub Release assets can publish."
 
   publish:
     name: macOS release
@@ -124,28 +120,26 @@ jobs:
       RELEASE_NOTES_PATH: macos/Tater/RELEASE_NOTES.md
 
     steps:
-      - name: Check out generated release files
+      - name: Check out release metadata
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
+      - name: Download macOS release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Tater-macOS-${{ github.ref_name }}
+          path: macos/Tater
+
       - name: Validate generated release files
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
-            git fetch origin main
-            git checkout --force origin/main
-            if [[ -f "${ZIP_PATH}" && -f "${DMG_PATH}" && -f "${MANIFEST_PATH}" ]]; then
-              sha256sum "${ZIP_PATH}" "${DMG_PATH}" "${MANIFEST_PATH}"
-              exit 0
-            fi
-            echo "Generated release files are not visible on main yet; retrying..." >&2
-            sleep 10
-          done
-          echo "Generated release files were not found on main." >&2
-          exit 1
+          test -f "${ZIP_PATH}"
+          test -f "${DMG_PATH}"
+          test -f "${MANIFEST_PATH}"
+          sha256sum "${ZIP_PATH}" "${DMG_PATH}" "${MANIFEST_PATH}"
 
       - name: Clean stale GitHub release assets
         uses: actions/github-script@v7

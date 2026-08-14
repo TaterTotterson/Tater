@@ -39,6 +39,7 @@ wav2vec2_checkpoints/
 # macOS launcher build products.
 macos/Tater/.build/
 macos/Tater/build/
+macos/Tater/releases/
 
 # WebUI frontend dependencies and transient build metadata.
 frontend/node_modules/

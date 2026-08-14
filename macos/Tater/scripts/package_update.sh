@@ -23,7 +23,7 @@ ZIP_PATH="${PROJECT_DIR}/build/${ZIP_NAME}"
 RELEASE_ZIP_PATH="${RELEASES_DIR}/${ZIP_NAME}"
 MANIFEST_PATH="${PROJECT_DIR}/build/update-manifest.json"
 REPO_MANIFEST_PATH="${PROJECT_DIR}/update-manifest.json"
-DOWNLOAD_URL="${1:-https://raw.githubusercontent.com/TaterTotterson/Tater/main/macos/Tater/releases/${ZIP_NAME}}"
+DOWNLOAD_URL="${1:-https://github.com/TaterTotterson/Tater/releases/download/${VERSION_LABEL}/${ZIP_NAME}}"
 
 "${SCRIPT_DIR}/build_app.sh"
 
