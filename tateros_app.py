@@ -2154,8 +2154,15 @@ def _hf_browser_param_size_label(value: Any) -> str:
         suffix = "M"
     else:
         return ""
-    text = f"{number:.1f}".rstrip("0").rstrip(".")
+    text = _hf_browser_size_number_text(f"{number:.1f}")
     return f"{text}{suffix}"
+
+
+def _hf_browser_size_number_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def _hf_browser_safetensors_param_count(safetensors: Any) -> int:
@@ -2203,7 +2210,7 @@ def _hf_browser_model_size_label(model_id: str, tags: List[str], files: List[str
     mixture = re.search(r"(?<![A-Za-z0-9])(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*([bBmM])(?=$|[^A-Za-z0-9])", haystack)
     if mixture:
         left = mixture.group(1)
-        right = mixture.group(2).rstrip("0").rstrip(".")
+        right = _hf_browser_size_number_text(mixture.group(2))
         return f"{left}x{right}{mixture.group(3).upper()}"
 
     matches = list(re.finditer(r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*([bBmM])(?=$|[^A-Za-z0-9])", haystack))
@@ -2212,7 +2219,7 @@ def _hf_browser_model_size_label(model_id: str, tags: List[str], files: List[str
         suffix = haystack[match.end() : match.end() + 4].lower()
         if prefix.endswith(("q", "v")) or suffix.startswith(("it/", "it-", "bit")):
             continue
-        number = match.group(1).rstrip("0").rstrip(".")
+        number = _hf_browser_size_number_text(match.group(1))
         return f"{number}{match.group(2).upper()}"
     return ""
 

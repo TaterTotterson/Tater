@@ -1,35 +1,38 @@
-# Tater v1.1.1
+# Tater v1.1.2
 
-Tater v1.1.1 is a full release for Docker and macOS. The release tag publishes
+Tater v1.1.2 is a full release for Docker and macOS. The release tag publishes
 the multi-architecture CPU image and NVIDIA image in addition to the macOS app.
 
 ## What's Changed
 
-### llama.cpp Speculative Decoding
+### Hugging Face Model Browser
 
-- Settings now presents one Speculative Decoding feature with selectable
-  Multi-Token Prediction (MTP), DFlash, and DSpark methods.
-- Each method provides a recommended maximum draft-token value and lets users
-  select the matching downloaded draft or sidecar GGUF.
-- Tater maps the selection to llama.cpp's native `draft-mtp`, `draft-dflash`,
-  or `draft-dspark` server mode and reports the active method in runtime
-  diagnostics.
+- The selected model's download options now remain visible in a sticky details
+  panel while users scroll through long model lists on desktop.
+- The details panel gets its own bounded scrolling area when needed and returns
+  to the normal document flow on smaller screens.
+- Parameter labels now preserve meaningful trailing zeroes, so models such as
+  Muse Glimmer 30B are displayed as `30B` instead of `3B`.
 
-### Compatibility and Safety
+### New and Updated Tater Picks
 
-- Existing MTP settings and environment variables remain compatible with the
-  new method selector.
-- DFlash and DSpark now fail with a clear message when a required matching draft
-  GGUF has not been selected.
-- The Apple Silicon single-slot safeguard remains limited to affected hybrid
-  MTP models and no longer applies to DFlash or DSpark.
+- **Qwen3.8-27B Tater NoThink** adds Qwen's new dense vision-language model with
+  a Q4_K_M main GGUF, matching vision projector, and native MTP draft model.
+- **NVIDIA Nemotron 3.5 Lightning 30B-A3B Tater NoThink** adds the lightweight
+  active-parameter MoE with its native MTP draft model.
+- **Muse Glimmer 30B Tater LowThink** adds Meta's vision-capable model with all
+  reasoning-effort selections redirected to low thinking and a DFlash option.
+- **Gemma 4 26B-A4B Tater NoThink** now offers both MTP and DFlash draft models
+  alongside its matching vision projector.
+- These draft models work with the MTP and DFlash choices in Tater's unified
+  Speculative Decoding settings.
 
 ## Updating
 
-- macOS users already running v1.0.1 through v1.1.0 can install v1.1.1 through
+- macOS users already running v1.0.1 through v1.1.1 can install v1.1.2 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.1` or `latest` for the CPU image and
-  `v1.1.1-nvidia` or `nvidia` for the NVIDIA image.
+- Docker users can pull `v1.1.2` or `latest` for the CPU image and
+  `v1.1.2-nvidia` or `nvidia` for the NVIDIA image.
