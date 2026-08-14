@@ -9,6 +9,12 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
+<p>
+  <a href="https://tatertotterson.github.io/TaterBench/">
+    <img alt="View Tater Bench model results" src="https://img.shields.io/badge/Tater%20Bench-View%20Model%20Results-FF7A18?style=for-the-badge&logo=githubpages&logoColor=white" />
+  </a>
+</p>
+
 ---
 
 ## Little Spud Companion App
