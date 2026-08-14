@@ -70,21 +70,83 @@ Tater Integrations provides modular packages for devices, services, search provi
 
 Some Portals are paired with companion repos/apps that complete the end-user integration:
 
-| App / Repo | Purpose |
-| --- | --- |
-| [HA Add-ons](https://github.com/TaterTotterson/hassio-addons-tater) | Home Assistant add-on repository for running Tater directly inside HAOS/Supervised setups. |
-| [HomeKit Shortcuts](https://taterassistant.com/portals/homekit.html) | Shortcut guide for Siri -> HomeKit bridge -> Tater workflows. |
-| [Meshtastic Bridge](https://github.com/TaterTotterson/tater_meshtastic_bridge) | Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API. |
-| [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) | Native firmware for Tater voice satellites and related hardware. |
-| [Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite) | Native Tater voice and persistent-music satellite runtime for Linux computers, Raspberry Pi, and robots. |
-| [ThirdReality S420 Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware) | Tater-native firmware, provisioning, signed OTA, and recovery images for the ThirdReality Voice & Music Assistant. |
-| [Tater Wake Words](https://github.com/TaterTotterson/Tater-Wake-Words) | Wake-word catalog for Tater Native satellites, including issue-based `mww:` requests for generating new wake words. |
-| [WakeWord Trainer for macOS](https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon) | Apple Silicon trainer app for creating custom wake words, reviewing satellite capture clips, and flashing Tater Native firmware. |
-| [WakeWord Trainer for NVIDIA Docker](https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker) | CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing. |
-| [Little Spud WebUI](https://github.com/TaterTotterson/Little-Spud-WebUI) | Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications. |
-| [Little Spud App](https://github.com/TaterTotterson/Little-Spud-App) | Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub. |
-| [Reachy Tater Satellite](https://huggingface.co/spaces/TaterTotterson/reachy_tater_sat) | Native Tater voice satellite for Reachy Mini with local wake words, continuous user tracking, expressive motion, reliable audio, and opt-in Reachy Vision snapshots. |
-| [XBMC4Xbox Skin](https://github.com/TaterTotterson/skin.cortana.tater-xbmc) | OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access. |
+### HA Add-ons
+
+Home Assistant add-on repository for running Tater directly inside HAOS/Supervised setups.
+
+<p><a href="https://github.com/TaterTotterson/hassio-addons-tater"><img alt="Browse Tater Home Assistant add-ons" src="https://img.shields.io/badge/HA%20Add--ons-Browse%20Repository-FF7A18?style=for-the-badge&logo=homeassistant&logoColor=white" /></a></p>
+
+### HomeKit Shortcuts
+
+Shortcut guide for Siri, the HomeKit bridge, and Tater workflows.
+
+<p><a href="https://taterassistant.com/portals/homekit.html"><img alt="View Tater HomeKit Shortcuts guide" src="https://img.shields.io/badge/HomeKit-View%20Shortcut%20Guide-FF7A18?style=for-the-badge&logo=apple&logoColor=white" /></a></p>
+
+### Meshtastic Bridge
+
+Host-side BLE bridge service for connecting Tater to Meshtastic radios over a simple local API.
+
+<p><a href="https://github.com/TaterTotterson/tater_meshtastic_bridge"><img alt="View Tater Meshtastic Bridge" src="https://img.shields.io/badge/Meshtastic%20Bridge-View%20Repository-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
+
+### Tater Native Firmware
+
+Native firmware for Tater voice satellites and related hardware.
+
+<p><a href="https://github.com/TaterTotterson/Tater-Native-Firmware"><img alt="View Tater Native Firmware" src="https://img.shields.io/badge/Native%20Firmware-View%20Repository-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
+
+### Tater Linux Satellite
+
+Native Tater voice and persistent-music satellite runtime for Linux computers, Raspberry Pi, and robots.
+
+<p><a href="https://github.com/TaterTotterson/Tater-Linux-Satellite"><img alt="View Tater Linux Satellite" src="https://img.shields.io/badge/Linux%20Satellite-View%20Repository-FF7A18?style=for-the-badge&logo=linux&logoColor=white" /></a></p>
+
+### ThirdReality S420 Firmware
+
+Tater-native firmware, provisioning, signed OTA, and recovery images for the ThirdReality Voice & Music Assistant.
+
+<p><a href="https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware"><img alt="View ThirdReality S420 Firmware" src="https://img.shields.io/badge/ThirdReality%20S420-View%20Firmware-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
+
+### Tater Wake Words
+
+Wake-word catalog for Tater Native satellites, including issue-based `mww:` requests for generating new wake words.
+
+<p><a href="https://github.com/TaterTotterson/Tater-Wake-Words"><img alt="Browse Tater Wake Words" src="https://img.shields.io/badge/Tater%20Wake%20Words-Browse%20Catalog-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
+
+### WakeWord Trainer for macOS
+
+Apple Silicon trainer app for creating custom wake words, reviewing satellite capture clips, and flashing Tater Native firmware.
+
+<p><a href="https://github.com/TaterTotterson/microWakeWord-Trainer-AppleSilicon"><img alt="View WakeWord Trainer for macOS" src="https://img.shields.io/badge/macOS%20WakeWord%20Trainer-View%20Repository-FF7A18?style=for-the-badge&logo=apple&logoColor=white" /></a></p>
+
+### WakeWord Trainer for NVIDIA Docker
+
+CUDA/Docker trainer for NVIDIA systems with wake-word training, capture review, and Tater Native firmware flashing.
+
+<p><a href="https://github.com/TaterTotterson/microWakeWord-Trainer-Nvidia-Docker"><img alt="View WakeWord Trainer for NVIDIA Docker" src="https://img.shields.io/badge/NVIDIA%20WakeWord%20Trainer-View%20Repository-FF7A18?style=for-the-badge&logo=nvidia&logoColor=white" /></a></p>
+
+### Little Spud WebUI
+
+Lightweight browser client for chatting with a paired Tater Spud Hub, including media, TTS/STT, and local device notifications.
+
+<p><a href="https://github.com/TaterTotterson/Little-Spud-WebUI"><img alt="View Little Spud WebUI" src="https://img.shields.io/badge/Little%20Spud%20WebUI-View%20Repository-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
+
+### Little Spud App
+
+Native Little Spud companion app for connecting Apple devices to a paired Tater Spud Hub.
+
+<p><a href="https://github.com/TaterTotterson/Little-Spud-App"><img alt="View Little Spud App" src="https://img.shields.io/badge/Little%20Spud%20App-View%20Repository-FF7A18?style=for-the-badge&logo=apple&logoColor=white" /></a></p>
+
+### Reachy Tater Satellite
+
+Native Tater voice satellite for Reachy Mini with local wake words, user tracking, expressive motion, reliable audio, and optional vision snapshots.
+
+<p><a href="https://huggingface.co/spaces/TaterTotterson/reachy_tater_sat"><img alt="Open Reachy Tater Satellite" src="https://img.shields.io/badge/Reachy%20Tater%20Satellite-Open%20App-FF7A18?style=for-the-badge&logo=huggingface&logoColor=white" /></a></p>
+
+### XBMC4Xbox Skin
+
+OG Xbox/XBMC4Xbox skin and script integration for on-console Tater access.
+
+<p><a href="https://github.com/TaterTotterson/skin.cortana.tater-xbmc"><img alt="View XBMC4Xbox Skin" src="https://img.shields.io/badge/XBMC4Xbox%20Skin-View%20Repository-FF7A18?style=for-the-badge&logo=github&logoColor=white" /></a></p>
 
 ---
 
