@@ -44,13 +44,25 @@ Tater is built around a modular system:
 - **Verbas** → AI-driven tools and actions Tater can perform
 - **Integrations** → modular provider packages for devices, services, search providers, and external APIs
 
-These catalogs, versions, metadata, and update paths are managed through **Tater Shop**:
+### Tater Shop
 
-👉 **https://github.com/TaterTotterson/Tater_Shop**
+Tater Shop manages the catalogs, versions, metadata, and updates for Tater Cores, Portals, and Verbas.
 
-Integration packages are maintained here:
+<p>
+  <a href="https://github.com/TaterTotterson/Tater_Shop">
+    <img alt="Browse Tater Shop" src="https://img.shields.io/badge/Tater%20Shop-Browse%20Extensions-FF7A18?style=for-the-badge&logo=github&logoColor=white" />
+  </a>
+</p>
 
-👉 **[TaterTotterson/Tater_Integrations](https://github.com/TaterTotterson/Tater_Integrations)**
+### Tater Integrations
+
+Tater Integrations provides modular packages for devices, services, search providers, and external APIs.
+
+<p>
+  <a href="https://github.com/TaterTotterson/Tater_Integrations">
+    <img alt="Browse Tater Integrations" src="https://img.shields.io/badge/Tater%20Integrations-Browse%20Packages-FF7A18?style=for-the-badge&logo=github&logoColor=white" />
+  </a>
+</p>
 
 ---
 
