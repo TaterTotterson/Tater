@@ -14,6 +14,11 @@ LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
 LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/llama-server}"
 
+# GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
+# shared download cache during setup.
+PIP_NO_CACHE_DIR="1"
+export PIP_NO_CACHE_DIR
+
 RED=""
 GREEN=""
 YELLOW=""
