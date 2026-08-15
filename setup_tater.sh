@@ -13,6 +13,9 @@ LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.gi
 LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
 LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/llama-server}"
+ROCM_LIBXML2_COMPAT_DIR="${TATER_ROCM_LIBXML2_COMPAT_DIR:-${RUNTIME_DIR}/rocm-libxml2-compat}"
+ROCM_LIBXML2_COMPAT_URL="https://launchpad.net/ubuntu/+archive/primary/+files/libxml2_2.12.7+dfsg+really2.9.14-0.4ubuntu0.4_amd64.deb"
+ROCM_LIBXML2_COMPAT_SHA256="685e94ff7fd7ad869894c2317ab9473075536a5c74c092ca5a9cd5876acaaf6c"
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -387,6 +390,77 @@ check_llama_cpp_native() {
   "${server_bin}" --version >/dev/null 2>&1
 }
 
+download_setup_file() {
+  url="$1"
+  destination="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl --location --fail --silent --show-error --output "${destination}" "${url}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --output-document="${destination}" "${url}"
+  else
+    fail "Downloading a setup compatibility file requires curl or wget."
+  fi
+}
+
+rocm_linker_missing_legacy_libxml2() {
+  rocm_root="${TATER_ROCM_PATH:-/opt/rocm}"
+  for linker in "${rocm_root}/lib/llvm/bin/lld" "${rocm_root}/lib/llvm/bin/ld.lld"; do
+    if [ -x "${linker}" ] && ldd "${linker}" 2>/dev/null | grep -q 'libxml2\.so\.2 => not found'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+prepare_rocm_linker_compat() {
+  rocm_compat_enabled="${TATER_SETUP_ROCM_LIBXML2_COMPAT:-1}"
+  rocm_compat_lib_dir="${ROCM_LIBXML2_COMPAT_DIR}/usr/lib/x86_64-linux-gnu"
+  if ! rocm_linker_missing_legacy_libxml2; then
+    return
+  fi
+  if [ -e "${rocm_compat_lib_dir}/libxml2.so.2" ]; then
+    LD_LIBRARY_PATH="${rocm_compat_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    export LD_LIBRARY_PATH
+    rocm_linker_missing_legacy_libxml2 && fail "The existing ROCm compatibility library could not satisfy libxml2.so.2."
+    ok "Using isolated ROCm linker compatibility library"
+    return
+  fi
+
+  os_id=""
+  os_version=""
+  if [ -r /etc/os-release ]; then
+    os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+    os_version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+  fi
+  if [ "${os_id}" != "ubuntu" ] || [ "${os_version}" != "26.04" ] || [ "$(uname -m)" != "x86_64" ]; then
+    warn "The ROCm linker requires libxml2.so.2, but this setup can only provide the isolated compatibility library on Ubuntu 26.04 x86_64."
+    return
+  fi
+  if ! truthy_env "${rocm_compat_enabled}"; then
+    warn "ROCm linker compatibility setup is disabled by TATER_SETUP_ROCM_LIBXML2_COMPAT."
+    return
+  fi
+  command -v sha256sum >/dev/null 2>&1 || fail "ROCm compatibility setup requires sha256sum."
+  command -v dpkg-deb >/dev/null 2>&1 || fail "ROCm compatibility setup requires dpkg-deb."
+
+  info "Preparing isolated Ubuntu 26.04 compatibility library for the ROCm linker"
+  mkdir -p "${ROCM_LIBXML2_COMPAT_DIR}"
+  compat_archive="${ROCM_LIBXML2_COMPAT_DIR}/libxml2-compat.deb"
+  download_setup_file "${ROCM_LIBXML2_COMPAT_URL}" "${compat_archive}"
+  compat_sha256="$(sha256sum "${compat_archive}" | awk '{print $1}')"
+  if [ "${compat_sha256}" != "${ROCM_LIBXML2_COMPAT_SHA256}" ]; then
+    rm -f "${compat_archive}"
+    fail "ROCm compatibility download checksum did not match."
+  fi
+  dpkg-deb -x "${compat_archive}" "${ROCM_LIBXML2_COMPAT_DIR}"
+  [ -e "${rocm_compat_lib_dir}/libxml2.so.2" ] || fail "ROCm compatibility library was not present in the verified package."
+
+  LD_LIBRARY_PATH="${rocm_compat_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export LD_LIBRARY_PATH
+  rocm_linker_missing_legacy_libxml2 && fail "The ROCm linker still cannot find libxml2.so.2 after compatibility setup."
+  ok "ROCm linker compatibility library is ready"
+}
+
 llama_cpp_native_cmake_args() {
   profile="$1"
   if [ "${TATER_LLAMA_CPP_CMAKE_ARGS:-}" ]; then
@@ -471,6 +545,9 @@ install_llama_cpp_native() {
     info "Updating native llama.cpp runtime"
     git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || warn "Could not fetch llama.cpp ${LLAMA_CPP_REF}; using existing checkout."
     git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
+  fi
+  if [ "${profile}" = "rocm" ]; then
+    prepare_rocm_linker_compat
   fi
   cmake_args="$(llama_cpp_native_cmake_args "${profile}")"
   cuda_stub_dir="$(llama_cpp_cuda_stub_dir "${profile}")"

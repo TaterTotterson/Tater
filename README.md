@@ -325,6 +325,7 @@ AMD ROCm / Strix Halo:
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
 - Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
 - llama.cpp ROCm/HIP is built by setup with `-DGGML_HIP=on` by default. Override with `TATER_LLAMA_CPP_CMAKE_ARGS` if your ROCm stack needs a different llama.cpp flag.
+- On Ubuntu 26.04 x86_64, setup detects the ROCm 7.2 linker issue involving the removed `libxml2.so.2` ABI and places a checksum-verified compatibility library under the ignored `.runtime` directory for build use only. Set `TATER_SETUP_ROCM_LIBXML2_COMPAT=0` to disable this workaround.
 - Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
 - Strix Halo may require newer AMD ROCm wheels than the default PyTorch index. Override the PyTorch ROCm wheel source with `TATER_ROCM_PYTORCH_INDEX_URL` before running setup if needed.
 
