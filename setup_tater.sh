@@ -192,6 +192,71 @@ truthy_env() {
   esac
 }
 
+missing_linux_build_tools() {
+  missing=""
+  for tool in git cmake make cc c++; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      missing="${missing} ${tool}"
+    fi
+  done
+  printf '%s' "${missing# }"
+}
+
+run_privileged() {
+  if [ "$(id -u)" = "0" ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  elif command -v doas >/dev/null 2>&1; then
+    doas "$@"
+  else
+    fail "System build tools are missing and neither sudo nor doas is available."
+  fi
+}
+
+ensure_linux_build_tools() {
+  profile="$1"
+  if [ "${profile}" = "macos" ] || [ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]; then
+    return
+  fi
+  if [ "${TATER_SETUP_LLAMA_CPP_NATIVE:-1}" = "0" ]; then
+    return
+  fi
+
+  missing="$(missing_linux_build_tools)"
+  if [ -z "${missing}" ]; then
+    ok "Linux build tools are ready"
+    return
+  fi
+  if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+    fail "Missing Linux build tools: ${missing}. Install them or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+  fi
+
+  info "Installing required Linux build tools: ${missing}"
+  if command -v apt-get >/dev/null 2>&1; then
+    run_privileged apt-get update
+    run_privileged apt-get install -y git cmake build-essential
+  elif command -v dnf >/dev/null 2>&1; then
+    run_privileged dnf install -y git cmake gcc gcc-c++ make
+  elif command -v yum >/dev/null 2>&1; then
+    run_privileged yum install -y git cmake gcc gcc-c++ make
+  elif command -v pacman >/dev/null 2>&1; then
+    run_privileged pacman -S --needed --noconfirm git cmake base-devel
+  elif command -v zypper >/dev/null 2>&1; then
+    run_privileged zypper --non-interactive install -y git cmake gcc gcc-c++ make
+  elif command -v apk >/dev/null 2>&1; then
+    run_privileged apk add git cmake build-base
+  elif command -v xbps-install >/dev/null 2>&1; then
+    run_privileged xbps-install -Sy git cmake base-devel
+  else
+    fail "Missing Linux build tools: ${missing}. No supported package manager was found."
+  fi
+
+  missing="$(missing_linux_build_tools)"
+  [ -z "${missing}" ] || fail "Linux build tools are still missing after installation: ${missing}"
+  ok "Linux build tools are ready"
+}
+
 ensure_venv() {
   profile="$1"
   python_bin="$2"
@@ -756,6 +821,7 @@ main() {
     warn "macOS profile can use Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro, plus MLX Whisper for STT."
   fi
 
+  ensure_linux_build_tools "${profile}"
   ensure_venv "${profile}" "${python_bin}"
   venv_python="${VENV_DIR}/bin/python"
   install_base "${venv_python}"
