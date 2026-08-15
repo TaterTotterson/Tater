@@ -311,6 +311,11 @@ brew install ffmpeg cmake
 
 Matrix encryption and embedded Redis are enabled by default. The macOS Apple Silicon setup includes bundled native wheels for `python-olm` and `redislite` so clean app installs do not need to compile those packages during first launch. Source installs on other macOS architectures may still need native build tools plus `libolm` and `pkg-config`.
 
+AMD ROCm / Strix Halo:
+
+- The ROCm setup detects Ryzen AI Max / Strix Halo systems and defaults both the llama.cpp target and speculative draft models to full GPU-layer offload. Other AMD and NVIDIA systems keep automatic placement.
+- Set `TATER_LLAMA_CPP_N_GPU_LAYERS=auto` and `TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS=auto` to override the Strix Halo default, or use `TATER_LLAMA_CPP_STRIX_HALO_FULL_OFFLOAD=0` when no explicit layer settings are present.
+
 NVIDIA desktop/server:
 - The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and builds Tater's native llama.cpp engine with CUDA.
 - To customize the llama.cpp build, set `TATER_LLAMA_CPP_CMAKE_ARGS` before running setup. The NVIDIA profile defaults to `-DGGML_CUDA=on`.

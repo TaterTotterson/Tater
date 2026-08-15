@@ -1597,16 +1597,65 @@ def _llama_cpp_n_threads() -> int:
     return max(1, min(256, value))
 
 
-def _llama_cpp_n_gpu_layers() -> int:
-    raw = str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or "auto").strip().lower()
-    if raw in {"", "auto", "all", "gpu"}:
-        return -1
-    if raw in {"none", "off", "false", "cpu"}:
+@functools.lru_cache(maxsize=8)
+def _detect_strix_halo_rocm_runtime(profile: str, override: str) -> bool:
+    override_token = str(override or "").strip().lower()
+    if override_token in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if override_token in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    if str(profile or "").strip().lower() != "rocm" or platform.system() != "Linux":
+        return False
+    candidates = []
+    for path in (Path("/proc/cpuinfo"), Path("/sys/devices/virtual/dmi/id/product_name")):
+        try:
+            candidates.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+    identity = " ".join(candidates)
+    return bool(re.search(r"\bAMD\s+RYZEN\s+AI\s+MAX", identity, flags=re.IGNORECASE))
+
+
+def _llama_cpp_strix_halo_full_offload_default() -> bool:
+    return _detect_strix_halo_rocm_runtime(
+        str(os.getenv("TATER_SETUP_PROFILE") or ""),
+        str(os.getenv("TATER_LLAMA_CPP_STRIX_HALO_FULL_OFFLOAD") or ""),
+    )
+
+
+def _llama_cpp_gpu_layers_value(raw: Any, *, default: int = -1) -> int:
+    token = str(raw or "").strip().lower()
+    if token in {"", "auto"}:
+        return int(default)
+    if token in {"all", "gpu"}:
+        return -2
+    if token in {"none", "off", "false", "cpu"}:
         return 0
     try:
-        return int(raw)
+        return int(token)
     except Exception:
-        return -1
+        return int(default)
+
+
+def _llama_cpp_gpu_layers_argument(value: int) -> str:
+    normalized = int(value)
+    if normalized == -1:
+        return "auto"
+    if normalized <= -2:
+        return "all"
+    return str(normalized)
+
+
+def _llama_cpp_n_gpu_layers() -> int:
+    raw = str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or "").strip()
+    if not raw and _llama_cpp_strix_halo_full_offload_default():
+        raw = "all"
+    return _llama_cpp_gpu_layers_value(raw, default=-1)
+
+
+def _llama_cpp_draft_n_gpu_layers() -> int:
+    raw = str(os.getenv("TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS") or "").strip()
+    return _llama_cpp_gpu_layers_value(raw, default=_llama_cpp_n_gpu_layers())
 
 
 def _llama_cpp_flash_attn_enabled() -> bool:
@@ -2954,6 +3003,7 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "server_bin": server_bin,
         "server_candidates": _llama_cpp_native_server_candidates(),
         "n_gpu_layers": _llama_cpp_n_gpu_layers(),
+        "draft_n_gpu_layers": _llama_cpp_draft_n_gpu_layers(),
         "n_ctx": _llama_cpp_n_ctx(),
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
         "n_batch": _llama_cpp_n_batch(),
@@ -2975,6 +3025,12 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "speculative_draft_model": _llama_cpp_mtp_draft_model(),
         "env": {
             "TATER_LLAMA_CPP_N_GPU_LAYERS": str(os.getenv("TATER_LLAMA_CPP_N_GPU_LAYERS") or ""),
+            "TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS": str(
+                os.getenv("TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS") or ""
+            ),
+            "TATER_LLAMA_CPP_STRIX_HALO_FULL_OFFLOAD": str(
+                os.getenv("TATER_LLAMA_CPP_STRIX_HALO_FULL_OFFLOAD") or ""
+            ),
             "TATER_LLAMA_CPP_N_BATCH": str(os.getenv("TATER_LLAMA_CPP_N_BATCH") or ""),
             "TATER_LLAMA_CPP_N_UBATCH": str(os.getenv("TATER_LLAMA_CPP_N_UBATCH") or ""),
             "TATER_LLAMA_CPP_CACHE_REUSE_TOKENS": str(os.getenv("TATER_LLAMA_CPP_CACHE_REUSE_TOKENS") or ""),
@@ -5996,6 +6052,7 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         str(os.getenv("TATER_LLAMA_CPP_CHAT_FORMAT") or "").strip(),
         _llama_cpp_n_ctx(vision=vision),
         _llama_cpp_n_gpu_layers(),
+        _llama_cpp_draft_n_gpu_layers(),
         _llama_cpp_n_batch(vision=vision),
         _llama_cpp_n_ubatch(vision=vision),
         _llama_cpp_cache_reuse_tokens(),
@@ -6019,6 +6076,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_n_ctx(vision=False),
         _llama_cpp_n_ctx(vision=True),
         _llama_cpp_n_gpu_layers(),
+        _llama_cpp_draft_n_gpu_layers(),
         _llama_cpp_n_batch(vision=False),
         _llama_cpp_n_batch(vision=True),
         _llama_cpp_n_ubatch(vision=False),
@@ -6609,6 +6667,7 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "mmproj_path",
         "model_root",
         "n_gpu_layers",
+        "draft_n_gpu_layers",
         "n_ctx",
         "n_batch",
         "n_ubatch",
@@ -6632,9 +6691,11 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "speculative_enabled",
         "speculative_method",
         "speculative_draft_tokens",
+        "speculative_draft_n_gpu_layers",
         "speculative_draft_model",
         "speculative_draft_model_path",
         "mtp_draft_tokens",
+        "mtp_draft_n_gpu_layers",
         "mtp_draft_model",
         "mtp_draft_model_path",
         "mtp_single_slot_workaround",
@@ -6742,6 +6803,7 @@ def _llama_cpp_native_server_command(
     n_ubatch = _llama_cpp_n_ubatch(vision=False)
     cache_reuse_tokens = _llama_cpp_cache_reuse_tokens()
     n_gpu_layers = _llama_cpp_n_gpu_layers()
+    draft_n_gpu_layers = _llama_cpp_draft_n_gpu_layers()
     configured_slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
     speculative_method = _llama_cpp_mtp_spec_type()
@@ -6790,7 +6852,7 @@ def _llama_cpp_native_server_command(
         "--batch-size",
         str(int(n_batch)),
         "--n-gpu-layers",
-        "auto" if int(n_gpu_layers) < 0 else str(int(n_gpu_layers)),
+        _llama_cpp_gpu_layers_argument(n_gpu_layers),
         "--alias",
         "tater-llama",
         "--no-ui",
@@ -6838,6 +6900,8 @@ def _llama_cpp_native_server_command(
                 speculative_method,
                 "--spec-draft-n-max",
                 str(int(_llama_cpp_mtp_draft_tokens())),
+                "--spec-draft-ngl",
+                _llama_cpp_gpu_layers_argument(draft_n_gpu_layers),
             ]
         )
         if mtp_draft_model_path:
@@ -6845,6 +6909,7 @@ def _llama_cpp_native_server_command(
     metadata = {
         "n_ctx": int(n_ctx),
         "n_gpu_layers": int(n_gpu_layers),
+        "draft_n_gpu_layers": int(draft_n_gpu_layers),
         "n_batch": int(n_batch),
         "n_ubatch": int(n_ubatch),
         "cache_reuse_tokens": int(cache_reuse_tokens),
@@ -6859,12 +6924,14 @@ def _llama_cpp_native_server_command(
         "mtp_enabled": bool(mtp_requested),
         "mtp_spec_type": speculative_method if mtp_requested else "",
         "mtp_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
+        "mtp_draft_n_gpu_layers": int(draft_n_gpu_layers) if mtp_requested else 0,
         "mtp_draft_model": mtp_draft_model,
         "mtp_draft_model_path": mtp_draft_model_path,
         "speculative_requested": bool(mtp_requested),
         "speculative_enabled": bool(mtp_requested),
         "speculative_method": speculative_method if mtp_requested else "",
         "speculative_draft_tokens": int(_llama_cpp_mtp_draft_tokens()) if mtp_requested else 0,
+        "speculative_draft_n_gpu_layers": int(draft_n_gpu_layers) if mtp_requested else 0,
         "speculative_draft_model": mtp_draft_model,
         "speculative_draft_model_path": mtp_draft_model_path,
         "mtp_single_slot_workaround": bool(mtp_single_slot_workaround),
@@ -7511,6 +7578,7 @@ def preload_llama_cpp_llm_model(
         "gpu_backend": str(bundle.get("gpu_backend") or ""),
         "n_ctx": int(bundle.get("n_ctx") or 0),
         "n_gpu_layers": int(bundle.get("n_gpu_layers") or 0),
+        "draft_n_gpu_layers": int(bundle.get("draft_n_gpu_layers") or 0),
         "n_batch": int(bundle.get("n_batch") or 0),
         "n_ubatch": int(bundle.get("n_ubatch") or 0),
         "ctx_checkpoints": int(bundle.get("ctx_checkpoints") or 0),
@@ -7522,11 +7590,15 @@ def preload_llama_cpp_llm_model(
         "mtp_enabled": bool(bundle.get("mtp_enabled")),
         "mtp_spec_type": str(bundle.get("mtp_spec_type") or ""),
         "mtp_draft_tokens": int(bundle.get("mtp_draft_tokens") or 0),
+        "mtp_draft_n_gpu_layers": int(bundle.get("mtp_draft_n_gpu_layers") or 0),
         "mtp_draft_model": str(bundle.get("mtp_draft_model") or ""),
         "mtp_draft_model_path": str(bundle.get("mtp_draft_model_path") or ""),
         "speculative_enabled": bool(bundle.get("speculative_enabled", bundle.get("mtp_enabled"))),
         "speculative_method": str(bundle.get("speculative_method") or bundle.get("mtp_spec_type") or ""),
         "speculative_draft_tokens": int(bundle.get("speculative_draft_tokens") or bundle.get("mtp_draft_tokens") or 0),
+        "speculative_draft_n_gpu_layers": int(
+            bundle.get("speculative_draft_n_gpu_layers") or bundle.get("mtp_draft_n_gpu_layers") or 0
+        ),
         "speculative_draft_model": str(bundle.get("speculative_draft_model") or bundle.get("mtp_draft_model") or ""),
         "speculative_draft_model_path": str(bundle.get("speculative_draft_model_path") or bundle.get("mtp_draft_model_path") or ""),
         "mtp_single_slot_workaround": bool(bundle.get("mtp_single_slot_workaround")),

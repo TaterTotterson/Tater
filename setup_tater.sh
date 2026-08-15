@@ -195,6 +195,17 @@ truthy_env() {
   esac
 }
 
+is_strix_halo_host() {
+  override="$(printf '%s' "${TATER_SETUP_STRIX_HALO:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${override}" in
+    1|true|yes|y|on) return 0 ;;
+    0|false|no|n|off) return 1 ;;
+  esac
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || return 1
+  [ -r /proc/cpuinfo ] || return 1
+  grep -Eiq 'AMD[[:space:]]+RYZEN[[:space:]]+AI[[:space:]]+MAX' /proc/cpuinfo
+}
+
 missing_linux_build_tools() {
   missing=""
   for tool in git cmake make cc c++; do
@@ -736,6 +747,7 @@ write_profile_env() {
   compute_type="auto"
   torch_mps_fallback=""
   nvidia_site_packages=""
+  strix_halo_full_offload="0"
   case "${profile}" in
     cpu)
       speech_acceleration="cpu"
@@ -749,6 +761,9 @@ write_profile_env() {
       ;;
     rocm)
       speech_acceleration="rocm"
+      if is_strix_halo_host; then
+        strix_halo_full_offload="1"
+      fi
       ;;
   esac
   if [ "${profile}" = "nvidia" ] && [ -x "${VENV_DIR}/bin/python" ]; then
@@ -771,7 +786,15 @@ write_profile_env() {
         say "export LD_LIBRARY_PATH=\"${nvidia_site_packages}/nvidia/cublas/lib:${nvidia_site_packages}/nvidia/cuda_runtime/lib:${nvidia_site_packages}/nvidia/cuda_nvrtc/lib:${nvidia_site_packages}/nvidia/cudnn/lib:${nvidia_site_packages}/nvidia/curand/lib:${nvidia_site_packages}/nvidia/cusolver/lib:${nvidia_site_packages}/nvidia/cusparse/lib:${nvidia_site_packages}/nvidia/nvjitlink/lib:\${LD_LIBRARY_PATH:-}\""
       fi
     fi
+    if [ "${strix_halo_full_offload}" = "1" ]; then
+      say "export TATER_LLAMA_CPP_N_GPU_LAYERS=\"\${TATER_LLAMA_CPP_N_GPU_LAYERS:-all}\""
+      say "export TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS=\"\${TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS:-all}\""
+    fi
   } > "${PROFILE_ENV}"
+
+  if [ "${strix_halo_full_offload}" = "1" ]; then
+    ok "Detected Strix Halo; llama.cpp target and draft models will fully offload to ROCm VRAM"
+  fi
 
   printf '%s\n' "${profile}" > "${PROFILE_FILE}"
 }

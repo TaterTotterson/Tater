@@ -30,6 +30,66 @@ def _local_result(text: str = "ok"):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
+    def test_gpu_layer_modes_keep_auto_and_all_distinct(self):
+        for configured, expected, argument in (
+            ("auto", -1, "auto"),
+            ("all", -2, "all"),
+            ("gpu", -2, "all"),
+            ("cpu", 0, "0"),
+            ("42", 42, "42"),
+        ):
+            with self.subTest(configured=configured):
+                with mock.patch.dict(
+                    helpers.os.environ,
+                    {"TATER_LLAMA_CPP_N_GPU_LAYERS": configured},
+                    clear=False,
+                ):
+                    value = helpers._llama_cpp_n_gpu_layers()
+                self.assertEqual(value, expected)
+                self.assertEqual(helpers._llama_cpp_gpu_layers_argument(value), argument)
+
+    def test_strix_halo_defaults_to_all_but_explicit_auto_wins(self):
+        with (
+            mock.patch.object(helpers, "_llama_cpp_strix_halo_full_offload_default", return_value=True),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_N_GPU_LAYERS": ""},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_n_gpu_layers(), -2)
+
+        with (
+            mock.patch.object(helpers, "_llama_cpp_strix_halo_full_offload_default", return_value=True),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_N_GPU_LAYERS": "auto"},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_n_gpu_layers(), -1)
+
+    def test_draft_gpu_layers_inherit_target_or_accept_override(self):
+        with (
+            mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-2),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS": ""},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_draft_n_gpu_layers(), -2)
+
+        with (
+            mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-2),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS": "auto"},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_draft_n_gpu_layers(), -1)
+
     def test_explicit_none_runs_to_eos_or_context_boundary(self):
         client = helpers.LlamaCppLLMClientWrapper(model="test-model")
         chat_kwargs = client._build_chat_kwargs(
@@ -83,7 +143,8 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 mock.patch.object(helpers, "_llama_cpp_n_batch", return_value=512),
                 mock.patch.object(helpers, "_llama_cpp_n_ubatch", return_value=0),
                 mock.patch.object(helpers, "_llama_cpp_cache_reuse_tokens", return_value=256),
-                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-2),
+                mock.patch.object(helpers, "_llama_cpp_draft_n_gpu_layers", return_value=-2),
                 mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
                 mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
                 mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=True),
@@ -112,8 +173,10 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 )
 
         self.assertEqual(command[command.index("--ctx-checkpoints") + 1], "0")
+        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "all")
         self.assertEqual(command[command.index("--spec-type") + 1], "draft-mtp")
         self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "2")
+        self.assertEqual(command[command.index("--spec-draft-ngl") + 1], "all")
         self.assertEqual(command[command.index("--parallel") + 1], "2")
         self.assertIn("--no-context-shift", command)
         self.assertEqual(metadata["ctx_checkpoints"], 0)
@@ -121,6 +184,8 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(metadata["slot_count"], 2)
         self.assertFalse(metadata["mtp_single_slot_workaround"])
         self.assertTrue(metadata["mtp_enabled"])
+        self.assertEqual(metadata["n_gpu_layers"], -2)
+        self.assertEqual(metadata["draft_n_gpu_layers"], -2)
         self.assertEqual(metadata["speculative_method"], "draft-mtp")
 
     def test_speculative_method_aliases_are_normalized(self):
