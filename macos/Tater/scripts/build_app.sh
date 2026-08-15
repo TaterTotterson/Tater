@@ -19,6 +19,12 @@ LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 NATIVE_BUILD_DIR="${PROJECT_DIR}/build/native"
 LLAMA_CPP_DIR="${TATER_MACOS_LLAMA_CPP_DIR:-${NATIVE_BUILD_DIR}/llama.cpp}"
 MLX_ENGINE_DIR="${TATER_MACOS_MLX_ENGINE_DIR:-${NATIVE_BUILD_DIR}/mlx-engine}"
+MACOS_DEPLOYMENT_TARGET="${TATER_MACOS_DEPLOYMENT_TARGET:-15.0}"
+
+# Keep SwiftPM and native CMake builds on the same deployment target. Without
+# this, native libraries can inherit the release machine's current macOS SDK
+# target and fail to launch on otherwise supported macOS versions.
+export MACOSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
 
 swift build -c release --package-path "${PROJECT_DIR}"
 BIN_DIR="$(swift build -c release --package-path "${PROJECT_DIR}" --show-bin-path)"
@@ -30,6 +36,9 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 
 cp "${BIN_DIR}/TaterAssistant" "${MACOS_DIR}/TaterAssistant"
 cp "${PROJECT_DIR}/Resources/Info.plist" "${CONTENTS_DIR}/Info.plist"
+/usr/libexec/PlistBuddy \
+  -c "Set :LSMinimumSystemVersion ${MACOS_DEPLOYMENT_TARGET}" \
+  "${CONTENTS_DIR}/Info.plist"
 cp "${PROJECT_DIR}/Resources/TaterIcon.icns" "${RESOURCES_DIR}/TaterIcon.icns"
 cp "${PROJECT_DIR}/Resources/TaterMenuBarTemplate.png" "${RESOURCES_DIR}/TaterMenuBarTemplate.png"
 cp "${PROJECT_DIR}/Resources/TaterAvatar.png" "${RESOURCES_DIR}/TaterAvatar.png"
@@ -190,10 +199,13 @@ prepare_bundled_llama_cpp_runtime() {
     git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
   fi
 
+  # Avoid packaging stale dylibs left behind by earlier llama.cpp versions.
+  rm -rf "${LLAMA_CPP_DIR}/build"
   cmake \
     -S "${LLAMA_CPP_DIR}" \
     -B "${LLAMA_CPP_DIR}/build" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" \
     -DGGML_METAL=on \
     -DLLAMA_OPENSSL=OFF \
     -DLLAMA_BUILD_UI=OFF \
@@ -257,8 +269,64 @@ prepare_bundled_mlx_engine_runtime() {
   test -d "${bundled_engine}/mlx_engine"
 }
 
+version_exceeds_target() {
+  actual_version="$1"
+  target_version="$2"
+  awk -v actual="${actual_version}" -v target="${target_version}" 'BEGIN {
+    actual_count = split(actual, actual_parts, ".")
+    target_count = split(target, target_parts, ".")
+    count = actual_count > target_count ? actual_count : target_count
+    for (part_index = 1; part_index <= count; part_index++) {
+      actual_part = actual_parts[part_index] + 0
+      target_part = target_parts[part_index] + 0
+      if (actual_part > target_part) exit 0
+      if (actual_part < target_part) exit 1
+    }
+    exit 1
+  }'
+}
+
+verify_macos_deployment_targets() {
+  report_path="$(mktemp "${TMPDIR:-/tmp}/tater-deployment-targets.XXXXXX")"
+  find "${APP_DIR}" -type f | while IFS= read -r payload_path; do
+    if ! file "${payload_path}" | grep -q 'Mach-O'; then
+      continue
+    fi
+    otool -l "${payload_path}" | awk -v path="${payload_path}" '
+      $1 == "cmd" {
+        build_version = ($2 == "LC_BUILD_VERSION")
+        legacy_version = ($2 == "LC_VERSION_MIN_MACOSX")
+        next
+      }
+      build_version && $1 == "minos" { print $2, path }
+      legacy_version && $1 == "version" { print $2, path }
+    '
+  done > "${report_path}"
+
+  if [ ! -s "${report_path}" ]; then
+    rm -f "${report_path}"
+    printf 'Could not read a macOS deployment target from the app bundle.\n' >&2
+    exit 1
+  fi
+
+  invalid_target=0
+  while IFS=' ' read -r minimum_version payload_path; do
+    if version_exceeds_target "${minimum_version}" "${MACOS_DEPLOYMENT_TARGET}"; then
+      printf '%s requires macOS %s, above the supported build target %s.\n' \
+        "${payload_path}" "${minimum_version}" "${MACOS_DEPLOYMENT_TARGET}" >&2
+      invalid_target=1
+    fi
+  done < "${report_path}"
+  rm -f "${report_path}"
+
+  if [ "${invalid_target}" -ne 0 ]; then
+    exit 1
+  fi
+}
+
 prepare_bundled_llama_cpp_runtime
 prepare_bundled_mlx_engine_runtime
+verify_macos_deployment_targets
 
 chmod +x "${MACOS_DIR}/TaterAssistant"
 

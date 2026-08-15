@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "TaterAssistant",
     platforms: [
-        .macOS(.v13)
+        .macOS("15.0")
     ],
     products: [
         .executable(name: "TaterAssistant", targets: ["TaterAssistant"])

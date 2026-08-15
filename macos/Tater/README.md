@@ -2,6 +2,8 @@
 
 This is a native macOS shell for Tater. It keeps the Python/FastAPI app intact, but gives it a Mac app window, menu bar status item, private runtime, and app-only update checks.
 
+The app requires an Apple Silicon Mac running macOS 15.0 or newer.
+
 ## Runtime Layout
 
 On first launch, the app prepares a private runtime in:
