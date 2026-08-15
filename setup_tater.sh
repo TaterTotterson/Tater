@@ -447,6 +447,7 @@ prepare_rocm_linker_compat() {
     return
   fi
   if [ -e "${rocm_compat_lib_dir}/libxml2.so.2" ]; then
+    rocm_compat_lib_dir="$(CDPATH= cd "${rocm_compat_lib_dir}" && pwd -P)"
     LD_LIBRARY_PATH="${rocm_compat_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export LD_LIBRARY_PATH
     rocm_linker_missing_legacy_libxml2 && fail "The existing ROCm compatibility library could not satisfy libxml2.so.2."
@@ -483,6 +484,7 @@ prepare_rocm_linker_compat() {
   dpkg-deb -x "${compat_archive}" "${ROCM_LIBXML2_COMPAT_DIR}"
   [ -e "${rocm_compat_lib_dir}/libxml2.so.2" ] || fail "ROCm compatibility library was not present in the verified package."
 
+  rocm_compat_lib_dir="$(CDPATH= cd "${rocm_compat_lib_dir}" && pwd -P)"
   LD_LIBRARY_PATH="${rocm_compat_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   export LD_LIBRARY_PATH
   rocm_linker_missing_legacy_libxml2 && fail "The ROCm linker still cannot find libxml2.so.2 after compatibility setup."
