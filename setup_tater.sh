@@ -402,10 +402,38 @@ download_setup_file() {
   fi
 }
 
-rocm_linker_missing_legacy_libxml2() {
-  rocm_root="${TATER_ROCM_PATH:-/opt/rocm}"
+rocm_root_linker_missing_legacy_libxml2() {
+  rocm_root="$1"
+  [ -d "${rocm_root}" ] || return 1
   for linker in "${rocm_root}/lib/llvm/bin/lld" "${rocm_root}/lib/llvm/bin/ld.lld"; do
     if [ -x "${linker}" ] && ldd "${linker}" 2>/dev/null | grep -q 'libxml2\.so\.2 => not found'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+rocm_linker_missing_legacy_libxml2() {
+  if [ "${TATER_ROCM_PATH:-}" ] && rocm_root_linker_missing_legacy_libxml2 "${TATER_ROCM_PATH}"; then
+    return 0
+  fi
+  if command -v hipconfig >/dev/null 2>&1; then
+    hipconfig_root="$(hipconfig --path 2>/dev/null | head -n 1)"
+    if [ "${hipconfig_root}" ] && rocm_root_linker_missing_legacy_libxml2 "${hipconfig_root}"; then
+      return 0
+    fi
+  fi
+  if command -v hipcc >/dev/null 2>&1 && command -v readlink >/dev/null 2>&1; then
+    hipcc_path="$(readlink -f "$(command -v hipcc)" 2>/dev/null || true)"
+    if [ "${hipcc_path}" ]; then
+      hipcc_root="$(CDPATH= cd "$(dirname "${hipcc_path}")/.." 2>/dev/null && pwd -P || true)"
+      if [ "${hipcc_root}" ] && rocm_root_linker_missing_legacy_libxml2 "${hipcc_root}"; then
+        return 0
+      fi
+    fi
+  fi
+  for rocm_root in /opt/rocm /opt/rocm-*; do
+    if rocm_root_linker_missing_legacy_libxml2 "${rocm_root}"; then
       return 0
     fi
   done
