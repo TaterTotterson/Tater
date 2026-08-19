@@ -13,11 +13,17 @@
 
 ## Little Spud Companion App
 
-Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your Apple devices.
+Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your iOS or Android device.
 
 <p>
   <a href="https://apps.apple.com/app/little-spud/id6781400718">
     <img alt="Download Little Spud on the App Store" src="https://img.shields.io/badge/App%20Store-Download%20Little%20Spud-0D96F6?style=for-the-badge&logo=apple&logoColor=white" />
+  </a>
+</p>
+
+<p>
+  <a href="https://play.google.com/store/apps/details?id=com.tatertotterson.littlespud.android">
+    <img alt="Download Little Spud on Google Play" src="https://img.shields.io/badge/Google%20Play-Download%20Little%20Spud-34A853?style=for-the-badge&logo=googleplay&logoColor=white" />
   </a>
 </p>
 
