@@ -134,6 +134,19 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertLess(app_js.index(shared_wake_host), app_js.index(wake_verifier_host))
         self.assertNotIn('id="settings-esphome-runtime-wake-verifier"', app_js)
 
+    def test_faster_whisper_card_visibility_follows_selected_stt_backend(self) -> None:
+        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="speech-faster-whisper-settings-wrap"', app_js)
+        self.assertIn(
+            'getElementById("speech-faster-whisper-settings-wrap")',
+            app_js,
+        )
+        self.assertIn(
+            'setElementVisible(speechFasterWhisperSettingsWrapEl, sttBackend === "faster_whisper")',
+            app_js,
+        )
+
     def test_led_brightness_is_a_percentage(self) -> None:
         normalized = native_live_settings.normalize_settings({"led_brightness": 255})
         brightness_field = next(
@@ -332,6 +345,50 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(row["fail_open"], 1)
         self.assertEqual(row["last_result"], "Fail-open")
         self.assertEqual(card["reset_action"], "voice_wake_verifier_stats_reset")
+
+    def test_result_card_marks_engine_from_previous_selection(self) -> None:
+        native_status = {
+            "clients": {
+                "native:test-sat": {
+                    "connected": True,
+                    "device_name": "Test Satellite",
+                    "wake_verifier": {
+                        "count": 1,
+                        "rejections": 0,
+                        "last": {
+                            "accepted": True,
+                            "available": True,
+                            "transcript": "hey tater",
+                            "score": 1.0,
+                            "stt_ms": 20.0,
+                            "stt_engine": "faster_whisper",
+                            "stt_engine_selected": "faster_whisper",
+                        },
+                    },
+                    "last_status": {"wake_engine": {"verifier": {"completed": 1}}},
+                }
+            }
+        }
+        with (
+            mock.patch.object(settings, "wake_verifier_mode", return_value="observe"),
+            mock.patch(
+                "tater_voice.voice_pipeline._selected_stt_backend",
+                return_value="qwen3_asr_llama_cpp",
+            ),
+            mock.patch.object(home.esphome_runtime, "voice_metrics_snapshot", return_value={}),
+        ):
+            card = home._wake_verifier_item_form(native_status)
+
+        self.assertEqual(
+            card["sections"][0]["fields"][2]["value"],
+            "qwen3_asr_llama_cpp",
+        )
+        results_field = card["sections"][1]["fields"][0]
+        engine_column = next(
+            column for column in results_field["columns"] if column["key"] == "stt_engine"
+        )
+        self.assertEqual(engine_column["label"], "Last STT Engine")
+        self.assertEqual(results_field["rows"][0]["stt_engine"], "faster_whisper (previous)")
 
     def test_persisted_wake_stats_remain_visible_while_satellite_is_offline(self) -> None:
         metrics = {

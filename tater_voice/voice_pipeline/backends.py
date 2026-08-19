@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -20,6 +21,11 @@ import requests
 from .conversation import VoiceSessionRuntime
 from runtime_executors import run_stt, run_tts
 from tateros import integration_store as integration_store_module
+from helpers import (
+    _llama_cpp_native_free_port,
+    _llama_cpp_native_server_bin,
+    _macos_posix_spawn_kwargs,
+)
 
 
 def _vp():
@@ -30,6 +36,19 @@ _LOCAL_STT_TRANSCRIBE_LOCK = asyncio.Lock()
 _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK = threading.RLock()
 _MLX_WHISPER_TRANSCRIBE_LOCK = threading.RLock()
 _PARAKEET_ONNX_TRANSCRIBE_LOCK = threading.RLock()
+_QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK = threading.RLock()
+_QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK = threading.RLock()
+_QWEN3_ASR_LLAMA_CPP_STATE: Dict[str, Any] = {
+    "process": None,
+    "base_url": "",
+    "model_path": "",
+    "mmproj_path": "",
+    "api_key": "",
+    "stdout_tail": [],
+    "stderr_tail": [],
+    "started_ts": 0.0,
+    "gpu_layers": 0,
+}
 
 
 def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
@@ -241,6 +260,7 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
     cleared = {
         "faster_whisper": 0,
         "parakeet_onnx": 0,
+        "qwen3_asr_llama_cpp": 0,
         "vosk": 0,
     }
 
@@ -261,6 +281,13 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
             cleared["vosk"] = len(vp._vosk_model_cache)
             vp._vosk_model_cache.clear()
 
+    if keep != "qwen3_asr_llama_cpp":
+        with _QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK:
+            snapshot = _qwen3_asr_llama_cpp_runtime_snapshot()
+            if snapshot.get("running"):
+                cleared["qwen3_asr_llama_cpp"] = 1
+            _shutdown_qwen3_asr_llama_cpp_server()
+
     if keep != "mlx_whisper":
         with contextlib.suppress(Exception):
             mlx_core = importlib.import_module("mlx.core")
@@ -272,6 +299,393 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
         gc.collect()
     vp.logger.info("[native-voice] cleared STT model caches keep=%s cleared=%s", keep or "-", cleared)
     return cleared
+
+
+def _qwen3_asr_llama_cpp_repo() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_REPO"))
+        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO
+    )
+
+
+def _qwen3_asr_llama_cpp_model_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MODEL_FILE"))
+        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE
+    )
+
+
+def _qwen3_asr_llama_cpp_mmproj_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE"))
+        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE
+    )
+
+
+def _qwen3_asr_llama_cpp_model_paths(*, download: bool) -> Tuple[str, str]:
+    vp = _vp()
+    root = vp._ensure_stt_backend_model_root("qwen3_asr_llama_cpp")
+    model_file = _qwen3_asr_llama_cpp_model_file()
+    mmproj_file = _qwen3_asr_llama_cpp_mmproj_file()
+    model_path = os.path.join(root, model_file)
+    mmproj_path = os.path.join(root, mmproj_file)
+    if download and (not os.path.isfile(model_path) or not os.path.isfile(mmproj_path)):
+        huggingface_hub = importlib.import_module("huggingface_hub")
+        vp.logger.info(
+            "[native-voice] qwen3-asr llama.cpp download repo=%s model=%s mmproj=%s root=%s",
+            _qwen3_asr_llama_cpp_repo(),
+            model_file,
+            mmproj_file,
+            root,
+        )
+        with _temporary_env(
+            huggingface_environment(
+                {
+                    "HF_HOME": root,
+                    "HF_HUB_CACHE": os.path.join(root, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                }
+            )
+        ):
+            huggingface_hub.snapshot_download(
+                repo_id=_qwen3_asr_llama_cpp_repo(),
+                local_dir=root,
+                allow_patterns=[model_file, mmproj_file],
+            )
+    missing = [path for path in (model_path, mmproj_path) if not os.path.isfile(path)]
+    if missing:
+        raise RuntimeError(
+            "Qwen3-ASR llama.cpp model files are missing after download: "
+            + ", ".join(missing)
+        )
+    return model_path, mmproj_path
+
+
+def _qwen3_asr_llama_cpp_available() -> Tuple[bool, str]:
+    server_bin = _llama_cpp_native_server_bin()
+    if not server_bin:
+        return False, "Tater's native llama-server binary was not found"
+    try:
+        model_path, mmproj_path = _qwen3_asr_llama_cpp_model_paths(download=False)
+    except Exception:
+        model_path = mmproj_path = ""
+    if model_path and mmproj_path:
+        return True, ""
+    if importlib.util.find_spec("huggingface_hub") is None:
+        return False, "huggingface-hub is required to download the Qwen3-ASR GGUF files"
+    return True, ""
+
+
+def _qwen3_asr_llama_cpp_runtime_snapshot() -> Dict[str, Any]:
+    with _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK:
+        proc = _QWEN3_ASR_LLAMA_CPP_STATE.get("process")
+        running = bool(proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": int(getattr(proc, "pid", 0) or 0) if running else 0,
+            "base_url": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("base_url") or ""),
+            "model_path": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("model_path") or ""),
+            "mmproj_path": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("mmproj_path") or ""),
+            "started_ts": float(_QWEN3_ASR_LLAMA_CPP_STATE.get("started_ts") or 0.0),
+            "gpu_layers": max(0, int(_QWEN3_ASR_LLAMA_CPP_STATE.get("gpu_layers") or 0)),
+            "stdout_tail": list(_QWEN3_ASR_LLAMA_CPP_STATE.get("stdout_tail") or [])[-20:],
+            "stderr_tail": list(_QWEN3_ASR_LLAMA_CPP_STATE.get("stderr_tail") or [])[-20:],
+        }
+
+
+def _qwen3_asr_llama_cpp_drain_stream(stream: Any, target: List[str]) -> None:
+    if stream is None:
+        return
+    try:
+        for line in stream:
+            text_line = str(line or "").rstrip()
+            if not text_line:
+                continue
+            target.append(text_line)
+            if len(target) > 100:
+                del target[:-100]
+    except Exception:
+        return
+
+
+def _qwen3_asr_llama_cpp_gpu_layers() -> int:
+    vp = _vp()
+    selected = vp.normalize_speech_acceleration(
+        vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION")
+    )
+    if selected == "cpu":
+        return 0
+    return vp._as_int(
+        os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_N_GPU_LAYERS"),
+        999,
+        minimum=0,
+        maximum=999,
+    )
+
+
+def _qwen3_asr_llama_cpp_server_command(
+    *,
+    server_bin: str,
+    model_path: str,
+    mmproj_path: str,
+    port: int,
+    api_key: str,
+) -> List[str]:
+    vp = _vp()
+    context_size = vp._as_int(
+        os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_CONTEXT_SIZE"),
+        vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_CONTEXT_SIZE,
+        minimum=2048,
+        maximum=131072,
+    )
+    return [
+        server_bin,
+        "--model",
+        model_path,
+        "--mmproj",
+        mmproj_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(int(port)),
+        "--ctx-size",
+        str(int(context_size)),
+        "--n-gpu-layers",
+        str(_qwen3_asr_llama_cpp_gpu_layers()),
+        "--parallel",
+        "1",
+        "--alias",
+        "qwen3-asr",
+        "--api-key",
+        api_key,
+        "--no-ui",
+        "--jinja",
+        "--reasoning",
+        "off",
+        "--reasoning-budget",
+        "0",
+        "--reasoning-format",
+        "none",
+        "--no-context-shift",
+        "--cache-ram",
+        "0",
+    ]
+
+
+def _shutdown_qwen3_asr_llama_cpp_server() -> None:
+    with _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK:
+        proc = _QWEN3_ASR_LLAMA_CPP_STATE.get("process")
+        _QWEN3_ASR_LLAMA_CPP_STATE.update(
+            {
+                "process": None,
+                "base_url": "",
+                "model_path": "",
+                "mmproj_path": "",
+                "api_key": "",
+                "stdout_tail": [],
+                "stderr_tail": [],
+                "started_ts": 0.0,
+                "gpu_layers": 0,
+            }
+        )
+    if proc is None or not callable(getattr(proc, "poll", None)) or proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=10.0)
+    except Exception:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5.0)
+
+
+def _load_qwen3_asr_llama_cpp_server() -> Dict[str, Any]:
+    vp = _vp()
+    with _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK:
+        proc = _QWEN3_ASR_LLAMA_CPP_STATE.get("process")
+        if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+            return _qwen3_asr_llama_cpp_runtime_snapshot()
+
+        model_path, mmproj_path = _qwen3_asr_llama_cpp_model_paths(download=True)
+        server_bin = _llama_cpp_native_server_bin()
+        if not server_bin:
+            raise RuntimeError("Tater's native llama-server binary was not found")
+        port = _llama_cpp_native_free_port()
+        base_url = f"http://127.0.0.1:{int(port)}"
+        api_key = os.urandom(24).hex()
+        stdout_tail: List[str] = []
+        stderr_tail: List[str] = []
+        gpu_layers = _qwen3_asr_llama_cpp_gpu_layers()
+        cmd = _qwen3_asr_llama_cpp_server_command(
+            server_bin=server_bin,
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            port=port,
+            api_key=api_key,
+        )
+        vp.logger.info(
+            "[native-voice] starting qwen3-asr llama.cpp server model=%s mmproj=%s gpu_layers=%s port=%s",
+            model_path,
+            mmproj_path,
+            _qwen3_asr_llama_cpp_gpu_layers(),
+            port,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=dict(os.environ),
+            **_macos_posix_spawn_kwargs(),
+        )
+        _QWEN3_ASR_LLAMA_CPP_STATE.update(
+            {
+                "process": proc,
+                "base_url": base_url,
+                "model_path": model_path,
+                "mmproj_path": mmproj_path,
+                "api_key": api_key,
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+                "started_ts": time.time(),
+                "gpu_layers": gpu_layers,
+            }
+        )
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stdout, stdout_tail),
+            daemon=True,
+            name="tater-qwen3-asr-stdout",
+        ).start()
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stderr, stderr_tail),
+            daemon=True,
+            name="tater-qwen3-asr-stderr",
+        ).start()
+
+        timeout_s = vp._as_float(
+            os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_STARTUP_TIMEOUT_S"),
+            vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS,
+            minimum=10.0,
+            maximum=600.0,
+        )
+        deadline = time.monotonic() + timeout_s
+        error = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                error = f"llama-server exited with code {proc.returncode}"
+                break
+            try:
+                response = requests.get(f"{base_url}/health", timeout=1.0)
+                if response.status_code == 200:
+                    return _qwen3_asr_llama_cpp_runtime_snapshot()
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        logs = " | ".join((stderr_tail or stdout_tail)[-10:])
+        _shutdown_qwen3_asr_llama_cpp_server()
+        detail = error or f"llama-server was not ready after {timeout_s:.1f}s"
+        if logs:
+            detail = f"{detail}. Logs: {logs}"
+        raise RuntimeError(f"Qwen3-ASR llama.cpp startup failed: {detail}")
+
+
+def _qwen3_asr_llama_cpp_response_text(payload: Any) -> str:
+    vp = _vp()
+    text = ""
+    if isinstance(payload, dict):
+        text = vp._text(payload.get("text"))
+        if not text:
+            choices = payload.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                message = choices[0].get("message")
+                if isinstance(message, dict):
+                    text = vp._text(message.get("content"))
+    else:
+        text = vp._text(payload)
+    if "<asr_text>" in text:
+        text = text.split("<asr_text>", 1)[1]
+    text = re.sub(r"^language\s+[^\s<]+\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\|(?:im_end|endoftext)\|>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _pcm16_mono_wav_bytes(pcm16: bytes, *, rate: int = 16000) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(rate))
+        wav_file.writeframes(bytes(pcm16 or b""))
+    return buffer.getvalue()
+
+
+def _transcribe_qwen3_asr_llama_cpp_sync(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    partial: bool = False,
+) -> str:
+    vp = _vp()
+    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
+    if not pcm16:
+        return ""
+    with _QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK:
+        runtime = _load_qwen3_asr_llama_cpp_server()
+        base_url = vp._text(runtime.get("base_url"))
+        if not base_url:
+            raise RuntimeError("Qwen3-ASR llama.cpp server did not report a base URL")
+        max_tokens = vp._as_int(
+            os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MAX_TOKENS"),
+            128 if partial else vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MAX_TOKENS,
+            minimum=32,
+            maximum=2048,
+        )
+        form: Dict[str, str] = {
+            "model": "qwen3-asr",
+            "response_format": "json",
+            "temperature": "0",
+            "max_tokens": str(int(max_tokens)),
+        }
+        lang = vp._text(language)
+        if lang:
+            form["language"] = lang
+        prompt = vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_PROMPT"))
+        if prompt:
+            form["prompt"] = prompt
+        response = requests.post(
+            f"{base_url}/v1/audio/transcriptions",
+            headers={
+                "Authorization": "Bearer "
+                + str(_QWEN3_ASR_LLAMA_CPP_STATE.get("api_key") or "")
+            },
+            data=form,
+            files={"file": ("tater-voice.wav", _pcm16_mono_wav_bytes(pcm16), "audio/wav")},
+            timeout=vp._get_float_setting(
+                "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
+                vp.DEFAULT_LOCAL_STT_TIMEOUT_SECONDS,
+                minimum=5.0,
+                maximum=180.0,
+            ),
+        )
+        if response.status_code >= 400:
+            detail = _response_error_text(response)
+            raise RuntimeError(
+                f"Qwen3-ASR llama.cpp transcription failed with HTTP {response.status_code}: {detail}"
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError("Qwen3-ASR llama.cpp returned invalid JSON") from exc
+        return _qwen3_asr_llama_cpp_response_text(payload)
 
 
 def _load_parakeet_onnx_model() -> Any:
@@ -1145,6 +1559,18 @@ async def _native_transcribe_local_audio_bytes(
                 language,
                 bool(partial),
             )
+        elif token == "qwen3_asr_llama_cpp":
+            vp._native_debug(
+                f"STT ({mode_label} qwen3-asr llama.cpp) local selector={selector} "
+                f"session_id={session_id} bytes={len(data)}"
+            )
+            transcript = await _run_local_stt_thread(
+                _transcribe_qwen3_asr_llama_cpp_sync,
+                data,
+                audio_format,
+                language,
+                bool(partial),
+            )
         elif token == "vosk":
             vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
             transcript = await _run_local_stt_thread(_transcribe_vosk_sync, data, audio_format)
@@ -1198,6 +1624,14 @@ async def _native_transcribe_wake_audio_bytes(
         elif token == "parakeet_onnx":
             transcript = await _run_local_stt_thread(
                 _transcribe_parakeet_onnx_sync,
+                data,
+                audio_format,
+                language,
+                True,
+            )
+        elif token == "qwen3_asr_llama_cpp":
+            transcript = await _run_local_stt_thread(
+                _transcribe_qwen3_asr_llama_cpp_sync,
                 data,
                 audio_format,
                 language,

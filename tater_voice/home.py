@@ -472,6 +472,16 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
             or selected_stt_engine
             or "—"
         )
+        last_selected_stt_engine = esphome_runtime.text(last.get("stt_engine_selected"))
+        if last and last_selected_stt_engine and selected_stt_engine and last_selected_stt_engine != selected_stt_engine:
+            stt_engine = f"{stt_engine} (previous)"
+        elif (
+            last
+            and esphome_runtime.text(last.get("stt_fallback_reason"))
+            and last_selected_stt_engine
+            and stt_engine != last_selected_stt_engine
+        ):
+            stt_engine = f"{stt_engine} (fallback)"
         name = (
             esphome_runtime.text(raw_row.get("device_name"))
             or esphome_runtime.text(raw_row.get("name"))
@@ -561,11 +571,11 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                             {"key": "last_result", "label": "Last"},
                             {"key": "transcript", "label": "Transcript"},
                             {"key": "score", "label": "Score"},
-                            {"key": "stt_engine", "label": "STT Engine"},
+                            {"key": "stt_engine", "label": "Last STT Engine"},
                             {"key": "stt_ms", "label": "STT"},
                         ],
                         "rows": rows,
-                        "description": "Observe mode populates this table while allowing every wake to continue normally.",
+                        "description": "Observe mode populates this table while allowing every wake to continue normally. Each row shows the engine used for its most recent check; run a new wake after changing STT backends to update it.",
                     }
                 ],
             },

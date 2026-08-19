@@ -147,6 +147,14 @@ def _normalize_stt_backend(value: Any) -> str:
         return "mlx_whisper"
     if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
         return "parakeet_onnx"
+    if token in {
+        "qwen3_asr",
+        "qwen3_asr_llama",
+        "qwen3_asr_llama_cpp",
+        "qwen_asr",
+        "qwen_asr_llama_cpp",
+    }:
+        return "qwen3_asr_llama_cpp"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -285,6 +293,10 @@ def _stt_backend_option_rows() -> List[Dict[str, Any]]:
         {"value": "faster_whisper", "label": "Faster Whisper"},
         {"value": "mlx_whisper", "label": "MLX Whisper"},
         {"value": "parakeet_onnx", "label": "Parakeet ONNX"},
+        {
+            "value": "qwen3_asr_llama_cpp",
+            "label": "Qwen3-ASR (llama.cpp, Experimental)",
+        },
         {"value": "wyoming", "label": "Wyoming"},
         {"value": "vosk", "label": "Vosk"},
     ]

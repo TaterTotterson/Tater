@@ -93,6 +93,7 @@ from .backends import (
     _load_parakeet_onnx_model,
     _load_piper_voice_model,
     _load_pocket_tts_model,
+    _load_qwen3_asr_llama_cpp_server,
     _load_vosk_model,
     _native_local_partial_stt_task,
     _open_chatterbox_tts_stream_response,
@@ -119,6 +120,7 @@ from .backends import (
     _transcribe_mlx_whisper_sync,
     _transcribe_mlx_whisper_wake_sync,
     _transcribe_parakeet_onnx_sync,
+    _transcribe_qwen3_asr_llama_cpp_sync,
     _transcribe_vosk_sync,
     _trim_pcm_for_playback,
     _tts_backend_available,
@@ -132,6 +134,9 @@ from .backends import (
     _temporary_env,
     _piper_model_paths,
     _build_piper_segment_plan,
+    _qwen3_asr_llama_cpp_available,
+    _qwen3_asr_llama_cpp_runtime_snapshot,
+    _shutdown_qwen3_asr_llama_cpp_server,
 )
 from .routes import router, shutdown, startup
 
@@ -344,6 +349,12 @@ DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
 DEFAULT_PARAKEET_ONNX_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 DEFAULT_PARAKEET_ONNX_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 DEFAULT_PARAKEET_ONNX_QUANTIZATION = "int8"
+DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO = "ggml-org/Qwen3-ASR-0.6B-GGUF"
+DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE = "Qwen3-ASR-0.6B-Q8_0.gguf"
+DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE = "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+DEFAULT_QWEN3_ASR_LLAMA_CPP_CONTEXT_SIZE = 8192
+DEFAULT_QWEN3_ASR_LLAMA_CPP_MAX_TOKENS = 256
+DEFAULT_QWEN3_ASR_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS = 180.0
 DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 DEFAULT_STT_MODEL_ROOT = str(agent_lab_path("models", "stt"))
@@ -2401,6 +2412,14 @@ def _normalize_stt_backend(value: Any) -> str:
         return "mlx_whisper"
     if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
         return "parakeet_onnx"
+    if token in {
+        "qwen3_asr",
+        "qwen3_asr_llama",
+        "qwen3_asr_llama_cpp",
+        "qwen_asr",
+        "qwen_asr_llama_cpp",
+    }:
+        return "qwen3_asr_llama_cpp"
     if token == "vosk":
         return "vosk"
     if token == "wyoming":
@@ -2862,6 +2881,16 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 "quantization": _parakeet_onnx_quantization() or "fp32",
                 "providers": _parakeet_onnx_providers(),
                 "model_root": _stt_backend_model_root("parakeet_onnx"),
+            },
+            "qwen3_asr_llama_cpp": {
+                "repo": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_REPO"))
+                or DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO,
+                "model_file": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MODEL_FILE"))
+                or DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE,
+                "mmproj_file": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE"))
+                or DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE,
+                "model_root": _stt_backend_model_root("qwen3_asr_llama_cpp"),
+                "runtime": _qwen3_asr_llama_cpp_runtime_snapshot(),
             },
             "vosk": {
                 "model_root": _stt_backend_model_root("vosk"),
@@ -4106,6 +4135,8 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
         if not providers:
             return False, "ONNX Runtime has no usable execution provider."
         return True, ""
+    if token == "qwen3_asr_llama_cpp":
+        return _qwen3_asr_llama_cpp_available()
     if token == "vosk":
         if VoskModel is None or KaldiRecognizer is None:
             return False, _text(VOSK_IMPORT_ERROR) or "vosk dependency unavailable"

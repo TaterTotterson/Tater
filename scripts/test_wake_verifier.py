@@ -51,6 +51,43 @@ class WakeVerifierMatcherTests(unittest.TestCase):
 
 
 class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verifier_uses_selected_qwen_backend(self) -> None:
+        from tater_voice import voice_pipeline as vp
+
+        transcribe = mock.AsyncMock(return_value="Hey Tater")
+        packet = build_packet(b"\x00\x00" * 8000, request_id=90, enforce=True)
+        with (
+            mock.patch.object(
+                native_live_settings,
+                "settings_snapshot",
+                return_value={
+                    "wake_word": "hey_tater",
+                    "wake_verifier_threshold": 0.85,
+                    "wake_verifier_timeout_ms": 500,
+                },
+            ),
+            mock.patch.object(vp, "_selected_stt_backend", return_value="qwen3_asr_llama_cpp"),
+            mock.patch.object(
+                vp,
+                "_resolve_stt_backend",
+                return_value=("qwen3_asr_llama_cpp", ""),
+            ),
+            mock.patch.object(vp, "_native_transcribe_wake_audio_bytes", new=transcribe),
+        ):
+            result = await wake_verifier.verify_packet(packet, selector="native:test")
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["available"])
+        self.assertEqual(result["stt_engine_selected"], "qwen3_asr_llama_cpp")
+        self.assertEqual(result["stt_engine"], "qwen3_asr_llama_cpp")
+        transcribe.assert_awaited_once_with(
+            backend="qwen3_asr_llama_cpp",
+            audio_bytes=b"\x00\x00" * 8000,
+            audio_format={"rate": 16000, "width": 2, "channels": 1},
+            language="en",
+            selector="native:test",
+        )
+
     async def test_verifier_uses_selected_faster_whisper_backend(self) -> None:
         from tater_voice import voice_pipeline as vp
 
@@ -194,6 +231,26 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(transcript, "Hey Tater")
         self.assertIs(runner.await_args.args[0], backends._transcribe_parakeet_onnx_sync)
+        self.assertTrue(runner.await_args.args[-1])
+
+    async def test_local_wake_router_uses_qwen_path(self) -> None:
+        from tater_voice.voice_pipeline import backends
+
+        runner = mock.AsyncMock(return_value="Hey Tater")
+        with mock.patch.object(backends, "_run_local_stt_thread", new=runner):
+            transcript = await backends._native_transcribe_wake_audio_bytes(
+                backend="qwen3_asr_llama_cpp",
+                audio_bytes=b"\x00\x00" * 100,
+                audio_format={"rate": 16000, "width": 2, "channels": 1},
+                language="en",
+                selector="native:test",
+            )
+
+        self.assertEqual(transcript, "Hey Tater")
+        self.assertIs(
+            runner.await_args.args[0],
+            backends._transcribe_qwen3_asr_llama_cpp_sync,
+        )
         self.assertTrue(runner.await_args.args[-1])
 
     async def test_local_wake_router_uses_vosk_path(self) -> None:

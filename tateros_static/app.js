@@ -23804,8 +23804,9 @@ async function loadSettingsView() {
     if (!fields.length) {
       return "";
     }
+	    const sectionId = label === "Faster Whisper" ? ' id="speech-faster-whisper-settings-wrap"' : "";
     return `
-      <div class="hydra-model-panel is-active voice-model-settings-panel">
+      <div${sectionId} class="hydra-model-panel is-active voice-model-settings-panel">
 	        <div class="hydra-model-panel-title">${escapeHtml(label || "Voice Model Settings")}</div>
 	        <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
 	          ${escapeHtml(
@@ -28340,6 +28341,7 @@ async function loadSettingsView() {
 
   const speechSttBackendEl = document.getElementById("set_speech_stt_backend");
   const speechSttBackendStatusEl = document.getElementById("speech-stt-backend-status");
+  const speechFasterWhisperSettingsWrapEl = document.getElementById("speech-faster-whisper-settings-wrap");
   const speechAccelerationEl = document.getElementById("set_speech_acceleration");
   const speechWyomingSttHostWrapEl = document.getElementById("speech-wyoming-stt-host-wrap");
   const speechWyomingSttPortWrapEl = document.getElementById("speech-wyoming-stt-port-wrap");
@@ -28743,6 +28745,7 @@ async function loadSettingsView() {
     const announcementTtsBackend = String(announcementTtsBackendEl?.value || "").trim();
     setElementVisible(speechWyomingSttHostWrapEl, sttBackend === "wyoming");
     setElementVisible(speechWyomingSttPortWrapEl, sttBackend === "wyoming");
+    setElementVisible(speechFasterWhisperSettingsWrapEl, sttBackend === "faster_whisper");
 
     const showsLocalModel = ["kokoro", "pocket_tts", "piper"].includes(ttsBackend);
     const showsVoiceSelect = ["kokoro", "pocket_tts"].includes(ttsBackend);

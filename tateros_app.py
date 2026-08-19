@@ -3723,6 +3723,12 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             )
             providers = ",".join(voice_pipeline._parakeet_onnx_providers()) or "unknown"
             return f"loaded STT {token} and warmed ONNX decode ({providers})"
+        elif token == "qwen3_asr_llama_cpp":
+            runtime = voice_pipeline._load_qwen3_asr_llama_cpp_server()
+            return (
+                f"loaded STT {token} in dedicated llama-server "
+                f"(pid={int(runtime.get('pid') or 0)})"
+            )
         elif token == "vosk":
             voice_pipeline._load_vosk_model()
         else:
@@ -3838,6 +3844,12 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
             }
         )
     logger.info("[speech-warmup] finished errors=%s", len(errors))
+    with contextlib.suppress(Exception):
+        system_task_manager.request_run_debounced(
+            "runtime_model_snapshot",
+            reason="speech-model-warmup-finished",
+            delay_seconds=0.1,
+        )
     if pending_settings:
         logger.info("[speech-warmup] starting queued warmup reason=%s", pending_reason or "settings-save-queued")
         thread = threading.Thread(
@@ -10236,6 +10248,39 @@ def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
                     model_root=str(getattr(voice_pipeline, "_stt_backend_model_root")("vosk")),
                     estimated_bytes=estimated,
                     memory_kind="ram",
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        runtime = voice_pipeline._qwen3_asr_llama_cpp_runtime_snapshot()
+        if bool(runtime.get("running")):
+            model_path = str(runtime.get("model_path") or "").strip()
+            mmproj_path = str(runtime.get("mmproj_path") or "").strip()
+            gpu_layers = max(0, int(runtime.get("gpu_layers") or 0))
+            if gpu_layers > 0:
+                device = "Metal" if sys.platform == "darwin" else "GPU offload"
+            else:
+                device = "CPU"
+            details = ["Dedicated llama.cpp server"]
+            if mmproj_path:
+                details.append(f"Projector {Path(mmproj_path).name}")
+            if int(runtime.get("pid") or 0) > 0:
+                details.append(f"PID {int(runtime.get('pid') or 0)}")
+            details.append(f"GPU layers {gpu_layers}")
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_qwen3_asr_llama_cpp",
+                    provider_label="STT • Qwen3-ASR (llama.cpp)",
+                    model=Path(model_path).stem if model_path else "Qwen3-ASR 0.6B Q8",
+                    device=device,
+                    model_path=model_path,
+                    model_root=str(Path(model_path).parent) if model_path else "",
+                    estimated_bytes=_runtime_path_bytes(model_path, mmproj_path),
+                    memory_kind=_runtime_model_memory_kind_from_device(device),
+                    details=details,
+                    loaded_ts=float(runtime.get("started_ts") or 0.0),
                 )
             )
 
