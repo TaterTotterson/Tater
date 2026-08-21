@@ -96,6 +96,18 @@ class VueCoresTests(unittest.TestCase):
             styles,
         )
 
+    def test_runtime_edit_popups_refresh_dependent_core_fields(self) -> None:
+        source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function bindRuntimeSettingDependentSelects(fieldsEl)", source)
+        self.assertIn('data-runtime-filter-source-key="', source)
+        self.assertIn("targetSelect.dataset.runtimeDependentBound", source)
+        self.assertIn("bindRuntimeSettingDependentSelects(fieldsEl);", source)
+        self.assertIn(
+            "_coreRenderSelectOptions(targetSelect, nextRows, preferredValue, preferredValues)",
+            source,
+        )
+
     def test_music_player_selectors_group_targets_and_use_friendly_names(self) -> None:
         display = (REPO_ROOT / "frontend" / "src" / "music" / "playerDisplay.ts").read_text(
             encoding="utf-8"

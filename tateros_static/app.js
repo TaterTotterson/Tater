@@ -4713,6 +4713,46 @@ function buildSettingInput(field, inputId) {
   const safeKey = escapeHtml(field.key || "");
   const safeDesc = field.description ? `<div class="small">${escapeHtml(field.description)}</div>` : "";
   const type = String(field.type || "text").toLowerCase();
+  const dependentOptions =
+    field?.dependent_options && typeof field.dependent_options === "object"
+      ? field.dependent_options
+      : {};
+  const dependentSourceKey = String(dependentOptions?.source_key || "").trim();
+  const buildRuntimeDependentAttrs = (preferredValue = "", preferredValues = []) => {
+    if (!dependentSourceKey) {
+      return "";
+    }
+    let optionsMap = "";
+    let defaultOptions = "";
+    let encodedPreferredValues = "";
+    try {
+      optionsMap = encodeURIComponent(JSON.stringify(dependentOptions?.options_by_source || {}));
+    } catch (_error) {
+      optionsMap = "";
+    }
+    try {
+      const fallbackOptions = Array.isArray(dependentOptions?.default_options)
+        ? dependentOptions.default_options
+        : Array.isArray(field?.options)
+          ? field.options
+          : [];
+      defaultOptions = encodeURIComponent(JSON.stringify(fallbackOptions));
+    } catch (_error) {
+      defaultOptions = "";
+    }
+    try {
+      encodedPreferredValues = encodeURIComponent(
+        JSON.stringify(Array.isArray(preferredValues) ? preferredValues : [])
+      );
+    } catch (_error) {
+      encodedPreferredValues = "";
+    }
+    return ` data-runtime-filter-source-key="${escapeHtml(dependentSourceKey)}"
+      data-runtime-filter-options-map="${escapeHtml(optionsMap)}"
+      data-runtime-filter-default-options="${escapeHtml(defaultOptions)}"
+      data-runtime-filter-preferred-value="${escapeHtml(String(preferredValue || ""))}"
+      data-runtime-filter-preferred-values="${escapeHtml(encodedPreferredValues)}"`;
+  };
   const showWhen = field?.show_when && typeof field.show_when === "object" ? field.show_when : {};
   const showWhenAll = Array.isArray(field?.show_when_all)
     ? field.show_when_all.filter((item) => item && typeof item === "object")
@@ -4804,7 +4844,8 @@ function buildSettingInput(field, inputId) {
       })
       .join("");
 
-    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" data-setting-type="select" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`);
+    const dependentAttrs = buildRuntimeDependentAttrs(field.value ?? "");
+    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" data-setting-type="select" data-setting-key="${safeKey}"${dependentAttrs}>${optionRows}</select>${safeDesc}</label>`);
   }
 
   if (type === "multiselect") {
@@ -4848,7 +4889,8 @@ function buildSettingInput(field, inputId) {
       })
       .join("");
 
-    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" class="settings-multiselect" multiple size="${size}" data-setting-type="multiselect" data-setting-key="${safeKey}">${optionRows}</select>${safeDesc}</label>`);
+    const dependentAttrs = buildRuntimeDependentAttrs("", Array.from(selectedValues));
+    return wrapRuntimeSetting(`<label>${safeLabel}<select id="${inputId}" class="settings-multiselect" multiple size="${size}" data-setting-type="multiselect" data-setting-key="${safeKey}"${dependentAttrs}>${optionRows}</select>${safeDesc}</label>`);
   }
 
   if (type === "checkbox") {
@@ -4994,6 +5036,77 @@ function runtimeSettingFieldValue(input) {
     return input.checked ? "true" : "false";
   }
   return String(input?.value ?? "").trim();
+}
+
+function bindRuntimeSettingDependentSelects(fieldsEl) {
+  if (!(fieldsEl instanceof HTMLElement)) {
+    return;
+  }
+  fieldsEl.querySelectorAll("select[data-runtime-filter-source-key]").forEach((targetSelect) => {
+    if (!(targetSelect instanceof HTMLSelectElement) || targetSelect.dataset.runtimeDependentBound === "1") {
+      return;
+    }
+    const sourceKey = String(targetSelect.dataset.runtimeFilterSourceKey || "").trim();
+    if (!sourceKey) {
+      return;
+    }
+    const sourceInput = Array.from(fieldsEl.querySelectorAll("[data-setting-key]")).find(
+      (field) => String(field?.dataset?.settingKey || "").trim() === sourceKey
+    );
+    if (!(sourceInput instanceof HTMLInputElement || sourceInput instanceof HTMLSelectElement || sourceInput instanceof HTMLTextAreaElement)) {
+      return;
+    }
+
+    const optionsBySource = _coreDecodeDependentJson(targetSelect.dataset.runtimeFilterOptionsMap, {});
+    const defaultOptions = _coreNormalizeOptionRows(
+      _coreDecodeDependentJson(targetSelect.dataset.runtimeFilterDefaultOptions, [])
+    );
+    const preferredValuesRaw = _coreDecodeDependentJson(
+      targetSelect.dataset.runtimeFilterPreferredValues,
+      []
+    );
+    const preferredValues = Array.isArray(preferredValuesRaw)
+      ? preferredValuesRaw.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+    const preferredValue = String(
+      targetSelect.dataset.runtimeFilterPreferredValue || targetSelect.value || ""
+    ).trim();
+    const isMulti =
+      targetSelect.multiple ||
+      String(targetSelect.dataset.settingType || "").toLowerCase() === "multiselect";
+
+    const refresh = () => {
+      const sourceValue = runtimeSettingFieldValue(sourceInput);
+      const sourceRows =
+        optionsBySource && typeof optionsBySource === "object"
+          ? optionsBySource[sourceValue]
+          : [];
+      const narrowed = _coreNormalizeOptionRows(sourceRows);
+      let nextRows = defaultOptions;
+      if (sourceValue) {
+        if (narrowed.length) {
+          nextRows = narrowed;
+        } else if (isMulti) {
+          nextRows = [];
+        } else {
+          nextRows = defaultOptions.filter(
+            (row) => String(row?.value ?? "").trim() === ""
+          );
+          if (!nextRows.length && defaultOptions.length) {
+            nextRows = [defaultOptions[0]];
+          }
+        }
+      } else if (narrowed.length && !isMulti) {
+        nextRows = narrowed;
+      }
+      _coreRenderSelectOptions(targetSelect, nextRows, preferredValue, preferredValues);
+    };
+
+    sourceInput.addEventListener("change", refresh);
+    sourceInput.addEventListener("input", refresh);
+    targetSelect.dataset.runtimeDependentBound = "1";
+    refresh();
+  });
 }
 
 function bindRuntimeSettingConditionalFields(fieldsEl) {
@@ -5314,6 +5427,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, saveLabel, onRe
           return buildSettingInput(field, inputId);
         })
         .join("");
+      bindRuntimeSettingDependentSelects(fieldsEl);
       bindRuntimeSettingConditionalFields(fieldsEl);
       bindNativeLedPreview(fieldsEl);
       fieldsEl.querySelectorAll(".runtime-generate-key-btn").forEach((button) => {
