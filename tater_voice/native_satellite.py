@@ -2474,15 +2474,44 @@ async def prepare_group_media_session(
     return result
 
 
-def stereo_pair_media_active(pair: Dict[str, Any]) -> bool:
-    pair_selector = _text((pair or {}).get("selector"))
-    for session in _stereo_sessions.values():
+def _stereo_pair_session(pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    pair_row = pair if isinstance(pair, dict) else {}
+    pair_selector = _text(pair_row.get("selector"))
+    pair_members = {
+        selector
+        for selector in (
+            _text(pair_row.get("left_selector")),
+            _text(pair_row.get("right_selector")),
+        )
+        if selector
+    }
+    if len(pair_members) != 2:
+        return None
+
+    candidates: list[tuple[int, int, Dict[str, Any]]] = []
+    for index, session in enumerate(_stereo_sessions.values()):
+        if not isinstance(session, dict):
+            continue
+        session_members = set(_session_members(session))
         if (
-            isinstance(session, dict)
-            and _text(session.get("pair_selector")) == pair_selector
+            _text(session.get("pair_selector")) != pair_selector
+            and not pair_members.issubset(session_members)
         ):
-            return True
-    return False
+            continue
+        candidates.append(
+            (
+                _as_int(session.get("created_server_us"), 0),
+                index,
+                session,
+            )
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: (row[0], row[1]))[2]
+
+
+def stereo_pair_media_active(pair: Dict[str, Any]) -> bool:
+    return _stereo_pair_session(pair) is not None
 
 
 async def start_stereo_overlay(
@@ -2505,15 +2534,7 @@ async def start_stereo_overlay(
     if not compatibility.get("ok"):
         raise RuntimeError(_text(compatibility.get("error")) or "Stereo pair is unavailable.")
 
-    pair_selector = _text(pair_row.get("selector"))
-    session = next(
-        (
-            row
-            for row in _stereo_sessions.values()
-            if isinstance(row, dict) and _text(row.get("pair_selector")) == pair_selector
-        ),
-        None,
-    )
+    session = _stereo_pair_session(pair_row)
     if not isinstance(session, dict):
         raise RuntimeError("The stereo pair does not have an active synchronized media session.")
 
@@ -2522,10 +2543,11 @@ async def start_stereo_overlay(
         raise ValueError("overlay_id is required")
     previous_future = session.get("overlay_completion_future")
     if isinstance(previous_future, asyncio.Future) and not previous_future.done():
+        previous_members = _overlay_session_members(session)
         previous_future.set_result(
             {
                 "ok": False,
-                "members": sorted(_session_members(session)),
+                "members": sorted(previous_members),
                 "overlay_id": _text(session.get("active_overlay_id")),
                 "group_id": _text(session.get("group_id")),
                 "error": "The stereo overlay was replaced by a newer reply.",
@@ -2537,6 +2559,7 @@ async def start_stereo_overlay(
         else None
     )
     session["active_overlay_id"] = overlay_token
+    session["overlay_target_selectors"] = [left, right]
     session["overlay_finished_selectors"] = []
     session["overlay_finished_ok"] = {}
     session["overlay_completion_future"] = completion_future
@@ -2607,6 +2630,7 @@ async def start_stereo_overlay(
     except Exception:
         if _text(session.get("active_overlay_id")) == overlay_token:
             session["active_overlay_id"] = ""
+            session["overlay_target_selectors"] = []
             session["overlay_completion_future"] = None
             session["overlay_stop_media_when_finished"] = False
             session["stop_on_overlay_id"] = ""
@@ -2634,6 +2658,7 @@ async def start_stereo_overlay(
         except asyncio.TimeoutError as exc:
             if _text(session.get("active_overlay_id")) == overlay_token:
                 session["active_overlay_id"] = ""
+                session["overlay_target_selectors"] = []
                 session["overlay_completion_future"] = None
                 session["overlay_stop_media_when_finished"] = False
                 session["stop_on_overlay_id"] = ""
@@ -2656,6 +2681,16 @@ def _session_members(session: Dict[str, Any]) -> list[str]:
         if selector and selector not in members:
             members.append(selector)
     return members
+
+
+def _overlay_session_members(session: Dict[str, Any]) -> list[str]:
+    targets = (
+        session.get("overlay_target_selectors")
+        if isinstance(session.get("overlay_target_selectors"), list)
+        else []
+    )
+    members = [_text(selector) for selector in targets if _text(selector)]
+    return list(dict.fromkeys(members)) or _session_members(session)
 
 
 def _media_group_ids_for_selector(selector: str) -> list[str]:
@@ -3345,7 +3380,7 @@ def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:
                 overlay_future.set_result(
                     {
                         "ok": False,
-                        "members": sorted(members),
+                        "members": sorted(_overlay_session_members(session)),
                         "overlay_id": _text(session.get("active_overlay_id")),
                         "group_id": group_id,
                         "error": "The stereo media session ended before its reply overlay completed.",
@@ -3366,7 +3401,7 @@ def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> N
             session.get("active_overlay_id") or session.get("stop_on_overlay_id")
         ) != overlay_id:
             continue
-        members = set(_session_members(session))
+        members = set(_overlay_session_members(session))
         if selector not in members:
             continue
         finished = session.setdefault("overlay_finished_selectors", [])
@@ -3403,6 +3438,7 @@ def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> N
                     )
                 )
             session["active_overlay_id"] = ""
+            session["overlay_target_selectors"] = []
             session["overlay_completion_future"] = None
             session["overlay_stop_media_when_finished"] = False
             session["stop_on_overlay_id"] = ""
