@@ -143,12 +143,24 @@ def _exact_satellite_image_src(value: Any) -> str:
         "esp32s3box3",
     }:
         return _named_satellite_image_src("taterD.png")
-    if token in {"satellite1", "satellite-1", "sat1", "sat-1", "tater-sat1", "tater-satellite1", "core-board"} or compact in {
+    if token in {
+        "satellite1",
+        "satellite-1",
+        "sat1",
+        "sat-1",
+        "tater-sat1",
+        "tater-satellite1",
+        "core-board",
+        "satellite1-beta-rev41",
+        "sat1-beta-rev41",
+    } or compact in {
         "satellite1",
         "sat1",
         "tatersat1",
         "tatersatellite1",
         "coreboard",
+        "satellite1betarev41",
+        "sat1betarev41",
     }:
         return _named_satellite_image_src("sat1.png")
     if token in {"voice-pe", "voicepe", "tater-voice-pe", "tatervpe"} or compact in {"voicepe", "tatervpe", "tatervoicepe"}:

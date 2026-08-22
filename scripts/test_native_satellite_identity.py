@@ -71,6 +71,15 @@ class NativeSatelliteIdentityTests(unittest.TestCase):
             ),
             "Tater Display Kitchen",
         )
+        self.assertEqual(
+            native_satellite._device_name_from_hello(
+                {
+                    "device_name": "Tater Voice PE",
+                    "board": "satellite1-beta-rev41",
+                }
+            ),
+            "Tater Sat1 Beta.1",
+        )
 
     def test_paired_token_migrates_to_corrected_selector(self) -> None:
         device_token = "paired-device-token"

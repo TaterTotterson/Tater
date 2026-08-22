@@ -140,6 +140,7 @@ _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "thirdreality_s420",
     "voicepe",
     "satellite1",
+    "satellite1_beta_rev41",
     "respeaker_xvf3800",
     "s3box_display",
     "s3_box",
@@ -220,6 +221,20 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "voice pe",
             "tatervpe",
             "vpe",
+        },
+    },
+    {
+        "key": "satellite1_beta_rev41",
+        "label": "Satellite1 Beta.1 / rev4.1",
+        "match_tokens": {
+            "satellite1-beta-rev41",
+            "satellite1 beta rev4.1",
+            "satellite1 beta",
+            "sat1-beta-rev41",
+            "sat1 beta rev4.1",
+            "sat1 beta",
+            "sat1beta",
+            "tater sat1 beta.1",
         },
     },
     {
@@ -1904,6 +1919,20 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         return "s3box_display"
     if token in {"voice-pe", "voicepe", "tater-vpe"} or compact in {"voicepe", "tatervpe", "vpe"}:
         return "voicepe"
+    if token in {
+        "satellite1-beta-rev41",
+        "satellite1-beta",
+        "sat1-beta-rev41",
+        "sat1-beta",
+    } or compact in {
+        "satellite1betarev41",
+        "satellite1beta",
+        "sat1betarev41",
+        "sat1beta",
+    } or compact.startswith(
+        ("sat1beta", "tatersat1beta", "nativesatellite1betarev41")
+    ):
+        return "satellite1_beta_rev41"
     if token in {"satellite1", "satellite-1", "sat1", "sat-1", "tater-sat1"} or compact in {
         "satellite1",
         "sat1",

@@ -346,6 +346,7 @@ def _default_name_for_board(board: Any) -> str:
     token = _text(board).lower().replace("_", "-")
     return {
         "satellite1": "Tater Sat1",
+        "satellite1-beta-rev41": "Tater Sat1 Beta.1",
         "respeaker-xvf3800": "Tater ReSpeaker XVF3800",
         "s3-box": "Tater S3 Box",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")

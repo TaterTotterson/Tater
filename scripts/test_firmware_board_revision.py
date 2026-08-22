@@ -28,6 +28,26 @@ from tater_voice import firmware  # noqa: E402
 
 
 class FirmwareBoardRevisionTests(unittest.TestCase):
+    def test_sat1_beta_uses_distinct_firmware_family(self) -> None:
+        self.assertEqual(
+            firmware._template_key_from_hardware_identity("satellite1-beta-rev41"),
+            "satellite1_beta_rev41",
+        )
+        self.assertEqual(
+            firmware._template_key_from_hardware_identity(
+                "native-satellite1-beta-rev41-0.3.11"
+            ),
+            "satellite1_beta_rev41",
+        )
+        self.assertEqual(
+            firmware._template_key_from_hardware_identity("satellite1"),
+            "satellite1",
+        )
+        self.assertEqual(
+            firmware._native_manifest_key_for_template("satellite1_beta_rev41"),
+            "satellite1_beta_rev41",
+        )
+
     def test_revision_orders_after_base_release(self) -> None:
         self.assertGreater(
             firmware._semver_tuple("native-satellite1-0.3.3-rev1"),

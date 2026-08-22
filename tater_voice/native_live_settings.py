@@ -744,7 +744,19 @@ def _global_wake_verifier_mode() -> str:
 def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
     token = _lower(board).replace("_", "-")
     compact = token.replace("-", "").replace(" ", "")
-    if token in {"satellite1", "satellite-1", "sat1", "sat-1"} or compact in {"satellite1", "sat1"}:
+    if token in {
+        "satellite1",
+        "satellite-1",
+        "sat1",
+        "sat-1",
+        "satellite1-beta-rev41",
+        "sat1-beta-rev41",
+    } or compact in {
+        "satellite1",
+        "sat1",
+        "satellite1betarev41",
+        "sat1betarev41",
+    }:
         return {
             "wake_sensitivity": "high",
             "wake_environment": "far_field",
