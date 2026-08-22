@@ -141,6 +141,7 @@ class MediaUnderstandingTests(unittest.TestCase):
         tab_bar_end = source.index("</div>", tab_bar_start)
         tab_bar = source[tab_bar_start:tab_bar_end]
         expected_tabs = (
+            'data-models-tab="huggingface">Hugging Face</button>',
             'data-models-tab="routing">LLM</button>',
             'data-models-tab="speech">Speech</button>',
             'data-models-tab="wake">Wake Word</button>',
@@ -152,6 +153,10 @@ class MediaUnderstandingTests(unittest.TestCase):
         )
         positions = [tab_bar.index(tab) for tab in expected_tabs]
         self.assertEqual(positions, sorted(positions))
+        self.assertIn('class="settings-subpanel active" data-models-panel="huggingface"', source)
+        self.assertIn('class="settings-subpanel" data-models-panel="routing"', source)
+        self.assertNotIn('data-llm-vision-tab="huggingface"', source)
+        self.assertIn('root.querySelector(\'[data-models-tab="huggingface"]\')?.addEventListener', source)
 
     def test_runtime_source_routes_modalities_and_reuses_cache(self):
         source = (ROOT / "helpers.py").read_text(encoding="utf-8")

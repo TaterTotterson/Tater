@@ -12151,7 +12151,7 @@ function bindModelSettingsTabs(root = document) {
     return;
   }
   const activate = (tabKey, { load = false } = {}) => {
-    const normalized = String(tabKey || "routing").trim() || "routing";
+    const normalized = String(tabKey || "huggingface").trim() || "huggingface";
     host.dataset.modelsActiveTab = normalized;
     buttons.forEach((button) => {
       button.classList.toggle("active", button.dataset.modelsTab === normalized);
@@ -12173,7 +12173,7 @@ function bindModelSettingsTabs(root = document) {
     button.dataset.modelsTabBound = "1";
     button.addEventListener("click", () => activate(String(button.dataset.modelsTab || "").trim(), { load: true }));
   });
-  const initial = String(host.dataset.modelsActiveTab || "routing").trim() || "routing";
+  const initial = String(host.dataset.modelsActiveTab || "huggingface").trim() || "huggingface";
   activate(initial);
 }
 
@@ -24370,7 +24370,8 @@ async function loadSettingsView() {
           >
             <div id="settings-hydra-model-stack" class="hydra-model-stack">
               <div class="settings-subtabs" style="grid-column: 1 / -1;">
-                <button type="button" class="settings-subtab-btn active" data-models-tab="routing">LLM</button>
+                <button type="button" class="settings-subtab-btn active" data-models-tab="huggingface">Hugging Face</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="routing">LLM</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="speech">Speech</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="wake">Wake Word</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="vision">Vision</button>
@@ -24380,14 +24381,8 @@ async function loadSettingsView() {
                 <button type="button" class="settings-subtab-btn" data-models-tab="faceid">Face ID</button>
               </div>
 
-              <div class="settings-subpanel active" data-models-panel="routing">
-              <div class="settings-subtabs llm-vision-mini-tabs" style="grid-column: 1 / -1;">
-                <button type="button" class="settings-subtab-btn active" data-llm-vision-tab="settings">Settings</button>
-                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="huggingface">Hugging Face</button>
-                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="manage">Manage</button>
-                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="debug">Debug</button>
-              </div>
-              <div id="settings-hf-model-browser" class="hf-model-browser" hidden>
+              <div class="settings-subpanel active" data-models-panel="huggingface">
+              <div id="settings-hf-model-browser" class="hf-model-browser active">
                 <div class="hf-model-browser-hero">
                   <div class="hf-model-browser-spud" aria-hidden="true">
                     <span class="hf-model-browser-spud-eye left"></span>
@@ -24444,6 +24439,14 @@ async function loadSettingsView() {
                   <div id="hf-model-browser-results" class="hf-model-browser-results"></div>
                   <div id="hf-model-browser-detail" class="hf-model-browser-detail"></div>
                 </div>
+              </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="routing">
+              <div class="settings-subtabs llm-vision-mini-tabs" style="grid-column: 1 / -1;">
+                <button type="button" class="settings-subtab-btn active" data-llm-vision-tab="settings">Settings</button>
+                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="manage">Manage</button>
+                <button type="button" class="settings-subtab-btn" data-llm-vision-tab="debug">Debug</button>
               </div>
               <div id="settings-local-model-manager" class="hf-model-browser local-model-manager" hidden>
                 <div class="hf-model-browser-hero">
@@ -28733,19 +28736,14 @@ async function loadSettingsView() {
   };
   const activateLlmVisionTab = (tab) => {
     const normalized = String(tab || "settings").trim() || "settings";
-    const browserActive = normalized === "huggingface";
     const manageActive = normalized === "manage";
     const debugActive = normalized === "debug";
     llmVisionTabButtons.forEach((button) => {
       button.classList.toggle("active", String(button.dataset.llmVisionTab || "") === normalized);
     });
     root.querySelectorAll(".llm-vision-settings-block").forEach((block) => {
-      block.classList.toggle("llm-vision-hidden", browserActive || manageActive || debugActive);
+      block.classList.toggle("llm-vision-hidden", manageActive || debugActive);
     });
-    if (hfModelBrowserEl) {
-      hfModelBrowserEl.hidden = !browserActive;
-      hfModelBrowserEl.classList.toggle("active", browserActive);
-    }
     if (localModelManagerEl) {
       localModelManagerEl.hidden = !manageActive;
       localModelManagerEl.classList.toggle("active", manageActive);
@@ -28757,10 +28755,6 @@ async function loadSettingsView() {
     if (!debugActive) {
       clearLlmDebugPollTimer();
     }
-    if (browserActive) {
-      renderHfDownloadSummary(state.hfLlmWarmupLastSnapshot || {});
-      scheduleHfLlmWarmupPoll(150);
-    }
     if (manageActive) {
       renderLocalModelManager();
       void refreshLocalLlmModels();
@@ -28771,7 +28765,15 @@ async function loadSettingsView() {
       void refreshLlmDebugConsole({ reset: state.llmDebugNextId <= 0 });
       scheduleLlmDebugPoll(800);
     }
-    if (browserActive && !hfModelBrowserState.loaded) {
+  };
+  const activateHfModelBrowser = () => {
+    const modelsPanel = root.querySelector('[data-settings-panel="models"]');
+    if (modelsPanel instanceof HTMLElement && !modelsPanel.classList.contains("active")) {
+      return;
+    }
+    renderHfDownloadSummary(state.hfLlmWarmupLastSnapshot || {});
+    scheduleHfLlmWarmupPoll(150);
+    if (!hfModelBrowserState.loaded) {
       if (hfModelBrowserProviderEl) {
         hfModelBrowserProviderEl.value = isHydraLocalProvider(hydraBaseProviderEl?.value || "")
           ? normalizeHydraBaseProvider(hydraBaseProviderEl?.value || "")
@@ -28780,6 +28782,13 @@ async function loadSettingsView() {
       void loadHfModelBrowser();
     }
   };
+  root.querySelector('[data-models-tab="huggingface"]')?.addEventListener("click", activateHfModelBrowser);
+  root.querySelector('[data-settings-tab="models"]')?.addEventListener("click", () => {
+    const browserTab = root.querySelector('[data-models-tab="huggingface"]');
+    if (browserTab?.classList.contains("active")) {
+      activateHfModelBrowser();
+    }
+  });
   llmVisionTabButtons.forEach((button) => {
     button.addEventListener("click", () => activateLlmVisionTab(button.dataset.llmVisionTab || "settings"));
   });
@@ -28959,6 +28968,7 @@ async function loadSettingsView() {
     void deleteLocalModel(provider, model);
   });
   activateLlmVisionTab("settings");
+  activateHfModelBrowser();
 
   const speechSttBackendEl = document.getElementById("set_speech_stt_backend");
   const speechSttBackendStatusEl = document.getElementById("speech-stt-backend-status");
