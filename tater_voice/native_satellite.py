@@ -2506,8 +2506,88 @@ def _stereo_pair_session(pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             )
         )
     if not candidates:
-        return None
+        return _recover_stereo_pair_session_from_clients(pair_row)
     return max(candidates, key=lambda row: (row[0], row[1]))[2]
+
+
+def _recover_stereo_pair_session_from_clients(
+    pair: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Rebuild coordinator state when both pair members still report one live session."""
+    pair_row = pair if isinstance(pair, dict) else {}
+    pair_selector = _text(pair_row.get("selector"))
+    left = _canonical_selector(pair_row.get("left_selector"))
+    right = _canonical_selector(pair_row.get("right_selector"))
+    if not left or not right or left == right:
+        return None
+
+    member_sessions: Dict[str, Dict[str, Any]] = {}
+    render_clock_support: Dict[str, bool] = {}
+    for selector in (left, right):
+        row = _clients.get(selector)
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            return None
+        media_session = row.get("media_session")
+        if not isinstance(media_session, dict) or not bool(media_session.get("active")):
+            return None
+        session_id = _text(media_session.get("session_id"))
+        group_id = _text(media_session.get("group_id"))
+        if not session_id or not group_id:
+            return None
+        member_sessions[selector] = dict(media_session)
+        hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+        render_clock_support[selector] = bool(
+            _capabilities(_message_payload(hello)).get("media_render_clock")
+        )
+
+    session_ids = {
+        _text(media_session.get("session_id"))
+        for media_session in member_sessions.values()
+    }
+    group_ids = {
+        _text(media_session.get("group_id"))
+        for media_session in member_sessions.values()
+    }
+    if len(session_ids) != 1 or len(group_ids) != 1:
+        return None
+
+    session_id = next(iter(session_ids))
+    group_id = next(iter(group_ids))
+    recovered = {
+        "group_id": group_id,
+        "pair_selector": pair_selector,
+        "session_id": session_id,
+        "selectors": [left, right],
+        "reference_selector": left,
+        "left_selector": left,
+        "right_selector": right,
+        "clock_offsets_us": {},
+        "clock_round_trip_us": {},
+        "clock_sync_server_us": 0,
+        "member_delays_ms": {
+            left: max(0, min(250, _as_int(pair_row.get("left_delay_ms"), 0))),
+            right: max(0, min(250, _as_int(pair_row.get("right_delay_ms"), 0))),
+        },
+        "playheads": {
+            selector: dict(media_session.get("playhead"))
+            for selector, media_session in member_sessions.items()
+            if isinstance(media_session.get("playhead"), dict)
+        },
+        "created_server_us": _monotonic_us(),
+        "use_rendered_clock": all(render_clock_support.values()),
+        "recovered_from_live_state": True,
+        "completion_future": None,
+    }
+    _stereo_sessions[group_id] = recovered
+    _vp().logger.info(
+        "[native-media] recovered synchronized pair state from live members "
+        "pair=%s group=%s session=%s members=%s",
+        pair_selector or "unknown",
+        group_id,
+        session_id,
+        ",".join((left, right)),
+    )
+    return recovered
 
 
 def stereo_pair_media_active(pair: Dict[str, Any]) -> bool:
@@ -2582,6 +2662,17 @@ async def start_stereo_overlay(
         synchronized_start_server_us = requested_start_server_us
     else:
         clocks = await asyncio.gather(_stereo_clock_probe(left), _stereo_clock_probe(right))
+        session["clock_offsets_us"] = {
+            _text(clock.get("selector")): _as_int(clock.get("offset_us"), 0)
+            for clock in clocks
+            if isinstance(clock, dict) and _text(clock.get("selector"))
+        }
+        session["clock_round_trip_us"] = {
+            _text(clock.get("selector")): _as_int(clock.get("round_trip_us"), 0)
+            for clock in clocks
+            if isinstance(clock, dict) and _text(clock.get("selector"))
+        }
+        session["clock_sync_server_us"] = _monotonic_us()
         synchronized_start_server_us = _monotonic_us() + (STEREO_START_LEAD_MS * 1000)
     duck = ducking if isinstance(ducking, dict) else {}
     base_volume = max(0, min(100, _as_int(foreground_volume_percent, 100)))

@@ -158,6 +158,8 @@ class AnnouncementIntegrationTargetTests(unittest.TestCase):
 class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         native_satellite._stereo_sessions.clear()
+        self.original_clients = dict(native_satellite._clients)
+        native_satellite._clients.clear()
         for task in list(native_satellite._stereo_adjust_tasks.values()):
             task.cancel()
         native_satellite._stereo_adjust_tasks.clear()
@@ -167,6 +169,8 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         native_satellite._stereo_adjust_tasks.clear()
         native_satellite._stereo_sessions.clear()
+        native_satellite._clients.clear()
+        native_satellite._clients.update(self.original_clients)
 
     async def test_group_member_status_separates_ready_offline_and_old_firmware(self) -> None:
         capabilities = {
@@ -821,6 +825,79 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             native_satellite._stereo_sessions["multi-1"]["session_id"],
             "music-1",
+        )
+
+    async def test_stereo_overlay_recovers_live_pair_when_coordinator_state_was_lost(self) -> None:
+        capabilities = {
+            "audio_session_version": 2,
+            "synchronized_media_sessions": True,
+            "stereo_channel_selection": True,
+            "media_playhead_telemetry": True,
+            "media_drift_correction": True,
+            "media_render_clock": True,
+        }
+        for selector, channel in (("native:left", "left"), ("native:right", "right")):
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "hello": {"payload": {"capabilities": capabilities}},
+                "media_session": {
+                    "active": True,
+                    "session_id": "music-live-1",
+                    "group_id": "pair-live-1",
+                    "channel": channel,
+                },
+            }
+        pair = {
+            "id": "pair-live-1",
+            "selector": "stereo:pair-live-1",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        sent = []
+
+        async def fake_command(selector, message_type, payload):
+            sent.append((selector, message_type, dict(payload)))
+            return {"ok": True}
+
+        async def fake_clock_probe(selector):
+            return {
+                "selector": selector,
+                "offset_us": 100 if selector.endswith("left") else 200,
+                "round_trip_us": 500,
+            }
+
+        with (
+            mock.patch.object(
+                native_satellite,
+                "stereo_pair_compatibility",
+                mock.AsyncMock(return_value={"ok": True}),
+            ),
+            mock.patch.object(
+                native_satellite,
+                "_stereo_clock_probe",
+                side_effect=fake_clock_probe,
+            ),
+            mock.patch.object(native_satellite, "send_command", side_effect=fake_command),
+        ):
+            self.assertTrue(native_satellite.stereo_pair_media_active(pair))
+            recovered = native_satellite._stereo_sessions["pair-live-1"]
+            self.assertTrue(recovered["recovered_from_live_state"])
+            self.assertEqual(recovered["session_id"], "music-live-1")
+
+            result = await native_satellite.start_stereo_overlay(
+                pair,
+                overlay_id="reply-live-1",
+                foreground_url="http://tater/media/reply.wav",
+            )
+
+        self.assertTrue(result["stereo_overlay_started"])
+        self.assertEqual(
+            [row[0] for row in sent],
+            ["native:left", "native:right"],
+        )
+        self.assertEqual(
+            native_satellite._stereo_sessions["pair-live-1"]["clock_offsets_us"],
+            {"native:left": 100, "native:right": 200},
         )
 
 

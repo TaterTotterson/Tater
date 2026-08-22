@@ -1,27 +1,30 @@
-# Tater v1.1.9
+# Tater v1.1.10
 
-Tater v1.1.9 keeps music playing correctly when TTS replies are delivered to a
-stereo pair that is part of synchronized playback.
+Tater v1.1.10 fixes the complete voice-to-music handoff for stereo satellite
+pairs, including commands that start new music.
 
 ## What's Changed
 
 ### Voice and Music
 
-- Recognizes a stereo pair's active music session even when that session is
-  owned by a larger synchronized speaker group.
-- Plays replies as synchronized TTS overlays instead of replacing the active
-  music with a temporary mono session.
-- Restores the music automatically after TTS finishes on both speakers.
-- Limits stereo overlay completion tracking to the addressed pair so other
-  members of a multi-room group do not delay the reply.
+- Skips spoken tool-progress audio when an idle stereo pair is about to begin
+  playback, while keeping the normal visual progress state.
+- Continues using spoken progress with normal ducking whenever stereo music is
+  already active.
+- Recovers synchronized session state directly from both live satellites when
+  coordinator state is missing.
+- Keeps the final spoken confirmation as a synchronized overlay so the new
+  music ducks and resumes instead of being replaced.
+- Refreshes the recovered pair's clock calibration before starting its TTS
+  overlay.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.9 through
+- macOS users already running v1.0.1 or later can install v1.1.10 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.9` or `latest` for the CPU image and
-  `v1.1.9-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.10` or `latest` for the CPU image and
+  `v1.1.10-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

@@ -5,9 +5,37 @@ import unittest
 from unittest import mock
 
 from tater_voice import native_satellite
+from tater_voice import stereo_pairs
+from tater_voice import voice_pipeline
 
 
 class NativeReplyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inactive_stereo_reply_target_skips_spoken_tool_progress(self) -> None:
+        pair = {
+            "selector": "stereo:office",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        with (
+            mock.patch.object(stereo_pairs, "get_pair", return_value=pair),
+            mock.patch.object(native_satellite, "stereo_pair_media_active", return_value=False),
+        ):
+            self.assertTrue(
+                voice_pipeline._stereo_reply_target_without_active_media(
+                    "voice_core:stereo:office"
+                )
+            )
+
+        with (
+            mock.patch.object(stereo_pairs, "get_pair", return_value=pair),
+            mock.patch.object(native_satellite, "stereo_pair_media_active", return_value=True),
+        ):
+            self.assertFalse(
+                voice_pipeline._stereo_reply_target_without_active_media(
+                    "voice_core:stereo:office"
+                )
+            )
+
     async def test_tts_end_queues_playback_with_clamped_ducking(self) -> None:
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         client = native_satellite._NativeVoiceAssistantClient(
