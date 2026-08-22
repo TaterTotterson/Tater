@@ -12,6 +12,7 @@ export interface SelectOption {
   meta?: string;
   room?: string;
   area?: string;
+  icon?: string;
 }
 
 export interface MusicField {
@@ -25,6 +26,8 @@ export interface MusicField {
   disabled?: boolean;
   read_only?: boolean;
   compact?: boolean;
+  full_width?: boolean;
+  presentation?: string;
   min?: number;
   max?: number;
   step?: number | string;

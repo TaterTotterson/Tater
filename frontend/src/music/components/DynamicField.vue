@@ -21,6 +21,7 @@ const emit = defineEmits<{
 
 const fieldType = computed(() => String(props.field.type || "text").toLowerCase());
 const targetMultiselect = computed(() => fieldType.value === "player_multiselect");
+const cardPresentation = computed(() => String(props.field.presentation || "").toLowerCase() === "cards");
 const disabled = computed(() => Boolean(props.field.disabled || props.field.read_only));
 const stringValue = computed(() => String(props.modelValue ?? ""));
 const numberValue = computed(() => Number(props.modelValue ?? 0));
@@ -80,6 +81,9 @@ function optionKind(option: SelectOption | Primitive): string {
 }
 
 function optionGlyph(option: SelectOption | Primitive): string {
+  if (option && typeof option === "object" && String(option.icon || "").trim()) {
+    return String(option.icon).trim();
+  }
   const kind = optionKind(option);
   if (kind === "stereo") return "T²";
   if (kind === "satellite") return "T";
@@ -146,10 +150,33 @@ function toggleOption(value: string, checked: boolean): void {
   <fieldset
     v-else-if="fieldType === 'multiselect' || fieldType === 'player_multiselect'"
     class="tm-field tm-multiselect"
-    :class="{ compact, 'tm-target-multiselect': targetMultiselect }"
+    :class="{
+      compact,
+      'full-width': Boolean(field.full_width),
+      'tm-target-multiselect': targetMultiselect,
+      'tm-choice-card-multiselect': cardPresentation,
+    }"
   >
     <legend>{{ field.label || field.key }}</legend>
-    <div v-if="targetMultiselect" class="tm-option-sections">
+    <div v-if="cardPresentation" class="tm-choice-card-grid" role="group">
+      <button
+        v-for="option in field.options || []"
+        :key="optionValue(option)"
+        type="button"
+        class="tm-choice-card"
+        :class="{ selected: selectedValues.has(optionValue(option)) }"
+        :aria-pressed="selectedValues.has(optionValue(option))"
+        :disabled="disabled || !optionValue(option)"
+        @click="toggleOption(optionValue(option), !selectedValues.has(optionValue(option)))"
+      >
+        <span v-if="optionGlyph(option)" class="tm-choice-card-icon" aria-hidden="true">{{ optionGlyph(option) }}</span>
+        <span class="tm-choice-card-copy">
+          <strong>{{ optionLabel(option) }}</strong>
+          <small v-if="optionMeta(option)">{{ optionMeta(option) }}</small>
+        </span>
+      </button>
+    </div>
+    <div v-else-if="targetMultiselect" class="tm-option-sections">
       <section v-for="section in optionSections" :key="section.key" class="tm-option-section">
         <h4>{{ section.label }}</h4>
         <div class="tm-option-grid">

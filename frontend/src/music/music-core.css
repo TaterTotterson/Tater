@@ -1089,6 +1089,7 @@
 
 .tm-form-grid > .tm-field { align-self: start; }
 .tm-form-grid > .tm-target-multiselect { grid-column: 1 / -1; }
+.tm-form-grid > .tm-field.full-width { grid-column: 1 / -1; }
 
 .tm-settings-card > footer {
   display: flex;
@@ -1181,6 +1182,84 @@
 }
 
 .tm-multiselect legend { margin-bottom: 8px; }
+
+.tm-choice-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 9px;
+}
+
+.tm-choice-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px 11px;
+  border: 1px solid var(--tm-border);
+  border-radius: 10px;
+  color: var(--tm-text);
+  background: rgb(255 255 255 / 3%);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.tm-choice-card:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--tm-accent) 38%, var(--tm-border));
+}
+
+.tm-choice-card.selected {
+  border-color: color-mix(in srgb, var(--tm-accent) 62%, var(--tm-border));
+  background: color-mix(in srgb, var(--tm-accent) 11%, rgb(255 255 255 / 3%));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--tm-accent) 86%, transparent);
+}
+
+.tm-choice-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--tm-accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.tm-choice-card:disabled { cursor: default; opacity: 0.5; }
+
+.tm-choice-card-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--tm-accent) 28%, var(--tm-border));
+  border-radius: 9px;
+  color: color-mix(in srgb, var(--tm-accent) 82%, white);
+  background: var(--tm-accent-soft);
+  font-size: 0.72rem;
+  font-weight: 820;
+}
+
+.tm-choice-card-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tm-choice-card-copy strong,
+.tm-choice-card-copy small {
+  overflow-wrap: anywhere;
+}
+
+.tm-choice-card-copy strong {
+  color: var(--tm-text);
+  font-size: 0.8rem;
+  font-weight: 720;
+}
+
+.tm-choice-card-copy small {
+  color: var(--tm-muted);
+  font-size: 0.69rem;
+  font-weight: 480;
+  line-height: 1.3;
+}
 
 .tm-option-grid {
   display: grid;
