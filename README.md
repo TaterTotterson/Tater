@@ -3,9 +3,14 @@
     <img src="images/tater-logo-primary.png" alt="Tater AI Assistant" width="440"/>
   </a>
 </div>
-<h3 align="center">
-  <a href="https://taterassistant.com">taterassistant.com</a>
-</h3>
+<p align="center">
+  <a href="https://taterassistant.com">
+    <img alt="Visit Tater Assistant" src="https://img.shields.io/badge/Tater%20Assistant-Visit%20Website-F28C28?style=for-the-badge&logo=googlechrome&logoColor=white" />
+  </a>
+  <a href="https://discord.gg/w52namKyXT">
+    <img alt="Join the Tater Assistant Discord" src="https://img.shields.io/badge/Discord-Join%20the%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" />
+  </a>
+</p>
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
