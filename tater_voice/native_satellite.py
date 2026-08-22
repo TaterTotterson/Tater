@@ -3589,12 +3589,29 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     setup_connection_changed = False
     hello_payload: Dict[str, Any] = {}
     response_future: Optional[asyncio.Future] = None
+    reported_volume: Any = None
+    reported_volume_changed = False
+    reported_volume_board = ""
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
             return None
         row["last_seen_ts"] = _now()
         row["last_message_type"] = msg_type
+        if msg_type in {"status", "settings.changed"}:
+            reported_settings = (
+                payload.get("settings")
+                if isinstance(payload.get("settings"), dict)
+                else payload
+            )
+            if "volume_percent" in reported_settings:
+                reported_volume = reported_settings.get("volume_percent")
+                reported_volume_changed = (
+                    row.get("reported_volume_percent") != reported_volume
+                )
+                row["reported_volume_percent"] = reported_volume
+                hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+                reported_volume_board = _text(_message_payload(hello).get("board"))
         if msg_type == "status":
             row["last_status"] = payload
             if setup_state_seen:
@@ -3694,6 +3711,15 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
         _upsert_registry_from_hello(selector, hello_payload, connected=False)
     if setup_connection_changed:
         _notify_state_change("disconnected", selector)
+    if reported_volume_changed:
+        from . import native_live_settings
+
+        if native_live_settings.adopt_reported_device_volume(
+            reported_volume,
+            selector=selector,
+            board=reported_volume_board,
+        ):
+            _notify_state_change("settings", selector)
     if msg_type == "ambient.observation.request":
         from . import reachy_ambient
 

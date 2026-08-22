@@ -135,6 +135,31 @@ class NativeSatelliteIdentityTests(unittest.TestCase):
             "63",
         )
 
+    def test_reported_device_volume_is_persisted_as_an_override(self) -> None:
+        redis = _FakeRedis()
+        selector = "native:sat1-2e88e8"
+
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            self.assertTrue(
+                native_live_settings.adopt_reported_device_volume(
+                    65,
+                    selector=selector,
+                    board="satellite1",
+                )
+            )
+            self.assertFalse(
+                native_live_settings.adopt_reported_device_volume(
+                    65,
+                    selector=selector,
+                    board="satellite1",
+                )
+            )
+
+        self.assertEqual(
+            redis.hashes[native_live_settings.settings_hash_key(selector)]["volume_percent"],
+            "65",
+        )
+
     def test_stereo_pair_member_is_migrated(self) -> None:
         redis = _FakeRedis()
         old_selector = "native:voicepe-2e88e8"
@@ -274,6 +299,44 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
             await native_satellite.forget(selector)
 
         self.assertIn(selector, native_satellite._clients)
+
+    async def test_hardware_volume_messages_refresh_the_saved_slider(self) -> None:
+        selector = "native:sat1-2e88e8"
+        native_satellite._clients[selector] = {
+            "selector": selector,
+            "connected": True,
+            "hello": {
+                "type": "hello",
+                "payload": {"board": "satellite1"},
+            },
+            "pending_requests": {},
+        }
+
+        for message_type in ("settings.changed", "status"):
+            native_satellite._clients[selector].pop("reported_volume_percent", None)
+            with self.subTest(message_type=message_type), mock.patch.object(
+                native_live_settings,
+                "adopt_reported_device_volume",
+                return_value=True,
+            ) as adopt, mock.patch.object(
+                native_satellite,
+                "_notify_state_change",
+            ) as notify:
+                message = {
+                    "type": message_type,
+                    "payload": {
+                        "settings": {"volume_percent": 65},
+                    },
+                }
+                await native_satellite._handle_text_message(selector, message)
+                await native_satellite._handle_text_message(selector, message)
+
+                adopt.assert_called_once_with(
+                    65,
+                    selector=selector,
+                    board="satellite1",
+                )
+                notify.assert_called_once_with("settings", selector)
 
 
 if __name__ == "__main__":

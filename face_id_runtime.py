@@ -1,4 +1,4 @@
-"""Optional isolated DeepFace runtime shared by Tater cores."""
+"""Separate-process DeepFace runtime shared by Tater cores."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import platform
 import selectors
 import shutil
+import site
 import subprocess
 import sys
 import threading
@@ -32,9 +33,10 @@ MATCH_THRESHOLD = 0.30
 MAX_FACES_PER_FRAME = 8
 DEEPFACE_VERSION = "0.0.100"
 TENSORFLOW_VERSION = "2.21.0"
-TENSORFLOW_METAL_BASE_VERSION = "2.18.0"
-TENSORFLOW_METAL_VERSION = "1.2.0"
-MODEL_PACK_VERSION = "4"
+TENSORFLOW_MACOS_VERSION = "2.18.0"
+MODEL_PACK_VERSION = "5"
+
+_RUNTIME_MODULES = ("cv2", "deepface", "retinaface", "tensorflow", "tf_keras")
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _condition = threading.Condition(threading.RLock())
@@ -84,14 +86,9 @@ def model_pack_dir() -> Path:
     return runtime_dir() / "models" / "face-id"
 
 
-def model_pack_venv_dir() -> Path:
-    return model_pack_dir() / "venv"
-
-
-def model_pack_python() -> Path:
-    if os.name == "nt":
-        return model_pack_venv_dir() / "Scripts" / "python.exe"
-    return model_pack_venv_dir() / "bin" / "python"
+def runtime_python() -> Path:
+    """Return Tater's current interpreter without resolving its venv symlink."""
+    return Path(sys.executable)
 
 
 def model_pack_ready_path() -> Path:
@@ -131,26 +128,34 @@ def desired_accelerator() -> str:
     return "cpu"
 
 
-def _accelerator_requirement(accelerator: str) -> str:
-    if accelerator == "metal":
-        return f"tensorflow-metal=={TENSORFLOW_METAL_VERSION}"
-    if accelerator == "cuda":
-        return f"tensorflow[and-cuda]=={TENSORFLOW_VERSION}"
-    return ""
-
-
-def _requirements_path() -> Path:
-    return Path(__file__).resolve().parent / "requirements-face.txt"
+def expected_tensorflow_version() -> str:
+    if sys.platform == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}:
+        return TENSORFLOW_MACOS_VERSION
+    return TENSORFLOW_VERSION
 
 
 def _worker_path() -> Path:
     return Path(__file__).resolve().parent / "face_id_worker.py"
 
 
-def _model_pack_available() -> bool:
-    python_bin = model_pack_python()
+def _missing_runtime_modules() -> List[str]:
+    import importlib.util
+
+    return [name for name in _RUNTIME_MODULES if importlib.util.find_spec(name) is None]
+
+
+def _runtime_dependencies_available() -> bool:
+    return not _missing_runtime_modules()
+
+
+def _model_pack_available(*, dependencies_available: Optional[bool] = None) -> bool:
     ready_path = model_pack_ready_path()
-    if not python_bin.is_file() or not ready_path.is_file():
+    dependencies_ready = (
+        _runtime_dependencies_available()
+        if dependencies_available is None
+        else bool(dependencies_available)
+    )
+    if not dependencies_ready or not ready_path.is_file():
         return False
     try:
         ready = json.loads(ready_path.read_text(encoding="utf-8"))
@@ -162,10 +167,7 @@ def _model_pack_available() -> bool:
         return False
     if str(ready.get("acceleration_target") or "cpu") != desired_accelerator():
         return False
-    venv_dir = model_pack_venv_dir()
-    candidates = list(venv_dir.glob("Lib/site-packages/deepface"))
-    candidates.extend(venv_dir.glob("lib/python*/site-packages/deepface"))
-    return any(path.is_dir() for path in candidates)
+    return True
 
 
 def _public_state(redis_client: Any = None) -> str:
@@ -177,7 +179,7 @@ def _public_state(redis_client: Any = None) -> str:
         return "disabled"
     if loaded:
         return "ready"
-    if state in {"installing", "loading", "error"}:
+    if state in {"loading", "error"}:
         return state
     return "idle"
 
@@ -197,12 +199,14 @@ def status(redis_client: Any = None) -> Dict[str, Any]:
         accelerator_warning = _accelerator_warning
     state = _public_state(redis_client)
     target = desired_accelerator()
+    dependencies_available = _runtime_dependencies_available()
     return {
         "enabled": enabled,
-        "installed": _model_pack_available(),
+        "installed": dependencies_available,
+        "models_ready": _model_pack_available(dependencies_available=dependencies_available),
         "loaded": loaded,
         "state": state,
-        "loading": enabled and (thread_alive or state in {"installing", "loading"}),
+        "loading": enabled and (thread_alive or state == "loading"),
         "error": error,
         "message": message,
         "model": MODEL_NAME,
@@ -237,7 +241,7 @@ def _worker_environment() -> Dict[str, str]:
         "DEEPFACE_HOME": str(model_pack_dir()),
     }
     if sys.platform == "linux":
-        site_packages = list(model_pack_venv_dir().glob("lib/python*/site-packages"))
+        site_packages = [Path(path) for path in site.getsitepackages()]
         library_dirs: List[str] = []
         binary_dirs: List[str] = []
         for site_dir in site_packages:
@@ -282,87 +286,47 @@ def _worker_result_from_output(output: str) -> Dict[str, Any]:
     return {}
 
 
-def _install_model_pack(generation: int) -> None:
+def _prepare_model_pack(generation: int) -> None:
     global _message, _state
     pack_dir = model_pack_dir()
     pack_dir.mkdir(parents=True, exist_ok=True)
     with _condition:
         if generation != _generation:
             return
-        _state = "installing"
-        _message = "Installing the private DeepFace model pack. This only happens the first time."
+        _state = "loading"
+        _message = "Preparing the Face ID models. The first load may download model weights."
         _condition.notify_all()
 
-    if not model_pack_python().is_file():
-        _run_checked([sys.executable, "-m", "venv", str(model_pack_venv_dir())], timeout=300)
-    python_bin = str(model_pack_python())
-    _run_checked([python_bin, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], timeout=600)
-    requirements = _requirements_path()
-    if not requirements.is_file():
-        raise RuntimeError("The Face ID model-pack requirements are missing from this Tater installation.")
-    _run_checked([python_bin, "-m", "pip", "install", "--upgrade", "-r", str(requirements)], timeout=2400)
+    missing = _missing_runtime_modules()
+    if missing:
+        raise RuntimeError(
+            "Face ID dependencies are missing from Tater's Python environment "
+            f"({', '.join(missing)}). Rerun Tater setup to install the regular requirements."
+        )
     acceleration_target = desired_accelerator()
-    accelerator_install_error = ""
-    accelerator_requirement = _accelerator_requirement(acceleration_target)
-    if accelerator_requirement:
-        with _condition:
-            if generation != _generation:
-                return
-            _message = (
-                "Installing Apple Metal acceleration for Face ID."
-                if acceleration_target == "metal"
-                else "Installing NVIDIA CUDA acceleration for Face ID."
-            )
-            _condition.notify_all()
-        try:
-            _run_checked(
-                [python_bin, "-m", "pip", "install", "--upgrade", accelerator_requirement],
-                timeout=2400,
-            )
-        except Exception as exc:
-            accelerator_install_error = str(exc) or exc.__class__.__name__
     with _condition:
         if generation != _generation:
             return
     worker = _worker_path()
     if not worker.is_file():
         raise RuntimeError("The Face ID worker is missing from this Tater installation.")
-    warmup_command = [python_bin, "-s", str(worker), "--warmup", MODEL_NAME, DETECTOR_BACKEND]
-    try:
-        output = _run_checked(warmup_command, timeout=1200)
-    except Exception as exc:
-        if acceleration_target != "metal":
-            raise
-        warmup_error = str(exc) or exc.__class__.__name__
-        accelerator_install_error = " | ".join(
-            value for value in (accelerator_install_error, warmup_error) if value
-        )
-        _run_checked(
-            [python_bin, "-m", "pip", "uninstall", "-y", "tensorflow-metal"],
-            timeout=300,
-        )
-        with _condition:
-            if generation != _generation:
-                return
-            _message = "Apple Metal was unavailable; validating the Face ID CPU fallback."
-            _condition.notify_all()
-        output = _run_checked(warmup_command, timeout=1200)
+    warmup_command = [str(runtime_python()), "-s", str(worker), "--warmup", MODEL_NAME, DETECTOR_BACKEND]
+    output = _run_checked(warmup_command, timeout=1200)
     warmup = _worker_result_from_output(output)
     if not bool(warmup.get("ok")):
-        raise RuntimeError("The Face ID model pack installed but its warm-up did not complete.")
+        raise RuntimeError("The Face ID models could not complete their first warm-up.")
     model_pack_ready_path().write_text(
         json.dumps(
             {
                 "model_pack_version": MODEL_PACK_VERSION,
                 "deepface_version": DEEPFACE_VERSION,
-                "tensorflow_version": _text(warmup.get("tensorflow_version")) or TENSORFLOW_VERSION,
+                "tensorflow_version": _text(warmup.get("tensorflow_version")) or expected_tensorflow_version(),
                 "model_name": MODEL_NAME,
                 "detector_backend": DETECTOR_BACKEND,
                 "acceleration_target": acceleration_target,
                 "accelerator": _text(warmup.get("accelerator")) or "cpu",
                 "device_name": _text(warmup.get("device_name")),
                 "gpu_count": int(warmup.get("gpu_count") or 0),
-                "accelerator_install_error": accelerator_install_error,
                 "ready_at": time.time(),
             },
             separators=(",", ":"),
@@ -376,10 +340,16 @@ def _start_worker() -> subprocess.Popen:
     with _worker_lock:
         if _worker_process is not None and _worker_process.poll() is None:
             return _worker_process
-        if not model_pack_python().is_file() or not _worker_path().is_file():
-            raise RuntimeError("The Face ID model pack is not installed.")
+        missing = _missing_runtime_modules()
+        if missing:
+            raise RuntimeError(
+                "Face ID dependencies are missing from Tater's Python environment "
+                f"({', '.join(missing)}). Rerun Tater setup."
+            )
+        if not _worker_path().is_file():
+            raise RuntimeError("The Face ID worker is missing from this Tater installation.")
         _worker_process = subprocess.Popen(
-            [str(model_pack_python()), "-s", str(_worker_path()), "--serve"],
+            [str(runtime_python()), "-s", str(_worker_path()), "--serve"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -468,7 +438,7 @@ def _perform_load(generation: int) -> bool:
     global _loaded_at, _message, _model_loaded, _state, _tensorflow_version
     try:
         if not _model_pack_available():
-            _install_model_pack(generation)
+            _prepare_model_pack(generation)
         with _condition:
             if generation != _generation:
                 return True
@@ -501,15 +471,7 @@ def _perform_load(generation: int) -> bool:
         _tensorflow_version = _text(warmup.get("tensorflow_version"))
         _gpu_count = max(0, int(warmup.get("gpu_count") or 0))
         target = desired_accelerator()
-        install_warning = ""
-        try:
-            ready = json.loads(model_pack_ready_path().read_text(encoding="utf-8"))
-            install_warning = _text(ready.get("accelerator_install_error")) if isinstance(ready, dict) else ""
-        except Exception:
-            pass
-        if install_warning:
-            _accelerator_warning = f"{target.title()} support could not be installed; using {_accelerator.upper()}."
-        elif target != "cpu" and _accelerator == "cpu":
+        if target != "cpu" and _accelerator == "cpu":
             _accelerator_warning = f"{target.title()} was requested but TensorFlow did not detect a GPU; using CPU."
         else:
             _accelerator_warning = ""
@@ -545,7 +507,7 @@ def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
             return status(redis_client)
         _generation += 1
         generation = _generation
-        _state = "loading" if _model_pack_available() else "installing"
+        _state = "loading"
         _load_thread = threading.Thread(
             target=_load_thread_main,
             args=(generation, redis_client),
@@ -562,7 +524,7 @@ def load_model(redis_client: Any = None, *, timeout: float = 2700.0) -> bool:
     start_model_load(redis_client)
     deadline = time.monotonic() + max(1.0, float(timeout))
     with _condition:
-        while not _model_loaded and _state in {"idle", "installing", "loading"}:
+        while not _model_loaded and _state in {"idle", "loading"}:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Face ID model load timed out.")

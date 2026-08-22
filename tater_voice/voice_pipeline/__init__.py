@@ -65,6 +65,8 @@ import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
 from speech_settings import (
+    DEFAULT_OMNIVOICE_TTS_MODEL,
+    DEFAULT_QWEN_TTS_MODEL,
     get_speech_settings as get_shared_speech_settings,
     normalize_speech_acceleration,
 )
@@ -522,6 +524,8 @@ _kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
 _pocket_tts_model_cache: Dict[str, Any] = {}
 _pocket_tts_model_lock = threading.Lock()
+_pocket_tts_voice_state_cache: Dict[Tuple[str, str], Any] = {}
+_pocket_tts_runtime_lock = threading.Lock()
 _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
@@ -2092,6 +2096,14 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_TTS_VOICE": shared.get("tts_voice"),
         "VOICE_KOKORO_OUTPUT_GAIN": shared.get("kokoro_output_gain"),
         "VOICE_POCKET_TTS_OUTPUT_GAIN": shared.get("pocket_tts_output_gain"),
+        "VOICE_QWEN_TTS_CLONE_AUDIO": shared.get("qwen_tts_clone_audio"),
+        "VOICE_QWEN_TTS_CLONE_TEXT": shared.get("qwen_tts_clone_text"),
+        "VOICE_QWEN_TTS_LANGUAGE": shared.get("qwen_tts_language"),
+        "VOICE_QWEN_TTS_INSTRUCT": shared.get("qwen_tts_instruct"),
+        "VOICE_OMNIVOICE_TTS_CLONE_AUDIO": shared.get("omnivoice_tts_clone_audio"),
+        "VOICE_OMNIVOICE_TTS_CLONE_TEXT": shared.get("omnivoice_tts_clone_text"),
+        "VOICE_OMNIVOICE_TTS_LANGUAGE": shared.get("omnivoice_tts_language"),
+        "VOICE_OMNIVOICE_TTS_INSTRUCT": shared.get("omnivoice_tts_instruct"),
         "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
         "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
@@ -2478,6 +2490,10 @@ def _normalize_tts_backend(value: Any) -> str:
         return "pocket_tts"
     if token == "piper":
         return "piper"
+    if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
+        return "qwen3_tts"
+    if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
+        return "omnivoice"
     return DEFAULT_TTS_BACKEND
 
 
@@ -2510,6 +2526,8 @@ def _tts_backend_model_root(backend: str) -> str:
         "kokoro": "kokoro",
         "pocket_tts": "pocket-tts",
         "piper": "piper",
+        "qwen3_tts": "qwen3-tts",
+        "omnivoice": "omnivoice",
         "openai_compatible": "openai-compatible",
         "chatterbox": "chatterbox",
         "wyoming": "wyoming",
@@ -2908,6 +2926,10 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                     if tts_backend == "pocket_tts"
                     else DEFAULT_PIPER_MODEL
                     if tts_backend == "piper"
+                    else DEFAULT_QWEN_TTS_MODEL
+                    if tts_backend == "qwen3_tts"
+                    else DEFAULT_OMNIVOICE_TTS_MODEL
+                    if tts_backend == "omnivoice"
                     else DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
                     if tts_backend == "openai_compatible"
                     else ""
@@ -2972,6 +2994,18 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
             "piper": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_PIPER_MODEL,
                 "model_root": _tts_backend_model_root("piper"),
+            },
+            "qwen3_tts": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_QWEN_TTS_MODEL,
+                "clone_audio_configured": bool(_text(settings.get("VOICE_QWEN_TTS_CLONE_AUDIO"))),
+                "language": _text(settings.get("VOICE_QWEN_TTS_LANGUAGE")) or "English",
+                "model_root": _tts_backend_model_root("qwen3_tts"),
+            },
+            "omnivoice": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_OMNIVOICE_TTS_MODEL,
+                "clone_audio_configured": bool(_text(settings.get("VOICE_OMNIVOICE_TTS_CLONE_AUDIO"))),
+                "language": _text(settings.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "English",
+                "model_root": _tts_backend_model_root("omnivoice"),
             },
         },
         "wyoming_tts": {

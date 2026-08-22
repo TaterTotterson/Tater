@@ -42,7 +42,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     TATER_AIRPLAY_CLI_PATH=/usr/local/bin/cliairplay \
     TATER_SHAIRPORT_SYNC_PATH=/usr/local/bin/shairport-sync \
     TATER_FFMPEG_PATH=/usr/bin/ffmpeg \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib:/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib
 
 ARG TARGETARCH
 ARG AIRPLAY_CLI_VERSION=0.4.12
@@ -121,13 +121,17 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
  && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
  && python -m pip install -r /tmp/requirements.nvidia.txt \
+ && python -m pip install "tensorflow[and-cuda]==2.21.0" \
+ && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
  && python -m pip uninstall -y onnxruntime \
  && python -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27" \
+ && python -c "import pathlib; libraries=sorted(pathlib.Path('/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib').glob('libnccl.so.2*')); assert libraries, 'PyTorch did not install the NCCL runtime'; print('nccl_runtime', libraries[0])" \
  && python -c "from google.protobuf import runtime_version; import onnx_asr, onnxruntime as ort, torch, torchaudio, transformers, webrtcvad; providers=ort.get_available_providers(); assert 'CUDAExecutionProvider' in providers, providers; print('protobuf_runtime', runtime_version.__name__, 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__, 'onnx_providers', ','.join(providers))"
 
 COPY --from=llama_cpp_builder /opt/llama.cpp /opt/llama.cpp
 
-RUN test -x "$TATER_LLAMA_CPP_SERVER_BIN"
+RUN test -x "$TATER_LLAMA_CPP_SERVER_BIN" \
+ && ldd "$TATER_LLAMA_CPP_SERVER_BIN" | grep -E 'libnccl\.so\.2 => /usr/local/lib/python3\.11/site-packages/nvidia/nccl/lib/'
 
 COPY . .
 

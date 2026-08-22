@@ -7,6 +7,7 @@ import logging
 import os
 import pkgutil
 import sys
+import threading
 import time
 from pathlib import Path
 from types import ModuleType
@@ -20,9 +21,11 @@ INTEGRATION_DIR = Path(os.getenv("TATER_INTEGRATION_DIR", "integrations"))
 logger = logging.getLogger("integration_registry")
 integration_registry_errors: List[str] = []
 INTEGRATION_DEVICE_REGISTRY_CACHE_KEY = "tater:integration_runtime:device_registry"
+INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY = "tater:integration_runtime:device_registry:generation"
 INTEGRATION_ROOM_OVERRIDES_KEY = "tater:integration_runtime:room_overrides"
 INTEGRATION_RUNTIME_STATES_KEY = "tater:integration_runtime:states"
 _DEVICE_REGISTRY_CACHE_VERSION = 4
+_DEVICE_REGISTRY_GENERATION_LOCK = threading.RLock()
 _DEVICE_REGISTRY_VOLATILE_FIELDS = {
     "age_seconds",
     "duration_ms",
@@ -1127,11 +1130,16 @@ def _integration_modules() -> List[Any]:
             continue
         if not integration_store_module.get_integration_enabled(name):
             continue
-        module_name = f"{INTEGRATION_PACKAGE}.{name}"
         try:
-            module = importlib.import_module(module_name)
+            module = integration_store_module.integration_module(
+                name,
+                auto_restore=False,
+                require_enabled=True,
+            )
+            if module is None:
+                continue
         except Exception as exc:
-            errors.append(f"{module_name}: {exc}")
+            errors.append(f"{INTEGRATION_PACKAGE}.{name}: {exc}")
             continue
         definition = getattr(module, "INTEGRATION", None)
         if isinstance(definition, dict) and _text(definition.get("id")):
@@ -1147,10 +1155,14 @@ def _module_for_integration(integration_id: str) -> Any:
     target = _text(integration_id)
     if not target:
         raise KeyError("Integration id is required.")
-    for module in _integration_modules():
-        definition = getattr(module, "INTEGRATION", None)
-        if isinstance(definition, dict) and _text(definition.get("id")) == target:
-            return module
+    module = integration_store_module.integration_module(
+        target,
+        auto_restore=False,
+        require_enabled=True,
+    )
+    definition = getattr(module, "INTEGRATION", None) if module is not None else None
+    if isinstance(definition, dict) and _text(definition.get("id")) == target:
+        return module
     raise KeyError(f"Unknown integration: {target}")
 
 
@@ -1572,12 +1584,45 @@ def _build_integration_device_registry(snapshot: Dict[str, Any], client: Any = N
     }
 
 
-def _cache_metadata(*, generated_at: float, duration_ms: float = 0.0, source: str = "runtime") -> Dict[str, Any]:
+def _device_registry_generation(client: Any = None) -> int:
+    redis_obj = _cache_client(client)
+    if not redis_obj:
+        return 0
+    try:
+        return max(0, int(redis_obj.get(INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY) or 0))
+    except Exception:
+        return 0
+
+
+def bump_integration_device_registry_generation(client: Any = None) -> int:
+    redis_obj = _cache_client(client)
+    if not redis_obj:
+        return 0
+    with _DEVICE_REGISTRY_GENERATION_LOCK:
+        try:
+            return max(0, int(redis_obj.incr(INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY)))
+        except Exception:
+            generation = _device_registry_generation(redis_obj) + 1
+            try:
+                redis_obj.set(INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY, str(generation))
+            except Exception:
+                return 0
+            return generation
+
+
+def _cache_metadata(
+    *,
+    generated_at: float,
+    duration_ms: float = 0.0,
+    source: str = "runtime",
+    generation: int = 0,
+) -> Dict[str, Any]:
     now = time.time()
     return {
         "version": _DEVICE_REGISTRY_CACHE_VERSION,
         "cached": True,
         "source": source,
+        "generation": max(0, int(generation or 0)),
         "enabled_integrations": _enabled_integration_ids(),
         "generated_at": generated_at,
         "updated_at": generated_at,
@@ -1645,6 +1690,7 @@ def _device_registry_cache_comparable(value: Any) -> Any:
             cache = item if isinstance(item, dict) else {}
             comparable[key] = {
                 "version": int(cache.get("version") or 0),
+                "generation": int(cache.get("generation") or 0),
                 "enabled_integrations": sorted(
                     _text(entry).lower()
                     for entry in (cache.get("enabled_integrations") or [])
@@ -1656,47 +1702,142 @@ def _device_registry_cache_comparable(value: Any) -> Any:
     return comparable
 
 
-def save_integration_device_registry_cache(registry: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
+def save_integration_device_registry_cache(
+    registry: Dict[str, Any],
+    client: Any = None,
+    *,
+    expected_generation: Optional[int] = None,
+) -> Dict[str, Any]:
     redis_obj = _cache_client(client)
-    payload = _copy_dict(registry)
-    generated_at = time.time()
-    cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
-    payload["cache"] = {
-        **cache,
-        "version": _DEVICE_REGISTRY_CACHE_VERSION,
-        "cached": True,
-        "enabled_integrations": _enabled_integration_ids(),
-        "generated_at": float(cache.get("generated_at") or generated_at),
-        "updated_at": generated_at,
-    }
-    if redis_obj:
-        should_write = True
-        try:
-            existing = _json_dict_loads(redis_obj.get(INTEGRATION_DEVICE_REGISTRY_CACHE_KEY))
-            if existing:
-                should_write = (
-                    _device_registry_cache_comparable(existing)
-                    != _device_registry_cache_comparable(payload)
-                )
-        except Exception:
-            should_write = True
-        if should_write:
-            redis_obj.set(
-                INTEGRATION_DEVICE_REGISTRY_CACHE_KEY,
-                json.dumps(payload, separators=(",", ":"), default=str),
+    with _DEVICE_REGISTRY_GENERATION_LOCK:
+        generation = _device_registry_generation(redis_obj)
+        if expected_generation is not None and generation != max(0, int(expected_generation)):
+            logger.info(
+                "Integration device registry scan superseded (started generation=%s, current generation=%s).",
+                expected_generation,
+                generation,
             )
-        else:
-            logger.debug("Integration device registry unchanged; skipped cache rewrite.")
-    return payload
+            return get_cached_integration_device_registry(redis_obj) or _copy_dict(registry)
+        payload = _copy_dict(registry)
+        generated_at = time.time()
+        cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+        payload["cache"] = {
+            **cache,
+            "version": _DEVICE_REGISTRY_CACHE_VERSION,
+            "cached": True,
+            "generation": generation,
+            "enabled_integrations": _enabled_integration_ids(),
+            "generated_at": float(cache.get("generated_at") or generated_at),
+            "updated_at": generated_at,
+        }
+        if redis_obj:
+            should_write = True
+            try:
+                existing = _json_dict_loads(redis_obj.get(INTEGRATION_DEVICE_REGISTRY_CACHE_KEY))
+                if existing:
+                    should_write = (
+                        _device_registry_cache_comparable(existing)
+                        != _device_registry_cache_comparable(payload)
+                    )
+            except Exception:
+                should_write = True
+            if should_write:
+                redis_obj.set(
+                    INTEGRATION_DEVICE_REGISTRY_CACHE_KEY,
+                    json.dumps(payload, separators=(",", ":"), default=str),
+                )
+            else:
+                logger.debug("Integration device registry unchanged; skipped cache rewrite.")
+        return payload
 
 
 def refresh_integration_device_registry_cache(client: Any = None, *, source: str = "runtime") -> Dict[str, Any]:
     started = time.time()
+    generation = _device_registry_generation(client)
     snapshot = _load_integration_devices_live()
     registry = _build_integration_device_registry(snapshot, client)
     duration_ms = (time.time() - started) * 1000.0
     generated_at = time.time()
-    registry["cache"] = _cache_metadata(generated_at=generated_at, duration_ms=duration_ms, source=source)
+    registry["cache"] = _cache_metadata(
+        generated_at=generated_at,
+        duration_ms=duration_ms,
+        source=source,
+        generation=generation,
+    )
+    return save_integration_device_registry_cache(
+        registry,
+        client,
+        expected_generation=generation,
+    )
+
+
+def refresh_integration_device_group_cache(
+    integration_id: Any,
+    client: Any = None,
+    *,
+    source: str = "integration-update",
+) -> Dict[str, Any]:
+    token = _text(integration_id).lower()
+    if not token:
+        raise ValueError("Integration id is required.")
+    cached = get_cached_integration_device_registry(client)
+    if not cached:
+        redis_obj = _cache_client(client)
+        try:
+            raw_cached = _json_dict_loads(redis_obj.get(INTEGRATION_DEVICE_REGISTRY_CACHE_KEY)) if redis_obj else None
+        except Exception:
+            raw_cached = None
+        if isinstance(raw_cached, dict):
+            raw_cache = raw_cached.get("cache") if isinstance(raw_cached.get("cache"), dict) else {}
+            if int(raw_cache.get("version") or 0) == _DEVICE_REGISTRY_CACHE_VERSION:
+                cached = _copy_dict(raw_cached)
+    cached_groups = [dict(row) for row in cached.get("groups") or [] if isinstance(row, dict)]
+    if not cached_groups:
+        bump_integration_device_registry_generation(client)
+        return refresh_integration_device_registry_cache(client, source=source)
+
+    module = _module_for_integration(token)
+    definition = _coerce_definition(module)
+    group = _device_group(module, definition)
+    groups = [row for row in cached_groups if _text(row.get("id")).lower() != token]
+    groups.append(group)
+    groups.sort(
+        key=lambda item: (
+            int(item.get("order") or 1000),
+            _text(item.get("name")).casefold(),
+            _text(item.get("id")),
+        )
+    )
+    errors = [
+        dict(row)
+        for row in cached.get("errors") or []
+        if isinstance(row, dict) and _text(row.get("integration_id")).lower() != token
+    ]
+    if _text(group.get("error")):
+        errors.append(
+            {
+                "integration_id": token,
+                "name": _text(group.get("name")) or token,
+                "error": _text(group.get("error")),
+            }
+        )
+    generation = bump_integration_device_registry_generation(client)
+    started = time.time()
+    registry = _build_integration_device_registry(
+        {
+            "groups": groups,
+            "total": sum(int(row.get("device_count") or 0) for row in groups),
+            "errors": errors,
+        },
+        client,
+    )
+    generated_at = time.time()
+    registry["cache"] = _cache_metadata(
+        generated_at=generated_at,
+        duration_ms=(generated_at - started) * 1000.0,
+        source=source,
+        generation=generation,
+    )
     return save_integration_device_registry_cache(registry, client)
 
 

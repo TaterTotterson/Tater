@@ -24,6 +24,7 @@ from announcement_targets import split_announcement_targets
 from helpers import redis_client
 from runtime_executors import run_background, run_tts
 from tater_paths import agent_lab_path
+from managed_tts import clear_managed_tts_workers, is_managed_tts_backend, synthesize_managed_tts_pcm
 from tateros import integration_store as integration_store_module
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -188,6 +189,9 @@ _kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
 _pocket_tts_model_cache: Dict[str, Any] = {}
 _pocket_tts_model_lock = threading.Lock()
+_pocket_tts_voice_state_cache: Dict[Tuple[str, str], Any] = {}
+_pocket_tts_runtime_lock = threading.Lock()
+_POCKET_TTS_VOICE_STATE_CACHE_LIMIT = 8
 _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
@@ -205,10 +209,12 @@ def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
     with _pocket_tts_model_lock:
         cleared["pocket_tts"] = len(_pocket_tts_model_cache)
         _pocket_tts_model_cache.clear()
+        _pocket_tts_voice_state_cache.clear()
     if include_piper:
         with _piper_voice_lock:
             cleared["piper"] = len(_piper_voice_cache)
             _piper_voice_cache.clear()
+    cleared.update(clear_managed_tts_workers())
     return cleared
 
 
@@ -499,6 +505,10 @@ def normalize_tts_backend(value: Any) -> str:
         return "pocket_tts"
     if token == "piper":
         return "piper"
+    if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
+        return "qwen3_tts"
+    if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
+        return "omnivoice"
     return DEFAULT_TTS_BACKEND
 
 
@@ -2135,20 +2145,67 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str, output_gai
     root = _ensure_tts_backend_model_root("pocket_tts")
     hf_root = os.path.join(root, "hf")
     os.makedirs(hf_root, exist_ok=True)
-    with _temporary_env(
-        huggingface_environment(
-            {
-                "HF_HOME": hf_root,
-                "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
-                "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
-            }
-        )
-    ):
-        model_state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
-        audio_tensor = model.generate_audio(model_state, prompt)
-    tensor = audio_tensor.detach().cpu().squeeze()
-    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=_pocket_tts_output_gain(output_gain))
+    selected_voice = _text(voice) or DEFAULT_POCKET_TTS_VOICE
+    env = huggingface_environment(
+        {
+            "HF_HOME": hf_root,
+            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+        }
+    )
+    with _pocket_tts_runtime_lock:
+        with _temporary_env(env):
+            model_state = _get_pocket_tts_voice_state(model, model_id, selected_voice)
+            audio_bytes = _generate_pocket_tts_pcm(
+                model,
+                model_state,
+                prompt,
+                gain=_pocket_tts_output_gain(output_gain),
+            )
     return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
+
+
+def _pocket_tts_voice_cache_key(model_id: str, voice: str) -> Tuple[str, str]:
+    model_token = _text(model_id) or DEFAULT_POCKET_TTS_MODEL
+    voice_token = _text(voice) or DEFAULT_POCKET_TTS_VOICE
+    expanded = os.path.abspath(os.path.expanduser(voice_token))
+    try:
+        stat = os.stat(expanded)
+    except OSError:
+        return model_token, voice_token
+    return model_token, f"file:{expanded}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _get_pocket_tts_voice_state(model: Any, model_id: str, voice: str) -> Any:
+    cache_key = _pocket_tts_voice_cache_key(model_id, voice)
+    with _pocket_tts_model_lock:
+        cached = _pocket_tts_voice_state_cache.pop(cache_key, None)
+        if cached is not None:
+            _pocket_tts_voice_state_cache[cache_key] = cached
+            return cached
+
+        state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
+        _pocket_tts_voice_state_cache[cache_key] = state
+        while len(_pocket_tts_voice_state_cache) > _POCKET_TTS_VOICE_STATE_CACHE_LIMIT:
+            oldest_key = next(iter(_pocket_tts_voice_state_cache))
+            _pocket_tts_voice_state_cache.pop(oldest_key, None)
+        return state
+
+
+def _generate_pocket_tts_pcm(model: Any, model_state: Any, text: str, *, gain: float) -> bytes:
+    stream = getattr(model, "generate_audio_stream", None)
+    if callable(stream):
+        chunks: List[bytes] = []
+        for audio_chunk in stream(model_state, text):
+            tensor = audio_chunk.detach().cpu().squeeze()
+            pcm = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+            if pcm:
+                chunks.append(pcm)
+        return b"".join(chunks)
+
+    audio_tensor = model.generate_audio(model_state, text)
+    tensor = audio_tensor.detach().cpu().squeeze()
+    return _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
 
 
 def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
@@ -2213,6 +2270,10 @@ async def synthesize_tts_wav(
     acceleration: Any = None,
     kokoro_output_gain: Any = None,
     pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
 ) -> bytes:
     selected_backend = normalize_tts_backend(backend)
     prompt = _text(text)
@@ -2245,6 +2306,26 @@ async def synthesize_tts_wav(
             _synthesize_piper_sync,
             prompt,
             _text(model) or DEFAULT_PIPER_MODEL,
+        )
+        return pcm_to_wav(audio_bytes, audio_format)
+
+    if is_managed_tts_backend(selected_backend):
+        speech_settings = get_speech_settings()
+        prefix = "qwen_tts" if selected_backend == "qwen3_tts" else "omnivoice_tts"
+        audio_bytes, audio_format = await run_tts(
+            synthesize_managed_tts_pcm,
+            prompt,
+            backend=selected_backend,
+            model=_text(model),
+            clone_audio=(clone_audio if clone_audio is not None else speech_settings.get(f"{prefix}_clone_audio")),
+            clone_text=(clone_text if clone_text is not None else speech_settings.get(f"{prefix}_clone_text")),
+            language=(
+                managed_language if managed_language is not None else speech_settings.get(f"{prefix}_language")
+            ),
+            instruct=(
+                managed_instruct if managed_instruct is not None else speech_settings.get(f"{prefix}_instruct")
+            ),
+            acceleration=acceleration if acceleration is not None else speech_settings.get("acceleration"),
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
@@ -2321,6 +2402,10 @@ async def synthesize_preview_wav(
     acceleration: Any = None,
     kokoro_output_gain: Any = None,
     pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
 ) -> bytes:
     return await synthesize_tts_wav(
         text=text,
@@ -2344,6 +2429,10 @@ async def synthesize_preview_wav(
         acceleration=acceleration,
         kokoro_output_gain=kokoro_output_gain,
         pocket_tts_output_gain=pocket_tts_output_gain,
+        clone_audio=clone_audio,
+        clone_text=clone_text,
+        managed_language=managed_language,
+        managed_instruct=managed_instruct,
     )
 
 

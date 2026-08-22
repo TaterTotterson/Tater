@@ -64,6 +64,20 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".tcx-repo-form { display: grid;", styles)
         self.assertIn(".tcx-legacy-host", styles)
 
+    def test_vue_input_styles_do_not_stretch_legacy_core_toggles(self) -> None:
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn(".tater-vue-surface input:not(.toggle-input)", styles)
+        self.assertIn(".tv-modal input:not(.tv-checkbox):not(.toggle-input)", styles)
+        self.assertNotIn(
+            ".tater-vue-surface input, .tater-vue-surface select, .tv-modal input:not(.tv-checkbox)",
+            styles,
+        )
+        self.assertNotIn(
+            ".tater-vue-surface input:focus, .tater-vue-surface select:focus, .tv-modal input:focus",
+            styles,
+        )
+
     def test_awareness_controls_and_event_list_have_scoped_layouts(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
@@ -107,6 +121,30 @@ class VueCoresTests(unittest.TestCase):
             "_coreRenderSelectOptions(targetSelect, nextRows, preferredValue, preferredValues)",
             source,
         )
+
+    def test_core_media_route_supports_browser_metadata_and_range_requests(self) -> None:
+        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+
+        self.assertIn('@app.head("/api/cores/{core_key}/media/{media_id}")', source)
+        self.assertIn('if request.method.upper() == "HEAD":', source)
+        self.assertIn('"Accept-Ranges": "bytes"', source)
+        self.assertIn('"Content-Range": f"bytes {start}-{end}/{size}"', source)
+
+    def test_core_video_can_return_to_its_poster_after_playback(self) -> None:
+        source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-core-video-reset-to-poster="1"', source)
+        self.assertIn("data-core-video-poster-button", source)
+        self.assertIn("function bindCoreVideoPosterReset(root = document)", source)
+        self.assertIn('video.addEventListener("pause"', source)
+        self.assertIn('video.addEventListener("ended", showPoster)', source)
+        self.assertIn("video.hidden = true", source)
+        self.assertIn('video.style.display = "none"', source)
+        self.assertIn('video.style.display = "block"', source)
+        self.assertIn("posterButton.hidden = false", source)
+        self.assertIn('posterButton.style.display = "block"', source)
+        self.assertIn('posterButton.addEventListener("click", async () => {', source)
+        self.assertIn("bindCoreVideoPosterReset();", source)
 
     def test_music_player_selectors_group_targets_and_use_friendly_names(self) -> None:
         display = (REPO_ROOT / "frontend" / "src" / "music" / "playerDisplay.ts").read_text(

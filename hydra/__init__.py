@@ -90,6 +90,8 @@ _KERNEL_TOOL_PURPOSE_HINTS = {
     "list_archive": "inspect archive entries",
     "extract_archive": "extract archives to a target directory",
     "image_describe": "describe an explicit image using an artifact_id, URL, blob, or local path",
+    "audio_analyze": "understand an explicit audio clip, including speech, music, and sound events; use STT for plain transcription and do not use this as exact Shazam-style fingerprint lookup",
+    "video_analyze": "understand an explicit short video clip, including actions, subjects, scene changes, and sequence",
     "attach_file": "attach an available artifact or local file, and optionally send it to a destination platform/target",
     "send_message": "queue a cross-portal notification/message only when the user explicitly asks to notify or message a destination (never for normal chat replies)",
 }
@@ -109,6 +111,8 @@ _KERNEL_TOOL_USAGE_HINTS = {
     "list_archive": '{"function":"list_archive","arguments":{"path":"<archive_path>"}}',
     "extract_archive": '{"function":"extract_archive","arguments":{"path":"<archive_path>","destination":"<dest_path>"}}',
     "image_describe": '{"function":"image_describe","arguments":{"artifact_id":"<artifact_id>","query":"Describe this image."}}',
+    "audio_analyze": '{"function":"audio_analyze","arguments":{"artifact_id":"<artifact_id>","query":"What can you hear in this clip?"}}',
+    "video_analyze": '{"function":"video_analyze","arguments":{"artifact_id":"<artifact_id>","query":"What happens in this video?"}}',
     "attach_file": '{"function":"attach_file","arguments":{"artifact_id":"<artifact_id>","message":"Attachment"}}',
     "send_message": '{"function":"send_message","arguments":{"message":"<message>"}}',
 }
@@ -4381,7 +4385,7 @@ def _autofix_image_describe_tool_call(
     if not isinstance(tool_call, dict):
         return tool_call
     func = str(tool_call.get("function") or "").strip().lower()
-    if func != "image_describe":
+    if func not in {"image_describe", "audio_analyze", "video_analyze"}:
         return tool_call
 
     args = dict(tool_call.get("arguments") or {}) if isinstance(tool_call.get("arguments"), dict) else {}
@@ -4398,10 +4402,19 @@ def _autofix_image_describe_tool_call(
             if str(item.get("artifact_id") or "").strip() == artifact_id:
                 return tool_call
 
-    selected = _select_image_artifact_for_call(
-        available_artifacts=available_artifacts,
-        hinted_value=artifact_id,
-    )
+    if func == "image_describe":
+        selected = _select_image_artifact_for_call(
+            available_artifacts=available_artifacts,
+            hinted_value=artifact_id,
+        )
+    else:
+        media_prefix = "audio/" if func == "audio_analyze" else "video/"
+        candidates = [
+            dict(item)
+            for item in (available_artifacts or [])
+            if str((item or {}).get("mimetype") or "").strip().lower().startswith(media_prefix)
+        ]
+        selected = candidates[0] if candidates else None
     if not isinstance(selected, dict):
         return tool_call
 

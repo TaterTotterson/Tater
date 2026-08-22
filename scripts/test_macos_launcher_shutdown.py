@@ -11,6 +11,7 @@ RUN_UI_SOURCE = ROOT / "run_ui.sh"
 REQUIREMENTS = ROOT / "requirements.txt"
 SETUP_SOURCE = ROOT / "setup_tater.sh"
 HELPERS_SOURCE = ROOT / "helpers.py"
+FIRMWARE_SOURCE = ROOT / "tater_voice" / "firmware.py"
 
 
 class MacOSLauncherShutdownTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         cls.requirements = REQUIREMENTS.read_text(encoding="utf-8")
         cls.setup_source = SETUP_SOURCE.read_text(encoding="utf-8")
         cls.helpers_source = HELPERS_SOURCE.read_text(encoding="utf-8")
+        cls.firmware_source = FIRMWARE_SOURCE.read_text(encoding="utf-8")
 
     def test_uvicorn_connection_drain_has_a_bounded_timeout(self) -> None:
         self.assertIn(
@@ -79,6 +81,44 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         status_guard = implementation.index("guard process.terminationStatus == 0")
         record = implementation.index("try recordRuntimeRequirementsFingerprint()")
         self.assertLess(status_guard, record)
+
+    def test_face_id_dependencies_are_part_of_the_managed_runtime(self) -> None:
+        self.assertIn("deepface==0.0.100", self.requirements)
+        self.assertIn("tensorflow-metal==1.2.0", self.requirements)
+        self.assertNotIn("requirements-face.txt", self.setup_source)
+        self.assertNotIn("filtered_face_id_requirements", self.setup_source)
+        self.assertNotIn("install_face_id_runtime", self.setup_source)
+        self.assertIn('face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]', self.setup_source)
+        self.assertIn("cleanup_legacy_runtime", self.setup_source)
+        self.assertIn("aioesphomeapi", self.setup_source)
+        self.assertIn("nanowakeword", self.setup_source)
+        self.assertIn('rm -rf "${managed_venv}"', self.setup_source)
+
+        start = self.source.index("private func pinnedRuntimeDependenciesReady")
+        end = self.source.index("private func sourceRequirementsFingerprint", start)
+        implementation = self.source[start:end]
+        self.assertIn('"deepface", "tensorflow", "tf-keras", "opencv-python", "retina-face"', implementation)
+        self.assertIn('faceIDPackages.append("tensorflow-metal")', implementation)
+        self.assertIn("using: python", implementation)
+        self.assertNotIn("faceIDPython", implementation)
+
+    def test_obsolete_runtime_content_triggers_setup_cleanup(self) -> None:
+        start = self.source.index("private func pinnedRuntimeDependenciesReady")
+        end = self.source.index("private func sourceRequirementsFingerprint", start)
+        implementation = self.source[start:end]
+
+        self.assertIn('"aioesphomeapi"', implementation)
+        self.assertIn('"nanowakeword"', implementation)
+        self.assertIn('"openwakeword"', implementation)
+        self.assertIn('appendingPathComponent("models/face-id/venv/pyvenv.cfg")', implementation)
+        self.assertIn('agentRoot.appendingPathComponent("esphome", isDirectory: true)', implementation)
+        self.assertIn('agentRoot.appendingPathComponent("firmware", isDirectory: true)', implementation)
+
+    def test_native_firmware_workspace_has_a_current_name(self) -> None:
+        self.assertIn('FIRMWARE_WORKSPACE_ROOT = agent_lab_path("firmware")', self.firmware_source)
+        self.assertNotIn('agent_lab_path("esphome")', self.firmware_source)
+        self.assertIn('legacy_firmware_root="${AGENT_ROOT}/esphome"', self.setup_source)
+        self.assertIn('firmware_root="${AGENT_ROOT}/firmware"', self.setup_source)
 
     def test_bootstrap_and_recovery_share_one_lifecycle_gate(self) -> None:
         start = self.source.index("func start()")

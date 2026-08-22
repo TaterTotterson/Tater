@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
-FIRMWARE_AGENT_LABS_ROOT = agent_lab_path("esphome")
-FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_AGENT_LABS_ROOT / "web_flash"
-FIRMWARE_PREBUILT_ROOT = FIRMWARE_AGENT_LABS_ROOT / "prebuilt_firmware"
+FIRMWARE_WORKSPACE_ROOT = agent_lab_path("firmware")
+FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_WORKSPACE_ROOT / "web_flash"
+FIRMWARE_PREBUILT_ROOT = FIRMWARE_WORKSPACE_ROOT / "prebuilt_firmware"
 _REMOTE_TEMPLATE_FETCH_TIMEOUT_SECONDS = 3.0
 _REMOTE_JSON_CACHE_TTL_SECONDS = 15 * 60.0
 _REMOTE_JSON_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -683,7 +683,7 @@ def _clean_terminal_text(value: Any) -> str:
 
 def _ensure_agent_labs_dirs() -> None:
     for path in (
-        FIRMWARE_AGENT_LABS_ROOT,
+        FIRMWARE_WORKSPACE_ROOT,
         FIRMWARE_WEB_FLASH_ROOT,
         FIRMWARE_PREBUILT_ROOT,
     ):
@@ -709,12 +709,12 @@ def _clean_firmware_workspace() -> Dict[str, Any]:
         raise RuntimeError(f"Stop the active firmware session(s) first: {joined}{more}.")
 
     legacy_paths = (
-        FIRMWARE_AGENT_LABS_ROOT / "firmware_configs",
-        FIRMWARE_AGENT_LABS_ROOT / "firmware_builds",
-        FIRMWARE_AGENT_LABS_ROOT / "runner",
-        FIRMWARE_AGENT_LABS_ROOT / "platformio",
-        FIRMWARE_AGENT_LABS_ROOT / "home",
-        FIRMWARE_AGENT_LABS_ROOT / "cache",
+        FIRMWARE_WORKSPACE_ROOT / "firmware_configs",
+        FIRMWARE_WORKSPACE_ROOT / "firmware_builds",
+        FIRMWARE_WORKSPACE_ROOT / "runner",
+        FIRMWARE_WORKSPACE_ROOT / "platformio",
+        FIRMWARE_WORKSPACE_ROOT / "home",
+        FIRMWARE_WORKSPACE_ROOT / "cache",
     )
     removed: List[str] = []
     for path in (FIRMWARE_WEB_FLASH_ROOT, FIRMWARE_PREBUILT_ROOT, *legacy_paths):

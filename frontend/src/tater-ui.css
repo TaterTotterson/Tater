@@ -117,8 +117,8 @@
 .ti-repo-row.builtin { border-style: dashed; }
 .ti-repo-form { display: grid; grid-template-columns: minmax(150px, .5fr) minmax(240px, 1fr) auto auto; gap: 8px; align-items: end; margin-top: 4px; }
 .ti-repo-form label, .ti-room-controls label, .ti-room-devices label { display: grid; gap: 5px; color: var(--tv-muted); font-size: .68rem; }
-.tater-vue-surface input, .tater-vue-surface select, .tv-modal input:not(.tv-checkbox), .tv-modal select, .tv-modal textarea { width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid var(--tv-border); border-radius: 9px; color: var(--tv-text); background: var(--tv-surface-strong); }
-.tater-vue-surface input:focus, .tater-vue-surface select:focus, .tv-modal input:focus, .tv-modal select:focus, .tv-modal textarea:focus { outline: 2px solid color-mix(in srgb, var(--tv-accent) 32%, transparent); border-color: var(--tv-accent); }
+.tater-vue-surface input:not(.toggle-input), .tater-vue-surface select, .tv-modal input:not(.tv-checkbox):not(.toggle-input), .tv-modal select, .tv-modal textarea { width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid var(--tv-border); border-radius: 9px; color: var(--tv-text); background: var(--tv-surface-strong); }
+.tater-vue-surface input:not(.toggle-input):focus, .tater-vue-surface select:focus, .tv-modal input:not(.toggle-input):focus, .tv-modal select:focus, .tv-modal textarea:focus { outline: 2px solid color-mix(in srgb, var(--tv-accent) 32%, transparent); border-color: var(--tv-accent); }
 .ti-browser { display: grid; gap: 15px; }
 .ti-browser-layout { display: grid; grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); gap: 14px; align-items: start; }
 .ti-browser-layout > aside { display: grid; align-content: start; gap: 6px; }

@@ -214,7 +214,22 @@ from speech_settings import (
     get_announcement_tts_ui_payload,
     get_speech_settings as get_shared_speech_settings,
     get_speech_ui_payload,
+    save_managed_tts_clone_audio_path,
+    save_managed_tts_clone_text,
     save_speech_settings as save_shared_speech_settings,
+)
+from managed_tts import (
+    DEFAULT_OMNIVOICE_TTS_MODEL as MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL,
+    DEFAULT_QWEN_TTS_MODEL as MANAGED_DEFAULT_QWEN_TTS_MODEL,
+    clone_audio_info,
+    clear_managed_tts_workers,
+    decode_clone_audio_pcm,
+    managed_tts_workers_snapshot,
+    normalize_managed_tts_backend,
+    remove_clone_audio,
+    store_clone_audio,
+    validate_clone_audio_path,
+    warm_managed_tts_model,
 )
 from speech_tts import (
     clear_tts_model_caches as clear_announcement_tts_model_caches,
@@ -227,6 +242,7 @@ from speech_tts import (
 )
 from integration_registry import (
     assign_integration_device_room,
+    bump_integration_device_registry_generation,
     clear_integration_device_name,
     clear_integration_device_room,
     clear_integration_room_preferred_media_player,
@@ -240,6 +256,7 @@ from integration_registry import (
     get_integration_room_overrides,
     rename_integration_device,
     rename_integration_room,
+    refresh_integration_device_group_cache,
     run_integration_action as run_registered_integration_action,
     run_integration_device_action as run_registered_integration_device_action,
     save_integration_settings as save_registered_integration_settings,
@@ -263,6 +280,7 @@ from integration_runtime import (
     stop_integration_runtime,
 )
 from vision_settings import get_vision_settings as get_shared_vision_settings, save_vision_settings as save_shared_vision_settings
+from media_understanding_settings import get_media_understanding_settings, save_media_understanding_settings
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
 from tateros import portal_store as portal_store_module
@@ -1115,18 +1133,31 @@ def _hf_llm_warmup_item_key(provider: str, model: str) -> str:
     return f"{_normalize_hydra_llm_provider(provider)}:{str(model or '').strip()}"
 
 
-def _hf_llm_warmup_base_item(provider: str, model: str) -> Dict[str, str]:
+def _hf_llm_warmup_base_item(
+    provider: str,
+    model: str,
+    *,
+    role: str = "",
+    media_kind: str = "",
+) -> Dict[str, Any]:
     provider_token = _normalize_hydra_llm_provider(provider)
     model_token = str(model or "").strip()
-    return {
+    target: Dict[str, Any] = {
         "key": _hf_llm_warmup_item_key(provider_token, model_token),
         "provider": provider_token,
         "provider_label": _hydra_llm_provider_label(provider_token),
         "model": model_token,
     }
+    role_token = str(role or "").strip()
+    media_token = str(media_kind or "").strip().lower()
+    if role_token:
+        target["roles"] = [role_token]
+    if media_token in {"vision", "audio", "video"}:
+        target["media_kinds"] = [media_token]
+    return target
 
 
-def _hf_llm_warmup_target(value: Any) -> Dict[str, str]:
+def _hf_llm_warmup_target(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         provider = _normalize_hydra_llm_provider(value.get("provider"))
         model = str(value.get("model") or "").strip()
@@ -1135,26 +1166,63 @@ def _hf_llm_warmup_target(value: Any) -> Dict[str, str]:
         model = str(value or "").strip()
     if not model or not _is_local_hydra_llm_provider(provider):
         return {}
-    return _hf_llm_warmup_base_item(provider, model)
+    target = _hf_llm_warmup_base_item(provider, model)
+    if isinstance(value, dict):
+        roles = value.get("roles") if isinstance(value.get("roles"), list) else [value.get("role")]
+        media_kinds = (
+            value.get("media_kinds")
+            if isinstance(value.get("media_kinds"), list)
+            else [value.get("media_kind")]
+        )
+        normalized_roles = []
+        for role in roles:
+            token = str(role or "").strip()
+            if token and token not in normalized_roles:
+                normalized_roles.append(token)
+        normalized_media = []
+        for media_kind in media_kinds:
+            token = str(media_kind or "").strip().lower()
+            if token in {"vision", "audio", "video"} and token not in normalized_media:
+                normalized_media.append(token)
+        if normalized_roles:
+            target["roles"] = normalized_roles
+        if normalized_media:
+            target["media_kinds"] = normalized_media
+    return target
 
 
-def _dedupe_hf_llm_warmup_targets(values: List[Any]) -> List[Dict[str, str]]:
-    targets: List[Dict[str, str]] = []
-    seen: set[str] = set()
+def _dedupe_hf_llm_warmup_targets(values: List[Any]) -> List[Dict[str, Any]]:
+    targets: List[Dict[str, Any]] = []
+    by_key: Dict[str, Dict[str, Any]] = {}
     for value in values or []:
         target = _hf_llm_warmup_target(value)
         if not target:
             continue
         key = str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
-        targets.append(target)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = target
+            targets.append(target)
+            continue
+        for field in ("roles", "media_kinds"):
+            merged = [str(item).strip() for item in existing.get(field, []) if str(item or "").strip()]
+            for item in target.get(field, []):
+                token = str(item or "").strip()
+                if token and token not in merged:
+                    merged.append(token)
+            if merged:
+                existing[field] = merged
     return targets
 
 
-def _hf_llm_warmup_models(base_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    models: List[Dict[str, str]] = []
+def _hf_llm_warmup_models(
+    base_rows: List[Dict[str, str]],
+    *,
+    role: str = "",
+) -> List[Dict[str, Any]]:
+    models: List[Dict[str, Any]] = []
     for row in base_rows or []:
         if not isinstance(row, dict):
             continue
@@ -1164,8 +1232,65 @@ def _hf_llm_warmup_models(base_rows: List[Dict[str, str]]) -> List[Dict[str, str
         model = str(row.get("model") or "").strip()
         if not model:
             continue
-        models.append(_hf_llm_warmup_base_item(provider, model))
+        models.append(_hf_llm_warmup_base_item(provider, model, role=role))
     return _dedupe_hf_llm_warmup_targets(models)
+
+
+def _dedicated_local_model_warmup_targets(
+    settings: Dict[str, Any],
+    *,
+    role: str,
+    media_kind: str,
+) -> List[Dict[str, Any]]:
+    if str(settings.get("mode") or "").strip().lower() != "dedicated":
+        return []
+    provider = _normalize_hydra_llm_provider(settings.get("provider"))
+    model = str(settings.get("model") or "").strip()
+    if not model or not _is_local_hydra_llm_provider(provider):
+        return []
+    return [
+        _hf_llm_warmup_base_item(
+            provider,
+            model,
+            role=role,
+            media_kind=media_kind,
+        )
+    ]
+
+
+def _current_vision_local_warmup_targets() -> List[Dict[str, Any]]:
+    try:
+        settings = get_shared_vision_settings(
+            default_api_base="http://127.0.0.1:1234",
+            default_model="qwen2.5-vl-7b-instruct",
+        )
+    except Exception:
+        settings = {}
+    return _dedicated_local_model_warmup_targets(settings, role="Image", media_kind="vision")
+
+
+def _current_media_local_warmup_targets(kind: str) -> List[Dict[str, Any]]:
+    token = str(kind or "").strip().lower()
+    try:
+        settings = get_media_understanding_settings(token)
+    except Exception:
+        settings = {}
+    return _dedicated_local_model_warmup_targets(
+        settings,
+        role="Audio" if token == "audio" else "Video",
+        media_kind=token,
+    )
+
+
+def _active_local_llm_startup_targets(base_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    return _dedupe_hf_llm_warmup_targets(
+        [
+            *_hf_llm_warmup_models(base_rows, role="Base"),
+            *_current_vision_local_warmup_targets(),
+            *_current_media_local_warmup_targets("audio"),
+            *_current_media_local_warmup_targets("video"),
+        ]
+    )
 
 
 def _sanitize_hydra_base_rows_for_startup(base_rows: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
@@ -1587,6 +1712,12 @@ def _run_hf_llm_warmup(
         row["started_ts"] = time.time()
         row["status"] = "preparing"
         row["progress"] = 2.0
+        media_kinds = [
+            str(value or "").strip().lower()
+            for value in row.get("media_kinds", [])
+            if str(value or "").strip().lower() in {"vision", "audio", "video"}
+        ]
+        requested_media_kind = media_kinds[0] if media_kinds else ""
         with hf_llm_warmup_lock:
             hf_llm_warmup_state["active_key"] = key
             hf_llm_warmup_state["items"] = list(item_states) + [
@@ -1601,6 +1732,8 @@ def _run_hf_llm_warmup(
                     loaded = preload_llama_cpp_llm_model(
                         model,
                         progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                        vision=requested_media_kind == "vision",
+                        media_kind=requested_media_kind,
                     )
                 elif provider == HYDRA_LLM_PROVIDER_MLX_LM:
                     loaded = preload_mlx_lm_llm_model(
@@ -1612,6 +1745,17 @@ def _run_hf_llm_warmup(
                         model,
                         progress_callback=_hf_llm_warmup_progress_callback(provider, model),
                     )
+                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+                    unsupported = [
+                        media_kind
+                        for media_kind in media_kinds
+                        if not bool(loaded.get(f"supports_{media_kind}"))
+                    ]
+                    if unsupported:
+                        labels = ["images" if value == "vision" else value for value in unsupported]
+                        raise RuntimeError(
+                            f"The selected model does not advertise support for {', '.join(labels)} input."
+                        )
             else:
                 if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
                     loaded = download_llama_cpp_llm_model(
@@ -1641,6 +1785,10 @@ def _run_hf_llm_warmup(
                 row["mmproj_filename"] = Path(str(loaded.get("mmproj_path") or "")).name
             if "supports_vision" in loaded:
                 row["supports_vision"] = bool(loaded.get("supports_vision"))
+            if "supports_audio" in loaded:
+                row["supports_audio"] = bool(loaded.get("supports_audio"))
+            if "supports_video" in loaded:
+                row["supports_video"] = bool(loaded.get("supports_video"))
             provider_warning = str(loaded.get("warning") or "").strip()
             if provider_warning:
                 row["warning"] = provider_warning
@@ -1659,6 +1807,9 @@ def _run_hf_llm_warmup(
                 model_path=str(row.get("model_path") or ""),
                 source=str(reason or "local-warmup"),
                 supports_vision=bool(row.get("supports_vision")),
+                supports_audio=bool(row.get("supports_audio")),
+                supports_video=bool(row.get("supports_video")),
+                capabilities_observed=bool(load_models),
                 mmproj_path=str(row.get("mmproj_path") or ""),
             )
             logger.info(
@@ -1746,6 +1897,12 @@ def _run_hf_llm_warmup(
             }
         )
     logger.info("[local-llm-warmup] finished errors=%s", len(errors))
+    with contextlib.suppress(Exception):
+        system_task_manager.request_run_debounced(
+            "runtime_model_snapshot",
+            reason="local-llm-warmup-finished",
+            delay_seconds=0.1,
+        )
 
 
 def _start_hf_llm_warmup(
@@ -1826,15 +1983,15 @@ def _start_local_llm_warmup_for_startup(*, reason: str) -> Dict[str, Any]:
         return snapshot
 
     rows, recovery = _sanitize_hydra_base_rows_for_startup(rows)
-    models = _hf_llm_warmup_models(rows)
+    models = _active_local_llm_startup_targets(rows)
     if not models:
         snapshot = _hf_llm_warmup_snapshot()
         snapshot["started"] = False
         snapshot["skipped"] = True
-        snapshot["skip_reason"] = "no local base models configured"
+        snapshot["skip_reason"] = "no active local models configured"
         if recovery:
             snapshot["recovery"] = recovery
-        logger.info("[local-llm-warmup] startup warmup skipped (no local base models configured)")
+        logger.info("[local-llm-warmup] startup warmup skipped (no active local models configured)")
         return snapshot
 
     snapshot = _start_hf_llm_warmup(models, reason=reason, load_models=True)
@@ -2230,6 +2387,10 @@ def _hf_browser_provider_search(provider: str, query: str, task: str = "text-gen
     task_token = _normalize_hf_browser_task(task)
     if task_token == "image-text-to-text" and not any(token in lowered for token in ("vision", "vl", "image")):
         q = f"{q} vision".strip()
+    elif task_token == "audio-text-to-text" and not any(token in lowered for token in ("audio", "music", "sound")):
+        q = f"{q} audio".strip()
+    elif task_token == "video-text-to-text" and "video" not in lowered:
+        q = f"{q} video".strip()
     return q
 
 
@@ -2492,6 +2653,10 @@ def _hf_browser_tater_pick_models_from_hub(*, query: str, task: str, limit: int,
         summary = _hf_browser_model_summary(model, provider=provider_token)
         if task_token == "image-text-to-text" and not bool(summary.get("supports_vision")):
             continue
+        if task_token == "audio-text-to-text" and not bool(summary.get("supports_audio")):
+            continue
+        if task_token == "video-text-to-text" and not bool(summary.get("supports_video")):
+            continue
         if not _hf_browser_tater_pick_matches_query(summary, query):
             continue
         rows.append(summary)
@@ -2540,7 +2705,9 @@ def _hf_browser_provider_library(provider: str) -> str:
 def _hf_browser_provider_pipeline_filter(provider: str, task: str = "text-generation") -> str:
     provider_token = _normalize_hydra_llm_provider(provider)
     task_token = _normalize_hf_browser_task(task)
-    if task_token == "text-generation" and provider_token in {HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM}:
+    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        return ""
+    if task_token == "text-generation" and provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
         return ""
     return task_token
 
@@ -2557,6 +2724,10 @@ def _normalize_hf_browser_task(value: Any) -> str:
     token = str(value or "text-generation").strip().lower().replace("_", "-")
     if token in {"vision", "image", "image-text", "image-text-to-text", "vl", "vllm"}:
         return "image-text-to-text"
+    if token in {"audio", "audio-text", "audio-text-to-text", "audio-understanding", "music"}:
+        return "audio-text-to-text"
+    if token in {"video", "video-text", "video-text-to-text", "video-understanding"}:
+        return "video-text-to-text"
     return "text-generation"
 
 
@@ -2606,7 +2777,35 @@ def _hf_browser_is_vision_model(model: Any) -> bool:
         for item in siblings
         if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
     )
-    return any(token in f"{model_id} {tags} {files}" for token in ("vision", "-vl", "_vl", "vl-", "mmproj", "multimodal"))
+    haystack = f"{model_id} {tags} {files}"
+    audio_only = any(token in haystack for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr"))
+    visual_marker = any(token in haystack for token in ("vision", "-vl", "_vl", "vl-", "video", "gemma-4", "multimodal", "omni"))
+    if audio_only and not visual_marker:
+        return False
+    return visual_marker or "mmproj" in haystack
+
+
+def _hf_browser_is_audio_model(model: Any) -> bool:
+    haystack = " ".join(
+        [
+            str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or ""),
+            str(_hf_browser_object_value(model, "pipeline_tag") or ""),
+            " ".join(str(item or "") for item in (_hf_browser_object_value(model, "tags", []) or [])),
+        ]
+    ).lower()
+    return any(token in haystack for token in ("audio-text-to-text", "music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr", "audio", "omni"))
+
+
+def _hf_browser_is_video_model(model: Any) -> bool:
+    haystack = " ".join(
+        [
+            str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or ""),
+            str(_hf_browser_object_value(model, "pipeline_tag") or ""),
+            " ".join(str(item or "") for item in (_hf_browser_object_value(model, "tags", []) or [])),
+        ]
+    ).lower()
+    audio_only = any(token in haystack for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr"))
+    return (not audio_only and _hf_browser_is_vision_model(model)) or "video-text-to-text" in haystack or "video" in haystack
 
 
 def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
@@ -2734,6 +2933,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
     card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(model, "card_data", None)
     tater_pick = _hf_browser_tater_pick_metadata(model_id, tags=tags, card_data=card_data, files=files)
     supports_vision = _hf_browser_is_vision_model(model) or "mmproj" in lower_files
+    supports_audio = _hf_browser_is_audio_model(model)
+    supports_video = _hf_browser_is_video_model(model)
     if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         compatible = (
             "llama.cpp" in provider_haystack
@@ -2772,6 +2973,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
         "gated": str(_hf_browser_object_value(model, "gated", "") or "").strip(),
         "compatible": compatible,
         "supports_vision": supports_vision,
+        "supports_audio": supports_audio,
+        "supports_video": supports_video,
         "provider": provider_token,
         "provider_label": _hydra_llm_provider_label(provider_token),
     }
@@ -3132,6 +3335,14 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
                         "max_context_tokens": max_context,
                         "context_source": context_source,
                         "supports_vision": bool(mmproj_path),
+                        "supports_audio": any(
+                            token in f"{repo_id} {rel}".lower()
+                            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "audio", "qwen3-asr", "omni")
+                        ),
+                        "supports_video": bool(mmproj_path) and not any(
+                            token in f"{repo_id} {rel}".lower()
+                            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
+                        ),
                         "mmproj_filename": mmproj_rel,
                         "mmproj_path": str(mmproj_path) if mmproj_path else "",
                     }
@@ -3218,6 +3429,9 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
             repo_id=repo_id or (model.split("::", 1)[0] if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP else model),
         )
     supports_vision = bool(row.get("supports_vision"))
+    supports_audio = bool(row.get("supports_audio"))
+    supports_video = bool(row.get("supports_video"))
+    capabilities_observed = bool(row.get("capabilities_observed"))
     mmproj_filename = str(row.get("mmproj_filename") or "").strip()
     mmproj_path = str(row.get("mmproj_path") or "").strip()
     if provider == HYDRA_LLM_PROVIDER_MLX_LM:
@@ -3234,6 +3448,29 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     elif not supports_vision:
         path_obj = Path(str(row.get("model_path") or "")).expanduser()
         supports_vision = bool(path_obj.exists() and _local_llm_json_files_support_vision(path_obj))
+    identifier = f"{model} {repo_id} {filename}".lower()
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not capabilities_observed and not supports_audio:
+        supports_audio = any(
+            token in identifier
+            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "audio", "qwen3-asr", "omni")
+        )
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not capabilities_observed:
+        audio_only_identifier = any(
+            token in identifier
+            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
+        )
+        visual_identifier = any(
+            token in identifier
+            for token in ("vision", "-vl", "_vl", "vl-", "video", "gemma-4", "multimodal", "omni")
+        )
+        if audio_only_identifier and not visual_identifier:
+            supports_vision = False
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not capabilities_observed and not supports_video:
+        audio_only = supports_audio and any(
+            token in identifier
+            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
+        )
+        supports_video = supports_vision and not audio_only
     return {
         "provider": provider,
         "provider_label": _hydra_llm_provider_label(provider),
@@ -3248,6 +3485,9 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "max_context_tokens": int(max_context or 0),
         "context_source": context_source,
         "supports_vision": supports_vision,
+        "supports_audio": supports_audio,
+        "supports_video": supports_video,
+        "capabilities_observed": capabilities_observed,
         "mmproj_filename": mmproj_filename,
         "mmproj_path": mmproj_path,
     }
@@ -3372,6 +3612,9 @@ def _record_downloaded_local_llm_model(
     model_path: str = "",
     source: str = "",
     supports_vision: bool = False,
+    supports_audio: bool = False,
+    supports_video: bool = False,
+    capabilities_observed: bool = False,
     mmproj_path: str = "",
 ) -> None:
     provider_token = _normalize_hydra_llm_provider(provider)
@@ -3391,6 +3634,9 @@ def _record_downloaded_local_llm_model(
         "source": str(source or "huggingface-browser").strip(),
         "downloaded_ts": time.time(),
         "supports_vision": bool(supports_vision),
+        "supports_audio": bool(supports_audio),
+        "supports_video": bool(supports_video),
+        "capabilities_observed": bool(capabilities_observed),
         "mmproj_path": str(mmproj_path or "").strip(),
     }
     if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP and str(mmproj_path or "").strip():
@@ -3431,8 +3677,17 @@ def _record_downloaded_local_llm_model(
             if replaced:
                 continue
             merged_row = dict(next_row)
-            if not bool(merged_row.get("supports_vision")) and bool(row.get("supports_vision")):
+            if bool(row.get("capabilities_observed")) and not bool(merged_row.get("capabilities_observed")):
+                merged_row["capabilities_observed"] = True
+                merged_row["supports_vision"] = bool(row.get("supports_vision"))
+                merged_row["supports_audio"] = bool(row.get("supports_audio"))
+                merged_row["supports_video"] = bool(row.get("supports_video"))
+            if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_vision")) and bool(row.get("supports_vision")):
                 merged_row["supports_vision"] = True
+            if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_audio")) and bool(row.get("supports_audio")):
+                merged_row["supports_audio"] = True
+            if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_video")) and bool(row.get("supports_video")):
+                merged_row["supports_video"] = True
             if not str(merged_row.get("mmproj_path") or "").strip() and str(row.get("mmproj_path") or "").strip():
                 merged_row["mmproj_path"] = str(row.get("mmproj_path") or "").strip()
             if not str(merged_row.get("mmproj_filename") or "").strip() and str(row.get("mmproj_filename") or "").strip():
@@ -3551,6 +3806,18 @@ def _local_llm_model_usage(provider: str, model: str) -> List[str]:
             usage.append("Vision Model")
     except Exception:
         pass
+
+    for media_kind, usage_label in (("audio", "Audio Understanding"), ("video", "Video Understanding")):
+        try:
+            media_settings = get_media_understanding_settings(media_kind)
+            if (
+                str(media_settings.get("mode") or "").strip().lower() == "dedicated"
+                and _normalize_hydra_llm_provider(media_settings.get("provider")) == provider_token
+                and str(media_settings.get("model") or "").strip() == model_token
+            ):
+                usage.append(usage_label)
+        except Exception:
+            pass
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         try:
@@ -3752,6 +4019,16 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             voice_pipeline._load_piper_voice_model(model or voice_pipeline.DEFAULT_PIPER_MODEL)
         elif token == "pocket_tts":
             voice_pipeline._load_pocket_tts_model(model or voice_pipeline.DEFAULT_POCKET_TTS_MODEL)
+        elif token in {"qwen3_tts", "omnivoice"}:
+            loaded = warm_managed_tts_model(
+                backend=token,
+                model=model,
+                acceleration=item.get("acceleration") or "auto",
+            )
+            return (
+                f"loaded TTS {token} model {loaded.get('model') or model} "
+                f"in managed worker pid={int(loaded.get('pid') or 0)}"
+            )
         else:
             raise RuntimeError(f"unsupported TTS backend: {token}")
         return f"loaded TTS {token}"
@@ -4378,6 +4655,98 @@ def _run_surface_htmlui_tab_action(tab_spec: Dict[str, Any], payload: "CoreTabAc
     if not isinstance(result, dict):
         return {"ok": True, "result": result}
     return result
+
+
+def _run_surface_htmlui_tab_media(tab_spec: Dict[str, Any], media_id: str) -> Dict[str, Any]:
+    key = str((tab_spec or {}).get("surface_key") or (tab_spec or {}).get("core_key") or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing surface key.")
+
+    try:
+        module = core_runtime._import_module(key, reload_module=False)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load core module: {exc}")
+
+    media_provider = getattr(module, "get_htmlui_tab_media", None)
+    if not callable(media_provider):
+        raise HTTPException(status_code=404, detail=f"{key} does not expose HTMLUI media.")
+    try:
+        result = media_provider(
+            media_id=str(media_id or "").strip(),
+            redis_client=redis_client,
+            core_key=key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Core media failed: {exc}")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=500, detail="Core media provider returned an invalid response.")
+    return result
+
+
+def _core_tab_media_response(payload: Dict[str, Any], request: Request) -> Response:
+    raw = payload.get("bytes") or payload.get("content")
+    if isinstance(raw, bytearray):
+        media_bytes = bytes(raw)
+    elif isinstance(raw, bytes):
+        media_bytes = raw
+    elif isinstance(raw, str) and payload.get("encoding") == "base64":
+        try:
+            media_bytes = base64.b64decode(raw)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Core media payload could not be decoded.") from exc
+    else:
+        raise HTTPException(status_code=404, detail="Core media is unavailable.")
+    if not media_bytes:
+        raise HTTPException(status_code=404, detail="Core media is empty.")
+
+    media_type = str(payload.get("content_type") or payload.get("media_type") or "application/octet-stream").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+", media_type):
+        media_type = "application/octet-stream"
+    filename = Path(str(payload.get("filename") or "core-media").strip()).name or "core-media"
+    filename = re.sub(r"[^a-zA-Z0-9._-]+", "-", filename).strip("-.") or "core-media"
+    size = len(media_bytes)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=300",
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+
+    if request.method.upper() == "HEAD":
+        headers["Content-Length"] = str(size)
+        return Response(status_code=200, media_type=media_type, headers=headers)
+
+    range_header = str(request.headers.get("range") or "").strip()
+    if not range_header:
+        headers["Content-Length"] = str(size)
+        return Response(content=media_bytes, media_type=media_type, headers=headers)
+
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+    if not match or (not match.group(1) and not match.group(2)):
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    if match.group(1):
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else size - 1
+    else:
+        suffix_length = int(match.group(2))
+        if suffix_length <= 0:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        start = max(0, size - suffix_length)
+        end = size - 1
+    if start >= size or start < 0 or end < start:
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    end = min(end, size - 1)
+    body = media_bytes[start : end + 1]
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(len(body)),
+        }
+    )
+    return Response(content=body, status_code=206, media_type=media_type, headers=headers)
 
 
 def _core_task_float(value: Any, default: float = 0.0) -> float:
@@ -9071,6 +9440,18 @@ class AppSettingsRequest(BaseModel):
     vision_provider: Optional[str] = None
     vision_model: Optional[str] = None
     vision_api_key: Optional[str] = None
+    audio_understanding_mode: Optional[str] = None
+    audio_understanding_provider: Optional[str] = None
+    audio_understanding_api_base: Optional[str] = None
+    audio_understanding_model: Optional[str] = None
+    audio_understanding_api_key: Optional[str] = None
+    audio_understanding_max_seconds: Optional[int] = None
+    video_understanding_mode: Optional[str] = None
+    video_understanding_provider: Optional[str] = None
+    video_understanding_api_base: Optional[str] = None
+    video_understanding_model: Optional[str] = None
+    video_understanding_api_key: Optional[str] = None
+    video_understanding_max_seconds: Optional[int] = None
     face_id_enabled: Optional[bool] = None
     speech_stt_backend: Optional[str] = None
     speech_acceleration: Optional[str] = None
@@ -9081,6 +9462,12 @@ class AppSettingsRequest(BaseModel):
     speech_tts_voice: Optional[str] = None
     speech_kokoro_output_gain: Optional[float] = None
     speech_pocket_tts_output_gain: Optional[float] = None
+    speech_qwen_tts_clone_text: Optional[str] = None
+    speech_qwen_tts_language: Optional[str] = None
+    speech_qwen_tts_instruct: Optional[str] = None
+    speech_omnivoice_tts_clone_text: Optional[str] = None
+    speech_omnivoice_tts_language: Optional[str] = None
+    speech_omnivoice_tts_instruct: Optional[str] = None
     speech_wyoming_tts_host: Optional[str] = None
     speech_wyoming_tts_port: Optional[str] = None
     speech_wyoming_tts_voice: Optional[str] = None
@@ -9238,6 +9625,9 @@ class SpeechTtsPreviewRequest(BaseModel):
     voice: Optional[str] = None
     kokoro_output_gain: Optional[float] = None
     pocket_tts_output_gain: Optional[float] = None
+    clone_text: Optional[str] = None
+    managed_language: Optional[str] = None
+    managed_instruct: Optional[str] = None
     acceleration: Optional[str] = None
     wyoming_host: Optional[str] = None
     wyoming_port: Optional[str] = None
@@ -10296,6 +10686,66 @@ def _runtime_announcement_tts_model_rows() -> List[Dict[str, Any]]:
     return _runtime_tts_cache_rows(speech_tts_module, scope_label="Announcement TTS", provider_prefix="announcement_tts")
 
 
+def _runtime_managed_tts_worker_rows() -> List[Dict[str, Any]]:
+    try:
+        snapshot = managed_tts_workers_snapshot()
+    except Exception:
+        return []
+    try:
+        settings = get_shared_speech_settings()
+    except Exception:
+        settings = {}
+    selected_roles: Dict[Tuple[str, str], List[str]] = {}
+    for prefix, role in (("", "Direct TTS"), ("announcement_", "Announcement TTS")):
+        backend = normalize_managed_tts_backend(settings.get(f"{prefix}tts_backend"))
+        if backend not in {"qwen3_tts", "omnivoice"}:
+            continue
+        model = str(settings.get(f"{prefix}tts_model") or "").strip() or (
+            MANAGED_DEFAULT_QWEN_TTS_MODEL
+            if backend == "qwen3_tts"
+            else MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL
+        )
+        selected_roles.setdefault((backend, model), []).append(role)
+
+    labels = {
+        "qwen3_tts": "Qwen3-TTS",
+        "omnivoice": "OmniVoice",
+    }
+    rows: List[Dict[str, Any]] = []
+    for worker_row in snapshot.get("models", []):
+        if not isinstance(worker_row, dict):
+            continue
+        backend = normalize_managed_tts_backend(worker_row.get("backend"))
+        if backend not in labels:
+            continue
+        details = []
+        model = str(worker_row.get("model") or labels[backend])
+        roles = selected_roles.get((backend, model), [])
+        if roles:
+            details.append(f"Roles {', '.join(roles)}")
+        pid = max(0, int(worker_row.get("pid") or 0))
+        if pid:
+            details.append(f"PID {pid}")
+        rows.append(
+            _runtime_managed_model_row(
+                category="tts",
+                kind_label="TTS",
+                provider=f"managed_tts_{backend}",
+                provider_label=f"TTS • {labels[backend]}",
+                model=model,
+                device=str(worker_row.get("device") or worker_row.get("acceleration") or ""),
+                model_root=str(worker_row.get("model_root") or ""),
+                estimated_bytes=max(0, int(worker_row.get("estimated_bytes") or 0)),
+                memory_kind=_runtime_model_memory_kind_from_device(
+                    worker_row.get("device") or worker_row.get("acceleration")
+                ),
+                details=details,
+                loaded_ts=float(worker_row.get("loaded_ts") or 0.0),
+            )
+        )
+    return rows
+
+
 def _runtime_speechbrain_engine_row(module: Any, *, category: str, kind_label: str, provider: str, provider_label: str) -> List[Dict[str, Any]]:
     try:
         lock = getattr(module, "_ENGINE_LOCK")
@@ -10341,6 +10791,7 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     rows.extend(_runtime_voice_pipeline_model_rows())
     rows.extend(_runtime_announcement_tts_model_rows())
+    rows.extend(_runtime_managed_tts_worker_rows())
     try:
         from tater_voice import speaker_id as speaker_id_module
 
@@ -10371,6 +10822,80 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
         pass
     rows.sort(key=lambda row: (str(row.get("kind_label") or ""), str(row.get("provider_label") or ""), str(row.get("model") or "")))
     return rows
+
+
+def _runtime_local_llm_roles(llm_rows: List[Dict[str, Any]]) -> None:
+    assignments: Dict[Tuple[str, str], List[str]] = {}
+
+    def _assign(provider: Any, model: Any, role: str) -> None:
+        provider_token = _normalize_hydra_llm_provider(provider)
+        model_token = str(model or "").strip()
+        if not model_token or not _is_local_hydra_llm_provider(provider_token):
+            return
+        roles = assignments.setdefault((provider_token, model_token), [])
+        if role not in roles:
+            roles.append(role)
+
+    try:
+        base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    except Exception:
+        base_rows = []
+    base_keys: set[Tuple[str, str]] = set()
+    for base_row in base_rows:
+        if not isinstance(base_row, dict):
+            continue
+        provider = _normalize_hydra_llm_provider(base_row.get("provider"))
+        model = str(base_row.get("model") or "").strip()
+        if model and _is_local_hydra_llm_provider(provider):
+            base_keys.add((provider, model))
+            _assign(provider, model, "Base")
+
+    modality_settings: List[Tuple[str, str, Dict[str, Any]]] = []
+    try:
+        modality_settings.append(
+            (
+                "Image",
+                "supports_vision",
+                get_shared_vision_settings(
+                    default_api_base="http://127.0.0.1:1234",
+                    default_model="qwen2.5-vl-7b-instruct",
+                ),
+            )
+        )
+    except Exception:
+        pass
+    for kind, role in (("audio", "Audio"), ("video", "Video")):
+        try:
+            modality_settings.append((role, f"supports_{kind}", get_media_understanding_settings(kind)))
+        except Exception:
+            pass
+
+    base_role_modes: List[Tuple[str, str, str]] = []
+    for role, capability_key, settings in modality_settings:
+        mode = str(settings.get("mode") or "").strip().lower()
+        if mode == "dedicated":
+            _assign(settings.get("provider"), settings.get("model"), role)
+        elif mode in {"base", "auto"}:
+            base_role_modes.append((role, capability_key, mode))
+
+    for row in llm_rows:
+        provider = _normalize_hydra_llm_provider(row.get("provider"))
+        model = str(row.get("model") or "").strip()
+        key = (provider, model)
+        roles = list(assignments.get(key, []))
+        if key in base_keys:
+            for role, capability_key, mode in base_role_modes:
+                if mode == "base" or bool(row.get(capability_key)):
+                    if role not in roles:
+                        roles.append(role)
+        if not roles:
+            continue
+        row["roles"] = roles
+        details = [str(value).strip() for value in row.get("details", []) if str(value or "").strip()]
+        role_detail = f"Roles {', '.join(roles)}"
+        if role_detail not in details:
+            details.append(role_detail)
+        row["details"] = details
 
 
 def _runtime_snapshot_cache_save(
@@ -10483,6 +11008,7 @@ def _runtime_loaded_models_snapshot(
         include_vram_probe=bool(include_models and not system_snapshot),
     )
     llm_rows = [dict(row) for row in list(llm_payload.get("models") or []) if isinstance(row, dict)]
+    _runtime_local_llm_roles(llm_rows)
     for row in llm_rows:
         row.setdefault("category", "llm")
         row.setdefault("kind_label", "LLM")
@@ -15838,11 +16364,12 @@ async def _spud_link_transcribe_wyoming_audio(
     return ""
 
 
-async def _spud_link_transcribe_pcm_audio(
+async def _transcribe_pcm_audio_with_selected_stt(
     audio_bytes: bytes,
     audio_format: Dict[str, int],
     *,
     language: str = "",
+    selector: str = "uploaded_audio",
 ) -> Tuple[str, str, str]:
     from tater_voice import voice_pipeline
 
@@ -15857,11 +16384,25 @@ async def _spud_link_transcribe_pcm_audio(
             audio_bytes=audio_bytes,
             audio_format=audio_format,
             language=language or None,
-            selector="little_spud",
-            session_id=f"little-spud-stt-{uuid.uuid4().hex}",
+            selector=selector,
+            session_id=f"{selector}-stt-{uuid.uuid4().hex}",
             partial=False,
         )
     return str(transcript or "").strip(), backend, backend_note
+
+
+async def _spud_link_transcribe_pcm_audio(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    *,
+    language: str = "",
+) -> Tuple[str, str, str]:
+    return await _transcribe_pcm_audio_with_selected_stt(
+        audio_bytes,
+        audio_format,
+        language=language,
+        selector="little_spud",
+    )
 
 
 @app.post("/api/spudlink/v1/stt/transcribe")
@@ -16600,6 +17141,23 @@ def run_core_tab_action(core_key: str, payload: CoreTabActionRequest) -> Dict[st
     return _run_surface_htmlui_tab_action(tab, payload)
 
 
+@app.get("/api/cores/{core_key}/media/{media_id}")
+@app.head("/api/cores/{core_key}/media/{media_id}")
+def get_core_tab_media(core_key: str, media_id: str, request: Request) -> Response:
+    key = str(core_key or "").strip()
+    token = str(media_id or "").strip()
+    if not key or not token:
+        raise HTTPException(status_code=400, detail="Missing core or media id.")
+
+    tabs = _discover_core_webui_tabs(core_registry_module.refresh_core_registry())
+    tab = next((item for item in tabs if str(item.get("core_key") or "").strip() == key), None)
+    if not isinstance(tab, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown core: {key}")
+
+    media = _run_surface_htmlui_tab_media(tab, token)
+    return _core_tab_media_response(media, request)
+
+
 async def _surface_request_payload(request: Request) -> Tuple[Dict[str, Any], str]:
     body_text = ""
     payload: Dict[str, Any] = {}
@@ -17040,16 +17598,38 @@ def save_portal_settings(portal_key: str, payload: SettingsUpdateRequest) -> Dic
     return {"key": portal_key, "saved": True}
 
 
-def _restart_integration_runtime_if_running() -> str:
-    _request_integration_device_registry_refresh("integration-runtime-changed")
+def _restart_integration_runtime_if_running(
+    *,
+    refresh_integration_ids: Optional[List[str]] = None,
+) -> str:
+    bump_integration_device_registry_generation(redis_client)
     try:
         running = bool(integration_runtime_status(redis_client).get("running"))
     except Exception:
         running = False
-    if not running:
-        return ""
-    _run_async_sync(restart_integration_runtime(redis_client), timeout=15.0)
-    return "runtime restarted"
+    notes: List[str] = []
+    if running:
+        _run_async_sync(restart_integration_runtime(redis_client), timeout=15.0)
+        notes.append("runtime restarted")
+
+    refreshed: List[str] = []
+    for raw_id in refresh_integration_ids or []:
+        integration_id = str(raw_id or "").strip().lower()
+        if not integration_id or integration_id in refreshed:
+            continue
+        try:
+            refresh_integration_device_group_cache(
+                integration_id,
+                redis_client,
+                source=f"integration-update-{integration_id}",
+            )
+            refreshed.append(integration_id)
+        except Exception as exc:
+            logger.warning("Integration device refresh failed for %s: %s", integration_id, exc)
+    if refreshed:
+        notes.append("device capabilities refreshed")
+    _request_integration_device_registry_refresh("integration-runtime-changed")
+    return "; ".join(notes)
 
 
 @app.get("/api/shop/integrations")
@@ -17116,7 +17696,7 @@ def enable_integration(payload: ShopItemRequest) -> Dict[str, Any]:
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
     integration_store_module.set_integration_enabled(integration_id, True)
-    restart_note = _restart_integration_runtime_if_running()
+    restart_note = _restart_integration_runtime_if_running(refresh_integration_ids=[integration_id])
     return {
         "ok": True,
         "message": msg if msg.lower().startswith("enabled") else f"{msg}; enabled {integration_id}",
@@ -17166,7 +17746,7 @@ def update_integration(payload: ShopItemRequest) -> Dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
-    restart_note = _restart_integration_runtime_if_running()
+    restart_note = _restart_integration_runtime_if_running(refresh_integration_ids=[integration_id])
     return {
         "ok": True,
         "message": msg,
@@ -17197,7 +17777,11 @@ def update_all_integrations() -> Dict[str, Any]:
         else:
             failed.append(msg)
 
-    restart_note = _restart_integration_runtime_if_running() if updated else ""
+    restart_note = (
+        _restart_integration_runtime_if_running(refresh_integration_ids=updated)
+        if updated
+        else ""
+    )
     return {
         "ok": True,
         "updated": updated,
@@ -18196,8 +18780,20 @@ def get_settings() -> Dict[str, Any]:
         default_api_base="http://127.0.0.1:1234",
         default_model="qwen2.5-vl-7b-instruct",
     )
+    audio_understanding_settings = get_media_understanding_settings("audio")
+    video_understanding_settings = get_media_understanding_settings("video")
     speech_settings = get_shared_speech_settings()
     speech_ui = get_speech_ui_payload(speech_settings)
+    try:
+        qwen_tts_clone_info = clone_audio_info("qwen3_tts", speech_settings.get("qwen_tts_clone_audio"))
+    except ValueError:
+        qwen_tts_clone_info = {"configured": False, "name": "", "size": 0}
+    try:
+        omnivoice_tts_clone_info = clone_audio_info(
+            "omnivoice", speech_settings.get("omnivoice_tts_clone_audio")
+        )
+    except ValueError:
+        omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
     esphome_fields = _esphome_settings_fields()
     esphome_settings_item = esphome_home_module.settings_item_form() if hasattr(esphome_home_module, "settings_item_form") else {}
     esphome_sections = (
@@ -18391,6 +18987,18 @@ def get_settings() -> Dict[str, Any]:
         "vision_api_base": str(vision_settings.get("api_base") or "http://127.0.0.1:1234"),
         "vision_model": str(vision_settings.get("model") or "qwen2.5-vl-7b-instruct"),
         "vision_api_key": str(vision_settings.get("api_key") or ""),
+        "audio_understanding_mode": str(audio_understanding_settings.get("mode") or "base"),
+        "audio_understanding_provider": _normalize_hydra_llm_provider(audio_understanding_settings.get("provider") or HYDRA_LLM_PROVIDER_LLAMA_CPP),
+        "audio_understanding_api_base": str(audio_understanding_settings.get("api_base") or "http://127.0.0.1:1234"),
+        "audio_understanding_model": str(audio_understanding_settings.get("model") or ""),
+        "audio_understanding_api_key": str(audio_understanding_settings.get("api_key") or ""),
+        "audio_understanding_max_seconds": int(audio_understanding_settings.get("max_seconds") or 60),
+        "video_understanding_mode": str(video_understanding_settings.get("mode") or "base"),
+        "video_understanding_provider": _normalize_hydra_llm_provider(video_understanding_settings.get("provider") or HYDRA_LLM_PROVIDER_LLAMA_CPP),
+        "video_understanding_api_base": str(video_understanding_settings.get("api_base") or "http://127.0.0.1:1234"),
+        "video_understanding_model": str(video_understanding_settings.get("model") or ""),
+        "video_understanding_api_key": str(video_understanding_settings.get("api_key") or ""),
+        "video_understanding_max_seconds": int(video_understanding_settings.get("max_seconds") or 15),
         "face_id": face_id_runtime.settings_payload(redis_client),
         "speech_stt_backend": str(speech_settings.get("stt_backend") or ""),
         "speech_acceleration": str(speech_settings.get("acceleration") or ""),
@@ -18401,6 +19009,20 @@ def get_settings() -> Dict[str, Any]:
         "speech_tts_voice": str(speech_settings.get("tts_voice") or ""),
         "speech_kokoro_output_gain": str(speech_settings.get("kokoro_output_gain") or ""),
         "speech_pocket_tts_output_gain": str(speech_settings.get("pocket_tts_output_gain") or ""),
+        "speech_qwen_tts_clone_text": str(speech_settings.get("qwen_tts_clone_text") or ""),
+        "speech_qwen_tts_language": str(speech_settings.get("qwen_tts_language") or "English"),
+        "speech_qwen_tts_instruct": str(speech_settings.get("qwen_tts_instruct") or ""),
+        "speech_qwen_tts_clone_audio": qwen_tts_clone_info,
+        "speech_qwen_tts_clone_audio_url": "/api/settings/speech/clone-audio/qwen3_tts"
+        if qwen_tts_clone_info.get("configured")
+        else "",
+        "speech_omnivoice_tts_clone_text": str(speech_settings.get("omnivoice_tts_clone_text") or ""),
+        "speech_omnivoice_tts_language": str(speech_settings.get("omnivoice_tts_language") or "English"),
+        "speech_omnivoice_tts_instruct": str(speech_settings.get("omnivoice_tts_instruct") or ""),
+        "speech_omnivoice_tts_clone_audio": omnivoice_tts_clone_info,
+        "speech_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice"
+        if omnivoice_tts_clone_info.get("configured")
+        else "",
         "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
         "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
@@ -18664,6 +19286,99 @@ def get_settings() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/settings/speech/clone-audio/{backend}")
+def get_speech_clone_audio(backend: str) -> Response:
+    token = normalize_managed_tts_backend(backend)
+    current = get_shared_speech_settings()
+    field = "qwen_tts_clone_audio" if token == "qwen3_tts" else "omnivoice_tts_clone_audio" if token == "omnivoice" else ""
+    if not field:
+        raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
+    try:
+        path = validate_clone_audio_path(token, current.get(field))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Clone audio is not configured.") from exc
+    if not path:
+        raise HTTPException(status_code=404, detail="Clone audio is not configured.")
+    return FileResponse(path, filename=Path(path).name)
+
+
+@app.post("/api/settings/speech/clone-audio/{backend}")
+async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str, Any]:
+    token = normalize_managed_tts_backend(backend)
+    if token not in {"qwen3_tts", "omnivoice"}:
+        raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
+    filename = str(request.headers.get("x-filename") or "reference.wav").strip()
+    try:
+        content_length = int(request.headers.get("content-length") or 0)
+    except Exception:
+        content_length = 0
+    if content_length > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Clone audio must be 50 MB or smaller.")
+    payload = await request.body()
+    try:
+        path = store_clone_audio(token, filename=filename, data=payload)
+        save_managed_tts_clone_audio_path(token, path)
+        save_managed_tts_clone_text(token, "")
+        info = clone_audio_info(token, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    transcript = ""
+    transcription: Dict[str, Any] = {
+        "status": "unavailable",
+        "backend": "",
+        "note": "",
+        "error": "",
+    }
+    try:
+        audio_bytes, audio_format = await asyncio.to_thread(decode_clone_audio_pcm, token, path)
+        transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
+            audio_bytes,
+            audio_format,
+            selector=f"tts_clone_{token}",
+        )
+        transcription.update(
+            {
+                "status": "ready" if transcript else "unavailable",
+                "backend": stt_backend,
+                "note": backend_note or ("" if transcript else "No speech was detected in the reference audio."),
+            }
+        )
+        if transcript:
+            save_managed_tts_clone_text(token, transcript)
+    except Exception as exc:
+        transcription["error"] = str(exc) or "Automatic transcription was unavailable."
+        logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
+    clear_managed_tts_workers()
+    return {
+        "ok": True,
+        "backend": token,
+        "audio": info,
+        "clone_text": transcript,
+        "transcription": transcription,
+        "url": f"/api/settings/speech/clone-audio/{token}",
+    }
+
+
+@app.delete("/api/settings/speech/clone-audio/{backend}")
+def delete_speech_clone_audio(backend: str) -> Dict[str, Any]:
+    token = normalize_managed_tts_backend(backend)
+    current = get_shared_speech_settings()
+    field = "qwen_tts_clone_audio" if token == "qwen3_tts" else "omnivoice_tts_clone_audio" if token == "omnivoice" else ""
+    if not field:
+        raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
+    remove_clone_audio(token, current.get(field))
+    save_managed_tts_clone_audio_path(token, "")
+    save_managed_tts_clone_text(token, "")
+    clear_managed_tts_workers()
+    return {
+        "ok": True,
+        "backend": token,
+        "audio": {"configured": False, "name": "", "size": 0},
+        "clone_text": "",
+        "transcription": {"status": "empty", "backend": "", "note": "", "error": ""},
+    }
+
+
 @app.post("/api/settings/speech/tts-preview")
 async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
     current_speech = get_shared_speech_settings()
@@ -18742,6 +19457,38 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
                 str(payload.chatterbox_language).strip()
                 if payload.chatterbox_language is not None
                 else str(current_speech.get("chatterbox_tts_language") or "").strip()
+            ),
+            clone_audio=(
+                current_speech.get("qwen_tts_clone_audio")
+                if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
+                else current_speech.get("omnivoice_tts_clone_audio")
+            ),
+            clone_text=(
+                payload.clone_text
+                if payload.clone_text is not None
+                else current_speech.get(
+                    "qwen_tts_clone_text"
+                    if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
+                    else "omnivoice_tts_clone_text"
+                )
+            ),
+            managed_language=(
+                payload.managed_language
+                if payload.managed_language is not None
+                else current_speech.get(
+                    "qwen_tts_language"
+                    if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
+                    else "omnivoice_tts_language"
+                )
+            ),
+            managed_instruct=(
+                payload.managed_instruct
+                if payload.managed_instruct is not None
+                else current_speech.get(
+                    "qwen_tts_instruct"
+                    if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
+                    else "omnivoice_tts_instruct"
+                )
             ),
         )
     except HTTPException:
@@ -19158,7 +19905,15 @@ def get_huggingface_models(
             model
             for model in raw_models[:clean_limit]
             if (
-                (_hf_browser_is_vision_model(model) if task_token == "image-text-to-text" else _hf_browser_is_text_generation_model(model))
+                (
+                    _hf_browser_is_vision_model(model)
+                    if task_token == "image-text-to-text"
+                    else _hf_browser_is_audio_model(model)
+                    if task_token == "audio-text-to-text"
+                    else _hf_browser_is_video_model(model)
+                    if task_token == "video-text-to-text"
+                    else _hf_browser_is_text_generation_model(model)
+                )
                 and _hf_browser_provider_matches(model, provider_token)
             )
         ]
@@ -19878,13 +20633,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     explicit_local_model_load_targets = "hydra_local_model_load_targets" in updates
 
-    def _normalize_local_model_load_targets(value: Any) -> List[Dict[str, str]]:
+    def _normalize_local_model_load_targets(value: Any) -> List[Dict[str, Any]]:
         if value is None:
             return []
         if not isinstance(value, list):
             raise HTTPException(status_code=400, detail="hydra_local_model_load_targets must be a list.")
-        targets: List[Dict[str, str]] = []
-        seen: set[Tuple[str, str]] = set()
+        targets: List[Dict[str, Any]] = []
         for raw_target in value:
             if not isinstance(raw_target, dict):
                 continue
@@ -19893,12 +20647,19 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             if not _is_local_hydra_llm_provider(provider_token) or not model_token:
                 continue
             model_token = _require_downloaded_local_model(provider_token, model_token, "Load target")
-            key = (provider_token, model_token)
-            if key in seen:
-                continue
-            seen.add(key)
-            targets.append({"provider": provider_token, "model": model_token})
-        return targets
+            targets.append(
+                {
+                    "provider": provider_token,
+                    "model": model_token,
+                    "roles": raw_target.get("roles") if isinstance(raw_target.get("roles"), list) else [],
+                    "media_kinds": (
+                        raw_target.get("media_kinds")
+                        if isinstance(raw_target.get("media_kinds"), list)
+                        else []
+                    ),
+                }
+            )
+        return _dedupe_hf_llm_warmup_targets(targets)
 
     local_model_load_targets = (
         _normalize_local_model_load_targets(updates.get("hydra_local_model_load_targets"))
@@ -19947,6 +20708,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_vision_context_tokens",
         "hydra_llama_cpp_vision_slot",
     }
+    media_understanding_model_keys = {
+        kind: {
+            f"{kind}_understanding_mode",
+            f"{kind}_understanding_provider",
+            f"{kind}_understanding_model",
+            f"{kind}_understanding_api_base",
+            f"{kind}_understanding_api_key",
+            f"{kind}_understanding_max_seconds",
+        }
+        for kind in ("audio", "video")
+    }
 
     def _single_local_model_target(provider: Any, model: Any) -> List[Dict[str, str]]:
         provider_token = _normalize_hydra_llm_provider(provider)
@@ -19973,22 +20745,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         return _dedupe_hf_llm_warmup_targets(targets)
 
     def _current_vision_local_targets() -> List[Dict[str, str]]:
-        try:
-            current = get_shared_vision_settings(
-                default_api_base="http://127.0.0.1:1234",
-                default_model="qwen2.5-vl-7b-instruct",
-            )
-        except Exception:
-            current = {}
-        mode = str(current.get("mode") or "api").strip().lower()
-        if mode != "dedicated":
-            return []
-        return _single_local_model_target(current.get("provider"), current.get("model"))
+        return _current_vision_local_warmup_targets()
+
+    def _current_media_understanding_local_targets(kind: str) -> List[Dict[str, str]]:
+        return _current_media_local_warmup_targets(kind)
 
     current_scope_local_targets = {
         "base": _hf_llm_warmup_models(resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)),
         "spudex": _current_spudex_local_targets(),
         "vision": _current_vision_local_targets(),
+        "audio_understanding": _current_media_understanding_local_targets("audio"),
+        "video_understanding": _current_media_understanding_local_targets("video"),
         "beast": _current_beast_local_targets(),
     }
     touched_local_model_scopes: set[str] = set()
@@ -19998,6 +20765,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         touched_local_model_scopes.add("spudex")
     if any(key in updates for key in vision_model_keys):
         touched_local_model_scopes.add("vision")
+    for media_kind in ("audio", "video"):
+        if any(key in updates for key in media_understanding_model_keys[media_kind]):
+            touched_local_model_scopes.add(f"{media_kind}_understanding")
     if "hydra_beast_mode_enabled" in updates or any(
         f"hydra_llm_{role_id}_{field}" in updates
         for role_id in HYDRA_BEAST_CONFIG_ROLE_IDS
@@ -20019,7 +20789,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             if str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
             not in protected_local_model_keys
         ]
-        if explicit_local_model_load_targets and local_model_load_targets
+        if explicit_local_model_load_targets
         else []
     )
 
@@ -20333,6 +21103,41 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             provider=vision_provider,
         )
 
+    for media_kind, media_label in (("audio", "Audio Understanding"), ("video", "Video Understanding")):
+        prefix = f"{media_kind}_understanding"
+        media_update_keys = {
+            f"{prefix}_api_base",
+            f"{prefix}_model",
+            f"{prefix}_api_key",
+            f"{prefix}_mode",
+            f"{prefix}_provider",
+            f"{prefix}_max_seconds",
+        }
+        if not any(key in updates for key in media_update_keys):
+            continue
+        current_media = get_media_understanding_settings(media_kind)
+        media_mode = str(updates.get(f"{prefix}_mode", current_media.get("mode") or "base") or "base").strip().lower()
+        if media_mode not in {"api", "auto", "base", "dedicated"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{prefix}_mode must be api, auto, base, or dedicated.",
+            )
+        media_provider = _normalize_hydra_llm_provider(
+            updates.get(f"{prefix}_provider", current_media.get("provider") or HYDRA_LLM_PROVIDER_LLAMA_CPP)
+        )
+        media_model = str(updates.get(f"{prefix}_model", current_media.get("model") or "")).strip()
+        if media_mode == "dedicated" and _is_local_hydra_llm_provider(media_provider):
+            media_model = _require_downloaded_local_model(media_provider, media_model, media_label)
+        save_media_understanding_settings(
+            media_kind,
+            mode=media_mode,
+            provider=media_provider,
+            api_base=str(updates.get(f"{prefix}_api_base", current_media.get("api_base") or "")).strip(),
+            model=media_model,
+            api_key=str(updates.get(f"{prefix}_api_key", current_media.get("api_key") or "")).strip(),
+            max_seconds=updates.get(f"{prefix}_max_seconds", current_media.get("max_seconds")),
+        )
+
     speech_keys = {
         "speech_stt_backend",
         "speech_acceleration",
@@ -20343,6 +21148,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_tts_voice",
         "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
+        "speech_qwen_tts_clone_text",
+        "speech_qwen_tts_language",
+        "speech_qwen_tts_instruct",
+        "speech_omnivoice_tts_clone_text",
+        "speech_omnivoice_tts_language",
+        "speech_omnivoice_tts_instruct",
         "speech_wyoming_tts_host",
         "speech_wyoming_tts_port",
         "speech_wyoming_tts_voice",
@@ -20387,6 +21198,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
+        "speech_qwen_tts_clone_text",
+        "speech_qwen_tts_language",
+        "speech_qwen_tts_instruct",
+        "speech_omnivoice_tts_clone_text",
+        "speech_omnivoice_tts_language",
+        "speech_omnivoice_tts_instruct",
     }
     speech_warmup_keys = set(speech_keys) - {
         "speech_kokoro_output_gain",
@@ -20417,6 +21234,32 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 "speech_pocket_tts_output_gain",
                 current_speech.get("pocket_tts_output_gain"),
             ),
+            qwen_tts_clone_audio=current_speech.get("qwen_tts_clone_audio"),
+            qwen_tts_clone_text=str(
+                updates.get("speech_qwen_tts_clone_text", current_speech.get("qwen_tts_clone_text") or "")
+            ).strip(),
+            qwen_tts_language=str(
+                updates.get("speech_qwen_tts_language", current_speech.get("qwen_tts_language") or "English")
+            ).strip(),
+            qwen_tts_instruct=str(
+                updates.get("speech_qwen_tts_instruct", current_speech.get("qwen_tts_instruct") or "")
+            ).strip(),
+            omnivoice_tts_clone_audio=current_speech.get("omnivoice_tts_clone_audio"),
+            omnivoice_tts_clone_text=str(
+                updates.get(
+                    "speech_omnivoice_tts_clone_text", current_speech.get("omnivoice_tts_clone_text") or ""
+                )
+            ).strip(),
+            omnivoice_tts_language=str(
+                updates.get(
+                    "speech_omnivoice_tts_language", current_speech.get("omnivoice_tts_language") or "English"
+                )
+            ).strip(),
+            omnivoice_tts_instruct=str(
+                updates.get(
+                    "speech_omnivoice_tts_instruct", current_speech.get("omnivoice_tts_instruct") or ""
+                )
+            ).strip(),
             wyoming_tts_host=str(
                 updates.get("speech_wyoming_tts_host", current_speech.get("wyoming_tts_host") or "")
             ).strip(),
@@ -20858,6 +21701,21 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             load_models=True,
             unload_before=local_model_unload_targets,
         )
+    elif explicit_local_model_load_targets and local_model_unload_targets:
+        unloaded: List[Dict[str, Any]] = []
+        for target in local_model_unload_targets:
+            unloaded.append(
+                unload_local_llm_models(
+                    provider=str(target.get("provider") or ""),
+                    model=str(target.get("model") or ""),
+                )
+            )
+        hf_llm_warmup_result = {
+            "ok": True,
+            "started": False,
+            "running": False,
+            "unloaded": unloaded,
+        }
 
     hydra_mappings = {
         "hydra_max_ledger_items": (HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS, 1, None),

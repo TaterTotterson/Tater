@@ -21,6 +21,12 @@ import requests
 from .conversation import VoiceSessionRuntime
 from runtime_executors import run_stt, run_tts
 from tateros import integration_store as integration_store_module
+from managed_tts import (
+    DEFAULT_OMNIVOICE_TTS_MODEL,
+    DEFAULT_QWEN_TTS_MODEL,
+    clear_managed_tts_workers,
+    synthesize_managed_tts_pcm,
+)
 from helpers import (
     _llama_cpp_native_free_port,
     _llama_cpp_native_server_bin,
@@ -38,6 +44,7 @@ _MLX_WHISPER_TRANSCRIBE_LOCK = threading.RLock()
 _PARAKEET_ONNX_TRANSCRIBE_LOCK = threading.RLock()
 _QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK = threading.RLock()
 _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK = threading.RLock()
+_POCKET_TTS_VOICE_STATE_CACHE_LIMIT = 8
 _QWEN3_ASR_LLAMA_CPP_STATE: Dict[str, Any] = {
     "process": None,
     "base_url": "",
@@ -138,6 +145,12 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
     elif backend == "piper":
         model = model or vp.DEFAULT_PIPER_MODEL
         voice = ""
+    elif backend == "qwen3_tts":
+        model = model or DEFAULT_QWEN_TTS_MODEL
+        voice = ""
+    elif backend == "omnivoice":
+        model = model or DEFAULT_OMNIVOICE_TTS_MODEL
+        voice = ""
     else:
         model = ""
         voice = vp._text(merged.get("VOICE_WYOMING_TTS_VOICE")) or vp.DEFAULT_WYOMING_TTS_VOICE
@@ -161,6 +174,14 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
         "chatterbox_speed_factor": merged.get("VOICE_CHATTERBOX_TTS_SPEED_FACTOR"),
         "chatterbox_language": merged.get("VOICE_CHATTERBOX_TTS_LANGUAGE"),
         "chatterbox_streaming_enabled": vp._as_bool(merged.get("VOICE_CHATTERBOX_TTS_STREAMING_ENABLED"), False),
+        "qwen_tts_clone_audio": vp._text(merged.get("VOICE_QWEN_TTS_CLONE_AUDIO")),
+        "qwen_tts_clone_text": vp._text(merged.get("VOICE_QWEN_TTS_CLONE_TEXT")),
+        "qwen_tts_language": vp._text(merged.get("VOICE_QWEN_TTS_LANGUAGE")) or "English",
+        "qwen_tts_instruct": vp._text(merged.get("VOICE_QWEN_TTS_INSTRUCT")),
+        "omnivoice_tts_clone_audio": vp._text(merged.get("VOICE_OMNIVOICE_TTS_CLONE_AUDIO")),
+        "omnivoice_tts_clone_text": vp._text(merged.get("VOICE_OMNIVOICE_TTS_CLONE_TEXT")),
+        "omnivoice_tts_language": vp._text(merged.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "English",
+        "omnivoice_tts_instruct": vp._text(merged.get("VOICE_OMNIVOICE_TTS_INSTRUCT")),
     }
 
 
@@ -202,6 +223,8 @@ def _tts_backend_available(backend: str) -> Tuple[bool, str]:
             vp.PiperVoice is not None and vp.PiperSynthesisConfig is not None and vp.piper_download_voice is not None,
             vp._text(vp.PIPER_IMPORT_ERROR) or "piper dependency unavailable",
         )
+    if token in {"qwen3_tts", "omnivoice"}:
+        return True, ""
     return False, f"unsupported TTS backend: {token}"
 
 
@@ -2233,10 +2256,12 @@ def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
     with vp._pocket_tts_model_lock:
         cleared["pocket_tts"] = len(vp._pocket_tts_model_cache)
         vp._pocket_tts_model_cache.clear()
+        vp._pocket_tts_voice_state_cache.clear()
     if include_piper:
         with vp._piper_voice_lock:
             cleared["piper"] = len(vp._piper_voice_cache)
             vp._piper_voice_cache.clear()
+    cleared.update(clear_managed_tts_workers())
     return cleared
 
 
@@ -2311,20 +2336,69 @@ def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[b
     root = vp._ensure_tts_backend_model_root("pocket_tts")
     hf_root = os.path.join(root, "hf")
     os.makedirs(hf_root, exist_ok=True)
-    with _temporary_env(
-        huggingface_environment(
-            {
-                "HF_HOME": hf_root,
-                "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
-                "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
-            }
-        )
-    ):
-        model_state = model.get_state_for_audio_prompt(vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE)
-        audio_tensor = model.generate_audio(model_state, prompt)
-    tensor = audio_tensor.detach().cpu().squeeze()
-    audio_bytes = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=_pocket_tts_output_gain())
+    selected_voice = vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE
+    env = huggingface_environment(
+        {
+            "HF_HOME": hf_root,
+            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+        }
+    )
+    with vp._pocket_tts_runtime_lock:
+        with _temporary_env(env):
+            model_state = _get_pocket_tts_voice_state(model, model_id, selected_voice)
+            audio_bytes = _generate_pocket_tts_pcm(
+                model,
+                model_state,
+                prompt,
+                gain=_pocket_tts_output_gain(),
+            )
     return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
+
+
+def _pocket_tts_voice_cache_key(model_id: str, voice: str) -> Tuple[str, str]:
+    vp = _vp()
+    model_token = vp._text(model_id) or vp.DEFAULT_POCKET_TTS_MODEL
+    voice_token = vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE
+    expanded = os.path.abspath(os.path.expanduser(voice_token))
+    try:
+        stat = os.stat(expanded)
+    except OSError:
+        return model_token, voice_token
+    return model_token, f"file:{expanded}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _get_pocket_tts_voice_state(model: Any, model_id: str, voice: str) -> Any:
+    vp = _vp()
+    cache_key = _pocket_tts_voice_cache_key(model_id, voice)
+    with vp._pocket_tts_model_lock:
+        cached = vp._pocket_tts_voice_state_cache.pop(cache_key, None)
+        if cached is not None:
+            vp._pocket_tts_voice_state_cache[cache_key] = cached
+            return cached
+
+        state = model.get_state_for_audio_prompt(vp._text(voice) or vp.DEFAULT_POCKET_TTS_VOICE)
+        vp._pocket_tts_voice_state_cache[cache_key] = state
+        while len(vp._pocket_tts_voice_state_cache) > _POCKET_TTS_VOICE_STATE_CACHE_LIMIT:
+            oldest_key = next(iter(vp._pocket_tts_voice_state_cache))
+            vp._pocket_tts_voice_state_cache.pop(oldest_key, None)
+        return state
+
+
+def _generate_pocket_tts_pcm(model: Any, model_state: Any, text: str, *, gain: float) -> bytes:
+    stream = getattr(model, "generate_audio_stream", None)
+    if callable(stream):
+        chunks: List[bytes] = []
+        for audio_chunk in stream(model_state, text):
+            tensor = audio_chunk.detach().cpu().squeeze()
+            pcm = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+            if pcm:
+                chunks.append(pcm)
+        return b"".join(chunks)
+
+    audio_tensor = model.generate_audio(model_state, text)
+    tensor = audio_tensor.detach().cpu().squeeze()
+    return _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
 
 
 def _split_piper_sentences(text: str) -> List[str]:
@@ -2501,6 +2575,22 @@ async def _native_synthesize_text(
         if effective_backend == "piper":
             vp._native_debug(f"TTS (piper) local model={selection.get('model') or vp.DEFAULT_PIPER_MODEL}")
             audio_bytes, audio_format = await run_tts(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
+            return audio_bytes, audio_format, effective_backend, backend_note
+        if effective_backend in {"qwen3_tts", "omnivoice"}:
+            prefix = "qwen_tts" if effective_backend == "qwen3_tts" else "omnivoice_tts"
+            default_model = DEFAULT_QWEN_TTS_MODEL if effective_backend == "qwen3_tts" else DEFAULT_OMNIVOICE_TTS_MODEL
+            vp._native_debug(f"TTS ({effective_backend}) managed local model={selection.get('model') or default_model}")
+            audio_bytes, audio_format = await run_tts(
+                synthesize_managed_tts_pcm,
+                prompt,
+                backend=effective_backend,
+                model=vp._text(selection.get("model")) or default_model,
+                clone_audio=selection.get(f"{prefix}_clone_audio"),
+                clone_text=selection.get(f"{prefix}_clone_text"),
+                language=selection.get(f"{prefix}_language"),
+                instruct=selection.get(f"{prefix}_instruct"),
+                acceleration=vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION"),
+            )
             return audio_bytes, audio_format, effective_backend, backend_note
         if effective_backend == "openai_compatible":
             vp._native_debug(

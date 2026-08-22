@@ -578,13 +578,35 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         settings_title = f"{name} Live Log"
         settings_label = "Live Log"
         settings_save_action = ""
+        volume_control: Dict[str, Any] = {}
         if native_device:
             popup_mode = ""
             popup_config = {
                 "selector": selector,
                 "name": name,
             }
-            popup_fields = native_live_settings.settings_fields(selector, board=board)
+            native_settings_fields = native_live_settings.settings_fields(selector, board=board)
+            volume_field = next(
+                (
+                    field
+                    for field in native_settings_fields
+                    if esphome_runtime.text(field.get("key")) == "volume_percent"
+                ),
+                {},
+            )
+            if volume_field:
+                volume_control = {
+                    "value": int(round(_as_float(volume_field.get("value"), 80.0))),
+                    "min": int(round(_as_float(volume_field.get("min"), 0.0))),
+                    "max": int(round(_as_float(volume_field.get("max"), 100.0))),
+                    "step": int(round(_as_float(volume_field.get("step"), 1.0))),
+                    "action": "voice_native_satellite_settings_save",
+                }
+            popup_fields = [
+                field
+                for field in native_settings_fields
+                if esphome_runtime.text(field.get("key")) != "volume_percent"
+            ]
             settings_title = f"{name} Satellite Settings"
             settings_label = "Satellite Settings"
             settings_save_action = "voice_native_satellite_settings_save"
@@ -638,6 +660,7 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "info_label": info_label,
                 "save_action": "voice_satellite_save",
                 "settings_save_action": settings_save_action,
+                "volume_control": volume_control,
                 "save_label": "Save",
                 "identify_action": "voice_satellite_identify",
                 "identify_label": "Identify",

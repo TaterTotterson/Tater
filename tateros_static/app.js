@@ -6165,7 +6165,7 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
                             data-model="${escapeHtml(model)}"
                             data-cache-key="${escapeHtml(cacheKey)}"
                           >Unload</button>`
-                        : `<span class="status-chip running">${escapeHtml(managed ? "Managed" : "Loaded")}</span>`
+                        : `<span class="status-chip running">Loaded</span>`
                     }
                   </div>
                 </div>
@@ -8210,6 +8210,54 @@ function renderCoreManagerField(field) {
         ${descHtml}
       </label>
     `);
+  }
+
+  if (type === "video") {
+    const src = String(field?.src ?? field?.url ?? "").trim();
+    if (!src) {
+      return wrapField(`
+        ${hideLabel ? "" : `<div>${escapeHtml(label)}</div>`}
+        <div class="small">No video available.</div>
+        ${descHtml}
+      `);
+    }
+    const contentType = String(field?.content_type || field?.mimetype || "video/mp4").trim() || "video/mp4";
+    const poster = String(field?.poster || field?.poster_src || "").trim();
+    const caption = String(field?.caption || "").trim();
+    const preloadRaw = String(field?.preload || "metadata").trim().toLowerCase();
+    const preload = ["none", "metadata", "auto"].includes(preloadRaw) ? preloadRaw : "metadata";
+    const controlsAttr = boolFromAny(field?.controls, true) ? " controls" : "";
+    const posterAttr = poster ? ` poster="${escapeHtml(poster)}"` : "";
+    const resetToPosterAttr = poster && boolFromAny(field?.reset_to_poster, false)
+      ? ' data-core-video-reset-to-poster="1"'
+      : "";
+    const posterResetButton = resetToPosterAttr
+      ? `
+        <button type="button" data-core-video-poster-button hidden aria-label="Play ${escapeHtml(label || "event clip")}"
+          style="position:relative; width:100%; padding:0; overflow:hidden; cursor:pointer; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:#000;">
+          <img src="${escapeHtml(poster)}" alt="${escapeHtml(label || "Event clip snapshot")}"
+            style="display:block; width:100%; max-height:420px; object-fit:contain; background:#000;" />
+          <span aria-hidden="true"
+            style="position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); display:grid; place-items:center; width:58px; height:58px; padding-left:4px; border-radius:50%; color:#fff; background:rgba(0,0,0,0.72); box-shadow:0 3px 18px rgba(0,0,0,0.45); font-size:27px; line-height:1;">▶</span>
+        </button>
+      `
+      : "";
+    const player = `
+      <div data-core-video-shell style="margin-top:6px;">
+        <video${controlsAttr} playsinline preload="${escapeHtml(preload)}"${posterAttr}${resetToPosterAttr}
+          style="display:block; width:100%; max-height:420px; object-fit:contain; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:#000;">
+          <source src="${escapeHtml(src)}" type="${escapeHtml(contentType)}" />
+          Your browser cannot play this camera clip.
+        </video>
+        ${posterResetButton}
+      </div>
+      ${caption ? `<div class="small" style="margin-top:6px;">${escapeHtml(caption)}</div>` : ""}
+      ${descHtml}
+    `;
+    if (hideLabel) {
+      return wrapField(player);
+    }
+    return wrapField(`<label>${escapeHtml(label)}${player}</label>`);
   }
 
   if (type === "checkbox") {
@@ -10457,6 +10505,48 @@ function renderEspHomeSensorRows(sensorRows, sensorTitle = "Live Entities", conn
   `;
 }
 
+function renderNativeSatelliteVolumeControl(control, title = "Satellite") {
+  if (!control || typeof control !== "object") {
+    return "";
+  }
+  const action = String(control?.action || "").trim();
+  if (!action) {
+    return "";
+  }
+  const minValue = Number(control?.min ?? 0);
+  const maxValue = Number(control?.max ?? 100);
+  const stepValue = Number(control?.step ?? 1);
+  const min = Number.isFinite(minValue) ? minValue : 0;
+  const max = Number.isFinite(maxValue) && maxValue > min ? maxValue : 100;
+  const step = Number.isFinite(stepValue) && stepValue > 0 ? stepValue : 1;
+  const rawValue = Number(control?.value ?? 80);
+  const value = Math.max(min, Math.min(max, Number.isFinite(rawValue) ? rawValue : 80));
+  const progress = ((value - min) / Math.max(1, max - min)) * 100;
+  return `
+    <div class="core-satellite-volume" style="--core-satellite-volume-progress:${escapeHtml(progress)}%;">
+      <span class="core-satellite-volume-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.1-3.8v7.6a4.5 4.5 0 0 0 2.1-3.8zm-2.1-8.2v2.1a7 7 0 0 1 0 12.2v2.1a9 9 0 0 0 0-16.4z"></path>
+        </svg>
+      </span>
+      <label class="core-satellite-volume-main">
+        <span class="core-satellite-volume-head">
+          <strong>Volume</strong>
+          <span class="core-satellite-volume-feedback" data-native-satellite-volume-feedback></span>
+          <output data-native-satellite-volume-output>${escapeHtml(value)}%</output>
+        </span>
+        <span class="core-satellite-volume-range">
+          <span aria-hidden="true">0</span>
+          <input type="range" min="${escapeHtml(min)}" max="${escapeHtml(max)}" step="${escapeHtml(step)}"
+            value="${escapeHtml(value)}" aria-label="${escapeHtml(title)} speaker volume"
+            data-native-satellite-volume data-native-satellite-volume-action="${escapeHtml(action)}" />
+          <span aria-hidden="true">100</span>
+        </span>
+      </label>
+    </div>
+  `;
+}
+
 function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = null) {
   const itemId = String(item?.id || "").trim();
   const itemGroup = String(item?.group || "satellite").trim() || "satellite";
@@ -10497,6 +10587,9 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
   const sensorTitle = String(item?.sensor_title || "Live Entities").trim() || "Live Entities";
   const showEntityRefresh = boolFromAny(item?.show_entity_refresh, true);
   const connected = boolFromAny(item?.connected, false);
+  const volumeControlHtml = nativeFirmware
+    ? renderNativeSatelliteVolumeControl(item?.volume_control, title)
+    : "";
   const displaySensorsPayload = displaySensorPayloadForSatellite(displaySensors, item);
   const displaySensorsPayloadEncoded = _encodeCoreManagerJson(displaySensorsPayload);
 
@@ -10564,6 +10657,7 @@ function renderEspHomeSatelliteCard(item, coreKey = "voice", displaySensors = nu
         <span class="small">${escapeHtml(coreKey)}</span>
       </div>
       ${summaryBlockHtml}
+      ${volumeControlHtml}
       ${fields.length ? `<div class="form-grid">${fields.map((field) => renderCoreManagerField(field)).join("")}</div>` : ""}
       <div class="inline-row" style="margin-top:10px;">
         ${saveAction ? `<button type="button" class="action-btn core-manager-save">${escapeHtml(saveLabel)}</button>` : ""}
@@ -13575,6 +13669,86 @@ function updateEspHomeSatelliteSensorRows(card, entityRows) {
     current.remove();
   }
   bindEspHomeEntityControls(card);
+}
+
+function bindNativeSatelliteVolumeControls(root = document) {
+  root.querySelectorAll("[data-native-satellite-volume]").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.nativeSatelliteVolumeBound === "1") {
+      return;
+    }
+    input.dataset.nativeSatelliteVolumeBound = "1";
+    input.dataset.nativeSatelliteVolumeLastValue = input.value;
+    const wrap = input.closest(".core-satellite-volume");
+    const output = wrap?.querySelector("[data-native-satellite-volume-output]");
+    const feedback = wrap?.querySelector("[data-native-satellite-volume-feedback]");
+    let feedbackTimer = null;
+
+    const updateVisual = () => {
+      const value = Number(input.value || 0);
+      const min = Number(input.min || 0);
+      const max = Number(input.max || 100);
+      const progress = ((value - min) / Math.max(1, max - min)) * 100;
+      wrap?.style.setProperty("--core-satellite-volume-progress", `${Math.max(0, Math.min(100, progress))}%`);
+      if (output) {
+        output.textContent = `${Math.round(value)}%`;
+      }
+    };
+    const setFeedback = (message, tone = "") => {
+      if (!feedback) {
+        return;
+      }
+      if (feedbackTimer) {
+        window.clearTimeout(feedbackTimer);
+        feedbackTimer = null;
+      }
+      feedback.textContent = String(message || "");
+      feedback.classList.toggle("is-error", tone === "error");
+      if (message && tone !== "saving") {
+        feedbackTimer = window.setTimeout(() => {
+          feedback.textContent = "";
+          feedback.classList.remove("is-error");
+        }, 2200);
+      }
+    };
+
+    input.addEventListener("input", updateVisual);
+    input.addEventListener("change", async () => {
+      const card = input.closest(".esphome-satellite-card");
+      const coreKey = String(card?.dataset?.coreKey || "voice").trim() || "voice";
+      const selector = decodeCoreManagerId(card?.dataset?.coreItemId || "");
+      const action = String(input.dataset.nativeSatelliteVolumeAction || "").trim();
+      if (!(card instanceof HTMLElement) || !selector || !action || input.disabled) {
+        return;
+      }
+      const previousValue = String(input.dataset.nativeSatelliteVolumeLastValue || input.value);
+      const volumePercent = Math.max(0, Math.min(100, Math.round(Number(input.value || 0))));
+      input.disabled = true;
+      setFeedback("Saving…", "saving");
+      try {
+        const result = await runCoreManagerAction(card, coreKey, action, {
+          id: selector,
+          selector,
+          values: { volume_percent: volumePercent },
+        });
+        const savedValue = Number(result?.settings?.volume_percent ?? volumePercent);
+        input.value = String(Number.isFinite(savedValue) ? savedValue : volumePercent);
+        input.dataset.nativeSatelliteVolumeLastValue = input.value;
+        updateVisual();
+        setFeedback("Saved");
+      } catch (error) {
+        input.value = previousValue;
+        updateVisual();
+        const message = error instanceof Error ? error.message : String(error || "Could not save volume.");
+        setFeedback("Couldn’t save", "error");
+        showToast(`Could not save satellite volume: ${message}`, "error", 3600);
+      } finally {
+        if (document.body.contains(input)) {
+          input.disabled = false;
+        }
+      }
+    });
+    updateVisual();
+  });
 }
 
 function bindEspHomeEntityControls(root = document) {
@@ -17489,6 +17663,70 @@ function bindEspHomeEmotionIdActions(root = document) {
   });
 }
 
+function bindCoreVideoPosterReset(root = document) {
+  root.querySelectorAll("video[data-core-video-reset-to-poster='1']").forEach((video) => {
+    if (!(video instanceof HTMLVideoElement) || video.dataset.coreVideoPosterBound === "1") {
+      return;
+    }
+    const shell = video.closest("[data-core-video-shell]");
+    const posterButton = shell?.querySelector("[data-core-video-poster-button]");
+    if (!(posterButton instanceof HTMLButtonElement)) {
+      return;
+    }
+    let hasPlayed = false;
+    let resetting = false;
+    const showPoster = () => {
+      if (!hasPlayed) {
+        return;
+      }
+      resetting = true;
+      hasPlayed = false;
+      if (!video.paused) {
+        video.pause();
+      }
+      try {
+        video.currentTime = 0;
+      } catch (_error) {
+        // Some WebKit builds reject seeks while media metadata is changing.
+      }
+      video.hidden = true;
+      video.style.display = "none";
+      posterButton.hidden = false;
+      posterButton.style.display = "block";
+      resetting = false;
+    };
+    video.addEventListener("play", () => {
+      hasPlayed = true;
+      video.hidden = false;
+      video.style.display = "block";
+      posterButton.hidden = true;
+      posterButton.style.display = "none";
+    });
+    video.addEventListener("pause", () => {
+      if (!resetting && !video.ended) {
+        showPoster();
+      }
+    });
+    video.addEventListener("ended", showPoster);
+    posterButton.addEventListener("click", async () => {
+      posterButton.hidden = true;
+      posterButton.style.display = "none";
+      video.hidden = false;
+      video.style.display = "block";
+      try {
+        video.currentTime = 0;
+        await video.play();
+      } catch (_error) {
+        video.hidden = true;
+        video.style.display = "none";
+        posterButton.hidden = false;
+        posterButton.style.display = "block";
+      }
+    });
+    video.dataset.coreVideoPosterBound = "1";
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -17501,6 +17739,8 @@ function bindCoreTabManagers() {
   bindCoreManagerConditionalFields();
   bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
+  bindCoreVideoPosterReset();
+  bindNativeSatelliteVolumeControls();
   document.querySelectorAll("[data-core-field-type='range']").forEach((input) => {
     if (!(input instanceof HTMLInputElement) || input.dataset.coreRangeBound === "1") {
       return;
@@ -23177,6 +23417,22 @@ async function loadSettingsView() {
       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
       .join("");
   };
+  const renderMediaUnderstandingModeOptions = (currentValue, kindLabel) => {
+    const selected = normalizeVisionMode(currentValue || "base");
+    const label = String(kindLabel || "Media").trim();
+    const options = [
+      { value: "base", label: "Same as Base" },
+      { value: "auto", label: `Auto: Base if ${label.toLowerCase()}-capable` },
+      { value: "dedicated", label: `Dedicated Local ${label}` },
+      { value: "api", label: "OpenAI-Compatible API" },
+    ];
+    return options
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+  };
+  const renderLlamaCppLocalProviderOptions = () => (
+    '<option value="llama_cpp" selected>llama.cpp Local</option>'
+  );
   const normalizeSpudexLlmMode = (value) => {
     const token = String(value || "base").trim().toLowerCase().replaceAll("_", "-");
     if (["custom", "override", "dedicated"].includes(token)) {
@@ -23228,6 +23484,8 @@ async function loadSettingsView() {
         max_context_tokens: Number(row?.max_context_tokens || 0),
         context_source: String(row?.context_source || "").trim(),
         supports_vision: Boolean(row?.supports_vision),
+        supports_audio: Boolean(row?.supports_audio),
+        supports_video: Boolean(row?.supports_video),
         mmproj_filename: String(row?.mmproj_filename || "").trim(),
       }))
       .filter((row) => row.model);
@@ -24112,9 +24370,11 @@ async function loadSettingsView() {
           >
             <div id="settings-hydra-model-stack" class="hydra-model-stack">
               <div class="settings-subtabs" style="grid-column: 1 / -1;">
-                <button type="button" class="settings-subtab-btn active" data-models-tab="routing">LLM / Vision</button>
+                <button type="button" class="settings-subtab-btn active" data-models-tab="routing">LLM</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="speech">Speech</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="wake">Wake Word</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="vision">Vision</button>
+                <button type="button" class="settings-subtab-btn" data-models-tab="audio-understanding">Audio Understanding</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="speakerid">Speaker ID</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="emotionid">Emotion ID</button>
                 <button type="button" class="settings-subtab-btn" data-models-tab="faceid">Face ID</button>
@@ -24147,6 +24407,8 @@ async function loadSettingsView() {
                     <select id="hf-model-browser-task">
                       <option value="text-generation">Text</option>
                       <option value="image-text-to-text">Vision</option>
+                      <option value="audio-text-to-text">Audio Understanding</option>
+                      <option value="video-text-to-text">Video Understanding</option>
                     </select>
                     <div class="hf-model-browser-view-switch" role="group" aria-label="Model list">
                       <button type="button" class="active" data-hf-model-view="picks">Tater Picks</button>
@@ -24553,10 +24815,12 @@ async function loadSettingsView() {
                 </div>
               </div>
 
+              </div>
+              <div class="settings-subpanel" data-models-panel="vision">
               <div class="hydra-model-panel is-active llm-vision-settings-block">
-                <div class="hydra-model-panel-title">Vision Model</div>
-                <div class="small hydra-model-panel-note">Used for image tools and vision-enabled requests.</div>
-                <label style="grid-column: 1 / -1;">Vision Mode
+                <div class="hydra-model-panel-title">Image Understanding</div>
+                <div class="small hydra-model-panel-note">Used for still-image tools and image-enabled requests.</div>
+                <label style="grid-column: 1 / -1;">Image Model Mode
                   <select id="set_vision_mode">
                     ${renderVisionModeOptions(settings.vision_mode || "api")}
                   </select>
@@ -24564,7 +24828,7 @@ async function loadSettingsView() {
                 <div id="vision-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
                   Auto reuses the Base model when it can process images, including llama.cpp Remote servers, then falls back to the dedicated/API vision settings.
                 </div>
-                <label id="vision-llama-context-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Vision Context
+                <label id="vision-llama-context-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Multimodal Context
                   <div class="hydra-context-control">
                     <input id="set_hydra_llama_cpp_vision_context_tokens_range" type="range" min="256" max="262144" step="256" value="${escapeHtml(
                       settings.hydra_llama_cpp_vision_context_tokens || "4096"
@@ -24573,40 +24837,116 @@ async function loadSettingsView() {
                       settings.hydra_llama_cpp_vision_context_tokens || "4096"
                     )}" />
                   </div>
-                  <div id="vision-llama-context-hint" class="small hydra-context-hint">Used only for llama.cpp image calls. Text chat keeps its own context length.</div>
+                  <div id="vision-llama-context-hint" class="small hydra-context-hint">Used for llama.cpp image, audio, and video calls. Text chat keeps its own context length.</div>
                 </label>
-                <label id="vision-llama-slot-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Vision Slot
+                <label id="vision-llama-slot-wrap" class="hydra-context-field" style="grid-column: 1 / -1;">llama.cpp Multimodal Slot
                   <input id="set_hydra_llama_cpp_vision_slot" type="number" min="0" max="31" step="1" placeholder="Auto" value="${escapeHtml(
                     settings.hydra_llama_cpp_vision_slot || ""
                   )}" />
-                  <div class="small hydra-context-hint">Blank lets llama.cpp choose an idle slot. Use a dedicated slot to preserve image prompt cache.</div>
+                  <div class="small hydra-context-hint">Blank lets llama.cpp choose an idle slot. Use a dedicated slot to preserve multimodal prompt cache.</div>
                 </label>
-                <label id="vision-provider-wrap" style="grid-column: 1 / -1;">Dedicated Vision Provider
+                <label id="vision-provider-wrap" style="grid-column: 1 / -1;">Dedicated Image Provider
                   <select id="set_vision_provider">
                     ${renderHydraVisionProviderOptions(settings.vision_provider || "hf_transformers")}
                   </select>
                 </label>
-                <label id="vision-model-wrap" style="grid-column: 1 / -1;"><span id="vision-model-label">Vision Model</span>
+                <label id="vision-model-wrap" style="grid-column: 1 / -1;"><span id="vision-model-label">Image Model</span>
                   <input id="set_vision_model" type="text" value="${escapeHtml(
                     settings.vision_model || "qwen2.5-vl-7b-instruct"
                   )}" placeholder="${escapeHtml(hydraModelPlaceholderForProvider(settings.vision_provider || ""))}" />
                   <select id="set_vision_model_select"></select>
                   <div id="vision-local-model-status" class="small"></div>
                 </label>
-                <label id="vision-api-base-wrap">Vision API Base URL
+                <label id="vision-api-base-wrap">Image API Base URL
                   <input id="set_vision_api_base" type="text" value="${escapeHtml(
                     settings.vision_api_base || "http://127.0.0.1:1234"
                   )}" />
                 </label>
-                <label id="vision-api-key-wrap" style="grid-column: 1 / -1;">Vision API Key (optional)
+                <label id="vision-api-key-wrap" style="grid-column: 1 / -1;">Image API Key (optional)
                   <input id="set_vision_api_key" type="password" value="${escapeHtml(settings.vision_api_key || "")}" />
                 </label>
                 <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
-                  <button type="button" id="settings-vision-model-save" class="inline-btn model-save-btn">Save Vision</button>
-                  <button type="button" id="settings-vision-model-save-load" class="inline-btn model-save-btn is-load">Save & Load Vision</button>
-                  <span class="small">Dedicated local vision uses downloaded models from the Hugging Face tab.</span>
+                  <button type="button" id="settings-vision-model-save" class="inline-btn model-save-btn">Save Image</button>
+                  <button type="button" id="settings-vision-model-save-load" class="inline-btn model-save-btn is-load">Save & Load Image</button>
+                  <span class="small">Dedicated local image understanding uses downloaded models from the Hugging Face tab.</span>
                 </div>
               </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="audio-understanding">
+                <div class="hydra-model-panel is-active">
+                  <div class="hydra-model-panel-title">Audio Understanding</div>
+                  <div class="small hydra-model-panel-note">Lets Tater reason about music, speech, and environmental sounds. Plain speech transcription should still use STT.</div>
+                  <label style="grid-column: 1 / -1;">Audio Model Mode
+                    <select id="set_audio_understanding_mode">
+                      ${renderMediaUnderstandingModeOptions(settings.audio_understanding_mode || "base", "Audio")}
+                    </select>
+                  </label>
+                  <div id="audio-understanding-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                    Same as Base reuses the already-loaded Base server and never loads a second copy. Auto tries Base first, then the configured fallback.
+                  </div>
+                  <label id="audio-understanding-provider-wrap" style="grid-column: 1 / -1;">Dedicated Audio Provider
+                    <select id="set_audio_understanding_provider">${renderLlamaCppLocalProviderOptions()}</select>
+                  </label>
+                  <label id="audio-understanding-model-wrap" style="grid-column: 1 / -1;"><span id="audio-understanding-model-label">Audio Model</span>
+                    <input id="set_audio_understanding_model" type="text" value="${escapeHtml(settings.audio_understanding_model || "")}" placeholder="Downloaded audio-capable GGUF model" />
+                    <select id="set_audio_understanding_model_select"></select>
+                    <div id="audio-understanding-local-model-status" class="small"></div>
+                  </label>
+                  <label id="audio-understanding-api-base-wrap">Audio API Base URL
+                    <input id="set_audio_understanding_api_base" type="text" value="${escapeHtml(settings.audio_understanding_api_base || "http://127.0.0.1:1234")}" />
+                  </label>
+                  <label id="audio-understanding-api-key-wrap">Audio API Key (optional)
+                    <input id="set_audio_understanding_api_key" type="password" value="${escapeHtml(settings.audio_understanding_api_key || "")}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Maximum Clip Length
+                    <input id="set_audio_understanding_max_seconds" type="number" min="1" max="3600" step="1" value="${escapeHtml(settings.audio_understanding_max_seconds || "60")}" />
+                    <div class="small hydra-context-hint">Longer clips use more context. Audio is limited before it reaches the model.</div>
+                  </label>
+                  <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                    <button type="button" id="settings-audio-understanding-save" class="inline-btn model-save-btn">Save Audio</button>
+                    <button type="button" id="settings-audio-understanding-save-load" class="inline-btn model-save-btn is-load">Save & Load Audio</button>
+                    <span class="small">Save & Load only warms a Dedicated local model.</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-subpanel" data-models-panel="vision">
+                <div class="hydra-model-panel is-active">
+                  <div class="hydra-model-panel-title">Video Understanding</div>
+                  <div class="small hydra-model-panel-note">Lets Tater inspect short clips as a sequence, including actions and scene changes.</div>
+                  <label style="grid-column: 1 / -1;">Video Model Mode
+                    <select id="set_video_understanding_mode">
+                      ${renderMediaUnderstandingModeOptions(settings.video_understanding_mode || "base", "Video")}
+                    </select>
+                  </label>
+                  <div id="video-understanding-base-note" class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
+                    Same as Base reuses the already-loaded Base server and never loads a second copy. Auto tries Base first, then the configured fallback.
+                  </div>
+                  <label id="video-understanding-provider-wrap" style="grid-column: 1 / -1;">Dedicated Video Provider
+                    <select id="set_video_understanding_provider">${renderLlamaCppLocalProviderOptions()}</select>
+                  </label>
+                  <label id="video-understanding-model-wrap" style="grid-column: 1 / -1;"><span id="video-understanding-model-label">Video Model</span>
+                    <input id="set_video_understanding_model" type="text" value="${escapeHtml(settings.video_understanding_model || "")}" placeholder="Downloaded video-capable GGUF model" />
+                    <select id="set_video_understanding_model_select"></select>
+                    <div id="video-understanding-local-model-status" class="small"></div>
+                  </label>
+                  <label id="video-understanding-api-base-wrap">Video API Base URL
+                    <input id="set_video_understanding_api_base" type="text" value="${escapeHtml(settings.video_understanding_api_base || "http://127.0.0.1:1234")}" />
+                  </label>
+                  <label id="video-understanding-api-key-wrap">Video API Key (optional)
+                    <input id="set_video_understanding_api_key" type="password" value="${escapeHtml(settings.video_understanding_api_key || "")}" />
+                  </label>
+                  <label style="grid-column: 1 / -1;">Maximum Clip Length
+                    <input id="set_video_understanding_max_seconds" type="number" min="1" max="3600" step="1" value="${escapeHtml(settings.video_understanding_max_seconds || "15")}" />
+                    <div class="small hydra-context-hint">Video frame tokens grow quickly, so Tater keeps clips bounded.</div>
+                  </label>
+                  <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
+                    <button type="button" id="settings-video-understanding-save" class="inline-btn model-save-btn">Save Video</button>
+                    <button type="button" id="settings-video-understanding-save-load" class="inline-btn model-save-btn is-load">Save & Load Video</button>
+                    <span class="small">Save & Load only warms a Dedicated local model.</span>
+                  </div>
+                </div>
               </div>
 
 	              <div class="settings-subpanel" data-models-panel="wake">
@@ -24810,6 +25150,89 @@ async function loadSettingsView() {
                   />
                   <div class="small">1.0 is raw model volume. Applies to Direct and Announcement Pocket TTS output.</div>
                 </label>
+                <section id="speech-qwen-tts-profile-wrap" class="core-inline-section" style="grid-column: 1 / -1;">
+                  <div class="small core-inline-section-title">Qwen3-TTS Voice</div>
+                  <div class="small hydra-model-panel-note">
+                    Upload a reference and Tater will detect its transcript automatically. The Base model clones the reference; VoiceDesign uses the description instead. The first preview installs the isolated runtime and downloads the selected model.
+                  </div>
+                  <div class="form-grid">
+                    <label style="grid-column: 1 / -1;">Clone Audio
+                      <input id="set_speech_qwen_tts_clone_audio" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac" />
+                    </label>
+                    <div class="inline-row" style="grid-column: 1 / -1;">
+                      <button type="button" id="settings-speech-qwen-tts-clone-upload" class="inline-btn">Upload Clone Audio</button>
+                      <button type="button" id="settings-speech-qwen-tts-clone-play" class="inline-btn" ${settings.speech_qwen_tts_clone_audio?.configured ? "" : "disabled"}>Play Saved Audio</button>
+                      <button type="button" id="settings-speech-qwen-tts-clone-remove" class="inline-btn" ${settings.speech_qwen_tts_clone_audio?.configured ? "" : "disabled"}>Remove</button>
+                      <span id="speech-qwen-tts-clone-status" class="small">${escapeHtml(
+                        settings.speech_qwen_tts_clone_audio?.configured
+                          ? `Saved: ${settings.speech_qwen_tts_clone_audio.name || "reference audio"}`
+                          : "No clone audio saved."
+                      )}</span>
+                    </div>
+                    <details style="grid-column: 1 / -1;">
+                      <summary>Reference transcript (optional)</summary>
+                      <div class="small">Tater fills this when you upload the sample. Open it only to review or correct the detected words.</div>
+                      <label>Detected Transcript
+                        <textarea id="set_speech_qwen_tts_clone_text" rows="3" placeholder="Detected automatically when clone audio is uploaded.">${escapeHtml(
+                          settings.speech_qwen_tts_clone_text || ""
+                        )}</textarea>
+                      </label>
+                    </details>
+                    <label>Language
+                      <select id="set_speech_qwen_tts_language">
+                        ${renderSettingsSelectOptions(
+                          ["Auto", "Chinese", "English", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"].map((value) => ({ value, label: value })),
+                          settings.speech_qwen_tts_language || "English"
+                        )}
+                      </select>
+                    </label>
+                    <label style="grid-column: 1 / -1;">VoiceDesign Description (optional)
+                      <textarea id="set_speech_qwen_tts_instruct" rows="2" placeholder="For example: A warm, calm woman with a natural conversational delivery.">${escapeHtml(
+                        settings.speech_qwen_tts_instruct || ""
+                      )}</textarea>
+                    </label>
+                  </div>
+                </section>
+                <section id="speech-omnivoice-tts-profile-wrap" class="core-inline-section" style="grid-column: 1 / -1;">
+                  <div class="small core-inline-section-title">OmniVoice Voice</div>
+                  <div class="small hydra-model-panel-note">
+                    Upload a reference and Tater will detect its transcript automatically, or leave it empty and describe a designed voice. This runtime is installed separately from Tater and Qwen.
+                  </div>
+                  <div class="form-grid">
+                    <label style="grid-column: 1 / -1;">Clone Audio
+                      <input id="set_speech_omnivoice_tts_clone_audio" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac" />
+                    </label>
+                    <div class="inline-row" style="grid-column: 1 / -1;">
+                      <button type="button" id="settings-speech-omnivoice-tts-clone-upload" class="inline-btn">Upload Clone Audio</button>
+                      <button type="button" id="settings-speech-omnivoice-tts-clone-play" class="inline-btn" ${settings.speech_omnivoice_tts_clone_audio?.configured ? "" : "disabled"}>Play Saved Audio</button>
+                      <button type="button" id="settings-speech-omnivoice-tts-clone-remove" class="inline-btn" ${settings.speech_omnivoice_tts_clone_audio?.configured ? "" : "disabled"}>Remove</button>
+                      <span id="speech-omnivoice-tts-clone-status" class="small">${escapeHtml(
+                        settings.speech_omnivoice_tts_clone_audio?.configured
+                          ? `Saved: ${settings.speech_omnivoice_tts_clone_audio.name || "reference audio"}`
+                          : "No clone audio saved."
+                      )}</span>
+                    </div>
+                    <details style="grid-column: 1 / -1;">
+                      <summary>Reference transcript (optional)</summary>
+                      <div class="small">Tater fills this when you upload the sample. Open it only to review or correct the detected words.</div>
+                      <label>Detected Transcript
+                        <textarea id="set_speech_omnivoice_tts_clone_text" rows="3" placeholder="Detected automatically when clone audio is uploaded.">${escapeHtml(
+                          settings.speech_omnivoice_tts_clone_text || ""
+                        )}</textarea>
+                      </label>
+                    </details>
+                    <label>Language
+                      <input id="set_speech_omnivoice_tts_language" type="text" value="${escapeHtml(
+                        settings.speech_omnivoice_tts_language || "English"
+                      )}" placeholder="English or en" />
+                    </label>
+                    <label style="grid-column: 1 / -1;">Voice Description (optional)
+                      <textarea id="set_speech_omnivoice_tts_instruct" rows="2" placeholder="Used when no clone audio is configured.">${escapeHtml(
+                        settings.speech_omnivoice_tts_instruct || ""
+                      )}</textarea>
+                    </label>
+                  </div>
+                </section>
                 <label id="speech-openai-tts-voice-wrap">OpenAI-Compatible Voice
                   <select id="set_speech_openai_tts_voice">
                     ${renderSettingsSelectOptions(
@@ -25113,7 +25536,7 @@ async function loadSettingsView() {
                 <div class="hydra-model-panel is-active" style="grid-column: 1 / -1;">
                   <div class="hydra-model-panel-title">DeepFace Runtime</div>
                   <div class="small hydra-model-panel-note">
-                    Face images and identity embeddings stay in your Tater data. Disabling Face ID unloads the model and stops Awareness burst captures.
+                    Face ID dependencies are installed during normal Tater setup. Face images and identity embeddings stay in your Tater data, and disabling Face ID unloads the model and stops Awareness burst captures.
                   </div>
                   <div class="hydra-model-mode" style="grid-column: 1 / -1;">
                     <div>
@@ -26596,12 +27019,16 @@ async function loadSettingsView() {
     preferredModel = "",
     syncContext = false,
     visionOnly = false,
+    capability = "",
   } = {}) => {
     if (!selectEl) {
       return;
     }
     const normalized = normalizeHydraBaseProvider(provider);
-    const rows = localLlmModelsForProvider(normalized).filter((row) => !visionOnly || Boolean(row.supports_vision));
+    const capabilityToken = String(capability || (visionOnly ? "vision" : "")).trim().toLowerCase();
+    const rows = localLlmModelsForProvider(normalized).filter((row) => (
+      !capabilityToken || Boolean(row[`supports_${capabilityToken}`])
+    ));
     const preferred = String(preferredModel || selectEl.value || inputEl?.value || "").trim();
     if (!rows.length) {
       selectEl.innerHTML = `<option value="">Download a model from the Hugging Face tab</option>`;
@@ -26610,7 +27037,9 @@ async function loadSettingsView() {
         syncHydraContextControl(normalized);
       }
       if (statusEl) {
-        statusEl.textContent = visionOnly ? "No downloaded vision-capable models for this provider yet." : "No downloaded models for this provider yet.";
+        statusEl.textContent = capabilityToken
+          ? `No downloaded ${capabilityToken}-capable models for this provider yet.`
+          : "No downloaded models for this provider yet.";
       }
       return;
     }
@@ -26863,6 +27292,7 @@ async function loadSettingsView() {
             statusEl: control.statusEl,
             preferredModel: control.modelSelectEl?.value || control.modelInputEl?.value || "",
             visionOnly: Boolean(control.visionOnly),
+            capability: control.capability || "",
           });
         }
       });
@@ -26950,6 +27380,7 @@ async function loadSettingsView() {
         statusEl: control.statusEl,
         preferredModel,
         visionOnly: Boolean(control.visionOnly),
+        capability: control.capability || "",
       });
     } else if (remoteLlama) {
       void populateHydraRemoteModelSelectFor({
@@ -27073,7 +27504,7 @@ async function loadSettingsView() {
     modelSelectEl: visionModelSelectEl,
     modelLabelEl: document.getElementById("vision-model-label"),
     statusEl: visionLocalModelStatusEl,
-    remoteLabel: "Vision Model",
+    remoteLabel: "Image Model",
     visionOnly: true,
   });
   const selectedVisionLlamaModelRow = () => {
@@ -27162,9 +27593,13 @@ async function loadSettingsView() {
     if (dedicated) {
       syncHydraRouteControl(visionRouteControl, visionModelEl?.value || visionModelSelectEl?.value || "");
     } else {
+      if (visionRouteControl?.modelLabelEl) {
+        visionRouteControl.modelLabelEl.textContent = "Image API Model";
+      }
       if (visionModelEl) {
         visionModelEl.style.display = "";
         visionModelEl.disabled = mode === "base";
+        visionModelEl.placeholder = "Model served by your API";
       }
       if (visionModelSelectEl) {
         visionModelSelectEl.style.display = "none";
@@ -27181,6 +27616,61 @@ async function loadSettingsView() {
   visionModelSelectEl?.addEventListener("change", () => syncVisionLlamaContextControl());
   visionModelEl?.addEventListener("input", () => syncVisionLlamaContextControl());
   syncVisionModeFields();
+  const mediaUnderstandingControls = {};
+  ["audio", "video"].forEach((kind) => {
+    const prefix = `${kind}-understanding`;
+    const modeEl = document.getElementById(`set_${kind}_understanding_mode`);
+    const providerEl = document.getElementById(`set_${kind}_understanding_provider`);
+    const modelInputEl = document.getElementById(`set_${kind}_understanding_model`);
+    const modelSelectEl = document.getElementById(`set_${kind}_understanding_model_select`);
+    const routeControl = registerHydraRouteControl({
+      scope: `${kind}_understanding`,
+      rootEl: modeEl?.closest(".hydra-model-panel"),
+      providerEl,
+      modelInputEl,
+      modelSelectEl,
+      modelLabelEl: document.getElementById(`${prefix}-model-label`),
+      statusEl: document.getElementById(`${prefix}-local-model-status`),
+      remoteLabel: `${kind[0].toUpperCase()}${kind.slice(1)} Model`,
+      capability: kind,
+    });
+    const syncModeFields = () => {
+      const mode = normalizeVisionMode(modeEl?.value || "base");
+      const dedicated = mode === "dedicated";
+      const apiVisible = mode === "api" || mode === "auto";
+      const providerWrap = document.getElementById(`${prefix}-provider-wrap`);
+      const modelWrap = document.getElementById(`${prefix}-model-wrap`);
+      const apiBaseWrap = document.getElementById(`${prefix}-api-base-wrap`);
+      const apiKeyWrap = document.getElementById(`${prefix}-api-key-wrap`);
+      const baseNote = document.getElementById(`${prefix}-base-note`);
+      if (providerWrap) providerWrap.style.display = dedicated ? "" : "none";
+      if (modelWrap) modelWrap.style.display = dedicated || apiVisible ? "" : "none";
+      if (apiBaseWrap) apiBaseWrap.style.display = apiVisible ? "" : "none";
+      if (apiKeyWrap) apiKeyWrap.style.display = apiVisible ? "" : "none";
+      if (baseNote) baseNote.style.display = mode === "base" || mode === "auto" ? "" : "none";
+      if (dedicated) {
+        syncHydraRouteControl(routeControl, modelInputEl?.value || modelSelectEl?.value || "");
+      } else {
+        if (routeControl?.modelLabelEl) {
+          routeControl.modelLabelEl.textContent = `${kind[0].toUpperCase()}${kind.slice(1)} API Model`;
+        }
+        if (modelInputEl) {
+          modelInputEl.style.display = "";
+          modelInputEl.disabled = mode === "base";
+          modelInputEl.placeholder = "Model served by your API";
+        }
+        if (modelSelectEl) {
+          modelSelectEl.style.display = "none";
+          modelSelectEl.disabled = true;
+        }
+        if (routeControl?.statusEl) routeControl.statusEl.style.display = "none";
+      }
+    };
+    modeEl?.addEventListener("change", syncModeFields);
+    providerEl?.addEventListener("change", syncModeFields);
+    mediaUnderstandingControls[kind] = { modeEl, providerEl, modelInputEl, modelSelectEl, routeControl, syncModeFields };
+    syncModeFields();
+  });
   const hydraRoleRouteControls = {};
   hydraRoleIds.forEach((role) => {
     hydraRoleRouteControls[role] = registerHydraRouteControl({
@@ -27305,6 +27795,8 @@ async function loadSettingsView() {
   hydraBaseProviderEl?.addEventListener("change", () => {
     syncHydraPrimaryProviderFields();
     syncVisionModeFields();
+    mediaUnderstandingControls.audio?.syncModeFields();
+    mediaUnderstandingControls.video?.syncModeFields();
   });
   [hydraBaseHostEl, hydraBasePortEl, hydraBaseApiKeyEl].forEach((fieldEl) => {
     fieldEl?.addEventListener("change", () => syncHydraPrimaryModelControl(hydraBaseProviderEl?.value || ""));
@@ -27468,9 +27960,16 @@ async function loadSettingsView() {
   };
   const normalizeHfModelTask = (value) => {
     const token = String(value || "text-generation").trim().toLowerCase();
-    return token === "image-text-to-text" || token === "vision" ? "image-text-to-text" : "text-generation";
+    if (token === "image-text-to-text" || token === "vision") return "image-text-to-text";
+    if (token === "audio-text-to-text" || token === "audio") return "audio-text-to-text";
+    if (token === "video-text-to-text" || token === "video") return "video-text-to-text";
+    return "text-generation";
   };
-  const hfModelTaskLabel = (task) => normalizeHfModelTask(task) === "image-text-to-text" ? "vision" : "text";
+  const hfModelTaskLabel = (task) => ({
+    "image-text-to-text": "vision",
+    "audio-text-to-text": "audio understanding",
+    "video-text-to-text": "video understanding",
+  }[normalizeHfModelTask(task)] || "text");
   const normalizeHfModelView = (value) => {
     const token = String(value || "trending").trim().toLowerCase().replace(/_/g, "-");
     if (["picks", "tater", "tater-picks", "recommended"].includes(token)) {
@@ -27545,6 +28044,8 @@ async function loadSettingsView() {
             max_context_tokens: Number(row?.max_context_tokens || 0),
             context_source: String(row?.context_source || "").trim(),
             supports_vision: Boolean(row?.supports_vision),
+            supports_audio: Boolean(row?.supports_audio),
+            supports_video: Boolean(row?.supports_video),
             mmproj_filename: String(row?.mmproj_filename || "").trim(),
             source: String(row?.source || "").trim(),
           }))
@@ -27578,6 +28079,8 @@ async function loadSettingsView() {
             <div class="hf-model-card-meta">
               ${contextLabel ? `<span>${escapeHtml(contextLabel)}</span>` : ""}
               ${row.supports_vision ? `<span>Vision</span>` : ""}
+              ${row.supports_audio ? `<span>Audio</span>` : ""}
+              ${row.supports_video ? `<span>Video</span>` : ""}
               ${row.mmproj_filename ? `<span>${escapeHtml(row.mmproj_filename)}</span>` : ""}
               ${downloaded ? `<span>Downloaded ${escapeHtml(downloaded)}</span>` : ""}
               ${row.source ? `<span>${escapeHtml(row.source)}</span>` : ""}
@@ -27714,6 +28217,8 @@ async function loadSettingsView() {
         const library = String(model?.library_name || model?.pipeline_tag || "").trim();
         const compatible = Boolean(model?.compatible);
         const supportsVision = Boolean(model?.supports_vision) || normalizeHfModelTask(model?.task) === "image-text-to-text" || normalizeHfModelTask(hfModelBrowserState.task) === "image-text-to-text";
+        const supportsAudio = Boolean(model?.supports_audio) || normalizeHfModelTask(hfModelBrowserState.task) === "audio-text-to-text";
+        const supportsVideo = Boolean(model?.supports_video) || normalizeHfModelTask(hfModelBrowserState.task) === "video-text-to-text";
         const isTaterPick = Boolean(model?.tater_pick);
         const taterPickLabel = String(model?.tater_pick_label || "Tater Pick").trim();
         const taterPickNote = String(model?.tater_pick_note || "").trim();
@@ -27732,6 +28237,8 @@ async function loadSettingsView() {
             <div class="hf-model-card-meta">
               ${modelSize ? `<span class="hf-model-size-pill">${escapeHtml(modelSize)}</span>` : ""}
               ${supportsVision ? `<span class="hf-model-vision-pill" title="Supports vision models">Vision</span>` : ""}
+              ${supportsAudio ? `<span class="hf-model-vision-pill" title="Supports audio input">Audio</span>` : ""}
+              ${supportsVideo ? `<span class="hf-model-vision-pill" title="Supports video input">Video</span>` : ""}
               ${isTaterPick && taterPickNote ? `<span class="hf-model-pick-note">${escapeHtml(taterPickNote)}</span>` : ""}
               <span>${escapeHtml(downloads)} downloads</span>
               <span>${escapeHtml(likes)} likes</span>
@@ -28472,6 +28979,24 @@ async function loadSettingsView() {
   const speechKokoroOutputGainEl = document.getElementById("set_speech_kokoro_output_gain");
   const speechPocketTtsOutputGainWrapEl = document.getElementById("speech-pocket-tts-output-gain-wrap");
   const speechPocketTtsOutputGainEl = document.getElementById("set_speech_pocket_tts_output_gain");
+  const speechQwenTtsProfileWrapEl = document.getElementById("speech-qwen-tts-profile-wrap");
+  const speechQwenTtsCloneAudioEl = document.getElementById("set_speech_qwen_tts_clone_audio");
+  const speechQwenTtsCloneUploadBtnEl = document.getElementById("settings-speech-qwen-tts-clone-upload");
+  const speechQwenTtsClonePlayBtnEl = document.getElementById("settings-speech-qwen-tts-clone-play");
+  const speechQwenTtsCloneRemoveBtnEl = document.getElementById("settings-speech-qwen-tts-clone-remove");
+  const speechQwenTtsCloneStatusEl = document.getElementById("speech-qwen-tts-clone-status");
+  const speechQwenTtsCloneTextEl = document.getElementById("set_speech_qwen_tts_clone_text");
+  const speechQwenTtsLanguageEl = document.getElementById("set_speech_qwen_tts_language");
+  const speechQwenTtsInstructEl = document.getElementById("set_speech_qwen_tts_instruct");
+  const speechOmnivoiceTtsProfileWrapEl = document.getElementById("speech-omnivoice-tts-profile-wrap");
+  const speechOmnivoiceTtsCloneAudioEl = document.getElementById("set_speech_omnivoice_tts_clone_audio");
+  const speechOmnivoiceTtsCloneUploadBtnEl = document.getElementById("settings-speech-omnivoice-tts-clone-upload");
+  const speechOmnivoiceTtsClonePlayBtnEl = document.getElementById("settings-speech-omnivoice-tts-clone-play");
+  const speechOmnivoiceTtsCloneRemoveBtnEl = document.getElementById("settings-speech-omnivoice-tts-clone-remove");
+  const speechOmnivoiceTtsCloneStatusEl = document.getElementById("speech-omnivoice-tts-clone-status");
+  const speechOmnivoiceTtsCloneTextEl = document.getElementById("set_speech_omnivoice_tts_clone_text");
+  const speechOmnivoiceTtsLanguageEl = document.getElementById("set_speech_omnivoice_tts_language");
+  const speechOmnivoiceTtsInstructEl = document.getElementById("set_speech_omnivoice_tts_instruct");
   const speechOpenAiTtsVoiceWrapEl = document.getElementById("speech-openai-tts-voice-wrap");
   const speechOpenAiTtsVoiceEl = document.getElementById("set_speech_openai_tts_voice");
   const speechOpenAiTtsManualVoiceWrapEl = document.getElementById("speech-openai-tts-manual-voice-wrap");
@@ -28591,6 +29116,7 @@ async function loadSettingsView() {
   const speechOpenAiTtsVoiceStatusEl = document.getElementById("speech-openai-tts-voice-status");
   let speechTtsPreviewUrl = "";
   let speechTtsPreviewBlob = null;
+  let speechClonePreviewAudio = null;
   let speechWyomingTtsRefreshSeq = 0;
   let speechWyomingTtsRefreshTimer = 0;
   let announcementWyomingTtsRefreshSeq = 0;
@@ -28861,7 +29387,7 @@ async function loadSettingsView() {
     setElementVisible(speechWyomingSttPortWrapEl, sttBackend === "wyoming");
     setElementVisible(speechFasterWhisperSettingsWrapEl, sttBackend === "faster_whisper");
 
-    const showsLocalModel = ["kokoro", "pocket_tts", "piper"].includes(ttsBackend);
+    const showsLocalModel = ["kokoro", "pocket_tts", "piper", "qwen3_tts", "omnivoice"].includes(ttsBackend);
     const showsVoiceSelect = ["kokoro", "pocket_tts"].includes(ttsBackend);
     const showsOpenAiCompatible = isOpenAiCompatibleTtsBackend(ttsBackend);
     const showsChatterbox = isChatterboxTtsBackend(ttsBackend);
@@ -28869,6 +29395,8 @@ async function loadSettingsView() {
     const showsSharedOpenAiConfig = showsOpenAiCompatible || isOpenAiCompatibleTtsBackend(announcementTtsBackend);
     const showsKokoroOutputGain = ttsBackend === "kokoro" || announcementTtsBackend === "kokoro";
     const showsPocketTtsOutputGain = ttsBackend === "pocket_tts" || announcementTtsBackend === "pocket_tts";
+    const showsQwenTtsProfile = ttsBackend === "qwen3_tts" || announcementTtsBackend === "qwen3_tts";
+    const showsOmnivoiceTtsProfile = ttsBackend === "omnivoice" || announcementTtsBackend === "omnivoice";
 
     syncSpeechTtsModelOptions({ forceReset: resetTtsSelection });
     syncSpeechTtsVoiceOptions({ forceReset: resetTtsSelection });
@@ -28877,6 +29405,8 @@ async function loadSettingsView() {
     setElementVisible(speechTtsVoiceWrapEl, showsVoiceSelect);
     setElementVisible(speechKokoroOutputGainWrapEl, showsKokoroOutputGain);
     setElementVisible(speechPocketTtsOutputGainWrapEl, showsPocketTtsOutputGain);
+    setElementVisible(speechQwenTtsProfileWrapEl, showsQwenTtsProfile);
+    setElementVisible(speechOmnivoiceTtsProfileWrapEl, showsOmnivoiceTtsProfile);
     setElementVisible(speechOpenAiTtsModelWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsManualModelWrapEl, showsOpenAiCompatible);
     setElementVisible(speechOpenAiTtsVoiceWrapEl, showsOpenAiCompatible);
@@ -28928,7 +29458,7 @@ async function loadSettingsView() {
       setChatterboxTtsVoiceStatus("direct", "");
     }
 
-    const showsAnnouncementLocalModel = ["kokoro", "pocket_tts", "piper"].includes(announcementTtsBackend);
+    const showsAnnouncementLocalModel = ["kokoro", "pocket_tts", "piper", "qwen3_tts", "omnivoice"].includes(announcementTtsBackend);
     const showsAnnouncementVoiceSelect = ["kokoro", "pocket_tts"].includes(announcementTtsBackend);
     const showsAnnouncementOpenAiCompatible = isOpenAiCompatibleTtsBackend(announcementTtsBackend);
     const showsAnnouncementChatterbox = isChatterboxTtsBackend(announcementTtsBackend);
@@ -29611,8 +30141,143 @@ async function loadSettingsView() {
     return Number.isFinite(parsed) ? parsed : null;
   };
 
-  const buildSpeechTtsPreviewPayload = () => ({
-    backend: String(speechTtsBackendEl?.value || "").trim(),
+  const managedTtsProfileElements = (backend) => {
+    const token = String(backend || "").trim();
+    if (token === "qwen3_tts") {
+      return {
+        file: speechQwenTtsCloneAudioEl,
+        upload: speechQwenTtsCloneUploadBtnEl,
+        play: speechQwenTtsClonePlayBtnEl,
+        remove: speechQwenTtsCloneRemoveBtnEl,
+        status: speechQwenTtsCloneStatusEl,
+        cloneText: speechQwenTtsCloneTextEl,
+        language: speechQwenTtsLanguageEl,
+        instruct: speechQwenTtsInstructEl,
+      };
+    }
+    if (token === "omnivoice") {
+      return {
+        file: speechOmnivoiceTtsCloneAudioEl,
+        upload: speechOmnivoiceTtsCloneUploadBtnEl,
+        play: speechOmnivoiceTtsClonePlayBtnEl,
+        remove: speechOmnivoiceTtsCloneRemoveBtnEl,
+        status: speechOmnivoiceTtsCloneStatusEl,
+        cloneText: speechOmnivoiceTtsCloneTextEl,
+        language: speechOmnivoiceTtsLanguageEl,
+        instruct: speechOmnivoiceTtsInstructEl,
+      };
+    }
+    return null;
+  };
+
+  const updateManagedCloneAudioState = (backend, audio = {}, transcription = null, cloneText = undefined) => {
+    const controls = managedTtsProfileElements(backend);
+    if (!controls) {
+      return;
+    }
+    const configured = Boolean(audio?.configured);
+    if (controls.play) {
+      controls.play.disabled = !configured;
+    }
+    if (controls.remove) {
+      controls.remove.disabled = !configured;
+    }
+    if (typeof cloneText === "string" && controls.cloneText) {
+      controls.cloneText.value = cloneText;
+    }
+    if (controls.status) {
+      const transcriptionStatus = String(transcription?.status || "").trim();
+      if (configured && transcriptionStatus === "ready") {
+        controls.status.textContent = `Saved: ${String(audio?.name || "reference audio")} • Transcript detected`;
+      } else if (configured && transcriptionStatus === "unavailable") {
+        controls.status.textContent = `Saved: ${String(audio?.name || "reference audio")} • Transcript was not detected; you can enter it under Reference transcript.`;
+      } else {
+        controls.status.textContent = configured
+          ? `Saved: ${String(audio?.name || "reference audio")}`
+          : "No clone audio saved.";
+      }
+    }
+    if (controls.file) {
+      controls.file.value = "";
+    }
+    clearSpeechTtsPreviewCache();
+  };
+
+  const uploadManagedCloneAudio = async (backend) => {
+    const controls = managedTtsProfileElements(backend);
+    const file = controls?.file?.files?.[0] || null;
+    if (!controls || !file) {
+      if (controls?.status) {
+        controls.status.textContent = "Choose an audio file first.";
+      }
+      return;
+    }
+    controls.upload.disabled = true;
+    controls.status.textContent = "Uploading and detecting transcript...";
+    try {
+      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`), {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          "X-Filename": encodeURIComponent(file.name || "reference.wav"),
+        },
+        body: file,
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(body?.detail || "Clone audio upload failed."));
+      }
+      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text);
+    } catch (error) {
+      controls.status.textContent = `Upload failed: ${String(error?.message || error)}`;
+    } finally {
+      controls.upload.disabled = false;
+    }
+  };
+
+  const removeManagedCloneAudio = async (backend) => {
+    const controls = managedTtsProfileElements(backend);
+    if (!controls) {
+      return;
+    }
+    controls.remove.disabled = true;
+    controls.status.textContent = "Removing clone audio...";
+    try {
+      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`), {
+        method: "DELETE",
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(body?.detail || "Could not remove clone audio."));
+      }
+      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text);
+    } catch (error) {
+      controls.status.textContent = `Remove failed: ${String(error?.message || error)}`;
+      controls.remove.disabled = false;
+    }
+  };
+
+  const playManagedCloneAudio = (backend) => {
+    const controls = managedTtsProfileElements(backend);
+    if (!controls || controls.play?.disabled) {
+      return;
+    }
+    if (speechClonePreviewAudio) {
+      speechClonePreviewAudio.pause();
+    }
+    speechClonePreviewAudio = new Audio(
+      `${withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`)}?ts=${Date.now()}`
+    );
+    speechClonePreviewAudio.play().catch((error) => {
+      controls.status.textContent = `Playback failed: ${String(error?.message || error)}`;
+    });
+  };
+
+  const buildSpeechTtsPreviewPayload = () => {
+    const backend = String(speechTtsBackendEl?.value || "").trim();
+    const managedProfile = managedTtsProfileElements(backend);
+    return {
+    backend,
     model: getSpeechTtsModelValue(),
     voice: getSpeechTtsVoiceValue(),
     kokoro_output_gain: readTtsOutputGainValue(speechKokoroOutputGainEl),
@@ -29632,8 +30297,12 @@ async function loadSettingsView() {
     chatterbox_seed: readOptionalNumberValue(speechChatterboxTtsSeedEl),
     chatterbox_speed_factor: readOptionalNumberValue(speechChatterboxTtsSpeedFactorEl),
     chatterbox_language: getChatterboxTtsValue("language"),
+    clone_text: String(managedProfile?.cloneText?.value || "").trim(),
+    managed_language: String(managedProfile?.language?.value || "").trim(),
+    managed_instruct: String(managedProfile?.instruct?.value || "").trim(),
     text: String(speechTtsSampleTextEl?.value || "").trim() || "Hello from Tater. This is a voice preview.",
-  });
+    };
+  };
 
   const requestSpeechTtsPreviewBlob = async () => {
     const response = await fetch(withBasePath("/api/settings/speech/tts-preview"), {
@@ -29827,6 +30496,23 @@ async function loadSettingsView() {
     syncSpeechTtsVoiceOptions({ forceReset: true });
   });
   speechTtsVoiceEl?.addEventListener("change", clearSpeechTtsPreviewCache);
+  [
+    speechQwenTtsCloneTextEl,
+    speechQwenTtsLanguageEl,
+    speechQwenTtsInstructEl,
+    speechOmnivoiceTtsCloneTextEl,
+    speechOmnivoiceTtsLanguageEl,
+    speechOmnivoiceTtsInstructEl,
+  ].forEach((element) => {
+    element?.addEventListener("input", clearSpeechTtsPreviewCache);
+    element?.addEventListener("change", clearSpeechTtsPreviewCache);
+  });
+  speechQwenTtsCloneUploadBtnEl?.addEventListener("click", () => uploadManagedCloneAudio("qwen3_tts"));
+  speechQwenTtsClonePlayBtnEl?.addEventListener("click", () => playManagedCloneAudio("qwen3_tts"));
+  speechQwenTtsCloneRemoveBtnEl?.addEventListener("click", () => removeManagedCloneAudio("qwen3_tts"));
+  speechOmnivoiceTtsCloneUploadBtnEl?.addEventListener("click", () => uploadManagedCloneAudio("omnivoice"));
+  speechOmnivoiceTtsClonePlayBtnEl?.addEventListener("click", () => playManagedCloneAudio("omnivoice"));
+  speechOmnivoiceTtsCloneRemoveBtnEl?.addEventListener("click", () => removeManagedCloneAudio("omnivoice"));
   speechOpenAiTtsModelEl?.addEventListener("change", () => {
     if (speechOpenAiTtsManualModelEl) {
       speechOpenAiTtsManualModelEl.value = "";
@@ -29944,13 +30630,22 @@ async function loadSettingsView() {
 	    );
 	  };
 
-	  const localLoadTargetForModel = (provider, model) => {
+	  const localLoadTargetForModel = (provider, model, { role = "", mediaKind = "" } = {}) => {
     const normalizedProvider = normalizeHydraBaseProvider(provider);
     const modelId = String(model || "").trim();
     if (!isHydraLocalProvider(normalizedProvider) || !modelId) {
       return null;
     }
-    return { provider: normalizedProvider, model: modelId };
+    const target = { provider: normalizedProvider, model: modelId };
+    const roleToken = String(role || "").trim();
+    const mediaToken = String(mediaKind || "").trim().toLowerCase();
+    if (roleToken) {
+      target.roles = [roleToken];
+    }
+    if (["vision", "audio", "video"].includes(mediaToken)) {
+      target.media_kinds = [mediaToken];
+    }
+    return target;
   };
   const dedupeLocalLoadTargets = (targets) => {
     const seen = new Set();
@@ -29963,16 +30658,36 @@ async function loadSettingsView() {
       }
       const key = `${normalizedProvider}|${modelId}`;
       if (seen.has(key)) {
+        const existing = rows.find((row) => `${row.provider}|${row.model}` === key);
+        if (existing) {
+          for (const field of ["roles", "media_kinds"]) {
+            const merged = Array.isArray(existing[field]) ? [...existing[field]] : [];
+            (Array.isArray(target?.[field]) ? target[field] : []).forEach((value) => {
+              const token = String(value || "").trim();
+              if (token && !merged.includes(token)) {
+                merged.push(token);
+              }
+            });
+            if (merged.length) {
+              existing[field] = merged;
+            }
+          }
+        }
         return;
       }
       seen.add(key);
-      rows.push({ provider: normalizedProvider, model: modelId });
+      rows.push({
+        provider: normalizedProvider,
+        model: modelId,
+        ...(Array.isArray(target?.roles) && target.roles.length ? { roles: target.roles } : {}),
+        ...(Array.isArray(target?.media_kinds) && target.media_kinds.length ? { media_kinds: target.media_kinds } : {}),
+      });
     });
     return rows;
   };
-  const localLoadTargetsForRows = (rows) => dedupeLocalLoadTargets(
+  const localLoadTargetsForRows = (rows, options = {}) => dedupeLocalLoadTargets(
     (Array.isArray(rows) ? rows : [])
-      .map((row) => localLoadTargetForModel(row?.provider, row?.model))
+      .map((row) => localLoadTargetForModel(row?.provider, row?.model, options))
       .filter(Boolean)
   );
   const readLlamaCppSlotValue = (element) => {
@@ -30035,7 +30750,7 @@ async function loadSettingsView() {
       baseProvider,
       baseModel,
       rows: hydraBaseServersPayload,
-      loadTargets: localLoadTargetsForRows(hydraBaseServersPayload),
+      loadTargets: localLoadTargetsForRows(hydraBaseServersPayload, { role: "Base" }),
       payload: {
         hydra_llm_provider: baseProvider,
         hydra_llm_host: baseHost,
@@ -30101,7 +30816,9 @@ async function loadSettingsView() {
       : String(document.getElementById("set_vision_model")?.value || "").trim();
     const llamaCppVisionContextTokens = String(document.getElementById("set_hydra_llama_cpp_vision_context_tokens")?.value || "").trim();
     const llamaCppVisionSlot = readLlamaCppSlotValue(document.getElementById("set_hydra_llama_cpp_vision_slot"));
-    const loadTargets = mode === "dedicated" ? dedupeLocalLoadTargets([localLoadTargetForModel(provider, model)]) : [];
+    const loadTargets = mode === "dedicated"
+      ? dedupeLocalLoadTargets([localLoadTargetForModel(provider, model, { role: "Image", mediaKind: "vision" })])
+      : [];
     return {
       mode,
       provider,
@@ -30115,6 +30832,36 @@ async function loadSettingsView() {
         vision_api_key: String(document.getElementById("set_vision_api_key")?.value || "").trim(),
         hydra_llama_cpp_vision_context_tokens: llamaCppVisionContextTokens,
         hydra_llama_cpp_vision_slot: llamaCppVisionSlot,
+      },
+    };
+  };
+  const readMediaUnderstandingSettingsPayload = (kind) => {
+    const control = mediaUnderstandingControls[kind] || {};
+    const prefix = `${kind}_understanding`;
+    const mode = normalizeVisionMode(document.getElementById(`set_${prefix}_mode`)?.value || "base");
+    const provider = normalizeHydraBaseProvider(document.getElementById(`set_${prefix}_provider`)?.value || "llama_cpp");
+    const model = mode === "dedicated"
+      ? getHydraRouteModelValue(control.routeControl)
+      : String(document.getElementById(`set_${prefix}_model`)?.value || "").trim();
+    return {
+      mode,
+      provider,
+      model,
+      loadTargets: mode === "dedicated"
+        ? dedupeLocalLoadTargets([
+            localLoadTargetForModel(provider, model, {
+              role: kind === "audio" ? "Audio" : "Video",
+              mediaKind: kind,
+            }),
+          ])
+        : [],
+      payload: {
+        [`${prefix}_mode`]: mode,
+        [`${prefix}_provider`]: provider,
+        [`${prefix}_api_base`]: String(document.getElementById(`set_${prefix}_api_base`)?.value || "").trim(),
+        [`${prefix}_model`]: model,
+        [`${prefix}_api_key`]: String(document.getElementById(`set_${prefix}_api_key`)?.value || "").trim(),
+        [`${prefix}_max_seconds`]: Number(document.getElementById(`set_${prefix}_max_seconds`)?.value || (kind === "audio" ? 60 : 15)),
       },
     };
   };
@@ -30158,6 +30905,12 @@ async function loadSettingsView() {
     speech_tts_voice: getSpeechTtsVoiceValue(),
     speech_kokoro_output_gain: readTtsOutputGainValue(speechKokoroOutputGainEl),
     speech_pocket_tts_output_gain: readTtsOutputGainValue(speechPocketTtsOutputGainEl),
+    speech_qwen_tts_clone_text: String(speechQwenTtsCloneTextEl?.value || "").trim(),
+    speech_qwen_tts_language: String(speechQwenTtsLanguageEl?.value || "").trim(),
+    speech_qwen_tts_instruct: String(speechQwenTtsInstructEl?.value || "").trim(),
+    speech_omnivoice_tts_clone_text: String(speechOmnivoiceTtsCloneTextEl?.value || "").trim(),
+    speech_omnivoice_tts_language: String(speechOmnivoiceTtsLanguageEl?.value || "").trim(),
+    speech_omnivoice_tts_instruct: String(speechOmnivoiceTtsInstructEl?.value || "").trim(),
     speech_wyoming_tts_host: String(document.getElementById("set_speech_wyoming_tts_host")?.value || "").trim(),
     speech_wyoming_tts_port: String(document.getElementById("set_speech_wyoming_tts_port")?.value || "").trim(),
     speech_wyoming_tts_voice: String(speechWyomingTtsVoiceEl?.value || "").trim(),
@@ -30238,9 +30991,9 @@ async function loadSettingsView() {
       faceIdStatusEl.textContent = `Face ID load failed: ${String(value.error || "unknown error")}`;
       return;
     }
-    if (["installing", "loading"].includes(stateToken) || value.loading) {
+    if (stateToken === "loading" || value.loading) {
       faceIdStatusEl.textContent = String(
-        value.message || "Loading Face ID locally. The first load also installs the private model pack..."
+        value.message || "Loading Face ID locally. The first load may download model weights..."
       );
       return;
     }
@@ -30271,7 +31024,9 @@ async function loadSettingsView() {
       all: "Model settings",
       base: "Base model settings",
       spudex: "Spudex LLM settings",
-      vision: "Vision model settings",
+      vision: "Image understanding settings",
+      audio: "Audio understanding settings",
+      video: "Video understanding settings",
       beast: "Beast routing settings",
       speech: "Voice model settings",
       faceid: "Face ID settings",
@@ -30304,13 +31059,30 @@ async function loadSettingsView() {
     const visionSettings = normalizedScope === "all" || normalizedScope === "vision" ? readVisionModelSettingsPayload() : null;
     if (visionSettings) {
       if (visionSettings.mode === "dedicated" && isHydraLocalProvider(visionSettings.provider) && !visionSettings.model) {
-        statusEl.textContent = "Choose a downloaded local Vision model before saving.";
-        showToast("Choose a downloaded local Vision model first.", "error", 3000);
+        statusEl.textContent = "Choose a downloaded local Image model before saving.";
+        showToast("Choose a downloaded local Image model first.", "error", 3000);
         return;
       }
       payload = { ...payload, ...visionSettings.payload };
       if (loadLocalModels) {
         loadTargets = loadTargets.concat(visionSettings.loadTargets);
+      }
+    }
+
+    for (const kind of ["audio", "video"]) {
+      if (!(normalizedScope === "all" || normalizedScope === kind)) {
+        continue;
+      }
+      const mediaSettings = readMediaUnderstandingSettingsPayload(kind);
+      const labelToken = kind[0].toUpperCase() + kind.slice(1);
+      if (mediaSettings.mode === "dedicated" && !mediaSettings.model) {
+        statusEl.textContent = `Choose a downloaded local ${labelToken} model before saving.`;
+        showToast(`Choose a downloaded local ${labelToken} model first.`, "error", 3000);
+        return;
+      }
+      payload = { ...payload, ...mediaSettings.payload };
+      if (loadLocalModels) {
+        loadTargets = loadTargets.concat(mediaSettings.loadTargets);
       }
     }
 
@@ -30440,6 +31212,14 @@ async function loadSettingsView() {
   });
   document.getElementById("settings-vision-model-save-load")?.addEventListener("click", () => {
     void saveModelSettings("vision", { loadLocalModels: true });
+  });
+  ["audio", "video"].forEach((kind) => {
+    document.getElementById(`settings-${kind}-understanding-save`)?.addEventListener("click", () => {
+      void saveModelSettings(kind);
+    });
+    document.getElementById(`settings-${kind}-understanding-save-load`)?.addEventListener("click", () => {
+      void saveModelSettings(kind, { loadLocalModels: true });
+    });
   });
   document.getElementById("settings-hydra-beast-save")?.addEventListener("click", () => {
     void saveModelSettings("beast");
@@ -30992,6 +31772,8 @@ async function loadSettingsView() {
       tater_personality: document.getElementById("set_tater_personality").value,
       show_speed_stats: document.getElementById("set_show_speed_stats").checked,
       ...readVisionModelSettingsPayload().payload,
+      ...readMediaUnderstandingSettingsPayload("audio").payload,
+      ...readMediaUnderstandingSettingsPayload("video").payload,
       emoji_enable_on_reaction_add: document.getElementById("set_emoji_enable_on_reaction_add").checked,
       emoji_enable_auto_reaction_on_reply: document.getElementById("set_emoji_enable_auto_reaction_on_reply").checked,
       emoji_reaction_chain_chance_percent: Number(

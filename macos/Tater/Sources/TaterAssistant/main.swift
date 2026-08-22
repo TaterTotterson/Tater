@@ -725,6 +725,44 @@ private final class BackendManager {
             appendLog("Private runtime is missing the Parakeet ONNX dependency (onnx-asr).\n")
             return false
         }
+        let obsoletePackages = [
+            "aioesphomeapi",
+            "nanowakeword",
+            "openwakeword",
+            "noiseprotocol",
+            "scikit-learn",
+            "narwhals",
+            "threadpoolctl",
+            "tzlocal",
+            "tzdata"
+        ]
+        for packageName in obsoletePackages where installedPackageVersion(packageName, using: python) != nil {
+            appendLog("Private runtime contains obsolete dependency \(packageName); setup will remove it.\n")
+            return false
+        }
+        let legacyFaceIDEnvironments = [
+            runtimeDir.appendingPathComponent("models/face-id/venv/pyvenv.cfg"),
+            runtimeDir.deletingLastPathComponent().appendingPathComponent("models/face-id/venv/pyvenv.cfg")
+        ]
+        if legacyFaceIDEnvironments.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+            appendLog("Private runtime contains an obsolete Face ID worker environment; setup will remove it.\n")
+            return false
+        }
+        let legacyFirmwareRoot = agentRoot.appendingPathComponent("esphome", isDirectory: true)
+        let firmwareRoot = agentRoot.appendingPathComponent("firmware", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacyFirmwareRoot.path),
+           !FileManager.default.fileExists(atPath: firmwareRoot.path) {
+            appendLog("Private runtime uses the legacy firmware workspace name; setup will rename it.\n")
+            return false
+        }
+        var faceIDPackages = ["deepface", "tensorflow", "tf-keras", "opencv-python", "retina-face"]
+        if isAppleSilicon {
+            faceIDPackages.append("tensorflow-metal")
+        }
+        for packageName in faceIDPackages where installedPackageVersion(packageName, using: python) == nil {
+            appendLog("Private runtime is missing the Face ID dependency \(packageName).\n")
+            return false
+        }
         return true
     }
 

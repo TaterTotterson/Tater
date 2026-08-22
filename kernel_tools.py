@@ -11,6 +11,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import tarfile
 import time
 import uuid
@@ -31,6 +32,7 @@ import requests
 from helpers import (
     HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
+    analyze_media_with_local_llm,
     describe_image_with_local_llm,
     finish_active_vision_call,
     get_llm_client_from_env,
@@ -51,6 +53,7 @@ from vision_settings import (
     DEFAULT_VISION_MODEL,
     get_vision_settings,
 )
+from media_understanding_settings import get_media_understanding_settings
 from tater_paths import agent_lab_dir
 
 
@@ -141,6 +144,14 @@ VISION_DEFAULT_PROMPT = (
     "Describe this image clearly and concisely. Mention important objects, people, actions, "
     "and any visible text."
 )
+MEDIA_UNDERSTANDING_MIMETYPES = {
+    "audio": {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/flac", "audio/x-flac"},
+    "video": {"video/mp4", "video/quicktime", "video/webm", "video/x-matroska", "video/mpeg", "video/x-msvideo"},
+}
+MEDIA_UNDERSTANDING_MAX_BYTES = {
+    "audio": int(os.getenv("TATER_AUDIO_UNDERSTANDING_MAX_BYTES", str(96 * 1024 * 1024))),
+    "video": int(os.getenv("TATER_VIDEO_UNDERSTANDING_MAX_BYTES", str(256 * 1024 * 1024))),
+}
 WEBUI_FILE_BLOB_KEY_PREFIX = "webui:file:"
 
 AI_TASKS_KEY_PREFIX = "reminders:"
@@ -2944,6 +2955,352 @@ def image_describe(
         summary_for_user=text,
         say_hint="Return the image description directly and do not invent extra visual details.",
     )
+
+
+def _media_understanding_duration_seconds(data: bytes) -> float:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", "pipe:0",
+            ],
+            input=data,
+            capture_output=True,
+            timeout=20,
+        )
+        if completed.returncode == 0:
+            return max(0.0, float(completed.stdout.decode("utf-8", errors="ignore").strip() or 0.0))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _media_understanding_download_url(
+    media_kind: str,
+    value: Any,
+) -> Tuple[Optional[bytes], str, str, str]:
+    raw_url = _as_text(value).strip()
+    if not _image_describe_looks_like_http_url(raw_url):
+        return None, "", "", "Media URL must be a valid http/https URL."
+    max_bytes = MEDIA_UNDERSTANDING_MAX_BYTES[media_kind]
+    try:
+        with requests.get(raw_url, timeout=45, stream=True, allow_redirects=True, headers={"User-Agent": "Tater/1.0"}) as response:
+            if response.status_code >= 300:
+                return None, "", "", f"Media URL returned HTTP {response.status_code}."
+            content_length = int(response.headers.get("Content-Length") or 0)
+            if content_length > max_bytes:
+                return None, "", "", f"Media exceeds the {max_bytes // (1024 * 1024)} MB limit."
+            chunks: List[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    return None, "", "", f"Media exceeds the {max_bytes // (1024 * 1024)} MB limit."
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            final_url = _as_text(response.url or raw_url).strip()
+            mime = _as_text(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    except Exception as exc:
+        return None, "", "", f"Failed to download media URL: {exc}"
+    filename = Path(urllib.parse.urlparse(final_url).path).name or ("audio.wav" if media_kind == "audio" else "video.mp4")
+    mime = mime or _as_text(mimetypes.guess_type(filename)[0]).strip().lower()
+    if mime not in MEDIA_UNDERSTANDING_MIMETYPES[media_kind]:
+        return None, "", "", f"The URL is not a supported {media_kind} file."
+    return data or None, filename, mime, "" if data else "Media URL returned no data."
+
+
+def _media_understanding_resolve(
+    media_kind: str,
+    *,
+    artifact_id: Any = None,
+    url: Any = None,
+    path: Any = None,
+    blob_key: Any = None,
+    file_id: Any = None,
+    media_ref: Any = None,
+    source: Any = None,
+    file: Any = None,
+    name: Any = None,
+    mimetype: Any = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[bytes], str, str, str, str]:
+    allowed = MEDIA_UNDERSTANDING_MIMETYPES[media_kind]
+    artifact_token = _as_text(artifact_id).strip()
+    if artifact_token:
+        artifact = _find_available_artifact(origin=origin, artifact_id=artifact_token)
+        if artifact is None:
+            return None, "", "", "", f"Artifact `{artifact_token}` was not found for this conversation."
+        data, filename, mime, error = _read_artifact_bytes(artifact)
+        if data is None:
+            return None, "", "", "", error or "The artifact could not be read."
+        final_name = filename or _as_text(artifact.get("name")).strip()
+        final_mime = _as_text(mime).strip().lower() or _artifact_mimetype(final_name, artifact.get("mimetype"))
+        if final_mime not in allowed:
+            return None, "", "", "", f"The selected artifact is not supported {media_kind}."
+        return data, final_name, final_mime, "artifact", ""
+
+    ref = media_ref if isinstance(media_ref, dict) else {}
+    if ref:
+        blob_key = blob_key or ref.get("blob_key")
+        file_id = file_id or ref.get("file_id") or ref.get("id")
+        url = url or ref.get("url")
+        name = name or ref.get("name")
+        mimetype = mimetype or ref.get("mimetype")
+        raw_data = ref.get("bytes") if isinstance(ref.get("bytes"), (bytes, bytearray)) else None
+        if raw_data is None:
+            raw_data = _image_describe_decode_base64_payload(ref.get("data"))
+        if raw_data:
+            final_name = _as_text(name).strip() or ("audio.wav" if media_kind == "audio" else "video.mp4")
+            final_mime = _as_text(mimetype).strip().lower() or _as_text(mimetypes.guess_type(final_name)[0]).strip().lower()
+            if final_mime not in allowed:
+                return None, "", "", "", f"The explicit reference is not supported {media_kind}."
+            return bytes(raw_data), final_name, final_mime, "explicit_ref", ""
+
+    explicit_url = _as_text(url).strip()
+    source_hint = source or file
+    if not explicit_url and _image_describe_looks_like_http_url(source_hint):
+        explicit_url = _as_text(source_hint).strip()
+    if explicit_url:
+        data, filename, mime, error = _media_understanding_download_url(media_kind, explicit_url)
+        return data, filename, mime, "url" if data else "", error
+
+    media_path = _as_text(path or (source_hint if not _image_describe_looks_like_http_url(source_hint) else "")).strip()
+    if media_path:
+        resolved = _resolve_safe_path(media_path, [AGENT_LAB_DIR])
+        if resolved is None or not resolved.is_file():
+            return None, "", "", "", "Media path is missing or outside the allowed workspace root."
+        final_mime = _as_text(mimetypes.guess_type(resolved.name)[0]).strip().lower()
+        if final_mime not in allowed:
+            return None, "", "", "", f"The provided path is not supported {media_kind}."
+        try:
+            return resolved.read_bytes(), resolved.name, final_mime, "path", ""
+        except Exception as exc:
+            return None, "", "", "", f"Failed to read media path: {exc}"
+
+    blob = _image_describe_load_blob_bytes(_image_describe_blob_client(), blob_key=blob_key, file_id=file_id)
+    if blob:
+        final_name = _as_text(name).strip() or ("audio.wav" if media_kind == "audio" else "video.mp4")
+        final_mime = _as_text(mimetype).strip().lower() or _as_text(mimetypes.guess_type(final_name)[0]).strip().lower()
+        if final_mime not in allowed:
+            return None, "", "", "", f"The provided blob is not supported {media_kind}."
+        return blob, final_name, final_mime, "blob", ""
+    return None, "", "", "", f"No {media_kind} clip was provided."
+
+
+def _media_understanding_messages(media_kind: str, data: bytes, filename: str, prompt: str) -> List[Dict[str, Any]]:
+    default_prompt = (
+        "Analyze this audio. Describe speech, music, sound events, and useful temporal details."
+        if media_kind == "audio"
+        else "Analyze this video. Describe important actions, subjects, scene changes, and their order."
+    )
+    media_format = Path(filename or "").suffix.lower().lstrip(".") or ("wav" if media_kind == "audio" else "mp4")
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": _as_text(prompt).strip() or default_prompt},
+            {
+                "type": f"input_{media_kind}",
+                f"input_{media_kind}": {
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "format": media_format,
+                },
+            },
+        ],
+    }]
+
+
+def _media_understanding_call_api(
+    media_kind: str,
+    *,
+    data: bytes,
+    filename: str,
+    prompt: str,
+    api_base: str,
+    model: str,
+    api_key: str = "",
+) -> Tuple[Optional[str], str, Optional[str]]:
+    if not api_base or not model:
+        return None, model, f"{media_kind.title()} understanding API settings are incomplete."
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = requests.post(
+            f"{api_base.rstrip('/')}/v1/chat/completions",
+            json={"model": model, "messages": _media_understanding_messages(media_kind, data, filename, prompt), "temperature": 0.2},
+            headers=headers,
+            timeout=180,
+        )
+        if response.status_code >= 300:
+            return None, model, f"{media_kind.title()} API returned HTTP {response.status_code}: {_as_text(response.text)[:400]}"
+        parsed = response.json()
+        content = parsed["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "\n".join(_as_text(item.get("text") if isinstance(item, dict) else item).strip() for item in content)
+        text = _as_text(content).strip()
+        return (text, _as_text(parsed.get("model") or model).strip(), None) if text else (None, model, f"{media_kind.title()} API returned an empty response.")
+    except Exception as exc:
+        return None, model, f"{media_kind.title()} API request failed: {exc}"
+
+
+def _media_understanding_call_local(
+    media_kind: str,
+    *,
+    provider: str,
+    model: str,
+    data: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], str, Optional[str]]:
+    try:
+        result = analyze_media_with_local_llm(
+            provider=provider,
+            model=model,
+            media_kind=media_kind,
+            media_bytes=data,
+            filename=filename,
+            prompt=prompt,
+            timeout=180.0,
+        )
+        return _as_text(result.get("description")).strip(), _as_text(result.get("model") or model).strip(), None
+    except Exception as exc:
+        return None, model, f"Local {media_kind} understanding failed: {exc}"
+
+
+def _media_understanding_call_configured(
+    media_kind: str,
+    *,
+    data: bytes,
+    filename: str,
+    prompt: str,
+) -> Tuple[Optional[str], str, Optional[str]]:
+    settings = get_media_understanding_settings(media_kind)
+    mode = _as_text(settings.get("mode") or "base").strip().lower()
+    provider = _normalize_hydra_llm_provider(settings.get("provider") or "llama_cpp")
+    model = _as_text(settings.get("model")).strip()
+
+    if mode in {"base", "auto"}:
+        try:
+            base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+        except Exception:
+            base_rows = []
+        base = dict(base_rows[0]) if base_rows and isinstance(base_rows[0], dict) else {}
+        base_provider = _normalize_hydra_llm_provider(base.get("provider"))
+        base_model = _as_text(base.get("model")).strip()
+        if base_provider == "llama_cpp" and base_model:
+            description, used_model, error = _media_understanding_call_local(
+                media_kind, provider=base_provider, model=base_model, data=data, filename=filename, prompt=prompt
+            )
+        elif base_provider in {HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE, HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE} and base_model:
+            description, used_model, error = _media_understanding_call_api(
+                media_kind,
+                data=data,
+                filename=filename,
+                prompt=prompt,
+                api_base=_as_text(base.get("endpoint") or base.get("host")).strip(),
+                model=base_model,
+                api_key=_as_text(base.get("api_key")).strip(),
+            )
+        else:
+            description, used_model, error = None, base_model, "Base model provider does not support this media input."
+        if description and not error:
+            return description, used_model, None
+        if mode == "base":
+            return None, used_model or base_model, error or f"Base model is not {media_kind}-capable."
+
+    if mode == "dedicated":
+        return _media_understanding_call_local(
+            media_kind, provider=provider, model=model, data=data, filename=filename, prompt=prompt
+        )
+    return _media_understanding_call_api(
+        media_kind,
+        data=data,
+        filename=filename,
+        prompt=prompt,
+        api_base=_as_text(settings.get("api_base")).strip(),
+        model=model,
+        api_key=_as_text(settings.get("api_key")).strip(),
+    )
+
+
+def _media_analyze_tool(
+    media_kind: str,
+    *,
+    request: Any = None,
+    query: Any = None,
+    prompt: Any = None,
+    artifact_id: Any = None,
+    url: Any = None,
+    path: Any = None,
+    blob_key: Any = None,
+    file_id: Any = None,
+    media_ref: Any = None,
+    source: Any = None,
+    file: Any = None,
+    name: Any = None,
+    mimetype: Any = None,
+    platform: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    del platform
+    origin_payload = origin if isinstance(origin, dict) else {}
+    prompt_text = _as_text(prompt or query or request or origin_payload.get("request_text")).strip()
+    data, filename, mime, resolution_source, error = _media_understanding_resolve(
+        media_kind,
+        artifact_id=artifact_id, url=url, path=path, blob_key=blob_key, file_id=file_id,
+        media_ref=media_ref, source=source, file=file, name=name, mimetype=mimetype, origin=origin,
+    )
+    if data is None:
+        return action_failure(
+            code=f"invalid_{media_kind}_source",
+            message=error or f"No {media_kind} clip was found.",
+            needs=[f"Provide a {media_kind} artifact_id, URL, blob, or workspace path."],
+            say_hint=f"Ask for a valid {media_kind} clip.",
+        )
+    max_bytes = MEDIA_UNDERSTANDING_MAX_BYTES[media_kind]
+    if len(data) > max_bytes:
+        return action_failure(code="media_too_large", message=f"{media_kind.title()} exceeds the {max_bytes // (1024 * 1024)} MB limit.")
+    settings = get_media_understanding_settings(media_kind)
+    duration = _media_understanding_duration_seconds(data)
+    max_seconds = int(settings.get("max_seconds") or (60 if media_kind == "audio" else 15))
+    if duration > max_seconds + 0.05:
+        return action_failure(
+            code="media_too_long",
+            message=f"This {media_kind} is {duration:.1f}s; the configured limit is {max_seconds}s.",
+            needs=["Provide a shorter clip or increase the limit in Models settings."],
+        )
+    description, model, call_error = _media_understanding_call_configured(
+        media_kind, data=data, filename=filename, prompt=prompt_text
+    )
+    if call_error:
+        return action_failure(code=f"{media_kind}_understanding_failed", message=call_error)
+    text = _as_text(description).strip()
+    return action_success(
+        facts={"tool": f"{media_kind}_analyze", "source": resolution_source or "unknown", "filename": filename},
+        data={
+            "description": text,
+            "text": text,
+            "filename": filename,
+            "mimetype": mime,
+            "model": model,
+            "source": resolution_source or "unknown",
+            "duration_seconds": round(duration, 3) if duration else None,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        },
+        summary_for_user=text,
+        say_hint=f"Return the {media_kind} analysis directly without inventing details.",
+    )
+
+
+def audio_analyze(**kwargs: Any) -> Dict[str, Any]:
+    return _media_analyze_tool("audio", **kwargs)
+
+
+def video_analyze(**kwargs: Any) -> Dict[str, Any]:
+    return _media_analyze_tool("video", **kwargs)
 
 
 def _ai_tasks_normalize_channel_targets(dest: str, targets: Dict[str, Any]) -> Dict[str, Any]:

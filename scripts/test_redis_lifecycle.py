@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,30 @@ class _FakeRedis:
     def set(self, key: str, value: str) -> None:
         self.set_calls.append((key, value))
         self.value = value
+
+
+class _GenerationRedis:
+    def __init__(self, existing: dict):
+        self.values = {
+            integration_registry.INTEGRATION_DEVICE_REGISTRY_CACHE_KEY: json.dumps(existing, separators=(",", ":")),
+            integration_registry.INTEGRATION_DEVICE_REGISTRY_GENERATION_KEY: "0",
+        }
+        self.set_calls: list[tuple[str, str]] = []
+
+    def get(self, key: str):
+        return self.values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.set_calls.append((key, value))
+        self.values[key] = value
+
+    def incr(self, key: str) -> int:
+        value = int(self.values.get(key) or 0) + 1
+        self.values[key] = str(value)
+        return value
+
+    def hgetall(self, _key: str) -> dict:
+        return {}
 
 
 def _registry_payload(*, name: str = "Kitchen Light", updated_at: float = 1.0) -> dict:
@@ -100,6 +125,82 @@ class RedisLifecycleTests(unittest.TestCase):
         ):
             integration_registry.save_integration_device_registry_cache(incoming, fake)
         self.assertEqual(len(fake.set_calls), 1)
+
+    def test_older_registry_scan_cannot_overwrite_new_generation(self) -> None:
+        existing = _registry_payload(name="Current Camera")
+        fake = _GenerationRedis(existing)
+        stale = _registry_payload(name="Stale Camera")
+        with mock.patch.object(integration_registry, "_enabled_integration_ids", return_value=["homekit"]):
+            generation = integration_registry._device_registry_generation(fake)
+            integration_registry.bump_integration_device_registry_generation(fake)
+            result = integration_registry.save_integration_device_registry_cache(
+                stale,
+                fake,
+                expected_generation=generation,
+            )
+
+        self.assertEqual(result["devices"][0]["name"], "Current Camera")
+        saved = json.loads(fake.values[integration_registry.INTEGRATION_DEVICE_REGISTRY_CACHE_KEY])
+        self.assertEqual(saved["devices"][0]["name"], "Current Camera")
+
+    def test_targeted_integration_refresh_replaces_capabilities_immediately(self) -> None:
+        existing = {
+            "groups": [
+                {
+                    "id": "unifi_protect",
+                    "name": "UniFi Protect",
+                    "order": 70,
+                    "devices": [
+                        {
+                            "id": "back-yard",
+                            "name": "Back Yard",
+                            "type": "camera",
+                            "capabilities": ["camera", "snapshot"],
+                            "actions": ["camera_snapshot"],
+                        }
+                    ],
+                    "device_count": 1,
+                }
+            ],
+            "devices": [],
+            "total": 1,
+            "errors": [],
+            "cache": {
+                "version": integration_registry._DEVICE_REGISTRY_CACHE_VERSION,
+                "enabled_integrations": ["unifi_protect"],
+                "generated_at": 1.0,
+                "updated_at": 1.0,
+            },
+        }
+        fake = _GenerationRedis(existing)
+        module = SimpleNamespace(
+            INTEGRATION={"id": "unifi_protect", "name": "UniFi Protect", "order": 70},
+            integration_status=lambda: {"configured": True},
+            integration_devices=lambda: {
+                "devices": [
+                    {
+                        "id": "back-yard",
+                        "name": "Back Yard",
+                        "type": "camera",
+                        "capabilities": ["camera", "snapshot", "video_clip"],
+                        "actions": ["camera_snapshot", "camera_clip"],
+                    }
+                ]
+            },
+        )
+        with (
+            mock.patch.object(integration_registry, "_enabled_integration_ids", return_value=["unifi_protect"]),
+            mock.patch.object(integration_registry, "_module_for_integration", return_value=module),
+        ):
+            refreshed = integration_registry.refresh_integration_device_group_cache(
+                "unifi_protect",
+                fake,
+            )
+
+        camera = refreshed["devices"][0]
+        self.assertIn("video_clip", camera["capabilities"])
+        self.assertIn("camera_clip", camera["actions"])
+        self.assertEqual(refreshed["cache"]["generation"], 1)
 
 
 if __name__ == "__main__":

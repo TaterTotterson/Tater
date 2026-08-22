@@ -36,6 +36,11 @@ DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
+DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+QWEN_TTS_VOICE_DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
+DEFAULT_QWEN_TTS_LANGUAGE = "English"
+DEFAULT_OMNIVOICE_TTS_LANGUAGE = "English"
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
 DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT = 20
 DEFAULT_SATELLITE_DUCKING_ATTACK_MS = 150
@@ -178,6 +183,10 @@ def _normalize_tts_backend(value: Any) -> str:
         return "pocket_tts"
     if token == "piper":
         return "piper"
+    if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
+        return "qwen3_tts"
+    if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
+        return "omnivoice"
     return DEFAULT_TTS_BACKEND
 
 
@@ -510,6 +519,14 @@ def get_speech_settings() -> Dict[str, Any]:
             shared.get("pocket_tts_output_gain"),
             DEFAULT_POCKET_TTS_OUTPUT_GAIN,
         ),
+        "qwen_tts_clone_audio": _clean(shared.get("qwen_tts_clone_audio")),
+        "qwen_tts_clone_text": _clean(shared.get("qwen_tts_clone_text")),
+        "qwen_tts_language": _clean(shared.get("qwen_tts_language")) or DEFAULT_QWEN_TTS_LANGUAGE,
+        "qwen_tts_instruct": _clean(shared.get("qwen_tts_instruct")),
+        "omnivoice_tts_clone_audio": _clean(shared.get("omnivoice_tts_clone_audio")),
+        "omnivoice_tts_clone_text": _clean(shared.get("omnivoice_tts_clone_text")),
+        "omnivoice_tts_language": _clean(shared.get("omnivoice_tts_language")) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
+        "omnivoice_tts_instruct": _clean(shared.get("omnivoice_tts_instruct")),
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
         "wyoming_tts_port": _as_int(shared.get("wyoming_tts_port"), DEFAULT_WYOMING_TTS_PORT),
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
@@ -654,6 +671,14 @@ def save_speech_settings(
     chatterbox_tts_streaming_enabled: Any = DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED,
     kokoro_output_gain: Any = DEFAULT_KOKORO_OUTPUT_GAIN,
     pocket_tts_output_gain: Any = DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+    qwen_tts_clone_audio: Any = "",
+    qwen_tts_clone_text: Any = "",
+    qwen_tts_language: Any = DEFAULT_QWEN_TTS_LANGUAGE,
+    qwen_tts_instruct: Any = "",
+    omnivoice_tts_clone_audio: Any = "",
+    omnivoice_tts_clone_text: Any = "",
+    omnivoice_tts_language: Any = DEFAULT_OMNIVOICE_TTS_LANGUAGE,
+    omnivoice_tts_instruct: Any = "",
     announcement_wyoming_tts_host: Any = None,
     announcement_wyoming_tts_port: Any = None,
     announcement_wyoming_tts_voice: Any = None,
@@ -688,6 +713,14 @@ def save_speech_settings(
             "pocket_tts_output_gain": str(
                 normalize_tts_output_gain(pocket_tts_output_gain, DEFAULT_POCKET_TTS_OUTPUT_GAIN)
             ),
+            "qwen_tts_clone_audio": _clean(qwen_tts_clone_audio),
+            "qwen_tts_clone_text": _clean(qwen_tts_clone_text),
+            "qwen_tts_language": _clean(qwen_tts_language) or DEFAULT_QWEN_TTS_LANGUAGE,
+            "qwen_tts_instruct": _clean(qwen_tts_instruct),
+            "omnivoice_tts_clone_audio": _clean(omnivoice_tts_clone_audio),
+            "omnivoice_tts_clone_text": _clean(omnivoice_tts_clone_text),
+            "omnivoice_tts_language": _clean(omnivoice_tts_language) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
+            "omnivoice_tts_instruct": _clean(omnivoice_tts_instruct),
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
             "wyoming_tts_port": str(_as_int(wyoming_tts_port, DEFAULT_WYOMING_TTS_PORT)),
             "wyoming_tts_voice": _clean(wyoming_tts_voice),
@@ -814,6 +847,28 @@ def save_speech_settings(
         redis_client.hdel(SPEECH_SETTINGS_KEY, "tts_public_base_url")
 
 
+def save_managed_tts_clone_audio_path(backend: Any, path: Any) -> None:
+    token = _normalize_tts_backend(backend)
+    field = {
+        "qwen3_tts": "qwen_tts_clone_audio",
+        "omnivoice": "omnivoice_tts_clone_audio",
+    }.get(token)
+    if not field:
+        raise ValueError("Clone audio is only available for Qwen3-TTS and OmniVoice.")
+    redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(path))
+
+
+def save_managed_tts_clone_text(backend: Any, text: Any) -> None:
+    token = _normalize_tts_backend(backend)
+    field = {
+        "qwen3_tts": "qwen_tts_clone_text",
+        "omnivoice": "omnivoice_tts_clone_text",
+    }.get(token)
+    if not field:
+        raise ValueError("Clone transcripts are only available for Qwen3-TTS and OmniVoice.")
+    redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(text))
+
+
 def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     current = dict(settings or get_speech_settings())
     current_tts_backend = _normalize_tts_backend(current.get("tts_backend"))
@@ -829,6 +884,19 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
     piper_model_rows = _piper_tts_model_option_rows(
         current_value=current_tts_model if current_tts_backend == "piper" else "",
         ensure_catalog=True,
+    )
+    qwen_model_rows = _option_rows_from_values(
+        [DEFAULT_QWEN_TTS_MODEL, QWEN_TTS_VOICE_DESIGN_MODEL],
+        current_value=current_tts_model if current_tts_backend == "qwen3_tts" else "",
+        labels={
+            DEFAULT_QWEN_TTS_MODEL: "Qwen3-TTS 0.6B Base (Voice Clone)",
+            QWEN_TTS_VOICE_DESIGN_MODEL: "Qwen3-TTS 1.7B VoiceDesign",
+        },
+    )
+    omnivoice_model_rows = _option_rows_from_values(
+        [DEFAULT_OMNIVOICE_TTS_MODEL],
+        current_value=current_tts_model if current_tts_backend == "omnivoice" else "",
+        labels={DEFAULT_OMNIVOICE_TTS_MODEL: "OmniVoice"},
     )
 
     voice_options_by_model: Dict[str, List[Dict[str, str]]] = {}
@@ -875,6 +943,8 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             {"value": "kokoro", "label": "Kokoro"},
             {"value": "pocket_tts", "label": "Pocket TTS"},
             {"value": "piper", "label": "Piper"},
+            {"value": "qwen3_tts", "label": "Qwen3-TTS"},
+            {"value": "omnivoice", "label": "OmniVoice"},
         ],
         "tts_model_options_by_backend": {
             "openai_compatible": [],
@@ -882,6 +952,8 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             "kokoro": kokoro_model_rows,
             "pocket_tts": pocket_model_rows,
             "piper": piper_model_rows,
+            "qwen3_tts": qwen_model_rows,
+            "omnivoice": omnivoice_model_rows,
         },
         "tts_voice_options_by_model": voice_options_by_model,
     }

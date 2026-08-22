@@ -313,6 +313,48 @@ def _vision_payload_has_image_url(payload: Any) -> bool:
     return False
 
 
+def _multimodal_payload_kind(payload: Any) -> str:
+    """Return the strongest media type present in an OpenAI-style message payload."""
+    found: set[str] = set()
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, dict):
+            item_type = str(value.get("type") or "").strip().lower()
+            if item_type in {"input_video", "video", "video_url"} or "video_url" in value:
+                found.add("video")
+            elif item_type in {"input_audio", "audio", "audio_url"} or "audio_url" in value:
+                found.add("audio")
+            elif item_type in {"image_url", "input_image", "image"} or "image_url" in value:
+                found.add("vision")
+            for child in value.values():
+                _walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                _walk(child)
+
+    _walk(payload)
+    for kind in ("video", "audio", "vision"):
+        if kind in found:
+            return kind
+    return ""
+
+
+def _normalize_llama_cpp_media_kind(value: Any = "", *, vision: bool = False) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"image", "vision"}:
+        return "vision"
+    if token in {"audio", "video"}:
+        return token
+    return "vision" if vision else ""
+
+
+def _llama_cpp_metadata_supports_media(metadata: Any, media_kind: Any) -> bool:
+    token = _normalize_llama_cpp_media_kind(media_kind)
+    if not token:
+        return True
+    return bool((metadata or {}).get(f"supports_{token}")) if isinstance(metadata, dict) else False
+
+
 def _looks_like_tracked_vision_call(url: Any, *, json_payload: Any = None, data_payload: Any = None, content_payload: Any = None) -> Dict[str, str]:
     raw_url = _text(url).strip()
     if not raw_url:
@@ -2780,6 +2822,8 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
         "chat_template_override": bool((bundle or {}).get("chat_template_override")),
         "chat_template_handler": str((bundle or {}).get("chat_template_handler") or ""),
         "supports_vision": bool((bundle or {}).get("supports_vision")),
+        "supports_audio": bool((bundle or {}).get("supports_audio")),
+        "supports_video": bool((bundle or {}).get("supports_video")),
         "mmproj_path": str((bundle or {}).get("mmproj_path") or (bundle or {}).get("vision_projector_path") or ""),
         "vision_chat_handler": str((bundle or {}).get("vision_chat_handler") or ""),
     }
@@ -6351,8 +6395,13 @@ def _llama_cpp_native_media_b64_from_url(value: Any) -> str:
             return str(encoded or "").strip()
         except Exception:
             return ""
-    if re.fullmatch(r"[A-Za-z0-9+/=\s]+", url) and len(url) > 64:
-        return re.sub(r"\s+", "", url)
+    if re.fullmatch(r"[A-Za-z0-9+/=\s]+", url):
+        candidate = re.sub(r"\s+", "", url)
+        try:
+            if candidate and base64.b64decode(candidate, validate=True):
+                return candidate
+        except Exception:
+            pass
     if url.startswith(("http://", "https://")):
         try:
             response = requests.get(url, timeout=20.0)
@@ -6384,13 +6433,26 @@ def _llama_cpp_native_message_text_and_media(content: Any) -> Tuple[str, List[st
                 if text:
                     parts.append(text)
                 continue
-            if item_type in {"image_url", "input_image", "image"}:
-                image_url = item.get("image_url")
-                if isinstance(image_url, dict):
-                    image_url = image_url.get("url")
-                if not image_url:
-                    image_url = item.get("url") or item.get("base64") or item.get("data")
-                encoded = _llama_cpp_native_media_b64_from_url(image_url)
+            if item_type in {
+                "image_url", "input_image", "image",
+                "audio_url", "input_audio", "audio",
+                "video_url", "input_video", "video",
+            }:
+                media_value = item.get(f"{item_type.split('_')[-1]}_url")
+                if not media_value:
+                    for nested_key in ("image_url", "audio_url", "video_url", "input_audio", "input_video"):
+                        if item.get(nested_key):
+                            media_value = item.get(nested_key)
+                            break
+                if isinstance(media_value, dict):
+                    media_value = (
+                        media_value.get("url")
+                        or media_value.get("data")
+                        or media_value.get("base64")
+                    )
+                if not media_value:
+                    media_value = item.get("url") or item.get("base64") or item.get("data")
+                encoded = _llama_cpp_native_media_b64_from_url(media_value)
                 if encoded:
                     media.append(encoded)
                     parts.append(media_marker)
@@ -6707,6 +6769,10 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "chat_template_warning",
         "vision_requested",
         "supports_vision",
+        "audio_requested",
+        "video_requested",
+        "supports_audio",
+        "supports_video",
         "vision_projector_path",
         "vision_chat_handler",
         "vision_warning",
@@ -6954,9 +7020,10 @@ def _llama_cpp_native_worker_load(
     model_token: str,
     *,
     vision: bool,
+    media_kind: str = "",
     timeout: float,
 ) -> Dict[str, Any]:
-    _ = vision
+    requested_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
     if str(state.get("model_token") or "") == model_token and state.get("process") is not None:
         proc = state.get("process")
         if callable(getattr(proc, "poll", None)) and proc.poll() is None:
@@ -7041,7 +7108,10 @@ def _llama_cpp_native_worker_load(
         except Exception:
             models_payload = {}
         capabilities = json.dumps(models_payload, default=str).lower()
-        supports_vision = bool(mmproj_path) or "multimodal" in capabilities
+        modalities = props.get("modalities") if isinstance(props.get("modalities"), dict) else {}
+        supports_vision = bool(modalities.get("vision")) or bool(mmproj_path) or "multimodal" in capabilities
+        supports_audio = bool(modalities.get("audio"))
+        supports_video = bool(modalities.get("video"))
         metadata = {
             "model_path": model_path,
             "mmproj_path": mmproj_path,
@@ -7055,7 +7125,11 @@ def _llama_cpp_native_worker_load(
             "server_bin": server_bin,
             "server_url": base_url,
             "supports_vision": supports_vision,
+            "supports_audio": supports_audio,
+            "supports_video": supports_video,
             "vision_requested": bool(vision),
+            "audio_requested": requested_media_kind == "audio",
+            "video_requested": requested_media_kind == "video",
             "vision_projector_path": mmproj_path,
             "vision_chat_handler": "llama-server mtmd" if supports_vision else "",
             "vision_warning": "" if supports_vision or not vision else "No matching mmproj vision projector was found for this GGUF.",
@@ -7076,13 +7150,22 @@ def _llama_cpp_native_worker_chat(
     chat_kwargs: Dict[str, Any],
     *,
     vision: bool,
+    media_kind: str = "",
     slot_id: Any = None,
     stream_callback: Optional[Callable[[str], Any]] = None,
     timeout: float,
 ) -> Dict[str, Any]:
-    metadata = _llama_cpp_native_worker_load(state, model_token, vision=vision, timeout=max(60.0, timeout or 900.0))
-    if vision and not bool(metadata.get("supports_vision")):
-        raise RuntimeError(str(metadata.get("vision_warning") or "This llama.cpp model was not loaded with a vision projector."))
+    requested_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
+    metadata = _llama_cpp_native_worker_load(
+        state,
+        model_token,
+        vision=vision,
+        media_kind=requested_media_kind,
+        timeout=max(60.0, timeout or 900.0),
+    )
+    if requested_media_kind and not _llama_cpp_metadata_supports_media(metadata, requested_media_kind):
+        label = "images" if requested_media_kind == "vision" else requested_media_kind
+        raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
     base_url = str(state.get("base_url") or "").strip()
     prepared_messages, media = _llama_cpp_native_prepare_messages(messages)
     template_payload = {
@@ -7378,20 +7461,26 @@ def _load_llama_cpp_engine_bundle(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
     vision: bool = False,
+    media_kind: str = "",
 ) -> Dict[str, Any]:
     model_token = str(model_id or "").strip()
     if not model_token:
         raise RuntimeError("llama.cpp GGUF model id or path is required.")
     cache_key = _llama_cpp_engine_cache_key(model_token)
+    requested_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
     with _LLAMA_CPP_ENGINE_CACHE_LOCK:
         cached = _LLAMA_CPP_ENGINE_CACHE.get(cache_key)
         cached_engine = cached.get("engine") if isinstance(cached, dict) else None
-        cached_supports_requested_vision = not vision or bool(cached.get("supports_vision")) if isinstance(cached, dict) else False
+        cached_supports_requested_media = (
+            _llama_cpp_metadata_supports_media(cached, requested_media_kind)
+            if isinstance(cached, dict)
+            else False
+        )
         if (
             isinstance(cached, dict)
             and callable(getattr(cached_engine, "alive", None))
             and cached_engine.alive()
-            and cached_supports_requested_vision
+            and cached_supports_requested_media
         ):
             _emit_hf_llm_progress(
                 progress_callback,
@@ -7409,6 +7498,14 @@ def _load_llama_cpp_engine_bundle(
                 },
             )
             return cached
+        if isinstance(cached, dict) and requested_media_kind:
+            cached_alive = callable(getattr(cached_engine, "alive", None)) and cached_engine.alive()
+            if cached_alive and not cached_supports_requested_media:
+                label = "images" if requested_media_kind == "vision" else requested_media_kind
+                raise RuntimeError(
+                    f"The loaded llama.cpp base model does not advertise support for {label} input. "
+                    f"Choose a dedicated {requested_media_kind} model instead."
+                )
         if isinstance(cached, dict):
             shutdown_engine = getattr(cached.get("engine"), "shutdown", None)
             if callable(shutdown_engine):
@@ -7424,8 +7521,8 @@ def _load_llama_cpp_engine_bundle(
                 "event": "start",
                 "stage": "load",
                 "description": (
-                    "Starting Tater llama.cpp vision engine"
-                    if vision
+                    f"Starting Tater llama.cpp {requested_media_kind} engine"
+                    if requested_media_kind
                     else "Starting Tater llama.cpp engine"
                 ),
                 "progress": 0.0,
@@ -7439,7 +7536,7 @@ def _load_llama_cpp_engine_bundle(
         try:
             metadata = engine.request(
                 "load",
-                {"model": model_token, "vision": bool(vision)},
+                {"model": model_token, "vision": requested_media_kind == "vision", "media_kind": requested_media_kind},
                 timeout=load_timeout,
             )
         except Exception:
@@ -7468,8 +7565,8 @@ def _load_llama_cpp_engine_bundle(
                 "event": "complete",
                 "stage": "load",
                 "description": (
-                    "Tater llama.cpp vision engine loaded"
-                    if vision
+                    f"Tater llama.cpp {requested_media_kind} engine loaded"
+                    if requested_media_kind
                     else "Tater llama.cpp engine loaded"
                 ),
                 "progress": 100.0,
@@ -7491,10 +7588,19 @@ def _llama_cpp_engine_chat_completion(
     *,
     timeout: Any = None,
     vision: bool = False,
+    media_kind: str = "",
     slot_id: Any = None,
     stream_callback: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
-    bundle = _load_llama_cpp_engine_bundle(model_token, vision=bool(vision))
+    requested_media_kind = _normalize_llama_cpp_media_kind(
+        media_kind or _multimodal_payload_kind(messages),
+        vision=vision,
+    )
+    bundle = _load_llama_cpp_engine_bundle(
+        model_token,
+        vision=requested_media_kind == "vision",
+        media_kind=requested_media_kind,
+    )
     engine = bundle.get("engine")
     if not callable(getattr(engine, "request", None)):
         raise RuntimeError("Tater llama.cpp engine is not loaded.")
@@ -7513,8 +7619,9 @@ def _llama_cpp_engine_chat_completion(
                 "model": model_token,
                 "messages": local_messages,
                 "chat_kwargs": dict(chat_kwargs),
-                "vision": bool(vision),
-                "slot_id": _llama_cpp_slot_id("vision" if vision else "base", slot_id),
+                "vision": requested_media_kind == "vision",
+                "media_kind": requested_media_kind,
+                "slot_id": _llama_cpp_slot_id("vision" if requested_media_kind else "base", slot_id),
                 "stream": bool(callable(stream_callback)),
                 "timeout": timeout_seconds,
             },
@@ -7563,11 +7670,13 @@ def preload_llama_cpp_llm_model(
     *,
     progress_callback: Optional[HFProgressCallback] = None,
     vision: bool = False,
+    media_kind: str = "",
 ) -> Dict[str, Any]:
     bundle = _load_llama_cpp_engine_bundle(
         model_id,
         progress_callback=progress_callback,
         vision=bool(vision),
+        media_kind=media_kind,
     )
     return {
         "ok": True,
@@ -7605,6 +7714,8 @@ def preload_llama_cpp_llm_model(
         "mtp_stall_timeout_seconds": float(bundle.get("mtp_stall_timeout_seconds") or 0.0),
         "mmproj_path": str(bundle.get("mmproj_path") or ""),
         "supports_vision": bool(bundle.get("supports_vision")),
+        "supports_audio": bool(bundle.get("supports_audio")),
+        "supports_video": bool(bundle.get("supports_video")),
         "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
         "runtime": str(bundle.get("runtime") or "tater-llama-engine"),
         "warning": _llama_cpp_warning_text(
@@ -11361,6 +11472,95 @@ def _local_vision_messages(image_bytes: bytes, filename: str, prompt: str) -> Li
     ]
 
 
+def _local_media_understanding_messages(
+    media_kind: str,
+    media_bytes: bytes,
+    filename: str,
+    prompt: str,
+) -> List[Dict[str, Any]]:
+    token = _normalize_llama_cpp_media_kind(media_kind)
+    if token not in {"audio", "video"}:
+        raise RuntimeError("Media understanding requires audio or video input.")
+    name = str(filename or f"input.{('wav' if token == 'audio' else 'mp4')}").strip()
+    encoded = base64.b64encode(bytes(media_bytes or b"")).decode("ascii")
+    media_format = Path(name).suffix.lower().lstrip(".") or ("wav" if token == "audio" else "mp4")
+    default_prompt = (
+        "Analyze this audio. Describe speech, music, sound events, and useful temporal details."
+        if token == "audio"
+        else "Analyze this video. Describe important actions, subjects, scene changes, and their order."
+    )
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": str(prompt or "").strip() or default_prompt},
+                {
+                    "type": f"input_{token}",
+                    f"input_{token}": {"data": encoded, "format": media_format},
+                },
+            ],
+        }
+    ]
+
+
+def analyze_media_with_local_llm(
+    *,
+    provider: str,
+    model: str,
+    media_kind: str,
+    media_bytes: bytes,
+    filename: str,
+    prompt: str = "",
+    timeout: float = 180.0,
+) -> Dict[str, Any]:
+    provider_token = _normalize_hydra_llm_provider(provider)
+    model_token = str(model or "").strip()
+    kind_token = _normalize_llama_cpp_media_kind(media_kind)
+    if provider_token != HYDRA_LLM_PROVIDER_LLAMA_CPP or not model_token:
+        raise RuntimeError("Local audio/video understanding currently requires a llama.cpp model.")
+    if kind_token not in {"audio", "video"}:
+        raise RuntimeError("Media understanding kind must be audio or video.")
+    messages = _local_media_understanding_messages(
+        kind_token,
+        media_bytes,
+        filename,
+        prompt,
+    )
+    call_id = register_active_vision_call(
+        api_base="llama-cpp://local",
+        model=model_token,
+        source=f"local_{kind_token}_understanding",
+    )
+    call_error: Optional[Exception] = None
+    response_model = model_token
+    try:
+        result = _llama_cpp_engine_chat_completion(
+            model_token,
+            messages,
+            {"max_tokens": 1024, "temperature": 0.2, "stream": False},
+            timeout=timeout,
+            media_kind=kind_token,
+            slot_id=_llama_cpp_slot_id("vision"),
+        )
+        content = _coerce_content_to_text(((result or {}).get("message") or {}).get("content")).strip()
+        response_model = str((result or {}).get("model") or model_token)
+        if not content:
+            raise RuntimeError(f"The {kind_token} understanding model returned an empty response.")
+        return {
+            "ok": True,
+            "description": content,
+            "model": response_model,
+            "provider": provider_token,
+            "provider_label": _local_llm_provider_label(provider_token),
+            "media_kind": kind_token,
+        }
+    except Exception as exc:
+        call_error = exc
+        raise
+    finally:
+        finish_active_vision_call(call_id, error=call_error, response_model=response_model)
+
+
 def _local_vision_prepare_image_bytes(image_bytes: bytes, filename: str) -> Tuple[bytes, str]:
     name = str(filename or "image.png").strip() or "image.png"
     lower_name = name.lower()
@@ -12552,6 +12752,7 @@ def _llama_cpp_engine_worker_main() -> int:
     protocol_out = _llama_cpp_engine_protocol_output()
     current_model = ""
     current_vision = False
+    current_media_kind = ""
     native_state: Dict[str, Any] = {}
     return_code = 0
     state_lock = threading.RLock()
@@ -12565,26 +12766,37 @@ def _llama_cpp_engine_worker_main() -> int:
         with reply_lock:
             _llama_cpp_engine_worker_reply(protocol_out, payload)
 
-    def _ensure_loaded(model_token: str, *, vision: bool) -> Dict[str, Any]:
-        nonlocal current_model, current_vision
+    def _ensure_loaded(model_token: str, *, vision: bool, media_kind: str = "") -> Dict[str, Any]:
+        nonlocal current_model, current_vision, current_media_kind
         with state_lock:
-            desired_vision = bool(vision)
+            desired_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
+            desired_vision = desired_media_kind == "vision"
             if current_model == model_token and native_state.get("process") is not None:
                 proc = native_state.get("process")
                 if callable(getattr(proc, "poll", None)) and proc.poll() is None:
                     metadata = dict(native_state.get("metadata") or {})
-                    if not desired_vision or bool(metadata.get("supports_vision")):
+                    if _llama_cpp_metadata_supports_media(metadata, desired_media_kind):
                         current_vision = bool(current_vision or desired_vision)
+                        current_media_kind = desired_media_kind or current_media_kind
                         return metadata
+                    label = "images" if desired_media_kind == "vision" else desired_media_kind
+                    raise RuntimeError(
+                        f"The loaded llama.cpp model does not advertise support for {label} input."
+                    )
             _llama_cpp_native_shutdown_state(native_state)
             bundle = _llama_cpp_native_worker_load(
                 native_state,
                 model_token,
                 vision=desired_vision,
+                media_kind=desired_media_kind,
                 timeout=max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900")),
             )
             current_model = model_token
             current_vision = desired_vision
+            current_media_kind = desired_media_kind
+            if desired_media_kind and not _llama_cpp_metadata_supports_media(bundle, desired_media_kind):
+                label = "images" if desired_media_kind == "vision" else desired_media_kind
+                raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
             return bundle
 
     def _handle_chat(request_id: str, payload: Dict[str, Any]) -> None:
@@ -12609,15 +12821,21 @@ def _llama_cpp_engine_worker_main() -> int:
             if not isinstance(chat_kwargs, dict):
                 chat_kwargs = {}
             requested_vision = _boolish((payload or {}).get("vision"), default=False)
+            requested_media_kind = _normalize_llama_cpp_media_kind(
+                (payload or {}).get("media_kind"),
+                vision=requested_vision,
+            )
             slot_id = (payload or {}).get("slot_id")
-            desired_vision = bool(loaded_vision or requested_vision)
-            _ensure_loaded(model_token, vision=desired_vision)
+            desired_media_kind = requested_media_kind or ("vision" if loaded_vision else "")
+            desired_vision = desired_media_kind == "vision"
+            _ensure_loaded(model_token, vision=desired_vision, media_kind=desired_media_kind)
             result = _llama_cpp_native_worker_chat(
                 native_state,
                 model_token,
                 messages,
                 chat_kwargs,
                 vision=desired_vision,
+                media_kind=desired_media_kind,
                 slot_id=slot_id,
                 stream_callback=(
                     lambda chunk: _reply(
@@ -12660,7 +12878,15 @@ def _llama_cpp_engine_worker_main() -> int:
                 if not model_token:
                     raise RuntimeError("llama.cpp engine load needs a model id.")
                 requested_vision = _boolish((payload or {}).get("vision"), default=False)
-                bundle = _ensure_loaded(model_token, vision=requested_vision)
+                requested_media_kind = _normalize_llama_cpp_media_kind(
+                    (payload or {}).get("media_kind"),
+                    vision=requested_vision,
+                )
+                bundle = _ensure_loaded(
+                    model_token,
+                    vision=requested_media_kind == "vision",
+                    media_kind=requested_media_kind,
+                )
                 result = _llama_cpp_public_bundle_metadata(bundle)
                 result["runtime"] = "tater-llama-engine"
                 _reply({"id": request_id, "ok": True, "result": result})

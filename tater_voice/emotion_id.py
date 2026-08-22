@@ -281,16 +281,24 @@ def _speechbrain_huggingface_integration_available() -> bool:
 
 
 def _patch_speechbrain_hyperparams(savedir: Path) -> None:
-    if not _speechbrain_huggingface_integration_available():
-        return
     hyperparams_path = savedir / "hyperparams.yaml"
     with contextlib.suppress(Exception):
         raw = hyperparams_path.read_text(encoding="utf-8")
-        if _DEPRECATED_SPEECHBRAIN_HF_PATH not in raw:
+        patched = raw
+        if _speechbrain_huggingface_integration_available():
+            patched = patched.replace(_DEPRECATED_SPEECHBRAIN_HF_PATH, _CURRENT_SPEECHBRAIN_HF_PATH)
+        legacy_cache_path = "save_path: wav2vec2_checkpoints"
+        if legacy_cache_path in patched:
+            wav2vec2_cache = savedir / "wav2vec2_checkpoints"
+            wav2vec2_cache.mkdir(parents=True, exist_ok=True)
+            patched = patched.replace(
+                legacy_cache_path,
+                f"save_path: {json.dumps(str(wav2vec2_cache))}",
+            )
+        if patched == raw:
             return
-        patched = raw.replace(_DEPRECATED_SPEECHBRAIN_HF_PATH, _CURRENT_SPEECHBRAIN_HF_PATH)
         hyperparams_path.write_text(patched, encoding="utf-8")
-        _log_info("patched SpeechBrain deprecated Hugging Face path in %s", str(hyperparams_path))
+        _log_info("patched SpeechBrain compatibility paths in %s", str(hyperparams_path))
 
 
 def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path) -> str:

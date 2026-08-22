@@ -1676,3 +1676,31 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
         "changed_keys": changed,
         "updated": len(changed),
     }
+
+
+def adopt_reported_device_volume(
+    value: Any,
+    *,
+    selector: Any = "",
+    board: Any = "",
+) -> bool:
+    """Persist a physical satellite volume change as its device override."""
+    token = _selector_token(selector)
+    if not token:
+        return False
+    volume = _as_int(
+        value,
+        int(DEFAULTS["volume_percent"]),
+        minimum=0,
+        maximum=100,
+    )
+    if settings_snapshot(token, board=board).get("volume_percent") == volume:
+        return False
+    try:
+        redis_client.hset(
+            settings_hash_key(token),
+            mapping={"volume_percent": str(volume)},
+        )
+    except Exception:
+        return False
+    return True

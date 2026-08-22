@@ -6,6 +6,7 @@ cd "${SCRIPT_DIR}"
 
 VENV_DIR="${TATER_VENV_DIR:-.venv}"
 RUNTIME_DIR="${TATER_RUNTIME_DIR:-.runtime}"
+AGENT_ROOT="${TATER_AGENT_ROOT:-agent_lab}"
 PROFILE_FILE="${TATER_SETUP_PROFILE_FILE:-${RUNTIME_DIR}/setup_profile}"
 PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
 REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
@@ -377,7 +378,60 @@ install_macos_bundled_native_wheels() {
 install_base() {
   venv_python="$1"
   info "Upgrading pip tooling"
-  "${venv_python}" -m pip install --upgrade pip setuptools wheel
+  "${venv_python}" -m pip install --upgrade pip "setuptools<81" wheel
+  cleanup_legacy_runtime "${venv_python}"
+}
+
+cleanup_legacy_runtime() {
+  venv_python="$1"
+  legacy_packages=""
+  for package_name in \
+    aioesphomeapi \
+    nanowakeword \
+    openwakeword \
+    noiseprotocol \
+    scikit-learn \
+    narwhals \
+    threadpoolctl \
+    tzlocal \
+    tzdata
+  do
+    if "${venv_python}" -m pip show "${package_name}" >/dev/null 2>&1; then
+      legacy_packages="${legacy_packages} ${package_name}"
+    fi
+  done
+  if [ -n "${legacy_packages}" ]; then
+    info "Removing obsolete Tater Python dependencies"
+    # Package names come only from the fixed allowlist above.
+    # shellcheck disable=SC2086
+    "${venv_python}" -m pip uninstall -y ${legacy_packages}
+  fi
+
+  remove_managed_venv_if_present "${RUNTIME_DIR}/models/face-id/venv" "obsolete Face ID worker environment"
+  case "${RUNTIME_DIR}" in
+    */runtime)
+      support_root="$(dirname "${RUNTIME_DIR}")"
+      remove_managed_venv_if_present "${support_root}/models/face-id/venv" "older Face ID worker environment"
+      ;;
+  esac
+
+  legacy_firmware_root="${AGENT_ROOT}/esphome"
+  firmware_root="${AGENT_ROOT}/firmware"
+  if [ -d "${legacy_firmware_root}" ] && [ ! -e "${firmware_root}" ]; then
+    info "Renaming the native firmware workspace to ${firmware_root}"
+    mkdir -p "$(dirname "${firmware_root}")"
+    mv "${legacy_firmware_root}" "${firmware_root}"
+  fi
+}
+
+remove_managed_venv_if_present() {
+  managed_venv="$1"
+  label="$2"
+  if [ ! -f "${managed_venv}/pyvenv.cfg" ]; then
+    return
+  fi
+  info "Removing ${label}"
+  rm -rf "${managed_venv}"
 }
 
 install_cpu() {
@@ -675,6 +729,20 @@ install_macos() {
   fi
   if [ "${is_apple_silicon}" = "1" ]; then
     install_mlx_engine_checkout
+    mlx_engine_requirements="${TATER_MLX_ENGINE_PATH:-${RUNTIME_DIR}/mlx-engine}/requirements.txt"
+    if [ -f "${mlx_engine_requirements}" ]; then
+      info "Aligning Python packages with the selected MLX engine"
+      mlx_engine_runtime_requirements="$(mktemp "${TMPDIR:-/tmp}/tater-mlx-engine-requirements.XXXXXX")"
+      awk '
+        /^(mlx|mlx-metal)==/ ||
+        /^(mlx-lm|mlx-vlm|outlines) @/ ||
+        /^(outlines-core|dill|xxhash)==/ { print }
+      ' "${mlx_engine_requirements}" > "${mlx_engine_runtime_requirements}"
+      if [ -s "${mlx_engine_runtime_requirements}" ]; then
+        "${venv_python}" -m pip install -r "${mlx_engine_runtime_requirements}"
+      fi
+      rm -f "${mlx_engine_runtime_requirements}"
+    fi
   fi
   rm -f "${tmp_req}"
   trap - EXIT
@@ -692,6 +760,8 @@ install_nvidia() {
   "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
   info "Installing Tater dependencies"
   "${venv_python}" -m pip install -r "${tmp_req}"
+  info "Installing NVIDIA TensorFlow CUDA extras for Face ID"
+  "${venv_python}" -m pip install --upgrade "tensorflow[and-cuda]==2.21.0"
   install_llama_cpp_native nvidia
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
@@ -821,6 +891,12 @@ if missing:
     raise SystemExit("Missing required packages: " + ", ".join(missing))
 
 print("core imports ok")
+
+face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]
+face_id_missing = [name for name in face_id_required if importlib.util.find_spec(name) is None]
+if face_id_missing:
+    raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))
+print("face_id_imports ok")
 
 try:
     import torch
