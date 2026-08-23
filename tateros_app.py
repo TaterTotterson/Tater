@@ -76,6 +76,7 @@ from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
+import face_identity
 import face_id_runtime
 import integration_runtime as integration_runtime_module
 import people as people_module
@@ -18738,7 +18739,7 @@ def get_people_settings() -> Dict[str, Any]:
 
 @app.get("/api/settings/face-id/status")
 def get_face_id_status() -> Dict[str, Any]:
-    return face_id_runtime.status(redis_client)
+    return face_identity.service_status(redis_client)
 
 
 @app.post("/api/settings/people/action")

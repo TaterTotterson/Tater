@@ -194,7 +194,7 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("<TrackList", app)
         self.assertNotIn("tm-player-size-toggle", player)
         self.assertNotIn("is-collapsed", player)
-        self.assertIn("progressStyle", player)
+        self.assertNotIn("progressStyle", player)
         self.assertIn("tm-player-volume", player)
         self.assertIn("selectedPlayerCount", player)
         self.assertIn("tm-queue-tab", track_list)

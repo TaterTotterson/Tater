@@ -22791,20 +22791,118 @@ function openPeoplePersonModal(card) {
   window.setTimeout(() => body.querySelector("[data-people-field='display_name']")?.focus(), 40);
 }
 
+function renderPeopleFaceCard(face, faces, people) {
+  const identityId = String(face?.id || "").trim();
+  const name = String(face?.name || "").trim();
+  const localName = String(face?.local_name || "").trim();
+  const personId = String(face?.person_id || "").trim();
+  const personName = String(face?.person_name || "").trim();
+  const imageSrc = String(face?.image_src || "").trim();
+  const gallery = Array.isArray(face?.gallery) ? face.gallery : [];
+  const captureCount = Math.max(0, Number(face?.capture_count || 0));
+  const eventCount = Math.max(0, Number(face?.event_count || 0));
+  const lastSeen = String(face?.last_seen || "").trim();
+  const targetOptions = faces
+    .filter((candidate) => String(candidate?.id || "").trim() && String(candidate?.id || "").trim() !== identityId)
+    .map((candidate) => {
+      const candidateId = String(candidate?.id || "").trim();
+      const candidateName = String(candidate?.name || "").trim() || `Unknown face · ${candidateId.slice(-6)}`;
+      return `<option value="${escapeHtml(candidateId)}">${escapeHtml(candidateName)}</option>`;
+    })
+    .join("");
+  const galleryHtml = gallery.length
+    ? `<div class="people-face-gallery">
+        ${gallery.map((observation) => {
+          const observationId = String(observation?.id || "").trim();
+          const observationSrc = String(observation?.image_src || "").trim();
+          const seenAt = String(observation?.seen_at || "").trim();
+          return `
+            <label class="people-face-capture">
+              <input type="checkbox" value="${escapeHtml(observationId)}" data-people-face-observation />
+              <img src="${escapeHtml(observationSrc)}" alt="Face captured ${escapeHtml(peopleTimeLabel(seenAt))}" loading="lazy" />
+              <span>${escapeHtml(peopleTimeLabel(seenAt))}</span>
+            </label>
+          `;
+        }).join("")}
+      </div>`
+    : renderNotice("No retained face crops are available for this profile.");
+  return `
+    <article class="people-face-card" data-face-identity-id="${escapeHtml(identityId)}">
+      <div class="people-face-summary">
+        <div class="people-face-avatar">
+          ${imageSrc ? `<img src="${escapeHtml(imageSrc)}" alt="${escapeHtml(name || "Unknown face")}" loading="lazy" />` : `<span>${escapeHtml(_avatarInitial(name, "?"))}</span>`}
+        </div>
+        <div class="people-face-copy">
+          <div class="people-identity-title-row">
+            <strong>${escapeHtml(name || `Unknown face · ${identityId.slice(-6)}`)}</strong>
+            <span class="people-badge ${personId ? "linked" : "muted"}">${personId ? `Linked to ${escapeHtml(personName)}` : "Not linked"}</span>
+          </div>
+          <span>${captureCount} ${captureCount === 1 ? "capture" : "captures"} • ${eventCount} ${eventCount === 1 ? "event" : "events"}</span>
+          <small>${lastSeen ? `Last seen ${escapeHtml(peopleTimeLabel(lastSeen))}` : "Not seen yet"}</small>
+        </div>
+      </div>
+      <div class="people-face-fields">
+        <label class="people-field">Person
+          <select data-people-face-person>
+            <option value="">Not linked to a Person</option>
+            ${renderPeoplePersonOptions(people, personId)}
+          </select>
+        </label>
+        <label class="people-field">Face Name
+          <input type="text" maxlength="80" value="${escapeHtml(localName)}" placeholder="Used when not linked" data-people-face-name />
+        </label>
+        <button type="button" class="inline-btn people-face-save">Save</button>
+      </div>
+      <details class="people-face-captures">
+        <summary>Review ${gallery.length} saved ${gallery.length === 1 ? "image" : "images"}</summary>
+        ${galleryHtml}
+        ${gallery.length ? `
+          <div class="people-face-bulk-actions">
+            <select data-people-face-target aria-label="Destination face profile">
+              <option value="">Choose destination...</option>
+              ${targetOptions}
+              <option value="__new_unknown__">New unknown face</option>
+            </select>
+            <button type="button" class="inline-btn people-face-move">Move Selected</button>
+            <button type="button" class="inline-btn danger people-face-remove-images">Remove Selected</button>
+          </div>
+        ` : ""}
+      </details>
+      <div class="people-face-footer">
+        <select data-people-face-merge-target aria-label="Face profile to merge into">
+          <option value="">Merge profile into...</option>
+          ${targetOptions}
+        </select>
+        <button type="button" class="inline-btn people-face-merge" ${targetOptions ? "" : "disabled"}>Merge Profile</button>
+        <button type="button" class="inline-btn danger people-face-delete">Remove Profile</button>
+        <span class="small core-manager-status"></span>
+      </div>
+    </article>
+  `;
+}
+
 function renderPeopleSettingsPanel(peoplePayload = {}) {
   const payload = peoplePayload && typeof peoplePayload === "object" ? peoplePayload : {};
   const people = Array.isArray(payload.people) ? payload.people : [];
   const identities = Array.isArray(payload.identities) ? payload.identities : [];
-  const personOptions = renderPeoplePersonOptions(people);
+  const faces = Array.isArray(payload.faces) ? payload.faces : [];
+  const faceStatus = payload.face_id && typeof payload.face_id === "object" ? payload.face_id : {};
   const defaultSort = ["recent", "name", "face"].includes(safeStorageGet("tater_people_sort", "recent"))
     ? safeStorageGet("tater_people_sort", "recent")
     : "recent";
-  const activePeopleTab = ["people", "identities"].includes(safeStorageGet("tater_people_tab", "people"))
+  const activePeopleTab = ["people", "faces", "identities"].includes(safeStorageGet("tater_people_tab", "people"))
     ? safeStorageGet("tater_people_tab", "people")
     : "people";
   const peopleHtml = people.length
     ? people.map((person) => renderPeoplePersonCard(person)).join("")
     : renderNotice("No people yet. Create a person, then link portal or voice identities to them.");
+  const facesHtml = faces.length
+    ? `<div class="people-face-grid">${faces.map((face) => renderPeopleFaceCard(face, faces, people)).join("")}</div>`
+    : renderNotice(
+        boolFromAny(faceStatus?.enabled, false)
+          ? "No faces have been captured yet. A Face ID-enabled Awareness source or Automation will add them here."
+          : "Face ID is disabled. Enable it in Settings › Models › Face ID to begin recognizing faces."
+      );
 
   const identitiesHtml = identities.length
     ? `<div class="people-identity-list">
@@ -22865,7 +22963,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
         <div class="people-overview-copy">
           <span class="people-overview-kicker">Identity Directory</span>
           <h3>Everyone Tater knows, in one place.</h3>
-          <p>Face ID photos and recent camera sightings appear automatically when an Awareness face is linked to a Tater Person.</p>
+          <p>Manage people, faces, portal users, and voice speakers from one shared identity directory.</p>
         </div>
         <div class="people-overview-metrics">
           ${renderPeopleSummaryMetrics(Array.isArray(payload.summary_metrics) ? payload.summary_metrics : [])}
@@ -22874,6 +22972,7 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
       <div class="people-tabs-shell">
         <div class="core-manager-subtabs people-subtabs" data-people-tabs>
           <button type="button" class="core-manager-subtab-btn ${activePeopleTab === "people" ? "active" : ""}" data-people-tab="people">People</button>
+          <button type="button" class="core-manager-subtab-btn ${activePeopleTab === "faces" ? "active" : ""}" data-people-tab="faces">Faces</button>
           <button type="button" class="core-manager-subtab-btn ${activePeopleTab === "identities" ? "active" : ""}" data-people-tab="identities">Identities</button>
         </div>
         <section class="people-tab-panel ${activePeopleTab === "people" ? "active" : ""}" data-people-tab-panel="people">
@@ -22902,11 +23001,21 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
           </details>
           <div class="people-directory-grid" data-people-directory>${peopleHtml}</div>
         </section>
+        <section class="people-tab-panel ${activePeopleTab === "faces" ? "active" : ""}" data-people-tab-panel="faces">
+          <div class="people-panel-head">
+            <div>
+              <h3>Face ID</h3>
+              <p>Link recognized faces to People, separate incorrect captures, or merge duplicate profiles.</p>
+            </div>
+            <span class="people-badge ${boolFromAny(faceStatus?.loaded, false) ? "linked" : "muted"}">${boolFromAny(faceStatus?.loaded, false) ? "Model Ready" : "Model Not Ready"}</span>
+          </div>
+          ${facesHtml}
+        </section>
         <section class="people-tab-panel ${activePeopleTab === "identities" ? "active" : ""}" data-people-tab-panel="identities">
           <div class="people-panel-head">
             <div>
               <h3>Discovered Identities</h3>
-              <p>Link portal, voice, memory, and Face ID identities to the correct person.</p>
+              <p>Link portal, voice, and memory identities to the correct person.</p>
             </div>
           </div>
           ${identitiesHtml}
@@ -22937,7 +23046,7 @@ function bindSettingsPeopleActions() {
     const shell = tabsRoot.closest(".people-tabs-shell");
     const panels = Array.from(shell?.querySelectorAll("[data-people-tab-panel]") || []);
     const activate = (tabName) => {
-      const normalized = ["people", "identities"].includes(String(tabName || "")) ? String(tabName) : "people";
+      const normalized = ["people", "faces", "identities"].includes(String(tabName || "")) ? String(tabName) : "people";
       buttons.forEach((button) => button.classList.toggle("active", button.dataset.peopleTab === normalized));
       panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.peopleTabPanel === normalized));
       safeStorageSet("tater_people_tab", normalized);
@@ -23097,6 +23206,82 @@ function bindSettingsPeopleActions() {
       return;
     }
     await runPeopleAction(row, "people_identity_forget", { platform, external_id: externalId }, "Identity forgotten.");
+  });
+
+  const faceSelection = (card) => Array.from(card?.querySelectorAll?.("[data-people-face-observation]:checked") || [])
+    .map((input) => String(input?.value || "").trim())
+    .filter(Boolean);
+
+  bindPeopleButton(".people-face-save", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-face-card");
+    await runPeopleAction(
+      card,
+      "people_face_save",
+      {
+        identity_id: String(card?.dataset?.faceIdentityId || "").trim(),
+        values: {
+          person_id: String(card?.querySelector?.("[data-people-face-person]")?.value || "").trim(),
+          name: String(card?.querySelector?.("[data-people-face-name]")?.value || "").trim(),
+        },
+      },
+      "Face identity saved."
+    );
+  });
+
+  bindPeopleButton(".people-face-merge", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-face-card");
+    const identityId = String(card?.dataset?.faceIdentityId || "").trim();
+    const targetIdentityId = String(card?.querySelector?.("[data-people-face-merge-target]")?.value || "").trim();
+    if (!targetIdentityId || !window.confirm("Merge this entire face profile into the selected profile?")) return;
+    await runPeopleAction(
+      card,
+      "people_face_merge",
+      { identity_id: identityId, values: { target_identity_id: targetIdentityId } },
+      "Face profiles merged."
+    );
+  });
+
+  bindPeopleButton(".people-face-move", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-face-card");
+    const observationIds = faceSelection(card);
+    const targetIdentityId = String(card?.querySelector?.("[data-people-face-target]")?.value || "").trim();
+    if (!observationIds.length) {
+      showToast("Select at least one face image.", "error", 3200);
+      return;
+    }
+    if (!targetIdentityId) {
+      showToast("Choose where to move the selected images.", "error", 3200);
+      return;
+    }
+    await runPeopleAction(
+      card,
+      "people_face_move_images",
+      { identity_id: String(card?.dataset?.faceIdentityId || "").trim(), values: { target_identity_id: targetIdentityId, observation_ids: observationIds } },
+      "Face images moved."
+    );
+  });
+
+  bindPeopleButton(".people-face-remove-images", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-face-card");
+    const observationIds = faceSelection(card);
+    if (!observationIds.length) {
+      showToast("Select at least one face image.", "error", 3200);
+      return;
+    }
+    if (!window.confirm(`Remove ${observationIds.length} selected face image${observationIds.length === 1 ? "" : "s"}?`)) return;
+    await runPeopleAction(
+      card,
+      "people_face_remove_images",
+      { identity_id: String(card?.dataset?.faceIdentityId || "").trim(), values: { observation_ids: observationIds } },
+      "Face images removed."
+    );
+  });
+
+  bindPeopleButton(".people-face-delete", async (event) => {
+    const card = event.currentTarget?.closest?.(".people-face-card");
+    const identityId = String(card?.dataset?.faceIdentityId || "").trim();
+    if (!identityId || !window.confirm("Remove this Face ID profile and all of its saved captures?")) return;
+    await runPeopleAction(card, "people_face_delete", { identity_id: identityId }, "Face identity removed.");
   });
 }
 

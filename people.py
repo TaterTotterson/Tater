@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import face_identity
 from verba_kernel import normalize_platform
 
 
@@ -15,7 +16,7 @@ PEOPLE_STORE_KEY = "tater:people:v1"
 DISCOVERY_MAX_KEYS = 200
 DISCOVERY_MAX_ROWS_PER_KEY = 200
 PERSON_INSTRUCTIONS_MAX_CHARS = 2000
-FACE_IDENTITIES_KEY = "awareness:face_identities"
+FACE_IDENTITIES_KEY = face_identity.SHARED_IDENTITIES_KEY
 INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
 PEOPLE_FACE_EVENT_SCAN_LIMIT = 1000
 PORTAL_HISTORY_PATTERNS_BY_PLATFORM = {
@@ -428,6 +429,7 @@ def delete_person(person_id: str, redis_client: Any = None) -> Dict[str, Any]:
     target = next((person for person in people if _text(person.get("id")) == wanted), None)
     if not isinstance(target, dict):
         raise KeyError("Person not found.")
+    face_identity.detach_person(wanted, redis_client)
     store["people"] = [person for person in people if _text(person.get("id")) != wanted]
     save_store(store, redis_client)
     return target
@@ -818,14 +820,10 @@ def _nonnegative_int(value: Any) -> int:
 
 
 def _face_identities_by_person(redis_client: Any) -> Dict[str, List[Dict[str, Any]]]:
-    raw_rows: Dict[Any, Any] = {}
-    with contextlib.suppress(Exception):
-        result = redis_client.hgetall(FACE_IDENTITIES_KEY) or {}
-        if isinstance(result, dict):
-            raw_rows = result
+    raw_rows = face_identity.identity_rows(redis_client)
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for raw_identity_id, raw_payload in raw_rows.items():
-        identity = _json_object(raw_payload)
+        identity = dict(raw_payload) if isinstance(raw_payload, dict) else _json_object(raw_payload)
         identity_id = _text(raw_identity_id) or _text(identity.get("id"))
         person_id = _text(identity.get("person_id"))
         if not identity_id or not person_id:
@@ -916,9 +914,9 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
     store = load_store(client)
     people = _people_with_face_context(list(store.get("people") or []), client)
     identities = discovered_identities(client)
+    faces = face_identity.ui_rows(client)
     linked_count = len([row for row in identities if _text(row.get("person_id"))])
     admin_count = len([person for person in people if _as_bool(person.get("is_admin"), False)])
-    face_linked_count = len([person for person in people if bool((person.get("face_id") or {}).get("linked"))])
     return {
         "settings": dict(store.get("settings") or {}),
         "summary_metrics": [
@@ -926,10 +924,12 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
             {"label": "Admins", "value": admin_count},
             {"label": "Linked Identities", "value": linked_count},
             {"label": "Discovered Identities", "value": len(identities)},
-            {"label": "Face ID Linked", "value": face_linked_count},
+            {"label": "Known Faces", "value": len([row for row in faces if row.get("name")])},
         ],
         "people": people,
         "identities": identities,
+        "faces": faces,
+        "face_id": face_identity.service_status(client),
     }
 
 
@@ -1268,6 +1268,85 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
             "ok": True,
             "action": token,
             "message": message,
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_save":
+        identity_id = _text(body.get("identity_id") or values.get("identity_id"))
+        identity = face_identity.save_profile(
+            identity_id,
+            name=_text(values.get("name")),
+            person_id=_text(values.get("person_id")),
+            person_link_supplied=True,
+            redis_client=client,
+        )
+        name = face_identity.display_name(identity, client)
+        return {
+            "ok": True,
+            "action": token,
+            "message": f"Face saved as {name}." if name else "Face identity updated.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_merge":
+        source_id = _text(body.get("identity_id") or values.get("identity_id"))
+        target_id = _text(values.get("target_identity_id") or body.get("target_identity_id"))
+        identity = face_identity.merge_identities(source_id, target_id, client)
+        name = face_identity.display_name(identity, client) or "one face identity"
+        return {
+            "ok": True,
+            "action": token,
+            "message": f"Faces merged into {name}.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_move_images":
+        source_id = _text(body.get("identity_id") or values.get("identity_id"))
+        target_id = _text(values.get("target_identity_id") or body.get("target_identity_id"))
+        observation_ids = [
+            _text(value)
+            for value in (values.get("observation_ids") or body.get("observation_ids") or [])
+            if _text(value)
+        ]
+        result = face_identity.move_observations(
+            source_id,
+            observation_ids,
+            target_id=target_id,
+            create_unknown=target_id == "__new_unknown__",
+            redis_client=client,
+        )
+        moved = int(result.get("moved") or 0)
+        return {
+            "ok": True,
+            "action": token,
+            "message": f"Moved {moved} face image{'s' if moved != 1 else ''}.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_remove_images":
+        identity_id = _text(body.get("identity_id") or values.get("identity_id"))
+        observation_ids = [
+            _text(value)
+            for value in (values.get("observation_ids") or body.get("observation_ids") or [])
+            if _text(value)
+        ]
+        result = face_identity.remove_observations(identity_id, observation_ids, client)
+        removed = int(result.get("removed") or 0)
+        return {
+            "ok": True,
+            "action": token,
+            "message": f"Removed {removed} face image{'s' if removed != 1 else ''}.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_delete":
+        identity_id = _text(body.get("identity_id") or values.get("identity_id"))
+        if not face_identity.delete_identity(identity_id, client):
+            raise KeyError("Face identity not found.")
+        return {
+            "ok": True,
+            "action": token,
+            "message": "Face identity removed.",
             "people": panel_payload(client),
         }
 

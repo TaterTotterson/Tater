@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import PopupTransition from "../../shared/PopupTransition.vue";
 import type { MusicField, MusicItem, MusicPlayerRow } from "../types";
 import {
@@ -25,22 +25,13 @@ const speakersOpen = ref(false);
 const volume = ref(75);
 const speakerValues = ref<Record<string, unknown>>({});
 const playerSettings = ref<Record<string, PlayerSetting>>({});
-const position = ref(0);
-const seeking = ref(false);
 const speakersDirty = ref(false);
 const volumeEditing = ref(false);
-let progressTimer: number | undefined;
 
 const volumeField = computed(() => props.item.fields?.find((field) => field.key === "volume_percent"));
 const popupFields = computed(() => props.item.popup_fields || []);
 const playerRows = computed(() => props.item.player_rows || []);
 const playerSections = computed(() => groupPlayerTargets(playerRows.value, (row) => row.target));
-const playback = computed(() => props.item.playback || {});
-const duration = computed(() => Math.max(0, Number(playback.value.duration_seconds || 0)));
-const canSeek = computed(() => Boolean(playback.value.seekable && duration.value > 0));
-const progressStyle = computed<Record<string, string>>(() => ({
-  "--tm-progress-percent": `${duration.value > 0 ? Math.min(100, (position.value / duration.value) * 100) : 0}%`,
-}));
 const volumeStyle = computed<Record<string, string>>(() => ({
   "--tm-volume-percent": `${Math.max(0, Math.min(100, volume.value))}%`,
 }));
@@ -59,30 +50,6 @@ watch(
   },
   { immediate: true },
 );
-
-function syncedPosition(): number {
-  const state = playback.value;
-  let next = Math.max(0, Number(state.position_seconds || 0));
-  const updatedAt = Number(state.position_updated_at || 0);
-  if (String(state.status || "").toLowerCase() === "playing" && updatedAt > 0) {
-    next += Math.max(0, Date.now() / 1000 - updatedAt);
-  }
-  return duration.value > 0 ? Math.min(duration.value, next) : next;
-}
-
-function refreshProgress(): void {
-  if (!seeking.value) position.value = syncedPosition();
-}
-
-watch(playback, refreshProgress, { immediate: true, deep: true });
-
-onMounted(() => {
-  progressTimer = window.setInterval(refreshProgress, 250);
-});
-
-onBeforeUnmount(() => {
-  if (progressTimer !== undefined) window.clearInterval(progressTimer);
-});
 
 watch(
   [popupFields, playerRows],
@@ -271,37 +238,6 @@ function updateVolumeFromEvent(event: Event): void {
   updateVolume((event.target as HTMLInputElement).value);
 }
 
-function formatTime(value: number): string {
-  const seconds = Math.max(0, Math.round(Number(value) || 0));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainder = seconds % 60;
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
-    : `${minutes}:${String(remainder).padStart(2, "0")}`;
-}
-
-function updateSeekPreview(event: Event): void {
-  seeking.value = true;
-  position.value = Number((event.target as HTMLInputElement).value || 0);
-}
-
-async function commitSeek(event: Event): Promise<void> {
-  position.value = Number((event.target as HTMLInputElement).value || 0);
-  const action = playback.value.seek_action;
-  if (!action) {
-    seeking.value = false;
-    return;
-  }
-  const moved = await props.run(
-    action,
-    { id: props.item.id, values: { position_seconds: position.value } },
-    "seek",
-  );
-  seeking.value = false;
-  if (!moved) refreshProgress();
-}
-
 async function saveSpeakers(): Promise<void> {
   if (!props.item.save_action) return;
   const saved = await props.run(
@@ -406,21 +342,6 @@ function setSpeakerValue(field: MusicField, value: unknown): void {
         </button>
       </div>
 
-      <div class="tm-progress" :class="{ disabled: !canSeek }" :style="progressStyle">
-        <span class="tm-progress-time">{{ formatTime(position) }}</span>
-        <input
-          type="range"
-          min="0"
-          :max="duration || 0"
-          step="1"
-          :value="position"
-          :disabled="!canSeek || busy('seek')"
-          aria-label="Track position"
-          @input="updateSeekPreview"
-          @change="commitSeek"
-        />
-        <span class="tm-progress-time">{{ formatTime(duration) }}</span>
-      </div>
     </div>
 
     <PopupTransition :open="speakersOpen" backdrop-class="tm-modal-backdrop" @close="closeSpeakers">

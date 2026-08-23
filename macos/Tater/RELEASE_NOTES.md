@@ -1,30 +1,42 @@
-# Tater v1.1.10
+# Tater v1.1.11
 
-Tater v1.1.10 fixes the complete voice-to-music handoff for stereo satellite
-pairs, including commands that start new music.
+Tater v1.1.11 makes Face ID a shared part of Tater's People system so camera
+features can recognize the same people without depending on Awareness Core.
+
+> **Face ID upgrade notice:** Existing faces saved by Awareness Core are not
+> migrated into the new shared face directory. After updating, rebuild the
+> face profiles you want Tater to recognize and link them to People again in
+> Settings › People › Faces.
 
 ## What's Changed
 
-### Voice and Music
+### People and Face ID
 
-- Skips spoken tool-progress audio when an idle stereo pair is about to begin
-  playback, while keeping the normal visual progress state.
-- Continues using spoken progress with normal ducking whenever stereo music is
-  already active.
-- Recovers synchronized session state directly from both live satellites when
-  coordinator state is missing.
-- Keeps the final spoken confirmation as a synchronized overlay so the new
-  music ducks and resumes instead of being replaced.
-- Refreshes the recovered pair's clock calibration before starting its TTS
-  overlay.
+- Adds a dedicated Faces tab under Settings › People for linking captured
+  faces to People, naming unknown visitors, reviewing saved crops, moving or
+  removing incorrect captures, and merging duplicate profiles.
+- Adds one shared Face ID identity and matching service for Awareness Core,
+  Automation Core, and future camera features.
+- Lets camera automations recognize and enroll faces without requiring
+  Awareness Core to be installed or configured.
+- Starts the shared face directory clean instead of importing the former
+  Awareness-owned profiles; existing faces must be rebuilt and relinked after
+  this update.
+- Keeps event identity references from the new shared directory stable when
+  face profiles are merged, split, or removed.
+
+### Music UI
+
+- Includes the queued compact-player cleanup that removes the inactive
+  timeline control and restores normal shuffle-button sizing.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.10 through
+- macOS users already running v1.0.1 or later can install v1.1.11 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.10` or `latest` for the CPU image and
-  `v1.1.10-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.11` or `latest` for the CPU image and
+  `v1.1.11-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

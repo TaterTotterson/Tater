@@ -153,16 +153,16 @@
 .tm-player-main {
   display: grid;
   grid-template-columns: 50px minmax(150px, 1fr) auto auto;
-  grid-template-rows: minmax(42px, auto) 14px;
+  grid-template-rows: minmax(50px, auto);
   column-gap: clamp(9px, 1.4vw, 15px);
   row-gap: 3px;
   align-items: center;
-  min-height: 72px;
+  min-height: 66px;
   padding: 8px 11px 7px;
 }
 
 .tm-art-wrap {
-  grid-row: 1 / span 2;
+  grid-row: 1;
   width: 50px;
   height: 50px;
 }
@@ -209,85 +209,11 @@
   white-space: nowrap;
 }
 
-.tm-progress {
-  grid-column: 2 / -1;
-  grid-row: 2;
-  display: grid;
-  grid-template-columns: 34px minmax(80px, 1fr) 34px;
-  gap: 7px;
-  align-items: center;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.tater-music-core .tm-progress input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  display: block;
-  width: 100%;
-  min-height: 0;
-  height: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  outline: 0;
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
-}
-
-.tater-music-core .tm-progress input[type="range"]:focus,
 .tater-music-core .tm-player-volume input[type="range"]:focus {
   border: 0;
   outline: 0;
   background: transparent;
   box-shadow: none;
-}
-
-.tm-progress input::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background:
-    linear-gradient(
-      90deg,
-      var(--tm-accent) 0 var(--tm-progress-percent),
-      color-mix(in srgb, var(--tm-border) 78%, transparent) var(--tm-progress-percent) 100%
-    );
-  box-shadow: inset 0 1px 1px rgb(0 0 0 / 28%);
-}
-
-.tm-progress input::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 8px;
-  height: 8px;
-  margin-top: -2px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--tm-accent);
-  box-shadow: none;
-}
-
-.tm-progress input:focus-visible::-webkit-slider-thumb {
-  box-shadow: none;
-}
-
-.tm-progress.disabled input {
-  cursor: default;
-  opacity: 0.45;
-}
-
-.tm-progress-time {
-  color: var(--tm-muted);
-  font-size: 0.62rem;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 .tm-badges {
@@ -1154,11 +1080,21 @@
 .tm-checkbox input,
 .tm-option input { accent-color: var(--tm-accent); }
 .tm-checkbox input[type="checkbox"],
-.tm-option input[type="checkbox"],
-.tm-shuffle input[type="checkbox"] {
+.tm-option input[type="checkbox"] {
   flex: 0 0 16px;
   width: 16px;
   height: 16px;
+  margin: 0;
+  padding: 0;
+}
+.tater-music-core .tm-shuffle input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
   margin: 0;
   padding: 0;
 }
@@ -1654,13 +1590,12 @@
 @media (max-width: 980px) {
   .tm-player-main {
     grid-template-columns: 46px minmax(150px, 1fr) auto;
-    grid-template-rows: 36px 30px 14px;
-    min-height: 94px;
+    grid-template-rows: 36px 30px;
+    min-height: 80px;
   }
   .tm-art-wrap { grid-row: 1 / span 2; width: 46px; height: 46px; }
   .tm-transport { grid-column: 3; grid-row: 1; }
   .tm-player-utility { grid-column: 2 / -1; grid-row: 2; justify-content: flex-end; }
-  .tm-progress { grid-column: 1 / -1; grid-row: 3; }
 }
 
 @media (max-width: 680px) {
@@ -1669,8 +1604,8 @@
   .tm-playback-dock { top: var(--tater-content-sticky-top, 6px); border-radius: 15px; }
   .tm-player-main {
     grid-template-columns: 42px minmax(110px, 1fr) auto;
-    grid-template-rows: 36px 30px 14px;
-    min-height: 92px;
+    grid-template-rows: 36px 30px;
+    min-height: 78px;
     padding: 7px 8px 6px;
   }
   .tm-art-wrap { width: 42px; height: 42px; }
@@ -1710,7 +1645,6 @@
   .tm-transport button.stop { display: none; }
   .tm-player-utility { gap: 6px; }
   .tm-player-volume { flex: 1 1 auto; grid-template-columns: 12px minmax(50px, 1fr) 29px; }
-  .tm-progress { grid-template-columns: 31px minmax(60px, 1fr) 31px; gap: 5px; }
   .tm-track { padding-inline: 11px; }
   .tm-track-duration { display: none; }
   .tm-search-controls { grid-template-columns: 1fr; }

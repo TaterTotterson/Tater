@@ -67,17 +67,6 @@ export interface MusicTrack {
   image_alt?: string;
 }
 
-export interface MusicPlaybackState {
-  status?: string;
-  position_seconds?: number;
-  duration_seconds?: number;
-  position_updated_at?: number;
-  seekable?: boolean;
-  seek_action?: string;
-  seek_relative_action?: string;
-  seek_step_seconds?: number;
-}
-
 export interface MusicPlayerRow {
   target: string;
   label?: string;
@@ -133,7 +122,6 @@ export interface MusicItem {
   run_action?: string;
   run_label?: string;
   actions?: MusicAction[];
-  playback?: MusicPlaybackState;
   fields_dropdown?: boolean;
   recommendation_items?: MusicRecommendationEntry[];
   generated_at?: number;
