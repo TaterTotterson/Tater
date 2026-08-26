@@ -290,6 +290,24 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('"voice_firmware_esp_usb_ports"', firmware_source)
         self.assertIn("openEspHomeLocalEspUsbFlashFlow", app_source)
 
+    def test_sat1_rpi_flavors_use_their_own_release_feed(self) -> None:
+        firmware_source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
+
+        self.assertIn('"satellite1_rpi_standalone",', firmware_source)
+        self.assertIn('"satellite1_rpi_satellite",', firmware_source)
+        self.assertIn("TATER_SAT1_RPI_FIRMWARE_LATEST_URL", firmware_source)
+        self.assertIn('"Tater-SAT1-Standalone"', firmware_source)
+        self.assertIn(
+            'for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):',
+            firmware_source,
+        )
+
+    def test_sat1_rpi_hardware_identities_do_not_alias_the_esp_sat1(self) -> None:
+        firmware_source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
+
+        self.assertIn('return "satellite1_rpi_standalone"', firmware_source)
+        self.assertIn('return "satellite1_rpi_satellite"', firmware_source)
+
     def test_native_ota_sends_manifest_integrity_fields(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
         self.assertIn('"sha256": _file_sha256(target_binary_path)', source)

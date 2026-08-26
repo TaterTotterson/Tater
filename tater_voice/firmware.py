@@ -85,6 +85,23 @@ _S420_FIRMWARE_LATEST_URL = str(
     )
     or ""
 ).strip()
+_SAT1_RPI_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
+_SAT1_RPI_FIRMWARE_GITHUB_REPO = "Tater-SAT1-Standalone"
+_SAT1_RPI_FIRMWARE_GITHUB_REF = "main"
+_SAT1_RPI_FIRMWARE_RAW_BASE_URL = str(
+    os.getenv(
+        "TATER_SAT1_RPI_FIRMWARE_RAW_BASE_URL",
+        f"https://raw.githubusercontent.com/{_SAT1_RPI_FIRMWARE_GITHUB_OWNER}/{_SAT1_RPI_FIRMWARE_GITHUB_REPO}/{_SAT1_RPI_FIRMWARE_GITHUB_REF}",
+    )
+    or ""
+).strip().rstrip("/")
+_SAT1_RPI_FIRMWARE_LATEST_URL = str(
+    os.getenv(
+        "TATER_SAT1_RPI_FIRMWARE_LATEST_URL",
+        f"https://github.com/{_SAT1_RPI_FIRMWARE_GITHUB_OWNER}/{_SAT1_RPI_FIRMWARE_GITHUB_REPO}/releases/latest/download/latest.json",
+    )
+    or ""
+).strip()
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NATIVE_FIRMWARE_LOCAL_ROOTS = tuple(
     root
@@ -130,6 +147,28 @@ _S420_FIRMWARE_LOCAL_LATEST = next(
     if _S420_FIRMWARE_LOCAL_ROOTS
     else _SOURCE_ROOT / "release_assets" / "latest.json",
 )
+_SAT1_RPI_FIRMWARE_LOCAL_ROOTS = tuple(
+    root
+    for root in (
+        Path(os.getenv("TATER_SAT1_RPI_FIRMWARE_LOCAL_ROOT", "")).expanduser()
+        if os.getenv("TATER_SAT1_RPI_FIRMWARE_LOCAL_ROOT")
+        else None,
+        _SOURCE_ROOT.parent / "Tater-SAT1-Standalone",
+        Path.home() / "Scripts" / "Tater-SAT1-Standalone",
+        Path.home() / "Tater-SAT1-Standalone",
+    )
+    if isinstance(root, Path)
+)
+_SAT1_RPI_FIRMWARE_LOCAL_LATEST = next(
+    (
+        root / "release_assets" / "latest.json"
+        for root in _SAT1_RPI_FIRMWARE_LOCAL_ROOTS
+        if (root / "release_assets" / "latest.json").is_file()
+    ),
+    (_SAT1_RPI_FIRMWARE_LOCAL_ROOTS[0] / "release_assets" / "latest.json")
+    if _SAT1_RPI_FIRMWARE_LOCAL_ROOTS
+    else _SOURCE_ROOT / "release_assets" / "latest.json",
+)
 _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY = {
     "s3box_display": "s3_box",
 }
@@ -138,6 +177,8 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
     for template_key, manifest_key in _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY.items()
 }
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
+    "satellite1_rpi_satellite",
+    "satellite1_rpi_standalone",
     "thirdreality_s420",
     "voicepe",
     "satellite1",
@@ -201,6 +242,26 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
 }
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
+    {
+        "key": "satellite1_rpi_standalone",
+        "label": "Tater SAT1 Raspberry Pi — Standalone",
+        "match_tokens": {
+            "satellite1_rpi_standalone",
+            "satellite1-rpi-standalone",
+            "sat1 rpi standalone",
+            "tater sat1 standalone",
+        },
+    },
+    {
+        "key": "satellite1_rpi_satellite",
+        "label": "Tater SAT1 Raspberry Pi — Satellite",
+        "match_tokens": {
+            "satellite1_rpi_satellite",
+            "satellite1-rpi-satellite",
+            "sat1 rpi satellite",
+            "tater sat1 satellite",
+        },
+    },
     {
         "key": "thirdreality_s420",
         "label": "Tater ThirdReality S420",
@@ -909,7 +970,15 @@ def _local_json(path: Path) -> Any:
 
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
-    if _lower(template_key) == "thirdreality_s420":
+    key = _lower(template_key)
+    if key in {"satellite1_rpi_standalone", "satellite1_rpi_satellite"}:
+        return {
+            "latest_url": _SAT1_RPI_FIRMWARE_LATEST_URL,
+            "raw_base_url": _SAT1_RPI_FIRMWARE_RAW_BASE_URL,
+            "local_latest": _SAT1_RPI_FIRMWARE_LOCAL_LATEST,
+            "local_roots": _SAT1_RPI_FIRMWARE_LOCAL_ROOTS,
+        }
+    if key == "thirdreality_s420":
         return {
             "latest_url": _S420_FIRMWARE_LATEST_URL,
             "raw_base_url": _S420_FIRMWARE_RAW_BASE_URL,
@@ -1084,7 +1153,7 @@ def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> 
 
 def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
     keys: set[str] = set()
-    for source_key in ("", "thirdreality_s420"):
+    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):
         try:
             manifest = _load_native_firmware_manifest(force_refresh=force_refresh, template_key=source_key)
         except Exception:
@@ -1266,7 +1335,7 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
 def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str, Any]:
     manifests: List[Dict[str, Any]] = []
     errors: List[str] = []
-    for source_key in ("", "thirdreality_s420"):
+    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):
         try:
             manifests.append(
                 _load_native_firmware_manifest(
@@ -1907,6 +1976,18 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _template_key_from_hardware_identity(value: Any) -> str:
     token = _lower(value).replace("_", "-")
     compact = re.sub(r"[^a-z0-9]+", "", token)
+    if token in {"satellite1-rpi-standalone", "sat1-rpi-standalone"} or compact in {
+        "satellite1rpistandalone",
+        "sat1rpistandalone",
+        "tatersat1rpistandalone",
+    }:
+        return "satellite1_rpi_standalone"
+    if token in {"satellite1-rpi-satellite", "sat1-rpi-satellite"} or compact in {
+        "satellite1rpisatellite",
+        "sat1rpisatellite",
+        "tatersat1rpisatellite",
+    }:
+        return "satellite1_rpi_satellite"
     if token in {"s420", "tater-s420", "thirdreality-s420", "third-reality-s420"} or compact == "s420" or compact.startswith(
         ("taters420", "thirdrealitys420")
     ):
