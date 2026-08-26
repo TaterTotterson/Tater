@@ -60,6 +60,7 @@ from fastapi import HTTPException
 from helpers import extract_json, get_llm_client_from_env, redis_client
 from runtime_executors import run_background, run_speech
 from tater_paths import agent_lab_path
+from tater_runtime_profile import remote_only_enabled
 from tateros import integration_store as integration_store_module
 import verba_registry
 from verba_settings import get_verba_enabled
@@ -322,7 +323,7 @@ DEFAULT_LOCAL_STT_TIMEOUT_SECONDS = 35.0
 DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S = 90.0
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS = 90.0
-DEFAULT_STT_BACKEND = "faster_whisper"
+DEFAULT_STT_BACKEND = "wyoming" if remote_only_enabled() else "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
 DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
@@ -422,7 +423,7 @@ DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
 
 DEFAULT_EOU_MODE = "server"
-DEFAULT_VAD_BACKEND = "silero"
+DEFAULT_VAD_BACKEND = "webrtc" if remote_only_enabled() else "silero"
 DEFAULT_VAD_SILENCE_SECONDS = 0.78
 DEFAULT_VAD_TIMEOUT_SECONDS = 8.50
 DEFAULT_VAD_NO_SPEECH_TIMEOUT_S = 3.50

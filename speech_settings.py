@@ -8,12 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
 
 from helpers import redis_client
+from tater_runtime_profile import remote_only_enabled
 
 SPEECH_SETTINGS_KEY = "verba_settings:Speech"
 REDIS_PIPER_TTS_MODELS_KEY = "tater:voice:piper:tts_models:v1"
 REDIS_PIPER_TTS_MODELS_META_KEY = "tater:voice:piper:tts_models:meta:v1"
 
-DEFAULT_STT_BACKEND = "faster_whisper"
+DEFAULT_STT_BACKEND = "wyoming" if remote_only_enabled() else "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
 DEFAULT_WYOMING_STT_PORT = 10300

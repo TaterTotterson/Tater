@@ -10,6 +10,7 @@ AGENT_ROOT="${TATER_AGENT_ROOT:-agent_lab}"
 PROFILE_FILE="${TATER_SETUP_PROFILE_FILE:-${RUNTIME_DIR}/setup_profile}"
 PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
 REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
+EDGE_REQUIREMENTS_FILE="${TATER_EDGE_REQUIREMENTS_FILE:-requirements-edge.txt}"
 LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
 LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
@@ -73,7 +74,7 @@ banner() {
 }
 
 usage() {
-  say "Usage: sh setup_tater.sh [cpu|macos|nvidia|rocm|jetson|thor]"
+  say "Usage: sh setup_tater.sh [cpu|macos|nvidia|rocm|jetson|thor|edge]"
   say ""
   say "Profiles:"
   say "  cpu     Local CPU-first install for most systems."
@@ -82,6 +83,7 @@ usage() {
   say "  rocm    Native AMD ROCm install for Radeon / Strix Halo systems."
   say "  jetson  Native Jetson install that uses JetPack/system AI packages."
   say "  thor    Native Jetson Thor install for JetPack 7 / CUDA 13 systems."
+  say "  edge    Remote-only install for Pi-class and memory-constrained hosts."
 }
 
 choose_profile() {
@@ -109,7 +111,10 @@ choose_profile() {
   say "  6) Jetson Thor"
   say "     Native ARM64 setup for Thor / JetPack 7 systems."
   say ""
-  printf "Select profile [1-6]: "
+  say "  7) Edge / remote-only"
+  say "     Full Tater app without local model runtimes; intended for Pi-class hosts."
+  say ""
+  printf "Select profile [1-7]: "
   read -r choice
 
   case "${choice}" in
@@ -119,6 +124,7 @@ choose_profile() {
     4) SELECTED_PROFILE="rocm" ;;
     5) SELECTED_PROFILE="jetson" ;;
     6) SELECTED_PROFILE="thor" ;;
+    7) SELECTED_PROFILE="edge" ;;
     *) fail "Unknown profile selection: ${choice}" ;;
   esac
 }
@@ -131,6 +137,7 @@ normalize_profile() {
     amd|rocm|amd-rocm|amd_rocm|radeon|strix|strix-halo|strix_halo) printf '%s' "rocm" ;;
     jetson|orin) printf '%s' "jetson" ;;
     thor|jetson-thor|jetson_thor) printf '%s' "thor" ;;
+    edge|edge-remote|edge_remote|remote|remote-only|remote_only|sat1|sat1-edge|sat1_edge) printf '%s' "edge" ;;
     -h|--help|help) usage; exit 0 ;;
     *) fail "Unknown setup profile: $1" ;;
   esac
@@ -231,7 +238,7 @@ run_privileged() {
 
 ensure_linux_build_tools() {
   profile="$1"
-  if [ "${profile}" = "macos" ] || [ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]; then
+  if [ "${profile}" = "macos" ] || [ "${profile}" = "edge" ] || [ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]; then
     return
   fi
   if [ "${TATER_SETUP_LLAMA_CPP_NATIVE:-1}" = "0" ]; then
@@ -447,6 +454,13 @@ install_cpu() {
   install_llama_cpp_native cpu
   rm -f "${tmp_req}"
   trap - EXIT
+}
+
+install_edge() {
+  venv_python="$1"
+  [ -f "${EDGE_REQUIREMENTS_FILE}" ] || fail "Missing edge requirements: ${EDGE_REQUIREMENTS_FILE}"
+  info "Installing remote-only Tater dependencies"
+  "${venv_python}" -m pip install -r "${EDGE_REQUIREMENTS_FILE}"
 }
 
 check_llama_cpp_native() {
@@ -819,6 +833,9 @@ write_profile_env() {
   nvidia_site_packages=""
   strix_halo_full_offload="0"
   case "${profile}" in
+    edge)
+      speech_acceleration="cpu"
+      ;;
     cpu)
       speech_acceleration="cpu"
       ;;
@@ -847,6 +864,17 @@ write_profile_env() {
     say "export TATER_FASTER_WHISPER_COMPUTE_TYPE=\"\${TATER_FASTER_WHISPER_COMPUTE_TYPE:-${compute_type}}\""
     say "export TATER_KOKORO_ENGINE=\"\${TATER_KOKORO_ENGINE:-auto}\""
     say "export TATER_LLAMA_CPP_SERVER_BIN=\"\${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_SERVER_BIN}}\""
+    if [ "${profile}" = "edge" ]; then
+      say "export TATER_REMOTE_ONLY=\"\${TATER_REMOTE_ONLY:-1}\""
+      say "export TATER_SETUP_LLAMA_CPP_NATIVE=\"\${TATER_SETUP_LLAMA_CPP_NATIVE:-0}\""
+      say "export TATER_SETUP_REQUIRE_LOCAL_LLM=\"\${TATER_SETUP_REQUIRE_LOCAL_LLM:-0}\""
+      say "export TATER_RUNTIME_WAKE_WORKERS=\"\${TATER_RUNTIME_WAKE_WORKERS:-1}\""
+      say "export TATER_RUNTIME_STT_WORKERS=\"\${TATER_RUNTIME_STT_WORKERS:-1}\""
+      say "export TATER_RUNTIME_TTS_WORKERS=\"\${TATER_RUNTIME_TTS_WORKERS:-1}\""
+      say "export TATER_RUNTIME_SPEECH_WORKERS=\"\${TATER_RUNTIME_SPEECH_WORKERS:-1}\""
+      say "export TATER_RUNTIME_DASHBOARD_WORKERS=\"\${TATER_RUNTIME_DASHBOARD_WORKERS:-1}\""
+      say "export TATER_RUNTIME_BACKGROUND_WORKERS=\"\${TATER_RUNTIME_BACKGROUND_WORKERS:-1}\""
+    fi
     if [ "${torch_mps_fallback}" ]; then
       say "export PYTORCH_ENABLE_MPS_FALLBACK=\"\${PYTORCH_ENABLE_MPS_FALLBACK:-${torch_mps_fallback}}\""
     fi
@@ -873,9 +901,16 @@ verify_install() {
   venv_python="$1"
   profile="$2"
   info "Checking installed runtime"
+  require_local_llm_default="1"
+  remote_only_default="0"
+  if [ "${profile}" = "edge" ]; then
+    require_local_llm_default="0"
+    remote_only_default="1"
+  fi
   TATER_LLAMA_CPP_SERVER_BIN="${LLAMA_CPP_SERVER_BIN}" \
   TATER_SETUP_PROFILE="${profile}" \
-  TATER_SETUP_REQUIRE_LOCAL_LLM="${TATER_SETUP_REQUIRE_LOCAL_LLM:-1}" \
+  TATER_SETUP_REQUIRE_LOCAL_LLM="${TATER_SETUP_REQUIRE_LOCAL_LLM:-${require_local_llm_default}}" \
+  TATER_REMOTE_ONLY="${TATER_REMOTE_ONLY:-${remote_only_default}}" \
   TATER_MLX_ENGINE_PATH="${TATER_MLX_ENGINE_PATH:-}" \
   TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
   "${venv_python}" - <<'PY'
@@ -885,18 +920,41 @@ import platform
 import sys
 from pathlib import Path
 
-required = ["fastapi", "uvicorn", "redis", "redislite"]
+required = ["fastapi", "uvicorn", "redis"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing required packages: " + ", ".join(missing))
 
+import shutil
+redis_server = shutil.which("redis-server")
+embedded_redis = importlib.util.find_spec("redislite") is not None
+if not redis_server and not embedded_redis:
+    raise SystemExit("Edge profile requires the operating system redis-server package")
+print(f"redis_runtime={'system:' + redis_server if redis_server else 'redislite'}")
+
 print("core imports ok")
 
-face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]
-face_id_missing = [name for name in face_id_required if importlib.util.find_spec(name) is None]
-if face_id_missing:
-    raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))
-print("face_id_imports ok")
+remote_only = str(os.getenv("TATER_REMOTE_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
+if remote_only:
+    forbidden = [
+        "torch",
+        "tensorflow",
+        "deepface",
+        "faster_whisper",
+        "transformers",
+        "onnx_asr",
+        "speechbrain",
+    ]
+    unexpectedly_installed = [name for name in forbidden if importlib.util.find_spec(name) is not None]
+    if unexpectedly_installed:
+        raise SystemExit("Remote-only profile unexpectedly installed local model packages: " + ", ".join(unexpectedly_installed))
+    print("remote_only_dependency_boundary ok")
+else:
+    face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]
+    face_id_missing = [name for name in face_id_required if importlib.util.find_spec(name) is None]
+    if face_id_missing:
+        raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))
+    print("face_id_imports ok")
 
 try:
     import torch
@@ -984,6 +1042,17 @@ for name in ("mlx_whisper", "kokoro"):
         print(f"{name}=available")
     except Exception as exc:
         print(f"{name}=unavailable: {exc}")
+
+if remote_only:
+    import tateros_app
+    from speech_settings import DEFAULT_STT_BACKEND
+    from tater_voice.voice_pipeline import DEFAULT_VAD_BACKEND
+
+    if DEFAULT_STT_BACKEND != "wyoming":
+        raise SystemExit(f"Remote-only STT default is {DEFAULT_STT_BACKEND}, expected wyoming")
+    if DEFAULT_VAD_BACKEND != "webrtc":
+        raise SystemExit(f"Remote-only VAD default is {DEFAULT_VAD_BACKEND}, expected webrtc")
+    print(f"edge_app_import ok module={tateros_app.__name__} stt={DEFAULT_STT_BACKEND} vad={DEFAULT_VAD_BACKEND}")
 PY
   ok "Profile '${profile}' is ready"
 }
@@ -1025,6 +1094,8 @@ main() {
     warn "AMD ROCm profile is for native Linux Radeon / Strix Halo systems with ROCm installed."
   elif [ "${profile}" = "macos" ]; then
     warn "macOS profile can use Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro, plus MLX Whisper for STT."
+  elif [ "${profile}" = "edge" ]; then
+    warn "Edge profile disables local model runtimes. Configure remote LLM, Wyoming STT, and Wyoming or OpenAI-compatible TTS providers in TaterOS."
   fi
 
   ensure_linux_build_tools "${profile}"
@@ -1033,6 +1104,7 @@ main() {
   install_base "${venv_python}"
 
   case "${profile}" in
+    edge) install_edge "${venv_python}" ;;
     cpu) install_cpu "${venv_python}" ;;
     macos) install_macos "${venv_python}" ;;
     nvidia) install_nvidia "${venv_python}" ;;

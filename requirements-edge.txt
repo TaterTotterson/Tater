@@ -1,0 +1,41 @@
+# Remote-only Tater runtime for Pi-class and other memory-constrained hosts.
+#
+# Keep the application, integrations, document tools, native satellite API,
+# remote LLM/TTS clients, and Wyoming speech clients. Local AI model stacks
+# intentionally live only in requirements.txt and the accelerator profiles.
+aiohttp
+aiohomekit
+zeroconf
+beautifulsoup4
+bencodepy
+cryptography
+discord.py
+feedparser
+openai
+Pillow
+moviepy
+python-dotenv
+requests
+qrcode
+youtube-transcript-api
+redis
+nest_asyncio
+websocket-client
+aioftp
+irc3
+pyyaml
+fastapi
+uvicorn
+matrix-nio[aiohttp]
+markdown-it-py[plugins,linkify]
+mdit-py-plugins
+pypdf
+python-docx
+openpyxl
+python-pptx
+py7zr
+rarfile
+pandas
+wyoming
+webrtcvad-wheels
+psutil

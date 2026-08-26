@@ -200,6 +200,7 @@ sh setup_tater.sh
 The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`.
 
 Available local profiles:
+- **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. It defaults native voice to remote Wyoming STT and WebRTC VAD.
 - **CPU**: safe default for most local Linux installs and generic ARM hosts.
 - **macOS Apple Silicon**: native Mac setup with Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro when available, plus MLX Whisper for local STT.
 - **NVIDIA desktop/server**: native amd64 CUDA setup for RTX/GTX machines.
@@ -211,12 +212,19 @@ Non-interactive setup is also available:
 
 ```bash
 sh setup_tater.sh cpu
+sh setup_tater.sh edge
 sh setup_tater.sh macos
 sh setup_tater.sh nvidia
 sh setup_tater.sh rocm
 sh setup_tater.sh jetson
 sh setup_tater.sh thor
 ```
+
+The edge profile uses the operating system `redis-server` instead of compiling
+the embedded Redis package. Install it before setup (for example,
+`sudo apt install redis-server` on Raspberry Pi OS). Matrix remains available,
+but encrypted Matrix rooms are omitted from this low-memory profile because
+their native `libolm` build is not included.
 
 ### Local Voice Acceleration Notes
 
