@@ -8980,13 +8980,22 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
 }
 
 .people-subtabs {
-  width: fit-content;
-  min-width: min(100%, 300px);
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap;
   margin-top: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.people-subtabs::-webkit-scrollbar {
+  display: none;
 }
 
 .people-subtabs .core-manager-subtab-btn {
-  flex: 1 1 130px;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .people-tab-panel {

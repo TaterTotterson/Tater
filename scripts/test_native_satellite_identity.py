@@ -5,6 +5,7 @@ import copy
 import json
 import sys
 import unittest
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -308,6 +309,50 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
             await native_satellite.forget(selector)
 
         self.assertIn(selector, native_satellite._clients)
+
+    async def test_reconnect_preserves_ota_log_ring(self) -> None:
+        selector = "native:voicepe-2e88e8"
+        hello = {
+            "type": "hello",
+            "payload": {
+                "device_id": "voicepe-2e88e8",
+                "device_name": "Voice PE",
+                "board": "voice-pe",
+                "firmware_version": "native-voicepe-0.3.13",
+            },
+        }
+        first_socket = SimpleNamespace(client=SimpleNamespace(host="192.0.2.10"))
+        second_socket = SimpleNamespace(client=SimpleNamespace(host="192.0.2.10"))
+
+        with mock.patch.object(native_satellite, "_cancel_media_disconnect_abort"), mock.patch.object(
+            native_satellite,
+            "_upsert_registry_from_hello",
+        ), mock.patch.object(
+            native_satellite,
+            "_load_selector_aliases",
+            return_value={},
+        ), mock.patch.object(
+            native_satellite,
+            "_notify_state_change",
+        ):
+            await native_satellite._record_client(selector, first_socket, hello)
+            native_satellite._clients[selector]["logs"] = deque(
+                [
+                    {
+                        "seq": 7,
+                        "type": "ota.status",
+                        "payload": {"status": "rebooting", "progress": 100},
+                    }
+                ],
+                maxlen=native_satellite.MAX_LOG_ROWS,
+            )
+            native_satellite._clients[selector]["log_seq"] = 7
+
+            await native_satellite._record_client(selector, second_socket, hello)
+
+        row = native_satellite._clients[selector]
+        self.assertEqual(7, row["log_seq"])
+        self.assertEqual("rebooting", row["logs"][-1]["payload"]["status"])
 
     async def test_hardware_volume_messages_refresh_the_saved_slider(self) -> None:
         selector = "native:sat1-2e88e8"

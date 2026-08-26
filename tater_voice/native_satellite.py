@@ -3618,6 +3618,16 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         for old_selector, canonical in aliases.items():
             if canonical == selector and old_selector != selector:
                 _clients.pop(old_selector, None)
+        previous = _clients.get(selector)
+        if isinstance(previous, dict):
+            previous_logs = previous.get("logs")
+            if isinstance(previous_logs, deque):
+                # OTA completion is reported immediately before the satellite
+                # reboots. Keep the connection log ring across that reconnect
+                # so firmware polling cannot lose the final status message.
+                row["logs"] = deque(previous_logs, maxlen=MAX_LOG_ROWS)
+                row["log_seq"] = int(previous.get("log_seq") or 0)
+            row["last_disconnect_ts"] = float(previous.get("last_disconnect_ts") or 0.0)
         _clients[selector] = row
     _notify_state_change("connected", selector)
     return queue

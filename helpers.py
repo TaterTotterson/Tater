@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import hashlib
+import shlex
 import weakref
 from openai import AsyncOpenAI
 import requests
@@ -6148,6 +6149,7 @@ _LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
 _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
 _LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
 _LLAMA_CPP_HTTP_THREAD_LOCAL = threading.local()
+_TATER_LLAMA_CPP_MANAGED_ALIASES = frozenset({"tater-llama", "qwen3-asr"})
 
 
 def _macos_bundled_llama_server_candidates() -> List[Path]:
@@ -6206,6 +6208,236 @@ def _llama_cpp_native_server_bin() -> str:
         if path.is_file() and os.access(str(path), os.X_OK):
             return str(path)
     return ""
+
+
+def _llama_cpp_native_process_rows() -> List[Dict[str, Any]]:
+    """Return a full-width POSIX process snapshot without using a shell."""
+    if os.name == "nt":
+        return []
+    ps_bin = shutil.which("ps") or "/bin/ps"
+    try:
+        completed = subprocess.run(
+            [ps_bin, "-ww", "-axo", "pid=,ppid=,command="],
+            text=True,
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for raw_line in str(completed.stdout or "").splitlines():
+        parts = raw_line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except Exception:
+            continue
+        if pid <= 0:
+            continue
+        rows.append({"pid": pid, "ppid": ppid, "command": parts[2]})
+    return rows
+
+
+def _llama_cpp_native_command_tokens(command: Any) -> List[str]:
+    text = str(command or "").strip()
+    if not text:
+        return []
+    try:
+        return [str(token) for token in shlex.split(text, posix=os.name != "nt")]
+    except Exception:
+        return text.split()
+
+
+def _llama_cpp_native_managed_server_row(
+    row: Dict[str, Any],
+    *,
+    server_bins: Optional[List[str]] = None,
+    aliases: Optional[set[str]] = None,
+) -> bool:
+    tokens = _llama_cpp_native_command_tokens((row or {}).get("command"))
+    if not tokens:
+        return False
+    executable = os.path.realpath(os.path.expanduser(tokens[0]))
+    known_bins = {
+        os.path.realpath(os.path.expanduser(str(item or "").strip()))
+        for item in (server_bins or _llama_cpp_native_server_candidates())
+        if str(item or "").strip()
+    }
+    packaged_binary = executable.replace("\\", "/").endswith(
+        "/Native/llama.cpp/bin/llama-server"
+    )
+    if executable not in known_bins and not packaged_binary:
+        return False
+
+    managed_aliases = aliases or set(_TATER_LLAMA_CPP_MANAGED_ALIASES)
+    alias = ""
+    for index, token in enumerate(tokens):
+        if token == "--alias" and index + 1 < len(tokens):
+            alias = str(tokens[index + 1]).strip()
+            break
+        if token.startswith("--alias="):
+            alias = token.partition("=")[2].strip()
+            break
+    return alias in managed_aliases
+
+
+def _llama_cpp_native_is_descendant(
+    pid: int,
+    ancestor_pid: int,
+    parent_by_pid: Dict[int, int],
+) -> bool:
+    current = int(pid or 0)
+    ancestor = int(ancestor_pid or 0)
+    seen: set[int] = set()
+    while current > 0 and current not in seen:
+        if current == ancestor:
+            return True
+        seen.add(current)
+        current = int(parent_by_pid.get(current) or 0)
+    return False
+
+
+def _llama_cpp_native_managed_server_pids(
+    rows: List[Dict[str, Any]],
+    *,
+    server_bins: Optional[List[str]] = None,
+    aliases: Optional[set[str]] = None,
+    descendant_of: int = 0,
+    exclude_descendants_of: int = 0,
+) -> List[int]:
+    parent_by_pid = {
+        int(row.get("pid") or 0): int(row.get("ppid") or 0)
+        for row in rows
+        if int(row.get("pid") or 0) > 0
+    }
+    matches: List[int] = []
+    for row in rows:
+        pid = int(row.get("pid") or 0)
+        if pid <= 0 or not _llama_cpp_native_managed_server_row(
+            row,
+            server_bins=server_bins,
+            aliases=aliases,
+        ):
+            continue
+        if descendant_of and not _llama_cpp_native_is_descendant(
+            pid,
+            int(descendant_of),
+            parent_by_pid,
+        ):
+            continue
+        if exclude_descendants_of and _llama_cpp_native_is_descendant(
+            pid,
+            int(exclude_descendants_of),
+            parent_by_pid,
+        ):
+            continue
+        matches.append(pid)
+    return sorted(set(matches))
+
+
+def _terminate_managed_llama_cpp_server_pids(
+    pids: List[int],
+    *,
+    server_bins: Optional[List[str]] = None,
+    aliases: Optional[set[str]] = None,
+    timeout: float = 3.0,
+) -> Dict[str, Any]:
+    requested = sorted({int(pid) for pid in pids if int(pid or 0) > 0})
+    if not requested:
+        return {"requested": [], "terminated": [], "remaining": []}
+
+    def _matching_requested() -> List[int]:
+        requested_set = set(requested)
+        return [
+            int(row.get("pid") or 0)
+            for row in _llama_cpp_native_process_rows()
+            if int(row.get("pid") or 0) in requested_set
+            and _llama_cpp_native_managed_server_row(
+                row,
+                server_bins=server_bins,
+                aliases=aliases,
+            )
+        ]
+
+    initial = _matching_requested()
+    first_signal = signal.SIGKILL if sys.platform == "darwin" else signal.SIGTERM
+    for pid in initial:
+        try:
+            os.kill(pid, first_signal)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except Exception:
+            logger.debug("[llama-cpp-native] failed signaling managed server pid=%s", pid, exc_info=True)
+
+    deadline = time.monotonic() + max(0.1, float(timeout or 0.1))
+    remaining = _matching_requested()
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = _matching_requested()
+    if remaining and first_signal != signal.SIGKILL:
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            except Exception:
+                logger.debug("[llama-cpp-native] failed force-killing managed server pid=%s", pid, exc_info=True)
+        force_deadline = time.monotonic() + 1.0
+        while remaining and time.monotonic() < force_deadline:
+            time.sleep(0.05)
+            remaining = _matching_requested()
+    remaining = sorted(set(remaining))
+    return {
+        "requested": requested,
+        "terminated": sorted(set(initial) - set(remaining)),
+        "remaining": remaining,
+    }
+
+
+def cleanup_stale_llama_cpp_servers() -> Dict[str, Any]:
+    """Remove Tater llama.cpp servers that do not belong to this backend."""
+    if not _boolish(os.getenv("TATER_LLAMA_CPP_STALE_CLEANUP"), default=True):
+        return {"enabled": False, "requested": [], "terminated": [], "remaining": []}
+    if str(os.getenv(_LLAMA_CPP_ENGINE_WORKER_ENV) or "").strip() == "1" or str(
+        os.getenv("TATER_LLAMA_CPP_VISION_WORKER") or ""
+    ).strip() == "1":
+        return {
+            "enabled": True,
+            "skipped": "subprocess_worker",
+            "requested": [],
+            "terminated": [],
+            "remaining": [],
+        }
+    server_bins = _llama_cpp_native_server_candidates()
+    rows = _llama_cpp_native_process_rows()
+    stale_pids = _llama_cpp_native_managed_server_pids(
+        rows,
+        server_bins=server_bins,
+        exclude_descendants_of=os.getpid(),
+    )
+    result = _terminate_managed_llama_cpp_server_pids(
+        stale_pids,
+        server_bins=server_bins,
+        timeout=3.0,
+    )
+    result["enabled"] = True
+    if result.get("terminated"):
+        logger.warning(
+            "[llama-cpp-native] cleaned up %d stale managed llama-server process(es): %s",
+            len(result["terminated"]),
+            ", ".join(str(pid) for pid in result["terminated"]),
+        )
+    if result.get("remaining"):
+        logger.warning(
+            "[llama-cpp-native] stale managed llama-server process(es) remain: %s",
+            ", ".join(str(pid) for pid in result["remaining"]),
+        )
+    return result
 
 
 def _llama_cpp_native_required_server_bin() -> str:
@@ -6780,6 +7012,7 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "runtime",
         "server_bin",
         "server_url",
+        "server_pid",
     )
     out: Dict[str, Any] = {}
     for key in keys:
@@ -7124,6 +7357,7 @@ def _llama_cpp_native_worker_load(
             "runtime": "tater-llama-native",
             "server_bin": server_bin,
             "server_url": base_url,
+            "server_pid": int(proc.pid),
             "supports_vision": supports_vision,
             "supports_audio": supports_audio,
             "supports_video": supports_video,
@@ -7264,6 +7498,7 @@ class _TaterLlamaCppEngineProcess:
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._stderr_tail: List[str] = []
+        self._server_pids: set[int] = set()
 
     def _command(self) -> List[str]:
         return [sys.executable, os.path.abspath(__file__), _LLAMA_CPP_ENGINE_WORKER_ARG]
@@ -7271,6 +7506,10 @@ class _TaterLlamaCppEngineProcess:
     def start(self) -> None:
         if self.process is not None and self.process.poll() is None:
             return
+        # A crashed or forcibly recycled macOS worker can leave its native
+        # child adopted by launchd. Remove only Tater-managed servers that are
+        # outside this backend's live process tree before starting a replacement.
+        cleanup_stale_llama_cpp_servers()
         env = dict(os.environ)
         env[_LLAMA_CPP_ENGINE_WORKER_ENV] = "1"
         env.setdefault("PYTHONUNBUFFERED", "1")
@@ -7422,12 +7661,35 @@ class _TaterLlamaCppEngineProcess:
         if not bool(response.get("ok")):
             detail = str(response.get("error") or "").strip() or f"Tater llama.cpp engine {op} failed."
             raise RuntimeError(detail)
-        return response.get("result")
+        result = response.get("result")
+        if str(op or "").strip().lower() == "load" and isinstance(result, dict):
+            try:
+                server_pid = int(result.get("server_pid") or 0)
+            except Exception:
+                server_pid = 0
+            if server_pid > 0:
+                with self._send_lock:
+                    self._server_pids.add(server_pid)
+        return result
 
     def shutdown(self) -> None:
         proc = self.process
         if proc is None:
             return
+        server_bins = _llama_cpp_native_server_candidates()
+        with self._send_lock:
+            server_pids = set(self._server_pids)
+        try:
+            server_pids.update(
+                _llama_cpp_native_managed_server_pids(
+                    _llama_cpp_native_process_rows(),
+                    server_bins=server_bins,
+                    aliases={"tater-llama"},
+                    descendant_of=int(proc.pid),
+                )
+            )
+        except Exception:
+            logger.debug("[llama-cpp-engine] failed capturing server descendants", exc_info=True)
         shutdown_acknowledged = False
         if proc.poll() is None:
             try:
@@ -7454,6 +7716,20 @@ class _TaterLlamaCppEngineProcess:
                 proc.stdin.close()
         except Exception:
             pass
+        cleanup_result = _terminate_managed_llama_cpp_server_pids(
+            list(server_pids),
+            server_bins=server_bins,
+            aliases={"tater-llama"},
+            timeout=3.0,
+        )
+        if cleanup_result.get("remaining"):
+            logger.warning(
+                "[llama-cpp-engine] managed server cleanup incomplete pids=%s",
+                cleanup_result["remaining"],
+            )
+        with self._send_lock:
+            self._server_pids.clear()
+        self.process = None
 
 
 def _load_llama_cpp_engine_bundle(

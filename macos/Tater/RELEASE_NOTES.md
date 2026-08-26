@@ -1,42 +1,39 @@
-# Tater v1.1.11
+# Tater v1.1.12
 
-Tater v1.1.11 makes Face ID a shared part of Tater's People system so camera
-features can recognize the same people without depending on Awareness Core.
-
-> **Face ID upgrade notice:** Existing faces saved by Awareness Core are not
-> migrated into the new shared face directory. After updating, rebuild the
-> face profiles you want Tater to recognize and link them to People again in
-> Settings › People › Faces.
+Tater v1.1.12 improves local model cleanup, native satellite firmware updates,
+and the People settings layout.
 
 ## What's Changed
 
-### People and Face ID
+### Local Models
 
-- Adds a dedicated Faces tab under Settings › People for linking captured
-  faces to People, naming unknown visitors, reviewing saved crops, moving or
-  removing incorrect captures, and merging duplicate profiles.
-- Adds one shared Face ID identity and matching service for Awareness Core,
-  Automation Core, and future camera features.
-- Lets camera automations recognize and enroll faces without requiring
-  Awareness Core to be installed or configured.
-- Starts the shared face directory clean instead of importing the former
-  Awareness-owned profiles; existing faces must be rebuilt and relinked after
-  this update.
-- Keeps event identity references from the new shared directory stable when
-  face profiles are merged, split, or removed.
+- Cleans up Tater-managed llama.cpp servers when the backend or macOS app
+  starts and stops so crashed workers cannot leave duplicate model servers
+  consuming memory.
+- Limits cleanup to Tater's own bundled llama.cpp processes and model aliases,
+  leaving unrelated llama.cpp servers alone.
 
-### Music UI
+### Native Satellite Updates
 
-- Includes the queued compact-player cleanup that removes the inactive
-  timeline control and restores normal shuffle-button sizing.
+- Keeps native OTA progress active through the satellite reboot and confirms
+  the device reconnects on the requested firmware before showing 100% and
+  Complete.
+- Preserves the satellite's OTA status log across reconnects and reports clear
+  failures when the update times out or the returned firmware version does not
+  match.
+
+### People UI
+
+- Keeps People, Faces, and Identities together on one tab row, with compact
+  horizontal scrolling on narrower screens.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.11 through
+- macOS users already running v1.0.1 or later can install v1.1.12 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.11` or `latest` for the CPU image and
-  `v1.1.11-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.12` or `latest` for the CPU image and
+  `v1.1.12-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

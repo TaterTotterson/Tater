@@ -201,6 +201,7 @@ from helpers import (
     set_local_llm_chat_template_override,
     clear_local_llm_chat_template_override,
     close_shared_async_http_client,
+    cleanup_stale_llama_cpp_servers,
     unload_local_llm_models,
 )
 from runtime_executors import configure_runtime_executors, run_dashboard, shutdown_runtime_executors
@@ -9798,6 +9799,10 @@ def external_audio_live_stream(
 async def _startup_event() -> None:
     set_main_loop(asyncio.get_running_loop())
     native_satellite_module.bind_runtime_loop()
+    try:
+        await asyncio.to_thread(cleanup_stale_llama_cpp_servers)
+    except Exception as exc:
+        logger.warning("[startup] stale llama.cpp cleanup failed: %s", exc, exc_info=True)
     restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
         "1",
         "true",

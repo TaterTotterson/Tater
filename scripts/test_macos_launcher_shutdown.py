@@ -167,6 +167,31 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn("CFRunLoopWakeUp(mainRunLoop)", implementation)
         self.assertNotIn("DispatchQueue.main.async {", implementation)
 
+    def test_backend_cleans_stale_tater_llama_servers_before_redis_bootstrap(self) -> None:
+        app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        startup = app_source[app_source.index("async def _startup_event()") :]
+
+        cleanup_index = startup.index("cleanup_stale_llama_cpp_servers")
+        redis_index = startup.index("_redis_reachable_for_startup()")
+
+        self.assertLess(cleanup_index, redis_index)
+
+    def test_launcher_cleans_only_bundled_tater_llama_aliases(self) -> None:
+        start = self.source.index("private func cleanupStaleBundledLlamaServers")
+        end = self.source.index("private func waitForProcessExit", start)
+        implementation = self.source[start:end]
+
+        self.assertIn("bundledLlamaServerURL()?.standardizedFileURL.path", implementation)
+        self.assertIn('command.contains("--alias tater-llama")', implementation)
+        self.assertIn('command.contains("--alias qwen3-asr")', implementation)
+        self.assertIn('command.hasPrefix(serverPath + " ")', implementation)
+        self.assertIn("Darwin.kill(pid, SIGKILL)", implementation)
+
+        stop_start = self.source.index("func stop(waitForExit:")
+        stop_end = self.source.index("func openLogsFolder", stop_start)
+        stop_implementation = self.source[stop_start:stop_end]
+        self.assertGreaterEqual(stop_implementation.count("cleanupStaleBundledLlamaServers()"), 3)
+
     def test_installer_forces_stuck_old_app_to_exit_before_replacing_it(self) -> None:
         start = self.source.index("private func writeInstallerScript()")
         end = self.source.index("private func safePathComponent", start)

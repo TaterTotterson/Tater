@@ -187,11 +187,15 @@ class SharedFaceIdentityTests(unittest.TestCase):
         styles = (ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('data-people-tab="faces"', app)
+        self.assertIn('data-people-tab="identities"', app)
         self.assertIn("people_face_move_images", app)
         self.assertIn("people_face_remove_images", app)
         self.assertIn("people_face_merge", app)
         self.assertIn(".people-face-grid", styles)
         self.assertIn(".people-face-gallery", styles)
+        self.assertIn(".people-subtabs::-webkit-scrollbar", styles)
+        self.assertIn("flex-wrap: nowrap;", styles)
+        self.assertIn("white-space: nowrap;", styles)
 
 
 if __name__ == "__main__":

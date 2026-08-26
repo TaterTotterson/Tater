@@ -98,6 +98,7 @@ private final class BackendManager {
                 self.endLifecycleOperation()
             }
             do {
+                self.cleanupStaleBundledLlamaServers()
                 self.appendLauncherLog("Ensuring private folders.\n")
                 try self.ensurePrivateFolders()
                 self.appendLauncherLog("Ensuring Python runtime.\n")
@@ -152,6 +153,7 @@ private final class BackendManager {
                 descendants: descendants,
                 timeout: gracefulStopTimeout
             )
+            cleanupStaleBundledLlamaServers()
             closeLogHandle()
             self.process = nil
             externalBackendPID = nil
@@ -162,6 +164,7 @@ private final class BackendManager {
         if let pid = backendProcessPIDOnPort() {
             appendLauncherLog("Stop requested for discovered backend pid \(pid).\n")
             terminateBackendProcess(pid: pid, waitForExit: true)
+            cleanupStaleBundledLlamaServers()
             detachOutputPipe()
             closeLogHandle()
             process = nil
@@ -171,6 +174,7 @@ private final class BackendManager {
         }
 
         detachOutputPipe()
+        cleanupStaleBundledLlamaServers()
         closeLogHandle()
         process = nil
         externalBackendPID = nil
@@ -1100,6 +1104,58 @@ private final class BackendManager {
             appendLauncherLog(
                 "Forced \(stubborn.count) backend descendant process(es) to exit: "
                     + stubborn.map(String.init).joined(separator: ", ")
+                    + ".\n"
+            )
+        }
+    }
+
+    private func cleanupStaleBundledLlamaServers() {
+        guard let serverPath = bundledLlamaServerURL()?.standardizedFileURL.path,
+              let output = runProcessCapture(
+                  executable: "/bin/ps",
+                  arguments: ["-ww", "-axo", "pid=,command="]
+              ) else {
+            return
+        }
+        var stale: [pid_t] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard parts.count == 2,
+                  let pid = pid_t(parts[0]),
+                  pid > 0,
+                  pid != getpid() else {
+                continue
+            }
+            let command = String(parts[1])
+            let managedAlias = command.contains("--alias tater-llama")
+                || command.contains("--alias=tater-llama")
+                || command.contains("--alias qwen3-asr")
+                || command.contains("--alias=qwen3-asr")
+            let ownsBinary = command == serverPath
+                || command.hasPrefix(serverPath + " ")
+                || command.hasPrefix("\"" + serverPath + "\" ")
+            if managedAlias && ownsBinary {
+                stale.append(pid)
+            }
+        }
+        guard !stale.isEmpty else { return }
+        appendLauncherLog(
+            "Cleaning up \(stale.count) stale bundled llama-server process(es): "
+                + stale.map(String.init).joined(separator: ", ")
+                + ".\n"
+        )
+        for pid in stale {
+            Darwin.kill(pid, SIGKILL)
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while stale.contains(where: processExists) && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let remaining = stale.filter(processExists)
+        if !remaining.isEmpty {
+            appendLauncherLog(
+                "Bundled llama-server process(es) still present after cleanup: "
+                    + remaining.map(String.init).joined(separator: ", ")
                     + ".\n"
             )
         }
