@@ -307,7 +307,7 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
 
         self.assertIn('return "satellite1_rpi_standalone"', firmware_source)
         self.assertIn('return "satellite1_rpi_satellite"', firmware_source)
-        self.assertIn("_SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 30 * 60.0", firmware_source)
+        self.assertIn("_SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 60 * 60.0", firmware_source)
 
     def test_native_ota_sends_manifest_integrity_fields(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
