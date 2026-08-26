@@ -46,6 +46,7 @@ _FIRMWARE_SESSION_MAX_ENTRIES = 4000
 _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
 _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 5 * 60.0
+_SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 30 * 60.0
 _FIRMWARE_USB_RECOVERY_SELECTOR = "__usb_recovery__"
 _FIRMWARE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _FIRMWARE_SESSION_LOCK = threading.Lock()
@@ -3439,7 +3440,13 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
             session["ota_reboot_requested"] = False
             session["ota_disconnect_seen"] = False
             session["ota_reconnect_seen"] = False
-            session["ota_verify_deadline_ts"] = time.time() + _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS
+            verify_timeout = (
+                _SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS
+                if _lower(session.get("template_key"))
+                in {"satellite1_rpi_standalone", "satellite1_rpi_satellite"}
+                else _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS
+            )
+            session["ota_verify_deadline_ts"] = time.time() + verify_timeout
             session["device_log_cursor"] = int(baseline_logs.get("cursor") or 0)
 
         result = native_satellite.run_on_runtime_loop(
