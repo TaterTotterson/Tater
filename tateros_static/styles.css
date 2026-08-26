@@ -9609,69 +9609,247 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   box-shadow: none;
 }
 
-.people-face-captures {
+.people-face-review-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(240, 131, 69, 0.16);
+  border-radius: 10px;
+  background:
+    linear-gradient(105deg, rgba(240, 131, 69, 0.09), transparent 60%),
+    rgba(0, 0, 0, 0.17);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.people-face-review-trigger:hover,
+.people-face-review-trigger:focus-visible {
+  outline: none;
+  border-color: rgba(240, 131, 69, 0.42);
+  background:
+    linear-gradient(105deg, rgba(240, 131, 69, 0.14), transparent 64%),
+    rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+}
+
+.people-face-review-trigger-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.people-face-review-trigger-copy small {
+  color: #9c9187;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.people-face-review-trigger-copy strong {
+  color: #eadfd5;
+  font-size: 0.78rem;
+}
+
+.people-face-review-trigger-action {
+  flex: 0 0 auto;
+  color: var(--accent-soft);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.people-face-review-trigger-action span {
+  margin-left: 3px;
+  font-size: 0.85rem;
+}
+
+.people-face-empty {
   border-top: 1px solid rgba(255, 255, 255, 0.055);
   padding-top: 8px;
 }
 
-.people-face-captures > summary {
-  cursor: pointer;
-  color: #d7cdc4;
-  font-size: 0.75rem;
+.people-face-review-dialog {
+  width: min(1040px, 96vw);
+  padding: 16px;
+  border-color: rgba(240, 131, 69, 0.2);
+  background:
+    radial-gradient(circle at 4% 0, rgba(240, 131, 69, 0.12), transparent 31%),
+    linear-gradient(180deg, rgba(35, 36, 39, 0.99), rgba(21, 22, 25, 0.99));
+}
+
+.people-face-review-modal-head {
+  flex: 0 0 auto;
+  align-items: flex-start;
+  margin-bottom: 0;
+  padding-bottom: 11px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.people-face-review-modal-head .small {
+  color: var(--accent-soft);
+  font-size: 0.67rem;
   font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.people-face-review-modal-head .card-title {
+  margin-top: 3px;
+}
+
+.people-face-review-modal-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.people-face-review-modal-body {
+  margin-top: 0;
+  padding: 12px 2px 2px;
+}
+
+.people-face-review-content {
+  display: grid;
+  gap: 11px;
+  min-height: 0;
+}
+
+.people-face-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.17);
+}
+
+.people-face-review-toolbar > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.people-face-review-toolbar strong {
+  color: #e5dbd1;
+  font-size: 0.76rem;
+}
+
+.people-face-review-toolbar span {
+  color: var(--muted);
+  font-size: 0.67rem;
+}
+
+.people-face-review-selection-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.people-face-selection-count {
+  min-width: 70px;
+  color: var(--accent-soft) !important;
+  font-weight: 800;
+  text-align: right;
 }
 
 .people-face-gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
-  gap: 7px;
-  margin-top: 9px;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 9px;
 }
 
-.view-root[data-view="settings"] label.people-face-capture {
+.people-face-capture {
   position: relative;
   display: grid;
-  grid-template-columns: none;
   gap: 4px;
   min-width: 0;
-  padding: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.065);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.19);
+  padding: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.025), transparent 55%),
+    rgba(0, 0, 0, 0.21);
+  color: inherit;
   box-shadow: none;
+  text-align: left;
+  cursor: pointer;
+  transform: translateY(0);
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
-.view-root[data-view="settings"] label.people-face-capture:hover {
+.people-face-capture:hover,
+.people-face-capture:focus-visible {
+  outline: none;
   border-color: rgba(240, 131, 69, 0.34);
   background: rgba(240, 131, 69, 0.06);
+  transform: translateY(-1px);
 }
 
-.people-face-capture input {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
+.people-face-capture.is-selected,
+.people-face-capture[aria-pressed="true"] {
+  border-color: rgba(255, 154, 87, 0.9);
+  background:
+    linear-gradient(155deg, rgba(240, 131, 69, 0.2), transparent 58%),
+    rgba(35, 20, 11, 0.62);
+  box-shadow:
+    0 0 0 2px rgba(240, 131, 69, 0.18),
+    0 9px 24px rgba(0, 0, 0, 0.24);
 }
 
 .people-face-capture img {
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 5px;
+  border-radius: 7px;
   object-fit: cover;
 }
 
-.people-face-capture span {
+.people-face-capture-time {
   overflow: hidden;
   color: var(--muted);
-  font-size: 0.59rem;
+  font-size: 0.62rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.people-face-bulk-actions,
+.people-face-selection-mark {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(17, 18, 20, 0.76);
+  color: transparent;
+  font-size: 0.75rem;
+  font-weight: 900;
+  opacity: 0.72;
+  backdrop-filter: blur(5px);
+  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+}
+
+.people-face-capture.is-selected .people-face-selection-mark,
+.people-face-capture[aria-pressed="true"] .people-face-selection-mark {
+  border-color: rgba(255, 210, 176, 0.82);
+  background: var(--accent);
+  color: #1b110b;
+  opacity: 1;
+}
+
+.people-face-review-actions,
 .people-face-footer {
   display: flex;
   flex-wrap: wrap;
@@ -9680,10 +9858,36 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   margin-top: 9px;
 }
 
-.people-face-bulk-actions select,
+.people-face-review-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 11px;
+  border: 1px solid rgba(240, 131, 69, 0.15);
+  border-radius: 11px;
+  background: rgba(27, 28, 31, 0.96);
+  box-shadow: 0 -10px 26px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(12px);
+}
+
+.people-face-destination {
+  display: grid;
+  flex: 1 1 260px;
+  gap: 5px;
+  min-width: 210px;
+  color: #d8d0c7;
+  font-size: 0.69rem;
+  font-weight: 700;
+}
+
+.people-face-destination select,
 .people-face-footer select {
   flex: 1 1 170px;
   min-width: 0;
+}
+
+.people-face-review-actions .core-manager-status {
+  flex: 1 0 100%;
 }
 
 .people-face-footer {
@@ -9781,8 +9985,42 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
     grid-template-columns: 1fr;
   }
 
+  .people-face-review-dialog {
+    width: min(96vw, 680px);
+    padding: 12px;
+  }
+
+  .people-face-review-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .people-face-review-selection-tools {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .people-face-selection-count {
+    margin-right: auto;
+    text-align: left;
+  }
+
+  .people-face-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+
+  .people-face-review-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .people-face-destination {
+    flex-basis: auto;
+    min-width: 0;
+  }
+
   .people-face-fields button,
-  .people-face-bulk-actions button,
+  .people-face-review-actions button,
   .people-face-footer button {
     width: 100%;
   }

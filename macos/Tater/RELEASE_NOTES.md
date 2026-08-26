@@ -26,6 +26,11 @@ and the People settings layout.
 
 - Keeps People, Faces, and Identities together on one tab row, with compact
   horizontal scrolling on narrower screens.
+- Replaces the cramped saved-face checkbox list with a themed review gallery
+  where face images can be clicked directly, selected together, moved to the
+  correct person or profile, or permanently deleted.
+- Adds clear selected-image highlighting, selection counts, Select All and
+  Clear controls, and responsive gallery actions for smaller screens.
 
 ## Updating
 

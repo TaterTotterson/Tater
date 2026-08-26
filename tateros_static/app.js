@@ -22791,6 +22791,120 @@ function openPeoplePersonModal(card) {
   window.setTimeout(() => body.querySelector("[data-people-field='display_name']")?.focus(), 40);
 }
 
+function ensurePeopleFaceReviewModal() {
+  let modal = document.getElementById("people-face-review-modal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="people-face-review-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card people-face-review-dialog" role="dialog" aria-modal="true" aria-labelledby="people-face-review-modal-title">
+          <div class="card-head people-face-review-modal-head">
+            <div>
+              <div class="small">Face ID Gallery</div>
+              <h3 id="people-face-review-modal-title" class="card-title">Review Saved Images</h3>
+              <p id="people-face-review-modal-meta">Select the captures that belong somewhere else.</p>
+            </div>
+            <button type="button" id="people-face-review-modal-close" class="inline-btn">Close</button>
+          </div>
+          <div id="people-face-review-modal-body" class="cerb-modal-body people-face-review-modal-body"></div>
+        </div>
+      </div>
+    `
+  );
+  modal = document.getElementById("people-face-review-modal");
+  const close = () => closePopupModal(modal);
+  document.getElementById("people-face-review-modal-close")?.addEventListener("click", close);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.classList.contains("active")) close();
+  });
+  return modal;
+}
+
+function syncPeopleFaceReviewSelection(reviewRoot) {
+  if (!(reviewRoot instanceof HTMLElement)) return;
+  const captures = Array.from(reviewRoot.querySelectorAll("[data-people-face-observation]"));
+  const selected = captures.filter((capture) => capture.getAttribute("aria-pressed") === "true");
+  const selectionCount = reviewRoot.querySelector("[data-people-face-selection-count]");
+  if (selectionCount) {
+    selectionCount.textContent = `${selected.length} selected`;
+  }
+  reviewRoot.querySelectorAll("[data-people-face-selection-required]").forEach((control) => {
+    control.disabled = selected.length === 0;
+  });
+  const selectAll = reviewRoot.querySelector("[data-people-face-select-all]");
+  if (selectAll) selectAll.disabled = captures.length === 0 || selected.length === captures.length;
+  const clear = reviewRoot.querySelector("[data-people-face-clear]");
+  if (clear) clear.disabled = selected.length === 0;
+}
+
+function setPeopleFaceCaptureSelected(capture, selected) {
+  if (!(capture instanceof HTMLElement)) return;
+  const active = Boolean(selected);
+  capture.setAttribute("aria-pressed", active ? "true" : "false");
+  capture.classList.toggle("is-selected", active);
+}
+
+function bindPeopleFaceReviewSelection(root = document) {
+  const host = root instanceof HTMLElement ? root : document;
+  host.querySelectorAll("[data-people-face-observation]").forEach((capture) => {
+    if (capture.dataset.peopleFaceSelectionBound === "1") return;
+    capture.dataset.peopleFaceSelectionBound = "1";
+    capture.addEventListener("click", () => {
+      setPeopleFaceCaptureSelected(capture, capture.getAttribute("aria-pressed") !== "true");
+      syncPeopleFaceReviewSelection(capture.closest(".people-face-review-content"));
+    });
+  });
+  host.querySelectorAll("[data-people-face-select-all]").forEach((button) => {
+    if (button.dataset.peopleFaceSelectionBound === "1") return;
+    button.dataset.peopleFaceSelectionBound = "1";
+    button.addEventListener("click", () => {
+      const reviewRoot = button.closest(".people-face-review-content");
+      reviewRoot?.querySelectorAll?.("[data-people-face-observation]").forEach((capture) => {
+        setPeopleFaceCaptureSelected(capture, true);
+      });
+      syncPeopleFaceReviewSelection(reviewRoot);
+    });
+  });
+  host.querySelectorAll("[data-people-face-clear]").forEach((button) => {
+    if (button.dataset.peopleFaceSelectionBound === "1") return;
+    button.dataset.peopleFaceSelectionBound = "1";
+    button.addEventListener("click", () => {
+      const reviewRoot = button.closest(".people-face-review-content");
+      reviewRoot?.querySelectorAll?.("[data-people-face-observation]").forEach((capture) => {
+        setPeopleFaceCaptureSelected(capture, false);
+      });
+      syncPeopleFaceReviewSelection(reviewRoot);
+    });
+  });
+  host.querySelectorAll(".people-face-review-content").forEach(syncPeopleFaceReviewSelection);
+}
+
+function openPeopleFaceReviewModal(card) {
+  if (!(card instanceof HTMLElement)) return;
+  const modal = ensurePeopleFaceReviewModal();
+  const dialog = modal?.querySelector(".people-face-review-dialog");
+  const body = modal?.querySelector("#people-face-review-modal-body");
+  const title = modal?.querySelector("#people-face-review-modal-title");
+  const meta = modal?.querySelector("#people-face-review-modal-meta");
+  const template = card.querySelector(".people-face-review-template");
+  const identityId = String(card.dataset.faceIdentityId || "").trim();
+  const displayName = String(card.querySelector(".people-face-copy strong")?.textContent || "Face profile").trim() || "Face profile";
+  const captureCount = Math.max(0, Number(card.dataset.faceCaptureCount || 0));
+  if (!(dialog instanceof HTMLElement) || !(body instanceof HTMLElement) || !(template instanceof HTMLTemplateElement)) return;
+  dialog.dataset.faceIdentityId = identityId;
+  if (title) title.textContent = displayName;
+  if (meta) meta.textContent = `${captureCount} saved ${captureCount === 1 ? "image" : "images"} · Click an image to select it.`;
+  body.innerHTML = template.innerHTML;
+  openPopupModal(modal);
+  bindSettingsPeopleActions();
+  bindPeopleFaceReviewSelection(body);
+  window.setTimeout(() => body.querySelector("[data-people-face-observation]")?.focus(), 40);
+}
+
 function renderPeopleFaceCard(face, faces, people) {
   const identityId = String(face?.id || "").trim();
   const name = String(face?.name || "").trim();
@@ -22807,7 +22921,11 @@ function renderPeopleFaceCard(face, faces, people) {
     .map((candidate) => {
       const candidateId = String(candidate?.id || "").trim();
       const candidateName = String(candidate?.name || "").trim() || `Unknown face · ${candidateId.slice(-6)}`;
-      return `<option value="${escapeHtml(candidateId)}">${escapeHtml(candidateName)}</option>`;
+      const candidatePerson = String(candidate?.person_name || "").trim();
+      const optionLabel = candidatePerson && candidatePerson !== candidateName
+        ? `${candidatePerson} · ${candidateName}`
+        : candidateName;
+      return `<option value="${escapeHtml(candidateId)}">${escapeHtml(optionLabel)}</option>`;
     })
     .join("");
   const galleryHtml = gallery.length
@@ -22817,17 +22935,23 @@ function renderPeopleFaceCard(face, faces, people) {
           const observationSrc = String(observation?.image_src || "").trim();
           const seenAt = String(observation?.seen_at || "").trim();
           return `
-            <label class="people-face-capture">
-              <input type="checkbox" value="${escapeHtml(observationId)}" data-people-face-observation />
+            <button
+              type="button"
+              class="people-face-capture"
+              data-people-face-observation="${escapeHtml(observationId)}"
+              aria-pressed="false"
+              aria-label="Select face captured ${escapeHtml(peopleTimeLabel(seenAt))}"
+            >
               <img src="${escapeHtml(observationSrc)}" alt="Face captured ${escapeHtml(peopleTimeLabel(seenAt))}" loading="lazy" />
-              <span>${escapeHtml(peopleTimeLabel(seenAt))}</span>
-            </label>
+              <span class="people-face-capture-time">${escapeHtml(peopleTimeLabel(seenAt))}</span>
+              <span class="people-face-selection-mark" aria-hidden="true">✓</span>
+            </button>
           `;
         }).join("")}
       </div>`
     : renderNotice("No retained face crops are available for this profile.");
   return `
-    <article class="people-face-card" data-face-identity-id="${escapeHtml(identityId)}">
+    <article class="people-face-card" data-face-identity-id="${escapeHtml(identityId)}" data-face-capture-count="${gallery.length}">
       <div class="people-face-summary">
         <div class="people-face-avatar">
           ${imageSrc ? `<img src="${escapeHtml(imageSrc)}" alt="${escapeHtml(name || "Unknown face")}" loading="lazy" />` : `<span>${escapeHtml(_avatarInitial(name, "?"))}</span>`}
@@ -22853,21 +22977,43 @@ function renderPeopleFaceCard(face, faces, people) {
         </label>
         <button type="button" class="inline-btn people-face-save">Save</button>
       </div>
-      <details class="people-face-captures">
-        <summary>Review ${gallery.length} saved ${gallery.length === 1 ? "image" : "images"}</summary>
-        ${galleryHtml}
-        ${gallery.length ? `
-          <div class="people-face-bulk-actions">
-            <select data-people-face-target aria-label="Destination face profile">
-              <option value="">Choose destination...</option>
-              ${targetOptions}
-              <option value="__new_unknown__">New unknown face</option>
-            </select>
-            <button type="button" class="inline-btn people-face-move">Move Selected</button>
-            <button type="button" class="inline-btn danger people-face-remove-images">Remove Selected</button>
+      ${gallery.length ? `
+        <button type="button" class="people-face-review-trigger" data-people-face-review>
+          <span class="people-face-review-trigger-copy">
+            <small>Saved face images</small>
+            <strong>Review ${gallery.length} ${gallery.length === 1 ? "image" : "images"}</strong>
+          </span>
+          <span class="people-face-review-trigger-action">Open Gallery <span aria-hidden="true">→</span></span>
+        </button>
+        <template class="people-face-review-template">
+          <div class="people-face-review-content" data-face-identity-id="${escapeHtml(identityId)}">
+            <div class="people-face-review-toolbar">
+              <div>
+                <strong>Choose the images you want to organize</strong>
+                <span>Click any face to select it. Select as many as you need.</span>
+              </div>
+              <div class="people-face-review-selection-tools">
+                <span class="people-face-selection-count" data-people-face-selection-count>0 selected</span>
+                <button type="button" class="inline-btn" data-people-face-select-all>Select All</button>
+                <button type="button" class="inline-btn" data-people-face-clear disabled>Clear</button>
+              </div>
+            </div>
+            ${galleryHtml}
+            <div class="people-face-review-actions">
+              <label class="people-face-destination">Move selected images to
+                <select data-people-face-target aria-label="Destination person or face profile">
+                  <option value="">Choose person or face...</option>
+                  ${targetOptions}
+                  <option value="__new_unknown__">New unknown face</option>
+                </select>
+              </label>
+              <button type="button" class="action-btn people-face-move" data-people-face-selection-required disabled>Move Selected</button>
+              <button type="button" class="inline-btn danger people-face-remove-images" data-people-face-selection-required disabled>Permanently Delete</button>
+              <span class="small core-manager-status"></span>
+            </div>
           </div>
-        ` : ""}
-      </details>
+        </template>
+      ` : `<div class="people-face-empty">${galleryHtml}</div>`}
       <div class="people-face-footer">
         <select data-people-face-merge-target aria-label="Face profile to merge into">
           <option value="">Merge profile into...</option>
@@ -23026,6 +23172,13 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
 }
 
 function bindSettingsPeopleActions() {
+  document.querySelectorAll("[data-people-face-review]").forEach((trigger) => {
+    if (trigger.dataset.peopleFaceReviewBound === "1") return;
+    trigger.dataset.peopleFaceReviewBound = "1";
+    trigger.addEventListener("click", () => openPeopleFaceReviewModal(trigger.closest(".people-face-card")));
+  });
+  bindPeopleFaceReviewSelection();
+
   document.querySelectorAll("[data-people-person-open]").forEach((trigger) => {
     if (trigger.dataset.peoplePersonOpenBound === "1") return;
     trigger.dataset.peoplePersonOpenBound = "1";
@@ -23208,8 +23361,10 @@ function bindSettingsPeopleActions() {
     await runPeopleAction(row, "people_identity_forget", { platform, external_id: externalId }, "Identity forgotten.");
   });
 
-  const faceSelection = (card) => Array.from(card?.querySelectorAll?.("[data-people-face-observation]:checked") || [])
-    .map((input) => String(input?.value || "").trim())
+  const faceSelection = (host) => Array.from(
+    host?.querySelectorAll?.("[data-people-face-observation][aria-pressed='true']") || []
+  )
+    .map((capture) => String(capture?.dataset?.peopleFaceObservation || "").trim())
     .filter(Boolean);
 
   bindPeopleButton(".people-face-save", async (event) => {
@@ -23242,9 +23397,9 @@ function bindSettingsPeopleActions() {
   });
 
   bindPeopleButton(".people-face-move", async (event) => {
-    const card = event.currentTarget?.closest?.(".people-face-card");
-    const observationIds = faceSelection(card);
-    const targetIdentityId = String(card?.querySelector?.("[data-people-face-target]")?.value || "").trim();
+    const host = event.currentTarget?.closest?.(".people-face-card, .people-face-review-content");
+    const observationIds = faceSelection(host);
+    const targetIdentityId = String(host?.querySelector?.("[data-people-face-target]")?.value || "").trim();
     if (!observationIds.length) {
       showToast("Select at least one face image.", "error", 3200);
       return;
@@ -23254,26 +23409,26 @@ function bindSettingsPeopleActions() {
       return;
     }
     await runPeopleAction(
-      card,
+      host,
       "people_face_move_images",
-      { identity_id: String(card?.dataset?.faceIdentityId || "").trim(), values: { target_identity_id: targetIdentityId, observation_ids: observationIds } },
+      { identity_id: String(host?.dataset?.faceIdentityId || "").trim(), values: { target_identity_id: targetIdentityId, observation_ids: observationIds } },
       "Face images moved."
     );
   });
 
   bindPeopleButton(".people-face-remove-images", async (event) => {
-    const card = event.currentTarget?.closest?.(".people-face-card");
-    const observationIds = faceSelection(card);
+    const host = event.currentTarget?.closest?.(".people-face-card, .people-face-review-content");
+    const observationIds = faceSelection(host);
     if (!observationIds.length) {
       showToast("Select at least one face image.", "error", 3200);
       return;
     }
-    if (!window.confirm(`Remove ${observationIds.length} selected face image${observationIds.length === 1 ? "" : "s"}?`)) return;
+    if (!window.confirm(`Permanently delete ${observationIds.length} selected face image${observationIds.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
     await runPeopleAction(
-      card,
+      host,
       "people_face_remove_images",
-      { identity_id: String(card?.dataset?.faceIdentityId || "").trim(), values: { observation_ids: observationIds } },
-      "Face images removed."
+      { identity_id: String(host?.dataset?.faceIdentityId || "").trim(), values: { observation_ids: observationIds } },
+      "Face images permanently deleted."
     );
   });
 
