@@ -1240,9 +1240,11 @@ private final class BackendManager {
         process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
+        let data: Data
         do {
             try process.run()
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
         } catch {
             return nil
@@ -1250,7 +1252,6 @@ private final class BackendManager {
         guard process.terminationStatus == 0 else {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output
     }

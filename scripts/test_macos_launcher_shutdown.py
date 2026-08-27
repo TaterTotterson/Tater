@@ -192,6 +192,16 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         stop_implementation = self.source[stop_start:stop_end]
         self.assertGreaterEqual(stop_implementation.count("cleanupStaleBundledLlamaServers()"), 3)
 
+    def test_process_capture_drains_output_before_waiting_for_exit(self) -> None:
+        start = self.source.index("private func runProcessCapture")
+        end = self.source.index("private func waitForWebReady", start)
+        implementation = self.source[start:end]
+
+        read_index = implementation.index("readDataToEndOfFile()")
+        wait_index = implementation.index("process.waitUntilExit()")
+        self.assertLess(read_index, wait_index)
+        self.assertIn("process.standardError = FileHandle.nullDevice", implementation)
+
     def test_installer_forces_stuck_old_app_to_exit_before_replacing_it(self) -> None:
         start = self.source.index("private func writeInstallerScript()")
         end = self.source.index("private func safePathComponent", start)

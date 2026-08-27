@@ -31,6 +31,11 @@ edge installs can use the models already running on their main Tater.
 - Lets Awareness use Hub-hosted Face ID while preserving recognized names in
   event history and notifications.
 
+### macOS Reliability
+
+- Prevents the stale llama.cpp cleanup from hanging Tater during startup on
+  Macs with a large process list.
+
 ## Updating
 
 - macOS users already running v1.0.1 or later can install v1.1.13 through
