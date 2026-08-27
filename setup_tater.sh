@@ -1095,7 +1095,7 @@ main() {
   elif [ "${profile}" = "macos" ]; then
     warn "macOS profile can use Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro, plus MLX Whisper for STT."
   elif [ "${profile}" = "edge" ]; then
-    warn "Edge profile disables local model runtimes. Configure remote LLM, Wyoming STT, and Wyoming or OpenAI-compatible TTS providers in TaterOS."
+    warn "Edge profile disables local model runtimes. Pair it as a Spudlet to use Spud Hub model routing, or configure standalone remote providers in TaterOS."
   fi
 
   ensure_linux_build_tools "${profile}"

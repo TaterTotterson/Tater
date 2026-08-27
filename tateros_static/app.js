@@ -24110,6 +24110,62 @@ async function loadSettingsView() {
   const spudLinkPairEndpoint = `${window.location.origin.replace(/\/$/, "")}/api/spudlink/pair`;
   const spudLinkNodes = Array.isArray(spudLink.linked_nodes) ? spudLink.linked_nodes : [];
   const spudLinkPairedHub = spudLink.paired_hub && typeof spudLink.paired_hub === "object" ? spudLink.paired_hub : {};
+  const spudLinkModelRouting =
+    spudLink.model_routing && typeof spudLink.model_routing === "object" ? spudLink.model_routing : {};
+  const spudLinkModelRoutingEnabled = Boolean(
+    settings?.spud_link_model_routing_enabled ?? spudLink.model_routing_enabled ?? spudLinkModelRouting.enabled
+  );
+  const spudLinkModelRouteSpecs = [
+    { id: "llm", label: "LLM", note: "Hydra planning, tools, chat, and final answers" },
+    { id: "stt", label: "Speech to Text", note: "Transcription runs on the Hub; wake word and VAD stay here" },
+    { id: "tts", label: "Text to Speech", note: "The Hub returns ready-to-play speech audio" },
+    { id: "vision", label: "Vision", note: "Image descriptions and camera snapshots" },
+    { id: "audio", label: "Audio Understanding", note: "Music and general audio analysis" },
+    { id: "video", label: "Video Understanding", note: "Camera clips and attached video analysis" },
+    { id: "speaker_id", label: "Speaker ID", note: "Voice identity matching uses the Hub profiles" },
+    { id: "emotion_id", label: "Emotion ID", note: "Voice tone analysis" },
+    { id: "face_id", label: "Face ID", note: "Face matching uses the Hub People library" },
+  ];
+  const spudLinkModelRouteValue = (kind) => {
+    const configured = String(
+      settings?.[`spud_link_model_route_${kind}`] || spudLinkModelRouting?.routes?.[kind] || (kind === "llm" ? "hub" : "auto")
+    ).trim().toLowerCase();
+    return ["auto", "hub", "local"].includes(configured) ? configured : kind === "llm" ? "hub" : "auto";
+  };
+  const renderSpudLinkModelRoutes = () => `
+    <div class="spud-link-model-grid">
+      ${spudLinkModelRouteSpecs
+        .map((spec) => {
+          const route = spudLinkModelRouteValue(spec.id);
+          const effectiveHub =
+            spudLinkMode === "spudlet" &&
+            Boolean(spudLinkPairedHub.connected) &&
+            route !== "local" &&
+            (spec.id === "llm" || route === "hub" || spudLinkModelRoutingEnabled);
+          return `
+            <label class="spud-link-model-route ${effectiveHub ? "is-hub" : "is-local"}" data-spud-link-model-route-card="${escapeHtml(spec.id)}">
+              <span class="spud-link-model-route-copy">
+                <strong>${escapeHtml(spec.label)}</strong>
+                <small>${escapeHtml(spec.note)}</small>
+              </span>
+              <span class="spud-link-model-route-controls">
+                ${
+                  spec.id === "llm"
+                    ? `<input id="set_spud_link_model_route_llm" type="hidden" value="hub" /><span class="spud-link-model-fixed">Spud Hub</span>`
+                    : `<select id="set_spud_link_model_route_${escapeHtml(spec.id)}" data-spud-link-model-route="${escapeHtml(spec.id)}">
+                  <option value="auto" ${route === "auto" ? "selected" : ""}>Auto</option>
+                  <option value="hub" ${route === "hub" ? "selected" : ""}>Spud Hub</option>
+                  <option value="local" ${route === "local" ? "selected" : ""}>This Tater</option>
+                </select>`
+                }
+                <small data-spud-link-model-route-status>${effectiveHub ? "Loaded on Spud Hub" : "Runs on this Tater"}</small>
+              </span>
+            </label>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
   const spudLinkModeLabel = (mode) => {
     const token = String(mode || "").trim().toLowerCase();
     if (token === "hub") return "Spud Hub";
@@ -24198,7 +24254,7 @@ async function loadSettingsView() {
         <span class="spud-link-node-dot" aria-hidden="true"></span>
         <span class="spud-link-node-main">
           <strong>${connected ? `Connected to ${escapeHtml(hubName)}` : "Not connected to a Spud Hub"}</strong>
-          <small>${connected ? "This Tater is routing local LLM calls through the paired Hub." : "Pair this Spudlet with a Hub using the manual pairing code."}</small>
+          <small>${connected ? "This Tater can route its selected AI models through the paired Hub." : "Pair this Spudlet with a Hub using the manual pairing code."}</small>
           ${detailItems.length ? `<span class="spud-link-node-details">${detailItems.map((item) => `<small>${escapeHtml(item)}</small>`).join("")}</span>` : ""}
         </span>
       </div>
@@ -24333,8 +24389,10 @@ async function loadSettingsView() {
               <div class="small">Off by default; keeps Hub logs metadata-first.</div>
             </label>
             <div class="spud-link-endpoints">
-              <span>Spudlet Model</span>
+              <span>LLM Route</span>
               <code>${escapeHtml(spudLinkEndpoint)}</code>
+              <span>Model Gateway</span>
+              <code>${escapeHtml(`${window.location.origin.replace(/\/$/, "")}/api/spudlink/v1/models/capabilities`)}</code>
               <span>Pair</span>
               <code>${escapeHtml(spudLinkPairEndpoint)}</code>
             </div>
@@ -24362,6 +24420,25 @@ async function loadSettingsView() {
               <span id="settings-spud-link-connect-status" class="small"></span>
             </div>
           </div>
+        </section>
+
+        <section class="core-inline-section spud-link-settings-card spud-link-model-card">
+          <div class="spud-link-model-heading">
+            <div>
+              <div class="small core-inline-section-title">Model Routing</div>
+              <p class="spud-link-pairing-copy">Let this Spudlet keep its interface and device features while selected AI models stay loaded on the Spud Hub.</p>
+            </div>
+            <label class="spud-link-model-master">
+              <span><strong>Use Hub For Additional Models</strong><small>Recommended for Edge installs</small></span>
+              ${renderToggleRow(
+                `<input id="set_spud_link_model_routing_enabled" class="toggle-input" type="checkbox" ${
+                  spudLinkModelRoutingEnabled ? "checked" : ""
+                } />`
+              )}
+            </label>
+          </div>
+          ${renderSpudLinkModelRoutes()}
+          <div class="spud-link-model-footnote">Auto follows the switch above. A specific Spud Hub or This Tater choice overrides Auto. Wake Word and voice activity detection always remain on this device.</div>
         </section>
 
         ${
@@ -28145,6 +28222,25 @@ async function loadSettingsView() {
     fieldEl?.addEventListener("change", () => syncHydraPrimaryModelControl(hydraBaseProviderEl?.value || ""));
     fieldEl?.addEventListener("blur", () => syncHydraPrimaryModelControl(hydraBaseProviderEl?.value || ""));
   });
+  const refreshSpudLinkModelRoutingUi = () => {
+    const mode = String(document.getElementById("set_spud_link_mode")?.value || "disabled").trim().toLowerCase();
+    const enabled = Boolean(document.getElementById("set_spud_link_model_routing_enabled")?.checked);
+    const paired = Boolean(
+      spudLinkPairedHub.connected ||
+        (settings.spud_link_node_token_set && (settings.spud_link_hub_url || spudLink.hub_url))
+    );
+    document.querySelectorAll("[data-spud-link-model-route-card]").forEach((card) => {
+      const kind = String(card.dataset.spudLinkModelRouteCard || "").trim();
+      const route = String(document.getElementById(`set_spud_link_model_route_${kind}`)?.value || (kind === "llm" ? "hub" : "auto"));
+      const useHub = paired && mode === "spudlet" && route !== "local" && (kind === "llm" || route === "hub" || enabled);
+      card.classList.toggle("is-hub", useHub);
+      card.classList.toggle("is-local", !useHub);
+      const statusEl = card.querySelector("[data-spud-link-model-route-status]");
+      if (statusEl) {
+        statusEl.textContent = useHub ? "Loaded on Spud Hub" : "Runs on this Tater";
+      }
+    });
+  };
   document.getElementById("set_spud_link_mode")?.addEventListener("change", (event) => {
     const mode = String(event.currentTarget?.value || "").trim().toLowerCase();
     if (mode === "spudlet" && hydraBaseProviderEl) {
@@ -28155,7 +28251,13 @@ async function loadSettingsView() {
       syncHydraPrimaryProviderFields();
       syncVisionModeFields();
     }
+    refreshSpudLinkModelRoutingUi();
   });
+  document.getElementById("set_spud_link_model_routing_enabled")?.addEventListener("change", refreshSpudLinkModelRoutingUi);
+  document.querySelectorAll("[data-spud-link-model-route]").forEach((selectEl) => {
+    selectEl.addEventListener("change", refreshSpudLinkModelRoutingUi);
+  });
+  refreshSpudLinkModelRoutingUi();
   hydraBaseModelSelectEl?.addEventListener("change", () => {
     if (hydraBaseModelEl) {
       hydraBaseModelEl.value = String(hydraBaseModelSelectEl.value || "").trim();
@@ -32159,6 +32261,13 @@ async function loadSettingsView() {
       spud_link_little_spud_tools_enabled: Boolean(document.getElementById("set_spud_link_little_spud_tools_enabled")?.checked),
       spud_link_telemetry_enabled: Boolean(document.getElementById("set_spud_link_telemetry_enabled")?.checked),
       spud_link_request_previews_enabled: Boolean(document.getElementById("set_spud_link_request_previews_enabled")?.checked),
+      spud_link_model_routing_enabled: Boolean(document.getElementById("set_spud_link_model_routing_enabled")?.checked),
+      ...Object.fromEntries(
+        spudLinkModelRouteSpecs.map((spec) => [
+          `spud_link_model_route_${spec.id}`,
+          document.getElementById(`set_spud_link_model_route_${spec.id}`)?.value || (spec.id === "llm" ? "hub" : "auto"),
+        ])
+      ),
       spud_link_hub_url: String(document.getElementById("set_spud_link_hub_url")?.value || "").trim(),
       esphome_settings: esphomeSettingsValues,
     };

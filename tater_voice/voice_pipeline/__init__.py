@@ -61,6 +61,7 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from runtime_executors import run_background, run_speech
 from tater_paths import agent_lab_path
 from tater_runtime_profile import remote_only_enabled
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 from tateros import integration_store as integration_store_module
 import verba_registry
 from verba_settings import get_verba_enabled
@@ -2437,6 +2438,8 @@ def _normalize_stt_backend(value: Any) -> str:
         return "vosk"
     if token == "wyoming":
         return "wyoming"
+    if token in {"spud_link", "spudhub", "spud_hub"}:
+        return "spud_link"
     return DEFAULT_STT_BACKEND
 
 
@@ -4148,6 +4151,9 @@ def _selected_stt_backend() -> str:
 
 def _stt_backend_available(backend: str) -> Tuple[bool, str]:
     token = _normalize_stt_backend(backend)
+    if token == "spud_link":
+        ok = spud_link_should_use_hub("stt", redis_conn=redis_client)
+        return ok, "Spud Link STT routing is not enabled or paired."
     if token == "wyoming":
         ok = (
             AsyncTcpClient is not None
@@ -7108,6 +7114,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         tts_cfg = voice_cfg.get("tts") if isinstance(voice_cfg.get("tts"), dict) else {}
         requested_stt_backend = _normalize_stt_backend(stt_cfg.get("backend"))
         effective_stt_backend, stt_backend_note = _resolve_stt_backend_selected(requested_stt_backend)
+        if spud_link_should_use_hub("stt", redis_conn=redis_client):
+            effective_stt_backend = "spud_link"
+            stt_backend_note = "Loaded on Spud Hub"
         requested_tts_backend = _normalize_tts_backend(tts_cfg.get("backend"))
         effective_tts_backend, tts_backend_note = _resolve_tts_backend_selected(requested_tts_backend)
         device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}

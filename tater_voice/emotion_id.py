@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import base64
 import hashlib
 import json
 import logging
@@ -15,6 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from helpers import redis_client
 from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_json as spud_link_request_json
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 from . import runtime as esphome_runtime
 
@@ -591,6 +595,18 @@ def warmup_model(*, enabled_only: bool = True) -> str:
     return f"loaded Emotion ID SpeechBrain model {source} on {_ENGINE_DEVICE or _vp()._speechbrain_device()}"
 
 
+def unload_model() -> Dict[str, Any]:
+    global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_AUTH_FINGERPRINT, _ENGINE_ERROR
+    with _ENGINE_LOCK:
+        _ENGINE = None
+        _ENGINE_SOURCE = ""
+        _ENGINE_DEVICE = ""
+        _ENGINE_REQUESTED_DEVICE = ""
+        _ENGINE_AUTH_FINGERPRINT = ""
+        _ENGINE_ERROR = ""
+    return {"loaded": False, "model": _model_source()}
+
+
 def _prepare_pcm_16k_mono(audio_bytes: bytes, audio_format: Dict[str, Any]) -> bytes:
     pcm = bytes(audio_bytes or b"")
     rate = int(audio_format.get("rate") or _vp().DEFAULT_VOICE_SAMPLE_RATE_HZ)
@@ -710,6 +726,25 @@ def classify_emotion_for_audio(
     if not emotion_id_enabled():
         _debug("classification skipped reason=disabled")
         return {"detected": False, "reason": "disabled"}
+    if spud_link_should_use_hub("emotion_id", redis_conn=redis_client):
+        try:
+            remote = spud_link_request_json(
+                "models/emotion-id",
+                payload={
+                    "data_base64": base64.b64encode(bytes(audio_bytes or b"")).decode("ascii"),
+                    "audio_format": dict(audio_format or {}),
+                    "speech_s": float(speech_s or 0.0),
+                },
+                redis_conn=redis_client,
+                timeout=120.0,
+            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            result["routed_via"] = "spud_link"
+            result["loaded_on"] = "Spud Hub"
+            return result
+        except Exception:
+            if not spud_link_allow_local_fallback("emotion_id", redis_conn=redis_client):
+                raise
     if float(speech_s or 0.0) < _min_speech_seconds():
         _debug(f"classification skipped reason=too_short speech_s={float(speech_s or 0.0):.2f}")
         return {"detected": False, "reason": "too_short"}

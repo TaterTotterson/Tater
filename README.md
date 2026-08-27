@@ -200,7 +200,7 @@ sh setup_tater.sh
 The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`.
 
 Available local profiles:
-- **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. It defaults native voice to remote Wyoming STT and WebRTC VAD.
+- **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. Pair it as a Spudlet to route LLM, STT, TTS, vision, audio/video understanding, Speaker ID, Emotion ID, and Face ID through a Spud Hub; wake-word detection and WebRTC VAD remain on the edge device. Standalone Wyoming and compatible remote providers remain available.
 - **CPU**: safe default for most local Linux installs and generic ARM hosts.
 - **macOS Apple Silicon**: native Mac setup with Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro when available, plus MLX Whisper for local STT.
 - **NVIDIA desktop/server**: native amd64 CUDA setup for RTX/GTX machines.

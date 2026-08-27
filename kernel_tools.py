@@ -54,6 +54,9 @@ from vision_settings import (
     get_vision_settings,
 )
 from media_understanding_settings import get_media_understanding_settings
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_media as spud_link_request_media
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 from tater_paths import agent_lab_dir
 
 
@@ -2797,6 +2800,25 @@ def _image_describe_call_vision_api(
     filename: str,
     prompt: str,
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if spud_link_should_use_hub("vision", redis_conn=redis_client):
+        try:
+            result = spud_link_request_media(
+                "vision",
+                data=image_bytes,
+                filename=filename,
+                mimetype=_as_text(mimetypes.guess_type(filename)[0]).strip() or "image/jpeg",
+                prompt=prompt,
+                redis_conn=redis_client,
+                timeout=120.0,
+            )
+            description = _as_text(result.get("description") or result.get("text")).strip()
+            if description:
+                return description, _as_text(result.get("model") or "Spud Hub Vision").strip(), None
+            raise RuntimeError("Spud Hub vision returned an empty description.")
+        except Exception as exc:
+            if not spud_link_allow_local_fallback("vision", redis_conn=redis_client):
+                return None, "Spud Hub Vision", f"Spud Hub vision request failed: {exc}"
+
     settings = get_vision_settings(
         default_api_base=DEFAULT_VISION_API_BASE,
         default_model=DEFAULT_VISION_MODEL,
@@ -2858,6 +2880,26 @@ def _image_describe_call_vision_api(
         model=model,
         api_key=api_key,
     )
+
+
+def describe_image_bytes(
+    *,
+    image_bytes: bytes,
+    filename: str = "image.jpg",
+    prompt: str = VISION_DEFAULT_PROMPT,
+) -> Dict[str, Any]:
+    description, model, error = _image_describe_call_vision_api(
+        image_bytes=bytes(image_bytes or b""),
+        filename=_image_describe_normalize_filename(filename, mimetypes.guess_type(filename)[0]),
+        prompt=_as_text(prompt).strip() or VISION_DEFAULT_PROMPT,
+    )
+    return {
+        "ok": not bool(error),
+        "description": _as_text(description).strip(),
+        "text": _as_text(description).strip(),
+        "model": _as_text(model).strip(),
+        "error": _as_text(error).strip(),
+    }
 
 
 def image_describe(
@@ -3176,6 +3218,25 @@ def _media_understanding_call_configured(
     filename: str,
     prompt: str,
 ) -> Tuple[Optional[str], str, Optional[str]]:
+    if spud_link_should_use_hub(media_kind, redis_conn=redis_client):
+        try:
+            result = spud_link_request_media(
+                media_kind,
+                data=data,
+                filename=filename,
+                mimetype=_as_text(mimetypes.guess_type(filename)[0]).strip() or f"{media_kind}/mpeg",
+                prompt=prompt,
+                redis_conn=redis_client,
+                timeout=240.0,
+            )
+            description = _as_text(result.get("description") or result.get("text")).strip()
+            if description:
+                return description, _as_text(result.get("model") or f"Spud Hub {media_kind.title()}").strip(), None
+            raise RuntimeError(f"Spud Hub {media_kind} understanding returned an empty description.")
+        except Exception as exc:
+            if not spud_link_allow_local_fallback(media_kind, redis_conn=redis_client):
+                return None, f"Spud Hub {media_kind.title()}", f"Spud Hub {media_kind} request failed: {exc}"
+
     settings = get_media_understanding_settings(media_kind)
     mode = _as_text(settings.get("mode") or "base").strip().lower()
     provider = _normalize_hydra_llm_provider(settings.get("provider") or "llama_cpp")

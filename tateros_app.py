@@ -242,6 +242,8 @@ from speech_tts import (
     get_runtime_tts_wav,
     synthesize_preview_wav,
 )
+from spud_link_models import MODEL_KINDS as SPUD_LINK_MODEL_KINDS
+from spud_link_models import load_model_routing_settings, normalize_route, should_use_hub as spud_link_should_use_hub
 from integration_registry import (
     assign_integration_device_room,
     bump_integration_device_registry_generation,
@@ -3955,6 +3957,9 @@ def _speech_model_warmup_tts_items(settings: Dict[str, Any]) -> List[Dict[str, s
 def _warm_speech_model_item(item: Dict[str, str]) -> str:
     kind = str(item.get("kind") or "").strip()
     backend = str(item.get("backend") or "").strip()
+    route_kind = kind if kind in {"stt", "tts", "speaker_id", "emotion_id"} else ""
+    if route_kind and spud_link_should_use_hub(route_kind, redis_conn=redis_client):
+        return "skipped local load; loaded on Spud Hub"
     if kind == "stt":
         from tater_voice import voice_pipeline as voice_pipeline
 
@@ -5928,6 +5933,8 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
         "little_spud_tools_enabled": _as_bool_flag(raw.get("little_spud_tools_enabled"), default=True),
         "telemetry_enabled": _as_bool_flag(raw.get("telemetry_enabled"), default=True),
         "request_previews_enabled": _as_bool_flag(raw.get("request_previews_enabled"), default=False),
+        "model_routing_enabled": load_model_routing_settings(redis_conn=redis_client).get("enabled", False),
+        "model_routes": load_model_routing_settings(redis_conn=redis_client).get("routes", {}),
         "hub_url": str(raw.get("hub_url") or "").strip(),
         "hub_name": str(raw.get("hub_name") or "").strip(),
         "hub_mode": _normalize_spud_link_tater_mode(raw.get("hub_mode"), default=SPUD_LINK_MODE_HUB),
@@ -5954,10 +5961,12 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         "spud_link_little_spud_tools_enabled",
         "spud_link_telemetry_enabled",
         "spud_link_request_previews_enabled",
+        "spud_link_model_routing_enabled",
         "spud_link_hub_url",
         "spud_link_node_token",
         "clear_spud_link_node_token",
     }
+    keys.update(f"spud_link_model_route_{kind}" for kind in SPUD_LINK_MODEL_KINDS)
     if not any(key in updates for key in keys):
         return
     mapping: Dict[str, str] = {}
@@ -5993,6 +6002,17 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         mapping["request_previews_enabled"] = (
             "true" if _as_bool_flag(updates.get("spud_link_request_previews_enabled"), default=False) else "false"
         )
+    if "spud_link_model_routing_enabled" in updates:
+        mapping["model_routing_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_model_routing_enabled"), default=False) else "false"
+        )
+    for kind in SPUD_LINK_MODEL_KINDS:
+        payload_key = f"spud_link_model_route_{kind}"
+        if payload_key in updates:
+            mapping[f"model_route_{kind}"] = normalize_route(
+                updates.get(payload_key),
+                default="hub" if kind == "llm" else "auto",
+            )
     if "spud_link_hub_url" in updates:
         mapping["hub_url"] = str(updates.get("spud_link_hub_url") or "").strip()[:500]
     if bool(updates.get("clear_spud_link_node_token")):
@@ -6786,6 +6806,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
     assistant_name = _tater_assistant_first_name()
     hub_url = str(settings.get("hub_url") or "").strip()
     node_token_set = bool(settings.get("node_token_set"))
+    model_routing = load_model_routing_settings(redis_conn=redis_client)
     paired_hub = {
         "connected": bool(server_mode == SPUD_LINK_MODE_SPUDLET and hub_url and node_token_set),
         "hub_url": hub_url,
@@ -6819,12 +6840,22 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
         "capabilities": {
             "server": is_server,
             "llm": is_server,
+            "models": is_server,
+            "stt": is_server,
+            "tts": is_server,
+            "vision": is_server,
+            "audio": is_server,
+            "video": is_server,
+            "speaker_id": is_server,
+            "emotion_id": is_server,
+            "face_id": is_server,
             "hydra": is_server,
             "tools": little_spud_tools_enabled,
             "notifications": is_server,
             "little_spud_clients": is_server and bool(settings.get("allow_little_spuds")),
             "spudlet_clients": is_server and bool(settings.get("allow_spudlets")),
         },
+        "model_routing": model_routing,
         "paired_hub": paired_hub,
         "linked_nodes": _spud_link_load_nodes(),
     }
@@ -9307,6 +9338,19 @@ class SpudLinkSttRequest(BaseModel):
     language: Optional[str] = None
 
 
+class SpudLinkModelRequest(BaseModel):
+    data_base64: Optional[str] = None
+    filename: Optional[str] = None
+    mimetype: Optional[str] = None
+    prompt: Optional[str] = None
+    audio_format: Dict[str, Any] = Field(default_factory=dict)
+    speech_s: Optional[float] = None
+    event_id: Optional[str] = None
+    seen_at: Optional[str] = None
+    source: Dict[str, Any] = Field(default_factory=dict)
+    record: Optional[bool] = None
+
+
 class SpudLinkRevokeNodeRequest(BaseModel):
     node_id: Optional[str] = None
 
@@ -9588,6 +9632,16 @@ class AppSettingsRequest(BaseModel):
     spud_link_little_spud_tools_enabled: Optional[bool] = None
     spud_link_telemetry_enabled: Optional[bool] = None
     spud_link_request_previews_enabled: Optional[bool] = None
+    spud_link_model_routing_enabled: Optional[bool] = None
+    spud_link_model_route_llm: Optional[str] = None
+    spud_link_model_route_stt: Optional[str] = None
+    spud_link_model_route_tts: Optional[str] = None
+    spud_link_model_route_vision: Optional[str] = None
+    spud_link_model_route_audio: Optional[str] = None
+    spud_link_model_route_video: Optional[str] = None
+    spud_link_model_route_speaker_id: Optional[str] = None
+    spud_link_model_route_emotion_id: Optional[str] = None
+    spud_link_model_route_face_id: Optional[str] = None
     spud_link_hub_url: Optional[str] = None
     spud_link_node_token: Optional[str] = None
     clear_spud_link_node_token: Optional[bool] = None
@@ -10830,6 +10884,76 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     return rows
 
 
+def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
+    routing = load_model_routing_settings(redis_conn=redis_client)
+    routed_kinds = [kind for kind in SPUD_LINK_MODEL_KINDS if spud_link_should_use_hub(kind, redis_conn=redis_client)]
+    if not routed_kinds:
+        return []
+    capabilities: Dict[str, Any] = {}
+    warning = ""
+    try:
+        from spud_link_models import request_json as spud_link_request_json
+
+        response = spud_link_request_json("models/capabilities", redis_conn=redis_client, timeout=8.0)
+        capabilities = response.get("models") if isinstance(response.get("models"), dict) else {}
+    except Exception as exc:
+        warning = str(exc) or "Spud Hub model status is unavailable."
+    labels = {
+        "llm": "LLM",
+        "stt": "STT",
+        "tts": "TTS",
+        "vision": "Vision",
+        "audio": "Audio Understanding",
+        "video": "Video Understanding",
+        "speaker_id": "Speaker ID",
+        "emotion_id": "Emotion ID",
+        "face_id": "Face ID",
+    }
+    local_feature_enabled = {"speaker_id": True, "emotion_id": True, "face_id": True}
+    with contextlib.suppress(Exception):
+        from tater_voice import speaker_id as speaker_id_module
+
+        local_feature_enabled["speaker_id"] = bool(speaker_id_module.speaker_id_enabled())
+    with contextlib.suppress(Exception):
+        from tater_voice import emotion_id as emotion_id_module
+
+        local_feature_enabled["emotion_id"] = bool(emotion_id_module.emotion_id_enabled())
+    with contextlib.suppress(Exception):
+        local_feature_enabled["face_id"] = bool(face_id_runtime.is_enabled(redis_client))
+    rows: List[Dict[str, Any]] = []
+    for kind in routed_kinds:
+        capability = capabilities.get(kind) if isinstance(capabilities.get(kind), dict) else {}
+        if kind in local_feature_enabled and not local_feature_enabled[kind]:
+            continue
+        if capability and capability.get("available") is False:
+            continue
+        label = labels.get(kind, kind.replace("_", " ").title())
+        model = str(capability.get("model") or f"Spud Hub {label}").strip()
+        loaded_on_hub = bool(capability.get("loaded", capability.get("available", not warning)))
+        row = _runtime_managed_model_row(
+            category=kind,
+            kind_label=label,
+            provider=f"spud_link_{kind}",
+            provider_label=f"{label} • Spud Hub",
+            model=model,
+            device="Spud Hub",
+            estimated_bytes=0,
+            memory_kind="remote",
+            warning=warning,
+            details=[
+                "Loaded on Spud Hub" if loaded_on_hub else "Configured on Spud Hub",
+                f"Route {normalize_route((routing.get('routes') or {}).get(kind))}",
+            ],
+        )
+        row["managed"] = True
+        row["managed_by"] = "spud_link"
+        row["unloadable"] = False
+        row["remote"] = True
+        row["loaded"] = loaded_on_hub
+        rows.append(row)
+    return rows
+
+
 def _runtime_local_llm_roles(llm_rows: List[Dict[str, Any]]) -> None:
     assignments: Dict[Tuple[str, str], List[str]] = {}
 
@@ -11023,7 +11147,8 @@ def _runtime_loaded_models_snapshot(
         row.setdefault("managed_by", "")
 
     managed_rows = _runtime_managed_voice_model_rows()
-    rows = [*llm_rows, *managed_rows]
+    spud_link_rows = _runtime_spud_link_model_rows()
+    rows = [*llm_rows, *managed_rows, *spud_link_rows]
     rows.sort(key=lambda row: (str(row.get("kind_label") or ""), str(row.get("provider_label") or ""), str(row.get("model") or "")))
 
     totals = {
@@ -15232,6 +15357,15 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
         "capabilities": {
             "llm": is_server,
             "hydra": is_server,
+            "models": is_server,
+            "stt": is_server,
+            "tts": is_server,
+            "vision": is_server,
+            "audio": is_server,
+            "video": is_server,
+            "speaker_id": is_server,
+            "emotion_id": is_server,
+            "face_id": is_server,
             "tools": hydra_tools_enabled,
             "notifications": is_server,
             "music": (
@@ -16226,6 +16360,179 @@ async def spud_link_chat_completions(
     )
 
 
+def _require_spud_link_model_request(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_SPUDLET:
+        raise HTTPException(status_code=403, detail="Spud Link model routing requires a paired Spudlet.")
+    _spud_link_touch_node_from_request(node, request)
+    return settings, node
+
+
+def _spud_link_model_bytes(payload: SpudLinkModelRequest, *, maximum: int) -> bytes:
+    encoded = str(payload.data_base64 or "").strip()
+    if not encoded:
+        raise HTTPException(status_code=400, detail="Model input data is required.")
+    if encoded.startswith("data:") and "," in encoded:
+        encoded = encoded.split(",", 1)[1]
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Model input was not valid base64.") from exc
+    if not data:
+        raise HTTPException(status_code=400, detail="Model input is empty.")
+    if len(data) > maximum:
+        raise HTTPException(status_code=413, detail="Model input is too large.")
+    return data
+
+
+def _spud_link_mark_model_activity(
+    settings: Dict[str, Any],
+    node: Dict[str, Any],
+    *,
+    kind: str,
+    model: str,
+) -> None:
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": f"model_{kind}",
+            "last_model": model or kind,
+            "role": _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET),
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+
+
+def _spud_link_model_capability_payload() -> Dict[str, Any]:
+    from media_understanding_settings import get_media_understanding_settings
+    from vision_settings import DEFAULT_VISION_API_BASE, DEFAULT_VISION_MODEL, get_vision_settings
+    from tater_voice import emotion_id as emotion_id_module
+    from tater_voice import speaker_id as speaker_id_module
+
+    speech = get_shared_speech_settings()
+    vision = get_vision_settings(default_api_base=DEFAULT_VISION_API_BASE, default_model=DEFAULT_VISION_MODEL)
+    audio = get_media_understanding_settings("audio")
+    video = get_media_understanding_settings("video")
+    base_rows = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
+    base = dict(base_rows[0]) if base_rows and isinstance(base_rows[0], dict) else {}
+    face = face_identity.runtime_status(redis_client)
+    speaker = speaker_id_module.runtime_availability()
+    emotion = emotion_id_module.runtime_availability()
+    return {
+        "llm": {"available": bool(base.get("model")), "model": str(base.get("model") or "tater/base")},
+        "stt": {"available": bool(speech.get("stt_backend")), "model": str(speech.get("stt_backend") or "")},
+        "tts": {"available": bool(speech.get("tts_backend")), "model": str(speech.get("tts_model") or speech.get("tts_backend") or "")},
+        "vision": {"available": True, "model": str(vision.get("model") or vision.get("mode") or "vision")},
+        "audio": {"available": True, "model": str(audio.get("model") or audio.get("mode") or "audio")},
+        "video": {"available": True, "model": str(video.get("model") or video.get("mode") or "video")},
+        "speaker_id": {"available": bool(speaker_id_module.speaker_id_enabled() and speaker.get("available")), "loaded": getattr(speaker_id_module, "_ENGINE", None) is not None, "model": str(speaker.get("model_source") or "SpeechBrain")},
+        "emotion_id": {"available": bool(emotion_id_module.emotion_id_enabled() and emotion.get("available")), "loaded": getattr(emotion_id_module, "_ENGINE", None) is not None, "model": str(emotion.get("model_source") or "SpeechBrain")},
+        "face_id": {"available": bool(face.get("enabled")), "loaded": bool(face.get("loaded")), "model": str(face.get("model") or "Face ID")},
+    }
+
+
+@app.get("/api/spudlink/v1/models/capabilities")
+def spud_link_model_capabilities(request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_model_request(request)
+    _spud_link_store_node(node)
+    return {"ok": True, "models": _spud_link_model_capability_payload()}
+
+
+@app.post("/api/spudlink/v1/models/vision")
+def spud_link_model_vision(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    import kernel_tools
+
+    settings, node = _require_spud_link_model_request(request)
+    image_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
+    filename = str(payload.filename or "image.jpg").strip() or "image.jpg"
+    description, model, error = kernel_tools._image_describe_call_vision_api(
+        image_bytes=image_bytes,
+        filename=filename,
+        prompt=str(payload.prompt or "Describe this image accurately and concisely.").strip(),
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    _spud_link_mark_model_activity(settings, node, kind="vision", model=str(model or "vision"))
+    return {"ok": True, "description": str(description or "").strip(), "text": str(description or "").strip(), "model": str(model or "")}
+
+
+def _spud_link_model_media(kind: str, payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    import kernel_tools
+
+    settings, node = _require_spud_link_model_request(request)
+    maximum = 96 * 1024 * 1024 if kind == "audio" else 256 * 1024 * 1024
+    data = _spud_link_model_bytes(payload, maximum=maximum)
+    filename = str(payload.filename or f"clip.{('wav' if kind == 'audio' else 'mp4')}").strip()
+    description, model, error = kernel_tools._media_understanding_call_configured(
+        kind,
+        data=data,
+        filename=filename,
+        prompt=str(payload.prompt or "").strip(),
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    _spud_link_mark_model_activity(settings, node, kind=kind, model=str(model or kind))
+    return {"ok": True, "description": str(description or "").strip(), "text": str(description or "").strip(), "model": str(model or "")}
+
+
+@app.post("/api/spudlink/v1/models/audio")
+def spud_link_model_audio(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    return _spud_link_model_media("audio", payload, request)
+
+
+@app.post("/api/spudlink/v1/models/video")
+def spud_link_model_video(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    return _spud_link_model_media("video", payload, request)
+
+
+@app.post("/api/spudlink/v1/models/speaker-id")
+def spud_link_model_speaker_id(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    from tater_voice import speaker_id as speaker_id_module
+
+    settings, node = _require_spud_link_model_request(request)
+    audio_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
+    result = speaker_id_module.match_speaker_for_audio(
+        audio_bytes=audio_bytes,
+        audio_format=dict(payload.audio_format or {}),
+        speech_s=float(payload.speech_s or 0.0),
+    )
+    _spud_link_mark_model_activity(settings, node, kind="speaker_id", model=str(result.get("model_source") or "Speaker ID"))
+    return {"ok": True, "result": result}
+
+
+@app.post("/api/spudlink/v1/models/emotion-id")
+def spud_link_model_emotion_id(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    from tater_voice import emotion_id as emotion_id_module
+
+    settings, node = _require_spud_link_model_request(request)
+    audio_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
+    result = emotion_id_module.classify_emotion_for_audio(
+        audio_bytes=audio_bytes,
+        audio_format=dict(payload.audio_format or {}),
+        speech_s=float(payload.speech_s or 0.0),
+    )
+    _spud_link_mark_model_activity(settings, node, kind="emotion_id", model=str(result.get("model_source") or "Emotion ID"))
+    return {"ok": True, "result": result}
+
+
+@app.post("/api/spudlink/v1/models/face-id")
+def spud_link_model_face_id(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
+    settings, node = _require_spud_link_model_request(request)
+    image_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
+    result = face_identity.recognize_image(
+        image_bytes,
+        event_id=str(payload.event_id or ""),
+        seen_at=str(payload.seen_at or ""),
+        source=dict(payload.source or {}),
+        record=payload.record is not False,
+        redis_client=redis_client,
+    )
+    _spud_link_mark_model_activity(settings, node, kind="face_id", model="Face ID")
+    return {"ok": True, "result": result}
+
+
 @app.post("/api/spudlink/v1/tts/speech")
 async def spud_link_tts_speech(payload: SpudLinkTtsRequest, request: Request) -> Response:
     settings, node = _require_spud_link_node_request(request)
@@ -16378,6 +16685,17 @@ async def _transcribe_pcm_audio_with_selected_stt(
     selector: str = "uploaded_audio",
 ) -> Tuple[str, str, str]:
     from tater_voice import voice_pipeline
+
+    if spud_link_should_use_hub("stt", redis_conn=redis_client):
+        from spud_link_models import request_stt_async as spud_link_request_stt_async
+
+        remote = await spud_link_request_stt_async(
+            audio_bytes=audio_bytes,
+            audio_format=audio_format,
+            language=language,
+            redis_conn=redis_client,
+        )
+        return str(remote.get("text") or "").strip(), "spud_link", "Loaded on Spud Hub"
 
     current_speech = get_shared_speech_settings()
     requested_backend = voice_pipeline._normalize_stt_backend(str(current_speech.get("stt_backend") or "").strip())
@@ -19286,6 +19604,14 @@ def get_settings() -> Dict[str, Any]:
         "spud_link_little_spud_tools_enabled": bool(spud_link_settings.get("little_spud_tools_enabled")),
         "spud_link_telemetry_enabled": bool(spud_link_settings.get("telemetry_enabled")),
         "spud_link_request_previews_enabled": bool(spud_link_settings.get("request_previews_enabled")),
+        "spud_link_model_routing_enabled": bool(spud_link_settings.get("model_routing_enabled")),
+        **{
+            f"spud_link_model_route_{kind}": normalize_route(
+                (spud_link_settings.get("model_routes") or {}).get(kind),
+                default="hub" if kind == "llm" else "auto",
+            )
+            for kind in SPUD_LINK_MODEL_KINDS
+        },
         "spud_link_hub_url": str(spud_link_settings.get("hub_url") or ""),
         "spud_link_node_token_set": bool(spud_link_settings.get("node_token_set")),
         "webui_password_set": _webui_password_is_set(),
@@ -21433,6 +21759,33 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             tts_reload_result = _reload_local_tts_model_caches(reason="settings-save")
         if any(key in updates for key in speech_warmup_keys):
             speech_warmup_result = _start_speech_model_warmup(updated_speech, reason="settings-save")
+
+    spud_model_route_keys = {"spud_link_model_routing_enabled"}
+    spud_model_route_keys.update(f"spud_link_model_route_{kind}" for kind in SPUD_LINK_MODEL_KINDS)
+    if any(key in updates for key in spud_model_route_keys):
+        from tater_voice import emotion_id as emotion_id_module
+        from tater_voice import speaker_id as speaker_id_module
+        from tater_voice import voice_pipeline
+
+        voice_pipeline._invalidate_voice_config_cache()
+        if spud_link_should_use_hub("stt", redis_conn=redis_client):
+            stt_reload_result = {
+                "reason": "spud-link-route",
+                "selected": "spud_link",
+                "cleared": voice_pipeline.clear_stt_model_caches(keep_backend=""),
+            }
+        if spud_link_should_use_hub("tts", redis_conn=redis_client):
+            tts_reload_result = _reload_local_tts_model_caches(reason="spud-link-route")
+        if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
+            speaker_id_module.unload_model()
+        if spud_link_should_use_hub("emotion_id", redis_conn=redis_client):
+            emotion_id_module.unload_model()
+        if face_id_runtime.is_enabled(redis_client):
+            face_id_result = face_id_runtime.start_model_load(redis_client)
+        speech_warmup_result = _start_speech_model_warmup(
+            get_shared_speech_settings(),
+            reason="spud-link-route",
+        )
 
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
     if any(key in updates for key in spudex_model_keys):

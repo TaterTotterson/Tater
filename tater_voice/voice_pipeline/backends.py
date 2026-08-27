@@ -32,6 +32,10 @@ from helpers import (
     _llama_cpp_native_server_bin,
     _macos_posix_spawn_kwargs,
 )
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_stt_async as spud_link_request_stt_async
+from spud_link_models import request_tts_wav_async as spud_link_request_tts_wav_async
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 
 def _vp():
@@ -1473,6 +1477,26 @@ async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason
 async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
     vp = _vp()
     backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
+    if spud_link_should_use_hub("stt", redis_conn=vp.redis_client):
+        try:
+            audio_bytes = vp._stt_audio_bytes_for_transcription(session)
+            if not audio_bytes:
+                session.stt_transcript = ""
+                return ""
+            remote = await spud_link_request_stt_async(
+                audio_bytes=audio_bytes,
+                audio_format=session.audio_format,
+                language=session.language or "",
+                redis_conn=vp.redis_client,
+            )
+            session.stt_backend_effective = "spud_link"
+            session.stt_transcript = vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            return session.stt_transcript
+        except Exception:
+            if not spud_link_allow_local_fallback("stt", redis_conn=vp.redis_client):
+                raise
+            backend, _fallback_note = vp._resolve_stt_backend_selected(vp._selected_stt_backend())
+            session.stt_backend_effective = backend
     if backend == "wyoming":
         if session.stt_task is not None:
             wait_timeout = 2.0 if bool(session.stt_stream_unhealthy) else 15.0
@@ -1542,6 +1566,21 @@ async def _native_transcribe_local_audio_bytes(
     data = bytes(audio_bytes or b"")
     if not data:
         return ""
+
+    if spud_link_should_use_hub("stt", redis_conn=vp.redis_client):
+        try:
+            remote = await spud_link_request_stt_async(
+                audio_bytes=data,
+                audio_format=audio_format,
+                language=language or "",
+                redis_conn=vp.redis_client,
+            )
+            cleaned = vp._text(remote.get("text"))
+            return cleaned if partial else vp._sanitize_stt_transcript(cleaned)
+        except Exception:
+            if not spud_link_allow_local_fallback("stt", redis_conn=vp.redis_client):
+                raise
+            token, _fallback_note = vp._resolve_stt_backend_selected(vp._selected_stt_backend())
 
     mode_label = "partial" if partial else "final"
     async with _LOCAL_STT_TRANSCRIBE_LOCK:
@@ -1623,6 +1662,14 @@ async def _native_transcribe_wake_audio_bytes(
 
     if token == "wyoming":
         return await _native_wyoming_transcribe_audio_bytes(data, audio_format, language)
+    if token == "spud_link":
+        remote = await spud_link_request_stt_async(
+            audio_bytes=data,
+            audio_format=audio_format,
+            language=language or "",
+            redis_conn=vp.redis_client,
+        )
+        return vp._text(remote.get("text"))
 
     vp._native_debug(
         f"STT (wake verifier {token}) selector={selector} bytes={len(data)}"
@@ -2536,6 +2583,21 @@ async def _native_synthesize_text(
     prompt = vp._text(text)
     if not prompt:
         return b"", {}, "", ""
+
+    if spud_link_should_use_hub("tts", redis_conn=vp.redis_client):
+        try:
+            wav_bytes = await spud_link_request_tts_wav_async(text=prompt, redis_conn=vp.redis_client)
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+                audio_format = {
+                    "rate": int(wav_file.getframerate() or 24000),
+                    "width": int(wav_file.getsampwidth() or 2),
+                    "channels": int(wav_file.getnchannels() or 1),
+                }
+                audio_bytes = wav_file.readframes(wav_file.getnframes())
+            return audio_bytes, audio_format, "spud_link", "Loaded on Spud Hub"
+        except Exception:
+            if not spud_link_allow_local_fallback("tts", redis_conn=vp.redis_client):
+                raise
 
     selection = _tts_selection_from_values(values)
     selected_backend = vp._normalize_tts_backend(vp._text(session.tts_backend if isinstance(session, VoiceSessionRuntime) else "") or selection.get("backend"))

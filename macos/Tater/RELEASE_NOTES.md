@@ -1,44 +1,43 @@
-# Tater v1.1.12
+# Tater v1.1.13
 
-Tater v1.1.12 improves local model cleanup, native satellite firmware updates,
-and the People settings layout.
+Tater v1.1.13 adds embedded Tater support for SAT1 and expands Spud Link so
+edge installs can use the models already running on their main Tater.
 
 ## What's Changed
 
-### Local Models
+### Embedded Tater on SAT1
 
-- Cleans up Tater-managed llama.cpp servers when the backend or macOS app
-  starts and stops so crashed workers cannot leave duplicate model servers
-  consuming memory.
-- Limits cleanup to Tater's own bundled llama.cpp processes and model aliases,
-  leaving unrelated llama.cpp servers alone.
+- Adds the lightweight Edge / remote-only Tater profile and SAT1 Raspberry Pi
+  firmware feed needed for embedded Tater installations.
+- Allows additional time for SAT1 appliance updates, reboot, and firmware
+  verification before reporting a timeout.
 
-### Native Satellite Updates
+### Spud Link Model Routing
 
-- Keeps native OTA progress active through the satellite reboot and confirms
-  the device reconnects on the requested firmware before showing 100% and
-  Complete.
-- Preserves the satellite's OTA status log across reconnects and reports clear
-  failures when the update times out or the returned firmware version does not
-  match.
+- Lets a paired Spudlet optionally run STT, TTS, vision, audio and video
+  understanding, Speaker ID, Emotion ID, and Face ID on its Spud Hub in
+  addition to the existing LLM route.
+- Adds a themed Spud Link model-routing panel with Auto, Spud Hub, and This
+  Tater choices for each supported model family.
+- Keeps wake-word detection and VAD on the edge device for responsive,
+  private listening while routing the heavier work to the Hub.
+- Shows routed models in runtime status as loaded on the Spud Hub without
+  counting their memory against the Spudlet.
 
-### People UI
+### Cores and Camera AI
 
-- Keeps People, Faces, and Identities together on one tab row, with compact
-  horizontal scrolling on narrower screens.
-- Replaces the cramped saved-face checkbox list with a themed review gallery
-  where face images can be clicked directly, selected together, moved to the
-  correct person or profile, or permanently deleted.
-- Adds clear selected-image highlighting, selection counts, Select All and
-  Clear controls, and responsive gallery actions for smaller screens.
+- Routes shared Awareness and Automation image descriptions through the
+  selected vision route.
+- Lets Awareness use Hub-hosted Face ID while preserving recognized names in
+  event history and notifications.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.12 through
+- macOS users already running v1.0.1 or later can install v1.1.13 through
   Tater's normal updater.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.12` or `latest` for the CPU image and
-  `v1.1.12-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.13` or `latest` for the CPU image and
+  `v1.1.13-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

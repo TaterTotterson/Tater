@@ -8,6 +8,7 @@ Awareness Core to be installed.
 from __future__ import annotations
 
 import contextlib
+import base64
 import json
 import math
 import threading
@@ -17,6 +18,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import face_id_runtime
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_json as spud_link_request_json
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 
 SHARED_IDENTITIES_KEY = "tater:face_identities:v1"
@@ -531,6 +535,29 @@ def recognize_image(
     status = runtime_status(client)
     if not bool(status.get("enabled")):
         return {"status": "disabled", "warning": "Face ID is disabled in Settings › Models.", "people": [], "identity_ids": []}
+    if spud_link_should_use_hub("face_id", redis_conn=client):
+        try:
+            remote = spud_link_request_json(
+                "models/face-id",
+                payload={
+                    "data_base64": base64.b64encode(bytes(image_bytes or b"")).decode("ascii"),
+                    "filename": "face.jpg",
+                    "mimetype": "image/jpeg",
+                    "event_id": _text(event_id),
+                    "seen_at": _text(seen_at),
+                    "source": dict(source or {}),
+                    "record": bool(record),
+                },
+                redis_conn=client,
+                timeout=180.0,
+            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            result["routed_via"] = "spud_link"
+            result["loaded_on"] = "Spud Hub"
+            return result
+        except Exception:
+            if not spud_link_allow_local_fallback("face_id", redis_conn=client):
+                raise
     if not bool(status.get("loaded")):
         return {"status": "not_ready", "warning": "Face ID is enabled but its model is not ready yet.", "people": [], "identity_ids": []}
     try:

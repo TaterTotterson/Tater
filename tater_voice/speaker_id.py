@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+import base64
 import contextlib
 import hashlib
 import json
@@ -17,6 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from helpers import redis_client
 from tater_paths import agent_lab_path
 from tateros import integration_store as integration_store_module
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_json as spud_link_request_json
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 from . import runtime as esphome_runtime
 
@@ -879,6 +883,18 @@ def warmup_model(*, enabled_only: bool = True) -> str:
     return f"loaded Speaker ID SpeechBrain model {source} on {_ENGINE_DEVICE or _vp()._speechbrain_device()}"
 
 
+def unload_model() -> Dict[str, Any]:
+    global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_AUTH_FINGERPRINT, _ENGINE_ERROR
+    with _ENGINE_LOCK:
+        _ENGINE = None
+        _ENGINE_SOURCE = ""
+        _ENGINE_DEVICE = ""
+        _ENGINE_REQUESTED_DEVICE = ""
+        _ENGINE_AUTH_FINGERPRINT = ""
+        _ENGINE_ERROR = ""
+    return {"loaded": False, "model": _model_source()}
+
+
 def _pcm_to_waveform(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Any:
     available, detail = _speechbrain_state()
     if not available:
@@ -977,6 +993,25 @@ def match_speaker_for_audio(
     if not speaker_id_enabled():
         _debug("match skipped reason=disabled")
         return {"matched": False, "reason": "disabled"}
+    if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
+        try:
+            remote = spud_link_request_json(
+                "models/speaker-id",
+                payload={
+                    "data_base64": base64.b64encode(bytes(audio_bytes or b"")).decode("ascii"),
+                    "audio_format": dict(audio_format or {}),
+                    "speech_s": float(speech_s or 0.0),
+                },
+                redis_conn=redis_client,
+                timeout=120.0,
+            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            result["routed_via"] = "spud_link"
+            result["loaded_on"] = "Spud Hub"
+            return result
+        except Exception:
+            if not spud_link_allow_local_fallback("speaker_id", redis_conn=redis_client):
+                raise
     effective_speech_s = max(
         0.0,
         float(speech_s or 0.0),

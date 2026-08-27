@@ -25,6 +25,9 @@ from helpers import redis_client
 from runtime_executors import run_background, run_tts
 from tater_paths import agent_lab_path
 from managed_tts import clear_managed_tts_workers, is_managed_tts_backend, synthesize_managed_tts_pcm
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_tts_wav_async as spud_link_request_tts_wav_async
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 from tateros import integration_store as integration_store_module
 from speech_settings import (
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
@@ -2279,6 +2282,13 @@ async def synthesize_tts_wav(
     prompt = _text(text)
     if not prompt:
         raise RuntimeError("Preview text is required.")
+
+    if spud_link_should_use_hub("tts", redis_conn=redis_client):
+        try:
+            return await spud_link_request_tts_wav_async(text=prompt, redis_conn=redis_client)
+        except Exception:
+            if not spud_link_allow_local_fallback("tts", redis_conn=redis_client):
+                raise
 
     if selected_backend == "kokoro":
         audio_bytes, audio_format = await run_tts(

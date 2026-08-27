@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tater_paths import runtime_dir
+from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 
 ENABLED_KEY = "tater:face_id:enabled"
@@ -186,6 +187,34 @@ def _public_state(redis_client: Any = None) -> str:
 
 def status(redis_client: Any = None) -> Dict[str, Any]:
     enabled = is_enabled(redis_client)
+    if enabled and spud_link_should_use_hub("face_id", redis_conn=redis_client):
+        return {
+            "enabled": True,
+            "installed": True,
+            "models_ready": True,
+            "loaded": True,
+            "state": "remote",
+            "loading": False,
+            "error": "",
+            "message": "Loaded on Spud Hub",
+            "model": MODEL_NAME,
+            "detector_backend": DETECTOR_BACKEND,
+            "distance_metric": DISTANCE_METRIC,
+            "match_threshold": MATCH_THRESHOLD,
+            "loaded_at": 0.0,
+            "model_pack_version": MODEL_PACK_VERSION,
+            "deepface_version": DEEPFACE_VERSION,
+            "model_pack_path": "",
+            "accelerator": "Spud Hub",
+            "accelerator_target": "remote",
+            "device_name": "Spud Hub",
+            "gpu_available": False,
+            "gpu_count": 0,
+            "tensorflow_version": "",
+            "accelerator_warning": "",
+            "local_only": False,
+            "routed_via": "spud_link",
+        }
     with _condition:
         loaded = _model_loaded
         error = _error
@@ -498,6 +527,10 @@ def _load_thread_main(generation: int, redis_client: Any) -> None:
 def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
     global _generation, _load_thread, _state
     if not is_enabled(redis_client):
+        return status(redis_client)
+    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
+        if _model_loaded or (_load_thread is not None and _load_thread.is_alive()):
+            unload_model()
         return status(redis_client)
     with _condition:
         if _model_loaded:

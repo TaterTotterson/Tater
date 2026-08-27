@@ -8514,6 +8514,13 @@ def _normalize_spud_link_hub_url(value: Any) -> str:
 def _resolve_spud_link_base_server(*, redis_conn: Any = None) -> Optional[Dict[str, str]]:
     client = redis_conn or redis_client
     try:
+        from spud_link_models import should_use_hub
+
+        if not should_use_hub("llm", redis_conn=client):
+            return None
+    except Exception:
+        pass
+    try:
         raw = client.hgetall(SPUD_LINK_SETTINGS_KEY) or {}
     except Exception:
         return None
