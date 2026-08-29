@@ -144,9 +144,80 @@ class SetupTaterVenvTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("Vulkan GPU acceleration", completed.stdout)
 
-    def test_amd_ryzen_ai_wheels_are_pinned_to_validated_rocm_release(self) -> None:
-        self.assertIn("rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1", SETUP_LIBRARY)
-        self.assertIn("rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1", SETUP_LIBRARY)
+    def test_amd_ryzen_ai_stack_is_pinned_to_rocm_10(self) -> None:
+        self.assertIn('AMD_RYZEN_AI_ROCM_VERSION="10.0.0"', SETUP_LIBRARY)
+        self.assertIn('AMD_RYZEN_AI_TORCH_VERSION="2.13.0+rocm10.0.0"', SETUP_LIBRARY)
+        self.assertIn('AMD_RYZEN_AI_TORCHVISION_VERSION="0.28.0+rocm10.0.0"', SETUP_LIBRARY)
+        self.assertIn('AMD_RYZEN_AI_TORCHAUDIO_VERSION="2.11.0.2+rocm10.0.0"', SETUP_LIBRARY)
+        self.assertIn("https://stable.repo.amd.com/rocm/whl-next/", SETUP_LIBRARY)
+
+    def test_rocm_10_uses_architecture_specific_ryzen_ai_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_python = Path(temp_dir) / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" > \"${TEST_LOG}\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            log_path = Path(temp_dir) / "pip.log"
+
+            completed = run_setup_functions(
+                r"""
+                install_amd_ryzen_ai_pytorch "${TEST_PYTHON}"
+                """,
+                environ={
+                    "TATER_ROCM_GFX_TARGET": "gfx1150",
+                    "TEST_LOG": str(log_path),
+                    "TEST_PYTHON": str(fake_python),
+                },
+            )
+            command = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("torch[device-gfx1150]==2.13.0+rocm10.0.0", command)
+        self.assertIn("torchvision[device-gfx1150]==0.28.0+rocm10.0.0", command)
+        self.assertIn("torchaudio==2.11.0.2+rocm10.0.0", command)
+
+    def test_strix_halo_auto_selects_gfx1151(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            amd_rocm_gfx_target_from_tools() { :; }
+            is_strix_halo_host() { return 0; }
+            test "$(amd_ryzen_ai_gfx_target)" = gfx1151
+            test "$(validated_rocm_gfx_target device-gfx1150)" = gfx1150
+            """,
+            environ={},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def test_rocm_upgrade_request_does_not_reuse_old_healthy_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            venv_dir = Path(temp_dir) / "venv"
+            runtime_dir = Path(temp_dir) / "runtime"
+            (venv_dir / "bin").mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            python = venv_dir / "bin" / "python"
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o755)
+            (runtime_dir / "setup_profile").write_text("rocm\n", encoding="utf-8")
+
+            completed = run_setup_functions(
+                r"""
+                rocm_torch_ready() { return 0; }
+                VENV_DIR="${TEST_ROOT}/venv"
+                RUNTIME_DIR="${TEST_ROOT}/runtime"
+                PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
+                ! existing_rocm_environment_ready
+                """,
+                environ={
+                    "TATER_SETUP_UPGRADE_ROCM": "1",
+                    "TEST_ROOT": temp_dir,
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 
     def test_existing_python_314_venv_is_rebuilt_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

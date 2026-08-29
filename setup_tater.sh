@@ -25,10 +25,11 @@ MANAGED_PYTHON_311_AARCH64_SHA256="93fd0d922d88b758a8df277bf12b601fe7c35543a2fec
 MANAGED_PYTHON_312_VERSION="3.12.14"
 MANAGED_PYTHON_312_X86_64_SHA256="cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3"
 MANAGED_PYTHON_312_AARCH64_SHA256="70162d3fa61a7bf52a9f098ad6f46046f9813ab50e0d2b3cfeb81ee1bad78f1c"
-AMD_RYZEN_AI_TORCH_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl"
-AMD_RYZEN_AI_TORCHVISION_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
-AMD_RYZEN_AI_TORCHAUDIO_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl"
-AMD_RYZEN_AI_TRITON_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl"
+AMD_RYZEN_AI_ROCM_VERSION="10.0.0"
+AMD_RYZEN_AI_PYTORCH_INDEX_URL="https://stable.repo.amd.com/rocm/whl-next/"
+AMD_RYZEN_AI_TORCH_VERSION="2.13.0+rocm10.0.0"
+AMD_RYZEN_AI_TORCHVISION_VERSION="0.28.0+rocm10.0.0"
+AMD_RYZEN_AI_TORCHAUDIO_VERSION="2.11.0.2+rocm10.0.0"
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -395,12 +396,15 @@ warn_if_unvalidated_ryzen_ai_os() {
   [ -r /etc/os-release ] || return
   os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
   os_version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
-  if [ "${os_id}" = "ubuntu" ] && [ "${os_version}" != "24.04" ]; then
-    warn "AMD validates the Ryzen AI ROCm 7.2.1 package set on Ubuntu 24.04; detected Ubuntu ${os_version}. Setup will continue and verify GPU access before reporting success."
+  if [ "${os_id}" = "ubuntu" ] && [ "${os_version}" != "24.04" ] && [ "${os_version}" != "26.04" ]; then
+    warn "AMD validates the Ryzen AI ROCm ${AMD_RYZEN_AI_ROCM_VERSION} package set on Ubuntu 24.04.4 and 26.04; detected Ubuntu ${os_version}. Setup will continue and verify GPU access before reporting success."
   fi
 }
 
 existing_rocm_environment_ready() {
+  if truthy_env "${TATER_SETUP_UPGRADE_ROCM:-}"; then
+    return 1
+  fi
   [ -x "${VENV_DIR}/bin/python" ] || return 1
   [ "$(cat "${PROFILE_FILE}" 2>/dev/null || true)" = "rocm" ] || return 1
   rocm_torch_ready "${VENV_DIR}/bin/python"
@@ -408,6 +412,67 @@ existing_rocm_environment_ready() {
 
 rocm_torch_ready() {
   "$1" -c 'import torch; raise SystemExit(0 if torch.version.hip and torch.cuda.is_available() else 1)' >/dev/null 2>&1
+}
+
+amd_rocm_gfx_target_from_tools() {
+  detected_target=""
+  if command -v rocm_agent_enumerator >/dev/null 2>&1; then
+    detected_target="$(rocm_agent_enumerator 2>/dev/null | awk '/^gfx[0-9a-f]+$/ && $0 != "gfx000" { print; exit }')"
+  fi
+  if [ -z "${detected_target}" ] && command -v rocminfo >/dev/null 2>&1; then
+    detected_target="$(rocminfo 2>/dev/null | awk '/^[[:space:]]*Name:[[:space:]]+gfx[0-9a-f]+/ { print $2; exit }')"
+  fi
+  printf '%s' "${detected_target}"
+}
+
+validated_rocm_gfx_target() {
+  requested_target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  requested_target="${requested_target#device-}"
+  case "${requested_target}" in
+    all|gfx908|gfx90a|gfx942|gfx950|gfx1030|gfx1100|gfx1101|gfx1102|gfx1103|gfx1150|gfx1151|gfx1152|gfx1153|gfx1200|gfx1201)
+      printf '%s' "${requested_target}"
+      ;;
+    *)
+      fail "Unsupported TATER_ROCM_GFX_TARGET value: ${requested_target}. Use a ROCm 10 gfx target such as gfx1150 or gfx1151."
+      ;;
+  esac
+}
+
+amd_ryzen_ai_gfx_target() {
+  if [ "${TATER_ROCM_GFX_TARGET:-}" ]; then
+    validated_rocm_gfx_target "${TATER_ROCM_GFX_TARGET}"
+    return
+  fi
+
+  detected_target="$(amd_rocm_gfx_target_from_tools)"
+  if [ "${detected_target}" ]; then
+    validated_rocm_gfx_target "${detected_target}"
+    return
+  fi
+
+  if is_strix_halo_host; then
+    printf '%s' "gfx1151"
+    return
+  fi
+  if [ -r /proc/cpuinfo ] && grep -Eiq 'AMD.*RYZEN.*AI.*(HX[[:space:]]*(370|375|470|475)|[[:space:]](365|465)([^0-9]|$))' /proc/cpuinfo; then
+    printf '%s' "gfx1150"
+    return
+  fi
+
+  warn "Could not determine the Ryzen AI GPU target; installing AMD's all-device ROCm package set" >&2
+  printf '%s' "all"
+}
+
+install_amd_ryzen_ai_pytorch() {
+  venv_python="$1"
+  gfx_target="$(amd_ryzen_ai_gfx_target)"
+  device_extra="device-${gfx_target}"
+  info "Installing AMD PyTorch ${AMD_RYZEN_AI_TORCH_VERSION} for ROCm ${AMD_RYZEN_AI_ROCM_VERSION} (${gfx_target})"
+  "${venv_python}" -m pip install --upgrade \
+    --index-url "${AMD_RYZEN_AI_PYTORCH_INDEX_URL}" \
+    "torch[${device_extra}]==${AMD_RYZEN_AI_TORCH_VERSION}" \
+    "torchvision[${device_extra}]==${AMD_RYZEN_AI_TORCHVISION_VERSION}" \
+    "torchaudio==${AMD_RYZEN_AI_TORCHAUDIO_VERSION}"
 }
 
 ensure_amd_gpu_device_access() {
@@ -1216,15 +1281,10 @@ install_rocm() {
   filtered_requirements "${tmp_req}"
 
   warn "AMD ROCm support is Linux-only and depends on the ROCm runtime installed for your GPU/APU."
-  if rocm_torch_ready "${venv_python}"; then
+  if rocm_torch_ready "${venv_python}" && ! truthy_env "${TATER_SETUP_UPGRADE_ROCM:-}"; then
     ok "Using the existing working PyTorch ROCm installation"
   elif [ -z "${TATER_ROCM_PYTORCH_INDEX_URL:-}" ] && is_amd_ryzen_ai_host && [ "$(python_version "${venv_python}")" = "3.12" ]; then
-    info "Installing AMD-validated PyTorch 2.9.1 for ROCm 7.2.1 on Ryzen AI"
-    "${venv_python}" -m pip install \
-      "${AMD_RYZEN_AI_TORCH_URL}" \
-      "${AMD_RYZEN_AI_TORCHVISION_URL}" \
-      "${AMD_RYZEN_AI_TORCHAUDIO_URL}" \
-      "${AMD_RYZEN_AI_TRITON_URL}"
+    install_amd_ryzen_ai_pytorch "${venv_python}"
   else
     rocm_index="${TATER_ROCM_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/rocm6.4}"
     warn "Generic AMD systems use the PyTorch ROCm 6.4 index by default; override TATER_ROCM_PYTORCH_INDEX_URL when the installed ROCm stack requires another version."
@@ -1522,7 +1582,7 @@ main() {
   required_python_minor=""
   if [ "${profile}" = "rocm" ] && [ -z "${TATER_ROCM_PYTORCH_INDEX_URL:-}" ] && is_amd_ryzen_ai_host && ! existing_rocm_environment_ready; then
     required_python_minor="3.12"
-    info "Ryzen AI ROCm setup uses AMD's validated Python 3.12 package set"
+    info "Ryzen AI ROCm setup uses AMD's ROCm ${AMD_RYZEN_AI_ROCM_VERSION} package set with Python 3.12"
     warn_if_unvalidated_ryzen_ai_os
   fi
   if [ "${profile}" = "rocm" ] && existing_rocm_environment_ready; then

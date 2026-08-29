@@ -267,14 +267,15 @@ NVIDIA desktop/server:
 - To restrict which GPUs native Tater can see, start it with `CUDA_VISIBLE_DEVICES=0 sh run_ui.sh` or use a GPU UUID.
 
 AMD ROCm / Strix Halo:
-- On Ryzen AI systems, the `rocm` profile uses Python 3.12 and AMD's validated PyTorch 2.9.1 package set for ROCm 7.2.1. Healthy existing ROCm environments are reused so working Strix Halo systems are not rebuilt merely because a newer package set exists.
-- AMD validates that Ryzen AI package set on Ubuntu 24.04. Setup warns on other Ubuntu releases and verifies actual GPU access before reporting success.
+- On Ryzen AI systems, the `rocm` profile uses Python 3.12 and pins AMD's PyTorch 2.13 package set for ROCm 10.0.0. Setup selects the architecture-specific package for known APUs, including `gfx1150` for Ryzen AI 9/HX and `gfx1151` for Ryzen AI Max / Strix Halo; set `TATER_ROCM_GFX_TARGET` to override detection.
+- Healthy existing ROCm environments are reused by default. Set `TATER_SETUP_UPGRADE_ROCM=1` when rerunning setup to explicitly move an existing Ryzen AI environment to the pinned ROCm 10 stack.
+- AMD supports that Ryzen AI package set on Ubuntu 24.04.4 and 26.04. Setup warns on other Ubuntu releases and verifies actual GPU access before reporting success.
 - Other AMD systems continue to use the PyTorch ROCm wheel index and can override it with `TATER_ROCM_PYTORCH_INDEX_URL`.
 - Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
 - Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
 - llama.cpp uses ROCm/HIP when a full system ROCm SDK is present. When only the GPU driver/runtime is available, setup installs the small Vulkan build dependencies and builds llama.cpp with Vulkan GPU acceleration instead. Set `TATER_LLAMA_CPP_ROCM_BACKEND=hip` or `vulkan` to force either backend, or override the complete build configuration with `TATER_LLAMA_CPP_CMAKE_ARGS`.
-- On Ubuntu 26.04 x86_64, setup detects the ROCm 7.2 linker issue involving the removed `libxml2.so.2` ABI and places a checksum-verified compatibility library under the ignored `.runtime` directory for build use only. Set `TATER_SETUP_ROCM_LIBXML2_COMPAT=0` to disable this workaround.
+- When an older system ROCm SDK has the linker issue involving the removed `libxml2.so.2` ABI, setup places a checksum-verified compatibility library under the ignored `.runtime` directory for build use only. Set `TATER_SETUP_ROCM_LIBXML2_COMPAT=0` to disable this workaround.
 - Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
 - Setup verification requires PyTorch to see the AMD GPU. If it does not, verify `/dev/kfd`, membership in the `render` and `video` groups, and whether a reboot is pending after driver changes.
 
