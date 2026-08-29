@@ -98,6 +98,56 @@ class SetupTaterVenvTests(unittest.TestCase):
         self.assertIn("cpython-3.11.16%2B20260825-x86_64-unknown-linux-gnu", completed.stdout)
         self.assertIn("25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab", completed.stdout)
 
+    def test_ryzen_ai_profile_can_select_managed_python_312(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            python_version() { printf '%s' '3.14'; }
+            install_managed_python() {
+              test "$1" = /system/python
+              test "$2" = 3.12
+              MANAGED_PYTHON_BIN=/managed/python3.12
+            }
+            unset PYTHON
+            select_supported_python /system/python 3.12
+            test "${SUPPORTED_PYTHON_BIN}" = /managed/python3.12
+
+            configure_managed_python 3.12
+            uname() {
+              case "$1" in
+                -m) printf '%s' x86_64 ;;
+                *) printf '%s' Linux ;;
+              esac
+            }
+            managed_python_asset
+            printf '%s\n%s\n' "${MANAGED_PYTHON_URL}" "${MANAGED_PYTHON_SHA256}"
+            """,
+            environ={},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("cpython-3.12.14%2B20260825-x86_64-unknown-linux-gnu", completed.stdout)
+        self.assertIn("cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3", completed.stdout)
+
+    def test_missing_rocm_sdk_selects_vulkan_llama_backend(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            find_rocm_sdk_root() { return 0; }
+            ensure_vulkan_build_dependencies() { :; }
+            unset TATER_LLAMA_CPP_ROCM_BACKEND
+            prepare_amd_llama_cpp_backend
+            test "${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED}" = vulkan
+            test "$(llama_cpp_native_cmake_args rocm)" = '-DGGML_VULKAN=on -DGGML_HIP=off'
+            """,
+            environ={},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("Vulkan GPU acceleration", completed.stdout)
+
+    def test_amd_ryzen_ai_wheels_are_pinned_to_validated_rocm_release(self) -> None:
+        self.assertIn("rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1", SETUP_LIBRARY)
+        self.assertIn("rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1", SETUP_LIBRARY)
+
     def test_existing_python_314_venv_is_rebuilt_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             venv_dir = Path(temp_dir) / "venv"
@@ -129,6 +179,38 @@ class SetupTaterVenvTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("unsupported Python 3.14", completed.stdout)
+
+    def test_ryzen_ai_venv_is_rebuilt_with_required_python_minor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            venv_dir = Path(temp_dir) / "venv"
+            (venv_dir / "bin").mkdir(parents=True)
+            old_python = venv_dir / "bin" / "python"
+            old_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            old_python.chmod(0o755)
+
+            completed = run_setup_functions(
+                r"""
+                python_version() {
+                  case "$1" in
+                    *venv/bin/python) printf '%s' '3.11' ;;
+                    *) printf '%s' '3.12' ;;
+                  esac
+                }
+                create_python_venv() {
+                  mkdir -p "${VENV_DIR}/bin"
+                  printf '%s\n' '#!/bin/sh' 'exit 0' > "${VENV_DIR}/bin/python"
+                  chmod +x "${VENV_DIR}/bin/python"
+                }
+                VENV_DIR="${TEST_ROOT}/venv"
+                RUNTIME_DIR="${TEST_ROOT}/runtime"
+                PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
+                ensure_venv rocm /managed/python3.12 3.12
+                """,
+                environ={"TEST_ROOT": temp_dir},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("Python 3.12 required by rocm", completed.stdout)
 
     def test_requirement_builds_receive_cmake_four_compatibility_floor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

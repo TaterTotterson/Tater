@@ -19,9 +19,16 @@ ROCM_LIBXML2_COMPAT_DIR="${TATER_ROCM_LIBXML2_COMPAT_DIR:-${RUNTIME_DIR}/rocm-li
 ROCM_LIBXML2_COMPAT_URL="https://launchpad.net/ubuntu/+archive/primary/+files/libxml2_2.12.7+dfsg+really2.9.14-0.4ubuntu0.4_amd64.deb"
 ROCM_LIBXML2_COMPAT_SHA256="685e94ff7fd7ad869894c2317ab9473075536a5c74c092ca5a9cd5876acaaf6c"
 MANAGED_PYTHON_RELEASE="20260825"
-MANAGED_PYTHON_VERSION="3.11.16"
-MANAGED_PYTHON_X86_64_SHA256="25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab"
-MANAGED_PYTHON_AARCH64_SHA256="93fd0d922d88b758a8df277bf12b601fe7c35543a2feceaf10df8496758d28ea"
+MANAGED_PYTHON_311_VERSION="3.11.16"
+MANAGED_PYTHON_311_X86_64_SHA256="25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab"
+MANAGED_PYTHON_311_AARCH64_SHA256="93fd0d922d88b758a8df277bf12b601fe7c35543a2feceaf10df8496758d28ea"
+MANAGED_PYTHON_312_VERSION="3.12.14"
+MANAGED_PYTHON_312_X86_64_SHA256="cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3"
+MANAGED_PYTHON_312_AARCH64_SHA256="70162d3fa61a7bf52a9f098ad6f46046f9813ab50e0d2b3cfeb81ee1bad78f1c"
+AMD_RYZEN_AI_TORCH_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl"
+AMD_RYZEN_AI_TORCHVISION_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
+AMD_RYZEN_AI_TORCHAUDIO_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl"
+AMD_RYZEN_AI_TRITON_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl"
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -148,9 +155,18 @@ normalize_profile() {
 }
 
 find_python() {
+  preferred_minor="${1:-}"
   if [ "${PYTHON:-}" ] && command -v "${PYTHON}" >/dev/null 2>&1; then
     printf '%s' "${PYTHON}"
     return
+  fi
+  if [ "${preferred_minor}" ]; then
+    for candidate in "python${preferred_minor}" "/usr/local/bin/python${preferred_minor}"; do
+      if command -v "${candidate}" >/dev/null 2>&1; then
+        printf '%s' "${candidate}"
+        return
+      fi
+    done
   fi
   for candidate in \
     python3.11 \
@@ -190,11 +206,31 @@ python_version_supported() {
   esac
 }
 
+configure_managed_python() {
+  requested_minor="$1"
+  case "${requested_minor}" in
+    3.11)
+      MANAGED_PYTHON_VERSION="${MANAGED_PYTHON_311_VERSION}"
+      MANAGED_PYTHON_X86_64_SHA256="${MANAGED_PYTHON_311_X86_64_SHA256}"
+      MANAGED_PYTHON_AARCH64_SHA256="${MANAGED_PYTHON_311_AARCH64_SHA256}"
+      ;;
+    3.12)
+      MANAGED_PYTHON_VERSION="${MANAGED_PYTHON_312_VERSION}"
+      MANAGED_PYTHON_X86_64_SHA256="${MANAGED_PYTHON_312_X86_64_SHA256}"
+      MANAGED_PYTHON_AARCH64_SHA256="${MANAGED_PYTHON_312_AARCH64_SHA256}"
+      ;;
+    *) fail "Automatic Python installation is not configured for Python ${requested_minor}." ;;
+  esac
+}
+
 managed_python_dir() {
   printf '%s' "${TATER_MANAGED_PYTHON_DIR:-${RUNTIME_DIR}/python/cpython-${MANAGED_PYTHON_VERSION}+${MANAGED_PYTHON_RELEASE}}"
 }
 
 managed_python_asset() {
+  if [ -z "${MANAGED_PYTHON_VERSION:-}" ]; then
+    configure_managed_python 3.11
+  fi
   case "$(uname -m 2>/dev/null || printf unknown)" in
     x86_64|amd64)
       MANAGED_PYTHON_ARCH="x86_64"
@@ -232,10 +268,12 @@ cleanup_managed_python_stage() {
 
 install_managed_python() {
   bootstrap_python="$1"
+  requested_minor="${2:-3.11}"
+  configure_managed_python "${requested_minor}"
   managed_root="$(managed_python_dir)"
-  managed_bin="${managed_root}/bin/python3.11"
+  managed_bin="${managed_root}/bin/python${requested_minor}"
 
-  if [ -x "${managed_bin}" ] && [ "$(python_version "${managed_bin}" 2>/dev/null || true)" = "3.11" ]; then
+  if [ -x "${managed_bin}" ] && [ "$(python_version "${managed_bin}" 2>/dev/null || true)" = "${requested_minor}" ]; then
     MANAGED_PYTHON_BIN="${managed_bin}"
     ok "Using managed Python ${MANAGED_PYTHON_VERSION}"
     return
@@ -262,9 +300,9 @@ install_managed_python() {
   fi
   tar -xzf "${managed_python_archive}" -C "${managed_python_stage}"
   extracted_root="${managed_python_stage}/python"
-  extracted_bin="${extracted_root}/bin/python3.11"
-  if [ ! -x "${extracted_bin}" ] || [ "$(python_version "${extracted_bin}" 2>/dev/null || true)" != "3.11" ]; then
-    fail "The downloaded Python runtime did not contain a working Python 3.11 interpreter."
+  extracted_bin="${extracted_root}/bin/python${requested_minor}"
+  if [ ! -x "${extracted_bin}" ] || [ "$(python_version "${extracted_bin}" 2>/dev/null || true)" != "${requested_minor}" ]; then
+    fail "The downloaded Python runtime did not contain a working Python ${requested_minor} interpreter."
   fi
 
   if [ -e "${managed_root}" ]; then
@@ -283,18 +321,27 @@ install_managed_python() {
 
 select_supported_python() {
   candidate="$1"
+  preferred_minor="${2:-}"
   version="$(python_version "${candidate}")"
-  if python_version_supported "${version}"; then
+  if python_version_supported "${version}" && { [ -z "${preferred_minor}" ] || [ "${version}" = "${preferred_minor}" ]; }; then
     SUPPORTED_PYTHON_BIN="${candidate}"
     ok "Using ${candidate} ${version}"
     return
   fi
 
   if [ "${PYTHON:-}" ]; then
-    fail "PYTHON points to unsupported Python ${version}. Set PYTHON to Python 3.11, 3.12, or 3.13, or unset it so setup can install a private Python 3.11 runtime."
+    if [ "${preferred_minor}" ] && [ "${version}" != "${preferred_minor}" ]; then
+      fail "This hardware profile requires Python ${preferred_minor}, but PYTHON points to ${version}. Set PYTHON to Python ${preferred_minor}, or unset it so setup can install a private runtime."
+    fi
+    fail "PYTHON points to unsupported Python ${version}. Set PYTHON to Python 3.11, 3.12, or 3.13, or unset it so setup can install a private supported runtime."
   fi
-  warn "Python ${version} is not supported by Tater's AI dependencies; using a private Python 3.11 runtime"
-  install_managed_python "${candidate}"
+  managed_minor="${preferred_minor:-3.11}"
+  if python_version_supported "${version}"; then
+    warn "The selected hardware profile requires Python ${managed_minor}; using a private runtime"
+  else
+    warn "Python ${version} is not supported by Tater's AI dependencies; using a private Python ${managed_minor} runtime"
+  fi
+  install_managed_python "${candidate}" "${managed_minor}"
   SUPPORTED_PYTHON_BIN="${MANAGED_PYTHON_BIN}"
 }
 
@@ -333,6 +380,47 @@ is_strix_halo_host() {
   grep -Eiq 'AMD[[:space:]]+RYZEN[[:space:]]+AI[[:space:]]+MAX' /proc/cpuinfo
 }
 
+is_amd_ryzen_ai_host() {
+  override="$(printf '%s' "${TATER_SETUP_RYZEN_AI:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${override}" in
+    1|true|yes|y|on) return 0 ;;
+    0|false|no|n|off) return 1 ;;
+  esac
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || return 1
+  [ -r /proc/cpuinfo ] || return 1
+  grep -Eiq 'AMD.*RYZEN.*AI' /proc/cpuinfo
+}
+
+warn_if_unvalidated_ryzen_ai_os() {
+  [ -r /etc/os-release ] || return
+  os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+  os_version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+  if [ "${os_id}" = "ubuntu" ] && [ "${os_version}" != "24.04" ]; then
+    warn "AMD validates the Ryzen AI ROCm 7.2.1 package set on Ubuntu 24.04; detected Ubuntu ${os_version}. Setup will continue and verify GPU access before reporting success."
+  fi
+}
+
+existing_rocm_environment_ready() {
+  [ -x "${VENV_DIR}/bin/python" ] || return 1
+  [ "$(cat "${PROFILE_FILE}" 2>/dev/null || true)" = "rocm" ] || return 1
+  rocm_torch_ready "${VENV_DIR}/bin/python"
+}
+
+rocm_torch_ready() {
+  "$1" -c 'import torch; raise SystemExit(0 if torch.version.hip and torch.cuda.is_available() else 1)' >/dev/null 2>&1
+}
+
+ensure_amd_gpu_device_access() {
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || fail "The AMD ROCm profile requires Linux."
+  if [ ! -e /dev/kfd ]; then
+    fail "The AMD compute device /dev/kfd is unavailable. Install a kernel/AMDGPU stack that supports this processor and reboot before rerunning setup."
+  fi
+  if [ ! -r /dev/kfd ] || [ ! -w /dev/kfd ]; then
+    fail "The current user cannot access /dev/kfd. Add the user to the render and video groups, sign out or reboot, then rerun setup."
+  fi
+  ok "AMD GPU device access is ready"
+}
+
 missing_linux_build_tools() {
   missing=""
   for tool in git cmake make cc c++; do
@@ -367,35 +455,137 @@ ensure_linux_build_tools() {
   missing="$(missing_linux_build_tools)"
   if [ -z "${missing}" ]; then
     ok "Linux build tools are ready"
+  else
+    if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+      fail "Missing Linux build tools: ${missing}. Install them or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+    fi
+
+    info "Installing required Linux build tools: ${missing}"
+    if command -v apt-get >/dev/null 2>&1; then
+      run_privileged apt-get update
+      run_privileged apt-get install -y git cmake build-essential
+    elif command -v dnf >/dev/null 2>&1; then
+      run_privileged dnf install -y git cmake gcc gcc-c++ make
+    elif command -v yum >/dev/null 2>&1; then
+      run_privileged yum install -y git cmake gcc gcc-c++ make
+    elif command -v pacman >/dev/null 2>&1; then
+      run_privileged pacman -S --needed --noconfirm git cmake base-devel
+    elif command -v zypper >/dev/null 2>&1; then
+      run_privileged zypper --non-interactive install -y git cmake gcc gcc-c++ make
+    elif command -v apk >/dev/null 2>&1; then
+      run_privileged apk add git cmake build-base
+    elif command -v xbps-install >/dev/null 2>&1; then
+      run_privileged xbps-install -Sy git cmake base-devel
+    else
+      fail "Missing Linux build tools: ${missing}. No supported package manager was found."
+    fi
+
+    missing="$(missing_linux_build_tools)"
+    [ -z "${missing}" ] || fail "Linux build tools are still missing after installation: ${missing}"
+    ok "Linux build tools are ready"
+  fi
+
+  if [ "${profile}" = "rocm" ] && [ -z "${TATER_LLAMA_CPP_CMAKE_ARGS:-}" ]; then
+    prepare_amd_llama_cpp_backend
+  fi
+}
+
+find_rocm_sdk_root() {
+  candidates=""
+  if [ "${TATER_ROCM_PATH:-}" ]; then
+    candidates="${candidates} ${TATER_ROCM_PATH}"
+  fi
+  if [ "${ROCM_PATH:-}" ]; then
+    candidates="${candidates} ${ROCM_PATH}"
+  fi
+  if command -v hipconfig >/dev/null 2>&1; then
+    detected_rocm_root="$(hipconfig --path 2>/dev/null | head -n 1 || true)"
+    [ -z "${detected_rocm_root}" ] || candidates="${candidates} ${detected_rocm_root}"
+  fi
+  candidates="${candidates} /opt/rocm"
+  for candidate in ${candidates}; do
+    if [ -x "${candidate}/bin/hipcc" ] || [ -f "${candidate}/lib/cmake/hip/hip-config.cmake" ]; then
+      printf '%s' "${candidate}"
+      return
+    fi
+  done
+  for candidate in /opt/rocm-*; do
+    if [ -x "${candidate}/bin/hipcc" ] || [ -f "${candidate}/lib/cmake/hip/hip-config.cmake" ]; then
+      printf '%s' "${candidate}"
+      return
+    fi
+  done
+  return 0
+}
+
+vulkan_build_dependencies_ready() {
+  command -v glslc >/dev/null 2>&1 || return 1
+  [ -f /usr/include/vulkan/vulkan.h ] || return 1
+  [ -f /usr/include/spirv/unified1/spirv.hpp ] || return 1
+}
+
+ensure_vulkan_build_dependencies() {
+  if vulkan_build_dependencies_ready; then
+    ok "Vulkan build tools are ready"
     return
   fi
   if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
-    fail "Missing Linux build tools: ${missing}. Install them or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+    fail "The ROCm SDK is absent and Vulkan build dependencies are missing. Install libvulkan-dev, glslc, and spirv-headers, or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
   fi
 
-  info "Installing required Linux build tools: ${missing}"
+  info "Installing Vulkan build tools for the AMD local LLM runtime"
   if command -v apt-get >/dev/null 2>&1; then
     run_privileged apt-get update
-    run_privileged apt-get install -y git cmake build-essential
+    run_privileged apt-get install -y libvulkan-dev glslc spirv-headers
   elif command -v dnf >/dev/null 2>&1; then
-    run_privileged dnf install -y git cmake gcc gcc-c++ make
+    run_privileged dnf install -y vulkan-loader-devel glslc spirv-headers
   elif command -v yum >/dev/null 2>&1; then
-    run_privileged yum install -y git cmake gcc gcc-c++ make
+    run_privileged yum install -y vulkan-loader-devel glslc spirv-headers
   elif command -v pacman >/dev/null 2>&1; then
-    run_privileged pacman -S --needed --noconfirm git cmake base-devel
+    run_privileged pacman -S --needed --noconfirm vulkan-headers shaderc spirv-headers
   elif command -v zypper >/dev/null 2>&1; then
-    run_privileged zypper --non-interactive install -y git cmake gcc gcc-c++ make
+    run_privileged zypper --non-interactive install -y vulkan-devel glslc spirv-headers
   elif command -v apk >/dev/null 2>&1; then
-    run_privileged apk add git cmake build-base
-  elif command -v xbps-install >/dev/null 2>&1; then
-    run_privileged xbps-install -Sy git cmake base-devel
+    run_privileged apk add vulkan-loader-dev shaderc spirv-headers
   else
-    fail "Missing Linux build tools: ${missing}. No supported package manager was found."
+    fail "The ROCm SDK is absent. Install this distribution's Vulkan loader headers, glslc, and SPIR-V headers, then rerun setup."
   fi
+  vulkan_build_dependencies_ready || fail "Vulkan build dependencies are still missing after installation."
+  ok "Vulkan build tools are ready"
+}
 
-  missing="$(missing_linux_build_tools)"
-  [ -z "${missing}" ] || fail "Linux build tools are still missing after installation: ${missing}"
-  ok "Linux build tools are ready"
+prepare_amd_llama_cpp_backend() {
+  requested_backend="$(printf '%s' "${TATER_LLAMA_CPP_ROCM_BACKEND:-auto}" | tr '[:upper:]' '[:lower:]')"
+  rocm_sdk_root="$(find_rocm_sdk_root)"
+  case "${requested_backend}" in
+    auto)
+      if [ "${rocm_sdk_root}" ]; then
+        selected_backend="hip"
+      else
+        selected_backend="vulkan"
+      fi
+      ;;
+    hip|vulkan) selected_backend="${requested_backend}" ;;
+    *) fail "Unknown TATER_LLAMA_CPP_ROCM_BACKEND value: ${requested_backend}. Use auto, hip, or vulkan." ;;
+  esac
+
+  if [ "${selected_backend}" = "hip" ]; then
+    [ "${rocm_sdk_root}" ] || fail "The HIP llama.cpp backend was requested, but no ROCm SDK was found. Install the ROCm HIP SDK or use TATER_LLAMA_CPP_ROCM_BACKEND=vulkan."
+    ROCM_PATH="${rocm_sdk_root}"
+    HIP_PATH="${rocm_sdk_root}"
+    PATH="${rocm_sdk_root}/bin:${PATH}"
+    CMAKE_PREFIX_PATH="${rocm_sdk_root}${CMAKE_PREFIX_PATH:+;${CMAKE_PREFIX_PATH}}"
+    export ROCM_PATH HIP_PATH PATH CMAKE_PREFIX_PATH
+    ok "Using ROCm SDK at ${rocm_sdk_root} for llama.cpp"
+  else
+    if [ "${rocm_sdk_root}" ]; then
+      info "Building llama.cpp with the requested Vulkan GPU backend"
+    else
+      warn "ROCm SDK not found; building llama.cpp with Vulkan GPU acceleration"
+    fi
+    ensure_vulkan_build_dependencies
+  fi
+  TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED="${selected_backend}"
 }
 
 create_python_venv() {
@@ -459,6 +649,7 @@ install_linux_python_venv_support() {
 ensure_venv() {
   profile="$1"
   python_bin="$2"
+  required_python_minor="${3:-}"
   existing_profile=""
   if [ -f "${PROFILE_FILE}" ]; then
     existing_profile="$(cat "${PROFILE_FILE}" 2>/dev/null || true)"
@@ -473,6 +664,9 @@ ensure_venv() {
     existing_venv_version="$(python_version "${VENV_DIR}/bin/python" 2>/dev/null || true)"
     if ! python_version_supported "${existing_venv_version}"; then
       warn "Removing ${VENV_DIR} created with unsupported Python ${existing_venv_version:-unknown}"
+      rm -rf "${VENV_DIR}"
+    elif [ -n "${required_python_minor}" ] && [ "${existing_venv_version}" != "${required_python_minor}" ]; then
+      warn "Rebuilding ${VENV_DIR} with Python ${required_python_minor} required by ${profile}"
       rm -rf "${VENV_DIR}"
     fi
   fi
@@ -805,7 +999,11 @@ llama_cpp_native_cmake_args() {
       printf '%s' "-DGGML_CUDA=on"
       ;;
     rocm)
-      printf '%s' "-DGGML_HIP=on"
+      if [ "${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED:-hip}" = "vulkan" ]; then
+        printf '%s' "-DGGML_VULKAN=on -DGGML_HIP=off"
+      else
+        printf '%s' "-DGGML_HIP=on -DGGML_VULKAN=off"
+      fi
       ;;
     *)
       printf '%s' ""
@@ -853,6 +1051,14 @@ llama_cpp_cuda_stub_dir() {
   done
 }
 
+handle_llama_cpp_build_failure() {
+  message="$1"
+  if truthy_env "${TATER_SETUP_REQUIRE_LOCAL_LLM:-1}"; then
+    fail "${message}"
+  fi
+  warn "${message}"
+}
+
 install_llama_cpp_native() {
   profile="$1"
   if [ "${TATER_SETUP_LLAMA_CPP_NATIVE:-1}" = "0" ]; then
@@ -863,18 +1069,18 @@ install_llama_cpp_native() {
     ok "Using native llama.cpp server at ${LLAMA_CPP_SERVER_BIN}"
     return
   fi
-  command -v git >/dev/null 2>&1 || { warn "git was not found; skipping native llama.cpp build."; return; }
-  command -v cmake >/dev/null 2>&1 || { warn "cmake was not found; install cmake and rerun setup for native llama.cpp."; return; }
+  command -v git >/dev/null 2>&1 || { handle_llama_cpp_build_failure "git was not found, so llama.cpp could not be installed."; return; }
+  command -v cmake >/dev/null 2>&1 || { handle_llama_cpp_build_failure "cmake was not found, so llama.cpp could not be built."; return; }
   mkdir -p "${RUNTIME_DIR}"
   if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
     info "Cloning native llama.cpp runtime"
-    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}" || { warn "Could not clone llama.cpp."; return; }
+    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}" || { handle_llama_cpp_build_failure "Could not clone llama.cpp."; return; }
   else
     info "Updating native llama.cpp runtime"
     git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || warn "Could not fetch llama.cpp ${LLAMA_CPP_REF}; using existing checkout."
     git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
   fi
-  if [ "${profile}" = "rocm" ]; then
+  if [ "${profile}" = "rocm" ] && [ "${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED:-hip}" = "hip" ]; then
     prepare_rocm_linker_compat
   fi
   cmake_args="$(llama_cpp_native_cmake_args "${profile}")"
@@ -885,16 +1091,16 @@ install_llama_cpp_native() {
     # shellcheck disable=SC2086
     cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} \
       "-DCMAKE_EXE_LINKER_FLAGS=-L${cuda_stub_dir} -Wl,-rpath-link,${cuda_stub_dir}" \
-      "-DCMAKE_SHARED_LINKER_FLAGS=-L${cuda_stub_dir} -Wl,-rpath-link,${cuda_stub_dir}" || { warn "llama.cpp configure failed."; return; }
+      "-DCMAKE_SHARED_LINKER_FLAGS=-L${cuda_stub_dir} -Wl,-rpath-link,${cuda_stub_dir}" || { handle_llama_cpp_build_failure "llama.cpp configure failed for ${profile}."; return; }
   else
     # shellcheck disable=SC2086
-    cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} || { warn "llama.cpp configure failed."; return; }
+    cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_DIR}/build" -DCMAKE_BUILD_TYPE=Release ${cmake_args} || { handle_llama_cpp_build_failure "llama.cpp configure failed for ${profile}."; return; }
   fi
-  cmake --build "${LLAMA_CPP_DIR}/build" --config Release --target llama-server -j "${TATER_LLAMA_CPP_BUILD_JOBS:-4}" || { warn "llama-server build failed."; return; }
+  cmake --build "${LLAMA_CPP_DIR}/build" --config Release --target llama-server -j "${TATER_LLAMA_CPP_BUILD_JOBS:-4}" || { handle_llama_cpp_build_failure "llama-server build failed for ${profile}."; return; }
   if check_llama_cpp_native "${LLAMA_CPP_SERVER_BIN}"; then
     ok "Built native llama.cpp server at ${LLAMA_CPP_SERVER_BIN}"
   else
-    warn "llama-server build finished, but ${LLAMA_CPP_SERVER_BIN} was not executable."
+    handle_llama_cpp_build_failure "llama-server build finished, but ${LLAMA_CPP_SERVER_BIN} was not executable."
   fi
 }
 
@@ -1009,11 +1215,22 @@ install_rocm() {
   trap 'rm -f "${tmp_req}"' EXIT
   filtered_requirements "${tmp_req}"
 
-  rocm_index="${TATER_ROCM_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/rocm6.4}"
   warn "AMD ROCm support is Linux-only and depends on the ROCm runtime installed for your GPU/APU."
-  warn "Strix Halo systems may need newer AMD ROCm wheels; override with TATER_ROCM_PYTORCH_INDEX_URL if needed."
-  info "Installing AMD ROCm PyTorch wheels from ${rocm_index}"
-  "${venv_python}" -m pip install --index-url "${rocm_index}" torch torchaudio
+  if rocm_torch_ready "${venv_python}"; then
+    ok "Using the existing working PyTorch ROCm installation"
+  elif [ -z "${TATER_ROCM_PYTORCH_INDEX_URL:-}" ] && is_amd_ryzen_ai_host && [ "$(python_version "${venv_python}")" = "3.12" ]; then
+    info "Installing AMD-validated PyTorch 2.9.1 for ROCm 7.2.1 on Ryzen AI"
+    "${venv_python}" -m pip install \
+      "${AMD_RYZEN_AI_TORCH_URL}" \
+      "${AMD_RYZEN_AI_TORCHVISION_URL}" \
+      "${AMD_RYZEN_AI_TORCHAUDIO_URL}" \
+      "${AMD_RYZEN_AI_TRITON_URL}"
+  else
+    rocm_index="${TATER_ROCM_PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/rocm6.4}"
+    warn "Generic AMD systems use the PyTorch ROCm 6.4 index by default; override TATER_ROCM_PYTORCH_INDEX_URL when the installed ROCm stack requires another version."
+    info "Installing AMD ROCm PyTorch wheels from ${rocm_index}"
+    "${venv_python}" -m pip install --index-url "${rocm_index}" torch torchaudio
+  fi
   info "Installing Tater dependencies"
   pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native rocm
@@ -1154,6 +1371,7 @@ print(f"redis_runtime={'system:' + redis_server if redis_server else 'redislite'
 print("core imports ok")
 
 remote_only = str(os.getenv("TATER_REMOTE_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
+setup_profile = str(os.getenv("TATER_SETUP_PROFILE") or "").strip().lower()
 if remote_only:
     forbidden = [
         "torch",
@@ -1175,6 +1393,8 @@ else:
         raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))
     print("face_id_imports ok")
 
+cuda = False
+hip = None
 try:
     import torch
     cuda = bool(getattr(torch, "cuda", None) and torch.cuda.is_available())
@@ -1185,6 +1405,13 @@ try:
     print(f"torch_mps={mps}")
 except Exception as exc:
     print(f"torch unavailable: {exc}")
+
+if setup_profile == "rocm" and not (cuda and hip):
+    raise SystemExit(
+        "The AMD profile installed, but PyTorch cannot access the GPU. Verify that the installed "
+        "ROCm version supports this processor, that /dev/kfd is available, and that the current "
+        "user belongs to the render and video groups; a reboot may be required after driver changes."
+    )
 
 try:
     import ctranslate2
@@ -1211,7 +1438,7 @@ if server_bin:
     if not server_available:
         message = (
             f"Missing required llama.cpp server binary: {server_bin}. "
-            "Install git and cmake, then rerun setup, or set "
+            "Review the earlier native build error and rerun setup, or set "
             "TATER_SETUP_LLAMA_CPP_NATIVE=0 TATER_SETUP_REQUIRE_LOCAL_LLM=0 "
             "to skip Tater's built-in local LLM runtime."
         )
@@ -1292,8 +1519,18 @@ main() {
   banner
   info "Selected profile: ${BOLD}${profile}${RESET}"
 
-  detected_python="$(find_python)"
-  select_supported_python "${detected_python}"
+  required_python_minor=""
+  if [ "${profile}" = "rocm" ] && [ -z "${TATER_ROCM_PYTORCH_INDEX_URL:-}" ] && is_amd_ryzen_ai_host && ! existing_rocm_environment_ready; then
+    required_python_minor="3.12"
+    info "Ryzen AI ROCm setup uses AMD's validated Python 3.12 package set"
+    warn_if_unvalidated_ryzen_ai_os
+  fi
+  if [ "${profile}" = "rocm" ] && existing_rocm_environment_ready; then
+    detected_python="${VENV_DIR}/bin/python"
+  else
+    detected_python="$(find_python "${required_python_minor}")"
+  fi
+  select_supported_python "${detected_python}" "${required_python_minor}"
   python_bin="${SUPPORTED_PYTHON_BIN}"
 
   if [ "${profile}" = "thor" ]; then
@@ -1310,8 +1547,11 @@ main() {
     warn "Edge profile disables local model runtimes. Pair it as a Spudlet to use Spud Hub model routing, or configure standalone remote providers in TaterOS."
   fi
 
+  if [ "${profile}" = "rocm" ]; then
+    ensure_amd_gpu_device_access
+  fi
   ensure_linux_build_tools "${profile}"
-  ensure_venv "${profile}" "${python_bin}"
+  ensure_venv "${profile}" "${python_bin}" "${required_python_minor}"
   venv_python="${VENV_DIR}/bin/python"
   install_base "${venv_python}"
 

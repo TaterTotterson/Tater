@@ -204,7 +204,7 @@ Use the interactive setup menu to choose the right local runtime profile:
 sh setup_tater.sh
 ```
 
-The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. Tater supports Python 3.11 through 3.13. If Linux only has a newer, unsupported system Python (such as Python 3.14), setup downloads a verified private Python 3.11 runtime into `.runtime/python/` and uses it without replacing the system Python. It also rebuilds an existing `.venv` when that environment was made with an unsupported Python version. Set `TATER_SETUP_INSTALL_MANAGED_PYTHON=0` to disable the private runtime download. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
+The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. Tater supports Python 3.11 through 3.13. If Linux only has a newer, unsupported system Python (such as Python 3.14), setup downloads a checksum-verified private Python runtime into `.runtime/python/` without replacing the system Python. The default managed runtime is Python 3.11; supported Ryzen AI systems use Python 3.12 for AMD's validated ROCm packages. Setup rebuilds an existing `.venv` when it was made with an unsupported or hardware-incompatible Python version. Set `TATER_SETUP_INSTALL_MANAGED_PYTHON=0` to disable the private runtime download. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
 
 Available local profiles:
 - **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. Pair it as a Spudlet to route LLM, STT, TTS, vision, audio/video understanding, Speaker ID, Emotion ID, and Face ID through a Spud Hub; wake-word detection and WebRTC VAD remain on the edge device. Standalone Wyoming and compatible remote providers remain available.
@@ -267,14 +267,16 @@ NVIDIA desktop/server:
 - To restrict which GPUs native Tater can see, start it with `CUDA_VISIBLE_DEVICES=0 sh run_ui.sh` or use a GPU UUID.
 
 AMD ROCm / Strix Halo:
-- The `rocm` profile installs PyTorch from the ROCm wheel index, then installs Tater dependencies and the official PyTorch Kokoro package.
+- On Ryzen AI systems, the `rocm` profile uses Python 3.12 and AMD's validated PyTorch 2.9.1 package set for ROCm 7.2.1. Healthy existing ROCm environments are reused so working Strix Halo systems are not rebuilt merely because a newer package set exists.
+- AMD validates that Ryzen AI package set on Ubuntu 24.04. Setup warns on other Ubuntu releases and verifies actual GPU access before reporting success.
+- Other AMD systems continue to use the PyTorch ROCm wheel index and can override it with `TATER_ROCM_PYTORCH_INDEX_URL`.
 - Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
 - Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
-- llama.cpp ROCm/HIP is built by setup with `-DGGML_HIP=on` by default. Override with `TATER_LLAMA_CPP_CMAKE_ARGS` if your ROCm stack needs a different llama.cpp flag.
+- llama.cpp uses ROCm/HIP when a full system ROCm SDK is present. When only the GPU driver/runtime is available, setup installs the small Vulkan build dependencies and builds llama.cpp with Vulkan GPU acceleration instead. Set `TATER_LLAMA_CPP_ROCM_BACKEND=hip` or `vulkan` to force either backend, or override the complete build configuration with `TATER_LLAMA_CPP_CMAKE_ARGS`.
 - On Ubuntu 26.04 x86_64, setup detects the ROCm 7.2 linker issue involving the removed `libxml2.so.2` ABI and places a checksum-verified compatibility library under the ignored `.runtime` directory for build use only. Set `TATER_SETUP_ROCM_LIBXML2_COMPAT=0` to disable this workaround.
 - Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
-- Strix Halo may require newer AMD ROCm wheels than the default PyTorch index. Override the PyTorch ROCm wheel source with `TATER_ROCM_PYTORCH_INDEX_URL` before running setup if needed.
+- Setup verification requires PyTorch to see the AMD GPU. If it does not, verify `/dev/kfd`, membership in the `render` and `video` groups, and whether a reboot is pending after driver changes.
 
 Jetson and Thor:
 - The `jetson` and `thor` profiles create a venv with `--system-site-packages` so NVIDIA JetPack-provided Python AI packages can be reused.
