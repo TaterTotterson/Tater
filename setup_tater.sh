@@ -232,7 +232,7 @@ run_privileged() {
   elif command -v doas >/dev/null 2>&1; then
     doas "$@"
   else
-    fail "System build tools are missing and neither sudo nor doas is available."
+    fail "System dependencies are missing and neither sudo nor doas is available."
   fi
 }
 
@@ -279,12 +279,75 @@ ensure_linux_build_tools() {
   ok "Linux build tools are ready"
 }
 
+create_python_venv() {
+  profile="$1"
+  python_bin="$2"
+  if [ "${profile}" = "jetson" ] || [ "${profile}" = "thor" ]; then
+    "${python_bin}" -m venv --system-site-packages "${VENV_DIR}"
+  else
+    "${python_bin}" -m venv "${VENV_DIR}"
+  fi
+}
+
+venv_failure_is_missing_support() {
+  error_output="$1"
+  case "${error_output}" in
+    *ensurepip*|*"No module named venv"*|*python3-venv*|*python3.*-venv*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_linux_python_venv_support() {
+  python_bin="$1"
+  version="$(python_version "${python_bin}")"
+  versioned_apt_package="python${version}-venv"
+
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]; then
+    fail "${python_bin} cannot create virtual environments. Install Python with venv/ensurepip support, then rerun setup."
+  fi
+  if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+    fail "${python_bin} cannot create virtual environments. Install ${versioned_apt_package} (Debian/Ubuntu) or the equivalent package for this system, or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+  fi
+
+  info "Installing Python ${version} virtual-environment support"
+  if command -v apt-get >/dev/null 2>&1; then
+    run_privileged apt-get update
+    if ! run_privileged apt-get install -y "${versioned_apt_package}"; then
+      warn "${versioned_apt_package} was unavailable; trying python3-venv"
+      run_privileged apt-get install -y python3-venv
+    fi
+  elif command -v dnf >/dev/null 2>&1; then
+    if ! run_privileged dnf install -y "python${version}-pip"; then
+      run_privileged dnf install -y python3-pip
+    fi
+  elif command -v yum >/dev/null 2>&1; then
+    if ! run_privileged yum install -y "python${version}-pip"; then
+      run_privileged yum install -y python3-pip
+    fi
+  elif command -v pacman >/dev/null 2>&1; then
+    run_privileged pacman -S --needed --noconfirm python python-pip
+  elif command -v zypper >/dev/null 2>&1; then
+    run_privileged zypper --non-interactive install -y python3-pip
+  elif command -v apk >/dev/null 2>&1; then
+    run_privileged apk add python3 py3-pip py3-virtualenv
+  elif command -v xbps-install >/dev/null 2>&1; then
+    run_privileged xbps-install -Sy python3 python3-pip
+  else
+    fail "${python_bin} cannot create virtual environments and no supported package manager was found. Install venv/ensurepip support for Python ${version}, then rerun setup."
+  fi
+}
+
 ensure_venv() {
   profile="$1"
   python_bin="$2"
   existing_profile=""
   if [ -f "${PROFILE_FILE}" ]; then
     existing_profile="$(cat "${PROFILE_FILE}" 2>/dev/null || true)"
+  fi
+
+  if [ -f "${VENV_DIR}/pyvenv.cfg" ] && [ -x "${VENV_DIR}/bin/python" ] && ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+    warn "Removing incomplete ${VENV_DIR} from a previous failed setup"
+    rm -rf "${VENV_DIR}"
   fi
 
   if [ -x "${VENV_DIR}/bin/python" ] && [ "${existing_profile}" != "${profile}" ]; then
@@ -302,13 +365,29 @@ ensure_venv() {
   if [ ! -x "${VENV_DIR}/bin/python" ]; then
     info "Creating ${VENV_DIR}"
     mkdir -p "$(dirname "${VENV_DIR}")"
-    if [ "${profile}" = "jetson" ] || [ "${profile}" = "thor" ]; then
-      "${python_bin}" -m venv --system-site-packages "${VENV_DIR}"
-    else
-      "${python_bin}" -m venv "${VENV_DIR}"
+    venv_error=""
+    if ! venv_error="$(create_python_venv "${profile}" "${python_bin}" 2>&1)"; then
+      [ -z "${venv_error}" ] || printf '%s\n' "${venv_error}" >&2
+      if ! venv_failure_is_missing_support "${venv_error}"; then
+        fail "Failed to create ${VENV_DIR} with ${python_bin}."
+      fi
+
+      warn "Python $(python_version "${python_bin}") is missing virtual-environment support"
+      install_linux_python_venv_support "${python_bin}"
+      if [ -e "${VENV_DIR}" ]; then
+        rm -rf "${VENV_DIR}"
+      fi
+      mkdir -p "$(dirname "${VENV_DIR}")"
+      if ! create_python_venv "${profile}" "${python_bin}"; then
+        fail "Failed to create ${VENV_DIR} after installing Python virtual-environment support."
+      fi
     fi
   else
     ok "Using existing ${VENV_DIR}"
+  fi
+
+  if [ ! -x "${VENV_DIR}/bin/python" ] || ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+    fail "${VENV_DIR} was created without a working pip installation. Install venv/ensurepip support for ${python_bin}, remove ${VENV_DIR}, and rerun setup."
   fi
 }
 

@@ -204,7 +204,7 @@ Use the interactive setup menu to choose the right local runtime profile:
 sh setup_tater.sh
 ```
 
-The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`.
+The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
 
 Available local profiles:
 - **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. Pair it as a Spudlet to route LLM, STT, TTS, vision, audio/video understanding, Speaker ID, Emotion ID, and Face ID through a Spud Hub; wake-word detection and WebRTC VAD remain on the edge device. Standalone Wyoming and compatible remote providers remain available.
