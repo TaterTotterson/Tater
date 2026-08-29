@@ -68,6 +68,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                         "TATER_LLAMA_CPP_GEMMA4_VULKAN_WORKAROUND": "",
                         "TATER_LLAMA_CPP_GEMMA4_NO_WARMUP": "",
                         "TATER_LLAMA_CPP_GEMMA4_CPU_MOE": "",
+                        "TATER_LLAMA_CPP_GEMMA4_LOAD_MODE": "",
                         "TATER_LLAMA_CPP_CHAT_FORMAT": "",
                         "TATER_LLAMA_CPP_USE_MLOCK": "0",
                     },
@@ -82,9 +83,11 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 )
 
         self.assertIn("--no-warmup", command)
+        self.assertEqual(command[command.index("--load-mode") + 1], "mmap")
         self.assertEqual(command[command.index("--n-cpu-moe") + 1], "99")
         self.assertTrue(metadata["gemma4_vulkan_workaround"])
         self.assertTrue(metadata["warmup_disabled"])
+        self.assertEqual(metadata["load_mode"], "mmap")
         self.assertEqual(metadata["cpu_moe_layers"], 99)
 
     def test_strix_halo_gemma4_keeps_gpu_experts(self):
@@ -95,6 +98,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 "TATER_ROCM_GFX_TARGET": "gfx1151",
                 "TATER_LLAMA_CPP_GPU_BACKEND": "vulkan",
                 "TATER_LLAMA_CPP_GEMMA4_CPU_MOE": "",
+                "TATER_LLAMA_CPP_GEMMA4_LOAD_MODE": "",
             },
             clear=False,
         ):
@@ -104,6 +108,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
             )
 
         self.assertTrue(workaround["no_warmup"])
+        self.assertEqual(workaround["load_mode"], "")
         self.assertEqual(workaround["cpu_moe_layers"], 0)
 
     def test_gpu_layer_modes_keep_auto_and_all_distinct(self):

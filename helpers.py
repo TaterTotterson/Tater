@@ -3144,12 +3144,20 @@ def _llama_cpp_gemma4_vulkan_workarounds(model_identity: str, server_bin: str) -
         active
         and _boolish(os.getenv("TATER_LLAMA_CPP_GEMMA4_NO_WARMUP"), default=True)
     )
+    configured_load_mode = str(os.getenv("TATER_LLAMA_CPP_GEMMA4_LOAD_MODE") or "").strip().lower()
+    if configured_load_mode in {"auto", "default", "off", "none"}:
+        load_mode = ""
+    elif configured_load_mode:
+        load_mode = configured_load_mode
+    else:
+        load_mode = "mmap" if active and gfx_target == "gfx1150" else ""
     return {
         "active": active,
         "backend": backend,
         "gfx_target": gfx_target,
         "no_warmup": no_warmup,
         "cpu_moe_layers": cpu_moe_layers,
+        "load_mode": load_mode,
     }
 
 
@@ -7288,6 +7296,8 @@ def _llama_cpp_native_server_command(
         cmd.extend(["--parallel", str(int(slot_count))])
     if gemma4_vulkan["no_warmup"]:
         cmd.append("--no-warmup")
+    if gemma4_vulkan["load_mode"]:
+        cmd.extend(["--load-mode", str(gemma4_vulkan["load_mode"])])
     if int(gemma4_vulkan["cpu_moe_layers"] or 0) > 0:
         cmd.extend(["--n-cpu-moe", str(int(gemma4_vulkan["cpu_moe_layers"]))])
     if n_ubatch > 0:
@@ -7359,9 +7369,10 @@ def _llama_cpp_native_server_command(
         "amd_gfx_target": str(gemma4_vulkan["gfx_target"] or ""),
         "gemma4_vulkan_workaround": bool(gemma4_vulkan["active"]),
         "warmup_disabled": bool(gemma4_vulkan["no_warmup"]),
+        "load_mode": str(gemma4_vulkan["load_mode"] or ""),
         "cpu_moe_layers": int(gemma4_vulkan["cpu_moe_layers"] or 0),
         "gemma4_vulkan_warning": (
-            "AMD gfx1150 Vulkan safeguard: llama.cpp warm-up is disabled and Gemma 4 MoE experts run on CPU to avoid device loss and incorrect output."
+            "AMD gfx1150 Vulkan safeguard: memory-mapped loading is enabled, llama.cpp warm-up is disabled, and Gemma 4 MoE experts run on CPU to avoid device loss and incorrect output."
             if int(gemma4_vulkan["cpu_moe_layers"] or 0) > 0
             else (
                 "Vulkan Gemma 4 safeguard: llama.cpp warm-up is disabled to avoid a backend startup failure."
