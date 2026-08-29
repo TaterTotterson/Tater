@@ -261,6 +261,87 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn("options: connectedDevices", render_source)
         self.assertIn("options: transportTemplates", render_source)
 
+    def test_usb_flashing_offers_factory_and_keep_settings_images(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function renderEspHomeFirmwareCard")
+        end = source.index("\nfunction renderEspHomeFirmwarePanel", start)
+        render_source = source[start:end]
+        flow_start = source.index("function openEspHomeBrowserUsbFlashFlow")
+        flow_end = source.index("\nasync function prepareAmlogicUsbImage", flow_start)
+        flow_source = source[flow_start:flow_end]
+
+        self.assertIn('data-firmware-usb-image="factory"', render_source)
+        self.assertIn('data-firmware-usb-image="ota"', render_source)
+        self.assertIn("OTA Update · Keep Settings", render_source)
+        self.assertIn("Erases Wi-Fi, pairing, and saved settings", render_source)
+        self.assertIn("amlogicFactoryImage && prebuiltOtaAvailable", render_source)
+        self.assertIn("https://taterassistant.com/usb-flasher/", source)
+        self.assertIn("Secure Tater USB Flasher", render_source)
+        self.assertIn('target="_blank"', render_source)
+
+        self.assertIn("flash_kind: flashKind", source)
+        self.assertIn("artifact?.flash_addresses", source)
+        self.assertIn("Existing Wi-Fi, pairing, and settings were kept", source)
+        self.assertIn('const flashKind = String(card.dataset?.firmwareUsbImage || "factory")', flow_source)
+        self.assertIn('const preservesSettings = flashKind === "ota";', flow_source)
+        self.assertIn("let logConsole = null;", flow_source)
+        self.assertNotIn('browserCapability.available ? "" : " disabled"', render_source)
+
+        firmware_source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
+        self.assertIn('"flash_addresses": flash_addresses', firmware_source)
+        self.assertIn('"preserves_settings": kind == "ota"', firmware_source)
+        self.assertIn('_download_prebuilt_firmware_binary(context, kind', firmware_source)
+
+    def test_browser_usb_capability_distinguishes_secure_context_and_web_serial(self) -> None:
+        script = textwrap.dedent(
+            r"""
+            const assert = require("assert");
+            const fs = require("fs");
+            const vm = require("vm");
+            const source = fs.readFileSync(process.argv[1], "utf8");
+
+            function extractFunction(name) {
+              const start = source.indexOf(`function ${name}(`);
+              assert.notStrictEqual(start, -1, `Missing ${name}`);
+              const bodyStart = source.indexOf("{", start);
+              let depth = 0;
+              for (let index = bodyStart; index < source.length; index += 1) {
+                if (source[index] === "{") depth += 1;
+                if (source[index] === "}") depth -= 1;
+                if (depth === 0) return source.slice(start, index + 1);
+              }
+              throw new Error(`Unterminated ${name}`);
+            }
+
+            function capability(windowValue, navigatorValue) {
+              const context = { window: windowValue, navigator: navigatorValue };
+              vm.createContext(context);
+              vm.runInContext(extractFunction("browserUsbCapability"), context);
+              return context.browserUsbCapability();
+            }
+
+            const insecure = capability({ isSecureContext: false }, { serial: { requestPort() {} } });
+            assert.strictEqual(insecure.available, false);
+            assert.match(insecure.message, /secure/i);
+
+            const missingSerial = capability({ isSecureContext: true }, {});
+            assert.strictEqual(missingSerial.available, false);
+            assert.match(missingSerial.message, /does not expose Web Serial/i);
+
+            const ready = capability({ isSecureContext: true }, { serial: { requestPort() {} } });
+            assert.strictEqual(ready.available, true);
+            """
+        )
+
+        result = subprocess.run(
+            ["node", "-e", script, str(APP_JS)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
     def test_payload_identifies_each_matched_devices_family(self) -> None:
         source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
         start = source.index("append_device_option(\n                    {\n                        **device_option")
@@ -283,6 +364,9 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('"Start Local USB Flash"', app_source)
         self.assertIn("Browser ESP flashing cannot write", app_source)
         self.assertIn("This browser session does not expose Web Serial", app_source)
+        self.assertIn("typeof serial.requestPort", app_source)
+        self.assertIn('message: "Browser USB needs a secure Tater page', app_source)
+        self.assertIn("!window.isSecureContext", app_source)
         self.assertNotIn('label: "Local USB Flash Log"', app_source)
         self.assertIn("createFirmwareProgressView", app_source)
         self.assertIn("Browser USB Logs", app_source)

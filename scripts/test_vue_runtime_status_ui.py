@@ -52,6 +52,13 @@ class VueRuntimeStatusTests(unittest.TestCase):
         ):
             self.assertIn(heading, source)
 
+    def test_remote_models_show_hub_status_without_fake_memory_estimates(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
+
+        self.assertIn("model.remote", source)
+        self.assertIn("model.remote ? 'Spud Hub'", source)
+        self.assertIn('model.remote\n    ? ""', source)
+
     def test_runtime_breakdown_still_updates_shared_cache_consumers(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
 

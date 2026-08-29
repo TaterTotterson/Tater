@@ -50,6 +50,8 @@ const DASHBOARD_BRIEF_REFRESH_INTERVAL_OPTIONS = [
   { value: 43200, label: "12 hours" },
 ];
 
+const TATER_HOSTED_USB_FLASHER_URL = "https://taterassistant.com/usb-flasher/";
+
 function normalizeDashboardRefreshIntervalSeconds(value) {
   const parsed = Number(value);
   const allowed = DASHBOARD_REFRESH_INTERVAL_OPTIONS.map((item) => Number(item.value));
@@ -68,6 +70,17 @@ function normalizeSpudexTab(value) {
     return "settings";
   }
   return token === "manual" ? "manual" : "workbench";
+}
+
+function normalizeSpudLinkTab(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "spudlet" || token === "upstream") {
+    return "spudlet";
+  }
+  if (token === "settings" || token === "advanced") {
+    return "settings";
+  }
+  return "pair";
 }
 
 const state = {
@@ -99,6 +112,10 @@ const state = {
   spudexChatMessages: [],
   spudexChatInFlight: false,
   spudexDetailsOpen: false,
+  spudLinkTab: normalizeSpudLinkTab(safeStorageGet("tater_spud_link_tab", "pair")),
+  spudLinkPairPollTimer: 0,
+  spudLinkPairCloseTimer: 0,
+  spudLinkPairPollInFlight: false,
   coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
   coreTabSpecs: {},
   coreTabPayloadCache: {},
@@ -120,6 +137,7 @@ const state = {
     selector: "",
   },
   esphomeFirmwareTransport: "ota",
+  esphomeFirmwareUsbImage: "factory",
   esphomeDisplaySensorTarget: "",
   esphomeBrowserUsbPorts: {},
   esptoolJsModule: null,
@@ -585,6 +603,214 @@ function closePopupModal(modal) {
   }, getPopupEffectCloseMs());
   modal.dataset.closeTimer = String(timer);
   syncPopupBodyScrollLock();
+}
+
+function clearSpudLinkPairingTimers() {
+  if (state.spudLinkPairPollTimer) {
+    window.clearTimeout(state.spudLinkPairPollTimer);
+    state.spudLinkPairPollTimer = 0;
+  }
+  if (state.spudLinkPairCloseTimer) {
+    window.clearTimeout(state.spudLinkPairCloseTimer);
+    state.spudLinkPairCloseTimer = 0;
+  }
+  state.spudLinkPairPollInFlight = false;
+}
+
+function ensureSpudLinkPairingModal() {
+  let modal = document.getElementById("spud-link-pairing-modal");
+  if (modal) {
+    return modal;
+  }
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="spud-link-pairing-modal" class="cerb-modal spud-link-pair-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card spud-link-pair-dialog" role="dialog" aria-modal="true" aria-labelledby="spud-link-pair-modal-title">
+          <div class="spud-link-pair-modal-glow" aria-hidden="true"></div>
+          <div class="card-head spud-link-pair-modal-head">
+            <div>
+              <div class="small spud-link-pair-eyebrow">SPUD LINK</div>
+              <h3 id="spud-link-pair-modal-title" class="card-title">Pair a Spud</h3>
+            </div>
+            <button type="button" class="inline-btn" id="spud-link-pair-modal-close">Close</button>
+          </div>
+          <div class="spud-link-pair-modal-body">
+            <div class="spud-link-pair-potato" aria-hidden="true"><span></span></div>
+            <div class="spud-link-pair-modal-copy">
+              <p id="spud-link-pair-modal-detail">Creating a secure pairing invite...</p>
+              <div id="spud-link-pair-modal-loading" class="spud-link-pair-loading">
+                <span></span><span></span><span></span>
+              </div>
+              <div id="spud-link-pair-modal-qr" class="spud-link-pair-qr" hidden>
+                <div class="spud-link-pair-qr-frame">
+                  <img id="spud-link-pair-modal-qr-image" alt="Little Spud pairing QR code" />
+                </div>
+                <strong>Scan this in Little Spud</strong>
+                <small>No code entry is needed.</small>
+              </div>
+              <div id="spud-link-pair-modal-code" class="spud-link-pair-code" hidden>
+                <span>Spudlet pairing code</span>
+                <div class="spud-link-pair-code-row">
+                  <code id="spud-link-pair-modal-code-value"></code>
+                  <button type="button" class="inline-btn" id="spud-link-pair-modal-copy">Copy</button>
+                </div>
+                <small>Paste this into SpudLink → Use a Spud Hub on the other Tater.</small>
+              </div>
+              <div id="spud-link-pair-modal-success" class="spud-link-pair-success" hidden>
+                <span class="spud-link-pair-check" aria-hidden="true">✓</span>
+                <div><strong>Connected!</strong><small id="spud-link-pair-modal-success-detail">Your Spud is ready.</small></div>
+              </div>
+              <div id="spud-link-pair-modal-status" class="small spud-link-pair-modal-status">Preparing invite...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `
+  );
+  modal = document.getElementById("spud-link-pairing-modal");
+  const close = () => {
+    clearSpudLinkPairingTimers();
+    closePopupModal(modal);
+  };
+  document.getElementById("spud-link-pair-modal-close")?.addEventListener("click", close);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      close();
+    }
+  });
+  document.getElementById("spud-link-pair-modal-copy")?.addEventListener("click", async () => {
+    const value = String(document.getElementById("spud-link-pair-modal-code-value")?.textContent || "").trim();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      const button = document.getElementById("spud-link-pair-modal-copy");
+      if (button) button.textContent = "Copied!";
+      showToast("Spudlet pairing code copied.");
+    } catch (error) {
+      showToast(`Copy failed: ${error.message}`, "error", 3200);
+    }
+  });
+  return modal;
+}
+
+function openSpudLinkPairingModal(role) {
+  const normalizedRole = role === "spudlet" ? "spudlet" : "little_spud";
+  const modal = ensureSpudLinkPairingModal();
+  clearSpudLinkPairingTimers();
+  modal.dataset.pairingRole = normalizedRole;
+  const titleEl = document.getElementById("spud-link-pair-modal-title");
+  const detailEl = document.getElementById("spud-link-pair-modal-detail");
+  const statusEl = document.getElementById("spud-link-pair-modal-status");
+  const loadingEl = document.getElementById("spud-link-pair-modal-loading");
+  const qrEl = document.getElementById("spud-link-pair-modal-qr");
+  const codeEl = document.getElementById("spud-link-pair-modal-code");
+  const successEl = document.getElementById("spud-link-pair-modal-success");
+  const copyButton = document.getElementById("spud-link-pair-modal-copy");
+  if (titleEl) titleEl.textContent = normalizedRole === "spudlet" ? "Link a Spudlet" : "Pair a Little Spud";
+  if (detailEl) {
+    detailEl.textContent = normalizedRole === "spudlet"
+      ? "Creating a short code for the other Tater..."
+      : "Creating a private QR code for Little Spud...";
+  }
+  if (statusEl) {
+    statusEl.textContent = "Preparing invite...";
+    statusEl.classList.remove("success", "error");
+  }
+  if (loadingEl) loadingEl.hidden = false;
+  if (qrEl) qrEl.hidden = true;
+  if (codeEl) codeEl.hidden = true;
+  if (successEl) successEl.hidden = true;
+  if (copyButton) copyButton.textContent = "Copy";
+  openPopupModal(modal);
+  return modal;
+}
+
+function showSpudLinkPairingInvite(role, result = {}) {
+  const normalizedRole = role === "spudlet" ? "spudlet" : "little_spud";
+  const loadingEl = document.getElementById("spud-link-pair-modal-loading");
+  const qrEl = document.getElementById("spud-link-pair-modal-qr");
+  const qrImageEl = document.getElementById("spud-link-pair-modal-qr-image");
+  const codeEl = document.getElementById("spud-link-pair-modal-code");
+  const codeValueEl = document.getElementById("spud-link-pair-modal-code-value");
+  const statusEl = document.getElementById("spud-link-pair-modal-status");
+  const detailEl = document.getElementById("spud-link-pair-modal-detail");
+  const expiresAt = Number(result?.expires_at || 0);
+  const expiresText = expiresAt > 0 ? new Date(expiresAt * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon";
+  if (loadingEl) loadingEl.hidden = true;
+  if (normalizedRole === "little_spud") {
+    if (qrImageEl) qrImageEl.src = String(result?.pairing_qr_svg || "");
+    if (qrEl) qrEl.hidden = false;
+    if (codeEl) codeEl.hidden = true;
+    if (detailEl) detailEl.textContent = "Open Little Spud and scan this QR code.";
+  } else {
+    if (codeValueEl) codeValueEl.textContent = String(result?.manual_code || result?.pairing_code || "").trim();
+    if (codeEl) codeEl.hidden = false;
+    if (qrEl) qrEl.hidden = true;
+    if (detailEl) detailEl.textContent = "Copy this code to the Tater you want to use as a Spudlet.";
+  }
+  if (statusEl) statusEl.textContent = `Waiting for connection • expires ${expiresText}`;
+}
+
+function failSpudLinkPairingModal(message) {
+  clearSpudLinkPairingTimers();
+  const loadingEl = document.getElementById("spud-link-pair-modal-loading");
+  const statusEl = document.getElementById("spud-link-pair-modal-status");
+  const detailEl = document.getElementById("spud-link-pair-modal-detail");
+  if (loadingEl) loadingEl.hidden = true;
+  if (detailEl) detailEl.textContent = "Tater could not create this pairing invite.";
+  if (statusEl) {
+    statusEl.textContent = String(message || "Pairing failed.");
+    statusEl.classList.add("error");
+  }
+}
+
+function startSpudLinkPairingSuccessPoll(role, startedAt) {
+  const normalizedRole = role === "spudlet" ? "spudlet" : "little_spud";
+  const poll = async () => {
+    if (state.spudLinkPairPollInFlight) return;
+    const modal = document.getElementById("spud-link-pairing-modal");
+    if (!modal?.classList.contains("active") || modal.dataset.pairingRole !== normalizedRole) return;
+    state.spudLinkPairPollInFlight = true;
+    try {
+      const result = await api("/api/spudlink/status");
+      const link = result?.spud_link && typeof result.spud_link === "object" ? result.spud_link : {};
+      const nodes = Array.isArray(link.linked_nodes) ? link.linked_nodes : [];
+      const connectedNode = nodes.find((node) => {
+        if (String(node?.role || "").trim().toLowerCase() !== normalizedRole) return false;
+        return Math.max(Number(node?.created_at || 0), Number(node?.last_seen_at || 0)) >= Number(startedAt || 0) - 1;
+      });
+      if (connectedNode && !link.pairing_code_active) {
+        clearSpudLinkPairingTimers();
+        document.getElementById("spud-link-pair-modal-qr")?.setAttribute("hidden", "");
+        document.getElementById("spud-link-pair-modal-code")?.setAttribute("hidden", "");
+        const successEl = document.getElementById("spud-link-pair-modal-success");
+        const successDetailEl = document.getElementById("spud-link-pair-modal-success-detail");
+        const statusEl = document.getElementById("spud-link-pair-modal-status");
+        const detailEl = document.getElementById("spud-link-pair-modal-detail");
+        if (successEl) successEl.hidden = false;
+        if (successDetailEl) successDetailEl.textContent = `${String(connectedNode?.name || (normalizedRole === "spudlet" ? "Spudlet" : "Little Spud"))} is ready.`;
+        if (detailEl) detailEl.textContent = normalizedRole === "spudlet" ? "Your Taters are now linked." : "Little Spud is now paired.";
+        if (statusEl) {
+          statusEl.textContent = "Pairing succeeded.";
+          statusEl.classList.add("success");
+        }
+        showToast(normalizedRole === "spudlet" ? "Spudlet connected." : "Little Spud connected.");
+        state.spudLinkPairCloseTimer = window.setTimeout(async () => {
+          closePopupModal(modal);
+          state.spudLinkPairCloseTimer = 0;
+          await loadSettingsView();
+        }, 1500);
+        return;
+      }
+    } catch (_error) {
+      // Keep waiting through brief status errors while the invite remains open.
+    } finally {
+      state.spudLinkPairPollInFlight = false;
+    }
+    state.spudLinkPairPollTimer = window.setTimeout(poll, 1100);
+  };
+  state.spudLinkPairPollTimer = window.setTimeout(poll, 700);
 }
 
 let healthRefreshTimer = 0;
@@ -6057,7 +6283,7 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
   const summaryParts = [
     `${loadedCount} loaded`,
     llmLoadedCount > 0 ? `${llmLoadedCount} LLM` : "",
-    managedLoadedCount > 0 ? `${managedLoadedCount} managed voice` : "",
+    managedLoadedCount > 0 ? `${managedLoadedCount} managed` : "",
     estimatedTotal > 0 ? `est ${formatBytes(estimatedTotal)}` : "",
     estimatedVram > 0 ? `VRAM est ${formatBytes(estimatedVram)}` : "",
     estimatedRam > 0 ? `RAM est ${formatBytes(estimatedRam)}` : "",
@@ -6131,6 +6357,7 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
               const device = String(row?.device || "").trim();
               const kind = String(row?.memory_kind || "ram").toUpperCase();
               const estimated = Number(row?.estimated_bytes || 0);
+              const remote = Boolean(row?.remote);
               const loadedAt = _runtimeLoadedAtLabel(row?.loaded_ts);
               const managed = Boolean(row?.managed);
               const unloadable = Boolean(row?.unloadable) && !managed;
@@ -6139,7 +6366,7 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
                 kindLabel,
                 providerLabel,
                 device ? `Device ${device}` : "",
-                estimated > 0 ? `${kind} est ${formatBytes(estimated)}` : `${kind} estimate unavailable`,
+                remote ? "" : estimated > 0 ? `${kind} est ${formatBytes(estimated)}` : `${kind} estimate unavailable`,
                 loadedAt,
               ].filter(Boolean);
               const detailLine = [
@@ -6165,7 +6392,7 @@ function _renderRuntimeLoadedModelsCard(memoryPayload) {
                             data-model="${escapeHtml(model)}"
                             data-cache-key="${escapeHtml(cacheKey)}"
                           >Unload</button>`
-                        : `<span class="status-chip running">Loaded</span>`
+                        : `<span class="status-chip running">${remote ? "Spud Hub" : managed ? "Managed" : "Loaded"}</span>`
                     }
                   </div>
                 </div>
@@ -11114,6 +11341,10 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const amlogicFactoryImage = factoryFlashTransport === "amlogic_usb_burn";
   const prebuiltOtaAvailable = prebuiltAvailable && Boolean(String(prebuiltOta?.path || "").trim());
   const prebuiltFactoryAvailable = prebuiltAvailable && Boolean(String(prebuiltFactory?.path || "").trim());
+  const requestedUsbImage = String(state.esphomeFirmwareUsbImage || "factory").trim().toLowerCase();
+  const usbFlashKind =
+    !amlogicFactoryImage && prebuiltOtaAvailable && requestedUsbImage === "ota" ? "ota" : "factory";
+  const usbFlashAvailable = usbFlashKind === "ota" ? prebuiltOtaAvailable : prebuiltFactoryAvailable;
   const prebuiltError = String(prebuilt?.error || "").trim();
   const artifactSizeLabel = (artifact) => {
     const size = Number(artifact?.size_bytes || 0);
@@ -11139,7 +11370,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
   const targetConnected = boolFromAny(variant?.connected ?? selectedDevice?.connected, false);
   const otaFlashDisabledAttr = prebuiltOtaAvailable && variantAvailable && targetConnected ? "" : " disabled";
   const otaLogsDisabledAttr = variantAvailable && targetConnected ? "" : " disabled";
-  const browserFlashDisabledAttr = prebuiltFactoryAvailable && variantAvailable ? "" : " disabled";
+  const browserFlashDisabledAttr = usbFlashAvailable && variantAvailable ? "" : " disabled";
   const browserLogsDisabledAttr = variantAvailable ? "" : " disabled";
   const otaActionLabel = "Flash Latest OTA";
   const otaWorkingText = nativeFirmware ? "Sending native OTA command..." : "Uploading prebuilt firmware...";
@@ -11172,13 +11403,13 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       key: "local_usb",
       step: "02",
       label: "Local USB",
-      detail: "Flash directly through the Tater app without Web Serial.",
+      detail: "Flash USB connected to the Tater computer. No HTTPS required.",
     },
     {
       key: "browser_usb",
       step: "03",
       label: "Browser USB",
-      detail: "Flash supported ESP satellites with Web Serial.",
+      detail: "Flash USB connected to this browser when it exposes Web Serial.",
     },
   ];
   const transportLabel =
@@ -11218,6 +11449,43 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           <span>No firmware families currently support this flashing method.</span>
         </div>
       `;
+  const usbImagePickerHtml =
+    selection.transport === "ota" || !transportTemplates.length
+      ? ""
+      : `
+        <div class="firmware-usb-image-picker" role="radiogroup" aria-label="USB flash type">
+          <button
+            type="button"
+            class="firmware-usb-image-option${usbFlashKind === "factory" ? " is-active" : ""}"
+            data-firmware-usb-image="factory"
+            role="radio"
+            aria-checked="${usbFlashKind === "factory" ? "true" : "false"}"
+            ${prebuiltFactoryAvailable ? "" : "disabled"}>
+            <span class="firmware-usb-image-icon">↻</span>
+            <span>
+              <strong>Factory</strong>
+              <small>Fresh install. Erases Wi-Fi, pairing, and saved settings.</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            class="firmware-usb-image-option${usbFlashKind === "ota" ? " is-active" : ""}"
+            data-firmware-usb-image="ota"
+            role="radio"
+            aria-checked="${usbFlashKind === "ota" ? "true" : "false"}"
+            ${!amlogicFactoryImage && prebuiltOtaAvailable ? "" : "disabled"}>
+            <span class="firmware-usb-image-icon">✓</span>
+            <span>
+              <strong>OTA Update · Keep Settings</strong>
+              <small>${
+                amlogicFactoryImage
+                  ? "Not available for this device's USB recovery method."
+                  : "Writes the app over USB without erasing Wi-Fi, pairing, or settings."
+              }</small>
+            </span>
+          </button>
+        </div>
+      `;
   const controlsHtml = `
     <section class="firmware-flasher-controls">
       <div class="firmware-flasher-step-head">
@@ -11250,6 +11518,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           <strong>${selection.transport === "ota" ? "Choose a connected satellite" : "Choose the device firmware"}</strong>
         </div>
         <div class="firmware-flasher-picker-field">${pickerHtml}</div>
+        ${usbImagePickerHtml}
       </div>
     </section>
   `;
@@ -11263,13 +11532,13 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
             amlogicFactoryImage
               ? "Tater OTA is automatic after installation; first install uses the verified Amlogic factory image and ThirdReality debug board."
               : nativeFirmware
-              ? "OTA is sent through Tater; USB writes the native factory image and then uses the Tater setup Wi-Fi network."
-              : "No local compile. OTA uses the app image; USB uses the factory image with optional Wi-Fi setup."
+              ? "OTA is sent through Tater; USB can factory reset or update while keeping the satellite's setup."
+              : "No local compile. USB can factory reset or update while keeping the satellite's setup."
           }</span>
         </div>
         <div class="firmware-prebuilt-artifacts">
-          <span><b>OTA</b>${escapeHtml(artifactSizeLabel(prebuiltOta))}</span>
-          <span><b>USB</b>${escapeHtml(artifactSizeLabel(prebuiltFactory))}</span>
+          <span><b>UPDATE</b>${escapeHtml(artifactSizeLabel(prebuiltOta))}</span>
+          <span><b>FACTORY</b>${escapeHtml(artifactSizeLabel(prebuiltFactory))}</span>
         </div>
       </section>
     `
@@ -11375,7 +11644,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           data-firmware-title="Preparing Browser USB Flash"
           data-firmware-working="${escapeHtml(browserWorkingText)}"
           data-firmware-success="${escapeHtml(browserSuccessText)}"
-          data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}${browserCapability.available ? "" : " disabled"}
+          data-firmware-error="Browser USB flash failed"${browserFlashDisabledAttr}
         >${escapeHtml(browserActionLabel)}</button>
         <button
           type="button"
@@ -11384,7 +11653,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
           data-firmware-title="Opening Browser USB Logs"
           data-firmware-working="Opening Browser USB logs..."
           data-firmware-success="Browser USB logs opened."
-          data-firmware-error="Browser USB logs failed"${browserLogsDisabledAttr}${browserCapability.available ? "" : " disabled"}
+          data-firmware-error="Browser USB logs failed"${browserLogsDisabledAttr}
         >Browser USB Logs</button>
       `;
   const transportHint =
@@ -11403,6 +11672,7 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       data-firmware-selector="${escapeHtml(selection.selector)}"
       data-firmware-template-key="${escapeHtml(selection.templateKey)}"
       data-firmware-transport="${escapeHtml(selection.transport)}"
+      data-firmware-usb-image="${escapeHtml(usbFlashKind)}"
       data-firmware-prebuilt="${prebuiltAvailable ? "1" : "0"}"
       data-firmware-prebuilt-ota="${prebuiltOtaAvailable ? "1" : "0"}"
       data-firmware-prebuilt-factory="${prebuiltFactoryAvailable ? "1" : "0"}"
@@ -11419,6 +11689,18 @@ function renderEspHomeFirmwareCard(firmware, coreKey = "voice") {
       ${targetSummaryHtml}
       ${prebuiltSummaryHtml}
       ${linksHtml}
+      <div class="firmware-hosted-flasher">
+        <span class="firmware-hosted-flasher-copy">
+          <strong>Secure Tater USB Flasher</strong>
+          <small>Flash the latest Factory or Keep Settings firmware from Tater’s HTTPS website when this Tater page cannot access Browser USB.</small>
+        </span>
+        <a
+          class="inline-btn primary firmware-hosted-flasher-link"
+          href="${escapeHtml(TATER_HOSTED_USB_FLASHER_URL)}"
+          target="_blank"
+          rel="noopener noreferrer"
+        >Open Web Flasher ↗</a>
+      </div>
       <div class="firmware-flasher-actions">
         <div class="firmware-flasher-action-row">${flashActionHtml}</div>
         <div class="firmware-flasher-action-copy">${escapeHtml(transportHint)}</div>
@@ -14095,6 +14377,21 @@ function bindEspHomeFirmwareSelectors(root = document) {
     });
   });
 
+  root.querySelectorAll(".firmware-usb-image-option[data-firmware-usb-image]").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.dataset.esphomeFirmwareUsbImageBound === "1") {
+      return;
+    }
+    button.dataset.esphomeFirmwareUsbImageBound = "1";
+    button.addEventListener("click", () => {
+      const flashKind = String(button.dataset.firmwareUsbImage || "factory").trim().toLowerCase();
+      if (!['factory', 'ota'].includes(flashKind) || button.disabled) {
+        return;
+      }
+      state.esphomeFirmwareUsbImage = flashKind;
+      rerenderEspHomeFirmwarePanel(document);
+    });
+  });
+
   root.querySelectorAll(".esphome-firmware-card select[data-core-field-key]").forEach((input) => {
     if (!(input instanceof HTMLSelectElement)) {
       return;
@@ -14827,16 +15124,17 @@ function browserUsbCapability() {
       message: "Browser USB needs a secure Tater page opened over HTTPS or localhost.",
     };
   }
-  if (typeof navigator === "undefined" || !navigator.serial) {
+  const serial = typeof navigator === "undefined" ? null : navigator.serial;
+  if (!serial || typeof serial.requestPort !== "function") {
     return {
       available: false,
       message:
-        "This browser session does not expose Web Serial. Open Tater’s localhost page in a Web Serial browser and allow USB access.",
+        "This browser session does not expose Web Serial. Use Local USB when the satellite is connected to the Tater computer, or open this page in a browser that allows USB access.",
     };
   }
   return {
     available: true,
-    message: "Web Serial is ready. The browser will ask you to choose the connected ESP satellite.",
+    message: "Browser USB is ready. The browser will ask you to choose the connected ESP satellite.",
   };
 }
 
@@ -14852,7 +15150,13 @@ async function browserUsbSelectPort(selector = "") {
 }
 
 async function browserUsbAuthorizedPorts() {
-  if (!window.isSecureContext || !navigator.serial || typeof navigator.serial.getPorts !== "function") {
+  if (
+    typeof window === "undefined" ||
+    !window.isSecureContext ||
+    typeof navigator === "undefined" ||
+    !navigator.serial ||
+    typeof navigator.serial.getPorts !== "function"
+  ) {
     return [];
   }
   return navigator.serial.getPorts();
@@ -15061,24 +15365,41 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode, onPro
     appendEspHomeFirmwareLog(logConsole, `Firmware downloaded (${firmwareData.byteLength} bytes).`, "info");
 
     const eraseAll = boolFromAny(artifact?.erase_all, true);
+    const flashKind = String(artifact?.flash_kind || (eraseAll ? "factory" : "ota")).trim().toLowerCase();
+    const requestedAddresses = Array.isArray(artifact?.flash_addresses) ? artifact.flash_addresses : [0];
+    const flashAddresses = requestedAddresses
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    if (!flashAddresses.length) {
+      throw new Error("Browser flash did not include a valid ESP destination address.");
+    }
+    const fileArray = flashAddresses.map((address) => ({ data: firmwareData, address }));
     if (statusNode instanceof HTMLElement) {
       statusNode.textContent = eraseAll
         ? "Erasing flash and flashing firmware over browser USB..."
-        : "Flashing firmware over browser USB...";
+        : "Updating firmware while keeping settings...";
     }
     if (eraseAll) {
       appendEspHomeFirmwareLog(logConsole, "Erasing flash first so stale recovery state is cleared.", "info");
     }
-    reportUpdate({ percent: 20, phase: "writing", stage: 2, message: eraseAll ? "Erasing the device and writing firmware..." : "Writing firmware over USB..." });
+    if (!eraseAll) {
+      appendEspHomeFirmwareLog(
+        logConsole,
+        `Writing the app image to ${flashAddresses.length} app slot${flashAddresses.length === 1 ? "" : "s"} without erasing setup data.`,
+        "info"
+      );
+    }
+    reportUpdate({ percent: 20, phase: "writing", stage: 2, message: eraseAll ? "Erasing the device and writing firmware..." : "Updating firmware and keeping settings..." });
     const flashOptions = {
-      fileArray: [{ data: firmwareData, address: 0 }],
+      fileArray,
       flashMode: String(artifact?.flash_mode || "dio"),
       flashFreq: String(artifact?.flash_freq || "40m"),
       flashSize: String(artifact?.flash_size || "4MB"),
       eraseAll,
       compress: true,
-      reportProgress: (_fileIndex, written, total) => {
-        const pct = total > 0 ? Math.floor((written / total) * 100) : 0;
+      reportProgress: (fileIndex, written, total) => {
+        const filePct = total > 0 ? written / total : 0;
+        const pct = Math.floor(((Number(fileIndex || 0) + filePct) / fileArray.length) * 100);
         if (pct >= lastProgress + 5 || pct === 100) {
           lastProgress = pct;
           reportUpdate({
@@ -15109,10 +15430,10 @@ async function flashBrowserUsbPort(port, artifact, logConsole, statusNode, onPro
       await loader.writeFlash({
         ...flashOptions,
         eraseAll: false,
-        fileArray: [{ data: uint8ArrayToBinaryString(firmwareData), address: 0 }],
+        fileArray: flashAddresses.map((address) => ({ data: uint8ArrayToBinaryString(firmwareData), address })),
       });
     }
-    appendEspHomeFirmwareLog(logConsole, "Flash complete. Resetting device.", "info");
+    appendEspHomeFirmwareLog(logConsole, `${flashKind === "ota" ? "Update" : "Factory flash"} complete. Resetting device.`, "info");
     reportUpdate({ percent: 96, phase: "restarting", stage: 3, message: "Firmware written. Restarting the device..." });
     const resetWorked = await browserUsbHardResetAfterFlash(transport, loader, port, logConsole);
     if (!resetWorked) {
@@ -15516,19 +15837,25 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
   const nativeFirmware = boolFromAny(card.dataset?.firmwareNative, false);
+  const flashKind = String(card.dataset?.firmwareUsbImage || "factory").trim().toLowerCase() === "ota" ? "ota" : "factory";
+  const preservesSettings = flashKind === "ota";
+  const browserCapability = browserUsbCapability();
   const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const templateLabel =
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "Firmware").trim() || "Firmware";
   const deviceLabel =
     String(selectorSelect?.selectedOptions?.[0]?.textContent || selector || "Native Satellite").trim() || "Native Satellite";
-  const prebuiltAvailable = String(card.dataset?.firmwarePrebuiltFactory || "").trim() === "1";
+  const prebuiltAvailable =
+    String(
+      flashKind === "ota" ? card.dataset?.firmwarePrebuiltOta || "" : card.dataset?.firmwarePrebuiltFactory || ""
+    ).trim() === "1";
   if (!selector || !templateKey || !coreKey) {
     showToast("Pick a firmware template and target before browser USB flashing.", "error", 3200);
     return;
   }
   if (!prebuiltAvailable) {
-    showToast("No prebuilt USB image is available for this firmware target.", "error", 3600);
+    showToast(`No prebuilt USB ${flashKind} image is available for this firmware target.`, "error", 3600);
     return;
   }
 
@@ -15547,6 +15874,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
   let wifiPasswordInput = null;
   let modalDialog = null;
   let progressView = null;
+  let logConsole = null;
 
   const updateSelectedPort = () => {
     if (selectedNode instanceof HTMLElement) {
@@ -15555,16 +15883,23 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         : "No USB device selected.";
     }
     if (buildButton instanceof HTMLButtonElement) {
-      const wifiEnabled = !nativeFirmware && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+      const wifiAvailable = !nativeFirmware && !preservesSettings;
+      const wifiEnabled = wifiAvailable && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
       const ssid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
       if (wifiSsidInput instanceof HTMLInputElement) {
-        wifiSsidInput.disabled = nativeFirmware || !wifiEnabled;
+        wifiSsidInput.disabled = !wifiAvailable || !wifiEnabled;
       }
       if (wifiPasswordInput instanceof HTMLInputElement) {
-        wifiPasswordInput.disabled = nativeFirmware || !wifiEnabled;
+        wifiPasswordInput.disabled = !wifiAvailable || !wifiEnabled;
       }
       buildButton.disabled = !selectedPort || (wifiEnabled && !ssid);
-      buildButton.textContent = nativeFirmware ? "Flash Native Firmware" : wifiEnabled ? "Flash + Set Up Wi-Fi" : "Flash Firmware";
+      buildButton.textContent = preservesSettings
+        ? "OTA Update · Keep Settings"
+        : nativeFirmware
+        ? "Factory Flash Native Firmware"
+        : wifiEnabled
+        ? "Factory Flash + Set Up Wi-Fi"
+        : "Factory Flash";
     }
   };
 
@@ -15624,7 +15959,11 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       // The flash succeeded; failing to record the local version should not make recovery look failed.
     }
     const artifactNative = boolFromAny(artifact?.native_firmware ?? nativeFirmware, false);
-    const wifiEnabled = !artifactNative && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+    const artifactPreservesSettings = boolFromAny(artifact?.preserves_settings, preservesSettings);
+    const wifiEnabled =
+      !artifactNative &&
+      !artifactPreservesSettings &&
+      (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
     if (wifiEnabled) {
       progressView?.update({
         percent: 98,
@@ -15646,7 +15985,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     } else {
       appendEspHomeFirmwareLog(
         logConsole,
-        artifactNative
+        artifactPreservesSettings
+          ? "Firmware updated over USB. Existing Wi-Fi, pairing, and settings were kept."
+          : artifactNative
           ? "Native firmware flashed. Connect to the Tater-Setup Wi-Fi network and use Add Satellite pairing to provision it."
           : "Wi-Fi setup skipped by user.",
         "info"
@@ -15663,7 +16004,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       phase: "completed",
       tone: "success",
       message: "Firmware update complete.",
-      hint: artifactNative
+      hint: artifactPreservesSettings
+        ? "The satellite is restarting with its existing setup intact."
+        : artifactNative
         ? "Connect to Tater-Setup to add this satellite."
         : "The device is restarting with its new firmware.",
     });
@@ -15675,7 +16018,10 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
       showToast("Select a USB device before flashing.", "error", 3000);
       return;
     }
-    const wifiEnabled = !nativeFirmware && (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
+    const wifiEnabled =
+      !nativeFirmware &&
+      !preservesSettings &&
+      (wifiSetupCheckbox instanceof HTMLInputElement ? wifiSetupCheckbox.checked : true);
     const wifiSsid = String(wifiSsidInput instanceof HTMLInputElement ? wifiSsidInput.value || "" : "").trim();
     if (wifiEnabled && !wifiSsid) {
       showToast("Enter a Wi-Fi SSID or turn off Wi-Fi setup.", "error", 3200);
@@ -15688,22 +16034,42 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
     if (selectButton instanceof HTMLButtonElement) {
       selectButton.disabled = true;
     }
-    setCoreManagerStatus(card, nativeFirmware ? "Preparing native USB firmware..." : "Preparing prebuilt USB firmware...");
+    setCoreManagerStatus(
+      card,
+      preservesSettings
+        ? "Preparing the keep-settings USB update..."
+        : nativeFirmware
+        ? "Preparing native factory firmware..."
+        : "Preparing prebuilt factory firmware..."
+    );
     progressView?.update({
       percent: 3,
       phase: "starting",
       stage: 0,
-      message: nativeFirmware ? "Preparing the native firmware image..." : "Preparing the verified firmware image...",
+      message: preservesSettings
+        ? "Preparing the verified app update..."
+        : nativeFirmware
+        ? "Preparing the native factory image..."
+        : "Preparing the verified factory image...",
     });
     if (selectedPort) {
       appendEspHomeFirmwareLog(logConsole, `Selected ${browserUsbPortLabel(selectedPort)}.`, "info");
     }
-    appendEspHomeFirmwareLog(logConsole, nativeFirmware ? "Preparing native USB firmware image." : "Preparing prebuilt USB firmware image.", "info");
+    appendEspHomeFirmwareLog(
+      logConsole,
+      preservesSettings
+        ? "Preparing the app image for a USB update that keeps setup data."
+        : nativeFirmware
+        ? "Preparing native factory firmware image."
+        : "Preparing prebuilt factory firmware image.",
+      "info"
+    );
     try {
       const result = await runCoreManagerAction(card, coreKey, "voice_firmware_browser_build", {
         id: selector,
         selector,
         template_key: templateKey,
+        flash_kind: flashKind,
       });
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
       if (String(result?.binary_url || "").trim()) {
@@ -15744,7 +16110,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         label: "USB Firmware Update",
         type: "textarea",
         value: "",
-        description: nativeFirmware
+        description: preservesSettings
+          ? "Select the USB device and update the app without erasing Wi-Fi, pairing, or saved settings."
+          : nativeFirmware
           ? "Select the USB device and flash the native factory image. Provision afterward from the Tater-Setup Wi-Fi network."
           : "Select the USB device, flash the prebuilt factory image, then optionally set up Wi-Fi over Improv Serial.",
       },
@@ -15767,17 +16135,21 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         controls.innerHTML = `
           <div class="small core-inline-section-title">USB Device</div>
           <div class="small">${
-            nativeFirmware
+            preservesSettings
+              ? "Choose the ESP32-S3 USB serial device. This update keeps the satellite's existing setup."
+              : nativeFirmware
               ? "Choose the ESP32-S3 USB serial device. After flashing, connect to Tater-Setup-XXXX and enter an Add Satellite pairing code."
               : "Choose the ESP32-S3 USB serial device from this browser."
           }</div>
           <div class="inline-row" style="margin-top:10px;">
             <button type="button" class="action-btn esphome-browser-usb-select">Select USB Device</button>
-            <button type="button" class="action-btn esphome-browser-usb-build" disabled>${nativeFirmware ? "Flash Native Firmware" : "Flash + Set Up Wi-Fi"}</button>
+            <button type="button" class="action-btn esphome-browser-usb-build" disabled>${
+              preservesSettings ? "OTA Update · Keep Settings" : nativeFirmware ? "Factory Flash Native Firmware" : "Factory Flash + Set Up Wi-Fi"
+            }</button>
           </div>
           <div class="small esphome-browser-usb-selected" style="margin-top:8px;"></div>
           <div class="inline-row esphome-browser-usb-list" style="margin-top:8px;"></div>
-          <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup" style="${nativeFirmware ? "display:none;" : ""}">
+          <section class="firmware-usb-wifi-panel" aria-label="Wi-Fi setup" style="${nativeFirmware || preservesSettings ? "display:none;" : ""}">
             <label class="firmware-usb-wifi-toggle">
               <input type="checkbox" class="toggle-input esphome-browser-usb-wifi-enabled" checked>
               <span>Set up Wi-Fi after USB flash</span>
@@ -15801,7 +16173,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
             transport: "usb",
             method: "Browser USB",
             target: deviceLabel,
-            message: "Select the USB device to begin.",
+            message: browserCapability.available ? "Select the USB device to begin." : browserCapability.message,
           });
         }
         selectButton = controls.querySelector(".esphome-browser-usb-select");
@@ -15813,7 +16185,9 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         wifiPasswordInput = controls.querySelector(".esphome-browser-usb-wifi-password");
       }
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = "Select the USB device to continue.";
+        statusNode.textContent = browserCapability.available
+          ? "Select the USB device to continue."
+          : browserCapability.message;
         statusNode.classList.add("voice-log-status");
       }
       updateSelectedPort();
@@ -15823,6 +16197,7 @@ function openEspHomeBrowserUsbFlashFlow(card, coreKey) {
         // Ignore authorized-port listing failures; requestPort still works.
       }
       if (selectButton instanceof HTMLButtonElement) {
+        selectButton.disabled = !browserCapability.available;
         selectButton.addEventListener("click", async () => {
           try {
             selectedPort = await browserUsbSelectPort(selector);
@@ -16079,6 +16454,8 @@ async function openEspHomeLocalEspUsbFlashFlow(card, coreKey) {
   }
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
   const templateKey = String(card.dataset?.firmwareTemplateKey || "").trim();
+  const flashKind = String(card.dataset?.firmwareUsbImage || "factory").trim().toLowerCase() === "ota" ? "ota" : "factory";
+  const preservesSettings = flashKind === "ota";
   const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const deviceLabel =
     String(templateSelect?.selectedOptions?.[0]?.textContent || templateKey || "ESP Satellite").trim() || "ESP Satellite";
@@ -16146,7 +16523,9 @@ async function openEspHomeLocalEspUsbFlashFlow(card, coreKey) {
         tone: success ? "success" : "error",
         message,
         hint: success
-          ? "The satellite is rebooting. Use its Tater setup hotspot if Wi-Fi provisioning is needed."
+          ? preservesSettings
+            ? "The satellite is rebooting with its existing Wi-Fi, pairing, and settings intact."
+            : "The satellite is rebooting. Use its Tater setup hotspot if Wi-Fi provisioning is needed."
           : error || "Keep the satellite connected and try the Local USB flash again.",
       });
       if (statusNode instanceof HTMLElement) {
@@ -16230,7 +16609,9 @@ async function openEspHomeLocalEspUsbFlashFlow(card, coreKey) {
           type: "textarea",
           value: "",
           description:
-            "Tater verifies the released factory image, erases the ESP32-S3, writes and verifies the complete image at 0x0, then hard-resets the satellite. Closing this window while flashing cancels the write.",
+            preservesSettings
+              ? "Tater verifies the released app image, writes it to the ESP32-S3 app slots without erasing setup data, then hard-resets the satellite. Closing this window while flashing cancels the write."
+              : "Tater verifies the released factory image, erases the ESP32-S3, writes and verifies the complete image at 0x0, then hard-resets the satellite. Closing this window while flashing cancels the write.",
         },
       ],
       onOpen: async ({ modal, fieldsEl, statusEl }) => {
@@ -16306,34 +16687,49 @@ async function openEspHomeLocalEspUsbFlashFlow(card, coreKey) {
         value: ports[0].value,
         options: ports,
         description:
-          "Choose the port for the satellite you want to erase and flash. Unplug unrelated serial devices if you are unsure which port is correct.",
+          preservesSettings
+            ? "Choose the port for the satellite you want to update while keeping its setup. Unplug unrelated serial devices if you are unsure which port is correct."
+            : "Choose the port for the satellite you want to erase and flash. Unplug unrelated serial devices if you are unsure which port is correct.",
       },
     ],
-    saveLabel: "Start Local USB Flash",
+    saveLabel: preservesSettings ? "OTA Update · Keep Settings" : "Start Factory Flash",
     onSave: async (values) => {
       const serialPort = String(values?.serial_port || "").trim();
       if (!serialPort) {
         throw new Error("Select a connected ESP USB serial device.");
       }
       const confirmed = window.confirm(
-        `Flash Tater firmware to ${deviceLabel} on ${serialPort}?\n\n` +
-          "This factory flash erases the ESP satellite. Keep its data USB cable connected until Tater reports completion."
+        preservesSettings
+          ? `Update Tater firmware on ${deviceLabel} using ${serialPort}?\n\n` +
+              "This USB update keeps Wi-Fi, pairing, and saved settings. Keep the data USB cable connected until Tater reports completion."
+          : `Factory flash Tater firmware to ${deviceLabel} on ${serialPort}?\n\n` +
+              "This factory flash erases the ESP satellite. Keep its data USB cable connected until Tater reports completion."
       );
       if (!confirmed) {
         setEspHomeFirmwareCardBusy(card, false);
         return { message: "Local USB flash cancelled." };
       }
       setEspHomeFirmwareCardBusy(card, true);
-      setCoreManagerStatus(card, `Preparing the verified factory image for ${deviceLabel}...`);
+      setCoreManagerStatus(
+        card,
+        preservesSettings
+          ? `Preparing the verified keep-settings update for ${deviceLabel}...`
+          : `Preparing the verified factory image for ${deviceLabel}...`
+      );
       try {
         const result = await runCoreManagerAction(card, coreKey, "voice_firmware_esp_usb_flash_start", {
           id: selector,
           selector,
           template_key: templateKey,
           serial_port: serialPort,
+          flash_kind: flashKind,
         });
         window.setTimeout(() => openProgressViewer(result, serialPort), 0);
-        return { message: `Local USB flash started for ${deviceLabel}.` };
+        return {
+          message: preservesSettings
+            ? `Local USB keep-settings update started for ${deviceLabel}.`
+            : `Local USB factory flash started for ${deviceLabel}.`,
+        };
       } catch (error) {
         setEspHomeFirmwareCardBusy(card, false);
         const message = String(error?.message || "unknown error");
@@ -16718,6 +17114,7 @@ function openEspHomeBrowserUsbLogs(card) {
     return;
   }
   const selector = String(card.dataset?.firmwareSelector || decodeCoreManagerId(card.dataset?.coreItemId || "")).trim();
+  const browserCapability = browserUsbCapability();
   const selectorSelect = card.querySelector('select[data-core-field-key="selector"]');
   const templateSelect = card.querySelector('select[data-core-field-key="template_key"]');
   const deviceLabel =
@@ -16748,10 +17145,10 @@ function openEspHomeBrowserUsbLogs(card) {
 
   const updateLogControls = () => {
     if (logSelectButton instanceof HTMLButtonElement) {
-      logSelectButton.disabled = reading || stopped;
+      logSelectButton.disabled = reading || stopped || !browserCapability.available;
     }
     if (logStartButton instanceof HTMLButtonElement) {
-      logStartButton.disabled = reading || stopped || !port;
+      logStartButton.disabled = reading || stopped || !port || !browserCapability.available;
     }
   };
 
@@ -16945,10 +17342,17 @@ function openEspHomeBrowserUsbLogs(card) {
         });
       }
       if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = "Select a USB device or start logs.";
+        statusNode.textContent = browserCapability.available
+          ? "Select a USB device or start logs."
+          : browserCapability.message;
         statusNode.classList.add("voice-log-status");
       }
-      renderEspHomeFirmwareLogEntries(logConsole, [], true, "Select a USB device to start logs.");
+      renderEspHomeFirmwareLogEntries(
+        logConsole,
+        [],
+        true,
+        browserCapability.available ? "Select a USB device to start logs." : browserCapability.message
+      );
     },
     onClose: ({ modal, fieldsEl, statusEl }) => {
       modal?.classList.remove("voice-log-modal");
@@ -23659,7 +24063,6 @@ async function loadSettingsView() {
     { value: "llama_cpp", label: "llama.cpp Local" },
     { value: "llama_cpp_remote", label: "llama.cpp Remote" },
     { value: "mlx_lm", label: "MLX LM (Apple Silicon)" },
-    { value: "spud_link", label: "Spudlet via Spud Hub" },
   ];
   const hydraOpenAiModelPlaceholder = "Model served by your API";
   const hydraHfModelPlaceholder = "Qwen/Qwen2.5-0.5B-Instruct";
@@ -23704,10 +24107,9 @@ async function loadSettingsView() {
     }
     return remoteLabel;
   };
-  const renderHydraProviderOptions = (currentValue, { includeSpudLink = false } = {}) => {
+  const renderHydraProviderOptions = (currentValue) => {
     const selected = normalizeHydraBaseProvider(currentValue);
     return hydraProviderOptions
-      .filter((option) => includeSpudLink || option.value !== "spud_link")
       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
       .join("");
   };
@@ -23901,17 +24303,6 @@ async function loadSettingsView() {
       model: settings.hydra_llm_model || "",
       api_key: settings.hydra_llm_api_key || "",
       provider: settings.hydra_llm_provider || "",
-    });
-  }
-  if (String(settings?.spud_link_mode || settings?.spud_link?.mode || "").trim().toLowerCase() === "spudlet") {
-    normalizedHydraBaseRows.length = 0;
-    normalizedHydraBaseSeen.clear();
-    appendHydraBaseRow({
-      provider: "spud_link",
-      host: "",
-      port: "",
-      model: "tater/base",
-      api_key: "",
     });
   }
   if (!normalizedHydraBaseRows.length) {
@@ -24137,11 +24528,12 @@ async function loadSettingsView() {
       ${spudLinkModelRouteSpecs
         .map((spec) => {
           const route = spudLinkModelRouteValue(spec.id);
+          const displayedRoute = spudLinkModelRoutingEnabled ? "hub" : route;
           const effectiveHub =
             spudLinkMode === "spudlet" &&
             Boolean(spudLinkPairedHub.connected) &&
-            route !== "local" &&
-            (spec.id === "llm" || route === "hub" || spudLinkModelRoutingEnabled);
+            displayedRoute !== "local" &&
+            (spec.id === "llm" || displayedRoute === "hub" || spudLinkModelRoutingEnabled);
           return `
             <label class="spud-link-model-route ${effectiveHub ? "is-hub" : "is-local"}" data-spud-link-model-route-card="${escapeHtml(spec.id)}">
               <span class="spud-link-model-route-copy">
@@ -24152,10 +24544,10 @@ async function loadSettingsView() {
                 ${
                   spec.id === "llm"
                     ? `<input id="set_spud_link_model_route_llm" type="hidden" value="hub" /><span class="spud-link-model-fixed">Spud Hub</span>`
-                    : `<select id="set_spud_link_model_route_${escapeHtml(spec.id)}" data-spud-link-model-route="${escapeHtml(spec.id)}">
-                  <option value="auto" ${route === "auto" ? "selected" : ""}>Auto</option>
-                  <option value="hub" ${route === "hub" ? "selected" : ""}>Spud Hub</option>
-                  <option value="local" ${route === "local" ? "selected" : ""}>This Tater</option>
+                    : `<select id="set_spud_link_model_route_${escapeHtml(spec.id)}" data-spud-link-model-route="${escapeHtml(spec.id)}" ${spudLinkModelRoutingEnabled ? "disabled" : ""}>
+                  <option value="auto" ${displayedRoute === "auto" ? "selected" : ""}>Auto</option>
+                  <option value="hub" ${displayedRoute === "hub" ? "selected" : ""}>Spud Hub</option>
+                  <option value="local" ${displayedRoute === "local" ? "selected" : ""}>This Tater</option>
                 </select>`
                 }
                 <small data-spud-link-model-route-status>${effectiveHub ? "Loaded on Spud Hub" : "Runs on this Tater"}</small>
@@ -24177,6 +24569,23 @@ async function loadSettingsView() {
     const text = String(value || "").trim();
     if (!text) return fallback;
     return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+  };
+  const validateSpudLinkPairUrl = (value, label, { required = false } = {}) => {
+    const text = String(value || "").trim().replace(/\/+$/, "");
+    if (!text) {
+      if (required) throw new Error(`Enter the ${label} before creating the QR code.`);
+      return "";
+    }
+    let parsed;
+    try {
+      parsed = new URL(text);
+    } catch {
+      throw new Error(`${label} must be a complete http:// or https:// address.`);
+    }
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+      throw new Error(`${label} must be a complete http:// or https:// address.`);
+    }
+    return text;
   };
   const renderSpudLinkNodes = () => {
     if (!spudLinkNodes.length) {
@@ -24260,14 +24669,43 @@ async function loadSettingsView() {
       </div>
     `;
   };
+  const spudLinkRouteUsesHub = (kind) => {
+    const token = String(kind || "").trim().toLowerCase();
+    const paired = Boolean(
+      spudLinkPairedHub.connected ||
+        (settings.spud_link_node_token_set && (settings.spud_link_hub_url || spudLink.hub_url))
+    );
+    if (!paired || spudLinkMode !== "spudlet") return false;
+    const route = spudLinkModelRouteValue(token);
+    if (route === "local") return false;
+    return token === "llm" || route === "hub" || spudLinkModelRoutingEnabled;
+  };
+  const renderSpudLinkRouteNotice = (...kinds) => {
+    const activeSpecs = spudLinkModelRouteSpecs.filter((spec) => kinds.includes(spec.id) && spudLinkRouteUsesHub(spec.id));
+    if (!activeSpecs.length) return "";
+    const labels = activeSpecs.map((spec) => spec.label).join(" and ");
+    return `
+      <div class="spud-link-route-notice">
+        <span class="spud-link-route-notice-icon" aria-hidden="true">↗</span>
+        <span><strong>Using Spud Hub</strong><small>${escapeHtml(labels)} ${activeSpecs.length === 1 ? "is" : "are"} controlled by the paired Hub, including whether ${activeSpecs.length === 1 ? "it is" : "they are"} enabled. Local settings are locked while this route uses the Hub.</small></span>
+        <button type="button" class="inline-btn" data-settings-tab-target="spudhub" data-spud-link-tab-target="spudlet">SpudLink settings</button>
+      </div>
+    `;
+  };
+  const spudLinkModeExplanation = (mode) => {
+    const token = String(mode || "disabled").trim().toLowerCase();
+    if (token === "hub") return "This Tater accepts Little Spuds and Spudlets and provides its models, Hydra, tools, and memory.";
+    if (token === "spudlet") return "This Tater uses an upstream Spud Hub. It can still share that connection with one or two downstream clients.";
+    return "SpudLink is off. Linked clients cannot pair or make remote requests until it is enabled.";
+  };
   const renderSpudLinkPanel = () => `
     <section class="settings-tab-panel" data-settings-panel="spudhub">
       ${renderSettingsSectionIntro(
         "Spud Link",
-        "Link Tater instances and lightweight Little Spud clients to a central model, Hydra, tools, and telemetry endpoint.",
+        "Pair lightweight Little Spuds, link full Tater Spudlets, or let this Tater use another Hub.",
         "LINK"
       )}
-      <div class="form-grid">
+      <div id="settings-spud-link-shell" class="spud-link-shell" data-spud-link-active-tab="${escapeHtml(state.spudLinkTab)}">
         <section class="core-inline-section spud-link-hero">
           <div class="spud-link-orbit" aria-hidden="true">
             <span class="spud-link-spud hub"></span>
@@ -24275,189 +24713,218 @@ async function loadSettingsView() {
             <span class="spud-link-spud little"></span>
           </div>
           <div class="spud-link-hero-copy">
-            <div class="small core-inline-section-title">Spud Link Roles</div>
+            <div class="small core-inline-section-title">One Tater, three ways to connect</div>
             <div class="spud-link-role-grid">
-              <span><strong>Spud Hub</strong><small>Main Tater with the model/GPU power, Hydra, tools, pairing, and linked Spud monitoring.</small></span>
-              <span><strong>Spudlet</strong><small>Full Tater install that keeps its local app features while using Spud Hub model power.</small></span>
-              <span><strong>Little Spud</strong><small>Lightweight chat client that pairs by QR or code and runs through its linked Tater.</small></span>
+              <span><strong>Spud Hub</strong><small>The main Tater that shares models, Hydra, tools, memory, and plugins.</small></span>
+              <span><strong>Spudlet</strong><small>A full Tater that keeps its own app while borrowing model power from a Hub.</small></span>
+              <span><strong>Little Spud</strong><small>A lightweight companion app that pairs by QR and talks through its Tater.</small></span>
             </div>
           </div>
         </section>
 
-        <section class="core-inline-section spud-link-pairing-card">
-          <div class="spud-link-pairing-head">
-            <div>
-              <div class="small core-inline-section-title">Pair Little Spuds</div>
-              <p class="spud-link-pairing-copy">Enter the routes Little Spud should use, then create a short-lived code to scan or paste into the app.</p>
-            </div>
-            <button type="button" id="settings-spud-link-generate-pairing" class="inline-btn">Create Pairing Code</button>
+        <div class="settings-subtabs spud-link-tabs" role="tablist" aria-label="Spud Link sections">
+          <button type="button" class="settings-subtab-btn ${state.spudLinkTab === "pair" ? "active" : ""}" data-spud-link-tab="pair">Pair Devices</button>
+          <button type="button" class="settings-subtab-btn ${state.spudLinkTab === "spudlet" ? "active" : ""}" data-spud-link-tab="spudlet">Use a Spud Hub</button>
+          <button type="button" class="settings-subtab-btn ${state.spudLinkTab === "settings" ? "active" : ""}" data-spud-link-tab="settings">Settings</button>
+        </div>
+
+        <div class="settings-subpanel spud-link-subpanel ${state.spudLinkTab === "pair" ? "active" : ""}" data-spud-link-panel="pair">
+          <div class="spud-link-action-grid">
+            <section class="core-inline-section spud-link-pair-choice little">
+              <div class="spud-link-choice-icon" aria-hidden="true"><span class="spud-link-spud little"></span></div>
+              <div class="spud-link-choice-copy">
+                <div class="small core-inline-section-title">Pair a Little Spud</div>
+                <p>Choose the addresses for this Little Spud, then create one clean QR code. Nothing needs to be typed on the client.</p>
+              </div>
+              <div class="spud-link-pair-addresses">
+                <div class="small core-inline-section-title">Connection Addresses for This Little Spud</div>
+                <div class="form-grid two-col">
+                  <label>Home / LAN URL
+                    <input id="pair_spud_link_home_url" type="url" required value="${escapeHtml(
+                      settings.spud_link_home_url || spudLink.home_url || window.location.origin
+                    )}" placeholder="http://tater.local:8501" />
+                    <div class="small">Required. This Little Spud tries this address while it is on your home network.</div>
+                  </label>
+                  <label>Away / Tater Tunnel URL
+                    <input id="pair_spud_link_public_url" type="url" value="${escapeHtml(
+                      settings.spud_link_public_url || spudLink.public_url || ""
+                    )}" placeholder="https://your-tater-tunnel.example" />
+                    <div class="small">Optional. This Little Spud uses it when the home address cannot be reached.</div>
+                  </label>
+                </div>
+              </div>
+              <button type="button" class="action-btn" data-spud-link-start-pairing="little_spud">Show Little Spud QR</button>
+            </section>
+            <section class="core-inline-section spud-link-pair-choice spudlet">
+              <div class="spud-link-choice-icon" aria-hidden="true"><span class="spud-link-spud spudlet"></span></div>
+              <div class="spud-link-choice-copy">
+                <div class="small core-inline-section-title">Link a Spudlet</div>
+                <p>Create a short code to paste into another full Tater. That Tater becomes a Spudlet of this one.</p>
+              </div>
+              <button type="button" class="action-btn" data-spud-link-start-pairing="spudlet">Create Spudlet Code</button>
+            </section>
           </div>
-          <div class="form-grid two-col">
-            <label>Home / LAN URL
-              <input id="set_spud_link_home_url" type="text" value="${escapeHtml(settings.spud_link_home_url || spudLink.home_url || "")}" placeholder="http://tater.local:8501" />
-              <div class="small">Local address Little Spud should try first when you are home.</div>
-            </label>
-            <label>Away / Tater Tunnel URL
-              <input id="set_spud_link_public_url" type="text" value="${escapeHtml(settings.spud_link_public_url || spudLink.public_url || "")}" placeholder="https://your-tater-tunnel.example" />
-              <div class="small">External address Little Spud should use away from home.</div>
-            </label>
-          </div>
-          <span id="settings-spud-link-pairing-status" class="small spud-link-pairing-status">${
-            spudLink.pairing_code_active ? "A pairing code is active." : "No active pairing code."
-          }</span>
-          <div id="settings-spud-link-sync-card" class="spud-link-sync-card" style="display:none;">
-            <div class="spud-link-sync-info">
-              <strong>Little Spud Sync</strong>
-              <small>Use the QR for camera pairing, or copy the manual code for devices without a camera.</small>
+          <div id="settings-spud-link-pairing-status" class="small spud-link-pairing-status">${
+            spudLink.pairing_code_active ? "A pairing invite is waiting for a device." : "Pairing invites are private, short-lived, and used once."
+          }</div>
+          <section class="core-inline-section spud-link-settings-card">
+            <div class="spud-link-section-heading">
+              <div><div class="small core-inline-section-title">Linked Spuds</div><p>Everything currently connected to this Tater.</p></div>
+              <span class="spud-link-count">${spudLinkNodes.length}</span>
             </div>
-            <div id="settings-spud-link-qr-wrap" class="spud-link-qr-wrap" style="display:none;">
-              <img id="settings-spud-link-qr-img" alt="Little Spud pairing QR code" />
+            <div class="spud-link-node-list">${renderSpudLinkNodes()}</div>
+          </section>
+        </div>
+
+        <div class="settings-subpanel spud-link-subpanel ${state.spudLinkTab === "spudlet" ? "active" : ""}" data-spud-link-panel="spudlet">
+          <section class="core-inline-section spud-link-settings-card spud-link-connect-card">
+            <div class="spud-link-section-heading">
+              <div>
+                <div class="small core-inline-section-title">Connect This Tater to a Spud Hub</div>
+                <p>On the main Tater, choose Pair Devices → Link a Spudlet. Paste its URL and short code here.</p>
+              </div>
+              <span class="spud-link-mode-chip">Spudlet</span>
             </div>
-            <div class="spud-link-sync-fields">
-              <label>Manual Code
-                <input id="settings-spud-link-manual-code" type="text" readonly />
+            <div class="form-grid two-col">
+              <label style="grid-column: 1 / -1;">Spud Hub URL
+                <input id="set_spud_link_hub_url" type="text" value="${escapeHtml(settings.spud_link_hub_url || spudLink.hub_url || "")}" placeholder="http://spud-hub.local:8501" />
+                <div class="small">Use the LAN address at home or the Hub's public Tater Tunnel address.</div>
               </label>
-              <label>QR Payload
-                <textarea id="settings-spud-link-qr-payload" readonly rows="4"></textarea>
+              <label style="grid-column: 1 / -1;">Spudlet Pairing Code
+                <input id="set_spud_link_pairing_code" type="text" autocomplete="off" placeholder="SPUD-XXXXXX-XXXXXX" />
+                <div class="small">The code is used once. The permanent node token is returned and saved automatically.</div>
+              </label>
+              <div class="spud-link-token-status" style="grid-column: 1 / -1;">
+                <span>Connection</span>
+                <strong>${settings.spud_link_node_token_set ? "Paired and saved" : "Not paired yet"}</strong>
+                <small>${settings.spud_link_node_token_set ? "Reconnect only when changing Hubs or replacing the saved connection." : "Connecting changes this Tater to Spudlet mode."}</small>
+              </div>
+              <div class="inline-row" style="grid-column: 1 / -1;">
+                <button type="button" id="settings-spud-link-connect" class="action-btn">Connect to Spud Hub</button>
+                <span id="settings-spud-link-connect-status" class="small"></span>
+              </div>
+            </div>
+          </section>
+
+          ${
+            spudLinkMode === "spudlet" || settings.spud_link_node_token_set || settings.spud_link_hub_url
+              ? `<section class="core-inline-section spud-link-settings-card">
+            <div class="small core-inline-section-title">Current Hub</div>
+            ${renderSpudletHubStatus()}
+          </section>`
+              : ""
+          }
+
+          <section class="core-inline-section spud-link-settings-card spud-link-model-card">
+            <div class="spud-link-model-heading">
+              <div>
+                <div class="small core-inline-section-title">Hub Model Settings</div>
+                <p class="spud-link-pairing-copy">Choose which heavy models run on the Spud Hub. Wake word detection and voice activity detection always stay on this device.</p>
+              </div>
+              <label class="spud-link-model-master">
+                <span><strong>Use Spud Hub for all models</strong><small>Recommended for Reachy, Edge, and low-power installs</small></span>
+                ${renderToggleRow(
+                  `<input id="set_spud_link_model_routing_enabled" class="toggle-input" type="checkbox" ${
+                    spudLinkModelRoutingEnabled ? "checked" : ""
+                  } />`
+                )}
               </label>
             </div>
-          </div>
-        </section>
+            ${renderSpudLinkModelRoutes()}
+            <div class="spud-link-model-footnote">When the all-models switch is on, every model route is saved as Spud Hub. Turn it off to choose individual Hub, local, or automatic routes.</div>
+            <div class="inline-row">
+              <button type="button" id="settings-save-spudhub" class="action-btn">Save Hub Model Settings</button>
+              <span class="small">The Models page will show a Hub notice and lock local controls for every active Hub route.</span>
+            </div>
+          </section>
+        </div>
 
-        <section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">This Tater</div>
-          <div class="form-grid two-col">
-            <label>Role
-              <select id="set_spud_link_mode">
-                <option value="disabled" ${spudLinkMode === "disabled" ? "selected" : ""}>Disabled</option>
-                <option value="hub" ${spudLinkMode === "hub" ? "selected" : ""}>Spud Hub</option>
-                <option value="spudlet" ${spudLinkMode === "spudlet" ? "selected" : ""}>Spudlet</option>
-              </select>
-              <div class="small">Little Spud is a separate lightweight client, not a full Tater mode.</div>
-            </label>
-            <label>Node Name
-              <input id="set_spud_link_node_name" type="text" value="${escapeHtml(settings.spud_link_node_name || spudLink.node_name || "Tater")}" />
-            </label>
-          </div>
-        </section>
+        <div class="settings-subpanel spud-link-subpanel ${state.spudLinkTab === "settings" ? "active" : ""}" data-spud-link-panel="settings">
+          <section class="core-inline-section spud-link-settings-card">
+            <div class="small core-inline-section-title">How This Tater Uses SpudLink</div>
+            <div class="form-grid two-col">
+              <label>SpudLink Mode
+                <select id="set_spud_link_mode">
+                  <option value="disabled" ${spudLinkMode === "disabled" ? "selected" : ""}>Disabled</option>
+                  <option value="hub" ${spudLinkMode === "hub" ? "selected" : ""}>Spud Hub</option>
+                  <option value="spudlet" ${spudLinkMode === "spudlet" ? "selected" : ""}>Spudlet</option>
+                </select>
+              </label>
+              <label>Display Name
+                <input id="set_spud_link_node_name" type="text" value="${escapeHtml(settings.spud_link_node_name || spudLink.node_name || "Tater")}" />
+                <div class="small">Shown to linked Little Spuds, Spudlets, and the upstream Hub.</div>
+              </label>
+              <div class="spud-link-mode-explanation" data-spud-link-mode-explanation style="grid-column: 1 / -1;">
+                <strong>${escapeHtml(spudLinkModeLabel(spudLinkMode))}</strong>
+                <span>${escapeHtml(spudLinkModeExplanation(spudLinkMode))}</span>
+              </div>
+            </div>
+          </section>
 
-        <section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">Server Controls</div>
-          <div class="form-grid two-col">
-            <label>Enable Pairing
-              ${renderToggleRow(
-                `<input id="set_spud_link_pairing_enabled" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_pairing_enabled ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Allow Spudlet Clients
-              ${renderToggleRow(
-                `<input id="set_spud_link_allow_spudlets" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_allow_spudlets !== false ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Allow Little Spuds
-              ${renderToggleRow(
-                `<input id="set_spud_link_allow_little_spuds" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_allow_little_spuds !== false ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Little Spud Tool Use
-              ${renderToggleRow(
-                `<input id="set_spud_link_little_spud_tools_enabled" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_little_spud_tools_enabled !== false ? "checked" : ""
-                } />`
-              )}
-              <div class="small">Applies to Little Spud Hydra calls on this server.</div>
-            </label>
-            <label>Telemetry
-              ${renderToggleRow(
-                `<input id="set_spud_link_telemetry_enabled" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_telemetry_enabled !== false ? "checked" : ""
-                } />`
-              )}
-            </label>
-            <label>Request Previews
-              ${renderToggleRow(
-                `<input id="set_spud_link_request_previews_enabled" class="toggle-input" type="checkbox" ${
-                  settings.spud_link_request_previews_enabled ? "checked" : ""
-                } />`
-              )}
-              <div class="small">Off by default; keeps Hub logs metadata-first.</div>
-            </label>
+          <section class="core-inline-section spud-link-settings-card">
+            <div class="small core-inline-section-title">Pairing & Privacy</div>
+            <div class="form-grid two-col">
+              <label>Allow New Pairing Invites
+                ${renderToggleRow(
+                  `<input id="set_spud_link_pairing_enabled" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_pairing_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">The Pair Devices buttons enable this automatically when needed.</div>
+              </label>
+              <label>Allow Spudlet Clients
+                ${renderToggleRow(
+                  `<input id="set_spud_link_allow_spudlets" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_allow_spudlets !== false ? "checked" : ""
+                  } />`
+                )}
+              </label>
+              <label>Allow Little Spuds
+                ${renderToggleRow(
+                  `<input id="set_spud_link_allow_little_spuds" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_allow_little_spuds !== false ? "checked" : ""
+                  } />`
+                )}
+              </label>
+              <label>Little Spud Tool Use
+                ${renderToggleRow(
+                  `<input id="set_spud_link_little_spud_tools_enabled" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_little_spud_tools_enabled !== false ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">Lets paired Little Spuds use this Tater's Hydra tools.</div>
+              </label>
+              <label>Telemetry
+                ${renderToggleRow(
+                  `<input id="set_spud_link_telemetry_enabled" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_telemetry_enabled !== false ? "checked" : ""
+                  } />`
+                )}
+              </label>
+              <label>Request Previews
+                ${renderToggleRow(
+                  `<input id="set_spud_link_request_previews_enabled" class="toggle-input" type="checkbox" ${
+                    settings.spud_link_request_previews_enabled ? "checked" : ""
+                  } />`
+                )}
+                <div class="small">Off by default so Hub activity stays metadata-first.</div>
+              </label>
+            </div>
+          </section>
+
+          <details class="settings-dropdown spud-link-technical" style="grid-column: 1 / -1;">
+            <summary class="settings-summary">Technical endpoints</summary>
             <div class="spud-link-endpoints">
-              <span>LLM Route</span>
-              <code>${escapeHtml(spudLinkEndpoint)}</code>
-              <span>Model Gateway</span>
-              <code>${escapeHtml(`${window.location.origin.replace(/\/$/, "")}/api/spudlink/v1/models/capabilities`)}</code>
-              <span>Pair</span>
-              <code>${escapeHtml(spudLinkPairEndpoint)}</code>
+              <span>LLM Route</span><code>${escapeHtml(spudLinkEndpoint)}</code>
+              <span>Model Gateway</span><code>${escapeHtml(`${window.location.origin.replace(/\/$/, "")}/api/spudlink/v1/models/capabilities`)}</code>
+              <span>Pair</span><code>${escapeHtml(spudLinkPairEndpoint)}</code>
             </div>
+          </details>
+
+          <div class="inline-row" style="grid-column: 1 / -1;">
+            <button type="button" id="settings-save-spudhub-settings" class="action-btn">Save SpudLink Settings</button>
+            <span class="small">Changing the mode changes whether this Tater serves clients, uses an upstream Hub, or keeps SpudLink off.</span>
           </div>
-        </section>
-
-        <section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">Connect This Tater As Spudlet</div>
-          <div class="form-grid two-col">
-            <label style="grid-column: 1 / -1;">Server URL
-              <input id="set_spud_link_hub_url" type="text" value="${escapeHtml(settings.spud_link_hub_url || spudLink.hub_url || "")}" placeholder="http://spud-hub.local:8501" />
-              <div class="small">Use the Spud Hub LAN/public URL shown in the Hub pairing panel.</div>
-            </label>
-            <label style="grid-column: 1 / -1;">Manual Pairing Code
-              <input id="set_spud_link_pairing_code" type="text" autocomplete="off" placeholder="Paste code from Spud Hub" />
-              <div class="small">This is the Manual Code from Spud Hub. QR pairing is mainly for Little Spud clients; Spudlets paste the manual code here.</div>
-            </label>
-            <div class="spud-link-token-status" style="grid-column: 1 / -1;">
-              <span>Node Token</span>
-              <strong>${settings.spud_link_node_token_set ? "Saved automatically" : "Not paired yet"}</strong>
-              <small>${settings.spud_link_node_token_set ? "Reconnect this Spudlet to replace the saved Hub token." : "The Hub returns and saves this token after a successful pairing."}</small>
-            </div>
-            <div class="inline-row" style="grid-column: 1 / -1;">
-              <button type="button" id="settings-spud-link-connect" class="inline-btn">Connect As Spudlet</button>
-              <span id="settings-spud-link-connect-status" class="small"></span>
-            </div>
-          </div>
-        </section>
-
-        <section class="core-inline-section spud-link-settings-card spud-link-model-card">
-          <div class="spud-link-model-heading">
-            <div>
-              <div class="small core-inline-section-title">Model Routing</div>
-              <p class="spud-link-pairing-copy">Let this Spudlet keep its interface and device features while selected AI models stay loaded on the Spud Hub.</p>
-            </div>
-            <label class="spud-link-model-master">
-              <span><strong>Use Hub For Additional Models</strong><small>Recommended for Edge installs</small></span>
-              ${renderToggleRow(
-                `<input id="set_spud_link_model_routing_enabled" class="toggle-input" type="checkbox" ${
-                  spudLinkModelRoutingEnabled ? "checked" : ""
-                } />`
-              )}
-            </label>
-          </div>
-          ${renderSpudLinkModelRoutes()}
-          <div class="spud-link-model-footnote">Auto follows the switch above. A specific Spud Hub or This Tater choice overrides Auto. Wake Word and voice activity detection always remain on this device.</div>
-        </section>
-
-        ${
-          spudLinkMode === "spudlet" || settings.spud_link_node_token_set || settings.spud_link_hub_url
-            ? `<section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">Connected Spud Hub</div>
-          ${renderSpudletHubStatus()}
-        </section>`
-            : ""
-        }
-
-        <section class="core-inline-section spud-link-settings-card">
-          <div class="small core-inline-section-title">Linked Spuds & Spudlets</div>
-          <div class="spud-link-node-list">${renderSpudLinkNodes()}</div>
-        </section>
-
-        <div class="inline-row" style="grid-column: 1 / -1;">
-          <button type="button" id="settings-save-spudhub" class="action-btn">Save Spud Link</button>
-          <span class="small">Saves Spud Link settings.</span>
         </div>
       </div>
     </section>
@@ -24521,7 +24988,14 @@ async function loadSettingsView() {
       })
       .join("");
   };
+  const currentSpeechSttBackend = String(settings.speech_stt_backend || "faster_whisper").trim() || "faster_whisper";
   const currentSpeechTtsBackend = String(settings.speech_tts_backend || "wyoming").trim() || "wyoming";
+  const displayedSpeechSttBackendOptions = spudLinkRouteUsesHub("stt")
+    ? [{ value: currentSpeechSttBackend, label: "Spud Hub" }]
+    : speechSttBackendOptions;
+  const displayedSpeechTtsBackendOptions = spudLinkRouteUsesHub("tts")
+    ? [{ value: currentSpeechTtsBackend, label: "Spud Hub" }]
+    : speechTtsBackendOptions;
   const initialSpeechTtsModelOptions = Array.isArray(speechTtsModelOptionsByBackend[currentSpeechTtsBackend])
     ? speechTtsModelOptionsByBackend[currentSpeechTtsBackend]
     : [];
@@ -24860,6 +25334,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="routing">
+              ${renderSpudLinkRouteNotice("llm")}
               <div class="settings-subtabs llm-vision-mini-tabs" style="grid-column: 1 / -1;">
                 <button type="button" class="settings-subtab-btn active" data-llm-vision-tab="settings">Settings</button>
                 <button type="button" class="settings-subtab-btn" data-llm-vision-tab="manage">Manage</button>
@@ -24910,7 +25385,7 @@ async function loadSettingsView() {
                 ${hydraRecoveryNotice ? `<div style="grid-column: 1 / -1;">${renderNotice(hydraRecoveryNotice)}</div>` : ""}
                 <label style="grid-column: 1 / -1;">Base Provider
                   <select id="set_hydra_llm_provider">
-                    ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider, { includeSpudLink: true })}
+                    ${renderHydraProviderOptions(hydraPrimaryBaseRow.provider)}
                   </select>
                 </label>
                 <label id="hydra-base-host-wrap" data-hydra-provider-field="openai_compatible">Base Host / IP
@@ -25237,6 +25712,7 @@ async function loadSettingsView() {
 
               </div>
               <div class="settings-subpanel" data-models-panel="vision">
+              ${renderSpudLinkRouteNotice("vision")}
               <div class="hydra-model-panel is-active llm-vision-settings-block">
                 <div class="hydra-model-panel-title">Image Understanding</div>
                 <div class="small hydra-model-panel-note">Used for still-image tools and image-enabled requests.</div>
@@ -25294,6 +25770,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="audio-understanding">
+                ${renderSpudLinkRouteNotice("audio")}
                 <div class="hydra-model-panel is-active">
                   <div class="hydra-model-panel-title">Audio Understanding</div>
                   <div class="small hydra-model-panel-note">Lets Tater reason about music, speech, and environmental sounds. Plain speech transcription should still use STT.</div>
@@ -25332,6 +25809,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="vision">
+                ${renderSpudLinkRouteNotice("video")}
                 <div class="hydra-model-panel is-active">
                   <div class="hydra-model-panel-title">Video Understanding</div>
                   <div class="small hydra-model-panel-note">Lets Tater inspect short clips as a sequence, including actions and scene changes.</div>
@@ -25381,6 +25859,7 @@ async function loadSettingsView() {
 	              </div>
 
               <div class="settings-subpanel" data-models-panel="speech">
+              ${renderSpudLinkRouteNotice("stt", "tts")}
               <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Voice Acceleration</div>
                 <div class="small hydra-model-panel-note">
@@ -25400,7 +25879,7 @@ async function loadSettingsView() {
                 </div>
                 <label>STT Backend
                   <select id="set_speech_stt_backend">
-                    ${renderSettingsSelectOptions(speechSttBackendOptions, settings.speech_stt_backend || "faster_whisper")}
+                    ${renderSettingsSelectOptions(displayedSpeechSttBackendOptions, currentSpeechSttBackend)}
                   </select>
                   <div id="speech-stt-backend-status" class="small"></div>
                 </label>
@@ -25426,7 +25905,7 @@ async function loadSettingsView() {
                 <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Direct TTS</div>
                 <label>TTS Backend
                   <select id="set_speech_tts_backend">
-                    ${renderSettingsSelectOptions(speechTtsBackendOptions, currentSpeechTtsBackend)}
+                    ${renderSettingsSelectOptions(displayedSpeechTtsBackendOptions, currentSpeechTtsBackend)}
                   </select>
                 </label>
                 <label id="speech-openai-tts-base-url-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS Base URL
@@ -25897,7 +26376,11 @@ async function loadSettingsView() {
               </div>
               </div>
 
-              <div class="settings-subpanel active llm-vision-settings-block" data-models-panel="routing">
+              <div
+                class="settings-subpanel active llm-vision-settings-block"
+                data-models-panel="routing"
+                data-spud-link-lock-without-notice="${spudLinkRouteUsesHub("llm") ? "true" : "false"}"
+              >
               <div class="hydra-model-mode" style="grid-column: 1 / -1;">
                 <div class="small hydra-model-mode-label">Beast Mode Routing</div>
                 ${renderToggleRow(
@@ -25922,6 +26405,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="speakerid">
+                ${renderSpudLinkRouteNotice("speaker_id")}
                 ${speechBrainSettingsHtml}
                 ${renderSettingsSectionIntro(
                   "Speaker ID",
@@ -25935,6 +26419,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="emotionid">
+                ${renderSpudLinkRouteNotice("emotion_id")}
                 ${renderSettingsSectionIntro(
                   "Emotion ID",
                   "Detect a soft voice-tone hint from each voice turn, then let Tater respond with a little more emotional awareness.",
@@ -25947,6 +26432,7 @@ async function loadSettingsView() {
               </div>
 
               <div class="settings-subpanel" data-models-panel="faceid">
+                ${renderSpudLinkRouteNotice("face_id")}
                 ${renderSettingsSectionIntro(
                   "Face ID",
                   "Locally recognize faces found by Awareness camera bursts and attach known people to event history.",
@@ -26500,6 +26986,18 @@ async function loadSettingsView() {
     </div>
   `;
 
+  document.querySelectorAll("[data-models-panel]").forEach((panel) => {
+    const routeNotice = Array.from(panel.children).find((child) => child.classList?.contains("spud-link-route-notice"));
+    const locksWithoutNotice = panel.dataset.spudLinkLockWithoutNotice === "true";
+    if (!routeNotice && !locksWithoutNotice) return;
+    panel.classList.add("is-spud-link-locked");
+    Array.from(panel.children).forEach((child) => {
+      if (child === routeNotice) return;
+      child.setAttribute("inert", "");
+      child.setAttribute("aria-disabled", "true");
+    });
+  });
+
   const statusEl = document.getElementById("settings-status");
   const popupEffectSelectEl = document.getElementById("set_popup_effect_style");
   const popupEffectPreviewEl = document.getElementById("settings-popup-effect-preview");
@@ -26861,6 +27359,21 @@ async function loadSettingsView() {
   const tabButtons = Array.from(root.querySelectorAll(".settings-tab-btn"));
   const tabPanels = Array.from(root.querySelectorAll(".settings-tab-panel"));
   const initialSettingsTab = !redisStatus.connected ? "redis" : normalizeSettingsTab(state.settingsTab || "general");
+  const spudLinkShell = document.getElementById("settings-spud-link-shell");
+  const spudLinkTabButtons = Array.from(spudLinkShell?.querySelectorAll("[data-spud-link-tab]") || []);
+  const spudLinkTabPanels = Array.from(spudLinkShell?.querySelectorAll("[data-spud-link-panel]") || []);
+  const activateSpudLinkTab = (tabKey) => {
+    const normalized = normalizeSpudLinkTab(tabKey);
+    state.spudLinkTab = normalized;
+    safeStorageSet("tater_spud_link_tab", normalized);
+    if (spudLinkShell) spudLinkShell.dataset.spudLinkActiveTab = normalized;
+    spudLinkTabButtons.forEach((button) => button.classList.toggle("active", button.dataset.spudLinkTab === normalized));
+    spudLinkTabPanels.forEach((panel) => panel.classList.toggle("active", panel.dataset.spudLinkPanel === normalized));
+  };
+  spudLinkTabButtons.forEach((button) => {
+    button.addEventListener("click", () => activateSpudLinkTab(button.dataset.spudLinkTab));
+  });
+  activateSpudLinkTab(state.spudLinkTab);
 
   const activateTab = (tabKey) => {
     const normalizedTab = normalizeSettingsTab(tabKey);
@@ -26908,7 +27421,10 @@ async function loadSettingsView() {
 	    button.addEventListener("click", () => activateTab(button.dataset.settingsTab));
 	  });
 	  root.querySelectorAll("[data-settings-tab-target]").forEach((button) => {
-	    button.addEventListener("click", () => activateTab(button.dataset.settingsTabTarget));
+	    button.addEventListener("click", () => {
+        activateTab(button.dataset.settingsTabTarget);
+        if (button.dataset.spudLinkTabTarget) activateSpudLinkTab(button.dataset.spudLinkTabTarget);
+      });
 	  });
 	  activateTab(initialSettingsTab);
   bindSettingsPeopleActions();
@@ -28229,6 +28745,10 @@ async function loadSettingsView() {
       spudLinkPairedHub.connected ||
         (settings.spud_link_node_token_set && (settings.spud_link_hub_url || spudLink.hub_url))
     );
+    document.querySelectorAll("[data-spud-link-model-route]").forEach((selectEl) => {
+      if (enabled) selectEl.value = "hub";
+      selectEl.disabled = enabled;
+    });
     document.querySelectorAll("[data-spud-link-model-route-card]").forEach((card) => {
       const kind = String(card.dataset.spudLinkModelRouteCard || "").trim();
       const route = String(document.getElementById(`set_spud_link_model_route_${kind}`)?.value || (kind === "llm" ? "hub" : "auto"));
@@ -28237,23 +28757,27 @@ async function loadSettingsView() {
       card.classList.toggle("is-local", !useHub);
       const statusEl = card.querySelector("[data-spud-link-model-route-status]");
       if (statusEl) {
-        statusEl.textContent = useHub ? "Loaded on Spud Hub" : "Runs on this Tater";
+        statusEl.textContent = useHub ? "Loaded on Spud Hub" : mode === "spudlet" && !paired ? "Pairs before Hub routing starts" : "Runs on this Tater";
       }
     });
   };
   document.getElementById("set_spud_link_mode")?.addEventListener("change", (event) => {
     const mode = String(event.currentTarget?.value || "").trim().toLowerCase();
-    if (mode === "spudlet" && hydraBaseProviderEl) {
-      hydraBaseProviderEl.value = "spud_link";
-      if (hydraBaseModelEl) {
-        hydraBaseModelEl.value = "tater/base";
-      }
-      syncHydraPrimaryProviderFields();
-      syncVisionModeFields();
+    const explanationEl = document.querySelector("[data-spud-link-mode-explanation]");
+    if (explanationEl) {
+      const titleEl = explanationEl.querySelector("strong");
+      const copyEl = explanationEl.querySelector("span");
+      if (titleEl) titleEl.textContent = spudLinkModeLabel(mode);
+      if (copyEl) copyEl.textContent = spudLinkModeExplanation(mode);
     }
     refreshSpudLinkModelRoutingUi();
   });
-  document.getElementById("set_spud_link_model_routing_enabled")?.addEventListener("change", refreshSpudLinkModelRoutingUi);
+  document.getElementById("set_spud_link_model_routing_enabled")?.addEventListener("change", () => {
+    refreshSpudLinkModelRoutingUi();
+    if (document.getElementById("set_spud_link_model_routing_enabled")?.checked) {
+      showToast("All model routes are set to Spud Hub. Save to apply.");
+    }
+  });
   document.querySelectorAll("[data-spud-link-model-route]").forEach((selectEl) => {
     selectEl.addEventListener("change", refreshSpudLinkModelRoutingUi);
   });
@@ -29745,6 +30269,15 @@ async function loadSettingsView() {
 
   const syncSpeechSttBackendOptions = () => {
     if (!speechSttBackendEl) {
+      return;
+    }
+    if (spudLinkRouteUsesHub("stt")) {
+      const current = String(speechSttBackendEl.value || currentSpeechSttBackend).trim() || currentSpeechSttBackend;
+      speechSttBackendEl.innerHTML = renderSettingsSelectOptions([{ value: current, label: "Spud Hub" }], current);
+      speechSttBackendEl.value = current;
+      if (speechSttBackendStatusEl) {
+        speechSttBackendStatusEl.textContent = "Controlled by the paired Spud Hub.";
+      }
       return;
     }
     const rows = speechSttOptionRowsForAcceleration();
@@ -32253,8 +32786,6 @@ async function loadSettingsView() {
       tater_api_hydra_tools_enabled: Boolean(document.getElementById("set_tater_api_hydra_tools_enabled")?.checked),
       spud_link_mode: document.getElementById("set_spud_link_mode")?.value || "disabled",
       spud_link_node_name: String(document.getElementById("set_spud_link_node_name")?.value || "").trim(),
-      spud_link_home_url: String(document.getElementById("set_spud_link_home_url")?.value || "").trim(),
-      spud_link_public_url: String(document.getElementById("set_spud_link_public_url")?.value || "").trim(),
       spud_link_pairing_enabled: Boolean(document.getElementById("set_spud_link_pairing_enabled")?.checked),
       spud_link_allow_spudlets: Boolean(document.getElementById("set_spud_link_allow_spudlets")?.checked),
       spud_link_allow_little_spuds: Boolean(document.getElementById("set_spud_link_allow_little_spuds")?.checked),
@@ -32382,62 +32913,74 @@ async function loadSettingsView() {
     }
   });
 
-  document.getElementById("settings-spud-link-generate-pairing")?.addEventListener("click", async () => {
-    const pairingStatusEl = document.getElementById("settings-spud-link-pairing-status");
-    const mode = String(document.getElementById("set_spud_link_mode")?.value || "disabled").trim();
-    const pairingEnabled = Boolean(document.getElementById("set_spud_link_pairing_enabled")?.checked);
-    if (!["hub", "spudlet"].includes(mode)) {
-      const message = "Set this Tater to Spud Hub or Spudlet before creating a pairing code.";
-      if (pairingStatusEl) pairingStatusEl.textContent = message;
-      showToast(message, "error", 3600);
-      return;
-    }
-    if (!pairingEnabled) {
-      const message = "Enable pairing first, then save or create the code again.";
-      if (pairingStatusEl) pairingStatusEl.textContent = message;
-      showToast(message, "error", 3600);
-      return;
-    }
-    if (pairingStatusEl) pairingStatusEl.textContent = "Saving Spud Link routes...";
-    try {
-      const homeUrl = String(document.getElementById("set_spud_link_home_url")?.value || "").trim();
-      const publicUrl = String(document.getElementById("set_spud_link_public_url")?.value || "").trim();
-      await runSettingsSave();
-      if (pairingStatusEl) pairingStatusEl.textContent = "Creating pairing code...";
-      const result = await api("/api/spudlink/pairing-code", {
-        method: "POST",
-        body: JSON.stringify({
-          home_url: homeUrl,
-          public_url: publicUrl,
-        }),
-      });
-      const code = String(result?.pairing_code || "").trim();
-      const pairingUri = String(result?.pairing_uri || "").trim();
-      const pairingPayloadText = String(result?.pairing_payload_text || pairingUri || "").trim();
-      const pairingQrSvg = String(result?.pairing_qr_svg || "").trim();
-      const expiresAt = Number(result?.expires_at || 0);
-      const expiresText = expiresAt > 0 ? new Date(expiresAt * 1000).toLocaleTimeString() : "soon";
-      if (pairingStatusEl) {
-        pairingStatusEl.innerHTML = code
-          ? `Pairing code: <code>${escapeHtml(code)}</code> expires ${escapeHtml(expiresText)}`
-          : "Pairing code created.";
+  root.querySelectorAll("[data-spud-link-start-pairing]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const role = String(button.dataset.spudLinkStartPairing || "little_spud").trim() === "spudlet" ? "spudlet" : "little_spud";
+      const pairingStatusEl = document.getElementById("settings-spud-link-pairing-status");
+      let pairingHomeUrl = "";
+      let pairingPublicUrl = "";
+      if (role === "little_spud") {
+        try {
+          pairingHomeUrl = validateSpudLinkPairUrl(
+            document.getElementById("pair_spud_link_home_url")?.value,
+            "Home / LAN URL",
+            { required: true }
+          );
+          pairingPublicUrl = validateSpudLinkPairUrl(
+            document.getElementById("pair_spud_link_public_url")?.value,
+            "Away / Tater Tunnel URL"
+          );
+        } catch (error) {
+          const message = String(error?.message || "Enter valid connection addresses before creating the QR code.");
+          if (pairingStatusEl) pairingStatusEl.textContent = message;
+          showToast(message, "error", 4200);
+          document.getElementById("pair_spud_link_home_url")?.focus();
+          return;
+        }
       }
-      const syncCard = document.getElementById("settings-spud-link-sync-card");
-      const qrWrap = document.getElementById("settings-spud-link-qr-wrap");
-      const qrImg = document.getElementById("settings-spud-link-qr-img");
-      const manualCodeEl = document.getElementById("settings-spud-link-manual-code");
-      const qrPayloadEl = document.getElementById("settings-spud-link-qr-payload");
-      if (qrImg) qrImg.src = pairingQrSvg;
-      if (qrWrap) qrWrap.style.display = pairingQrSvg ? "" : "none";
-      if (manualCodeEl) manualCodeEl.value = code;
-      if (qrPayloadEl) qrPayloadEl.value = pairingUri || pairingPayloadText;
-      if (syncCard) syncCard.style.display = code || pairingPayloadText ? "" : "none";
-      showToast("Spud Link pairing code created.");
-    } catch (error) {
-      const message = `Pairing failed: ${error.message}`;
-      if (pairingStatusEl) pairingStatusEl.textContent = message;
-      showToast(message, "error", 4200);
-    }
+      const modal = openSpudLinkPairingModal(role);
+      const startedAt = Date.now() / 1000;
+      try {
+        const modeEl = document.getElementById("set_spud_link_mode");
+        const pairingEnabledEl = document.getElementById("set_spud_link_pairing_enabled");
+        const allowRoleEl = document.getElementById(
+          role === "spudlet" ? "set_spud_link_allow_spudlets" : "set_spud_link_allow_little_spuds"
+        );
+        const currentMode = String(modeEl?.value || spudLinkMode || "disabled").trim().toLowerCase();
+        const readyMode = currentMode === "disabled" ? "hub" : currentMode;
+        if (modeEl) modeEl.value = readyMode;
+        if (pairingEnabledEl) pairingEnabledEl.checked = true;
+        if (allowRoleEl) allowRoleEl.checked = true;
+        await api("/api/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            spud_link_mode: readyMode,
+            spud_link_node_name: String(document.getElementById("set_spud_link_node_name")?.value || spudLink.node_name || "Tater").trim(),
+            spud_link_pairing_enabled: true,
+            ...(role === "spudlet" ? { spud_link_allow_spudlets: true } : { spud_link_allow_little_spuds: true }),
+          }),
+        });
+        const result = await api("/api/spudlink/pairing-code", {
+          method: "POST",
+          body: JSON.stringify({
+            ...(role === "little_spud" ? { home_url: pairingHomeUrl, public_url: pairingPublicUrl } : {}),
+            role,
+          }),
+        });
+        if (role === "little_spud" && !String(result?.pairing_qr_svg || "").trim()) {
+          throw new Error("QR generation is unavailable on this Tater install.");
+        }
+        showSpudLinkPairingInvite(role, result);
+        startSpudLinkPairingSuccessPoll(role, startedAt);
+        if (pairingStatusEl) pairingStatusEl.textContent = role === "spudlet" ? "A Spudlet invite is waiting for the other Tater." : "A Little Spud QR invite is waiting to be scanned.";
+      } catch (error) {
+        const message = `Pairing failed: ${error.message}`;
+        failSpudLinkPairingModal(message);
+        if (pairingStatusEl) pairingStatusEl.textContent = message;
+        showToast(message, "error", 4200);
+        modal?.querySelector("#spud-link-pair-modal-close")?.focus({ preventScroll: true });
+      }
+    });
   });
 
   document.getElementById("settings-spud-link-connect")?.addEventListener("click", async () => {
@@ -32446,7 +32989,7 @@ async function loadSettingsView() {
     const pairingCode = String(document.getElementById("set_spud_link_pairing_code")?.value || "").trim();
     const role = "spudlet";
     const nodeName = String(document.getElementById("set_spud_link_node_name")?.value || "").trim();
-    const publicUrl = String(document.getElementById("set_spud_link_public_url")?.value || "").trim();
+    const publicUrl = String(settings.spud_link_public_url || spudLink.public_url || "").trim();
     if (!hubUrl || !pairingCode) {
       const message = "Server URL and pairing code are required.";
       if (connectStatusEl) connectStatusEl.textContent = message;
@@ -32484,6 +33027,7 @@ async function loadSettingsView() {
     "settings-save-general",
     "settings-save-esphome",
     "settings-save-spudhub",
+    "settings-save-spudhub-settings",
     "settings-save-misc",
     "settings-save-advanced",
   ].forEach((buttonId) => {

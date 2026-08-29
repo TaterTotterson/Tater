@@ -2404,16 +2404,24 @@ def _kokoro_provider() -> str:
     return "cuda" if _effective_speech_acceleration() == "cuda" and _onnx_cuda_available() else DEFAULT_KOKORO_PROVIDER
 
 
+def _voice_setting_or_environment(name: str) -> Any:
+    """Use persisted settings first, then allow appliance-only env tuning."""
+    settings = _voice_settings()
+    if name in settings:
+        return settings.get(name)
+    return os.getenv(name)
+
+
 def _get_bool_setting(name: str, default: bool) -> bool:
-    return _as_bool(_voice_settings().get(name), default)
+    return _as_bool(_voice_setting_or_environment(name), default)
 
 
 def _get_int_setting(name: str, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
-    return _as_int(_voice_settings().get(name), default, minimum=minimum, maximum=maximum)
+    return _as_int(_voice_setting_or_environment(name), default, minimum=minimum, maximum=maximum)
 
 
 def _get_float_setting(name: str, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
-    return _as_float(_voice_settings().get(name), default, minimum=minimum, maximum=maximum)
+    return _as_float(_voice_setting_or_environment(name), default, minimum=minimum, maximum=maximum)
 
 
 def _normalize_stt_backend(value: Any) -> str:

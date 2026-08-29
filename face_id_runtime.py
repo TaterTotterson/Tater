@@ -186,8 +186,7 @@ def _public_state(redis_client: Any = None) -> str:
 
 
 def status(redis_client: Any = None) -> Dict[str, Any]:
-    enabled = is_enabled(redis_client)
-    if enabled and spud_link_should_use_hub("face_id", redis_conn=redis_client):
+    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
         return {
             "enabled": True,
             "installed": True,
@@ -215,6 +214,7 @@ def status(redis_client: Any = None) -> Dict[str, Any]:
             "local_only": False,
             "routed_via": "spud_link",
         }
+    enabled = is_enabled(redis_client)
     with _condition:
         loaded = _model_loaded
         error = _error
@@ -526,11 +526,11 @@ def _load_thread_main(generation: int, redis_client: Any) -> None:
 
 def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
     global _generation, _load_thread, _state
-    if not is_enabled(redis_client):
-        return status(redis_client)
     if spud_link_should_use_hub("face_id", redis_conn=redis_client):
         if _model_loaded or (_load_thread is not None and _load_thread.is_alive()):
             unload_model()
+        return status(redis_client)
+    if not is_enabled(redis_client):
         return status(redis_client)
     with _condition:
         if _model_loaded:
@@ -552,6 +552,9 @@ def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
 
 
 def load_model(redis_client: Any = None, *, timeout: float = 2700.0) -> bool:
+    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
+        start_model_load(redis_client)
+        return True
     if not is_enabled(redis_client):
         raise RuntimeError("Face ID is disabled in Settings > Models.")
     start_model_load(redis_client)

@@ -289,8 +289,34 @@ def resolve_person(
 ) -> Dict[str, Any]:
     store = load_store(redis_client)
     candidates = alias_candidates_from_origin(platform, origin)
+    people = list(store.get("people") or [])
+
+    # Runtime identity providers stamp these fields only after authenticating a
+    # person. Resolve them against the People store before trying portal aliases
+    # so an authenticated identity is not discarded merely because it has no
+    # speaker or platform alias yet.
+    source = origin if isinstance(origin, dict) else {}
+    people_by_id = {
+        _text(person.get("id")): person
+        for person in people
+        if _text(person.get("id"))
+    }
+    for identity_field in ("person_id", "master_user_id"):
+        trusted_person_id = _text(source.get(identity_field))
+        person = people_by_id.get(trusted_person_id)
+        if person:
+            return {
+                "matched": True,
+                "match_type": identity_field,
+                "master_user_id": _text(person.get("id")),
+                "person_id": _text(person.get("id")),
+                "display_name": _text(person.get("display_name")),
+                "instructions": _text(person.get("instructions"))[:PERSON_INSTRUCTIONS_MAX_CHARS],
+                "candidate_aliases": candidates,
+            }
+
     alias_index: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
-    for person in list(store.get("people") or []):
+    for person in people:
         for alias in list(person.get("aliases") or []):
             alias_index[_alias_key(alias.get("platform"), alias.get("external_id"))] = (person, alias)
 

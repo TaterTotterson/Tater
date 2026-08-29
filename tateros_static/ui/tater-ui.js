@@ -8480,7 +8480,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			return [
 				`${V(E.value.loaded_count ?? j.value.length)} loaded`,
 				V(E.value.local_llm_loaded_count) ? `${V(E.value.local_llm_loaded_count)} LLM` : "",
-				V(E.value.managed_loaded_count) ? `${V(E.value.managed_loaded_count)} managed voice` : "",
+				V(E.value.managed_loaded_count) ? `${V(E.value.managed_loaded_count)} managed` : "",
 				V(e.estimated_total_bytes) ? `est ${ce(e.estimated_total_bytes)}` : "",
 				V(e.estimated_vram_bytes) ? `VRAM est ${ce(e.estimated_vram_bytes)}` : "",
 				V(e.estimated_ram_bytes) ? `RAM est ${ce(e.estimated_ram_bytes)}` : "",
@@ -8576,11 +8576,12 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			})}` : "";
 		}
 		function fe(e) {
+			let t = e.remote ? "" : V(e.estimated_bytes) ? `${B(e.memory_kind || "ram").toUpperCase()} est ${ce(e.estimated_bytes)}` : "Estimate unavailable";
 			return [
 				B(e.kind_label || e.category),
 				B(e.provider_label || e.provider || "Local"),
 				B(e.device) ? `Device ${B(e.device)}` : "",
-				V(e.estimated_bytes) ? `${B(e.memory_kind || "ram").toUpperCase()} est ${ce(e.estimated_bytes)}` : "Estimate unavailable",
+				t,
 				de(e.loaded_ts)
 			].filter(Boolean).join(" • ");
 		}
@@ -8757,7 +8758,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							type: "button",
 							disabled: !!u.value,
 							onClick: (t) => Se(e)
-						}, U(u.value === B(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, r_)) : (J(), Y("span", i_, U(e.managed ? "Managed" : "Loaded"), 1))]))), 128))])) : (J(), Y("div", a_, "No runtime models are loaded right now."))])
+						}, U(u.value === B(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, r_)) : (J(), Y("span", i_, U(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))]))), 128))])) : (J(), Y("div", a_, "No runtime models are loaded right now."))])
 					]),
 					X("article", o_, [X("header", null, [X("div", null, [
 						n[8] ||= X("span", { class: "tv-eyebrow" }, "Orchestration", -1),
