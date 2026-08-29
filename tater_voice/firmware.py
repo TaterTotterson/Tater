@@ -2552,23 +2552,53 @@ def _browser_flash_artifact_id(context: Dict[str, Any]) -> str:
     return base or f"artifact_{uuid.uuid4().hex[:12]}"
 
 
-def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -> Dict[str, Any]:
-    artifact_id = _browser_flash_artifact_id(context)
-    artifact_dir = FIRMWARE_WEB_FLASH_ROOT / artifact_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+def _usb_flash_kind(value: Any) -> str:
+    flash_kind = _lower(value) or "factory"
+    if flash_kind not in {"factory", "ota"}:
+        raise RuntimeError(f"Unsupported USB flash type: {_text(value) or 'unknown'}.")
+    return flash_kind
 
+
+def _create_browser_flash_artifact(
+    context: Dict[str, Any], binary_path: Path, *, flash_kind: str = "factory"
+) -> Dict[str, Any]:
+    from . import esp_usb
+
+    kind = _usb_flash_kind(flash_kind)
     prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
     artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
     factory_artifact = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
+    selected_artifact = artifacts.get(kind) if isinstance(artifacts.get(kind), dict) else {}
     flash_transport = _text(factory_artifact.get("flash_transport")) or "esp_serial"
+    if kind == "ota" and flash_transport != "esp_serial":
+        raise RuntimeError("USB keep-settings updates are only available for ESP serial firmware.")
+    artifact_id = _browser_flash_artifact_id(context)
+    artifact_dir = FIRMWARE_WEB_FLASH_ROOT / artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     target_binary_name = Path(binary_path).name if flash_transport != "esp_serial" else "firmware.bin"
     target_binary_path = artifact_dir / target_binary_name
     shutil.copy2(binary_path, target_binary_path)
+    target_binary_size = int(target_binary_path.stat().st_size)
+    if kind == "ota" and target_binary_size > esp_usb.APP_PARTITION_SIZE:
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"The OTA image is too large for the ESP app partition: "
+            f"{target_binary_size} > {esp_usb.APP_PARTITION_SIZE}."
+        )
 
     template_ctx = context.get("template_ctx") if isinstance(context.get("template_ctx"), dict) else {}
     template_doc = template_ctx.get("template_doc") if isinstance(template_ctx.get("template_doc"), dict) else {}
     esp32_block = template_doc.get("esp32") if isinstance(template_doc.get("esp32"), dict) else {}
     native_firmware = bool(prebuilt.get("native")) or bool(context.get("native_firmware"))
+    flash_size = (
+        _text(selected_artifact.get("flash_size"))
+        or _text(factory_artifact.get("flash_size"))
+        or _text(esp32_block.get("flash_size"))
+        or ("16MB" if native_firmware else "4MB")
+    )
+    flash_addresses = [0]
+    if kind == "ota":
+        flash_addresses = [int(offset, 16) for offset in esp_usb.app_partition_offsets(flash_size)]
     base_url = f"/api/settings/voice/firmware-web/{artifact_id}"
     return {
         "artifact_id": artifact_id,
@@ -2578,13 +2608,16 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
         "template_key": _text(context.get("template_key")),
         "firmware_version": _text(context.get("firmware_version")),
         "source_binary": str(binary_path),
-        "binary_size": int(target_binary_path.stat().st_size),
-        "erase_all": True,
-        "flash_size": _text(factory_artifact.get("flash_size")) or _text(esp32_block.get("flash_size")) or ("16MB" if native_firmware else "4MB"),
-        "flash_mode": _text(factory_artifact.get("flash_mode")) or "dio",
-        "flash_freq": _text(factory_artifact.get("flash_freq")) or "40m",
+        "binary_size": target_binary_size,
+        "flash_kind": kind,
+        "preserves_settings": kind == "ota",
+        "erase_all": kind == "factory",
+        "flash_addresses": flash_addresses,
+        "flash_size": flash_size,
+        "flash_mode": _text(selected_artifact.get("flash_mode")) or _text(factory_artifact.get("flash_mode")) or "dio",
+        "flash_freq": _text(selected_artifact.get("flash_freq")) or _text(factory_artifact.get("flash_freq")) or "40m",
         "native_firmware": native_firmware,
-        "native_setup_ap": bool(native_firmware),
+        "native_setup_ap": bool(native_firmware) and kind == "factory",
         "flash_transport": flash_transport,
         "browser_flash_supported": _as_bool(factory_artifact.get("browser_flash_supported"), flash_transport == "esp_serial"),
         "requires_debug_board": _as_bool(factory_artifact.get("requires_debug_board"), False),
@@ -2592,9 +2625,12 @@ def _create_browser_flash_artifact(context: Dict[str, Any], binary_path: Path) -
     }
 
 
-def _prepare_prebuilt_browser_flash_artifact(context: Dict[str, Any]) -> Dict[str, Any]:
-    binary = _download_prebuilt_firmware_binary(context, "factory", force_refresh=True)
-    artifact = _create_browser_flash_artifact(context, binary["path"])
+def _prepare_prebuilt_browser_flash_artifact(
+    context: Dict[str, Any], *, flash_kind: str = "factory"
+) -> Dict[str, Any]:
+    kind = _usb_flash_kind(flash_kind)
+    binary = _download_prebuilt_firmware_binary(context, kind, force_refresh=True)
+    artifact = _create_browser_flash_artifact(context, binary["path"], flash_kind=kind)
     template_label = _text(context.get("template_label")) or "firmware"
     display_name = _text(context.get("display_name")) or _text(context.get("selector")) or "device"
     cached_text = "cached" if bool(binary.get("cached")) else "downloaded"
@@ -2603,22 +2639,22 @@ def _prepare_prebuilt_browser_flash_artifact(context: Dict[str, Any]) -> Dict[st
         "selector": context.get("selector"),
         "template_key": context.get("template_key"),
         "firmware_version": _text(context.get("firmware_version")),
-        "message": f"Prepared prebuilt browser USB firmware for {display_name}.",
+        "message": f"Prepared prebuilt browser USB {kind} firmware for {display_name}.",
         "entries": [
             {
                 "seq": 1,
                 "time": _entry_time_text(),
                 "level": "info",
-                "message": f"Using prebuilt {template_label} factory firmware {context.get('firmware_version') or ''}.",
-                "display": f"Using prebuilt {template_label} factory firmware {context.get('firmware_version') or ''}.",
+                "message": f"Using prebuilt {template_label} {kind} firmware {context.get('firmware_version') or ''}.",
+                "display": f"Using prebuilt {template_label} {kind} firmware {context.get('firmware_version') or ''}.",
                 "source": "session",
             },
             {
                 "seq": 2,
                 "time": _entry_time_text(),
                 "level": "info",
-                "message": f"Factory image {cached_text}: {Path(binary['path']).name}.",
-                "display": f"Factory image {cached_text}: {Path(binary['path']).name}.",
+                "message": f"{kind.title()} image {cached_text}: {Path(binary['path']).name}.",
+                "display": f"{kind.title()} image {cached_text}: {Path(binary['path']).name}.",
                 "source": "session",
             },
         ],
@@ -3203,6 +3239,8 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "binary_name": _text(session.get("binary_name")),
         "binary_size": int(session.get("binary_size") or 0),
         "source_binary": _text(session.get("source_binary")),
+        "flash_kind": _text(session.get("flash_kind")),
+        "preserves_settings": _as_bool(session.get("preserves_settings"), False),
         "erase_all": _as_bool(session.get("erase_all"), False),
         "flash_size": _text(session.get("flash_size")),
         "flash_mode": _text(session.get("flash_mode")),
@@ -3718,12 +3756,16 @@ def _esp_usb_session_worker(session_id: str) -> None:
         command = [str(item) for item in list(session.get("command") or [])]
         display_name = _text(session.get("display_name")) or "ESP satellite"
         serial_port = _text(session.get("serial_port"))
+        preserves_settings = _as_bool(session.get("preserves_settings"), False)
         _set_session_phase_locked(session, "usb_flashing")
         _append_session_entry_locked(
             session,
             level="warn",
             message=(
-                f"Local USB will erase {display_name} on {serial_port} and write the verified Tater factory image. "
+                f"Local USB will update {display_name} on {serial_port} without erasing Wi-Fi, pairing, or settings. "
+                "Keep the USB cable connected until Tater reports completion."
+                if preserves_settings
+                else f"Local USB will erase {display_name} on {serial_port} and write the verified Tater factory image. "
                 "Keep the USB cable connected until Tater reports completion."
             ),
             source="session",
@@ -4197,9 +4239,12 @@ def _start_local_usb_log_session(context: Dict[str, Any], serial_port: str) -> D
         return _session_payload_locked(live_session, after_seq=0)
 
 
-def _start_esp_usb_flash_session(context: Dict[str, Any], serial_port: str) -> Dict[str, Any]:
+def _start_esp_usb_flash_session(
+    context: Dict[str, Any], serial_port: str, *, flash_kind: str = "factory"
+) -> Dict[str, Any]:
     from . import esp_usb
 
+    kind = _usb_flash_kind(flash_kind)
     _prune_firmware_sessions()
     selector = _text(context.get("selector"))
     if _lower(context.get("template_key")) == "thirdreality_s420":
@@ -4216,19 +4261,24 @@ def _start_esp_usb_flash_session(context: Dict[str, Any], serial_port: str) -> D
     prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
     artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
     factory = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else {}
+    selected_artifact = artifacts.get(kind) if isinstance(artifacts.get(kind), dict) else {}
     flash_transport = _lower(factory.get("flash_transport")) or "esp_serial"
     if flash_transport != "esp_serial":
         raise RuntimeError(f"{_text(context.get('template_label')) or 'This firmware'} is not an ESP serial image.")
 
-    factory_binary = _download_prebuilt_firmware_binary(context, "factory")
-    image_path = Path(factory_binary["path"]).resolve()
+    selected_binary = _download_prebuilt_firmware_binary(context, kind)
+    image_path = Path(selected_binary["path"]).resolve()
+    flash_size = _text(selected_artifact.get("flash_size")) or _text(factory.get("flash_size")) or "16MB"
+    flash_mode = _text(selected_artifact.get("flash_mode")) or _text(factory.get("flash_mode")) or "dio"
+    flash_freq = _text(selected_artifact.get("flash_freq")) or _text(factory.get("flash_freq")) or "40m"
     command = esp_usb.flash_command(
         _text(port_info.get("path")),
         image_path,
-        flash_size=_text(factory.get("flash_size")) or "16MB",
-        flash_mode=_text(factory.get("flash_mode")) or "dio",
-        flash_freq=_text(factory.get("flash_freq")) or "40m",
+        flash_size=flash_size,
+        flash_mode=flash_mode,
+        flash_freq=flash_freq,
         python_executable=_text(tool_info.get("python")),
+        flash_kind=kind,
     )
     session_id = f"fw_{uuid.uuid4().hex}"
     target_label = _text(context.get("display_name")) or _text(context.get("template_label")) or "ESP satellite"
@@ -4239,17 +4289,19 @@ def _start_esp_usb_flash_session(context: Dict[str, Any], serial_port: str) -> D
         "firmware_version": _text(context.get("firmware_version")),
         "display_name": target_label,
         "host": "usb",
-        "operation": "esp_usb_factory_flash",
+        "operation": f"esp_usb_{kind}_flash",
+        "flash_kind": kind,
+        "preserves_settings": kind == "ota",
         "context": context,
         "command": command,
         "serial_port": _text(port_info.get("path")),
         "source_binary": str(image_path),
         "binary_name": image_path.name,
         "binary_size": int(image_path.stat().st_size),
-        "flash_size": _text(factory.get("flash_size")) or "16MB",
-        "flash_mode": _text(factory.get("flash_mode")) or "dio",
-        "flash_freq": _text(factory.get("flash_freq")) or "40m",
-        "erase_all": True,
+        "flash_size": flash_size,
+        "flash_mode": flash_mode,
+        "flash_freq": flash_freq,
+        "erase_all": kind == "factory",
         "created_ts": time.time(),
         "updated_ts": time.time(),
         "cursor": 0,
@@ -4270,12 +4322,12 @@ def _start_esp_usb_flash_session(context: Dict[str, Any], serial_port: str) -> D
     }
     with _FIRMWARE_SESSION_LOCK:
         _FIRMWARE_SESSIONS[session_id] = session
-        cached_text = "cached" if bool(factory_binary.get("cached")) else "downloaded"
+        cached_text = "cached" if bool(selected_binary.get("cached")) else "downloaded"
         _append_session_entry_locked(
             session,
             level="info",
             message=(
-                f"Verified Tater {_text(context.get('template_label')) or 'ESP'} factory image "
+                f"Verified Tater {_text(context.get('template_label')) or 'ESP'} {kind} image "
                 f"{image_path.name} ({image_path.stat().st_size} bytes, {cached_text})."
             ),
             source="session",
@@ -4571,7 +4623,7 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
                 "Stopping the Amlogic USB flash. The S420 may need to be flashed again before it can boot."
                 if operation == "amlogic_usb_factory_flash"
                 else "Stopping the local ESP USB flash. The satellite may need to be flashed again before it can boot."
-                if operation == "esp_usb_factory_flash"
+                if operation in {"esp_usb_factory_flash", "esp_usb_ota_flash"}
                 else "Closing the Local USB log viewer."
                 if operation in {"esp_usb_serial_log", "s420_usb_serial_log"}
                 else "Firmware log viewer closed."
@@ -4582,7 +4634,7 @@ def _stop_flash_session(session_id: str) -> Dict[str, Any]:
     if operation == "amlogic_usb_factory_flash" and process is not None:
         with contextlib.suppress(Exception):
             os.killpg(int(process.pid), signal.SIGTERM)
-    elif operation == "esp_usb_factory_flash" and process is not None:
+    elif operation in {"esp_usb_factory_flash", "esp_usb_ota_flash"} and process is not None:
         with contextlib.suppress(Exception):
             process.terminate()
     elif operation in {"esp_usb_serial_log", "s420_usb_serial_log"} and serial_handle is not None:
@@ -4781,7 +4833,14 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         return result
 
     if action_name == "voice_firmware_esp_usb_flash_start":
-        result = _start_esp_usb_flash_session(context, _text(body.get("serial_port") or body.get("port")))
+        flash_kind = _usb_flash_kind(body.get("flash_kind"))
+        if not _prebuilt_artifact_available(context, flash_kind):
+            raise RuntimeError(f"No prebuilt USB {flash_kind} image is available for this firmware target.")
+        result = _start_esp_usb_flash_session(
+            context,
+            _text(body.get("serial_port") or body.get("port")),
+            flash_kind=flash_kind,
+        )
         result["action"] = action_name
         return result
 
@@ -4791,9 +4850,10 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         return result
 
     if action_name == "voice_firmware_browser_build":
-        if not _prebuilt_artifact_available(context, "factory"):
-            raise RuntimeError("No prebuilt USB image is available for this firmware target.")
-        result = _prepare_prebuilt_browser_flash_artifact(context)
+        flash_kind = _usb_flash_kind(body.get("flash_kind"))
+        if not _prebuilt_artifact_available(context, flash_kind):
+            raise RuntimeError(f"No prebuilt USB {flash_kind} image is available for this firmware target.")
+        result = _prepare_prebuilt_browser_flash_artifact(context, flash_kind=flash_kind)
         result["action"] = action_name
         return result
 

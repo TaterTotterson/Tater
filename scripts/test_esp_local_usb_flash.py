@@ -53,6 +53,66 @@ class EspLocalUsbFlashTests(unittest.TestCase):
         self.assertEqual(command[0], str(private_python.absolute()))
         self.assertNotEqual(command[0], str(system_python.resolve()))
 
+    def test_ota_flash_command_updates_all_16mb_app_slots_without_erasing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            image = root / "satellite1-ota.bin"
+            python = root / "python"
+            image.write_bytes(b"ota")
+            python.write_bytes(b"runtime")
+
+            command = esp_usb.flash_command(
+                "/dev/cu.usbmodem5101",
+                image,
+                flash_size="16MB",
+                python_executable=str(python),
+                flash_kind="ota",
+            )
+
+        self.assertNotIn("--erase-all", command)
+        self.assertNotIn("0x0", command)
+        for offset in ("0x20000", "0x320000", "0x620000"):
+            self.assertIn(offset, command)
+        self.assertEqual(command.count(str(image.resolve())), 3)
+
+    def test_ota_flash_command_uses_two_app_slots_for_8mb_satellites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            image = root / "respeaker-ota.bin"
+            python = root / "python"
+            image.write_bytes(b"ota")
+            python.write_bytes(b"runtime")
+
+            command = esp_usb.flash_command(
+                "/dev/cu.usbmodem6101",
+                image,
+                flash_size="8MB",
+                python_executable=str(python),
+                flash_kind="ota",
+            )
+
+        self.assertIn("0x20000", command)
+        self.assertIn("0x320000", command)
+        self.assertNotIn("0x620000", command)
+        self.assertEqual(command.count(str(image.resolve())), 2)
+
+    def test_ota_flash_command_rejects_unknown_partition_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            image = root / "unknown-ota.bin"
+            python = root / "python"
+            image.write_bytes(b"ota")
+            python.write_bytes(b"runtime")
+
+            with self.assertRaisesRegex(ValueError, "do not support ESP flash size"):
+                esp_usb.flash_command(
+                    "/dev/cu.usbmodem7101",
+                    image,
+                    flash_size="4MB",
+                    python_executable=str(python),
+                    flash_kind="ota",
+                )
+
     def test_serial_ports_are_filtered_and_labeled(self) -> None:
         ports = [
             mock.Mock(

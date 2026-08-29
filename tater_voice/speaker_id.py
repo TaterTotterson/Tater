@@ -990,9 +990,6 @@ def match_speaker_for_audio(
     audio_format: Dict[str, Any],
     speech_s: float = 0.0,
 ) -> Dict[str, Any]:
-    if not speaker_id_enabled():
-        _debug("match skipped reason=disabled")
-        return {"matched": False, "reason": "disabled"}
     if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
         try:
             remote = spud_link_request_json(
@@ -1012,6 +1009,9 @@ def match_speaker_for_audio(
         except Exception:
             if not spud_link_allow_local_fallback("speaker_id", redis_conn=redis_client):
                 raise
+    if not speaker_id_enabled():
+        _debug("match skipped reason=disabled")
+        return {"matched": False, "reason": "disabled"}
     effective_speech_s = max(
         0.0,
         float(speech_s or 0.0),
