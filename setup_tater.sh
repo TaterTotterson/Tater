@@ -1360,6 +1360,8 @@ write_profile_env() {
   torch_mps_fallback=""
   nvidia_site_packages=""
   strix_halo_full_offload="0"
+  rocm_gfx_target=""
+  llama_cpp_gpu_backend=""
   case "${profile}" in
     edge)
       speech_acceleration="cpu"
@@ -1376,6 +1378,12 @@ write_profile_env() {
       ;;
     rocm)
       speech_acceleration="rocm"
+      if is_amd_ryzen_ai_host; then
+        rocm_gfx_target="$(amd_ryzen_ai_gfx_target)"
+      else
+        rocm_gfx_target="${TATER_ROCM_GFX_TARGET:-}"
+      fi
+      llama_cpp_gpu_backend="${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED:-auto}"
       if is_strix_halo_host; then
         strix_halo_full_offload="1"
       fi
@@ -1411,6 +1419,10 @@ write_profile_env() {
       if [ "${nvidia_site_packages}" ]; then
         say "export LD_LIBRARY_PATH=\"${nvidia_site_packages}/nvidia/cublas/lib:${nvidia_site_packages}/nvidia/cuda_runtime/lib:${nvidia_site_packages}/nvidia/cuda_nvrtc/lib:${nvidia_site_packages}/nvidia/cudnn/lib:${nvidia_site_packages}/nvidia/curand/lib:${nvidia_site_packages}/nvidia/cusolver/lib:${nvidia_site_packages}/nvidia/cusparse/lib:${nvidia_site_packages}/nvidia/nvjitlink/lib:\${LD_LIBRARY_PATH:-}\""
       fi
+    fi
+    if [ "${profile}" = "rocm" ]; then
+      say "export TATER_ROCM_GFX_TARGET=\"\${TATER_ROCM_GFX_TARGET:-${rocm_gfx_target}}\""
+      say "export TATER_LLAMA_CPP_GPU_BACKEND=\"\${TATER_LLAMA_CPP_GPU_BACKEND:-${llama_cpp_gpu_backend}}\""
     fi
     if [ "${strix_halo_full_offload}" = "1" ]; then
       say "export TATER_LLAMA_CPP_N_GPU_LAYERS=\"\${TATER_LLAMA_CPP_N_GPU_LAYERS:-all}\""

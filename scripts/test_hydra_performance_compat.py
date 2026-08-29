@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import threading
 import time
@@ -30,6 +31,81 @@ def _local_result(text: str = "ok"):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
+    def test_native_backend_is_detected_from_bundled_vulkan_library(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server_bin = os.path.join(temp_dir, "llama-server")
+            with open(server_bin, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(server_bin, 0o755)
+            open(os.path.join(temp_dir, "libggml-vulkan.so.0"), "a", encoding="utf-8").close()
+            backend = helpers._llama_cpp_native_binary_backend(server_bin, "")
+
+        self.assertEqual(backend, "vulkan")
+
+    def test_gfx1150_gemma4_vulkan_uses_safe_startup_and_cpu_experts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(helpers, "_llama_cpp_n_ctx", return_value=4096),
+                mock.patch.object(helpers, "_llama_cpp_n_batch", return_value=512),
+                mock.patch.object(helpers, "_llama_cpp_n_ubatch", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_cache_reuse_tokens", return_value=256),
+                mock.patch.object(helpers, "_llama_cpp_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_draft_n_gpu_layers", return_value=-1),
+                mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=1),
+                mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
+                mock.patch.object(helpers, "_llama_cpp_mtp_enabled", return_value=False),
+                mock.patch.object(helpers, "_llama_cpp_mtp_spec_type", return_value="draft-mtp"),
+                mock.patch.object(helpers, "_llama_cpp_mtp_draft_model", return_value=""),
+                mock.patch.object(helpers, "_llama_cpp_flash_attn_enabled", return_value=False),
+                mock.patch.object(helpers, "_llama_cpp_offload_kqv_enabled", return_value=True),
+                mock.patch.object(helpers, "_llama_cpp_chat_template_override_text", return_value=""),
+                mock.patch.dict(
+                    helpers.os.environ,
+                    {
+                        "TATER_SETUP_PROFILE": "rocm",
+                        "TATER_ROCM_GFX_TARGET": "gfx1150",
+                        "TATER_LLAMA_CPP_GPU_BACKEND": "vulkan",
+                        "TATER_LLAMA_CPP_GEMMA4_VULKAN_WORKAROUND": "",
+                        "TATER_LLAMA_CPP_GEMMA4_NO_WARMUP": "",
+                        "TATER_LLAMA_CPP_GEMMA4_CPU_MOE": "",
+                        "TATER_LLAMA_CPP_CHAT_FORMAT": "",
+                        "TATER_LLAMA_CPP_USE_MLOCK": "0",
+                    },
+                    clear=False,
+                ),
+            ):
+                command, metadata = helpers._llama_cpp_native_server_command(
+                    server_bin="/tmp/llama-server",
+                    model_path="/tmp/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+                    mmproj_path="",
+                    temp_dir=temp_dir,
+                )
+
+        self.assertIn("--no-warmup", command)
+        self.assertEqual(command[command.index("--n-cpu-moe") + 1], "99")
+        self.assertTrue(metadata["gemma4_vulkan_workaround"])
+        self.assertTrue(metadata["warmup_disabled"])
+        self.assertEqual(metadata["cpu_moe_layers"], 99)
+
+    def test_strix_halo_gemma4_keeps_gpu_experts(self):
+        with mock.patch.dict(
+            helpers.os.environ,
+            {
+                "TATER_SETUP_PROFILE": "rocm",
+                "TATER_ROCM_GFX_TARGET": "gfx1151",
+                "TATER_LLAMA_CPP_GPU_BACKEND": "vulkan",
+                "TATER_LLAMA_CPP_GEMMA4_CPU_MOE": "",
+            },
+            clear=False,
+        ):
+            workaround = helpers._llama_cpp_gemma4_vulkan_workarounds(
+                "/tmp/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+                "/tmp/llama-server",
+            )
+
+        self.assertTrue(workaround["no_warmup"])
+        self.assertEqual(workaround["cpu_moe_layers"], 0)
+
     def test_gpu_layer_modes_keep_auto_and_all_distinct(self):
         for configured, expected, argument in (
             ("auto", -1, "auto"),

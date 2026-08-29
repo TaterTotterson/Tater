@@ -192,6 +192,28 @@ class SetupTaterVenvTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 
+    def test_rocm_profile_records_llama_backend_and_gpu_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            completed = run_setup_functions(
+                r"""
+                RUNTIME_DIR="${TEST_ROOT}/runtime"
+                PROFILE_ENV="${RUNTIME_DIR}/tater_profile.env"
+                PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
+                TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED=vulkan
+                amd_ryzen_ai_gfx_target() { printf '%s' gfx1150; }
+                is_amd_ryzen_ai_host() { return 0; }
+                is_strix_halo_host() { return 1; }
+                write_profile_env rocm
+                """,
+                environ={"TEST_ROOT": temp_dir},
+            )
+            profile_env = (runtime_dir / "tater_profile.env").read_text(encoding="utf-8")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn('TATER_ROCM_GFX_TARGET:-gfx1150', profile_env)
+        self.assertIn('TATER_LLAMA_CPP_GPU_BACKEND:-vulkan', profile_env)
+
     def test_rocm_upgrade_request_does_not_reuse_old_healthy_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             venv_dir = Path(temp_dir) / "venv"

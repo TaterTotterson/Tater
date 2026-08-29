@@ -1666,6 +1666,54 @@ def _llama_cpp_strix_halo_full_offload_default() -> bool:
     )
 
 
+@functools.lru_cache(maxsize=8)
+def _detect_amd_rocm_gfx_target(profile: str, override: str) -> str:
+    configured = str(override or "").strip().lower()
+    if configured.startswith("device-"):
+        configured = configured[len("device-") :]
+    if re.fullmatch(r"gfx[0-9a-f]+", configured):
+        return configured
+    if str(profile or "").strip().lower() != "rocm" or platform.system() != "Linux":
+        return ""
+
+    for command in (("rocm_agent_enumerator",), ("rocminfo",)):
+        if not shutil.which(command[0]):
+            continue
+        try:
+            completed = subprocess.run(
+                list(command),
+                text=True,
+                capture_output=True,
+                timeout=5.0,
+                **_macos_posix_spawn_kwargs(),
+            )
+            match = re.search(
+                r"\bgfx[0-9a-f]+\b",
+                "\n".join((completed.stdout or "", completed.stderr or "")).lower(),
+            )
+            if match and match.group(0) != "gfx000":
+                return match.group(0)
+        except Exception:
+            continue
+
+    identity_parts: List[str] = []
+    for path in (Path("/proc/cpuinfo"), Path("/sys/devices/virtual/dmi/id/product_name")):
+        try:
+            identity_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+    identity = " ".join(identity_parts)
+    if re.search(r"\bAMD\s+RYZEN\s+AI\s+MAX", identity, flags=re.IGNORECASE):
+        return "gfx1151"
+    if re.search(
+        r"AMD.*RYZEN.*AI.*(?:HX\s*(?:370|375|470|475)|\b(?:365|465)\b)",
+        identity,
+        flags=re.IGNORECASE,
+    ):
+        return "gfx1150"
+    return ""
+
+
 def _llama_cpp_gpu_layers_value(raw: Any, *, default: int = -1) -> int:
     token = str(raw or "").strip().lower()
     if token in {"", "auto"}:
@@ -3040,6 +3088,71 @@ def _llama_cpp_gpu_backend(system_info: str) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=8)
+def _llama_cpp_native_binary_backend(server_bin: str, configured_backend: str) -> str:
+    configured = str(configured_backend or "").strip().lower()
+    if configured in {"cuda", "metal", "vulkan", "rocm", "hip", "sycl", "opencl"}:
+        return "rocm" if configured == "hip" else configured
+    if not server_bin or not os.path.isfile(server_bin) or not os.access(server_bin, os.X_OK):
+        return ""
+    binary_dir = Path(server_bin).resolve().parent
+    backend_libraries = (
+        ("vulkan", ("libggml-vulkan.so*", "libggml-vulkan.dylib")),
+        ("rocm", ("libggml-hip.so*", "libggml-hip.dylib")),
+        ("cuda", ("libggml-cuda.so*", "libggml-cuda.dylib")),
+        ("metal", ("libggml-metal.so*", "libggml-metal.dylib")),
+    )
+    for backend, patterns in backend_libraries:
+        if any(any(binary_dir.glob(pattern)) for pattern in patterns):
+            return backend
+    try:
+        version = subprocess.run(
+            [server_bin, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=10.0,
+            **_macos_posix_spawn_kwargs(),
+        )
+        return _llama_cpp_gpu_backend("\n".join((version.stdout or "", version.stderr or "")))
+    except Exception:
+        return ""
+
+
+def _llama_cpp_gemma4_vulkan_workarounds(model_identity: str, server_bin: str) -> Dict[str, Any]:
+    backend = _llama_cpp_native_binary_backend(
+        str(server_bin or ""),
+        str(os.getenv("TATER_LLAMA_CPP_GPU_BACKEND") or ""),
+    )
+    normalized_model = re.sub(r"[^a-z0-9]+", " ", str(model_identity or "").lower()).strip()
+    is_gemma4 = bool(re.search(r"\bgemma\s+4\b", normalized_model))
+    enabled = _boolish(os.getenv("TATER_LLAMA_CPP_GEMMA4_VULKAN_WORKAROUND"), default=True)
+    active = bool(enabled and backend == "vulkan" and is_gemma4)
+    gfx_target = _detect_amd_rocm_gfx_target(
+        str(os.getenv("TATER_SETUP_PROFILE") or ""),
+        str(os.getenv("TATER_ROCM_GFX_TARGET") or ""),
+    )
+    is_26b_a4b = bool(
+        re.search(r"\b26b\b", normalized_model)
+        and re.search(r"\ba4b\b", normalized_model)
+    )
+    cpu_moe_layers = 0
+    if active and is_26b_a4b:
+        cpu_moe_override = os.getenv("TATER_LLAMA_CPP_GEMMA4_CPU_MOE")
+        if _boolish(cpu_moe_override, default=gfx_target == "gfx1150"):
+            cpu_moe_layers = 99
+    no_warmup = bool(
+        active
+        and _boolish(os.getenv("TATER_LLAMA_CPP_GEMMA4_NO_WARMUP"), default=True)
+    )
+    return {
+        "active": active,
+        "backend": backend,
+        "gfx_target": gfx_target,
+        "no_warmup": no_warmup,
+        "cpu_moe_layers": cpu_moe_layers,
+    }
+
+
 def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
     server_bin = _llama_cpp_native_server_bin()
     diagnostics: Dict[str, Any] = {
@@ -3099,6 +3212,8 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
             ),
             "TATER_LLAMA_CPP_SERVER_BIN": str(os.getenv("TATER_LLAMA_CPP_SERVER_BIN") or ""),
             "TATER_LLAMA_CPP_NATIVE_BIN": str(os.getenv("TATER_LLAMA_CPP_NATIVE_BIN") or ""),
+            "TATER_LLAMA_CPP_GPU_BACKEND": str(os.getenv("TATER_LLAMA_CPP_GPU_BACKEND") or ""),
+            "TATER_ROCM_GFX_TARGET": str(os.getenv("TATER_ROCM_GFX_TARGET") or ""),
             "CUDA_VISIBLE_DEVICES": str(os.getenv("CUDA_VISIBLE_DEVICES") or ""),
             "NVIDIA_VISIBLE_DEVICES": str(os.getenv("NVIDIA_VISIBLE_DEVICES") or ""),
         },
@@ -7112,6 +7227,7 @@ def _llama_cpp_native_server_command(
             str(os.getenv("TATER_LLAMA_CPP_ACTIVE_MODEL") or ""),
         )
     )
+    gemma4_vulkan = _llama_cpp_gemma4_vulkan_workarounds(model_identity, server_bin)
     mtp_single_slot_workaround = _llama_cpp_mtp_single_slot_workaround(
         model_identity,
         mtp_enabled=mtp_requested,
@@ -7170,6 +7286,10 @@ def _llama_cpp_native_server_command(
     ]
     if slot_count > 1:
         cmd.extend(["--parallel", str(int(slot_count))])
+    if gemma4_vulkan["no_warmup"]:
+        cmd.append("--no-warmup")
+    if int(gemma4_vulkan["cpu_moe_layers"] or 0) > 0:
+        cmd.extend(["--n-cpu-moe", str(int(gemma4_vulkan["cpu_moe_layers"]))])
     if n_ubatch > 0:
         cmd.extend(["--ubatch-size", str(int(n_ubatch))])
     if cache_reuse_tokens > 0:
@@ -7235,6 +7355,20 @@ def _llama_cpp_native_server_command(
         "speculative_draft_model_path": mtp_draft_model_path,
         "mtp_single_slot_workaround": bool(mtp_single_slot_workaround),
         "mtp_stall_timeout_seconds": float(mtp_stall_timeout_seconds),
+        "native_gpu_backend": str(gemma4_vulkan["backend"] or ""),
+        "amd_gfx_target": str(gemma4_vulkan["gfx_target"] or ""),
+        "gemma4_vulkan_workaround": bool(gemma4_vulkan["active"]),
+        "warmup_disabled": bool(gemma4_vulkan["no_warmup"]),
+        "cpu_moe_layers": int(gemma4_vulkan["cpu_moe_layers"] or 0),
+        "gemma4_vulkan_warning": (
+            "AMD gfx1150 Vulkan safeguard: llama.cpp warm-up is disabled and Gemma 4 MoE experts run on CPU to avoid device loss and incorrect output."
+            if int(gemma4_vulkan["cpu_moe_layers"] or 0) > 0
+            else (
+                "Vulkan Gemma 4 safeguard: llama.cpp warm-up is disabled to avoid a backend startup failure."
+                if gemma4_vulkan["no_warmup"]
+                else ""
+            )
+        ),
         "mtp_warning": (
             "Apple Metal hybrid-MTP safeguard: one llama.cpp slot with a "
             f"{int(mtp_stall_timeout_seconds)}-second inactivity watchdog."
