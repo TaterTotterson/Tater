@@ -723,6 +723,9 @@ def classify_emotion_for_audio(
     audio_format: Dict[str, Any],
     speech_s: float = 0.0,
 ) -> Dict[str, Any]:
+    if not emotion_id_enabled():
+        _debug("classification skipped reason=disabled")
+        return {"detected": False, "reason": "disabled"}
     if spud_link_should_use_hub("emotion_id", redis_conn=redis_client):
         try:
             remote = spud_link_request_json(
@@ -742,9 +745,6 @@ def classify_emotion_for_audio(
         except Exception:
             if not spud_link_allow_local_fallback("emotion_id", redis_conn=redis_client):
                 raise
-    if not emotion_id_enabled():
-        _debug("classification skipped reason=disabled")
-        return {"detected": False, "reason": "disabled"}
     if float(speech_s or 0.0) < _min_speech_seconds():
         _debug(f"classification skipped reason=too_short speech_s={float(speech_s or 0.0):.2f}")
         return {"detected": False, "reason": "too_short"}

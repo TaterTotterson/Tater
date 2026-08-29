@@ -243,12 +243,7 @@ from speech_tts import (
     synthesize_preview_wav,
 )
 from spud_link_models import MODEL_KINDS as SPUD_LINK_MODEL_KINDS
-from spud_link_models import (
-    build_remote_runtime_model_rows,
-    load_model_routing_settings,
-    normalize_route,
-    should_use_hub as spud_link_should_use_hub,
-)
+from spud_link_models import load_model_routing_settings, normalize_route, should_use_hub as spud_link_should_use_hub
 from integration_registry import (
     assign_integration_device_room,
     bump_integration_device_registry_generation,
@@ -5890,16 +5885,6 @@ def _spud_link_qr_svg_data_url(value: str) -> str:
         return ""
 
 
-def _spud_link_pairing_code(role: Any) -> str:
-    """Create a readable code for Spudlets and an opaque code for QR clients."""
-    normalized_role = _normalize_spud_link_mode(role, default=SPUD_LINK_MODE_LITTLE_SPUD)
-    if normalized_role == SPUD_LINK_MODE_SPUDLET:
-        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        value = "".join(secrets.choice(alphabet) for _ in range(12))
-        return f"SPUD-{value[:6]}-{value[6:]}"
-    return f"spud-{secrets.token_urlsafe(18)}"
-
-
 def _spud_link_token_digest(token: Any) -> str:
     text = str(token or "").strip()
     if not text:
@@ -5961,10 +5946,6 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
     if include_secret:
         settings["node_token"] = token_value
         settings["pairing_code_hash"] = str(raw.get("pairing_code_hash") or "").strip()
-        settings["pairing_role"] = _normalize_spud_link_mode(
-            raw.get("pairing_role"),
-            default=SPUD_LINK_MODE_DISABLED,
-        )
     return settings
 
 
@@ -6021,18 +6002,13 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         mapping["request_previews_enabled"] = (
             "true" if _as_bool_flag(updates.get("spud_link_request_previews_enabled"), default=False) else "false"
         )
-    route_all_models_to_hub = False
     if "spud_link_model_routing_enabled" in updates:
-        route_all_models_to_hub = _as_bool_flag(
-            updates.get("spud_link_model_routing_enabled"),
-            default=False,
+        mapping["model_routing_enabled"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_model_routing_enabled"), default=False) else "false"
         )
-        mapping["model_routing_enabled"] = "true" if route_all_models_to_hub else "false"
     for kind in SPUD_LINK_MODEL_KINDS:
         payload_key = f"spud_link_model_route_{kind}"
-        if route_all_models_to_hub:
-            mapping[f"model_route_{kind}"] = "hub"
-        elif payload_key in updates:
+        if payload_key in updates:
             mapping[f"model_route_{kind}"] = normalize_route(
                 updates.get(payload_key),
                 default="hub" if kind == "llm" else "auto",
@@ -9295,7 +9271,6 @@ class SpudLinkPairingCodeRequest(BaseModel):
     public_url: Optional[str] = None
     spud_link_home_url: Optional[str] = None
     spud_link_public_url: Optional[str] = None
-    role: Optional[str] = None
 
 
 class SpudLinkConnectRequest(BaseModel):
@@ -10915,7 +10890,6 @@ def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
     if not routed_kinds:
         return []
     capabilities: Dict[str, Any] = {}
-    response: Dict[str, Any] = {}
     warning = ""
     try:
         from spud_link_models import request_json as spud_link_request_json
@@ -10924,9 +10898,6 @@ def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
         capabilities = response.get("models") if isinstance(response.get("models"), dict) else {}
     except Exception as exc:
         warning = str(exc) or "Spud Hub model status is unavailable."
-    remote_rows = build_remote_runtime_model_rows(response, routed_kinds=routed_kinds)
-    if remote_rows is not None:
-        return remote_rows
     labels = {
         "llm": "LLM",
         "stt": "STT",
@@ -10938,9 +10909,22 @@ def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
         "emotion_id": "Emotion ID",
         "face_id": "Face ID",
     }
+    local_feature_enabled = {"speaker_id": True, "emotion_id": True, "face_id": True}
+    with contextlib.suppress(Exception):
+        from tater_voice import speaker_id as speaker_id_module
+
+        local_feature_enabled["speaker_id"] = bool(speaker_id_module.speaker_id_enabled())
+    with contextlib.suppress(Exception):
+        from tater_voice import emotion_id as emotion_id_module
+
+        local_feature_enabled["emotion_id"] = bool(emotion_id_module.emotion_id_enabled())
+    with contextlib.suppress(Exception):
+        local_feature_enabled["face_id"] = bool(face_id_runtime.is_enabled(redis_client))
     rows: List[Dict[str, Any]] = []
     for kind in routed_kinds:
         capability = capabilities.get(kind) if isinstance(capabilities.get(kind), dict) else {}
+        if kind in local_feature_enabled and not local_feature_enabled[kind]:
+            continue
         if capability and capability.get("available") is False:
             continue
         label = labels.get(kind, kind.replace("_", " ").title())
@@ -10994,13 +10978,13 @@ def _runtime_local_llm_roles(llm_rows: List[Dict[str, Any]]) -> None:
         model = str(base_row.get("model") or "").strip()
         if model and _is_local_hydra_llm_provider(provider):
             base_keys.add((provider, model))
-            _assign(provider, model, "Base LLM")
+            _assign(provider, model, "Base")
 
     modality_settings: List[Tuple[str, str, Dict[str, Any]]] = []
     try:
         modality_settings.append(
             (
-                "Vision",
+                "Image",
                 "supports_vision",
                 get_shared_vision_settings(
                     default_api_base="http://127.0.0.1:1234",
@@ -11010,7 +10994,7 @@ def _runtime_local_llm_roles(llm_rows: List[Dict[str, Any]]) -> None:
         )
     except Exception:
         pass
-    for kind, role in (("audio", "Audio Understanding"), ("video", "Video Understanding")):
+    for kind, role in (("audio", "Audio"), ("video", "Video")):
         try:
             modality_settings.append((role, f"supports_{kind}", get_media_understanding_settings(kind)))
         except Exception:
@@ -15281,58 +15265,31 @@ def spud_link_status() -> Dict[str, Any]:
 
 @app.post("/api/spudlink/pairing-code")
 def create_spud_link_pairing_code(request: Request, payload: Optional[SpudLinkPairingCodeRequest] = None) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+    if payload is not None:
+        if payload.home_url is not None or payload.spud_link_home_url is not None:
+            updates["spud_link_home_url"] = (
+                payload.home_url if payload.home_url is not None else payload.spud_link_home_url
+            )
+        if payload.public_url is not None or payload.spud_link_public_url is not None:
+            updates["spud_link_public_url"] = (
+                payload.public_url if payload.public_url is not None else payload.spud_link_public_url
+            )
+    if updates:
+        _save_spud_link_settings_from_updates(updates)
     settings = _require_spud_link_server_enabled()
     if not bool(settings.get("pairing_enabled")):
         raise HTTPException(status_code=400, detail="Enable Spud Link pairing before creating a pairing code.")
-    pairing_role = _normalize_spud_link_mode(
-        payload.role if payload is not None else None,
-        default=SPUD_LINK_MODE_DISABLED,
-    )
-    if pairing_role in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_SPUDLET}:
-        pairing_payload_role = pairing_role
-    elif bool(settings.get("allow_little_spuds")):
-        pairing_payload_role = SPUD_LINK_MODE_LITTLE_SPUD
-    else:
-        pairing_payload_role = SPUD_LINK_MODE_SPUDLET
-    if pairing_payload_role == SPUD_LINK_MODE_LITTLE_SPUD and not bool(settings.get("allow_little_spuds")):
-        raise HTTPException(status_code=400, detail="Enable Little Spud clients before creating this QR code.")
-    if pairing_payload_role == SPUD_LINK_MODE_SPUDLET and not bool(settings.get("allow_spudlets")):
-        raise HTTPException(status_code=400, detail="Enable Spudlet clients before creating this pairing code.")
-    pairing_settings = dict(settings)
-    if payload is not None:
-        home_url = payload.home_url if payload.home_url is not None else payload.spud_link_home_url
-        public_url = payload.public_url if payload.public_url is not None else payload.spud_link_public_url
-        if home_url is not None:
-            pairing_settings["home_url"] = str(home_url or "").strip().rstrip("/")
-        if public_url is not None:
-            pairing_settings["public_url"] = str(public_url or "").strip().rstrip("/")
-    if pairing_payload_role == SPUD_LINK_MODE_LITTLE_SPUD and payload is not None and payload.role:
-        if not str(pairing_settings.get("home_url") or "").strip():
-            raise HTTPException(status_code=400, detail="Enter a Home / LAN URL before creating a Little Spud QR code.")
-    for key, label in (("home_url", "Home / LAN URL"), ("public_url", "Away / Tater Tunnel URL")):
-        route_url = str(pairing_settings.get(key) or "").strip()
-        if not route_url:
-            continue
-        parsed = urlparse(route_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise HTTPException(status_code=400, detail=f"{label} must be a complete http(s) URL.")
-    code = _spud_link_pairing_code(pairing_payload_role)
+    code = f"spud-{secrets.token_urlsafe(18)}"
     expires_at = time.time() + SPUD_LINK_PAIRING_TTL_SECONDS
     redis_client.hset(
         SPUD_LINK_SETTINGS_KEY,
         mapping={
             "pairing_code_hash": _spud_link_token_digest(code),
             "pairing_expires_at": str(float(expires_at)),
-            "pairing_role": pairing_role,
         },
     )
-    pairing_payload = _spud_link_pairing_payload(
-        settings=pairing_settings,
-        code=code,
-        expires_at=expires_at,
-        request=request,
-        default_role=pairing_payload_role,
-    )
+    pairing_payload = _spud_link_pairing_payload(settings=settings, code=code, expires_at=expires_at, request=request)
     pairing_uri = _spud_link_pairing_uri(pairing_payload)
     return {
         "ok": True,
@@ -15342,7 +15299,6 @@ def create_spud_link_pairing_code(request: Request, payload: Optional[SpudLinkPa
         "pairing_payload_text": json.dumps(pairing_payload, separators=(",", ":"), ensure_ascii=False),
         "pairing_uri": pairing_uri,
         "pairing_qr_svg": _spud_link_qr_svg_data_url(pairing_uri),
-        "pairing_role": pairing_payload_role,
         "expires_at": expires_at,
         "expires_in_seconds": SPUD_LINK_PAIRING_TTL_SECONDS,
     }
@@ -15361,17 +15317,7 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
     if not hmac.compare_digest(expected_hash, supplied_hash):
         raise HTTPException(status_code=401, detail="Invalid Spud Link pairing code.")
 
-    expected_role = _normalize_spud_link_mode(
-        settings.get("pairing_role"),
-        default=SPUD_LINK_MODE_DISABLED,
-    )
-    requested_role = _normalize_spud_link_mode(payload.role, default=SPUD_LINK_MODE_SPUDLET)
-    if expected_role in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_SPUDLET}:
-        if payload.role and requested_role != expected_role:
-            raise HTTPException(status_code=403, detail=f"This pairing invite is only for {_spud_link_mode_label(expected_role)}.")
-        role = expected_role
-    else:
-        role = requested_role
+    role = _normalize_spud_link_mode(payload.role, default=SPUD_LINK_MODE_SPUDLET)
     if role == SPUD_LINK_MODE_HUB:
         raise HTTPException(status_code=400, detail="A linked node cannot pair as another Spud Link server.")
     if role == SPUD_LINK_MODE_DISABLED:
@@ -15399,7 +15345,7 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
     node = _spud_link_reuse_duplicate_node_slot(node)
     _spud_link_touch_node_from_request(node, request)
     stored = _spud_link_store_node(node)
-    redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "pairing_code_hash", "pairing_expires_at", "pairing_role")
+    redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "pairing_code_hash", "pairing_expires_at")
     server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
     is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
     hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
@@ -16459,77 +16405,6 @@ def _spud_link_mark_model_activity(
     _spud_link_store_node(node)
 
 
-def _spud_link_public_loaded_models_payload() -> Dict[str, Any]:
-    """Return the Hub's real loaded model inventory without local paths or controls."""
-
-    try:
-        snapshot = _runtime_cached_loaded_models(include_models=True)
-    except Exception:
-        snapshot = {}
-    public_rows: List[Dict[str, Any]] = []
-    for raw_row in snapshot.get("models", []) if isinstance(snapshot.get("models"), list) else []:
-        if not isinstance(raw_row, dict):
-            continue
-        model = str(raw_row.get("model") or "").strip()
-        if not model:
-            continue
-        try:
-            loaded_ts = max(0.0, float(raw_row.get("loaded_ts") or 0.0))
-        except (TypeError, ValueError):
-            loaded_ts = 0.0
-        public_rows.append(
-            {
-                "category": str(raw_row.get("category") or "").strip(),
-                "kind_label": str(raw_row.get("kind_label") or "").strip(),
-                "provider": str(raw_row.get("provider") or "").strip(),
-                "provider_label": str(raw_row.get("provider_label") or "").strip(),
-                "model": model,
-                "device": str(raw_row.get("device") or "").strip(),
-                "loaded_ts": loaded_ts,
-                "roles": [
-                    str(value).strip()
-                    for value in raw_row.get("roles", [])
-                    if str(value or "").strip()
-                ]
-                if isinstance(raw_row.get("roles"), list)
-                else [],
-                "supports_vision": bool(raw_row.get("supports_vision")),
-                "supports_audio": bool(raw_row.get("supports_audio")),
-                "supports_video": bool(raw_row.get("supports_video")),
-            }
-        )
-    return {"loaded_count": len(public_rows), "models": public_rows}
-
-
-def _spud_link_effective_modality_capability(
-    kind: str,
-    settings: Dict[str, Any],
-    base: Dict[str, Any],
-) -> Dict[str, Any]:
-    mode = str(settings.get("mode") or "").strip().lower()
-    base_model = str(base.get("model") or "").strip()
-    if mode in {"base", "auto"} and base_model:
-        provider = _normalize_hydra_llm_provider(base.get("provider"))
-        return {
-            "available": True,
-            "model": base_model,
-            "provider": provider,
-            "provider_label": str(base.get("provider_label") or provider or "Base model").strip(),
-            "mode": mode,
-            "shared_base": True,
-        }
-    model = str(settings.get("model") or "").strip()
-    provider = _normalize_hydra_llm_provider(settings.get("provider"))
-    return {
-        "available": bool(model),
-        "model": model,
-        "provider": provider,
-        "provider_label": provider or f"{kind.title()} model",
-        "mode": mode,
-        "shared_base": False,
-    }
-
-
 def _spud_link_model_capability_payload() -> Dict[str, Any]:
     from media_understanding_settings import get_media_understanding_settings
     from vision_settings import DEFAULT_VISION_API_BASE, DEFAULT_VISION_MODEL, get_vision_settings
@@ -16545,21 +16420,13 @@ def _spud_link_model_capability_payload() -> Dict[str, Any]:
     face = face_identity.runtime_status(redis_client)
     speaker = speaker_id_module.runtime_availability()
     emotion = emotion_id_module.runtime_availability()
-    vision_capability = _spud_link_effective_modality_capability("vision", vision, base)
-    audio_capability = _spud_link_effective_modality_capability("audio", audio, base)
-    video_capability = _spud_link_effective_modality_capability("video", video, base)
     return {
-        "llm": {
-            "available": bool(base.get("model")),
-            "model": str(base.get("model") or "tater/base"),
-            "provider": str(base.get("provider") or "").strip(),
-            "provider_label": str(base.get("provider_label") or base.get("provider") or "Base model").strip(),
-        },
+        "llm": {"available": bool(base.get("model")), "model": str(base.get("model") or "tater/base")},
         "stt": {"available": bool(speech.get("stt_backend")), "model": str(speech.get("stt_backend") or "")},
         "tts": {"available": bool(speech.get("tts_backend")), "model": str(speech.get("tts_model") or speech.get("tts_backend") or "")},
-        "vision": vision_capability,
-        "audio": audio_capability,
-        "video": video_capability,
+        "vision": {"available": True, "model": str(vision.get("model") or vision.get("mode") or "vision")},
+        "audio": {"available": True, "model": str(audio.get("model") or audio.get("mode") or "audio")},
+        "video": {"available": True, "model": str(video.get("model") or video.get("mode") or "video")},
         "speaker_id": {"available": bool(speaker_id_module.speaker_id_enabled() and speaker.get("available")), "loaded": getattr(speaker_id_module, "_ENGINE", None) is not None, "model": str(speaker.get("model_source") or "SpeechBrain")},
         "emotion_id": {"available": bool(emotion_id_module.emotion_id_enabled() and emotion.get("available")), "loaded": getattr(emotion_id_module, "_ENGINE", None) is not None, "model": str(emotion.get("model_source") or "SpeechBrain")},
         "face_id": {"available": bool(face.get("enabled")), "loaded": bool(face.get("loaded")), "model": str(face.get("model") or "Face ID")},
@@ -16570,11 +16437,7 @@ def _spud_link_model_capability_payload() -> Dict[str, Any]:
 def spud_link_model_capabilities(request: Request) -> Dict[str, Any]:
     _settings, node = _require_spud_link_model_request(request)
     _spud_link_store_node(node)
-    return {
-        "ok": True,
-        "models": _spud_link_model_capability_payload(),
-        "loaded_models": _spud_link_public_loaded_models_payload(),
-    }
+    return {"ok": True, "models": _spud_link_model_capability_payload()}
 
 
 @app.post("/api/spudlink/v1/models/vision")
@@ -18555,28 +18418,9 @@ def remove_core(payload: ShopRemoveRequest) -> Dict[str, Any]:
     if not core_id:
         raise HTTPException(status_code=400, detail="Core id is required.")
 
-    if core_store_module._is_reserved_builtin_core_id(core_id):
-        raise HTTPException(status_code=400, detail="Bundled cores cannot be removed or have their data purged here.")
-    try:
-        core_store_module._safe_core_file_path(core_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    module_key = core_store_module._core_module_key(core_id)
-    if not module_key:
-        raise HTTPException(status_code=400, detail="Invalid core id.")
-
+    module_key = f"{core_id}_core"
     if core_runtime.is_running(module_key):
-        stop_result = core_runtime.stop(module_key)
-        if bool(stop_result.get("running")):
-            raise HTTPException(status_code=409, detail="Core is still running; no data or files were removed.")
-
-    cleanup_message = ""
-    if bool(payload.purge_redis):
-        ok2, msg2 = core_store_module.clear_core_redis_data(core_id, module_key=module_key)
-        cleanup_message = msg2
-        if not ok2:
-            raise HTTPException(status_code=400, detail=f"Core data cleanup failed; core was not removed: {msg2}")
+        core_runtime.stop(module_key)
 
     ok, msg = core_store_module.uninstall_core_file(core_id)
     if not ok:
@@ -18584,13 +18428,16 @@ def remove_core(payload: ShopRemoveRequest) -> Dict[str, Any]:
 
     redis_client.set(f"{module_key}_running", "false")
 
-    response_message = msg
-    if cleanup_message:
-        response_message = f"{msg}. {cleanup_message}"
+    cleanup_message = ""
+    if bool(payload.purge_redis):
+        ok2, msg2 = core_store_module.clear_core_redis_data(core_id, module_key=module_key)
+        cleanup_message = msg2
+        if not ok2:
+            raise HTTPException(status_code=400, detail=f"Removed file, but Redis cleanup failed: {msg2}")
 
     return {
         "ok": True,
-        "message": response_message,
+        "message": msg,
         "cleanup": cleanup_message,
     }
 
@@ -19316,11 +19163,7 @@ def get_settings() -> Dict[str, Any]:
     admin_plugin_options = sorted(str(plugin_id or "").strip() for plugin_id in registry_snapshot.keys() if str(plugin_id or "").strip())
     admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
 
-    hydra_base_servers_raw = resolve_hydra_base_servers(
-        redis_conn=redis_client,
-        include_legacy=True,
-        include_spud_link=False,
-    )
+    hydra_base_servers_raw = resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)
     hydra_base_servers: List[Dict[str, str]] = []
     for row in hydra_base_servers_raw:
         if not isinstance(row, dict):

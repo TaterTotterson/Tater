@@ -22,64 +22,6 @@ RESERVED_BUILTIN_CORE_IDS = {
     "voice_core",
 }
 
-# Core-owned Redis data must live below the core id/module namespace so the
-# host can honor the Cores UI's "Delete data" promise without executing the
-# core or trusting a core-supplied glob. These entries cover historical
-# official cores that predate that convention or intentionally expose data
-# through a legacy/shared-looking namespace.
-KNOWN_CORE_REDIS_OWNERSHIP = {
-    "ai_task": {
-        "prefixes": ("reminders:",),
-    },
-    "awareness": {
-        "prefixes": ("tater:automations:events:",),
-    },
-    "memory": {
-        "prefixes": (
-            "mem:",
-            "tater:memory:",
-            "tater:room_label:",
-            "tater:user_label:",
-        ),
-    },
-    "music": {
-        "keys": (
-            "music_core_catalog_v1",
-            "music_core_listening_history_v1",
-            "music_core_player_v1",
-            "music_core_prompt_profile_v1",
-            "music_core_recommendations_v1",
-            "music_core_runtime",
-            "tater_tube_activity_feed_v1",
-        ),
-    },
-    "tater_tube": {
-        "keys": (
-            "tater_tube_core_context",
-            "tater_tube_core_main_menu_message_v1",
-            "tater_tube_core_recommendations",
-            "tater_tube_core_runtime",
-        ),
-    },
-}
-
-_CORE_REDIS_SCAN_COUNT = 500
-_CORE_REDIS_DELETE_BATCH_SIZE = 200
-_RESERVED_CORE_REDIS_PREFIXES = {
-    "hydra:",
-    "integration:",
-    "mem:",
-    "notify:",
-    "people:",
-    "portal:",
-    "spud:",
-    "system:",
-    "tater:",
-    "verba:",
-    "voice:",
-    "webui:",
-}
-
 def _normalize_manifest_url(url: str | None) -> str:
     return str(url or "").strip()
 
@@ -628,90 +570,33 @@ def uninstall_core_file(platform_id: str) -> tuple[bool, str]:
         return False, f"Uninstall failed: {exc}"
 
 
-def _core_redis_ownership(platform_id: str, module_key: str | None = None) -> tuple[list[str], list[str]]:
-    """Return exact keys and literal prefixes owned by an installed core.
-
-    Prefixes are host-derived or drawn from the audited compatibility table
-    above. They are not glob patterns supplied by downloaded core code.
-    """
-    normalized_id = _normalize_core_id(platform_id)
-    _safe_core_file_path(normalized_id)  # Validate before building SCAN matches.
-
-    resolved_module_key = str(module_key or _core_module_key(normalized_id)).strip()
-    if not _re.fullmatch(r"[a-zA-Z0-9_]+", resolved_module_key or ""):
-        raise ValueError("Invalid core module key")
-
-    known = KNOWN_CORE_REDIS_OWNERSHIP.get(normalized_id) or {}
-    exact_keys = {
-        str(key).strip()
-        for key in known.get("keys", ())
-        if str(key).strip()
-    }
-    prefixes = {f"{resolved_module_key}:"}
-    canonical_prefix = f"{normalized_id}:"
-    if canonical_prefix not in _RESERVED_CORE_REDIS_PREFIXES:
-        prefixes.add(canonical_prefix)
-    prefixes.update(
-        str(prefix).strip()
-        for prefix in known.get("prefixes", ())
-        if str(prefix).strip()
-    )
-    return sorted(exact_keys), sorted(prefixes)
-
-
-def _delete_redis_keys(keys) -> int:
-    batch = []
-    deleted_count = 0
-    for raw_key in keys:
-        key = str(raw_key or "").strip()
-        if not key:
-            continue
-        batch.append(key)
-        if len(batch) >= _CORE_REDIS_DELETE_BATCH_SIZE:
-            deleted_count += int(redis_client.delete(*batch) or 0)
-            batch = []
-    if batch:
-        deleted_count += int(redis_client.delete(*batch) or 0)
-    return deleted_count
-
-
 def clear_core_redis_data(platform_id: str, module_key: str | None = None) -> tuple[bool, str]:
-    """Delete all Redis data owned by a core and leave it disabled.
-
-    Standard settings/cooldown keys, canonical core namespaces, and audited
-    legacy namespaces are removed. The running marker remains as ``false``
-    so startup recovery cannot reinstall or restart a deliberately removed
-    core.
-    """
     try:
         normalized_id = _normalize_core_id(platform_id)
         resolved_module_key = str(module_key or _core_module_key(normalized_id)).strip()
-        exact_keys, prefixes = _core_redis_ownership(normalized_id, resolved_module_key)
+        if not resolved_module_key:
+            return False, "Invalid core id."
 
+        deleted = []
         settings_key = f"{resolved_module_key}_settings"
         state_key = f"{resolved_module_key}_running"
         cooldown_key = f"tater:cooldown:{resolved_module_key}"
-        exact_keys = sorted({*exact_keys, settings_key, cooldown_key})
 
-        deleted_count = _delete_redis_keys(exact_keys)
-        for prefix in prefixes:
-            matches = (
-                key
-                for key in redis_client.scan_iter(
-                    match=f"{prefix}*",
-                    count=_CORE_REDIS_SCAN_COUNT,
-                )
-                if str(key or "").strip() != state_key
-            )
-            deleted_count += _delete_redis_keys(matches)
+        if redis_client.exists(settings_key):
+            redis_client.delete(settings_key)
+            deleted.append(settings_key)
 
-        redis_client.set(state_key, "false")
-        namespace_count = len(prefixes)
-        return (
-            True,
-            f"Deleted {deleted_count} Redis key(s) from {namespace_count} core-owned namespace(s); "
-            f"set {state_key}=false.",
-        )
+        if redis_client.get(state_key) is not None:
+            redis_client.set(state_key, "false")
+            deleted.append(f"{state_key}=false")
+
+        if redis_client.exists(cooldown_key):
+            redis_client.delete(cooldown_key)
+            deleted.append(cooldown_key)
+
+        if deleted:
+            return True, "Deleted: " + ", ".join(deleted)
+        return True, "No Redis keys found for this core."
     except Exception as exc:
         return False, f"Redis cleanup failed: {exc}"
 

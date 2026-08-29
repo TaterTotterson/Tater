@@ -59,13 +59,6 @@ Tater is built around a modular system:
 
 Tater Shop manages the catalogs, versions, metadata, and updates for Tater Cores, Portals, and Verbas.
 
-Core-owned Redis keys must use the Core's canonical namespace: `<core_id>:` or
-`<module_key>:`. Standard `<module_key>_settings` and running-state keys are
-handled separately. The **Delete data** uninstall option removes those
-namespaces automatically. Shared platform namespaces such as `tater:` are not
-inferred from a downloaded Core;
-historical official exceptions are explicitly audited in `tateros/core_store.py`.
-
 <p>
   <a href="https://github.com/TaterTotterson/Tater_Shop">
     <img alt="Browse Tater Shop" src="https://img.shields.io/badge/Tater%20Shop-Browse%20Extensions-FF7A18?style=for-the-badge&logo=github&logoColor=white" />

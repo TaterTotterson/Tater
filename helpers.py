@@ -8543,17 +8543,12 @@ def _resolve_spud_link_base_server(*, redis_conn: Any = None) -> Optional[Dict[s
     }
 
 
-def resolve_hydra_base_servers(
-    *,
-    redis_conn: Any = None,
-    include_legacy: bool = True,
-    include_spud_link: bool = True,
-) -> List[Dict[str, str]]:
+def resolve_hydra_base_servers(*, redis_conn: Any = None, include_legacy: bool = True) -> List[Dict[str, str]]:
     client = redis_conn or redis_client
     rows: List[Dict[str, str]] = []
     seen: set[Tuple[str, str, str, str, str]] = set()
 
-    spud_link_row = _resolve_spud_link_base_server(redis_conn=client) if include_spud_link else None
+    spud_link_row = _resolve_spud_link_base_server(redis_conn=client)
     if spud_link_row:
         signature = (
             spud_link_row.get("provider", HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE),

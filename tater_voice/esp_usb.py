@@ -22,11 +22,6 @@ _FALLBACK_PORT_PATTERNS = (
     "/dev/ttyACM*",
     "/dev/ttyUSB*",
 )
-APP_PARTITION_SIZE = 0x300000
-_APP_PARTITION_OFFSETS_BY_FLASH_SIZE = {
-    "8mb": ("0x20000", "0x320000"),
-    "16mb": ("0x20000", "0x320000", "0x620000"),
-}
 
 
 def _text(value: Any) -> str:
@@ -140,14 +135,6 @@ def inspect_esptool() -> Dict[str, Any]:
     }
 
 
-def app_partition_offsets(flash_size: str) -> List[str]:
-    size_key = (_text(flash_size) or "16MB").lower()
-    offsets = _APP_PARTITION_OFFSETS_BY_FLASH_SIZE.get(size_key)
-    if not offsets:
-        raise ValueError(f"USB keep-settings updates do not support ESP flash size {flash_size!r}.")
-    return list(offsets)
-
-
 def flash_command(
     port: str,
     image_path: Path,
@@ -157,7 +144,6 @@ def flash_command(
     flash_freq: str = "40m",
     baud: int = 921600,
     python_executable: Optional[str] = None,
-    flash_kind: str = "factory",
 ) -> List[str]:
     port_token = _text(port)
     image = Path(image_path).expanduser().resolve()
@@ -167,18 +153,11 @@ def flash_command(
     python_path = Path(os.path.abspath(os.path.expanduser(_text(python_executable) or sys.executable)))
     if not port_token:
         raise ValueError("ESP USB serial port is required.")
-    kind = _text(flash_kind).lower() or "factory"
-    if kind not in {"factory", "ota"}:
-        raise ValueError(f"Unsupported ESP USB flash kind: {flash_kind!r}")
     if not image.is_file():
-        raise FileNotFoundError(f"ESP {kind} image not found: {image}")
+        raise FileNotFoundError(f"ESP factory image not found: {image}")
     if not python_path.is_file():
         raise FileNotFoundError(f"Tater Python runtime not found: {python_path}")
-    if kind == "ota" and image.stat().st_size > APP_PARTITION_SIZE:
-        raise ValueError(
-            f"ESP OTA image is too large for the app partition: {image.stat().st_size} > {APP_PARTITION_SIZE}."
-        )
-    command = [
+    return [
         str(python_path),
         "-u",
         "-m",
@@ -194,26 +173,16 @@ def flash_command(
         "--after",
         "hard-reset",
         "write-flash",
+        "--erase-all",
+        "--flash-mode",
+        _text(flash_mode) or "dio",
+        "--flash-freq",
+        _text(flash_freq) or "40m",
+        "--flash-size",
+        _text(flash_size) or "16MB",
+        "0x0",
+        str(image),
     ]
-    if kind == "factory":
-        command.append("--erase-all")
-    command.extend(
-        [
-            "--flash-mode",
-            _text(flash_mode) or "dio",
-            "--flash-freq",
-            _text(flash_freq) or "40m",
-            "--flash-size",
-            _text(flash_size) or "16MB",
-        ]
-    )
-    if kind == "factory":
-        command.extend(["0x0", str(image)])
-        return command
-
-    for offset in app_partition_offsets(flash_size):
-        command.extend([offset, str(image)])
-    return command
 
 
 def progress_percent(line: Any) -> Optional[float]:
