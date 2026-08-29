@@ -30,6 +30,106 @@ def run_setup_functions(body: str, *, environ: dict[str, str]) -> subprocess.Com
 
 
 class SetupTaterVenvTests(unittest.TestCase):
+    def test_supported_python_versions_match_ai_dependency_wheels(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            python_version_supported 3.11
+            python_version_supported 3.12
+            python_version_supported 3.13
+            ! python_version_supported 3.10
+            ! python_version_supported 3.14
+            """,
+            environ={},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def test_unsupported_system_python_selects_managed_python(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            python_version() {
+              case "$1" in
+                /system/python) printf '%s' '3.14' ;;
+                /managed/python) printf '%s' '3.11' ;;
+              esac
+            }
+            install_managed_python() {
+              test "$1" = /system/python
+              MANAGED_PYTHON_BIN=/managed/python
+            }
+            unset PYTHON
+            select_supported_python /system/python
+            test "${SUPPORTED_PYTHON_BIN}" = /managed/python
+            """,
+            environ={},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("not supported", completed.stdout)
+
+    def test_explicit_unsupported_python_fails_with_supported_range(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            python_version() { printf '%s' '3.14'; }
+            select_supported_python /explicit/python
+            """,
+            environ={"PYTHON": "/explicit/python"},
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Python 3.11, 3.12, or 3.13", completed.stderr)
+
+    def test_managed_python_assets_are_pinned_for_linux_x86_64(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            uname() {
+              case "$1" in
+                -m) printf '%s' "${TEST_ARCH}" ;;
+                *) printf '%s' Linux ;;
+              esac
+            }
+            managed_python_asset
+            printf '%s\n%s\n' "${MANAGED_PYTHON_URL}" "${MANAGED_PYTHON_SHA256}"
+            """,
+            environ={"TEST_ARCH": "x86_64"},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("cpython-3.11.16%2B20260825-x86_64-unknown-linux-gnu", completed.stdout)
+        self.assertIn("25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab", completed.stdout)
+
+    def test_existing_python_314_venv_is_rebuilt_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            venv_dir = Path(temp_dir) / "venv"
+            (venv_dir / "bin").mkdir(parents=True)
+            old_python = venv_dir / "bin" / "python"
+            old_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            old_python.chmod(0o755)
+
+            completed = run_setup_functions(
+                r"""
+                python_version() {
+                  case "$1" in
+                    *venv/bin/python) printf '%s' '3.14' ;;
+                    *) printf '%s' '3.11' ;;
+                  esac
+                }
+                create_python_venv() {
+                  mkdir -p "${VENV_DIR}/bin"
+                  printf '%s\n' '#!/bin/sh' 'exit 0' > "${VENV_DIR}/bin/python"
+                  chmod +x "${VENV_DIR}/bin/python"
+                }
+                VENV_DIR="${TEST_ROOT}/venv"
+                RUNTIME_DIR="${TEST_ROOT}/runtime"
+                PROFILE_FILE="${RUNTIME_DIR}/setup_profile"
+                ensure_venv rocm /managed/python
+                """,
+                environ={"TEST_ROOT": temp_dir},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("unsupported Python 3.14", completed.stdout)
+
     def test_requirement_builds_receive_cmake_four_compatibility_floor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fake_python = Path(temp_dir) / "python"

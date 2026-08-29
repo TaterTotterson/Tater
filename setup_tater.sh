@@ -18,6 +18,10 @@ LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/l
 ROCM_LIBXML2_COMPAT_DIR="${TATER_ROCM_LIBXML2_COMPAT_DIR:-${RUNTIME_DIR}/rocm-libxml2-compat}"
 ROCM_LIBXML2_COMPAT_URL="https://launchpad.net/ubuntu/+archive/primary/+files/libxml2_2.12.7+dfsg+really2.9.14-0.4ubuntu0.4_amd64.deb"
 ROCM_LIBXML2_COMPAT_SHA256="685e94ff7fd7ad869894c2317ab9473075536a5c74c092ca5a9cd5876acaaf6c"
+MANAGED_PYTHON_RELEASE="20260825"
+MANAGED_PYTHON_VERSION="3.11.16"
+MANAGED_PYTHON_X86_64_SHA256="25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab"
+MANAGED_PYTHON_AARCH64_SHA256="93fd0d922d88b758a8df277bf12b601fe7c35543a2feceaf10df8496758d28ea"
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -177,6 +181,121 @@ find_python() {
 
 python_version() {
   "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+}
+
+python_version_supported() {
+  case "$1" in
+    3.11|3.12|3.13) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_python_dir() {
+  printf '%s' "${TATER_MANAGED_PYTHON_DIR:-${RUNTIME_DIR}/python/cpython-${MANAGED_PYTHON_VERSION}+${MANAGED_PYTHON_RELEASE}}"
+}
+
+managed_python_asset() {
+  case "$(uname -m 2>/dev/null || printf unknown)" in
+    x86_64|amd64)
+      MANAGED_PYTHON_ARCH="x86_64"
+      MANAGED_PYTHON_SHA256="${MANAGED_PYTHON_X86_64_SHA256}"
+      ;;
+    aarch64|arm64)
+      MANAGED_PYTHON_ARCH="aarch64"
+      MANAGED_PYTHON_SHA256="${MANAGED_PYTHON_AARCH64_SHA256}"
+      ;;
+    *)
+      fail "Automatic Python installation is not available for architecture $(uname -m 2>/dev/null || printf unknown). Install Python 3.11, 3.12, or 3.13, then rerun setup."
+      ;;
+  esac
+  MANAGED_PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${MANAGED_PYTHON_RELEASE}/cpython-${MANAGED_PYTHON_VERSION}%2B${MANAGED_PYTHON_RELEASE}-${MANAGED_PYTHON_ARCH}-unknown-linux-gnu-install_only.tar.gz"
+}
+
+setup_file_sha256() {
+  file="$1"
+  fallback_python="${2:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+  elif [ "${fallback_python}" ]; then
+    "${fallback_python}" -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "${file}"
+  else
+    fail "A SHA-256 tool is required to verify setup downloads."
+  fi
+}
+
+cleanup_managed_python_stage() {
+  [ -z "${managed_python_archive:-}" ] || rm -f "${managed_python_archive}"
+  [ -z "${managed_python_stage:-}" ] || rm -rf "${managed_python_stage}"
+}
+
+install_managed_python() {
+  bootstrap_python="$1"
+  managed_root="$(managed_python_dir)"
+  managed_bin="${managed_root}/bin/python3.11"
+
+  if [ -x "${managed_bin}" ] && [ "$(python_version "${managed_bin}" 2>/dev/null || true)" = "3.11" ]; then
+    MANAGED_PYTHON_BIN="${managed_bin}"
+    ok "Using managed Python ${MANAGED_PYTHON_VERSION}"
+    return
+  fi
+
+  if ! truthy_env "${TATER_SETUP_INSTALL_MANAGED_PYTHON:-1}"; then
+    fail "Tater requires Python 3.11, 3.12, or 3.13. Install one of those versions, or enable TATER_SETUP_INSTALL_MANAGED_PYTHON."
+  fi
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || fail "Tater requires Python 3.11, 3.12, or 3.13. Install a supported version, then rerun setup."
+  command -v tar >/dev/null 2>&1 || fail "Automatic Python installation requires tar."
+
+  managed_python_asset
+  managed_parent="$(dirname "${managed_root}")"
+  mkdir -p "${managed_parent}"
+  managed_python_archive="$(mktemp "${managed_parent}/.cpython-download.XXXXXX")"
+  managed_python_stage="$(mktemp -d "${managed_parent}/.cpython-extract.XXXXXX")"
+  trap cleanup_managed_python_stage EXIT
+
+  info "Installing a private Python ${MANAGED_PYTHON_VERSION} runtime for Tater"
+  download_setup_file "${MANAGED_PYTHON_URL}" "${managed_python_archive}" "${bootstrap_python}"
+  actual_sha256="$(setup_file_sha256 "${managed_python_archive}" "${bootstrap_python}")"
+  if [ "${actual_sha256}" != "${MANAGED_PYTHON_SHA256}" ]; then
+    fail "The downloaded Python runtime did not match its expected SHA-256 checksum."
+  fi
+  tar -xzf "${managed_python_archive}" -C "${managed_python_stage}"
+  extracted_root="${managed_python_stage}/python"
+  extracted_bin="${extracted_root}/bin/python3.11"
+  if [ ! -x "${extracted_bin}" ] || [ "$(python_version "${extracted_bin}" 2>/dev/null || true)" != "3.11" ]; then
+    fail "The downloaded Python runtime did not contain a working Python 3.11 interpreter."
+  fi
+
+  if [ -e "${managed_root}" ]; then
+    warn "Replacing an incomplete managed Python runtime"
+    rm -rf "${managed_root}"
+  fi
+  mv "${extracted_root}" "${managed_root}"
+  cleanup_managed_python_stage
+  managed_python_archive=""
+  managed_python_stage=""
+  trap - EXIT
+
+  MANAGED_PYTHON_BIN="${managed_bin}"
+  ok "Managed Python ${MANAGED_PYTHON_VERSION} is ready"
+}
+
+select_supported_python() {
+  candidate="$1"
+  version="$(python_version "${candidate}")"
+  if python_version_supported "${version}"; then
+    SUPPORTED_PYTHON_BIN="${candidate}"
+    ok "Using ${candidate} ${version}"
+    return
+  fi
+
+  if [ "${PYTHON:-}" ]; then
+    fail "PYTHON points to unsupported Python ${version}. Set PYTHON to Python 3.11, 3.12, or 3.13, or unset it so setup can install a private Python 3.11 runtime."
+  fi
+  warn "Python ${version} is not supported by Tater's AI dependencies; using a private Python 3.11 runtime"
+  install_managed_python "${candidate}"
+  SUPPORTED_PYTHON_BIN="${MANAGED_PYTHON_BIN}"
 }
 
 confirm() {
@@ -348,6 +467,14 @@ ensure_venv() {
   if [ -f "${VENV_DIR}/pyvenv.cfg" ] && [ -x "${VENV_DIR}/bin/python" ] && ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
     warn "Removing incomplete ${VENV_DIR} from a previous failed setup"
     rm -rf "${VENV_DIR}"
+  fi
+
+  if [ -x "${VENV_DIR}/bin/python" ]; then
+    existing_venv_version="$(python_version "${VENV_DIR}/bin/python" 2>/dev/null || true)"
+    if ! python_version_supported "${existing_venv_version}"; then
+      warn "Removing ${VENV_DIR} created with unsupported Python ${existing_venv_version:-unknown}"
+      rm -rf "${VENV_DIR}"
+    fi
   fi
 
   if [ -x "${VENV_DIR}/bin/python" ] && [ "${existing_profile}" != "${profile}" ]; then
@@ -561,10 +688,13 @@ check_llama_cpp_native() {
 download_setup_file() {
   url="$1"
   destination="$2"
+  fallback_python="${3:-}"
   if command -v curl >/dev/null 2>&1; then
     curl --location --fail --silent --show-error --output "${destination}" "${url}"
   elif command -v wget >/dev/null 2>&1; then
     wget --quiet --output-document="${destination}" "${url}"
+  elif [ "${fallback_python}" ]; then
+    "${fallback_python}" -c 'import pathlib, sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], pathlib.Path(sys.argv[2]))' "${url}" "${destination}"
   else
     fail "Downloading a setup compatibility file requires curl or wget."
   fi
@@ -1162,16 +1292,9 @@ main() {
   banner
   info "Selected profile: ${BOLD}${profile}${RESET}"
 
-  python_bin="$(find_python)"
-  version="$(python_version "${python_bin}")"
-  case "${version}" in
-    3.11|3.12|3.13)
-      ok "Using ${python_bin} ${version}"
-      ;;
-    *)
-      warn "Detected Python ${version}. Tater is tested most heavily on Python 3.11."
-      ;;
-  esac
+  detected_python="$(find_python)"
+  select_supported_python "${detected_python}"
+  python_bin="${SUPPORTED_PYTHON_BIN}"
 
   if [ "${profile}" = "thor" ]; then
     warn "Thor should use JetPack 7 / CUDA 13 packages from NVIDIA. This script will not install system CUDA."
