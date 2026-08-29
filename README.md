@@ -270,6 +270,7 @@ AMD ROCm / Strix Halo:
 - On Ryzen AI systems, the `rocm` profile uses Python 3.12 and pins AMD's PyTorch 2.13 package set for ROCm 10.0.0. Setup selects the architecture-specific package for known APUs, including `gfx1150` for Ryzen AI 9/HX and `gfx1151` for Ryzen AI Max / Strix Halo; set `TATER_ROCM_GFX_TARGET` to override detection.
 - Healthy existing ROCm environments are reused by default. Set `TATER_SETUP_UPGRADE_ROCM=1` when rerunning setup to explicitly move an existing Ryzen AI environment to the pinned ROCm 10 stack.
 - AMD supports that Ryzen AI package set on Ubuntu 24.04.4 and 26.04. Setup warns on other Ubuntu releases and verifies actual GPU access before reporting success.
+- If the current user cannot access `/dev/kfd`, setup adds that account to AMD's required `render` and `video` groups when automatic system dependency setup is enabled, then asks for the required reboot. Rerun setup after reboot; the managed Python download and any completed setup work are reused.
 - Other AMD systems continue to use the PyTorch ROCm wheel index and can override it with `TATER_ROCM_PYTORCH_INDEX_URL`.
 - Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
 - AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.

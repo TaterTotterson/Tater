@@ -475,13 +475,45 @@ install_amd_ryzen_ai_pytorch() {
     "torchaudio==${AMD_RYZEN_AI_TORCHAUDIO_VERSION}"
 }
 
-ensure_amd_gpu_device_access() {
-  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || fail "The AMD ROCm profile requires Linux."
-  if [ ! -e /dev/kfd ]; then
-    fail "The AMD compute device /dev/kfd is unavailable. Install a kernel/AMDGPU stack that supports this processor and reboot before rerunning setup."
+user_is_in_group() {
+  setup_user="$1"
+  required_group="$2"
+  user_groups="$(id -Gn "${setup_user}" 2>/dev/null || true)"
+  case " ${user_groups} " in
+    *" ${required_group} "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_amd_gpu_group_membership() {
+  setup_user="${TATER_SETUP_USER:-${SUDO_USER:-$(id -un)}}"
+  missing_groups=""
+  for required_group in render video; do
+    if ! user_is_in_group "${setup_user}" "${required_group}"; then
+      missing_groups="${missing_groups}${missing_groups:+,}${required_group}"
+    fi
+  done
+
+  if [ -z "${missing_groups}" ]; then
+    fail "${setup_user} belongs to the render and video groups, but this login session does not have GPU access yet. Reboot, then rerun setup."
   fi
-  if [ ! -r /dev/kfd ] || [ ! -w /dev/kfd ]; then
-    fail "The current user cannot access /dev/kfd. Add the user to the render and video groups, sign out or reboot, then rerun setup."
+  if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+    fail "${setup_user} must be added to the render and video groups for AMD GPU access. Run 'sudo usermod -a -G render,video ${setup_user}', reboot, then rerun setup."
+  fi
+
+  info "Adding ${setup_user} to the render and video groups for AMD GPU access"
+  run_privileged usermod -a -G render,video "${setup_user}"
+  fail "Added ${setup_user} to the render and video groups. Reboot this machine, then rerun setup."
+}
+
+ensure_amd_gpu_device_access() {
+  kfd_path="${TATER_AMD_KFD_PATH:-/dev/kfd}"
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || fail "The AMD ROCm profile requires Linux."
+  if [ ! -e "${kfd_path}" ]; then
+    fail "The AMD compute device ${kfd_path} is unavailable. Install a kernel/AMDGPU stack that supports this processor and reboot before rerunning setup."
+  fi
+  if [ ! -r "${kfd_path}" ] || [ ! -w "${kfd_path}" ]; then
+    ensure_amd_gpu_group_membership
   fi
   ok "AMD GPU device access is ready"
 }

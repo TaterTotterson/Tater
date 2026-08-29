@@ -219,6 +219,51 @@ class SetupTaterVenvTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 
+    def test_missing_amd_gpu_groups_are_added_before_requesting_reboot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "privileged.log"
+            completed = run_setup_functions(
+                r"""
+                id() {
+                  case "$1" in
+                    -Gn) printf '%s' 'phooey sudo' ;;
+                    -un) printf '%s' 'phooey' ;;
+                    *) command id "$@" ;;
+                  esac
+                }
+                run_privileged() { printf '%s\n' "$*" > "${TEST_LOG}"; }
+                ensure_amd_gpu_group_membership
+                """,
+                environ={
+                    "TATER_SETUP_USER": "phooey",
+                    "TEST_LOG": str(log_path),
+                },
+            )
+            command = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(command.strip(), "usermod -a -G render,video phooey")
+        self.assertIn("Reboot this machine", completed.stderr)
+
+    def test_existing_amd_gpu_groups_only_require_a_fresh_login(self) -> None:
+        completed = run_setup_functions(
+            r"""
+            id() {
+              case "$1" in
+                -Gn) printf '%s' 'phooey sudo video render' ;;
+                -un) printf '%s' 'phooey' ;;
+                *) command id "$@" ;;
+              esac
+            }
+            run_privileged() { return 99; }
+            ensure_amd_gpu_group_membership
+            """,
+            environ={"TATER_SETUP_USER": "phooey"},
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("login session does not have GPU access", completed.stderr)
+
     def test_existing_python_314_venv_is_rebuilt_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             venv_dir = Path(temp_dir) / "venv"
