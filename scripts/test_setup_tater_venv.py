@@ -30,6 +30,39 @@ def run_setup_functions(body: str, *, environ: dict[str, str]) -> subprocess.Com
 
 
 class SetupTaterVenvTests(unittest.TestCase):
+    def test_requirement_builds_receive_cmake_four_compatibility_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_python = Path(temp_dir) / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"${CMAKE_POLICY_VERSION_MINIMUM:-}\" \"$*\" > \"${TEST_LOG}\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            requirements = Path(temp_dir) / "requirements.txt"
+            requirements.write_text("example\n", encoding="utf-8")
+            log_path = Path(temp_dir) / "pip.log"
+
+            completed = run_setup_functions(
+                r"""
+                unset CMAKE_POLICY_VERSION_MINIMUM
+                pip_install_requirements "${TEST_PYTHON}" "${TEST_REQUIREMENTS}"
+                """,
+                environ={
+                    "TEST_LOG": str(log_path),
+                    "TEST_PYTHON": str(fake_python),
+                    "TEST_REQUIREMENTS": str(requirements),
+                },
+            )
+            output = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertEqual(output.splitlines()[0], "3.5")
+        self.assertIn(f"-m pip install -r {requirements}", output)
+
+    def test_all_requirement_files_use_the_compatibility_helper(self) -> None:
+        self.assertEqual(SETUP_LIBRARY.count('-m pip install -r'), 1)
+
     def test_missing_ensurepip_is_repaired_for_every_linux_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             completed = run_setup_functions(

@@ -520,6 +520,16 @@ remove_managed_venv_if_present() {
   rm -rf "${managed_venv}"
 }
 
+pip_install_requirements() {
+  venv_python="$1"
+  requirements_file="$2"
+  # python-olm 3.2.16 bundles a pre-CMake-3.5 project and must build from
+  # source on Python 3.13+. CMake 4 supports this external compatibility
+  # floor without modifying the third-party source.
+  CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}" \
+    "${venv_python}" -m pip install -r "${requirements_file}"
+}
+
 install_cpu() {
   venv_python="$1"
   tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-cpu.XXXXXX")"
@@ -529,7 +539,7 @@ install_cpu() {
   info "Installing CPU PyTorch wheels"
   "${venv_python}" -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${tmp_req}"
+  pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native cpu
   rm -f "${tmp_req}"
   trap - EXIT
@@ -539,7 +549,7 @@ install_edge() {
   venv_python="$1"
   [ -f "${EDGE_REQUIREMENTS_FILE}" ] || fail "Missing edge requirements: ${EDGE_REQUIREMENTS_FILE}"
   info "Installing remote-only Tater dependencies"
-  "${venv_python}" -m pip install -r "${EDGE_REQUIREMENTS_FILE}"
+  pip_install_requirements "${venv_python}" "${EDGE_REQUIREMENTS_FILE}"
 }
 
 check_llama_cpp_native() {
@@ -814,7 +824,7 @@ install_macos() {
   fi
   info "Installing Tater dependencies for macOS"
   install_macos_bundled_native_wheels "${venv_python}"
-  "${venv_python}" -m pip install -r "${tmp_req}"
+  pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native macos
   info "Installing Apple-native speech extras"
   if ! "${venv_python}" -m pip install mlx-whisper kokoro; then
@@ -832,7 +842,7 @@ install_macos() {
         /^(outlines-core|dill|xxhash)==/ { print }
       ' "${mlx_engine_requirements}" > "${mlx_engine_runtime_requirements}"
       if [ -s "${mlx_engine_runtime_requirements}" ]; then
-        "${venv_python}" -m pip install -r "${mlx_engine_runtime_requirements}"
+        pip_install_requirements "${venv_python}" "${mlx_engine_runtime_requirements}"
       fi
       rm -f "${mlx_engine_runtime_requirements}"
     fi
@@ -852,7 +862,7 @@ install_nvidia() {
   info "Installing CUDA runtime Python packages"
   "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${tmp_req}"
+  pip_install_requirements "${venv_python}" "${tmp_req}"
   info "Installing NVIDIA TensorFlow CUDA extras for Face ID"
   "${venv_python}" -m pip install --upgrade "tensorflow[and-cuda]==2.21.0"
   install_llama_cpp_native nvidia
@@ -875,7 +885,7 @@ install_rocm() {
   info "Installing AMD ROCm PyTorch wheels from ${rocm_index}"
   "${venv_python}" -m pip install --index-url "${rocm_index}" torch torchaudio
   info "Installing Tater dependencies"
-  "${venv_python}" -m pip install -r "${tmp_req}"
+  pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native rocm
   info "Installing PyTorch Kokoro runtime"
   if ! "${venv_python}" -m pip install kokoro; then
@@ -893,7 +903,7 @@ install_jetson_like() {
 
   filtered_requirements "${tmp_req}"
   info "Installing Tater dependencies without replacing JetPack PyTorch"
-  "${venv_python}" -m pip install -r "${tmp_req}"
+  pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native "${profile}"
 
   if ! "${venv_python}" -c 'import torch' >/dev/null 2>&1; then
