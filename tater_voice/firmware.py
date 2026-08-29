@@ -4,6 +4,7 @@ import contextlib
 import copy
 import gzip
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import logging
@@ -47,6 +48,10 @@ _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
 _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 5 * 60.0
 _SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 60 * 60.0
+_SAT1_RPI_SELF_OTA_STATE_ENV = "TATER_SAT1_SELF_OTA_STATE_DIR"
+_SAT1_RPI_SELF_OTA_HANDOFF_NAME = "tater-self-ota-session.json"
+_SAT1_RPI_SELF_OTA_SUCCESS_NAME = "last-success.json"
+_SAT1_RPI_SELF_OTA_FAILURE_NAME = "last-failure.json"
 _FIRMWARE_USB_RECOVERY_SELECTOR = "__usb_recovery__"
 _FIRMWARE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _FIRMWARE_SESSION_LOCK = threading.Lock()
@@ -87,7 +92,7 @@ _S420_FIRMWARE_LATEST_URL = str(
     or ""
 ).strip()
 _SAT1_RPI_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
-_SAT1_RPI_FIRMWARE_GITHUB_REPO = "Tater-SAT1-Standalone"
+_SAT1_RPI_FIRMWARE_GITHUB_REPO = "Tater-SAT1-RPi"
 _SAT1_RPI_FIRMWARE_GITHUB_REF = "main"
 _SAT1_RPI_FIRMWARE_RAW_BASE_URL = str(
     os.getenv(
@@ -154,9 +159,9 @@ _SAT1_RPI_FIRMWARE_LOCAL_ROOTS = tuple(
         Path(os.getenv("TATER_SAT1_RPI_FIRMWARE_LOCAL_ROOT", "")).expanduser()
         if os.getenv("TATER_SAT1_RPI_FIRMWARE_LOCAL_ROOT")
         else None,
-        _SOURCE_ROOT.parent / "Tater-SAT1-Standalone",
-        Path.home() / "Scripts" / "Tater-SAT1-Standalone",
-        Path.home() / "Tater-SAT1-Standalone",
+        _SOURCE_ROOT.parent / "Tater-SAT1-RPi",
+        Path.home() / "Scripts" / "Tater-SAT1-RPi",
+        Path.home() / "Tater-SAT1-RPi",
     )
     if isinstance(root, Path)
 )
@@ -2918,6 +2923,112 @@ def _append_session_passthrough_locked(session: Dict[str, Any], entry: Dict[str,
     )
 
 
+def _sat1_rpi_self_ota_state_dir() -> Optional[Path]:
+    raw = _text(os.getenv(_SAT1_RPI_SELF_OTA_STATE_ENV))
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else None
+
+
+def _is_loopback_host(value: Any) -> bool:
+    host = _lower(value).strip("[]")
+    if host == "localhost":
+        return True
+    host = host.split("%", 1)[0]
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return False
+
+
+def _sat1_rpi_self_ota_enabled(template_key: Any, host: Any) -> bool:
+    return (
+        _lower(template_key) == "satellite1_rpi_standalone"
+        and _is_loopback_host(host)
+        and _sat1_rpi_self_ota_state_dir() is not None
+    )
+
+
+def _is_sat1_rpi_self_ota_session(session: Dict[str, Any]) -> bool:
+    return (
+        _lower(session.get("template_key")) == "satellite1_rpi_standalone"
+        and _lower(session.get("operation")) == "native_tater_ota"
+        and bool(session.get("self_ota_recovery"))
+        and _sat1_rpi_self_ota_state_dir() is not None
+    )
+
+
+def _sat1_rpi_self_ota_json(path: Path) -> Dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _persist_sat1_rpi_self_ota_handoff_locked(session: Dict[str, Any]) -> None:
+    if not _is_sat1_rpi_self_ota_session(session):
+        return
+    state_dir = _sat1_rpi_self_ota_state_dir()
+    if state_dir is None:
+        return
+    created_ts = float(session.get("created_ts") or time.time())
+    verify_deadline_ts = float(
+        session.get("ota_verify_deadline_ts")
+        or (created_ts + _SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS)
+    )
+    payload = {
+        "schema": 1,
+        "session_id": _text(session.get("id")),
+        "selector": _text(session.get("selector")),
+        "template_key": "satellite1_rpi_standalone",
+        "firmware_version": _text(session.get("firmware_version")),
+        "display_name": _text(session.get("display_name")) or "Tater Embedded SAT1",
+        "operation": "native_tater_ota",
+        "health_results_cleared": True,
+        "created_ts": created_ts,
+        "verify_deadline_ts": verify_deadline_ts,
+        "binary_name": _text(session.get("binary_name")),
+        "binary_size": int(session.get("binary_size") or 0),
+    }
+    if not payload["session_id"] or not payload["firmware_version"]:
+        raise ValueError("SAT1 self-update recovery requires a session ID and expected version")
+    state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
+    destination = state_dir / _SAT1_RPI_SELF_OTA_HANDOFF_NAME
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _prepare_sat1_rpi_self_ota_handoff_locked(session: Dict[str, Any]) -> None:
+    if not _is_sat1_rpi_self_ota_session(session):
+        return
+    state_dir = _sat1_rpi_self_ota_state_dir()
+    if state_dir is None:
+        return
+    state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
+    for filename in (_SAT1_RPI_SELF_OTA_SUCCESS_NAME, _SAT1_RPI_SELF_OTA_FAILURE_NAME):
+        (state_dir / filename).unlink(missing_ok=True)
+    _persist_sat1_rpi_self_ota_handoff_locked(session)
+
+
+def _clear_sat1_rpi_self_ota_handoff_locked(session: Dict[str, Any]) -> None:
+    if not _is_sat1_rpi_self_ota_session(session):
+        return
+    state_dir = _sat1_rpi_self_ota_state_dir()
+    if state_dir is None:
+        return
+    with contextlib.suppress(OSError):
+        (state_dir / _SAT1_RPI_SELF_OTA_HANDOFF_NAME).unlink(missing_ok=True)
+
+
 def _is_native_selector(selector: Any) -> bool:
     return _text(selector).startswith("native:")
 
@@ -3111,6 +3222,7 @@ def _fail_native_ota_locked(session: Dict[str, Any], message: str) -> None:
     session["error"] = error
     session["message"] = error
     _set_session_phase_locked(session, "failed")
+    _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
 def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) -> None:
@@ -3128,6 +3240,7 @@ def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) ->
         display_name=session.get("display_name"),
         source="native_tater_ota",
     )
+    _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
 def _apply_native_ota_update_locked(
@@ -3152,6 +3265,8 @@ def _apply_native_ota_update_locked(
         return
     if terminal_status == "rebooting":
         session["ota_reboot_requested"] = True
+        with contextlib.suppress(OSError, ValueError):
+            _persist_sat1_rpi_self_ota_handoff_locked(session)
 
     if isinstance(client_status, dict):
         connected = bool(client_status.get("connected"))
@@ -3191,6 +3306,140 @@ def _apply_native_ota_update_locked(
         _set_session_phase_locked(session, "awaiting_device_logs")
 
 
+def _sat1_rpi_self_ota_health_result(
+    state_dir: Path,
+    expected_version: str,
+) -> Dict[str, Any]:
+    matches: List[Tuple[float, str, Dict[str, Any]]] = []
+    for outcome, filename in (
+        ("success", _SAT1_RPI_SELF_OTA_SUCCESS_NAME),
+        ("failure", _SAT1_RPI_SELF_OTA_FAILURE_NAME),
+    ):
+        payload = _sat1_rpi_self_ota_json(state_dir / filename)
+        if _text(payload.get("version")) != expected_version:
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            result_ts = float(payload.get("timestamp") or 0.0)
+            matches.append((result_ts, outcome, payload))
+    if not matches:
+        return {}
+    _result_ts, outcome, payload = max(matches, key=lambda row: row[0])
+    return {**payload, "outcome": outcome}
+
+
+def _refresh_recovered_sat1_rpi_self_ota_locked(session: Dict[str, Any]) -> None:
+    if not bool(session.get("active")) or not bool(session.get("self_ota_recovered")):
+        return
+    state_dir = _sat1_rpi_self_ota_state_dir()
+    if state_dir is None:
+        _fail_native_ota_locked(session, "Tater Embedded OTA recovery storage is no longer configured.")
+        return
+    expected_version = _text(session.get("firmware_version"))
+    result = _sat1_rpi_self_ota_health_result(state_dir, expected_version)
+    outcome = _lower(result.get("outcome"))
+    if outcome == "success":
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message=f"Tater Embedded passed its post-update health check on {expected_version}.",
+            source="session",
+        )
+        _complete_native_ota_locked(session, expected_version)
+        return
+    if outcome == "failure":
+        previous_version = _text(result.get("previous_version"))
+        status = _lower(result.get("status"))
+        rollback_detail = (
+            f" and rolled back to {previous_version}"
+            if status == "rolled_back" and previous_version
+            else "; automatic rollback was unavailable"
+            if status == "rollback_unavailable"
+            else ""
+        )
+        message = f"Tater Embedded failed its post-update health check{rollback_detail}."
+        _append_session_entry_locked(session, level="error", message=message, source="session")
+        _fail_native_ota_locked(session, message)
+        return
+    deadline = float(session.get("ota_verify_deadline_ts") or 0.0)
+    if deadline > 0.0 and time.time() >= deadline:
+        _fail_native_ota_locked(
+            session,
+            "Timed out waiting for Tater Embedded to finish its post-update health check.",
+        )
+        return
+    session["message"] = "Tater Embedded restarted. Waiting for its post-update health check to finish."
+    _set_session_progress_locked(session, 99.0)
+    _set_session_phase_locked(session, "awaiting_device_logs")
+    session["status_text"] = session["message"]
+
+
+def _recover_sat1_rpi_self_ota_session(session_id: str) -> bool:
+    state_dir = _sat1_rpi_self_ota_state_dir()
+    if state_dir is None:
+        return False
+    handoff = _sat1_rpi_self_ota_json(state_dir / _SAT1_RPI_SELF_OTA_HANDOFF_NAME)
+    token = _text(session_id)
+    if (
+        int(handoff.get("schema") or 0) != 1
+        or _text(handoff.get("session_id")) != token
+        or _lower(handoff.get("template_key")) != "satellite1_rpi_standalone"
+        or _lower(handoff.get("operation")) != "native_tater_ota"
+    ):
+        return False
+    expected_version = _text(handoff.get("firmware_version"))
+    if not expected_version:
+        return False
+    now = time.time()
+    with _FIRMWARE_SESSION_LOCK:
+        if isinstance(_FIRMWARE_SESSIONS.get(token), dict):
+            return True
+        session: Dict[str, Any] = {
+            "id": token,
+            "selector": _text(handoff.get("selector")),
+            "template_key": "satellite1_rpi_standalone",
+            "firmware_version": expected_version,
+            "display_name": _text(handoff.get("display_name")) or "Tater Embedded SAT1",
+            "host": "localhost",
+            "operation": "native_tater_ota",
+            "command": [],
+            "source_binary": "",
+            "binary_url": "",
+            "binary_name": _text(handoff.get("binary_name")),
+            "binary_size": int(handoff.get("binary_size") or 0),
+            "created_ts": float(handoff.get("created_ts") or now),
+            "updated_ts": now,
+            "cursor": 0,
+            "entries": [],
+            "phase": "awaiting_device_logs",
+            "status_text": "Tater Embedded restarted. Verifying the installed update...",
+            "progress_percent": 99.0,
+            "progress_bytes": 0,
+            "progress_total_bytes": int(handoff.get("binary_size") or 0),
+            "active": True,
+            "error": "",
+            "message": "Tater Embedded restarted. Verifying the installed update...",
+            "returncode": None,
+            "stop_requested": False,
+            "follow_logs": False,
+            "device_logs_started": False,
+            "ota_verify_deadline_ts": float(
+                handoff.get("verify_deadline_ts")
+                or (now + _SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS)
+            ),
+            "self_ota_recovery": True,
+            "self_ota_recovered": True,
+        }
+        _FIRMWARE_SESSIONS[token] = session
+        _append_session_entry_locked(
+            session,
+            level="info",
+            message="Reconnected to Tater Embedded after its appliance restart.",
+            source="session",
+        )
+        _refresh_recovered_sat1_rpi_self_ota_locked(session)
+    return True
+
+
 def _final_session_phase(session: Dict[str, Any]) -> str:
     phase = _lower(session.get("phase"))
     if phase in {"failed", "cancelled"}:
@@ -3220,6 +3469,7 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "display_name": _text(session.get("display_name")),
         "host": _text(session.get("host")),
         "operation": _text(session.get("operation")),
+        "self_ota_recovery": bool(session.get("self_ota_recovery")),
         "phase": phase,
         "status_text": _text(session.get("status_text")) or _phase_status_text(phase, _text(session.get("display_name"))),
         "progress_percent": round(max(0.0, min(100.0, float(session.get("progress_percent") or 0.0))), 1),
@@ -3454,11 +3704,7 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         with _FIRMWARE_SESSION_LOCK:
             session = _FIRMWARE_SESSIONS.get(session_id)
             if isinstance(session, dict):
-                session["active"] = False
-                session["returncode"] = 1
-                session["error"] = "Native OTA selector or URL is missing."
-                session["message"] = "Native OTA failed."
-                _set_session_phase_locked(session, "failed")
+                _fail_native_ota_locked(session, "Native OTA selector or URL is missing.")
         return
 
     try:
@@ -3486,6 +3732,8 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
             )
             session["ota_verify_deadline_ts"] = time.time() + verify_timeout
             session["device_log_cursor"] = int(baseline_logs.get("cursor") or 0)
+            with contextlib.suppress(OSError, ValueError):
+                _persist_sat1_rpi_self_ota_handoff_locked(session)
 
         result = native_satellite.run_on_runtime_loop(
             native_satellite.send_command(
@@ -3501,11 +3749,7 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         with _FIRMWARE_SESSION_LOCK:
             session = _FIRMWARE_SESSIONS.get(session_id)
             if isinstance(session, dict):
-                session["active"] = False
-                session["returncode"] = 1
-                session["error"] = _text(exc) or exc.__class__.__name__
-                session["message"] = "Native OTA failed."
-                _set_session_phase_locked(session, "failed")
+                _fail_native_ota_locked(session, _text(exc) or exc.__class__.__name__)
                 _append_session_entry_locked(
                     session,
                     level="error",
@@ -3535,6 +3779,8 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         session["device_log_next_retry_ts"] = time.time()
         session["device_log_retry_count"] = 0
         _set_session_phase_locked(session, "awaiting_device_logs")
+        with contextlib.suppress(OSError, ValueError):
+            _persist_sat1_rpi_self_ota_handoff_locked(session)
 
 
 def _prebuilt_ota_session_worker(session_id: str) -> None:
@@ -4484,6 +4730,10 @@ def _start_flash_session(
         else ["native_ota", host, str(prebuilt_binary["path"])]
     )
     operation = "native_tater_ota" if native_firmware else "prebuilt_ota_upload"
+    self_ota_recovery = bool(
+        native_firmware
+        and _sat1_rpi_self_ota_enabled(context.get("template_key"), host)
+    )
     command_display = (
         f"Tater Native OTA --selector {selector} --url {_text(ota_artifact.get('ota_url'))}"
         if native_firmware
@@ -4499,6 +4749,7 @@ def _start_flash_session(
         "display_name": target_label,
         "host": host,
         "operation": operation,
+        "self_ota_recovery": self_ota_recovery,
         "context": context,
         "command": command,
         "source_binary": str(prebuilt_binary.get("path") or ""),
@@ -4567,6 +4818,14 @@ def _start_flash_session(
             message="Command: " + command_display,
             source="session",
         )
+        if self_ota_recovery:
+            try:
+                _prepare_sat1_rpi_self_ota_handoff_locked(session)
+            except (OSError, ValueError) as exc:
+                _FIRMWARE_SESSIONS.pop(session_id, None)
+                raise RuntimeError(
+                    f"Could not prepare Tater Embedded restart recovery: {_text(exc) or exc.__class__.__name__}."
+                ) from exc
 
     worker_target = _native_tater_ota_session_worker if native_firmware else _prebuilt_ota_session_worker
     worker = threading.Thread(target=worker_target, args=(session_id,), daemon=True)
@@ -4585,9 +4844,22 @@ def _start_flash_session(
 
 def _poll_flash_session(session_id: str, *, after_seq: int = 0) -> Dict[str, Any]:
     _prune_firmware_sessions()
-    _pump_session_device_logs(session_id)
+    session_token = _text(session_id)
     with _FIRMWARE_SESSION_LOCK:
-        session = _FIRMWARE_SESSIONS.get(_text(session_id))
+        existing = _FIRMWARE_SESSIONS.get(session_token)
+    if not isinstance(existing, dict):
+        _recover_sat1_rpi_self_ota_session(session_token)
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_token)
+        recovered_self_ota = bool(
+            isinstance(session, dict) and session.get("self_ota_recovered")
+        )
+        if recovered_self_ota and isinstance(session, dict):
+            _refresh_recovered_sat1_rpi_self_ota_locked(session)
+    if not recovered_self_ota:
+        _pump_session_device_logs(session_token)
+    with _FIRMWARE_SESSION_LOCK:
+        session = _FIRMWARE_SESSIONS.get(session_token)
         if not isinstance(session, dict):
             raise RuntimeError("Firmware log session is no longer available.")
         return _session_payload_locked(session, after_seq=after_seq)

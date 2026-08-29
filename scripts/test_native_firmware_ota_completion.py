@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import pathlib
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -44,6 +47,25 @@ def _ota_entry(status: str, progress: int, message: str = "") -> dict[str, objec
             "message": message,
         },
     }
+
+
+def _self_ota_session(session_id: str, version: str, created_ts: float) -> dict[str, object]:
+    session = _session()
+    session.update(
+        {
+            "id": session_id,
+            "selector": "native:tater-sat1-local",
+            "template_key": "satellite1_rpi_standalone",
+            "display_name": "Tater Embedded SAT1",
+            "firmware_version": version,
+            "created_ts": created_ts,
+            "ota_verify_deadline_ts": created_ts + 3600.0,
+            "binary_name": "firmware.bin",
+            "binary_size": 1234,
+            "self_ota_recovery": True,
+        }
+    )
+    return session
 
 
 class NativeFirmwareOtaCompletionTests(unittest.TestCase):
@@ -128,6 +150,105 @@ class NativeFirmwareOtaCompletionTests(unittest.TestCase):
         self.assertFalse(session["active"])
         self.assertEqual("failed", session["phase"])
         self.assertIn("Timed out", str(session["error"]))
+
+    def test_embedded_sat1_session_recovers_after_tater_restarts(self) -> None:
+        session_id = "fw_self_ota_success"
+        version = "tater-sat1-standalone-v0.2.0"
+        created_ts = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = pathlib.Path(temporary)
+            environment = {firmware._SAT1_RPI_SELF_OTA_STATE_ENV: str(state_dir)}
+            with mock.patch.dict(os.environ, environment, clear=False):
+                session = _self_ota_session(session_id, version, created_ts)
+                stale_result = state_dir / firmware._SAT1_RPI_SELF_OTA_SUCCESS_NAME
+                stale_result.write_text(
+                    json.dumps({"status": "accepted", "version": version, "timestamp": created_ts - 100.0}),
+                    encoding="utf-8",
+                )
+                firmware._prepare_sat1_rpi_self_ota_handoff_locked(session)
+                self.assertFalse(stale_result.exists())
+                (state_dir / firmware._SAT1_RPI_SELF_OTA_SUCCESS_NAME).write_text(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "status": "accepted",
+                            "version": version,
+                            "previous_version": "tater-sat1-standalone-v0.1.2",
+                            "timestamp": created_ts + 10.0,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+                try:
+                    with mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version:
+                        result = firmware._poll_flash_session(session_id)
+                    self.assertFalse(result["active"])
+                    self.assertEqual("completed", result["phase"])
+                    self.assertEqual(100.0, result["progress_percent"])
+                    self.assertTrue(result["self_ota_recovery"])
+                    self.assertFalse((state_dir / firmware._SAT1_RPI_SELF_OTA_HANDOFF_NAME).exists())
+                    save_version.assert_called_once()
+                finally:
+                    firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+
+    def test_embedded_sat1_rollback_is_reported_after_tater_restarts(self) -> None:
+        session_id = "fw_self_ota_rollback"
+        version = "tater-sat1-standalone-v0.2.0"
+        previous_version = "tater-sat1-standalone-v0.1.2"
+        created_ts = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = pathlib.Path(temporary)
+            environment = {firmware._SAT1_RPI_SELF_OTA_STATE_ENV: str(state_dir)}
+            with mock.patch.dict(os.environ, environment, clear=False):
+                firmware._persist_sat1_rpi_self_ota_handoff_locked(
+                    _self_ota_session(session_id, version, created_ts)
+                )
+                (state_dir / firmware._SAT1_RPI_SELF_OTA_FAILURE_NAME).write_text(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "status": "rolled_back",
+                            "version": version,
+                            "previous_version": previous_version,
+                            "timestamp": created_ts + 10.0,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+                try:
+                    result = firmware._poll_flash_session(session_id)
+                    self.assertFalse(result["active"])
+                    self.assertEqual("failed", result["phase"])
+                    self.assertIn(previous_version, str(result["error"]))
+                    self.assertFalse((state_dir / firmware._SAT1_RPI_SELF_OTA_HANDOFF_NAME).exists())
+                finally:
+                    firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+
+    def test_self_update_handoff_is_not_used_for_other_satellites(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = pathlib.Path(temporary)
+            environment = {firmware._SAT1_RPI_SELF_OTA_STATE_ENV: str(state_dir)}
+            with mock.patch.dict(os.environ, environment, clear=False):
+                self.assertTrue(
+                    firmware._sat1_rpi_self_ota_enabled(
+                        "satellite1_rpi_standalone",
+                        "127.0.0.1",
+                    )
+                )
+                self.assertFalse(
+                    firmware._sat1_rpi_self_ota_enabled(
+                        "satellite1_rpi_standalone",
+                        "10.4.20.198",
+                    )
+                )
+                for template_key in ("satellite1_rpi_satellite", "thirdreality_s420", "satellite1"):
+                    with self.subTest(template_key=template_key):
+                        session = _self_ota_session(f"fw_{template_key}", "test-v2", time.time())
+                        session["template_key"] = template_key
+                        firmware._persist_sat1_rpi_self_ota_handoff_locked(session)
+                        self.assertFalse((state_dir / firmware._SAT1_RPI_SELF_OTA_HANDOFF_NAME).exists())
 
 
 if __name__ == "__main__":

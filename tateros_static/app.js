@@ -15118,12 +15118,6 @@ function browserUsbPortLabel(port) {
 }
 
 function browserUsbCapability() {
-  if (typeof window === "undefined" || !window.isSecureContext) {
-    return {
-      available: false,
-      message: "Browser USB needs a secure Tater page opened over HTTPS or localhost.",
-    };
-  }
   const serial = typeof navigator === "undefined" ? null : navigator.serial;
   if (!serial || typeof serial.requestPort !== "function") {
     return {
@@ -15152,7 +15146,6 @@ async function browserUsbSelectPort(selector = "") {
 async function browserUsbAuthorizedPorts() {
   if (
     typeof window === "undefined" ||
-    !window.isSecureContext ||
     typeof navigator === "undefined" ||
     !navigator.serial ||
     typeof navigator.serial.getPorts !== "function"
@@ -17440,6 +17433,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
   const singleUpdate = updates.length === 1;
   let stopped = false;
   let currentSessionId = "";
+  let currentSelfOtaRecovery = false;
+  let selfOtaReconnectDeadline = 0;
   let cursor = 0;
   let pollTimer = 0;
   let index = 0;
@@ -17559,6 +17554,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
             appendBatchLine(`${row.title} ${actionPast}.`, "info");
           }
           currentSessionId = "";
+          currentSelfOtaRecovery = false;
+          selfOtaReconnectDeadline = 0;
           progressView?.update({
             percent: (index / updates.length) * 100,
             phase: index >= updates.length ? "restarting" : "uploading",
@@ -17575,6 +17572,26 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         }
         pollCurrent(row);
       } catch (error) {
+        if (currentSelfOtaRecovery && Date.now() < selfOtaReconnectDeadline) {
+          const currentProgress = 99;
+          const overallProgress = ((Math.max(0, index - 1) + currentProgress / 100) / updates.length) * 100;
+          const message = "Tater Embedded is restarting. Reconnecting to verify the update...";
+          progressView?.update({
+            percent: overallProgress,
+            phase: "restarting",
+            activeIndex: index - 1,
+            deviceState: "active",
+            devicePercent: currentProgress,
+            stage: 2,
+            message,
+            hint: "Keep this page open. It will reconnect automatically when Tater is healthy.",
+          });
+          if (statusNode instanceof HTMLElement) {
+            statusNode.textContent = message;
+          }
+          pollTimer = window.setTimeout(() => pollCurrent(row), 2500);
+          return;
+        }
         failed += 1;
         appendBatchLine(`${row.title} log polling failed: ${String(error?.message || "unknown error")}`, "error");
         progressView?.update({
@@ -17604,6 +17621,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
     index += 1;
     cursor = 0;
     currentSessionId = "";
+    currentSelfOtaRecovery = false;
+    selfOtaReconnectDeadline = 0;
     appendBatchLine(`Starting ${row.title} (${index}/${updates.length})...`, "info");
     progressView?.update({
       percent: ((index - 1) / updates.length) * 100,
@@ -17626,6 +17645,8 @@ function openEspHomeFirmwareUpdateAllFlow(trigger, coreKey = "voice", updateRows
         follow_logs: false,
       });
       currentSessionId = String(result?.session_id || "").trim();
+      currentSelfOtaRecovery = boolFromAny(result?.self_ota_recovery, false);
+      selfOtaReconnectDeadline = currentSelfOtaRecovery ? Date.now() + 65 * 60 * 1000 : 0;
       cursor = Number(result?.cursor || 0);
       renderEspHomeFirmwareLogEntries(logConsole, Array.isArray(result?.entries) ? result.entries : [], false);
       progressView?.update({

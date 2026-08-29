@@ -292,7 +292,7 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('"preserves_settings": kind == "ota"', firmware_source)
         self.assertIn('_download_prebuilt_firmware_binary(context, kind', firmware_source)
 
-    def test_browser_usb_capability_distinguishes_secure_context_and_web_serial(self) -> None:
+    def test_browser_usb_capability_relies_on_web_serial_instead_of_https(self) -> None:
         script = textwrap.dedent(
             r"""
             const assert = require("assert");
@@ -320,9 +320,8 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
               return context.browserUsbCapability();
             }
 
-            const insecure = capability({ isSecureContext: false }, { serial: { requestPort() {} } });
-            assert.strictEqual(insecure.available, false);
-            assert.match(insecure.message, /secure/i);
+            const httpWithSerial = capability({ isSecureContext: false }, { serial: { requestPort() {} } });
+            assert.strictEqual(httpWithSerial.available, true);
 
             const missingSerial = capability({ isSecureContext: true }, {});
             assert.strictEqual(missingSerial.available, false);
@@ -365,8 +364,8 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn("Browser ESP flashing cannot write", app_source)
         self.assertIn("This browser session does not expose Web Serial", app_source)
         self.assertIn("typeof serial.requestPort", app_source)
-        self.assertIn('message: "Browser USB needs a secure Tater page', app_source)
-        self.assertIn("!window.isSecureContext", app_source)
+        self.assertNotIn('message: "Browser USB needs a secure Tater page', app_source)
+        self.assertNotIn("!window.isSecureContext", app_source)
         self.assertNotIn('label: "Local USB Flash Log"', app_source)
         self.assertIn("createFirmwareProgressView", app_source)
         self.assertIn("Browser USB Logs", app_source)
@@ -380,7 +379,8 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('"satellite1_rpi_standalone",', firmware_source)
         self.assertIn('"satellite1_rpi_satellite",', firmware_source)
         self.assertIn("TATER_SAT1_RPI_FIRMWARE_LATEST_URL", firmware_source)
-        self.assertIn('"Tater-SAT1-Standalone"', firmware_source)
+        self.assertIn('"Tater-SAT1-RPi"', firmware_source)
+        self.assertNotIn('"Tater-SAT1-Standalone"', firmware_source)
         self.assertIn(
             'for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):',
             firmware_source,

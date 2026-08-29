@@ -129,6 +129,25 @@ class FirmwareProgressUiTests(unittest.TestCase):
         self.assertIn('"progress_bytes": int(session.get("progress_bytes") or 0)', source)
         self.assertIn('"progress_total_bytes": int(session.get("progress_total_bytes") or 0)', source)
 
+    def test_embedded_sat1_reconnect_isolated_from_other_update_paths(self) -> None:
+        update_flow = _function_source(
+            self.app_source,
+            "openEspHomeFirmwareUpdateAllFlow",
+            "bindEspHomeFirmwareActions",
+        )
+        backend = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
+
+        self.assertIn("currentSelfOtaRecovery", update_flow)
+        self.assertIn("Tater Embedded is restarting. Reconnecting to verify the update", update_flow)
+        self.assertIn("result?.self_ota_recovery", update_flow)
+        self.assertIn('== "satellite1_rpi_standalone"', backend)
+        self.assertIn('== "native_tater_ota"', backend)
+        self.assertIn("and _is_loopback_host(host)", backend)
+        self.assertIn("TATER_SAT1_SELF_OTA_STATE_DIR", backend)
+        self.assertIn("def _recover_sat1_rpi_self_ota_session", backend)
+        self.assertIn("last-success.json", backend)
+        self.assertIn("last-failure.json", backend)
+
 
 if __name__ == "__main__":
     unittest.main()
