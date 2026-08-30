@@ -8227,6 +8227,31 @@ function renderCoreManagerField(field) {
     const maxBytesAttr = Number.isFinite(maxBytes) && maxBytes > 0
       ? ` data-core-file-max-bytes="${Math.floor(maxBytes)}"`
       : "";
+    const cameraCapture = boolFromAny(field?.camera_capture, false);
+    const cameraFacingModeRaw = String(field?.camera_facing_mode || "user").trim().toLowerCase();
+    const cameraFacingMode = ["user", "environment"].includes(cameraFacingModeRaw) ? cameraFacingModeRaw : "user";
+    if (cameraCapture) {
+      return wrapField(`
+        <div data-core-camera-field data-core-camera-facing-mode="${escapeHtml(cameraFacingMode)}">
+          <label>${escapeHtml(label)}
+            <input type="file"${acceptAttr}${fileEncodingAttr}${maxBytesAttr}${disabledAttr}
+              data-core-field-key="${escapeHtml(key)}" data-core-field-type="file" />
+            ${descHtml}
+          </label>
+          <div class="inline-row" style="margin-top:8px;">
+            <button type="button" class="inline-btn" data-core-camera-start${disabledAttr}>Use Camera</button>
+            <button type="button" class="action-btn" data-core-camera-take hidden${disabledAttr}>Take Photo</button>
+            <button type="button" class="inline-btn" data-core-camera-cancel hidden>Cancel</button>
+            <span class="small" data-core-camera-status>Choose an image or use the camera.</span>
+          </div>
+          <video data-core-camera-video autoplay muted playsinline hidden
+            style="display:none; width:100%; max-height:360px; margin-top:8px; object-fit:contain; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:#000;"></video>
+          <canvas data-core-camera-canvas hidden></canvas>
+          <img data-core-camera-preview alt="Selected face photo" hidden
+            style="display:none; width:100%; max-height:360px; margin-top:8px; object-fit:contain; border:1px solid rgba(255,255,255,0.12); border-radius:10px; background:rgba(0,0,0,0.2);" />
+        </div>
+      `);
+    }
     return wrapField(`
       <label>${escapeHtml(label)}
         <input type="file"${acceptAttr}${fileEncodingAttr}${maxBytesAttr}${disabledAttr}
@@ -13361,7 +13386,8 @@ async function collectCoreManagerValuesWithFiles(host) {
     if (input.disabled || !(input instanceof HTMLInputElement)) {
       continue;
     }
-    const file = input.files && input.files.length ? input.files[0] : null;
+    const capturedFile = input._coreCapturedFile instanceof File ? input._coreCapturedFile : null;
+    const file = capturedFile || (input.files && input.files.length ? input.files[0] : null);
     if (!file) {
       continue;
     }
@@ -18152,6 +18178,151 @@ function bindCoreVideoPosterReset(root = document) {
   });
 }
 
+function bindCoreCameraCaptureFields(root = document) {
+  root.querySelectorAll("[data-core-camera-field]").forEach((field) => {
+    if (!(field instanceof HTMLElement) || field.dataset.coreCameraBound === "1") {
+      return;
+    }
+    const input = field.querySelector("input[type='file'][data-core-field-type='file']");
+    const startButton = field.querySelector("[data-core-camera-start]");
+    const takeButton = field.querySelector("[data-core-camera-take]");
+    const cancelButton = field.querySelector("[data-core-camera-cancel]");
+    const video = field.querySelector("[data-core-camera-video]");
+    const canvas = field.querySelector("[data-core-camera-canvas]");
+    const preview = field.querySelector("[data-core-camera-preview]");
+    const status = field.querySelector("[data-core-camera-status]");
+    if (
+      !(input instanceof HTMLInputElement) ||
+      !(startButton instanceof HTMLButtonElement) ||
+      !(takeButton instanceof HTMLButtonElement) ||
+      !(cancelButton instanceof HTMLButtonElement) ||
+      !(video instanceof HTMLVideoElement) ||
+      !(canvas instanceof HTMLCanvasElement) ||
+      !(preview instanceof HTMLImageElement)
+    ) {
+      return;
+    }
+
+    const setStatus = (message) => {
+      if (status instanceof HTMLElement) {
+        status.textContent = String(message || "");
+      }
+    };
+    const stopCamera = () => {
+      const stream = video.srcObject;
+      if (stream && typeof stream.getTracks === "function") {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      video.srcObject = null;
+      video.hidden = true;
+      video.style.display = "none";
+      takeButton.hidden = true;
+      cancelButton.hidden = true;
+      startButton.hidden = false;
+      startButton.disabled = input.disabled;
+    };
+    const showPreview = (file) => {
+      const oldUrl = String(preview.dataset.coreCameraObjectUrl || "");
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+      }
+      if (!(file instanceof File)) {
+        preview.removeAttribute("src");
+        preview.dataset.coreCameraObjectUrl = "";
+        preview.hidden = true;
+        preview.style.display = "none";
+        return;
+      }
+      const objectUrl = URL.createObjectURL(file);
+      preview.dataset.coreCameraObjectUrl = objectUrl;
+      preview.src = objectUrl;
+      preview.hidden = false;
+      preview.style.display = "block";
+    };
+
+    input.addEventListener("change", () => {
+      input._coreCapturedFile = null;
+      stopCamera();
+      const file = input.files && input.files.length ? input.files[0] : null;
+      showPreview(file);
+      setStatus(file ? `Selected ${file.name || "image"}.` : "Choose an image or use the camera.");
+    });
+
+    startButton.addEventListener("click", async () => {
+      if (input.disabled) {
+        return;
+      }
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        setStatus("Live camera capture requires HTTPS or localhost. You can still upload an image.");
+        return;
+      }
+      startButton.disabled = true;
+      setStatus("Requesting camera permission...");
+      try {
+        const facingMode = String(field.dataset.coreCameraFacingMode || "user");
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode,
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        });
+        video.srcObject = stream;
+        video.hidden = false;
+        video.style.display = "block";
+        startButton.hidden = true;
+        takeButton.hidden = false;
+        cancelButton.hidden = false;
+        await video.play();
+        setStatus("Center one face in the frame, then take the photo.");
+      } catch (error) {
+        stopCamera();
+        setStatus(`Camera unavailable: ${String(error?.message || "permission was not granted")}`);
+      }
+    });
+
+    takeButton.addEventListener("click", async () => {
+      const width = Number(video.videoWidth || 0);
+      const height = Number(video.videoHeight || 0);
+      if (!width || !height) {
+        setStatus("The camera is not ready yet. Try again in a moment.");
+        return;
+      }
+      takeButton.disabled = true;
+      try {
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          throw new Error("The browser could not capture the camera frame.");
+        }
+        context.drawImage(video, 0, 0, width, height);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+        if (!(blob instanceof Blob)) {
+          throw new Error("The browser could not create the camera photo.");
+        }
+        const file = new File([blob], `face-photo-${Date.now()}.jpg`, { type: "image/jpeg" });
+        input.value = "";
+        input._coreCapturedFile = file;
+        showPreview(file);
+        stopCamera();
+        setStatus("Camera photo ready. Click Add Face to Person to save it.");
+      } catch (error) {
+        setStatus(`Photo failed: ${String(error?.message || "unknown error")}`);
+      } finally {
+        takeButton.disabled = false;
+      }
+    });
+
+    cancelButton.addEventListener("click", () => {
+      stopCamera();
+      setStatus("Camera closed. Choose an image or try the camera again.");
+    });
+    field.dataset.coreCameraBound = "1";
+  });
+}
+
 function bindCoreTabManagers() {
   bindCoreManagerTabs();
   bindCoreManagerSubtabs();
@@ -18165,6 +18336,7 @@ function bindCoreTabManagers() {
   bindCoreManagerConditionalDisabledFields();
   bindCoreManagerDependentSelects();
   bindCoreVideoPosterReset();
+  bindCoreCameraCaptureFields();
   bindNativeSatelliteVolumeControls();
   document.querySelectorAll("[data-core-field-type='range']").forEach((input) => {
     if (!(input instanceof HTMLInputElement) || input.dataset.coreRangeBound === "1") {
