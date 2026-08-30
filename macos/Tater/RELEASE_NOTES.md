@@ -1,79 +1,79 @@
-# Tater v1.1.14
+# Tater v1.1.15
 
-Tater v1.1.14 adds first-class SAT1 Raspberry Pi and Tater Embedded support,
-then makes Spud Link and satellite firmware management much easier to
-understand and use.
+Tater v1.1.15 gives Spudex and voice settings a cleaner Tater-themed interface,
+expands Spud Link voice and identity routing, and improves Ryzen AI setup and
+runtime reliability.
 
 ## What's Changed
 
-### SAT1 Raspberry Pi and Tater Embedded
+### Spudex Workbench
 
-- Adds the complete Tater firmware feed for the new
-  [Tater SAT1 Raspberry Pi](https://github.com/TaterTotterson/Tater-SAT1-RPi)
-  project, including both Tater Embedded and satellite-only images.
-- Lets Tater match connected SAT1 Raspberry Pi devices to their signed
-  appliance updates in the Firmware panel.
-- Keeps an embedded SAT1 update visible while its local Tater shuts down and
-  restarts, then reconnects automatically and reports either a successful
-  install or an automatic rollback.
-- Keeps the new self-update recovery limited to a local Tater Embedded SAT1;
-  existing ThirdReality, Reachy, ESP32 SAT1, and remote SAT1 update paths keep
-  their current behavior.
+- Refreshes Spudex with a warmer Tater-themed workbench and more compact
+  controls throughout.
+- Places chat and the read-only command output terminal side by side so the
+  conversation stays clean while runtime activity remains visible and
+  scrollable.
+- Combines tracked processes and session controls into one slim status bar.
+- Rebuilds Manual Session as a full terminal-style workspace with an inline
+  command prompt, a correctly sized Keep Running option, and no redundant
+  recent-command panel.
+- Repairs oversized checkboxes and tightens the Settings layout for clearer,
+  more consistent controls.
 
-### Why Tater Embedded Is Useful
+### Voice, Announcements, and Spud Link
 
-- A SAT1 can now be a self-contained Tater for a room, area, or person instead
-  of only being a microphone and speaker for one central server.
-- Each embedded Tater can keep its own wake word, wake sound, memory, personal
-  information, plugins, music preferences, and music recommendations.
-- One or two additional satellites can connect to that room's embedded Tater,
-  allowing a home to use separate satellite groups with different identities
-  and behavior while still keeping a larger main Tater elsewhere.
-- Wake-word detection and VAD stay on the SAT1 for responsive listening, while
-  heavier speech, vision, and language-model work can use a Spud Hub or remote
-  APIs.
+- Organizes speech settings into focused Listening & STT, Reply Voice,
+  Announcements, and Playback & Test tabs.
+- Lets announcements reuse the complete direct-reply TTS setup or use an
+  independent backend, model, gain, cloned voice, language, and voice
+  instructions.
+- Keeps direct-reply and announcement clone audio in separate managed profiles
+  so changing or removing one does not affect the other.
+- Adds Spud Hub speech-end detection as an independently routable model and
+  streams microphone audio to the Hub for live endpointing, with automatic
+  local fallback when the connection is interrupted.
+- Reuses the Hub stream's final transcription when STT is also routed there,
+  avoiding duplicate speech processing.
+- Makes WebRTC speech-end detection require sustained speech by default,
+  reducing false starts from isolated noisy audio frames.
+- Realigns a late stereo-group member to the shared playback timeline when
+  supported, while leaving ordinary startup jitter alone.
 
-### Spud Link and Model Routing
+### Face ID, Speaker ID, and People
 
-- Separates Little Spud QR pairing and Spudlet short-code pairing into clear,
-  themed flows that confirm success automatically.
-- Places each Little Spud's LAN and optional Tater Tunnel address beside its
-  QR pairing action so the correct connection details are captured first.
-- Organizes Spudlet connection, model routing, role, privacy, and technical
-  settings into focused tabs with clearer explanations.
-- Greys out model controls that are owned by the Spud Hub and labels routed
-  STT, TTS, Beast Mode, Face ID, and other model families consistently.
-- Shows the actual models loaded on the Hub—including shared models used for
-  multiple jobs—instead of placeholder `base` entries or stale local choices.
-- Improves Hub-routed Face ID and preserves authenticated person identity when
-  results return to the Spudlet.
+- Adds manual Face ID enrollment from an uploaded photo or a camera capture in
+  the People panel.
+- Makes Spud Hub Face ID and Speaker ID stateless embedding services: images
+  and audio can be processed on the Hub while People links, face galleries,
+  speaker profiles, and enrollment samples remain on the calling Tater.
+- Records embedding-model metadata and only compares compatible Face ID and
+  Speaker ID vectors, preventing stale or mismatched models from producing
+  incorrect identity matches.
+- Requires image-backed face observations and preserves the saved face crop
+  used by each local identity profile.
+- Clarifies routed identity ownership and model location throughout the model
+  and Spud Link interfaces.
 
-### Firmware Flasher
+### Ryzen AI, Setup, and Core Forms
 
-- Adds Factory and Keep Settings choices to both Local USB and Browser USB
-  flashing for supported ESP satellites.
-- Keep Settings writes the OTA application image without erasing Wi-Fi,
-  pairing, or satellite settings; Factory remains available for recovery and
-  first-time setup.
-- Removes Tater's extra HTTPS-only gate from Browser USB and leaves browser
-  capability detection to Chrome.
-- Updates the SAT1 Raspberry Pi feed and local development paths for the new
-  `Tater-SAT1-RPi` repository name.
-
-### Runtime and Core Reliability
-
-- Makes the runtime model panel distinguish remote Hub models from local
-  memory use and present managed model state more clearly.
-- Makes **Delete data** remove audited Core-owned Redis keys and namespaces
-  without allowing downloaded Cores to choose arbitrary deletion patterns.
+- Updates Ryzen AI setup for the current ROCm 10 stack and configures AMD GPU
+  access during installation.
+- Improves Gemma 4 Vulkan stability on `gfx1150` Ryzen AI systems and uses
+  memory-mapped model loading where supported.
+- Selects a supported Python version during setup, repairs missing virtual
+  environment support, and handles CMake 4 when building Python dependencies.
+- Adds reusable camera capture support to Core forms opened over HTTPS or
+  localhost.
+- Adds refreshed Tater ecosystem artwork for Mini AI PC, Spud Hub, and Spudlet
+  deployments.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.14 through
-  Tater's normal updater.
+- macOS users already running v1.0.1 or later can install v1.1.15 through
+  Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.14` or `latest` for the CPU image and
-  `v1.1.14-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.15` or `latest` for the CPU image and
+  `v1.1.15-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

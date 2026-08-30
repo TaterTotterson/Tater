@@ -517,6 +517,89 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["finished_members"], ["native:left", "native:right"])
         self.assertNotIn("office12", native_satellite._stereo_sessions)
 
+    async def test_large_startup_skew_jumps_late_member_to_shared_timeline(self) -> None:
+        native_satellite._stereo_sessions["office-pair"] = {
+            "group_id": "office-pair",
+            "session_id": "reply-1",
+            "selectors": ["native:left", "native:right"],
+            "clock_offsets_us": {"native:left": 0, "native:right": 0},
+            "member_delays_ms": {"native:left": 0, "native:right": 0},
+            "render_latency_frames": {"native:left": 6144, "native:right": 6144},
+            "render_sample_rates": {"native:left": 48000, "native:right": 48000},
+            "actual_starts_us": {},
+            "startup_realign_supported": True,
+            "startup_realign_scheduled": False,
+        }
+        sent = []
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            sent.append((selector, message_type, dict(payload), timeout_s))
+            return {"ok": True}
+
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with (
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+            mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline),
+        ):
+            native_satellite._record_stereo_started(
+                "native:left",
+                {
+                    "group_id": "office-pair",
+                    "session_id": "reply-1",
+                    "actual_start_us": 1_000_000,
+                },
+            )
+            native_satellite._record_stereo_started(
+                "native:right",
+                {
+                    "group_id": "office-pair",
+                    "session_id": "reply-1",
+                    "actual_start_us": 1_826_000,
+                },
+            )
+            for _index in range(20):
+                session = native_satellite._stereo_sessions["office-pair"]
+                if "startup_realign_applied" in session:
+                    break
+                await asyncio.sleep(0)
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "native:right")
+        self.assertEqual(sent[0][1], "media.session.adjust")
+        self.assertEqual(sent[0][2]["mode"], "jump")
+        self.assertEqual(sent[0][2]["correction_frames"], 39648)
+        session = native_satellite._stereo_sessions["office-pair"]
+        self.assertTrue(session["startup_realign_applied"])
+        self.assertEqual(session["startup_spread_us"], 826000)
+        voice_pipeline.logger.warning.assert_called_once()
+
+    async def test_small_startup_jitter_does_not_seek_either_member(self) -> None:
+        native_satellite._stereo_sessions["office-pair"] = {
+            "group_id": "office-pair",
+            "session_id": "reply-2",
+            "selectors": ["native:left", "native:right"],
+            "clock_offsets_us": {"native:left": 0, "native:right": 0},
+            "member_delays_ms": {"native:left": 0, "native:right": 0},
+            "render_latency_frames": {"native:left": 6144, "native:right": 6144},
+            "render_sample_rates": {"native:left": 48000, "native:right": 48000},
+            "actual_starts_us": {
+                "native:left": 1_000_000,
+                "native:right": 1_012_000,
+            },
+            "startup_realign_supported": True,
+        }
+        with mock.patch.object(
+            native_satellite,
+            "send_request",
+            mock.AsyncMock(),
+        ) as request_mock:
+            await native_satellite._realign_stereo_startup("office-pair")
+
+        request_mock.assert_not_awaited()
+        session = native_satellite._stereo_sessions["office-pair"]
+        self.assertFalse(session["startup_realign_applied"])
+        self.assertEqual(session["startup_spread_us"], 12000)
+
     async def test_phase_error_adjusts_right_member_toward_left(self) -> None:
         now_us = native_satellite._monotonic_us()
         native_satellite._stereo_sessions["pair1"] = {

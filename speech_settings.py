@@ -43,6 +43,7 @@ DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
 DEFAULT_QWEN_TTS_LANGUAGE = "English"
 DEFAULT_OMNIVOICE_TTS_LANGUAGE = "English"
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
+ANNOUNCEMENT_TTS_DIRECT_BACKEND = "same_as_direct"
 DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT = 20
 DEFAULT_SATELLITE_DUCKING_ATTACK_MS = 150
 DEFAULT_SATELLITE_DUCKING_RELEASE_MS = 350
@@ -192,6 +193,9 @@ def _normalize_tts_backend(value: Any) -> str:
 
 
 def normalize_announcement_tts_backend(value: Any, *, default: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND) -> str:
+    token = _clean(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"same_as_direct", "same_as_direct_tts", "direct", "direct_tts", "shared"}:
+        return ANNOUNCEMENT_TTS_DIRECT_BACKEND
     return _normalize_tts_backend(_clean(value) or default)
 
 
@@ -490,6 +494,11 @@ def _piper_tts_model_option_rows(*, current_value: Any = "", ensure_catalog: boo
 def get_speech_settings() -> Dict[str, Any]:
     shared = redis_client.hgetall(SPEECH_SETTINGS_KEY) or {}
     current_tts_backend = _normalize_tts_backend(shared.get("tts_backend"))
+
+    def announcement_value(field: str, direct_field: str, default: Any = "") -> str:
+        value = shared.get(field) if field in shared else shared.get(direct_field)
+        return _clean(value) or _clean(default)
+
     has_announcement_wyoming_host = "announcement_wyoming_tts_host" in shared
     has_announcement_wyoming_port = "announcement_wyoming_tts_port" in shared
     has_announcement_wyoming_voice = "announcement_wyoming_tts_voice" in shared
@@ -552,6 +561,42 @@ def get_speech_settings() -> Dict[str, Any]:
         ),
         "announcement_tts_model": _clean(shared.get("announcement_tts_model")),
         "announcement_tts_voice": _clean(shared.get("announcement_tts_voice")),
+        "announcement_kokoro_output_gain": normalize_tts_output_gain(
+            shared.get("announcement_kokoro_output_gain")
+            if "announcement_kokoro_output_gain" in shared
+            else shared.get("kokoro_output_gain"),
+            DEFAULT_KOKORO_OUTPUT_GAIN,
+        ),
+        "announcement_pocket_tts_output_gain": normalize_tts_output_gain(
+            shared.get("announcement_pocket_tts_output_gain")
+            if "announcement_pocket_tts_output_gain" in shared
+            else shared.get("pocket_tts_output_gain"),
+            DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+        ),
+        "announcement_qwen_tts_clone_audio": announcement_value(
+            "announcement_qwen_tts_clone_audio", "qwen_tts_clone_audio"
+        ),
+        "announcement_qwen_tts_clone_text": announcement_value(
+            "announcement_qwen_tts_clone_text", "qwen_tts_clone_text"
+        ),
+        "announcement_qwen_tts_language": announcement_value(
+            "announcement_qwen_tts_language", "qwen_tts_language", DEFAULT_QWEN_TTS_LANGUAGE
+        ),
+        "announcement_qwen_tts_instruct": announcement_value(
+            "announcement_qwen_tts_instruct", "qwen_tts_instruct"
+        ),
+        "announcement_omnivoice_tts_clone_audio": announcement_value(
+            "announcement_omnivoice_tts_clone_audio", "omnivoice_tts_clone_audio"
+        ),
+        "announcement_omnivoice_tts_clone_text": announcement_value(
+            "announcement_omnivoice_tts_clone_text", "omnivoice_tts_clone_text"
+        ),
+        "announcement_omnivoice_tts_language": announcement_value(
+            "announcement_omnivoice_tts_language", "omnivoice_tts_language", DEFAULT_OMNIVOICE_TTS_LANGUAGE
+        ),
+        "announcement_omnivoice_tts_instruct": announcement_value(
+            "announcement_omnivoice_tts_instruct", "omnivoice_tts_instruct"
+        ),
         "satellite_ducking_target_percent": _as_int(
             shared.get("satellite_ducking_target_percent"),
             DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT,
@@ -680,6 +725,16 @@ def save_speech_settings(
     omnivoice_tts_clone_text: Any = "",
     omnivoice_tts_language: Any = DEFAULT_OMNIVOICE_TTS_LANGUAGE,
     omnivoice_tts_instruct: Any = "",
+    announcement_kokoro_output_gain: Any = None,
+    announcement_pocket_tts_output_gain: Any = None,
+    announcement_qwen_tts_clone_audio: Any = None,
+    announcement_qwen_tts_clone_text: Any = None,
+    announcement_qwen_tts_language: Any = None,
+    announcement_qwen_tts_instruct: Any = None,
+    announcement_omnivoice_tts_clone_audio: Any = None,
+    announcement_omnivoice_tts_clone_text: Any = None,
+    announcement_omnivoice_tts_language: Any = None,
+    announcement_omnivoice_tts_instruct: Any = None,
     announcement_wyoming_tts_host: Any = None,
     announcement_wyoming_tts_port: Any = None,
     announcement_wyoming_tts_voice: Any = None,
@@ -745,6 +800,62 @@ def save_speech_settings(
             ),
             "announcement_tts_model": _clean(announcement_tts_model),
             "announcement_tts_voice": _clean(announcement_tts_voice),
+            "announcement_kokoro_output_gain": str(
+                normalize_tts_output_gain(
+                    announcement_kokoro_output_gain
+                    if announcement_kokoro_output_gain is not None
+                    else kokoro_output_gain,
+                    DEFAULT_KOKORO_OUTPUT_GAIN,
+                )
+            ),
+            "announcement_pocket_tts_output_gain": str(
+                normalize_tts_output_gain(
+                    announcement_pocket_tts_output_gain
+                    if announcement_pocket_tts_output_gain is not None
+                    else pocket_tts_output_gain,
+                    DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+                )
+            ),
+            "announcement_qwen_tts_clone_audio": _clean(
+                announcement_qwen_tts_clone_audio
+                if announcement_qwen_tts_clone_audio is not None
+                else qwen_tts_clone_audio
+            ),
+            "announcement_qwen_tts_clone_text": _clean(
+                announcement_qwen_tts_clone_text
+                if announcement_qwen_tts_clone_text is not None
+                else qwen_tts_clone_text
+            ),
+            "announcement_qwen_tts_language": _clean(
+                announcement_qwen_tts_language
+                if announcement_qwen_tts_language is not None
+                else qwen_tts_language
+            ) or DEFAULT_QWEN_TTS_LANGUAGE,
+            "announcement_qwen_tts_instruct": _clean(
+                announcement_qwen_tts_instruct
+                if announcement_qwen_tts_instruct is not None
+                else qwen_tts_instruct
+            ),
+            "announcement_omnivoice_tts_clone_audio": _clean(
+                announcement_omnivoice_tts_clone_audio
+                if announcement_omnivoice_tts_clone_audio is not None
+                else omnivoice_tts_clone_audio
+            ),
+            "announcement_omnivoice_tts_clone_text": _clean(
+                announcement_omnivoice_tts_clone_text
+                if announcement_omnivoice_tts_clone_text is not None
+                else omnivoice_tts_clone_text
+            ),
+            "announcement_omnivoice_tts_language": _clean(
+                announcement_omnivoice_tts_language
+                if announcement_omnivoice_tts_language is not None
+                else omnivoice_tts_language
+            ) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
+            "announcement_omnivoice_tts_instruct": _clean(
+                announcement_omnivoice_tts_instruct
+                if announcement_omnivoice_tts_instruct is not None
+                else omnivoice_tts_instruct
+            ),
             "satellite_ducking_target_percent": str(
                 _as_int(
                     satellite_ducking_target_percent,
@@ -848,25 +959,27 @@ def save_speech_settings(
         redis_client.hdel(SPEECH_SETTINGS_KEY, "tts_public_base_url")
 
 
-def save_managed_tts_clone_audio_path(backend: Any, path: Any) -> None:
+def save_managed_tts_clone_audio_path(backend: Any, path: Any, *, profile: Any = "direct") -> None:
     token = _normalize_tts_backend(backend)
-    field = {
+    direct_field = {
         "qwen3_tts": "qwen_tts_clone_audio",
         "omnivoice": "omnivoice_tts_clone_audio",
     }.get(token)
-    if not field:
+    if not direct_field:
         raise ValueError("Clone audio is only available for Qwen3-TTS and OmniVoice.")
+    field = f"announcement_{direct_field}" if _clean(profile).lower() == "announcement" else direct_field
     redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(path))
 
 
-def save_managed_tts_clone_text(backend: Any, text: Any) -> None:
+def save_managed_tts_clone_text(backend: Any, text: Any, *, profile: Any = "direct") -> None:
     token = _normalize_tts_backend(backend)
-    field = {
+    direct_field = {
         "qwen3_tts": "qwen_tts_clone_text",
         "omnivoice": "omnivoice_tts_clone_text",
     }.get(token)
-    if not field:
+    if not direct_field:
         raise ValueError("Clone transcripts are only available for Qwen3-TTS and OmniVoice.")
+    field = f"announcement_{direct_field}" if _clean(profile).lower() == "announcement" else direct_field
     redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(text))
 
 
@@ -972,13 +1085,20 @@ def get_announcement_tts_ui_payload(
     current_voice = _clean(voice)
     speech_ui = get_speech_ui_payload(
         {
-            "tts_backend": current_backend,
+            "tts_backend": default_backend if current_backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND else current_backend,
             "tts_model": current_model,
             "tts_voice": current_voice,
         }
     )
+    backend_options = [
+        {
+            "value": ANNOUNCEMENT_TTS_DIRECT_BACKEND,
+            "label": "Same as Direct Reply TTS",
+        },
+        *list(speech_ui.get("tts_backend_options") or []),
+    ]
     return {
-        "tts_backend_options": list(speech_ui.get("tts_backend_options") or []),
+        "tts_backend_options": backend_options,
         "tts_model_options_by_backend": dict(speech_ui.get("tts_model_options_by_backend") or {}),
         "tts_voice_options_by_model": dict(speech_ui.get("tts_voice_options_by_model") or {}),
     }

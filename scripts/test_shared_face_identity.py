@@ -1,3 +1,4 @@
+import base64
 import json
 import unittest
 from pathlib import Path
@@ -121,6 +122,192 @@ class SharedFaceIdentityTests(unittest.TestCase):
             "Fred",
         )
 
+    def test_people_face_enrollment_saves_one_uploaded_face(self):
+        person = people.create_person("Fred", self.redis)
+        upload = {
+            "filename": "fred.jpg",
+            "content_type": "image/jpeg",
+            "data_b64": base64.b64encode(b"jpeg").decode("ascii"),
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity.face_id_runtime, "analyze_image", return_value=[self.detection([1.0, 0.0])]),
+        ):
+            result = people.handle_action(
+                "people_face_enroll",
+                {"values": {"person_id": person["id"], "face_image": upload}},
+                self.redis,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["person_id"], person["id"])
+        face = result["people"]["faces"][0]
+        self.assertEqual(face["person_name"], "Fred")
+        self.assertEqual(face["capture_count"], 1)
+        self.assertEqual(face["gallery"][0]["source"]["kind"], "people_face_enrollment")
+
+    def test_people_face_enrollment_rejects_multiple_faces_without_saving(self):
+        person = people.create_person("Fred", self.redis)
+        upload = {
+            "filename": "group.jpg",
+            "content_type": "image/jpeg",
+            "data_b64": base64.b64encode(b"jpeg").decode("ascii"),
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(
+                face_identity.face_id_runtime,
+                "analyze_image",
+                return_value=[self.detection([1.0, 0.0]), self.detection([0.0, 1.0])],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "More than one face"):
+                people.handle_action(
+                    "people_face_enroll",
+                    {"values": {"person_id": person["id"], "face_image": upload}},
+                    self.redis,
+                )
+
+        self.assertEqual(face_identity.identity_rows(self.redis), {})
+
+    def test_people_face_enrollment_does_not_reassign_an_existing_face(self):
+        fred = people.create_person("Fred", self.redis)
+        wilma = people.create_person("Wilma", self.redis)
+        identity = face_identity.record_detection(
+            self.detection([1.0, 0.0]),
+            event_id="existing-face",
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(identity["id"], person_id=wilma["id"], redis_client=self.redis)
+        upload = {
+            "filename": "fred.jpg",
+            "content_type": "image/jpeg",
+            "data_b64": base64.b64encode(b"jpeg").decode("ascii"),
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity.face_id_runtime, "analyze_image", return_value=[self.detection([1.0, 0.0])]),
+        ):
+            with self.assertRaisesRegex(ValueError, "already linked to Wilma"):
+                people.handle_action(
+                    "people_face_enroll",
+                    {"values": {"person_id": fred["id"], "face_image": upload}},
+                    self.redis,
+                )
+
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(saved["person_id"], wilma["id"])
+        self.assertEqual(saved["observation_count"], 1)
+
+    def test_spudlet_face_id_uses_hub_embeddings_with_local_people(self):
+        person = people.create_person("Fred", self.redis)
+        identity = face_identity.record_detection(
+            self.detection([1.0, 0.0]),
+            event_id="local-enrollment",
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
+        remote_result = {
+            "result": {
+                "status": "embedded",
+                "detections": [self.detection([0.999, 0.001])],
+                "model": {
+                    "model_name": "Facenet512",
+                    "distance_metric": "cosine",
+                    "embedding_dimensions": 2,
+                    "match_threshold": 0.30,
+                },
+                "stored": False,
+            }
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity, "spud_link_should_use_hub", return_value=True),
+            patch.object(face_identity, "spud_link_request_json", return_value=remote_result) as request,
+        ):
+            result = face_identity.recognize_image(
+                b"jpeg",
+                event_id="reachy-saw-fred",
+                source={"device": "Reachy"},
+                record=False,
+                redis_client=self.redis,
+            )
+
+        self.assertEqual(result["status"], "recognized")
+        self.assertEqual(result["people"], ["Fred"])
+        self.assertEqual(result["person_ids"], [person["id"]])
+        self.assertEqual(result["identity_owner"], "This Tater")
+        self.assertEqual(result["loaded_on"], "Spud Hub")
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["operation"], "embed")
+        self.assertNotIn("event_id", payload)
+        self.assertNotIn("source", payload)
+        self.assertNotIn("record", payload)
+
+    def test_spudlet_manual_enrollment_embeds_once_and_saves_locally(self):
+        person = people.create_person("Fred", self.redis)
+        remote_result = {
+            "result": {
+                "status": "embedded",
+                "detections": [self.detection([1.0, 0.0])],
+                "model": {
+                    "model_name": "Facenet512",
+                    "distance_metric": "cosine",
+                    "embedding_dimensions": 2,
+                    "match_threshold": 0.30,
+                },
+                "stored": False,
+            }
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity, "spud_link_should_use_hub", return_value=True),
+            patch.object(face_identity, "spud_link_request_json", return_value=remote_result) as request,
+        ):
+            result = face_identity.enroll_person_image(
+                b"jpeg",
+                person_id=person["id"],
+                source={"kind": "people_face_enrollment"},
+                redis_client=self.redis,
+            )
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(result["person_id"], person["id"])
+        self.assertEqual(result["routed_via"], "spud_link")
+        saved = face_identity.identity_rows(self.redis)[result["identity_id"]]
+        self.assertEqual(saved["person_id"], person["id"])
+        self.assertEqual(saved["observations"][0]["source"]["kind"], "people_face_enrollment")
+
+    def test_face_matching_does_not_mix_incompatible_embedding_models(self):
+        identity = face_identity.record_detection(
+            self.detection([1.0, 0.0]),
+            event_id="facenet-face",
+            redis_client=self.redis,
+        )
+        incompatible = face_identity._annotate_detection(
+            self.detection([1.0, 0.0]),
+            {
+                "model_name": "DifferentFaceModel",
+                "distance_metric": "cosine",
+                "embedding_dimensions": 2,
+                "match_threshold": 0.30,
+            },
+        )
+
+        matched_id, _distance = face_identity.match_identity(
+            face_identity.identity_rows(self.redis),
+            incompatible["embedding"],
+            model_signature=incompatible["embedding_model_signature"],
+        )
+
+        self.assertTrue(identity["embedding_model_signature"])
+        self.assertEqual(matched_id, "")
+
     def test_moving_images_keeps_event_identity_resolution_current(self):
         source = face_identity.record_detection(
             self.detection([1.0, 0.0]),
@@ -165,6 +352,45 @@ class SharedFaceIdentityTests(unittest.TestCase):
             face_identity.identity_ids_for_event("event-remove", [identity["id"]], self.redis),
             [],
         )
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(face_identity.observations(saved), [])
+        self.assertEqual(face_identity.reference_embeddings(saved), [])
+        self.assertNotIn("centroid", saved)
+        self.assertNotIn("reference_centroids", saved)
+        self.assertNotIn("face_b64", saved)
+
+    def test_legacy_image_less_anchor_vectors_are_scrubbed_on_read(self):
+        self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY] = {
+            "face_legacy": json.dumps(
+                {
+                    "id": "face_legacy",
+                    "name": "Legacy",
+                    "anchor_references": [[1.0, 0.0]],
+                    "centroid": [1.0, 0.0],
+                    "centroid_count": 1,
+                    "reference_centroids": [[1.0, 0.0]],
+                    "face_b64": "ZmFjZQ==",
+                    "observations": [
+                        {
+                            "id": "observation_without_image",
+                            "embedding": [1.0, 0.0],
+                            "seen_at": "2026-08-01T12:00:00Z",
+                        }
+                    ],
+                }
+            )
+        }
+
+        identity = face_identity.identity_rows(self.redis)["face_legacy"]
+
+        self.assertNotIn("anchor_references", identity)
+        self.assertNotIn("centroid", identity)
+        self.assertNotIn("reference_centroids", identity)
+        self.assertNotIn("face_b64", identity)
+        self.assertEqual(face_identity.observations(identity), [])
+        self.assertEqual(face_identity.reference_embeddings(identity), [])
+        persisted = json.loads(self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY]["face_legacy"])
+        self.assertNotIn("anchor_references", persisted)
 
     def test_automation_style_recognition_records_unknown_faces(self):
         with (
@@ -191,6 +417,11 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertIn("people_face_move_images", app)
         self.assertIn("people_face_remove_images", app)
         self.assertIn("people_face_merge", app)
+        self.assertIn("people_face_enroll", app)
+        self.assertIn("data-people-face-enroll-open", app)
+        self.assertIn('id="people-face-enroll-modal"', app)
+        self.assertIn("collectCoreManagerValuesWithFiles(form)", app)
+        self.assertIn("bindCoreCameraCaptureFields(body)", app)
         self.assertIn('id="people-face-review-modal"', app)
         self.assertIn("data-people-face-review", app)
         self.assertIn('aria-pressed="false"', app)
@@ -201,6 +432,7 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertIn(".people-face-grid", styles)
         self.assertIn(".people-face-gallery", styles)
         self.assertIn(".people-face-review-dialog", styles)
+        self.assertIn(".people-face-enroll-dialog", styles)
         self.assertIn('.people-face-capture[aria-pressed="true"]', styles)
         self.assertIn(".people-face-selection-mark", styles)
         self.assertIn(".people-subtabs::-webkit-scrollbar", styles)

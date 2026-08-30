@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 import json
 import re
@@ -19,6 +21,7 @@ PERSON_INSTRUCTIONS_MAX_CHARS = 2000
 FACE_IDENTITIES_KEY = face_identity.SHARED_IDENTITIES_KEY
 INTEGRATION_RUNTIME_EVENTS_KEY = "tater:integration_runtime:events"
 PEOPLE_FACE_EVENT_SCAN_LIMIT = 1000
+PEOPLE_FACE_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 PORTAL_HISTORY_PATTERNS_BY_PLATFORM = {
     "discord": (
         "tater:channel:*:history",
@@ -59,6 +62,28 @@ def _person_id() -> str:
 
 def _now() -> float:
     return time.time()
+
+
+def _decode_face_upload(value: Any) -> Tuple[bytes, str, str]:
+    upload = value if isinstance(value, dict) else {}
+    filename = _text(upload.get("filename"))[:160] or "face-photo.jpg"
+    content_type = _text(upload.get("content_type")).lower().split(";", 1)[0]
+    if content_type and content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        raise ValueError("Choose a JPEG, PNG, or WebP face photo.")
+    encoded = _text(upload.get("data_b64"))
+    if not encoded:
+        raise ValueError("Choose a face photo or take one with the camera first.")
+    if len(encoded) > ((PEOPLE_FACE_UPLOAD_MAX_BYTES + 2) // 3) * 4 + 8:
+        raise ValueError("The face photo must be 8 MB or smaller.")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("The selected face photo could not be read.") from exc
+    if not image_bytes:
+        raise ValueError("The selected face photo is empty.")
+    if len(image_bytes) > PEOPLE_FACE_UPLOAD_MAX_BYTES:
+        raise ValueError("The face photo must be 8 MB or smaller.")
+    return image_bytes, filename, content_type or "image/jpeg"
 
 
 def _platform(value: Any) -> str:
@@ -1294,6 +1319,28 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
             "ok": True,
             "action": token,
             "message": message,
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_enroll":
+        image_bytes, filename, content_type = _decode_face_upload(values.get("face_image"))
+        enrollment = face_identity.enroll_person_image(
+            image_bytes,
+            person_id=_text(values.get("person_id")),
+            source={
+                "kind": "people_face_enrollment",
+                "filename": filename,
+                "content_type": content_type,
+            },
+            redis_client=client,
+        )
+        person_name = _text(enrollment.get("person_name")) or "Person"
+        return {
+            "ok": True,
+            "action": token,
+            "identity_id": _text(enrollment.get("identity_id")),
+            "person_id": _text(enrollment.get("person_id")),
+            "message": f"Face added to {person_name}.",
             "people": panel_payload(client),
         }
 

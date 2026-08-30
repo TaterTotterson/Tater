@@ -213,6 +213,7 @@ from verba_settings import (
 )
 from verba_kernel import normalize_platform
 from speech_settings import (
+    ANNOUNCEMENT_TTS_DIRECT_BACKEND,
     get_announcement_tts_ui_payload,
     get_speech_settings as get_shared_speech_settings,
     get_speech_ui_payload,
@@ -3941,6 +3942,8 @@ def _speech_model_warmup_tts_items(settings: Dict[str, Any]) -> List[Dict[str, s
     seen: set[Tuple[str, str, str, str]] = set()
     for prefix in ("", "announcement_"):
         backend = str(settings.get(f"{prefix}tts_backend") or "").strip()
+        if prefix and backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND:
+            continue
         model = str(settings.get(f"{prefix}tts_model") or "").strip()
         voice = str(settings.get(f"{prefix}tts_voice") or "").strip()
         key = (backend, model, voice, str(settings.get("acceleration") or "").strip())
@@ -6865,6 +6868,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
             "server": is_server,
             "llm": is_server,
             "models": is_server,
+            "vad": is_server,
             "stt": is_server,
             "tts": is_server,
             "vision": is_server,
@@ -9367,6 +9371,7 @@ class SpudLinkModelRequest(BaseModel):
     data_base64: Optional[str] = None
     filename: Optional[str] = None
     mimetype: Optional[str] = None
+    operation: Optional[str] = Field(default=None, max_length=40)
     prompt: Optional[str] = None
     audio_format: Dict[str, Any] = Field(default_factory=dict)
     speech_s: Optional[float] = None
@@ -9557,6 +9562,14 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
+    speech_announcement_kokoro_output_gain: Optional[float] = None
+    speech_announcement_pocket_tts_output_gain: Optional[float] = None
+    speech_announcement_qwen_tts_clone_text: Optional[str] = None
+    speech_announcement_qwen_tts_language: Optional[str] = None
+    speech_announcement_qwen_tts_instruct: Optional[str] = None
+    speech_announcement_omnivoice_tts_clone_text: Optional[str] = None
+    speech_announcement_omnivoice_tts_language: Optional[str] = None
+    speech_announcement_omnivoice_tts_instruct: Optional[str] = None
     speech_satellite_ducking_target_percent: Optional[int] = None
     speech_satellite_ducking_attack_ms: Optional[int] = None
     speech_satellite_ducking_release_ms: Optional[int] = None
@@ -9659,6 +9672,7 @@ class AppSettingsRequest(BaseModel):
     spud_link_request_previews_enabled: Optional[bool] = None
     spud_link_model_routing_enabled: Optional[bool] = None
     spud_link_model_route_llm: Optional[str] = None
+    spud_link_model_route_vad: Optional[str] = None
     spud_link_model_route_stt: Optional[str] = None
     spud_link_model_route_tts: Optional[str] = None
     spud_link_model_route_vision: Optional[str] = None
@@ -10929,6 +10943,7 @@ def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
         return remote_rows
     labels = {
         "llm": "LLM",
+        "vad": "Voice Activity Detection",
         "stt": "STT",
         "tts": "TTS",
         "vision": "Vision",
@@ -16555,6 +16570,13 @@ def _spud_link_model_capability_payload() -> Dict[str, Any]:
             "provider": str(base.get("provider") or "").strip(),
             "provider_label": str(base.get("provider_label") or base.get("provider") or "Base model").strip(),
         },
+        "vad": {
+            "available": True,
+            "loaded": True,
+            "model": "Tater Native speech endpointing",
+            "provider": "tater_native",
+            "provider_label": "Tater Native",
+        },
         "stt": {"available": bool(speech.get("stt_backend")), "model": str(speech.get("stt_backend") or "")},
         "tts": {"available": bool(speech.get("tts_backend")), "model": str(speech.get("tts_model") or speech.get("tts_backend") or "")},
         "vision": vision_capability,
@@ -16630,11 +16652,26 @@ def spud_link_model_speaker_id(payload: SpudLinkModelRequest, request: Request) 
 
     settings, node = _require_spud_link_model_request(request)
     audio_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
-    result = speaker_id_module.match_speaker_for_audio(
-        audio_bytes=audio_bytes,
-        audio_format=dict(payload.audio_format or {}),
-        speech_s=float(payload.speech_s or 0.0),
-    )
+    operation = str(payload.operation or "match").strip().lower().replace("-", "_")
+    if operation in {"embed", "encode", "embedding", "embeddings"}:
+        if not speaker_id_module.speaker_id_enabled():
+            raise HTTPException(status_code=503, detail="Speaker ID is disabled on the Spud Hub.")
+        try:
+            result = speaker_id_module.speaker_embedding_for_audio(
+                audio_bytes=audio_bytes,
+                audio_format=dict(payload.audio_format or {}),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc).strip() or "The Spud Hub Speaker ID model is unavailable.",
+            ) from exc
+    else:
+        result = speaker_id_module.match_speaker_for_audio(
+            audio_bytes=audio_bytes,
+            audio_format=dict(payload.audio_format or {}),
+            speech_s=float(payload.speech_s or 0.0),
+        )
     _spud_link_mark_model_activity(settings, node, kind="speaker_id", model=str(result.get("model_source") or "Speaker ID"))
     return {"ok": True, "result": result}
 
@@ -16658,14 +16695,31 @@ def spud_link_model_emotion_id(payload: SpudLinkModelRequest, request: Request) 
 def spud_link_model_face_id(payload: SpudLinkModelRequest, request: Request) -> Dict[str, Any]:
     settings, node = _require_spud_link_model_request(request)
     image_bytes = _spud_link_model_bytes(payload, maximum=32 * 1024 * 1024)
-    result = face_identity.recognize_image(
-        image_bytes,
-        event_id=str(payload.event_id or ""),
-        seen_at=str(payload.seen_at or ""),
-        source=dict(payload.source or {}),
-        record=payload.record is not False,
-        redis_client=redis_client,
-    )
+    operation = str(payload.operation or "recognize").strip().lower().replace("-", "_")
+    if operation in {"embed", "encode", "embedding", "embeddings"}:
+        try:
+            detections = list(face_id_runtime.analyze_image(image_bytes, redis_client) or [])
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc).strip() or "The Spud Hub Face ID model is unavailable.",
+            ) from exc
+        result = {
+            "status": "embedded" if detections else "no_faces",
+            "detections": [dict(row) for row in detections if isinstance(row, dict)],
+            "faces_detected": len([row for row in detections if isinstance(row, dict)]),
+            "model": face_id_runtime.embedding_model_metadata(),
+            "stored": False,
+        }
+    else:
+        result = face_identity.recognize_image(
+            image_bytes,
+            event_id=str(payload.event_id or ""),
+            seen_at=str(payload.seen_at or ""),
+            source=dict(payload.source or {}),
+            record=payload.record is not False,
+            redis_client=redis_client,
+        )
     _spud_link_mark_model_activity(settings, node, kind="face_id", model="Face ID")
     return {"ok": True, "result": result}
 
@@ -16952,6 +17006,14 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
             parsed = int(default)
         return max(int(minimum), min(int(maximum), parsed))
 
+    def _ws_query_bool(name: str, default: bool) -> bool:
+        raw = str(websocket.query_params.get(name) or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
+
     audio_bits = _ws_query_int("bits", 16, minimum=8, maximum=32)
     audio_format = {
         "rate": _ws_query_int("rate", 16000, minimum=8000, maximum=48000),
@@ -16961,6 +17023,8 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
     language = str(websocket.query_params.get("language") or "").strip()
     user_name = str(websocket.query_params.get("user") or websocket.headers.get("x-spudlink-user") or "").strip()
     device_name = str(websocket.query_params.get("device") or websocket.headers.get("x-spudlink-device") or "").strip()
+    transcribe_stream = _ws_query_bool("transcribe", True)
+    vad_ignore_s = float(_ws_query_int("vad_ignore_ms", 0, minimum=0, maximum=2000)) / 1000.0
     selector = f"little_spud:{str(node.get('id') or client_host or 'remote').strip()}"
 
     from tater_voice import voice_pipeline
@@ -16981,7 +17045,7 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
 
     role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
     logger.info(
-        "[spudlink-stt] stream-start node=%s role=%s client=%s rate=%s width=%s ch=%s vad=%s user=%s device=%s",
+        "[spudlink-stt] stream-start node=%s role=%s client=%s rate=%s width=%s ch=%s vad=%s transcribe=%s vad_ignore_s=%.2f user=%s device=%s",
         node.get("id") or "-",
         role,
         client_host or "-",
@@ -16989,6 +17053,8 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
         audio_format.get("width"),
         audio_format.get("channels"),
         getattr(eou_engine, "backend_name", ""),
+        transcribe_stream,
+        vad_ignore_s,
         user_name or "-",
         device_name or "-",
     )
@@ -16999,6 +17065,7 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
             "vad_backend": getattr(eou_engine, "backend_name", ""),
             "silence_s": eou_cfg.get("silence_s"),
             "timeout_s": eou_cfg.get("timeout_s"),
+            "transcribe": transcribe_stream,
         }
     )
 
@@ -17044,7 +17111,19 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
             audio_buffer.extend(audio_bytes)
             frame_count += 1
 
-            metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
+            if vad_ignore_s > 0.0 and (now_ts - first_audio_ts) < vad_ignore_s:
+                metrics = {
+                    "backend": getattr(eou_engine, "backend_name", ""),
+                    "should_finalize": False,
+                    "voice_seen": False,
+                    "speech_chunks": 0,
+                    "speech_s": 0.0,
+                    "silence_s": 0.0,
+                    "timed_out": False,
+                    "vad_startup_ignored": True,
+                }
+            else:
+                metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
             if bool(metrics.get("vad_error")):
                 await websocket.send_json(
                     {
@@ -17102,6 +17181,33 @@ async def spud_link_stt_stream(websocket: WebSocket) -> None:
         1.0,
         float(int(audio_format.get("rate") or 16000) * int(audio_format.get("width") or 2) * int(audio_format.get("channels") or 1)),
     )
+    if not transcribe_stream:
+        _spud_link_touch_node_from_request(node, websocket)  # type: ignore[arg-type]
+        node["activity"] = _spud_link_sanitize_activity(
+            {
+                "last_call_at": time.time(),
+                "last_call_mode": "vad_stream",
+                "last_model": getattr(eou_engine, "backend_name", ""),
+                "last_user": user_name,
+                "last_device": device_name,
+                "role": role,
+            },
+            allow_previews=bool(settings.get("request_previews_enabled")),
+        )
+        _spud_link_store_node(node)
+        await websocket.send_json(
+            {
+                "ok": True,
+                "type": "final",
+                "text": "",
+                "backend": "",
+                "reason": finalize_reason,
+                "duration_s": duration_s,
+                "endpointing_only": True,
+            }
+        )
+        await websocket.close(code=1000)
+        return
     try:
         transcript, backend, backend_note = await _spud_link_transcribe_pcm_audio(
             bytes(audio_buffer),
@@ -19271,6 +19377,18 @@ def get_settings() -> Dict[str, Any]:
         )
     except ValueError:
         omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
+    try:
+        announcement_qwen_tts_clone_info = clone_audio_info(
+            "qwen3_tts", speech_settings.get("announcement_qwen_tts_clone_audio")
+        )
+    except ValueError:
+        announcement_qwen_tts_clone_info = {"configured": False, "name": "", "size": 0}
+    try:
+        announcement_omnivoice_tts_clone_info = clone_audio_info(
+            "omnivoice", speech_settings.get("announcement_omnivoice_tts_clone_audio")
+        )
+    except ValueError:
+        announcement_omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
     esphome_fields = _esphome_settings_fields()
     esphome_settings_item = esphome_home_module.settings_item_form() if hasattr(esphome_home_module, "settings_item_form") else {}
     esphome_sections = (
@@ -19307,7 +19425,7 @@ def get_settings() -> Dict[str, Any]:
         backend=speech_settings.get("announcement_tts_backend"),
         model=speech_settings.get("announcement_tts_model"),
         voice=speech_settings.get("announcement_tts_voice"),
-        default_backend=str(speech_settings.get("announcement_tts_backend") or speech_settings.get("tts_backend") or "wyoming"),
+        default_backend=str(speech_settings.get("tts_backend") or "wyoming"),
     )
     emoji_settings = get_core_emoji_settings() or {}
 
@@ -19525,6 +19643,38 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
+        "speech_announcement_kokoro_output_gain": str(
+            speech_settings.get("announcement_kokoro_output_gain") or ""
+        ),
+        "speech_announcement_pocket_tts_output_gain": str(
+            speech_settings.get("announcement_pocket_tts_output_gain") or ""
+        ),
+        "speech_announcement_qwen_tts_clone_text": str(
+            speech_settings.get("announcement_qwen_tts_clone_text") or ""
+        ),
+        "speech_announcement_qwen_tts_language": str(
+            speech_settings.get("announcement_qwen_tts_language") or "English"
+        ),
+        "speech_announcement_qwen_tts_instruct": str(
+            speech_settings.get("announcement_qwen_tts_instruct") or ""
+        ),
+        "speech_announcement_qwen_tts_clone_audio": announcement_qwen_tts_clone_info,
+        "speech_announcement_qwen_tts_clone_audio_url": "/api/settings/speech/clone-audio/qwen3_tts?scope=announcement"
+        if announcement_qwen_tts_clone_info.get("configured")
+        else "",
+        "speech_announcement_omnivoice_tts_clone_text": str(
+            speech_settings.get("announcement_omnivoice_tts_clone_text") or ""
+        ),
+        "speech_announcement_omnivoice_tts_language": str(
+            speech_settings.get("announcement_omnivoice_tts_language") or "English"
+        ),
+        "speech_announcement_omnivoice_tts_instruct": str(
+            speech_settings.get("announcement_omnivoice_tts_instruct") or ""
+        ),
+        "speech_announcement_omnivoice_tts_clone_audio": announcement_omnivoice_tts_clone_info,
+        "speech_announcement_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice?scope=announcement"
+        if announcement_omnivoice_tts_clone_info.get("configured")
+        else "",
         "speech_satellite_ducking_target_percent": int(
             speech_settings.get("satellite_ducking_target_percent")
             if speech_settings.get("satellite_ducking_target_percent") is not None
@@ -19775,11 +19925,24 @@ def get_settings() -> Dict[str, Any]:
     }
 
 
+def _managed_tts_profile_scope(value: Any) -> str:
+    return "announcement" if str(value or "").strip().lower() == "announcement" else "direct"
+
+
+def _managed_tts_profile_field(backend: str, scope: str, suffix: str) -> str:
+    prefix = "qwen_tts" if backend == "qwen3_tts" else "omnivoice_tts" if backend == "omnivoice" else ""
+    if not prefix:
+        return ""
+    field = f"{prefix}_{suffix}"
+    return f"announcement_{field}" if scope == "announcement" else field
+
+
 @app.get("/api/settings/speech/clone-audio/{backend}")
-def get_speech_clone_audio(backend: str) -> Response:
+def get_speech_clone_audio(backend: str, scope: str = "direct") -> Response:
     token = normalize_managed_tts_backend(backend)
+    profile_scope = _managed_tts_profile_scope(scope)
     current = get_shared_speech_settings()
-    field = "qwen_tts_clone_audio" if token == "qwen3_tts" else "omnivoice_tts_clone_audio" if token == "omnivoice" else ""
+    field = _managed_tts_profile_field(token, profile_scope, "clone_audio")
     if not field:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
     try:
@@ -19792,8 +19955,9 @@ def get_speech_clone_audio(backend: str) -> Response:
 
 
 @app.post("/api/settings/speech/clone-audio/{backend}")
-async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str, Any]:
+async def upload_speech_clone_audio(backend: str, request: Request, scope: str = "direct") -> Dict[str, Any]:
     token = normalize_managed_tts_backend(backend)
+    profile_scope = _managed_tts_profile_scope(scope)
     if token not in {"qwen3_tts", "omnivoice"}:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
     filename = str(request.headers.get("x-filename") or "reference.wav").strip()
@@ -19805,9 +19969,9 @@ async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str,
         raise HTTPException(status_code=413, detail="Clone audio must be 50 MB or smaller.")
     payload = await request.body()
     try:
-        path = store_clone_audio(token, filename=filename, data=payload)
-        save_managed_tts_clone_audio_path(token, path)
-        save_managed_tts_clone_text(token, "")
+        path = store_clone_audio(token, filename=filename, data=payload, profile=profile_scope)
+        save_managed_tts_clone_audio_path(token, path, profile=profile_scope)
+        save_managed_tts_clone_text(token, "", profile=profile_scope)
         info = clone_audio_info(token, path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -19823,7 +19987,7 @@ async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str,
         transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
             audio_bytes,
             audio_format,
-            selector=f"tts_clone_{token}",
+            selector=f"tts_clone_{profile_scope}_{token}",
         )
         transcription.update(
             {
@@ -19833,7 +19997,7 @@ async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str,
             }
         )
         if transcript:
-            save_managed_tts_clone_text(token, transcript)
+            save_managed_tts_clone_text(token, transcript, profile=profile_scope)
     except Exception as exc:
         transcription["error"] = str(exc) or "Automatic transcription was unavailable."
         logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
@@ -19841,27 +20005,30 @@ async def upload_speech_clone_audio(backend: str, request: Request) -> Dict[str,
     return {
         "ok": True,
         "backend": token,
+        "scope": profile_scope,
         "audio": info,
         "clone_text": transcript,
         "transcription": transcription,
-        "url": f"/api/settings/speech/clone-audio/{token}",
+        "url": f"/api/settings/speech/clone-audio/{token}?scope={profile_scope}",
     }
 
 
 @app.delete("/api/settings/speech/clone-audio/{backend}")
-def delete_speech_clone_audio(backend: str) -> Dict[str, Any]:
+def delete_speech_clone_audio(backend: str, scope: str = "direct") -> Dict[str, Any]:
     token = normalize_managed_tts_backend(backend)
+    profile_scope = _managed_tts_profile_scope(scope)
     current = get_shared_speech_settings()
-    field = "qwen_tts_clone_audio" if token == "qwen3_tts" else "omnivoice_tts_clone_audio" if token == "omnivoice" else ""
+    field = _managed_tts_profile_field(token, profile_scope, "clone_audio")
     if not field:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
-    remove_clone_audio(token, current.get(field))
-    save_managed_tts_clone_audio_path(token, "")
-    save_managed_tts_clone_text(token, "")
+    remove_clone_audio(token, current.get(field), profile=profile_scope)
+    save_managed_tts_clone_audio_path(token, "", profile=profile_scope)
+    save_managed_tts_clone_text(token, "", profile=profile_scope)
     clear_managed_tts_workers()
     return {
         "ok": True,
         "backend": token,
+        "scope": profile_scope,
         "audio": {"configured": False, "name": "", "size": 0},
         "clone_text": "",
         "transcription": {"status": "empty", "backend": "", "note": "", "error": ""},
@@ -21661,6 +21828,14 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
+        "speech_announcement_kokoro_output_gain",
+        "speech_announcement_pocket_tts_output_gain",
+        "speech_announcement_qwen_tts_clone_text",
+        "speech_announcement_qwen_tts_language",
+        "speech_announcement_qwen_tts_instruct",
+        "speech_announcement_omnivoice_tts_clone_text",
+        "speech_announcement_omnivoice_tts_language",
+        "speech_announcement_omnivoice_tts_instruct",
         "speech_satellite_ducking_target_percent",
         "speech_satellite_ducking_attack_ms",
         "speech_satellite_ducking_release_ms",
@@ -21687,6 +21862,12 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
+        "speech_announcement_qwen_tts_clone_text",
+        "speech_announcement_qwen_tts_language",
+        "speech_announcement_qwen_tts_instruct",
+        "speech_announcement_omnivoice_tts_clone_text",
+        "speech_announcement_omnivoice_tts_language",
+        "speech_announcement_omnivoice_tts_instruct",
         "speech_qwen_tts_clone_text",
         "speech_qwen_tts_language",
         "speech_qwen_tts_instruct",
@@ -21697,6 +21878,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     speech_warmup_keys = set(speech_keys) - {
         "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
+        "speech_announcement_kokoro_output_gain",
+        "speech_announcement_pocket_tts_output_gain",
         "speech_chatterbox_tts_streaming_enabled",
         "speech_satellite_ducking_target_percent",
         "speech_satellite_ducking_attack_ms",
@@ -21706,6 +21889,30 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         current_speech = get_shared_speech_settings()
         previous_stt_backend = str(current_speech.get("stt_backend") or "").strip()
         previous_acceleration = str(current_speech.get("acceleration") or "").strip()
+        selected_announcement_backend = normalize_managed_tts_backend(
+            updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
+        )
+        announcement_managed_audio = {
+            "qwen3_tts": current_speech.get("announcement_qwen_tts_clone_audio"),
+            "omnivoice": current_speech.get("announcement_omnivoice_tts_clone_audio"),
+        }
+        if selected_announcement_backend in announcement_managed_audio:
+            direct_field = (
+                "qwen_tts_clone_audio" if selected_announcement_backend == "qwen3_tts" else "omnivoice_tts_clone_audio"
+            )
+            direct_path = str(current_speech.get(direct_field) or "").strip()
+            announcement_path = str(announcement_managed_audio.get(selected_announcement_backend) or "").strip()
+            if direct_path and announcement_path == direct_path:
+                with contextlib.suppress(Exception):
+                    validated_path = validate_clone_audio_path(selected_announcement_backend, direct_path)
+                    if validated_path:
+                        source_path = Path(validated_path)
+                        announcement_managed_audio[selected_announcement_backend] = store_clone_audio(
+                            selected_announcement_backend,
+                            filename=source_path.name,
+                            data=source_path.read_bytes(),
+                            profile="announcement",
+                        )
         save_shared_speech_settings(
             stt_backend=str(updates.get("speech_stt_backend", current_speech.get("stt_backend") or "")).strip(),
             acceleration=str(updates.get("speech_acceleration", current_speech.get("acceleration") or "")).strip(),
@@ -21806,6 +22013,52 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             ).strip(),
             announcement_tts_voice=str(
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
+            ).strip(),
+            announcement_kokoro_output_gain=updates.get(
+                "speech_announcement_kokoro_output_gain",
+                current_speech.get("announcement_kokoro_output_gain"),
+            ),
+            announcement_pocket_tts_output_gain=updates.get(
+                "speech_announcement_pocket_tts_output_gain",
+                current_speech.get("announcement_pocket_tts_output_gain"),
+            ),
+            announcement_qwen_tts_clone_audio=announcement_managed_audio.get("qwen3_tts"),
+            announcement_qwen_tts_clone_text=str(
+                updates.get(
+                    "speech_announcement_qwen_tts_clone_text",
+                    current_speech.get("announcement_qwen_tts_clone_text") or "",
+                )
+            ).strip(),
+            announcement_qwen_tts_language=str(
+                updates.get(
+                    "speech_announcement_qwen_tts_language",
+                    current_speech.get("announcement_qwen_tts_language") or "English",
+                )
+            ).strip(),
+            announcement_qwen_tts_instruct=str(
+                updates.get(
+                    "speech_announcement_qwen_tts_instruct",
+                    current_speech.get("announcement_qwen_tts_instruct") or "",
+                )
+            ).strip(),
+            announcement_omnivoice_tts_clone_audio=announcement_managed_audio.get("omnivoice"),
+            announcement_omnivoice_tts_clone_text=str(
+                updates.get(
+                    "speech_announcement_omnivoice_tts_clone_text",
+                    current_speech.get("announcement_omnivoice_tts_clone_text") or "",
+                )
+            ).strip(),
+            announcement_omnivoice_tts_language=str(
+                updates.get(
+                    "speech_announcement_omnivoice_tts_language",
+                    current_speech.get("announcement_omnivoice_tts_language") or "English",
+                )
+            ).strip(),
+            announcement_omnivoice_tts_instruct=str(
+                updates.get(
+                    "speech_announcement_omnivoice_tts_instruct",
+                    current_speech.get("announcement_omnivoice_tts_instruct") or "",
+                )
             ).strip(),
             satellite_ducking_target_percent=updates.get(
                 "speech_satellite_ducking_target_percent",

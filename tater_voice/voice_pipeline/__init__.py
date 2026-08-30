@@ -61,7 +61,9 @@ from helpers import extract_json, get_llm_client_from_env, redis_client
 from runtime_executors import run_background, run_speech
 from tater_paths import agent_lab_path
 from tater_runtime_profile import remote_only_enabled
+from spud_link_models import open_stt_stream as spud_link_open_stt_stream
 from spud_link_models import should_use_hub as spud_link_should_use_hub
+from spud_link_models import route_for as spud_link_route_for
 from tateros import integration_store as integration_store_module
 import verba_registry
 from verba_settings import get_verba_enabled
@@ -435,6 +437,11 @@ DEFAULT_SILERO_MIN_SPEECH_FRAMES = 2
 DEFAULT_SILERO_MIN_SILENCE_FRAMES = 4
 DEFAULT_WEBRTC_VAD_AGGRESSIVENESS = 2
 DEFAULT_WEBRTC_VAD_FRAME_MS = 30
+# Require sustained speech across a multi-frame audio block instead of treating
+# one stray positive 30 ms frame as the entire block being speech. Single-frame
+# blocks retain their natural 0%/100% behavior. Set this to 0 to restore the
+# legacy any-positive-frame behavior for a device that explicitly needs it.
+DEFAULT_WEBRTC_VAD_MIN_SPEECH_RATIO = 0.60
 DEFAULT_VAD_MIN_SILENCE_SHORT_S = 0.50
 DEFAULT_VAD_MIN_SILENCE_LONG_S = 0.62
 DEFAULT_AUDIO_INPUT_GAIN = 1.6
@@ -2454,7 +2461,7 @@ def _normalize_stt_backend(value: Any) -> str:
 def _normalize_vad_backend(value: Any, *, default: str = DEFAULT_VAD_BACKEND) -> str:
     token = _lower(value).replace("-", "_").replace(" ", "_")
     fallback = _lower(default).replace("-", "_").replace(" ", "_")
-    if fallback not in {"silero", "webrtc", "auto"}:
+    if fallback not in {"silero", "webrtc", "spud_link", "auto"}:
         fallback = DEFAULT_VAD_BACKEND
     if token in {"", "default"}:
         return fallback
@@ -2462,6 +2469,8 @@ def _normalize_vad_backend(value: Any, *, default: str = DEFAULT_VAD_BACKEND) ->
         return "silero"
     if token in {"webrtc", "webrtcvad", "webrtc_vad", "web_rtc"}:
         return "webrtc"
+    if token in {"spud_link", "spudlink", "spud_hub", "spudhub", "hub"}:
+        return "spud_link"
     if token == "auto":
         return "auto"
     return fallback
@@ -2869,6 +2878,18 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
     tts_model = _text(settings.get("VOICE_TTS_MODEL"))
     tts_voice = _text(settings.get("VOICE_TTS_VOICE"))
     vad_backend = _normalize_vad_backend(settings.get("VOICE_VAD_BACKEND"))
+    local_vad_backend = vad_backend
+    if local_vad_backend == "spud_link":
+        local_vad_backend = _normalize_vad_backend(DEFAULT_VAD_BACKEND, default="silero")
+        if local_vad_backend in {"auto", "spud_link"}:
+            local_vad_backend = "webrtc" if remote_only_enabled() else "silero"
+    vad_route = spud_link_route_for("vad", redis_conn=redis_client)
+    if spud_link_should_use_hub("vad", redis_conn=redis_client):
+        vad_backend = "spud_link"
+    elif vad_route == "local" and vad_backend == "spud_link":
+        # A saved local route wins over the legacy direct Spud Hub backend
+        # selection. Keep a dependable on-device fallback available.
+        vad_backend = local_vad_backend
     selected_acceleration = normalize_speech_acceleration(settings.get("VOICE_ACCELERATION"))
     effective_acceleration = _effective_speech_acceleration()
     return {
@@ -3047,6 +3068,7 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 maximum=1.0,
             ),
             "backend": vad_backend,
+            "local_backend": local_vad_backend,
             "silence_s": _get_float_setting("VOICE_VAD_SILENCE_SECONDS", DEFAULT_VAD_SILENCE_SECONDS, minimum=0.2, maximum=5.0),
             "timeout_s": _get_float_setting("VOICE_VAD_TIMEOUT_SECONDS", DEFAULT_VAD_TIMEOUT_SECONDS, minimum=2.0, maximum=60.0),
             "startup_gate_s": _get_float_setting("VOICE_STARTUP_GATE_S", DEFAULT_STARTUP_GATE_S, minimum=0.0, maximum=2.0),
@@ -3075,6 +3097,12 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 DEFAULT_WEBRTC_VAD_AGGRESSIVENESS,
                 minimum=0,
                 maximum=3,
+            ),
+            "webrtc_min_speech_ratio": _get_float_setting(
+                "VOICE_WEBRTC_VAD_MIN_SPEECH_RATIO",
+                DEFAULT_WEBRTC_VAD_MIN_SPEECH_RATIO,
+                minimum=0.0,
+                maximum=1.0,
             ),
             "webrtc_frame_ms": int(DEFAULT_WEBRTC_VAD_FRAME_MS),
         },
@@ -3742,6 +3770,12 @@ class WebRtcVadBackend(VadBackendBase):
             minimum=0,
             maximum=3,
         )
+        self.min_speech_ratio = _as_float(
+            cfg.get("webrtc_min_speech_ratio"),
+            DEFAULT_WEBRTC_VAD_MIN_SPEECH_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
         frame_ms = _as_int(cfg.get("webrtc_frame_ms"), DEFAULT_WEBRTC_VAD_FRAME_MS, minimum=10, maximum=30)
         self.frame_ms = frame_ms if frame_ms in {10, 20, 30} else DEFAULT_WEBRTC_VAD_FRAME_MS
         self._available = False
@@ -3804,6 +3838,11 @@ class WebRtcVadBackend(VadBackendBase):
 
             is_speech = speech_frames > 0
             ratio = float(speech_frames) / float(total_frames) if total_frames > 0 else 0.0
+            if self.min_speech_ratio > 0.0:
+                # A single positive 30 ms frame should not hold an entire
+                # multi-frame audio block open. This is especially important
+                # for beamformed streams with a small speech/reverb tail.
+                is_speech = ratio >= self.min_speech_ratio
             probability = 1.0 if is_speech else 0.0
             return {
                 "backend": "webrtc",
@@ -3814,6 +3853,7 @@ class WebRtcVadBackend(VadBackendBase):
                 "frames": total_frames,
                 "speech_frames": speech_frames,
                 "mode": int(self.mode),
+                "min_speech_ratio": round(float(self.min_speech_ratio), 4),
             }
         except Exception as exc:
             return {
@@ -4086,6 +4126,14 @@ def _build_eou_engine(
     selected_backend = _normalize_vad_backend(eou.get("backend"))
     if selected_backend == "auto":
         selected_backend = DEFAULT_VAD_BACKEND
+    if selected_backend == "spud_link":
+        # The live Hub stream is orchestrated by the session handler. Always
+        # prepare a local engine too so a lost pairing/network connection does
+        # not strand an active voice turn. This also prevents a Hub configured
+        # with this option from recursively trying to send VAD to itself.
+        selected_backend = _normalize_vad_backend(eou.get("local_backend"), default="webrtc")
+        if selected_backend in {"auto", "spud_link"}:
+            selected_backend = "webrtc" if remote_only_enabled() else "silero"
     backend_name = selected_backend
     mode = DEFAULT_EOU_MODE
 
@@ -6322,6 +6370,10 @@ async def _finalize_session(
         session.partial_stt_task = None
 
     if abort:
+        if session.spud_link_stt_stream is not None:
+            with contextlib.suppress(Exception):
+                await session.spud_link_stt_stream.close(abort=True)
+            session.spud_link_stt_stream = None
         logger.info(
             "[native-voice] session aborted selector=%s session_id=%s reason=%s",
             token,
@@ -6338,8 +6390,20 @@ async def _finalize_session(
             )
         return
 
+    if session.spud_link_stt_stream is not None:
+        # Usually the Hub already ended the stream via its own VAD. This also
+        # lets device-stop/audio-stall finalization ask it to complete cleanly.
+        with contextlib.suppress(Exception):
+            await session.spud_link_stt_stream.finish()
+
     no_speech_reason = _text(reason)
-    if no_speech_reason in {"server_vad", "audio_stall_no_speech", "audio_stall_no_audio", "blank_wake_timeout"}:
+    if no_speech_reason in {
+        "server_vad",
+        "spud_link_vad",
+        "audio_stall_no_speech",
+        "audio_stall_no_audio",
+        "blank_wake_timeout",
+    }:
         seg = None
         if isinstance(session.eou_engine, EouEngine):
             seg = session.eou_engine.segmenter
@@ -6888,6 +6952,11 @@ async def _finalize_session(
                 session_id=session.session_id,
                 reason="pipeline_error",
             )
+    finally:
+        if session.spud_link_stt_stream is not None:
+            with contextlib.suppress(Exception):
+                await session.spud_link_stt_stream.close()
+            session.spud_link_stt_stream = None
 
 
 async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module: Any, *, api_audio_supported: bool) -> Callable[[], None]:
@@ -7000,6 +7069,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         voice_cfg = _voice_config_snapshot()
         eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
         limits_cfg = voice_cfg.get("limits") if isinstance(voice_cfg.get("limits"), dict) else {}
+        requested_vad_backend = _normalize_vad_backend(eou_cfg.get("backend"))
 
         wake_word_session = bool(wake_phrase)
         capture_reopen_profile = bool(continued_chat_reopen or wake_word_session)
@@ -7122,7 +7192,8 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         tts_cfg = voice_cfg.get("tts") if isinstance(voice_cfg.get("tts"), dict) else {}
         requested_stt_backend = _normalize_stt_backend(stt_cfg.get("backend"))
         effective_stt_backend, stt_backend_note = _resolve_stt_backend_selected(requested_stt_backend)
-        if spud_link_should_use_hub("stt", redis_conn=redis_client):
+        hub_stt_routed = spud_link_should_use_hub("stt", redis_conn=redis_client)
+        if hub_stt_routed:
             effective_stt_backend = "spud_link"
             stt_backend_note = "Loaded on Spud Hub"
         requested_tts_backend = _normalize_tts_backend(tts_cfg.get("backend"))
@@ -7191,7 +7262,38 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             audio_stall_no_speech_timeout_s=audio_stall_no_speech_timeout_s,
             blank_wake_timeout_s=blank_wake_timeout_s,
             audio_input_gain=audio_input_gain,
+            spud_link_endpointing_requested=requested_vad_backend == "spud_link",
+            spud_link_endpointing_reuse_stt=bool(hub_stt_routed),
         )
+        if session.spud_link_endpointing_requested:
+            try:
+                session.spud_link_stt_stream = await spud_link_open_stt_stream(
+                    audio_format=fmt,
+                    language=session.language,
+                    device=device_name,
+                    transcribe=bool(session.spud_link_endpointing_reuse_stt),
+                    vad_ignore_s=vad_startup_ignore_s,
+                    redis_conn=redis_client,
+                    connect_timeout=3.0,
+                )
+                session.spud_link_endpointing_active = True
+                logger.info(
+                    "[native-voice] Spud Hub endpointing connected selector=%s session_id=%s reuse_stt=%s local_fallback=%s",
+                    token,
+                    sid,
+                    session.spud_link_endpointing_reuse_stt,
+                    eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "-",
+                )
+            except Exception as exc:
+                session.spud_link_endpointing_fallback = True
+                session.spud_link_endpointing_error = _text(exc) or type(exc).__name__
+                logger.warning(
+                    "[native-voice] Spud Hub endpointing unavailable; using local VAD selector=%s session_id=%s fallback=%s error=%s",
+                    token,
+                    sid,
+                    eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "-",
+                    session.spud_link_endpointing_error,
+                )
         async with lock:
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
@@ -7228,6 +7330,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         _schedule_audio_stall_watch(token, client, module, session_id=sid)
 
         log_ts = _now()
+        active_vad_backend = (
+            "spud_link"
+            if session.spud_link_endpointing_active
+            else eou_engine.backend_name
+            if isinstance(eou_engine, EouEngine)
+            else ""
+        )
         logger.info(
             "[native-voice] session start selector=%s conversation_id=%s session_id=%s wake_word=%s followup=%s capture_profile=%s area=%s stt=%s tts=%s vad=%s wake_engine=%s rate=%s width=%s ch=%s input_gain=%.2f gate_s=%.2f vad_ignore_s=%.2f preroll_s=%.2f setup_ms=%.1f ready_ms=%.1f",
             token,
@@ -7239,7 +7348,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             area_name,
             effective_stt_backend,
             effective_tts_backend,
-            eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "",
+            active_vad_backend,
             "device",
             int(fmt.get("rate") or 0),
             int(fmt.get("width") or 0),
@@ -7280,6 +7389,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 f"min_speech_frames={seg.min_speech_frames} min_silence_frames={seg.min_silence_frames} "
                 f"silero_threshold={float(getattr(eou_engine.backend, 'threshold', DEFAULT_SILERO_THRESHOLD)):.2f} "
                 f"webrtc_aggressiveness={int(getattr(eou_engine.backend, 'mode', DEFAULT_WEBRTC_VAD_AGGRESSIVENESS))} "
+                f"webrtc_min_speech_ratio={float(getattr(eou_engine.backend, 'min_speech_ratio', DEFAULT_WEBRTC_VAD_MIN_SPEECH_RATIO)):.2f} "
                 f"startup_gate_s={float(session.startup_gate_s or 0.0):.2f} "
                 f"vad_startup_ignore_s={float(session.vad_startup_ignore_s or 0.0):.2f} "
                 f"input_gain={float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN):.2f} "
@@ -7356,9 +7466,110 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         metrics: Dict[str, Any] = {}
         should_finalize = False
-        vad_startup_ignored = False
-        if isinstance(eou_engine, EouEngine):
-            vad_startup_ignored = vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
+        vad_startup_ignored = vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
+        spud_stream = None
+        spud_stream_active = False
+        spud_speech_seen = False
+        spud_stream_payload = audio_bytes
+        async with lock:
+            active_session = runtime.get("session")
+            if isinstance(active_session, VoiceSessionRuntime) and active_session.session_id == sid:
+                spud_stream = active_session.spud_link_stt_stream
+                spud_stream_active = bool(active_session.spud_link_endpointing_active and spud_stream is not None)
+                spud_speech_seen = bool(active_session.spud_link_endpointing_speech_seen)
+                if spud_stream_active and not bool(active_session.spud_link_stream_audio_started):
+                    if active_session.startup_preroll_buffer:
+                        spud_stream_payload = bytes(active_session.startup_preroll_buffer) + audio_bytes
+                    active_session.spud_link_stream_audio_started = True
+
+        spud_stream_error = ""
+        if spud_stream_active:
+            try:
+                await spud_stream.send_audio(spud_stream_payload)
+                await asyncio.sleep(0)
+                for event in spud_stream.drain_events():
+                    event_type = _lower(event.get("type"))
+                    if event_type == "speech_start":
+                        spud_speech_seen = True
+                        with contextlib.suppress(Exception):
+                            speech_score = float(event.get("score") or 0.0)
+                            if speech_score > float(metrics.get("max_probability") or 0.0):
+                                metrics["max_probability"] = speech_score
+                    elif event_type == "speech_end":
+                        spud_speech_seen = True
+                        metrics.update(
+                            {
+                                "should_finalize": True,
+                                "speech_s": float(event.get("speech_s") or 0.0),
+                                "silence_s": float(event.get("silence_s") or 0.0),
+                                "timed_out": bool(event.get("timed_out")),
+                            }
+                        )
+                        should_finalize = True
+                    elif event_type == "error" or event.get("ok") is False:
+                        spud_stream_error = _text(event.get("error")) or "Spud Hub endpointing failed."
+            except Exception as exc:
+                spud_stream_error = _text(exc) or type(exc).__name__
+
+            if not spud_stream_error:
+                metrics.update(
+                    {
+                        "backend": "spud_link",
+                        "binary_active": spud_speech_seen,
+                        "score": float(metrics.get("max_probability") or 0.0),
+                        "chunk_score": float(metrics.get("max_probability") or 0.0),
+                        "probability": float(metrics.get("max_probability") or 0.0),
+                        "max_probability": float(metrics.get("max_probability") or 0.0),
+                        "should_finalize": should_finalize,
+                        "voice_seen": spud_speech_seen,
+                        "speech_chunks": 1 if spud_speech_seen else 0,
+                        "speech_s": max(
+                            0.05 if spud_speech_seen else 0.0,
+                            float(metrics.get("speech_s") or 0.0),
+                        ),
+                        "silence_s": float(metrics.get("silence_s") or 0.0),
+                        "timed_out": bool(metrics.get("timed_out")),
+                        "in_command": spud_speech_seen and not should_finalize,
+                        "vad_startup_ignored": vad_startup_ignored,
+                        "spud_link_endpointing": True,
+                    }
+                )
+                if spud_speech_seen and isinstance(eou_engine, EouEngine):
+                    segmenter = eou_engine.segmenter
+                    segmenter.voice_seen = True
+                    segmenter.in_command = not should_finalize
+                    segmenter.speech_chunks = max(1, int(segmenter.speech_chunks or 0))
+                    segmenter.speech_seconds_total = max(
+                        float(metrics.get("speech_s") or 0.0),
+                        float(segmenter.speech_seconds_total or 0.0),
+                    )
+
+        if spud_stream_error:
+            logger.warning(
+                "[native-voice] Spud Hub endpointing interrupted; continuing with local VAD selector=%s session_id=%s fallback=%s error=%s",
+                token,
+                sid,
+                eou_engine.backend_name if isinstance(eou_engine, EouEngine) else "-",
+                spud_stream_error,
+            )
+            with contextlib.suppress(Exception):
+                await spud_stream.close(abort=True)
+            async with lock:
+                active_session = runtime.get("session")
+                if isinstance(active_session, VoiceSessionRuntime) and active_session.session_id == sid:
+                    active_session.spud_link_endpointing_active = False
+                    active_session.spud_link_endpointing_fallback = True
+                    active_session.spud_link_endpointing_error = spud_stream_error
+                    active_session.spud_link_stt_stream = None
+            spud_stream_active = False
+            if spud_speech_seen and isinstance(eou_engine, EouEngine):
+                segmenter = eou_engine.segmenter
+                segmenter.voice_seen = True
+                segmenter.in_command = True
+                segmenter.speech_chunks = max(1, int(segmenter.speech_chunks or 0))
+                segmenter.speech_seconds_total = max(0.05, float(segmenter.speech_seconds_total or 0.0))
+
+        if not spud_stream_active and isinstance(eou_engine, EouEngine):
             if vad_startup_ignored:
                 metrics = {
                     "backend": eou_engine.backend_name,
@@ -7379,6 +7590,12 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             else:
                 metrics = eou_engine.process(audio_bytes, audio_format, now_ts)
                 should_finalize = bool(metrics.get("should_finalize"))
+
+        if spud_stream_active:
+            async with lock:
+                active_session = runtime.get("session")
+                if isinstance(active_session, VoiceSessionRuntime) and active_session.session_id == sid:
+                    active_session.spud_link_endpointing_speech_seen = spud_speech_seen
 
         async with lock:
             session = runtime.get("session")
@@ -7583,7 +7800,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         if should_finalize:
             vad_error = bool(metrics.get("vad_error"))
-            finalize_reason = "vad_unavailable" if vad_error else "server_vad"
+            finalize_reason = (
+                "vad_unavailable"
+                if vad_error
+                else "spud_link_vad"
+                if bool(metrics.get("spud_link_endpointing"))
+                else "server_vad"
+            )
             if vad_error:
                 logger.error(
                     "[native-voice] VAD backend error selector=%s session_id=%s backend=%s error=%s",
@@ -7593,7 +7816,7 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     _text(metrics.get("error")) or "unknown",
                 )
             _native_debug(
-                f"server_vad finalize selector={token} session_id={sid} reason={finalize_reason} "
+                f"voice endpoint finalize selector={token} session_id={sid} reason={finalize_reason} "
                 f"silence_s={float(metrics.get('silence_s') or 0.0):.2f} speech_chunks={int(metrics.get('speech_chunks') or 0)} "
                 f"speech_s={float(metrics.get('speech_s') or 0.0):.2f} timed_out={bool(metrics.get('timed_out'))}"
             )

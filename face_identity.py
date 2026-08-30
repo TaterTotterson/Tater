@@ -100,7 +100,26 @@ def _read_hash(client: Any, key: str) -> Dict[str, Dict[str, Any]]:
 
 def identity_rows(redis_client: Any = None) -> Dict[str, Dict[str, Any]]:
     """Return the identities owned by Tater's shared People service."""
-    return _read_hash(_client(redis_client), SHARED_IDENTITIES_KEY)
+    client = _client(redis_client)
+    rows = _read_hash(client, SHARED_IDENTITIES_KEY)
+    for identity_id, identity in list(rows.items()):
+        current_observations = observations(identity)
+        image_observations = image_backed_observations(identity)
+        has_image_less_vectors = len(current_observations) != len(image_observations)
+        has_profile_vectors_without_images = not image_observations and any(
+            identity.get(key) for key in ("centroid", "reference_centroids")
+        )
+        if (
+            "anchor_references" not in identity
+            and not has_image_less_vectors
+            and not has_profile_vectors_without_images
+        ):
+            continue
+        cleaned = rebuild_identity(identity, image_observations, keep_name=True)
+        cleaned.pop("anchor_references", None)
+        client.hset(SHARED_IDENTITIES_KEY, identity_id, json.dumps(cleaned, separators=(",", ":")))
+        rows[identity_id] = cleaned
+    return rows
 
 
 def save_identity(identity: Dict[str, Any], redis_client: Any = None) -> Dict[str, Any]:
@@ -110,6 +129,7 @@ def save_identity(identity: Dict[str, Any], redis_client: Any = None) -> Dict[st
         raise ValueError("Face identity cannot be stored without an ID.")
     payload = dict(identity)
     payload["id"] = identity_id
+    payload.pop("anchor_references", None)
     encoded = json.dumps(payload, separators=(",", ":"))
     client.hset(SHARED_IDENTITIES_KEY, identity_id, encoded)
     return payload
@@ -205,6 +225,44 @@ def valid_embedding(raw: Any, dimensions: int = 0) -> List[float]:
     return embedding
 
 
+def _embedding_model_metadata(raw: Any = None, *, dimensions: int = 0) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    local = face_id_runtime.embedding_model_metadata()
+    metadata = {
+        "model_name": _text(source.get("model_name")) or _text(local.get("model_name")),
+        "detector_backend": _text(source.get("detector_backend")) or _text(local.get("detector_backend")),
+        "distance_metric": _text(source.get("distance_metric")) or _text(local.get("distance_metric")),
+        "match_threshold": _float(source.get("match_threshold"), _float(local.get("match_threshold"), 0.30)),
+        "embedding_dimensions": _int(
+            dimensions or source.get("embedding_dimensions") or local.get("embedding_dimensions"),
+            minimum=0,
+        ),
+        "model_pack_version": _text(source.get("model_pack_version")) or _text(local.get("model_pack_version")),
+        "deepface_version": _text(source.get("deepface_version")) or _text(local.get("deepface_version")),
+    }
+    return metadata
+
+
+def _embedding_model_signature(metadata: Any, *, dimensions: int = 0) -> str:
+    normalized = _embedding_model_metadata(metadata, dimensions=dimensions)
+    return "|".join(
+        (
+            _text(normalized.get("model_name")).lower(),
+            _text(normalized.get("distance_metric")).lower(),
+            str(_int(dimensions or normalized.get("embedding_dimensions"), minimum=0)),
+        )
+    )
+
+
+def _annotate_detection(detection: Dict[str, Any], metadata: Any) -> Dict[str, Any]:
+    payload = dict(detection)
+    embedding = valid_embedding(payload.get("embedding"))
+    normalized = _embedding_model_metadata(metadata, dimensions=len(embedding))
+    payload["embedding_model"] = normalized
+    payload["embedding_model_signature"] = _embedding_model_signature(normalized, dimensions=len(embedding))
+    return payload
+
+
 def cosine_distance(left: List[float], right: List[float]) -> float:
     if not left or not right or len(left) != len(right):
         return float("inf")
@@ -231,7 +289,18 @@ def observations(identity: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows[:OBSERVATION_LIMIT]
 
 
+def image_backed_observations(identity: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        row
+        for row in observations(identity)
+        if _text(row.get("face_b64")) and valid_embedding(row.get("embedding"))
+    ]
+
+
 def reference_embeddings(identity: Dict[str, Any]) -> List[List[float]]:
+    image_rows = image_backed_observations(identity)
+    if not image_rows:
+        return []
     references: List[List[float]] = []
 
     def add(raw: Any) -> None:
@@ -250,10 +319,8 @@ def reference_embeddings(identity: Dict[str, Any]) -> List[List[float]]:
             add(raw)
     if references:
         return references
-    for raw in identity.get("anchor_references") or []:
-        add(raw)
     add(identity.get("centroid"))
-    for row in observations(identity):
+    for row in image_rows:
         add(row.get("embedding"))
     return references
 
@@ -261,14 +328,13 @@ def reference_embeddings(identity: Dict[str, Any]) -> List[List[float]]:
 def curate_reference_embeddings(
     identity: Dict[str, Any],
     *,
-    extra_references: Optional[List[List[float]]] = None,
     limit: int = REFERENCE_LIMIT,
 ) -> List[List[float]]:
     maximum = max(1, int(limit))
     best_quality = max(1.0, _float(identity.get("best_quality")))
     candidates: List[Dict[str, Any]] = []
 
-    def add(raw: Any, *, quality: float, seen_at: Any = "", anchor: bool = False) -> None:
+    def add(raw: Any, *, quality: float, seen_at: Any = "") -> None:
         embedding = valid_embedding(raw, len(candidates[0]["embedding"]) if candidates else 0)
         if not embedding:
             return
@@ -276,31 +342,22 @@ def curate_reference_embeddings(
             "embedding": embedding,
             "quality": max(0.0, float(quality)),
             "seen_at": _text(seen_at),
-            "anchor": bool(anchor),
         }
         for index, existing in enumerate(candidates):
             if cosine_distance(embedding, existing["embedding"]) >= 0.005:
                 continue
-            candidate["anchor"] = bool(candidate["anchor"] or existing["anchor"])
             if (candidate["quality"], candidate["seen_at"]) >= (existing["quality"], existing["seen_at"]):
                 candidates[index] = candidate
-            else:
-                existing["anchor"] = candidate["anchor"]
             return
         candidates.append(candidate)
 
-    for raw in identity.get("anchor_references") or []:
-        add(raw, quality=best_quality, anchor=True)
-    for raw in extra_references or []:
-        add(raw, quality=1.0)
     add(identity.get("centroid"), quality=1.0)
-    for row in observations(identity):
+    for row in image_backed_observations(identity):
         add(row.get("embedding"), quality=_float(row.get("quality")), seen_at=row.get("seen_at"))
     if len(candidates) <= maximum:
         return [row["embedding"] for row in candidates]
 
-    anchors = [row for row in candidates if row["anchor"]]
-    seed = max(anchors or candidates, key=lambda row: (row["quality"], row["seen_at"]))
+    seed = max(candidates, key=lambda row: (row["quality"], row["seen_at"]))
     selected = [seed]
     remaining = [row for row in candidates if row is not seed]
     while remaining and len(selected) < maximum:
@@ -320,11 +377,15 @@ def match_identity(
     embedding: List[float],
     *,
     threshold: Optional[float] = None,
+    model_signature: str = "",
 ) -> Tuple[str, float]:
     maximum = _float(threshold, _float(getattr(face_id_runtime, "MATCH_THRESHOLD", 0.30), 0.30))
     best_id = ""
     best_distance = float("inf")
     for identity_id, identity in identities.items():
+        stored_signature = _text(identity.get("embedding_model_signature"))
+        if model_signature and stored_signature and stored_signature != model_signature:
+            continue
         distance = min(
             (cosine_distance(embedding, reference) for reference in reference_embeddings(identity)),
             default=float("inf"),
@@ -363,6 +424,12 @@ def _detection_observation(
         "face_b64": _text(detection.get("crop_b64")),
         "face_content_type": _text(detection.get("crop_content_type")) or "image/jpeg",
     }
+    embedding_model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
+    model_signature = _text(detection.get("embedding_model_signature"))
+    if embedding_model:
+        row["embedding_model"] = dict(embedding_model)
+    if model_signature:
+        row["embedding_model_signature"] = model_signature
     if isinstance(source, dict):
         row["source"] = {key: value for key, value in source.items() if _text(value)}
     return row
@@ -375,7 +442,8 @@ def rebuild_identity(
     keep_name: bool = True,
 ) -> Dict[str, Any]:
     payload = dict(identity)
-    normalized = observations({"observations": rows})
+    payload.pop("anchor_references", None)
+    normalized = image_backed_observations({"observations": rows})
     payload["observations"] = normalized
     payload["observation_count"] = len(normalized)
     embeddings = [valid_embedding(row.get("embedding")) for row in normalized]
@@ -387,7 +455,6 @@ def rebuild_identity(
         payload["centroid_count"] = len(embeddings)
         payload["reference_centroids"] = curate_reference_embeddings(
             {
-                "anchor_references": payload.get("anchor_references") if keep_name else [],
                 "centroid": payload["centroid"],
                 "observations": normalized,
                 "best_quality": payload.get("best_quality"),
@@ -396,8 +463,6 @@ def rebuild_identity(
     else:
         for key in ("centroid", "centroid_count", "reference_centroids"):
             payload.pop(key, None)
-        if keep_name and payload.get("anchor_references"):
-            payload["reference_centroids"] = curate_reference_embeddings(payload)
     event_ids = {_text(row.get("event_id")) for row in normalized if _text(row.get("event_id"))}
     payload["event_count"] = len(event_ids)
     if normalized:
@@ -433,15 +498,22 @@ def record_detection(
     embedding = valid_embedding(detection.get("embedding"))
     if not embedding:
         raise ValueError("Face result did not include an embedding.")
+    if not _text(detection.get("crop_b64")):
+        raise ValueError("Face result did not include a saved face image.")
     timestamp = _text(seen_at) or _now_iso()
     area = detection.get("facial_area") if isinstance(detection.get("facial_area"), dict) else {}
     confidence = _float(detection.get("confidence"))
     area_pixels = max(1, _int(area.get("w"), 1, minimum=1) * _int(area.get("h"), 1, minimum=1))
     quality = max(0.0, confidence) + min(2.0, area_pixels / 100_000.0)
+    embedding_model = _embedding_model_metadata(detection.get("embedding_model"), dimensions=len(embedding))
+    model_signature = _text(detection.get("embedding_model_signature")) or _embedding_model_signature(
+        embedding_model,
+        dimensions=len(embedding),
+    )
 
     with _identity_lock:
         identities = identity_rows(client)
-        identity_id, distance = match_identity(identities, embedding)
+        identity_id, distance = match_identity(identities, embedding, model_signature=model_signature)
         identity = dict(identities.get(identity_id) or {})
         if not identity_id:
             identity_id = f"face_{uuid.uuid4().hex[:16]}"
@@ -456,8 +528,13 @@ def record_detection(
                 "centroid_count": 0,
                 "reference_centroids": [embedding],
                 "best_quality": 0.0,
+                "embedding_model": embedding_model,
+                "embedding_model_signature": model_signature,
             }
             distance = 0.0
+        else:
+            identity["embedding_model"] = embedding_model
+            identity["embedding_model_signature"] = model_signature
 
         existing = observations(identity)
         event_token = _text(event_id)
@@ -522,6 +599,90 @@ def runtime_status(redis_client: Any = None) -> Dict[str, Any]:
         return {"enabled": False, "loaded": False, "state": "error", "error": _text(exc)}
 
 
+def _analyze_face_image(
+    image_bytes: bytes,
+    *,
+    redis_client: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Return embeddings while keeping identity ownership on the calling Tater."""
+    client = _client(redis_client)
+    status = runtime_status(client)
+    if not bool(status.get("enabled")):
+        return [], {}, {
+            "status": "disabled",
+            "warning": "Face ID is disabled in Settings › Models.",
+            "people": [],
+            "identity_ids": [],
+        }
+
+    force_local = False
+    if spud_link_should_use_hub("face_id", redis_conn=client):
+        try:
+            remote = spud_link_request_json(
+                "models/face-id",
+                payload={
+                    "operation": "embed",
+                    "data_base64": base64.b64encode(bytes(image_bytes or b"")).decode("ascii"),
+                    "filename": "face.jpg",
+                    "mimetype": "image/jpeg",
+                },
+                redis_conn=client,
+                timeout=180.0,
+            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            if not isinstance(result.get("detections"), list):
+                raise RuntimeError(
+                    "The Spud Hub needs the stateless Face ID embedding update before this Spudlet can use Hub Face ID."
+                )
+            model = _embedding_model_metadata(result.get("model"))
+            detections = [
+                _annotate_detection(row, model)
+                for row in result.get("detections") or []
+                if isinstance(row, dict)
+            ]
+            return detections, {
+                "routed_via": "spud_link",
+                "loaded_on": "Spud Hub",
+                "identity_owner": "This Tater",
+                "embedding_model": model,
+            }, None
+        except Exception:
+            if not spud_link_allow_local_fallback("face_id", redis_conn=client):
+                raise
+            force_local = True
+            status = face_id_runtime.status(client, force_local=True)
+
+    if not bool(status.get("enabled")):
+        return [], {}, {
+            "status": "disabled",
+            "warning": "Face ID is unavailable on the Spud Hub and the local fallback is disabled.",
+            "people": [],
+            "identity_ids": [],
+        }
+    if not bool(status.get("loaded")):
+        return [], {}, {
+            "status": "not_ready",
+            "warning": "Face ID is enabled but its model is not ready yet.",
+            "people": [],
+            "identity_ids": [],
+        }
+    try:
+        model = _embedding_model_metadata()
+        detections = [
+            _annotate_detection(row, model)
+            for row in list(face_id_runtime.analyze_image(image_bytes, client, force_local=force_local) or [])
+            if isinstance(row, dict)
+        ]
+        return detections, {"identity_owner": "This Tater", "embedding_model": model}, None
+    except Exception as exc:
+        return [], {}, {
+            "status": "error",
+            "warning": _text(exc) or "Face ID analysis failed.",
+            "people": [],
+            "identity_ids": [],
+        }
+
+
 def recognize_image(
     image_bytes: bytes,
     *,
@@ -532,38 +693,9 @@ def recognize_image(
     redis_client: Any = None,
 ) -> Dict[str, Any]:
     client = _client(redis_client)
-    status = runtime_status(client)
-    if not bool(status.get("enabled")):
-        return {"status": "disabled", "warning": "Face ID is disabled in Settings › Models.", "people": [], "identity_ids": []}
-    if spud_link_should_use_hub("face_id", redis_conn=client):
-        try:
-            remote = spud_link_request_json(
-                "models/face-id",
-                payload={
-                    "data_base64": base64.b64encode(bytes(image_bytes or b"")).decode("ascii"),
-                    "filename": "face.jpg",
-                    "mimetype": "image/jpeg",
-                    "event_id": _text(event_id),
-                    "seen_at": _text(seen_at),
-                    "source": dict(source or {}),
-                    "record": bool(record),
-                },
-                redis_conn=client,
-                timeout=180.0,
-            )
-            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
-            result["routed_via"] = "spud_link"
-            result["loaded_on"] = "Spud Hub"
-            return result
-        except Exception:
-            if not spud_link_allow_local_fallback("face_id", redis_conn=client):
-                raise
-    if not bool(status.get("loaded")):
-        return {"status": "not_ready", "warning": "Face ID is enabled but its model is not ready yet.", "people": [], "identity_ids": []}
-    try:
-        detections = list(face_id_runtime.analyze_image(image_bytes, client) or [])
-    except Exception as exc:
-        return {"status": "error", "warning": _text(exc) or "Face ID analysis failed.", "people": [], "identity_ids": []}
+    detections, routing, failure = _analyze_face_image(image_bytes, redis_client=client)
+    if failure is not None:
+        return failure
 
     identities_before = identity_rows(client)
     identity_ids: List[str] = []
@@ -587,7 +719,13 @@ def recognize_image(
             if not isinstance(detection, dict):
                 continue
             embedding = valid_embedding(detection.get("embedding"))
-            identity_id, _distance = match_identity(identities_before, embedding)
+            model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
+            identity_id, _distance = match_identity(
+                identities_before,
+                embedding,
+                threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+                model_signature=_text(detection.get("embedding_model_signature")),
+            )
             if identity_id and identity_id not in identity_ids:
                 identity_ids.append(identity_id)
 
@@ -600,6 +738,80 @@ def recognize_image(
         "person_ids": [row["person_id"] for row in recognized],
         "identity_ids": identity_ids,
         "faces_detected": len([row for row in detections if isinstance(row, dict)]),
+        **routing,
+    }
+
+
+def enroll_person_image(
+    image_bytes: bytes,
+    *,
+    person_id: str,
+    source: Optional[Dict[str, Any]] = None,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    """Explicitly save one clear face image and link it to an existing Person."""
+    client = _client(redis_client)
+    wanted_person_id = _text(person_id)
+    wanted_person_name = person_name(wanted_person_id, client)
+    if not wanted_person_id or not wanted_person_name:
+        raise ValueError("Choose an existing Tater Person.")
+    if not bytes(image_bytes or b""):
+        raise ValueError("Choose a face photo or take one with the camera first.")
+
+    source_payload = dict(source or {})
+    source_payload.setdefault("kind", "manual_face_enrollment")
+    detections, routing, failure = _analyze_face_image(image_bytes, redis_client=client)
+    if failure is not None:
+        raise ValueError(_text(failure.get("warning")) or "Tater Face ID did not return a usable result.")
+    faces_detected = len(detections)
+    if faces_detected < 1:
+        raise ValueError("No clear face was found. Try a closer, front-facing photo.")
+    if faces_detected > 1:
+        raise ValueError("More than one face was found. Use a photo containing only the selected person.")
+
+    detection = detections[0]
+    embedding = valid_embedding(detection.get("embedding"))
+    model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
+    existing_id, _distance = match_identity(
+        identity_rows(client),
+        embedding,
+        threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+        model_signature=_text(detection.get("embedding_model_signature")),
+    )
+    existing_ids = [existing_id] if existing_id else []
+    if len(existing_ids) > 1:
+        raise ValueError("The photo matched more than one Face ID profile. Use a clearer photo.")
+    if existing_ids:
+        existing_id = resolve_identity_id(existing_ids[0], client)
+        existing = identity_rows(client).get(existing_id) or {}
+        existing_person_id = _text(existing.get("person_id"))
+        if existing_person_id and existing_person_id != wanted_person_id:
+            existing_person_name = person_name(existing_person_id, client) or "another Person"
+            raise ValueError(
+                f"This face is already linked to {existing_person_name}. "
+                "Choose that Person or review the existing face profile first."
+            )
+
+    identity = record_detection(
+        detection,
+        event_id=f"manual_face_enrollment_{uuid.uuid4().hex[:16]}",
+        seen_at=_now_iso(),
+        source=source_payload,
+        redis_client=client,
+    )
+    identity = save_profile(
+        _text(identity.get("id")),
+        person_id=wanted_person_id,
+        person_link_supplied=True,
+        redis_client=client,
+    )
+    return {
+        "identity": identity,
+        "identity_id": _text(identity.get("id")),
+        "person_id": wanted_person_id,
+        "person_name": wanted_person_name,
+        "matched_existing": bool(existing_ids),
+        **routing,
     }
 
 
@@ -741,10 +953,6 @@ def merge_identities(source_id: str, target_id: str, redis_client: Any = None) -
             target["name"] = target["person_name"]
         target_observations = observations(target)
         source_observations = observations(source)
-        if not target_observations and reference_embeddings(target):
-            target["anchor_references"] = reference_embeddings(target)
-        if not source_observations and reference_embeddings(source):
-            target["anchor_references"] = [*(target.get("anchor_references") or []), *reference_embeddings(source)]
         target = rebuild_identity(target, [*target_observations, *source_observations], keep_name=True)
         target["observation_count"] = _int(target.get("observation_count"), 0, minimum=0)
         target["merged_identity_ids"] = list(
@@ -756,7 +964,6 @@ def merge_identities(source_id: str, target_id: str, redis_client: Any = None) -
         )
         if not display_name(target, client) and display_name(source, client):
             target["name"] = display_name(source, client)
-        target["reference_centroids"] = curate_reference_embeddings(target, extra_references=reference_embeddings(source))
         saved = save_identity(target, client)
         _set_identity_alias(client, source_token, target_token)
         _delete_identity_row(source_token, client)

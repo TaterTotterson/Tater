@@ -69,6 +69,15 @@ def managed_tts_clone_dir(backend: Any) -> Path:
     return target
 
 
+def normalize_managed_tts_profile(value: Any) -> str:
+    token = str(value or "direct").strip().lower().replace("-", "_").replace(" ", "_")
+    return "announcement" if token in {"announcement", "announcements", "announce"} else "direct"
+
+
+def _managed_tts_clone_stem(profile: Any) -> str:
+    return "announcement-reference" if normalize_managed_tts_profile(profile) == "announcement" else "reference"
+
+
 def validate_clone_audio_path(backend: Any, value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -96,7 +105,7 @@ def clone_audio_info(backend: Any, value: Any) -> Dict[str, Any]:
     return {"configured": False, "name": "", "size": 0}
 
 
-def store_clone_audio(backend: Any, *, filename: Any, data: bytes) -> str:
+def store_clone_audio(backend: Any, *, filename: Any, data: bytes, profile: Any = "direct") -> str:
     payload = bytes(data or b"")
     if not payload:
         raise ValueError("Choose a clone audio file first.")
@@ -106,8 +115,9 @@ def store_clone_audio(backend: Any, *, filename: Any, data: bytes) -> str:
     if suffix not in _CLONE_AUDIO_SUFFIXES:
         raise ValueError("Clone audio must be WAV, MP3, FLAC, M4A, OGG, Opus, or AAC.")
     root = managed_tts_clone_dir(backend)
-    target = root / f"reference{suffix}"
-    fd, temp_name = tempfile.mkstemp(prefix=".reference-", suffix=suffix, dir=str(root))
+    stem = _managed_tts_clone_stem(profile)
+    target = root / f"{stem}{suffix}"
+    fd, temp_name = tempfile.mkstemp(prefix=f".{stem}-", suffix=suffix, dir=str(root))
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
@@ -120,18 +130,20 @@ def store_clone_audio(backend: Any, *, filename: Any, data: bytes) -> str:
         with contextlib.suppress(OSError):
             os.unlink(temp_name)
         raise
-    for sibling in root.glob("reference.*"):
+    for sibling in root.glob(f"{stem}.*"):
         if sibling != target and sibling.is_file():
             with contextlib.suppress(OSError):
                 sibling.unlink()
     return str(target.resolve())
 
 
-def remove_clone_audio(backend: Any, value: Any = "") -> bool:
+def remove_clone_audio(backend: Any, value: Any = "", *, profile: Any = "direct") -> bool:
     root = managed_tts_clone_dir(backend).resolve()
     removed = False
     path = validate_clone_audio_path(backend, value)
-    candidates = [Path(path)] if path else list(root.glob("reference.*"))
+    stem = _managed_tts_clone_stem(profile)
+    explicit_path = Path(path) if path and Path(path).name.startswith(f"{stem}.") else None
+    candidates = [explicit_path] if explicit_path is not None else list(root.glob(f"{stem}.*"))
     for candidate in candidates:
         with contextlib.suppress(ValueError):
             candidate.resolve().relative_to(root)

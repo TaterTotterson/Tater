@@ -70,6 +70,8 @@ STEREO_STARTUP_ADJUST_WINDOW_S = 10.0
 STEREO_STARTUP_ADJUST_THRESHOLD_FRAMES = 24
 STEREO_STARTUP_ADJUST_MAX_FRAMES = 240
 STEREO_STARTUP_ADJUST_SETTLE_MS = 2000
+STEREO_STARTUP_REALIGN_THRESHOLD_US = 40_000
+STEREO_STARTUP_REALIGN_MAX_US = 2_000_000
 STEREO_PHASE_EMA_ALPHA = 0.25
 STEREO_PHASE_STABLE_SAMPLES = 2
 MEDIA_RENDER_START_GUARD_MS = 250
@@ -2228,6 +2230,7 @@ async def prepare_group_media_session(
             raise RuntimeError(_text(compatibility.get("error")) or "The synchronized media group is unavailable.")
     async with _clients_lock:
         render_clock_support = {}
+        startup_realign_support = {}
         capability_latency_frames: Dict[str, int] = {}
         capability_sample_rates: Dict[str, int] = {}
         for selector in selectors:
@@ -2235,6 +2238,9 @@ async def prepare_group_media_session(
             hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
             capabilities = _capabilities(_message_payload(hello))
             render_clock_support[selector] = bool(capabilities.get("media_render_clock"))
+            startup_realign_support[selector] = bool(
+                capabilities.get("media_startup_realign")
+            )
             capability_latency_frames[selector] = max(
                 0,
                 min(
@@ -2247,6 +2253,9 @@ async def prepare_group_media_session(
                 _as_int(capabilities.get("media_sample_rate_hz"), 48000),
             )
     use_rendered_clock = bool(selectors) and all(render_clock_support.values())
+    startup_realign_supported = bool(selectors) and all(
+        startup_realign_support.values()
+    )
     if any(render_clock_support.values()) and not use_rendered_clock:
         _vp().logger.warning(
             "[native-media] synchronized group uses the common source clock because "
@@ -2425,6 +2434,8 @@ async def prepare_group_media_session(
         "last_phase_sample_server_us": 0,
         "last_adjust_server_us": 0,
         "use_rendered_clock": use_rendered_clock,
+        "startup_realign_supported": startup_realign_supported,
+        "startup_realign_scheduled": False,
         "created_server_us": _monotonic_us(),
         "loop": bool(loop),
         "content_type": media_content_type,
@@ -2450,6 +2461,7 @@ async def prepare_group_media_session(
         },
         "start_lead_ms": lead_ms,
         "use_rendered_clock": use_rendered_clock,
+        "startup_realign_supported": startup_realign_supported,
         "clock_samples": clocks,
         "playback_completed": False,
     }
@@ -3429,6 +3441,134 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
     _stereo_adjust_tasks[group_id] = asyncio.create_task(_adjust_stereo_session(group_id))
 
 
+async def _realign_stereo_startup(group_id: str) -> None:
+    """Jump late members onto the shared audible timeline after a missed start."""
+    session = _stereo_sessions.get(group_id)
+    if not isinstance(session, dict) or not _as_bool(
+        session.get("startup_realign_supported"),
+        False,
+    ):
+        return
+    selectors = _session_members(session)
+    actual_starts = (
+        session.get("actual_starts_us")
+        if isinstance(session.get("actual_starts_us"), dict)
+        else {}
+    )
+    if not selectors or any(
+        _as_int(actual_starts.get(selector), 0) <= 0 for selector in selectors
+    ):
+        return
+
+    offsets = (
+        session.get("clock_offsets_us")
+        if isinstance(session.get("clock_offsets_us"), dict)
+        else {}
+    )
+    latency_frames = (
+        session.get("render_latency_frames")
+        if isinstance(session.get("render_latency_frames"), dict)
+        else {}
+    )
+    sample_rates = (
+        session.get("render_sample_rates")
+        if isinstance(session.get("render_sample_rates"), dict)
+        else {}
+    )
+    member_delays = (
+        session.get("member_delays_ms")
+        if isinstance(session.get("member_delays_ms"), dict)
+        else {}
+    )
+    normalized_audible_starts: Dict[str, int] = {}
+    for selector in selectors:
+        sample_rate = max(1, _as_int(sample_rates.get(selector), 48000))
+        latency_us = int(
+            round(
+                max(0, _as_int(latency_frames.get(selector), 0))
+                * 1_000_000.0
+                / sample_rate
+            )
+        )
+        normalized_audible_starts[selector] = (
+            _as_int(actual_starts.get(selector), 0)
+            - _as_int(offsets.get(selector), 0)
+            + latency_us
+            - (_as_int(member_delays.get(selector), 0) * 1000)
+        )
+
+    reference = min(
+        selectors,
+        key=lambda selector: normalized_audible_starts[selector],
+    )
+    reference_start_us = normalized_audible_starts[reference]
+    corrections: Dict[str, int] = {}
+    for selector in selectors:
+        late_us = normalized_audible_starts[selector] - reference_start_us
+        if late_us < STEREO_STARTUP_REALIGN_THRESHOLD_US:
+            continue
+        capped_late_us = min(STEREO_STARTUP_REALIGN_MAX_US, late_us)
+        sample_rate = max(1, _as_int(sample_rates.get(selector), 48000))
+        corrections[selector] = int(
+            round(capped_late_us * sample_rate / 1_000_000.0)
+        )
+    if not corrections:
+        session["startup_realign_applied"] = False
+        session["startup_spread_us"] = (
+            max(normalized_audible_starts.values()) - reference_start_us
+        )
+        return
+
+    async def _jump(
+        selector: str,
+        correction_frames: int,
+    ) -> tuple[str, int, Dict[str, Any]]:
+        result = await send_request(
+            selector,
+            "media.session.adjust",
+            {
+                "session_id": _text(session.get("session_id")),
+                "group_id": group_id,
+                "correction_frames": correction_frames,
+                "mode": "jump",
+                "settle_ms": 0,
+                "reference_selector": reference,
+                "reason": "startup_realign",
+            },
+            timeout_s=2.0,
+        )
+        return selector, correction_frames, result
+
+    results = await asyncio.gather(
+        *(_jump(selector, correction) for selector, correction in corrections.items()),
+        return_exceptions=True,
+    )
+    current = _stereo_sessions.get(group_id)
+    if current is not session:
+        return
+    applied = {
+        selector: correction
+        for row in results
+        if isinstance(row, tuple) and len(row) == 3
+        for selector, correction, result in [row]
+        if _as_bool(result.get("ok"), False)
+    }
+    session["startup_spread_us"] = (
+        max(normalized_audible_starts.values()) - reference_start_us
+    )
+    session["startup_realign_frames"] = applied
+    session["startup_realign_applied"] = bool(applied)
+    if applied:
+        _vp().logger.warning(
+            "[native-media] corrected late synchronized start group=%s reference=%s "
+            "spread_ms=%.1f corrections=%s",
+            group_id,
+            reference,
+            session["startup_spread_us"] / 1000.0,
+            ",".join(f"{selector}:{frames}" for selector, frames in applied.items()),
+        )
+
+
 def _record_stereo_started(selector: str, payload: Dict[str, Any]) -> None:
     group_id = _text(payload.get("group_id"))
     session = _stereo_sessions.get(group_id)
@@ -3437,6 +3577,17 @@ def _record_stereo_started(selector: str, payload: Dict[str, Any]) -> None:
     actual_starts = session.setdefault("actual_starts_us", {})
     if isinstance(actual_starts, dict):
         actual_starts[selector] = _as_int(payload.get("actual_start_us"), 0)
+        selectors = _session_members(session)
+        ready = bool(selectors) and all(
+            _as_int(actual_starts.get(member), 0) > 0 for member in selectors
+        )
+        if (
+            ready
+            and _as_bool(session.get("startup_realign_supported"), False)
+            and not _as_bool(session.get("startup_realign_scheduled"), False)
+        ):
+            session["startup_realign_scheduled"] = True
+            asyncio.create_task(_realign_stereo_startup(group_id))
 
 
 def _record_stereo_finished(selector: str, payload: Dict[str, Any]) -> None:

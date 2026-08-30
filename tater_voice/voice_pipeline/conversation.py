@@ -64,6 +64,14 @@ class VoiceSessionRuntime:
     audio_buffer: bytearray = field(default_factory=bytearray)
     secondary_audio_buffer: bytearray = field(default_factory=bytearray)
     eou_engine: Any = None
+    spud_link_stt_stream: Any = None
+    spud_link_endpointing_requested: bool = False
+    spud_link_endpointing_active: bool = False
+    spud_link_endpointing_reuse_stt: bool = False
+    spud_link_endpointing_speech_seen: bool = False
+    spud_link_endpointing_fallback: bool = False
+    spud_link_endpointing_error: str = ""
+    spud_link_stream_audio_started: bool = False
 
     stt_task: Optional[asyncio.Task] = None
     stt_queue: Optional[asyncio.Queue] = None

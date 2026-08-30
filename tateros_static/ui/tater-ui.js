@@ -11,39 +11,39 @@ var t = {}, n = [], r = () => {}, i = () => !1, a = (e) => e.charCodeAt(0) === 1
 }, l = Object.prototype.hasOwnProperty, u = (e, t) => l.call(e, t), d = Array.isArray, f = (e) => x(e) === "[object Map]", p = (e) => x(e) === "[object Set]", m = (e) => x(e) === "[object Date]", h = (e) => typeof e == "function", g = (e) => typeof e == "string", _ = (e) => typeof e == "symbol", v = (e) => typeof e == "object" && !!e, y = (e) => (v(e) || h(e)) && h(e.then) && h(e.catch), b = Object.prototype.toString, x = (e) => b.call(e), S = (e) => x(e).slice(8, -1), C = (e) => x(e) === "[object Object]", w = (e) => g(e) && e !== "NaN" && e[0] !== "-" && "" + parseInt(e, 10) === e, T = /* @__PURE__ */ e(",key,ref,ref_for,ref_key,onVnodeBeforeMount,onVnodeMounted,onVnodeBeforeUpdate,onVnodeUpdated,onVnodeBeforeUnmount,onVnodeUnmounted"), E = (e) => {
 	let t = /* @__PURE__ */ Object.create(null);
 	return ((n) => t[n] || (t[n] = e(n)));
-}, D = /-\w/g, O = E((e) => e.replace(D, (e) => e.slice(1).toUpperCase())), k = /\B([A-Z])/g, A = E((e) => e.replace(k, "-$1").toLowerCase()), j = E((e) => e.charAt(0).toUpperCase() + e.slice(1)), ee = E((e) => e ? `on${j(e)}` : ""), M = (e, t) => !Object.is(e, t), te = (e, ...t) => {
+}, D = /-\w/g, O = E((e) => e.replace(D, (e) => e.slice(1).toUpperCase())), k = /\B([A-Z])/g, A = E((e) => e.replace(k, "-$1").toLowerCase()), j = E((e) => e.charAt(0).toUpperCase() + e.slice(1)), M = E((e) => e ? `on${j(e)}` : ""), N = (e, t) => !Object.is(e, t), ee = (e, ...t) => {
 	for (let n = 0; n < e.length; n++) e[n](...t);
-}, N = (e, t, n, r = !1) => {
+}, P = (e, t, n, r = !1) => {
 	Object.defineProperty(e, t, {
 		configurable: !0,
 		enumerable: !1,
 		writable: r,
 		value: n
 	});
-}, ne = (e) => {
+}, te = (e) => {
 	let t = parseFloat(e);
 	return isNaN(t) ? e : t;
-}, re = (e) => {
+}, ne = (e) => {
 	let t = g(e) ? Number(e) : NaN;
 	return isNaN(t) ? e : t;
-}, P, F = () => P ||= typeof globalThis < "u" ? globalThis : typeof self < "u" ? self : typeof window < "u" ? window : typeof global < "u" ? global : {};
-function I(e) {
+}, F, I = () => F ||= typeof globalThis < "u" ? globalThis : typeof self < "u" ? self : typeof window < "u" ? window : typeof global < "u" ? global : {};
+function L(e) {
 	if (d(e)) {
 		let t = {};
 		for (let n = 0; n < e.length; n++) {
-			let r = e[n], i = g(r) ? R(r) : I(r);
+			let r = e[n], i = g(r) ? ae(r) : L(r);
 			if (i) for (let e in i) t[e] = i[e];
 		}
 		return t;
 	}
 	if (g(e) || v(e)) return e;
 }
-var L = /;(?![^(]*\))/g, ie = /:([^]+)/, ae = /\/\*[^]*?\*\//g;
-function R(e) {
+var R = /;(?![^(]*\))/g, re = /:([^]+)/, ie = /\/\*[^]*?\*\//g;
+function ae(e) {
 	let t = {};
-	return e.replace(ae, "").split(L).forEach((e) => {
+	return e.replace(ie, "").split(R).forEach((e) => {
 		if (e) {
-			let n = e.split(ie);
+			let n = e.split(re);
 			n.length > 1 && (t[n[0].trim()] = n[1].trim());
 		}
 	}), t;
@@ -265,7 +265,7 @@ function Ee(e) {
 	try {
 		Ce(e);
 		let n = e.fn(e._value);
-		(t.version === 0 || M(n, e._value)) && (e.flags |= 128, e._value = n, t.version++);
+		(t.version === 0 || N(n, e._value)) && (e.flags |= 128, e._value = n, t.version++);
 	} catch (e) {
 		throw t.version++, e;
 	} finally {
@@ -563,7 +563,7 @@ var rt = class {
 			if (!/* @__PURE__ */ kt(n) && !/* @__PURE__ */ Ot(n) && (i = /* @__PURE__ */ jt(i), n = /* @__PURE__ */ jt(n)), !a && /* @__PURE__ */ Ft(i) && !/* @__PURE__ */ Ft(n)) return e || (i.value = n), !0;
 		}
 		let o = a ? Number(t) < e.length : u(e, t), s = Reflect.set(e, t, n, /* @__PURE__ */ Ft(e) ? e : r);
-		return e === /* @__PURE__ */ jt(r) && s && (o ? M(n, i) && Ue(e, "set", t, n, i) : Ue(e, "add", t, n)), s;
+		return e === /* @__PURE__ */ jt(r) && s && (o ? N(n, i) && Ue(e, "set", t, n, i) : Ue(e, "add", t, n)), s;
 	}
 	deleteProperty(e, t) {
 		let n = u(e, t), r = e[t], i = Reflect.deleteProperty(e, t);
@@ -611,7 +611,7 @@ function pt(e, t) {
 	let n = {
 		get(n) {
 			let r = this.__v_raw, i = /* @__PURE__ */ jt(r), a = /* @__PURE__ */ jt(n);
-			e || (M(n, a) && He(i, "get", n), He(i, "get", a));
+			e || (N(n, a) && He(i, "get", n), He(i, "get", a));
 			let { has: o } = ut(i), s = t ? lt : e ? Pt : Nt;
 			if (o.call(i, n)) return s(r.get(n));
 			if (o.call(i, a)) return s(r.get(a));
@@ -623,7 +623,7 @@ function pt(e, t) {
 		},
 		has(t) {
 			let n = this.__v_raw, r = /* @__PURE__ */ jt(n), i = /* @__PURE__ */ jt(t);
-			return e || (M(t, i) && He(r, "has", t), He(r, "has", i)), t === i ? n.has(t) : n.has(t) || n.has(i);
+			return e || (N(t, i) && He(r, "has", t), He(r, "has", i)), t === i ? n.has(t) : n.has(t) || n.has(i);
 		},
 		forEach(n, r) {
 			let i = this, a = i.__v_raw, o = /* @__PURE__ */ jt(a), s = t ? lt : e ? Pt : Nt;
@@ -638,14 +638,14 @@ function pt(e, t) {
 	} : {
 		add(e) {
 			let n = /* @__PURE__ */ jt(this), r = ut(n), i = /* @__PURE__ */ jt(e), a = !t && !/* @__PURE__ */ kt(e) && !/* @__PURE__ */ Ot(e) ? i : e;
-			return r.has.call(n, a) || M(e, a) && r.has.call(n, e) || M(i, a) && r.has.call(n, i) || (n.add(a), Ue(n, "add", a, a)), this;
+			return r.has.call(n, a) || N(e, a) && r.has.call(n, e) || N(i, a) && r.has.call(n, i) || (n.add(a), Ue(n, "add", a, a)), this;
 		},
 		set(e, n) {
 			!t && !/* @__PURE__ */ kt(n) && !/* @__PURE__ */ Ot(n) && (n = /* @__PURE__ */ jt(n));
 			let r = /* @__PURE__ */ jt(this), { has: i, get: a } = ut(r), o = i.call(r, e);
 			o ||= (e = /* @__PURE__ */ jt(e), i.call(r, e));
 			let s = a.call(r, e);
-			return r.set(e, n), o ? M(n, s) && Ue(r, "set", e, n, s) : Ue(r, "add", e, n), this;
+			return r.set(e, n), o ? N(n, s) && Ue(r, "set", e, n, s) : Ue(r, "add", e, n), this;
 		},
 		delete(e) {
 			let t = /* @__PURE__ */ jt(this), { has: n, get: r } = ut(t), i = n.call(t, e);
@@ -725,7 +725,7 @@ function jt(e) {
 	return t ? /* @__PURE__ */ jt(t) : e;
 }
 function Mt(e) {
-	return !u(e, "__v_skip") && Object.isExtensible(e) && N(e, "__v_skip", !0), e;
+	return !u(e, "__v_skip") && Object.isExtensible(e) && P(e, "__v_skip", !0), e;
 }
 var Nt = (e) => v(e) ? /* @__PURE__ */ Ct(e) : e, Pt = (e) => v(e) ? /* @__PURE__ */ Tt(e) : e;
 // @__NO_SIDE_EFFECTS__
@@ -748,7 +748,7 @@ var Lt = class {
 	}
 	set value(e) {
 		let t = this._rawValue, n = this.__v_isShallow || /* @__PURE__ */ kt(e) || /* @__PURE__ */ Ot(e);
-		e = n ? e : /* @__PURE__ */ jt(e), M(e, t) && (this._rawValue = e, this._value = n ? e : Nt(e), this.dep.trigger());
+		e = n ? e : /* @__PURE__ */ jt(e), N(e, t) && (this._rawValue = e, this._value = n ? e : Nt(e), this.dep.trigger());
 	}
 };
 function Rt(e) {
@@ -830,7 +830,7 @@ function qt(e, n, i = t) {
 	let C = b ? Array(e.length).fill(Ut) : Ut, w = (e) => {
 		if (!(!(m.flags & 1) || !m.dirty && !e)) if (n) {
 			let t = m.run();
-			if (e || o || y || (b ? t.some((e, t) => M(e, C[t])) : M(t, C))) {
+			if (e || o || y || (b ? t.some((e, t) => N(e, C[t])) : N(t, C))) {
 				_ && _();
 				let e = Gt;
 				Gt = m;
@@ -1404,7 +1404,7 @@ function ur(e) {
 	let t = cr.get(e);
 	t && (t.flags |= 8, cr.delete(e));
 }
-F().requestIdleCallback, F().cancelIdleCallback;
+I().requestIdleCallback, I().cancelIdleCallback;
 var dr = (e) => !!e.type.__asyncLoader, fr = (e) => e.type.__isKeepAlive;
 function pr(e, t) {
 	hr(e, "a", t);
@@ -1574,7 +1574,7 @@ var Vr = !0;
 function Hr(e) {
 	let t = Kr(e), n = e.proxy, i = e.ctx;
 	Vr = !1, t.beforeCreate && Wr(t.beforeCreate, e, "bc");
-	let { data: a, computed: o, methods: s, watch: c, provide: l, inject: u, created: f, beforeMount: p, mounted: m, beforeUpdate: g, updated: _, activated: y, deactivated: b, beforeDestroy: x, beforeUnmount: S, destroyed: C, unmounted: w, render: T, renderTracked: E, renderTriggered: D, errorCaptured: O, serverPrefetch: k, expose: A, inheritAttrs: j, components: ee, directives: M, filters: te } = t;
+	let { data: a, computed: o, methods: s, watch: c, provide: l, inject: u, created: f, beforeMount: p, mounted: m, beforeUpdate: g, updated: _, activated: y, deactivated: b, beforeDestroy: x, beforeUnmount: S, destroyed: C, unmounted: w, render: T, renderTracked: E, renderTriggered: D, errorCaptured: O, serverPrefetch: k, expose: A, inheritAttrs: j, components: M, directives: N, filters: ee } = t;
 	if (u && Ur(u, i, null), s) for (let e in s) {
 		let t = s[e];
 		h(t) && (i[e] = t.bind(n));
@@ -1603,10 +1603,10 @@ function Hr(e) {
 		});
 	}
 	f && Wr(f, e, "c");
-	function N(e, t) {
+	function P(e, t) {
 		d(t) ? t.forEach((t) => e(t.bind(n))) : t && e(t.bind(n));
 	}
-	if (N(yr, p), N(br, m), N(xr, g), N(Sr, _), N(pr, y), N(mr, b), N(Or, O), N(Dr, E), N(Er, D), N(Cr, S), N(wr, w), N(Tr, k), d(A)) if (A.length) {
+	if (P(yr, p), P(br, m), P(xr, g), P(Sr, _), P(pr, y), P(mr, b), P(Or, O), P(Dr, E), P(Er, D), P(Cr, S), P(wr, w), P(Tr, k), d(A)) if (A.length) {
 		let t = e.exposed ||= {};
 		A.forEach((e) => {
 			Object.defineProperty(t, e, {
@@ -1616,7 +1616,7 @@ function Hr(e) {
 			});
 		});
 	} else e.exposed ||= {};
-	T && e.render === r && (e.render = T), j != null && (e.inheritAttrs = j), ee && (e.components = ee), M && (e.directives = M), k && or(e);
+	T && e.render === r && (e.render = T), j != null && (e.inheritAttrs = j), M && (e.components = M), N && (e.directives = N), k && or(e);
 }
 function Ur(e, t, n = r) {
 	d(e) && (e = Zr(e));
@@ -1797,9 +1797,9 @@ var ai = null, oi = (e, t) => t === "modelValue" || t === "model-value" ? e.mode
 function si(e, n, ...r) {
 	if (e.isUnmounted) return;
 	let i = e.vnode.props || t, a = r, o = n.startsWith("update:"), s = o && oi(i, n.slice(7));
-	s && (s.trim && (a = r.map((e) => g(e) ? e.trim() : e)), s.number && (a = r.map(ne)));
-	let c, l = i[c = ee(n)] || i[c = ee(O(n))];
-	!l && o && (l = i[c = ee(A(n))]), l && Xt(l, e, 6, a);
+	s && (s.trim && (a = r.map((e) => g(e) ? e.trim() : e)), s.number && (a = r.map(te)));
+	let c, l = i[c = M(n)] || i[c = M(O(n))];
+	!l && o && (l = i[c = M(A(n))]), l && Xt(l, e, 6, a);
 	let u = i[c + "Once"];
 	if (u) {
 		if (!e.emitted) e.emitted = {};
@@ -2026,7 +2026,7 @@ var Oi = (e) => e === "_" || e === "_ctx" || e === "$stable", ki = (e) => d(e) ?
 	let r = e.slots = yi();
 	if (e.vnode.shapeFlag & 32) {
 		let e = t._;
-		e ? (Ni(r, t, n), n && N(r, "_", e, !0)) : ji(t, r);
+		e ? (Ni(r, t, n), n && P(r, "_", e, !0)) : ji(t, r);
 	} else t && Mi(e, t);
 }, Fi = (e, n, r) => {
 	let { vnode: i, slots: a } = e, o = !0, s = t;
@@ -2040,11 +2040,11 @@ function Li(e) {
 	return Ri(e);
 }
 function Ri(e, i) {
-	let a = F();
+	let a = I();
 	a.__VUE__ = !0;
 	let { insert: o, remove: s, patchProp: c, createElement: l, createText: u, createComment: d, setText: f, setElementText: p, parentNode: m, nextSibling: h, setScopeId: g = r, insertStaticContent: _ } = e, v = (e, t, n, r = null, i = null, a = null, o = void 0, s = null, c = !!t.dynamicChildren) => {
 		if (e === t) return;
-		e && !oa(e, t) && (r = se(e), R(e, i, a, !0), e = null), t.patchFlag === -2 && (c = !1, t.dynamicChildren = null);
+		e && !oa(e, t) && (r = se(e), ae(e, i, a, !0), e = null), t.patchFlag === -2 && (c = !1, t.dynamicChildren = null);
 		let { type: l, ref: u, shapeFlag: d } = t;
 		switch (l) {
 			case Yi:
@@ -2057,9 +2057,9 @@ function Ri(e, i) {
 				e ?? x(t, n, r, o);
 				break;
 			case q:
-				ee(e, t, n, r, i, a, o, s, c);
+				M(e, t, n, r, i, a, o, s, c);
 				break;
-			default: d & 1 ? w(e, t, n, r, i, a, o, s, c) : d & 6 ? M(e, t, n, r, i, a, o, s, c) : (d & 64 || d & 128) && l.process(e, t, n, r, i, a, o, s, c, le);
+			default: d & 1 ? w(e, t, n, r, i, a, o, s, c) : d & 6 ? N(e, t, n, r, i, a, o, s, c) : (d & 64 || d & 128) && l.process(e, t, n, r, i, a, o, s, c, le);
 		}
 		u != null && i ? lr(u, e && e.ref, a, t || e, !t) : u == null && e && e.ref != null && lr(e.ref, null, a, e, !0);
 	}, y = (e, t, n, r) => {
@@ -2121,7 +2121,7 @@ function Ri(e, i) {
 		let l = n.el = e.el, { patchFlag: u, dynamicChildren: d, dirs: f } = n;
 		u |= e.patchFlag & 16;
 		let m = e.props || t, h = n.props || t, g;
-		if (r && Bi(r, !1), (g = h.onVnodeBeforeUpdate) && _a(g, r, n, e), f && xn(n, e, r, "beforeUpdate"), r && Bi(r, !0), d && (!e.dynamicChildren || e.dynamicChildren.length !== d.length) && (u = 0, s = !1, d = null), (m.innerHTML && h.innerHTML == null || m.textContent && h.textContent == null) && p(l, ""), d ? A(e.dynamicChildren, d, l, r, i, zi(n, a), o) : s || I(e, n, l, null, r, i, zi(n, a), o, !1), u > 0) {
+		if (r && Bi(r, !1), (g = h.onVnodeBeforeUpdate) && _a(g, r, n, e), f && xn(n, e, r, "beforeUpdate"), r && Bi(r, !0), d && (!e.dynamicChildren || e.dynamicChildren.length !== d.length) && (u = 0, s = !1, d = null), (m.innerHTML && h.innerHTML == null || m.textContent && h.textContent == null) && p(l, ""), d ? A(e.dynamicChildren, d, l, r, i, zi(n, a), o) : s || L(e, n, l, null, r, i, zi(n, a), o, !1), u > 0) {
 			if (u & 16) j(l, m, h, r, a);
 			else if (u & 2 && m.class !== h.class && c(l, "class", null, h.class, a), u & 4 && c(l, "style", m.style, h.style, a), u & 8) {
 				let e = n.dynamicProps;
@@ -2150,34 +2150,34 @@ function Ri(e, i) {
 			}
 			"value" in r && c(e, "value", n.value, r.value, a);
 		}
-	}, ee = (e, t, n, r, i, a, s, c, l) => {
+	}, M = (e, t, n, r, i, a, s, c, l) => {
 		let d = t.el = e ? e.el : u(""), f = t.anchor = e ? e.anchor : u(""), { patchFlag: p, dynamicChildren: m, slotScopeIds: h } = t;
-		h && (c = c ? c.concat(h) : h), e == null ? (o(d, n, r), o(f, n, r), O(t.children || [], n, f, i, a, s, c, l)) : p > 0 && p & 64 && m && e.dynamicChildren && e.dynamicChildren.length === m.length ? (A(e.dynamicChildren, m, n, i, a, s, c), (t.key != null || i && t === i.subTree) && Hi(e, t, !0)) : I(e, t, n, f, i, a, s, c, l);
-	}, M = (e, t, n, r, i, a, o, s, c) => {
-		t.slotScopeIds = s, e == null ? t.shapeFlag & 512 ? i.ctx.activate(t, n, r, o, c) : N(t, n, r, i, a, o, c) : ne(e, t, c);
-	}, N = (e, t, n, r, i, a, o) => {
+		h && (c = c ? c.concat(h) : h), e == null ? (o(d, n, r), o(f, n, r), O(t.children || [], n, f, i, a, s, c, l)) : p > 0 && p & 64 && m && e.dynamicChildren && e.dynamicChildren.length === m.length ? (A(e.dynamicChildren, m, n, i, a, s, c), (t.key != null || i && t === i.subTree) && Hi(e, t, !0)) : L(e, t, n, f, i, a, s, c, l);
+	}, N = (e, t, n, r, i, a, o, s, c) => {
+		t.slotScopeIds = s, e == null ? t.shapeFlag & 512 ? i.ctx.activate(t, n, r, o, c) : P(t, n, r, i, a, o, c) : te(e, t, c);
+	}, P = (e, t, n, r, i, a, o) => {
 		let s = e.component = ba(e, r, i);
 		if (fr(e) && (s.ctx.renderer = le), ka(s, !1, o), s.asyncDep) {
-			if (i && i.registerDep(s, re, o), !e.el) {
+			if (i && i.registerDep(s, ne, o), !e.el) {
 				let r = s.subTree = la(Xi);
 				b(null, r, t, n), e.placeholder = r.el;
 			}
-		} else re(s, e, t, n, i, a, o);
-	}, ne = (e, t, n) => {
+		} else ne(s, e, t, n, i, a, o);
+	}, te = (e, t, n) => {
 		let r = t.component = e.component;
 		if (mi(e, t, n)) if (r.asyncDep && !r.asyncResolved) {
-			P(r, t, n);
+			F(r, t, n);
 			return;
 		} else r.next = t, r.update();
 		else t.el = e.el, r.vnode = t;
-	}, re = (e, t, n, r, i, a, o) => {
+	}, ne = (e, t, n, r, i, a, o) => {
 		let s = () => {
 			if (e.isMounted) {
 				let { next: t, bu: n, u: r, parent: s, vnode: c } = e;
 				{
 					let n = Wi(e);
 					if (n) {
-						t && (t.el = c.el, P(e, t, o)), n.asyncDep.then(() => {
+						t && (t.el = c.el, F(e, t, o)), n.asyncDep.then(() => {
 							Ii(() => {
 								e.isUnmounted || l();
 							}, i);
@@ -2186,12 +2186,12 @@ function Ri(e, i) {
 					}
 				}
 				let u = t, d;
-				Bi(e, !1), t ? (t.el = c.el, P(e, t, o)) : t = c, n && te(n), (d = t.props && t.props.onVnodeBeforeUpdate) && _a(d, s, t, c), Bi(e, !0);
+				Bi(e, !1), t ? (t.el = c.el, F(e, t, o)) : t = c, n && ee(n), (d = t.props && t.props.onVnodeBeforeUpdate) && _a(d, s, t, c), Bi(e, !0);
 				let f = di(e), p = e.subTree;
 				e.subTree = f, v(p, f, m(p.el), se(p), e, i, a), t.el = f.el, u === null && _i(e, f.el), r && Ii(r, i), (d = t.props && t.props.onVnodeUpdated) && Ii(() => _a(d, s, t, c), i);
 			} else {
 				let o, { el: s, props: c } = t, { bm: l, m: u, parent: d, root: f, type: p } = e, m = dr(t);
-				if (Bi(e, !1), l && te(l), !m && (o = c && c.onVnodeBeforeMount) && _a(o, d, t), Bi(e, !0), s && ue) {
+				if (Bi(e, !1), l && ee(l), !m && (o = c && c.onVnodeBeforeMount) && _a(o, d, t), Bi(e, !0), s && ue) {
 					let t = () => {
 						e.subTree = di(e), ue(s, e.subTree, e, i, null);
 					};
@@ -2213,24 +2213,24 @@ function Ri(e, i) {
 		e.scope.off();
 		let l = e.update = c.run.bind(c), u = e.job = c.runIfDirty.bind(c);
 		u.i = e, u.id = e.uid, c.scheduler = () => ln(u), Bi(e, !0), l();
-	}, P = (e, t, n) => {
+	}, F = (e, t, n) => {
 		t.component = e;
 		let r = e.vnode.props;
 		e.vnode = t, e.next = null, Si(e, t.props, r, n), Fi(e, t.children, n), je(), fn(e), Me();
-	}, I = (e, t, n, r, i, a, o, s, c = !1) => {
+	}, L = (e, t, n, r, i, a, o, s, c = !1) => {
 		let l = e && e.children, u = e ? e.shapeFlag : 0, d = t.children, { patchFlag: f, shapeFlag: m } = t;
 		if (f > 0) {
 			if (f & 128) {
-				ie(l, d, n, r, i, a, o, s, c);
+				re(l, d, n, r, i, a, o, s, c);
 				return;
 			}
 			if (f & 256) {
-				L(l, d, n, r, i, a, o, s, c);
+				R(l, d, n, r, i, a, o, s, c);
 				return;
 			}
 		}
-		m & 8 ? (u & 16 && oe(l, i, a), d !== l && p(n, d)) : u & 16 ? m & 16 ? ie(l, d, n, r, i, a, o, s, c) : oe(l, i, a, !0) : (u & 8 && p(n, ""), m & 16 && O(d, n, r, i, a, o, s, c));
-	}, L = (e, t, r, i, a, o, s, c, l) => {
+		m & 8 ? (u & 16 && oe(l, i, a), d !== l && p(n, d)) : u & 16 ? m & 16 ? re(l, d, n, r, i, a, o, s, c) : oe(l, i, a, !0) : (u & 8 && p(n, ""), m & 16 && O(d, n, r, i, a, o, s, c));
+	}, R = (e, t, r, i, a, o, s, c, l) => {
 		e ||= n, t ||= n;
 		let u = e.length, d = t.length, f = Math.min(u, d), p;
 		for (p = 0; p < f; p++) {
@@ -2238,7 +2238,7 @@ function Ri(e, i) {
 			v(e[p], n, r, null, a, o, s, c, l);
 		}
 		u > d ? oe(e, a, o, !0, !1, f) : O(t, r, i, a, o, s, c, l, f);
-	}, ie = (e, t, r, i, a, o, s, c, l) => {
+	}, re = (e, t, r, i, a, o, s, c, l) => {
 		let u = 0, d = t.length, f = e.length - 1, p = d - 1;
 		for (; u <= f && u <= p;) {
 			let n = e[u], i = t[u] = l ? ma(t[u]) : pa(t[u]);
@@ -2257,7 +2257,7 @@ function Ri(e, i) {
 				let e = p + 1, n = e < d ? t[e].el : i;
 				for (; u <= p;) v(null, t[u] = l ? ma(t[u]) : pa(t[u]), r, n, a, o, s, c, l), u++;
 			}
-		} else if (u > p) for (; u <= f;) R(e[u], a, o, !0), u++;
+		} else if (u > p) for (; u <= f;) ae(e[u], a, o, !0), u++;
 		else {
 			let m = u, h = u, g = /* @__PURE__ */ new Map();
 			for (u = h; u <= p; u++) {
@@ -2269,7 +2269,7 @@ function Ri(e, i) {
 			for (u = m; u <= f; u++) {
 				let n = e[u];
 				if (y >= b) {
-					R(n, a, o, !0);
+					ae(n, a, o, !0);
 					continue;
 				}
 				let i;
@@ -2278,18 +2278,18 @@ function Ri(e, i) {
 					i = _;
 					break;
 				}
-				i === void 0 ? R(n, a, o, !0) : (C[i - h] = u + 1, i >= S ? S = i : x = !0, v(n, t[i], r, null, a, o, s, c, l), y++);
+				i === void 0 ? ae(n, a, o, !0) : (C[i - h] = u + 1, i >= S ? S = i : x = !0, v(n, t[i], r, null, a, o, s, c, l), y++);
 			}
 			let w = x ? Ui(C) : n;
 			for (_ = w.length - 1, u = b - 1; u >= 0; u--) {
 				let e = h + u, n = t[e], f = t[e + 1], p = e + 1 < d ? f.el || Ki(f) : i;
-				C[u] === 0 ? v(null, n, r, p, a, o, s, c, l) : x && (_ < 0 || u !== w[_] ? ae(n, r, p, 2) : _--);
+				C[u] === 0 ? v(null, n, r, p, a, o, s, c, l) : x && (_ < 0 || u !== w[_] ? ie(n, r, p, 2) : _--);
 			}
 		}
-	}, ae = (e, t, n, r, i = null) => {
+	}, ie = (e, t, n, r, i = null) => {
 		let { el: a, type: c, transition: l, children: u, shapeFlag: d } = e;
 		if (d & 6) {
-			ae(e.component.subTree, t, n, r);
+			ie(e.component.subTree, t, n, r);
 			return;
 		}
 		if (d & 128) {
@@ -2302,7 +2302,7 @@ function Ri(e, i) {
 		}
 		if (c === q) {
 			o(a, t, n);
-			for (let e = 0; e < u.length; e++) ae(u[e], t, n, r);
+			for (let e = 0; e < u.length; e++) ie(u[e], t, n, r);
 			o(e.anchor, t, n);
 			return;
 		}
@@ -2323,7 +2323,7 @@ function Ri(e, i) {
 			i ? i(a, u, d) : d();
 		}
 		else o(a, t, n);
-	}, R = (e, t, n, r = !1, i = !1) => {
+	}, ae = (e, t, n, r = !1, i = !1) => {
 		let { type: a, props: o, ref: s, children: c, dynamicChildren: l, shapeFlag: u, patchFlag: d, dirs: f, cacheIndex: p, memo: m } = e;
 		if (d === -2 && (i = !1), s != null && (je(), lr(s, null, n, e, !0), Me()), p != null && (t.renderCache[p] = void 0), u & 256) {
 			t.ctx.deactivate(e);
@@ -2365,11 +2365,11 @@ function Ri(e, i) {
 		s(t);
 	}, V = (e, t, n) => {
 		let { bum: r, scope: i, job: a, subTree: o, um: s, m: c, a: l } = e;
-		Gi(c), Gi(l), r && te(r), i.stop(), a && (a.flags |= 8, R(o, e, t, n)), s && Ii(s, t), Ii(() => {
+		Gi(c), Gi(l), r && ee(r), i.stop(), a && (a.flags |= 8, ae(o, e, t, n)), s && Ii(s, t), Ii(() => {
 			e.isUnmounted = !0;
 		}, t);
 	}, oe = (e, t, n, r = !1, i = !1, a = 0) => {
-		for (let o = a; o < e.length; o++) R(e[o], t, n, r, i);
+		for (let o = a; o < e.length; o++) ae(e[o], t, n, r, i);
 	}, se = (e) => {
 		if (e.shapeFlag & 6) return se(e.component.subTree);
 		if (e.shapeFlag & 128) return e.suspense.next();
@@ -2377,15 +2377,15 @@ function Ri(e, i) {
 		return n ? h(n) : t;
 	}, H = !1, ce = (e, t, n) => {
 		let r;
-		e == null ? t._vnode && (R(t._vnode, null, null, !0), r = t._vnode.component) : v(t._vnode || null, e, t, null, null, null, n), t._vnode = e, H ||= (H = !0, fn(r), pn(), !1);
+		e == null ? t._vnode && (ae(t._vnode, null, null, !0), r = t._vnode.component) : v(t._vnode || null, e, t, null, null, null, n), t._vnode = e, H ||= (H = !0, fn(r), pn(), !1);
 	}, le = {
 		p: v,
-		um: R,
-		m: ae,
+		um: ae,
+		m: ie,
 		r: z,
-		mt: N,
+		mt: P,
 		mc: O,
-		pc: I,
+		pc: L,
 		pbc: A,
 		n: se,
 		o: e
@@ -2517,7 +2517,7 @@ function ua(e, t = null, n = null, r = 0, i = null, a = !1) {
 	if (za(e) && (e = e.__vccOpts), t) {
 		t = da(t);
 		let { class: e, style: n } = t;
-		e && !g(e) && (t.class = z(e)), v(n) && (/* @__PURE__ */ At(n) && !d(n) && (n = s({}, n)), t.style = I(n));
+		e && !g(e) && (t.class = z(e)), v(n) && (/* @__PURE__ */ At(n) && !d(n) && (n = s({}, n)), t.style = L(n));
 	}
 	let o = g(e) ? 1 : qi(e) ? 128 : Mn(e) ? 64 : v(e) ? 4 : h(e) ? 2 : 0;
 	return X(e, t, n, r, i, o, a, !0);
@@ -2601,7 +2601,7 @@ function ga(...e) {
 	for (let n = 0; n < e.length; n++) {
 		let r = e[n];
 		for (let e in r) if (e === "class") t.class !== r.class && (t.class = z([t.class, r.class]));
-		else if (e === "style") t.style = I([t.style, r.style]);
+		else if (e === "style") t.style = L([t.style, r.style]);
 		else if (a(e)) {
 			let n = t[e], i = r[e];
 			i && n !== i && !(d(n) && n.includes(i)) ? t[e] = n ? [].concat(n, i) : i : i == null && n == null && !o(e) && (t[e] = i);
@@ -2682,7 +2682,7 @@ function ba(e, n, r) {
 }
 var xa = null, Sa = () => xa || gn, Ca, wa;
 {
-	let e = F(), t = (t, n) => {
+	let e = I(), t = (t, n) => {
 		let r;
 		return (r = e[t]) || (r = e[t] = []), r.push(n), (e) => {
 			r.length > 1 ? r.forEach((t) => t(e)) : r[0](e);
@@ -2914,7 +2914,7 @@ function ao(e) {
 	}
 }
 function oo(e) {
-	return re(e);
+	return ne(e);
 }
 function so(e, t) {
 	t.split(/\s+/).forEach((t) => t && e.classList.add(t)), (e[Qa] || (e[Qa] = /* @__PURE__ */ new Set())).add(t);
@@ -3109,7 +3109,7 @@ function Ko(e, t) {
 }
 var qo = (e) => {
 	let t = e.props["onUpdate:modelValue"] || !1;
-	return d(t) ? (e) => te(t, e) : t;
+	return d(t) ? (e) => ee(t, e) : t;
 };
 function Jo(e) {
 	e.target.composing = !0;
@@ -3120,7 +3120,7 @@ function Yo(e) {
 }
 var Xo = /* @__PURE__ */ Symbol("_assign");
 function Zo(e, t, n) {
-	return t && (e = e.trim()), n && (e = ne(e)), e;
+	return t && (e = e.trim()), n && (e = te(e)), e;
 }
 var Qo = {
 	created(e, { modifiers: { lazy: t, trim: n, number: r } }, i) {
@@ -3137,7 +3137,7 @@ var Qo = {
 	},
 	beforeUpdate(e, { value: t, oldValue: n, modifiers: { lazy: r, trim: i, number: a } }, o) {
 		if (e[Xo] = qo(o), e.composing) return;
-		let s = (a || e.type === "number") && !/^0\d/.test(e.value) ? ne(e.value) : e.value, c = t ?? "";
+		let s = (a || e.type === "number") && !/^0\d/.test(e.value) ? te(e.value) : e.value, c = t ?? "";
 		if (s === c) return;
 		let l = e.getRootNode();
 		(l instanceof Document || l instanceof ShadowRoot) && l.activeElement === e && e.type !== "range" && (r && t === n || i && e.value.trim() === c) || (e.value = c);
@@ -3189,7 +3189,7 @@ var ts = {
 	deep: !0,
 	created(e, { value: t, modifiers: { number: n } }, r) {
 		e._modelValue = t, Mo(e, "change", () => {
-			let t = Array.prototype.filter.call(e.options, (e) => e.selected).map((e) => n ? ne(is(e)) : is(e));
+			let t = Array.prototype.filter.call(e.options, (e) => e.selected).map((e) => n ? te(is(e)) : is(e));
 			e[Xo](e.multiple ? p(e._modelValue) ? new Set(t) : t : t[0]), e._assigning = !0, sn(() => {
 				e._assigning = !1;
 			});
@@ -3665,23 +3665,23 @@ var Ds = {
 			let t = { ...f.value };
 			delete t[e], f.value = t, D();
 		}
-		function ee() {
+		function M() {
 			p.value = !0, sn(() => {
 				n.value && (n.value.scrollTop = n.value.scrollHeight);
 			});
 		}
-		function M() {
-			p.value && ee();
+		function N() {
+			p.value && M();
 		}
-		function te() {
+		function ee() {
 			let e = n.value;
 			e && (p.value = e.scrollHeight - e.scrollTop - e.clientHeight < 120);
 		}
-		async function N() {
+		async function P() {
 			let e = await xs(t.options.endpoints.history);
 			t.state.messages = Array.isArray(e.messages) ? e.messages : [], u.value = [];
 		}
-		async function ne() {
+		async function te() {
 			try {
 				t.state.stats = await xs(t.options.endpoints.stats);
 			} catch {
@@ -3691,13 +3691,13 @@ var Ds = {
 				};
 			}
 		}
-		async function re(e, n, r = []) {
+		async function ne(e, n, r = []) {
 			if (!f.value[e]) return;
 			O(e), k(e), j(e);
 			let i = { ...d.value };
 			delete i[e], d.value = i;
 			try {
-				await N();
+				await P();
 			} catch (e) {
 				r.length ? t.state.messages = [...t.state.messages, ...r.map((e) => ({
 					role: "assistant",
@@ -3705,16 +3705,16 @@ var Ds = {
 					content: e
 				}))] : E(e, "Chat history refresh failed.");
 			}
-			await ne(), t.options.onHealthRefresh?.(), c.value = n, ee();
+			await te(), t.options.onHealthRefresh?.(), c.value = n, M();
 		}
-		function P(e, t) {
+		function F(e, t) {
 			let n = String(t.status || "running").trim().toLowerCase();
 			if (n === "done") {
-				re(e, "Complete.", Array.isArray(t.responses) ? t.responses : []);
+				ne(e, "Complete.", Array.isArray(t.responses) ? t.responses : []);
 				return;
 			}
 			if (n === "error") {
-				re(e, `Job failed: ${String(t.error || "unknown error")}`);
+				ne(e, `Job failed: ${String(t.error || "unknown error")}`);
 				return;
 			}
 			A(e, {
@@ -3723,64 +3723,64 @@ var Ds = {
 				task_name: String(t.task_name || f.value[e]?.task_name || "").trim()
 			});
 		}
-		function F(e, n) {
+		function I(e, n) {
 			k(e), f.value[e] && (h[e] = window.setTimeout(async () => {
 				if (f.value[e]) {
 					try {
-						P(e, await xs(`${t.options.endpoints.jobs}/${encodeURIComponent(e)}`));
+						F(e, await xs(`${t.options.endpoints.jobs}/${encodeURIComponent(e)}`));
 					} catch (e) {
 						t.options.onRequestError?.(e instanceof Error ? e.message : "Chat job polling failed.");
 					}
-					f.value[e] && F(e, 1200);
+					f.value[e] && I(e, 1200);
 				}
 			}, Math.max(250, n ?? (t.options.isIngress ? 900 : 2e3))));
 		}
-		function I(e) {
+		function L(e) {
 			try {
 				return JSON.parse(String(e.data || "{}"));
 			} catch {
 				return {};
 			}
 		}
-		function L(e, n = {}) {
+		function R(e, n = {}) {
 			if (!e || (A(e, {
 				status: "queued",
 				...n
-			}), O(e), F(e), typeof EventSource != "function")) return;
+			}), O(e), I(e), typeof EventSource != "function")) return;
 			let r = new EventSource(`${t.options.endpoints.jobs}/${encodeURIComponent(e)}/events`);
-			m[e] = r, r.addEventListener("status", (t) => P(e, I(t))), r.addEventListener("tool", (t) => {
-				let n = I(t);
+			m[e] = r, r.addEventListener("status", (t) => F(e, L(t))), r.addEventListener("tool", (t) => {
+				let n = L(t);
 				A(e, {
 					status: "running",
 					current_tool: String(n.current_tool || "tool"),
 					task_name: String(n.task_name || f.value[e]?.task_name || "")
 				});
 			}), r.addEventListener("waiting", (e) => {
-				let t = String(I(e).wait_text || "").trim();
+				let t = String(L(e).wait_text || "").trim();
 				t && (u.value = [...u.value, {
 					role: "assistant",
 					content: {
 						marker: "plugin_wait",
 						content: t
 					}
-				}], M());
+				}], N());
 			}), r.addEventListener("response_chunk", (t) => {
-				let n = String(I(t).chunk || "");
+				let n = String(L(t).chunk || "");
 				n && (d.value = {
 					...d.value,
 					[e]: String(d.value[e] || "") + n
-				}, M());
+				}, N());
 			}), r.addEventListener("done", (t) => {
-				let n = I(t);
-				re(e, "Complete.", Array.isArray(n.responses) ? n.responses : []);
+				let n = L(t);
+				ne(e, "Complete.", Array.isArray(n.responses) ? n.responses : []);
 			}), r.addEventListener("job_error", (t) => {
-				re(e, `Job failed: ${String(I(t).error || "unknown error")}`);
+				ne(e, `Job failed: ${String(L(t).error || "unknown error")}`);
 			}), r.onerror = () => O(e);
 		}
-		function ie(e) {
+		function re(e) {
 			return e < 1024 ? `${e} B` : e < 1024 ** 2 ? `${(e / 1024).toFixed(1)} KB` : `${(e / 1024 ** 2).toFixed(1)} MB`;
 		}
-		function ae(e) {
+		function ie(e) {
 			let t = e.target, n = Array.from(t.files || []), r = Number(g.value.attach_max_mb_each || 0) * 1024 ** 2, i = Number(g.value.attach_max_mb_total || 0) * 1024 ** 2, a = [], s = 0;
 			for (let e of n) {
 				if (r > 0 && e.size > r) {
@@ -3795,7 +3795,7 @@ var Ds = {
 			}
 			o.value = a, t.value = "";
 		}
-		function R(e) {
+		function ae(e) {
 			o.value = o.value.filter((t, n) => n !== e);
 		}
 		function z() {
@@ -3814,7 +3814,7 @@ var Ds = {
 				c.value = "Enter a message or attach files first.";
 				return;
 			}
-			s.value = !0, a.value = "", z(), se(), c.value = n.length ? "Preparing attachments…" : "Queueing chat job…", ee();
+			s.value = !0, a.value = "", z(), se(), c.value = n.length ? "Preparing attachments…" : "Queueing chat job…", M();
 			try {
 				let r = [];
 				for (let e of n) r.push({
@@ -3830,10 +3830,10 @@ var Ds = {
 				a && (l.value = a, t.options.onSessionChange?.(a));
 				let o = String(i.job_id || "").trim();
 				if (!o) throw Error("Backend did not return a job id.");
-				await N(), L(o, {
+				await P(), R(o, {
 					status: "queued",
 					task_name: String(i.task_name || "")
-				}), c.value = i.task_name ? `Job queued: ${i.task_name}` : "Job queued…", t.options.onHealthRefresh?.(), ee();
+				}), c.value = i.task_name ? `Job queued: ${i.task_name}` : "Job queued…", t.options.onHealthRefresh?.(), M();
 			} catch (e) {
 				T(`Chat failed: ${E(e, "Chat failed.")}`, "error");
 			} finally {
@@ -3854,8 +3854,8 @@ var Ds = {
 			() => u.value.length,
 			() => x.value.map(([e, t]) => `${e}:${t.length}`).join("|"),
 			b
-		], M), En(a, se), br(() => {
-			Object.entries(f.value).forEach(([e, t]) => L(e, t)), ee();
+		], N), En(a, se), br(() => {
+			Object.entries(f.value).forEach(([e, t]) => R(e, t)), M();
 		}), Cr(() => {
 			Object.keys(m).forEach(O), Object.keys(h).forEach(k);
 		}), (t, c) => (J(), Y("div", $s, [X("section", ec, [
@@ -3863,7 +3863,7 @@ var Ds = {
 				ref_key: "feed",
 				ref: n,
 				class: "chat-log tc-chat-log",
-				onScroll: te
+				onScroll: ee
 			}, [
 				!_.value.length && !u.value.length && !x.value.length ? (J(), Y("div", tc, [
 					X("div", nc, U(v.value.charAt(0)), 1),
@@ -3875,7 +3875,7 @@ var Ds = {
 					message: t,
 					profile: g.value,
 					"files-endpoint": e.options.endpoints.files,
-					onMediaReady: M
+					onMediaReady: N
 				}, null, 8, [
 					"message",
 					"profile",
@@ -3924,10 +3924,10 @@ var Ds = {
 				type: "button",
 				class: "tc-attachment-chip",
 				title: `Remove ${e.name}`,
-				onClick: (e) => R(t)
+				onClick: (e) => ae(t)
 			}, [
 				X("span", null, U(e.name), 1),
-				X("small", null, U(ie(e.size)), 1),
+				X("small", null, U(re(e.size)), 1),
 				c[2] ||= X("b", { "aria-hidden": "true" }, "×", -1)
 			], 8, oc))), 128))]), X("button", {
 				type: "button",
@@ -3946,7 +3946,7 @@ var Ds = {
 					class: "tc-file-input",
 					type: "file",
 					multiple: "",
-					onChange: ae
+					onChange: ie
 				}, null, 544), c[4] ||= X("span", {
 					class: "chat-composer-icon chat-composer-plus",
 					"aria-hidden": "true"
@@ -4619,19 +4619,19 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function j() {
 			n.value = !1, o.value = !1, h();
 		}
-		function ee(e) {
+		function M(e) {
 			return e.endsWith("_play") || e.endsWith("_pause") ? "primary" : e.endsWith("_stop") ? "stop" : "";
 		}
-		function M(e, t) {
+		function N(e, t) {
 			return e.endsWith("_previous") ? "⏮" : e.endsWith("_pause") ? "⏸" : e.endsWith("_stop") ? "■" : e.endsWith("_next") ? "⏭" : t;
 		}
-		async function te(e) {
+		async function ee(e) {
 			await t.run(e, {
 				id: t.item.id,
 				values: { volume_percent: r.value }
 			}, "transport");
 		}
-		async function N() {
+		async function P() {
 			let e = c.value;
 			if (!e?.action) {
 				s.value = !1;
@@ -4643,13 +4643,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}, "volume");
 			s.value = !1, n || (r.value = Number(c.value?.value ?? r.value));
 		}
-		function ne(e) {
+		function te(e) {
 			r.value = Number(e), s.value = !0;
 		}
-		function re(e) {
-			ne(e.target.value);
+		function ne(e) {
+			te(e.target.value);
 		}
-		async function P() {
+		async function F() {
 			t.item.save_action && await t.run(t.item.save_action, {
 				id: t.item.id,
 				values: {
@@ -4658,7 +4658,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}, "speakers") && (o.value = !1, h(), n.value = !1);
 		}
-		async function F() {
+		async function I() {
 			!t.item.test_sync_action || v().length === 0 || await t.run(t.item.test_sync_action, {
 				id: t.item.id,
 				values: {
@@ -4667,7 +4667,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}, "sync-test");
 		}
-		function L(e, t) {
+		function R(e, t) {
 			i.value = {
 				...i.value,
 				[e.key]: t
@@ -4686,16 +4686,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				X("div", El, [(J(!0), Y(q, null, K(e.item.actions || [], (t) => (J(), Y("button", {
 					key: t.action,
 					type: "button",
-					class: z([ee(t.action), { "is-play": t.action.endsWith("_play") }]),
+					class: z([M(t.action), { "is-play": t.action.endsWith("_play") }]),
 					disabled: e.busy("transport"),
 					"aria-label": t.aria_label || t.label,
 					title: t.tooltip || t.label,
-					onClick: (e) => te(t.action)
-				}, [t.action.endsWith("_play") ? (J(), Y("svg", Ol, [...a[0] ||= [X("path", { d: "M10 6.5 22 13.5 10 20.5Z" }, null, -1)]])) : (J(), Y("span", kl, U(M(t.action, t.label || "Run")), 1))], 10, Dl))), 128))]),
+					onClick: (e) => ee(t.action)
+				}, [t.action.endsWith("_play") ? (J(), Y("svg", Ol, [...a[0] ||= [X("path", { d: "M10 6.5 22 13.5 10 20.5Z" }, null, -1)]])) : (J(), Y("span", kl, U(N(t.action, t.label || "Run")), 1))], 10, Dl))), 128))]),
 				X("div", Al, [c.value ? (J(), Y("label", {
 					key: 0,
 					class: "tm-player-volume",
-					style: I(f.value)
+					style: L(f.value)
 				}, [
 					a[1] ||= X("span", { "aria-hidden": "true" }, "♪", -1),
 					X("input", {
@@ -4706,8 +4706,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						value: r.value,
 						disabled: e.busy("volume"),
 						"aria-label": "Music volume",
-						onInput: re,
-						onChange: N
+						onInput: ne,
+						onChange: P
 					}, null, 40, jl),
 					X("output", null, U(r.value) + "%", 1)
 				], 4)) : Q("", !0), X("button", {
@@ -4770,7 +4770,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						key: e.key,
 						field: e,
 						"model-value": i.value[e.key],
-						"onUpdate:modelValue": (t) => L(e, t)
+						"onUpdate:modelValue": (t) => R(e, t)
 					}, null, 8, [
 						"field",
 						"model-value",
@@ -4783,7 +4783,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							class: "tm-button secondary tm-sync-test",
 							disabled: e.busy("sync-test") || v().length === 0,
 							title: "Stops current music and plays a short click track",
-							onClick: F
+							onClick: I
 						}, U(e.busy("sync-test") ? "Starting test…" : "Test sync"), 9, Ql)) : Q("", !0),
 						a[7] ||= X("span", { class: "tm-modal-footer-spacer" }, null, -1),
 						X("button", {
@@ -4795,7 +4795,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							type: "button",
 							class: "tm-button primary",
 							disabled: e.busy("speakers") || v().length === 0,
-							onClick: P
+							onClick: F
 						}, " Set players ", 8, $l)
 					])
 				])]),
@@ -5598,73 +5598,73 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				id: "repos",
 				label: "Repositories"
 			}
-		], i = /* @__PURE__ */ G(String(n.options.initialTab || "manage")), a = /* @__PURE__ */ G("installed"), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(""), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G(""), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G([]), p = /* @__PURE__ */ G(null), m = /* @__PURE__ */ G({}), h = /* @__PURE__ */ Ct({}), g = /* @__PURE__ */ G({}), _ = null, v = 0, y = $(() => n.state.payload?.runtime || {}), b = $(() => n.state.payload?.shop || {}), x = $(() => n.state.payload?.tabs || {}), S = $(() => Array.isArray(y.value.items) ? y.value.items : []), C = $(() => Array.isArray(b.value.installed) ? b.value.installed : []), w = $(() => Array.isArray(b.value.catalog) ? b.value.catalog : []), T = $(() => w.value.filter((e) => !e.installed).sort(ie)), E = $(() => C.value.filter((e) => e.update_available)), D = $(() => S.value.filter((e) => !!e.running).length), O = $(() => (Array.isArray(x.value.tabs) ? x.value.tabs : []).filter((e) => P(e.core_key)).map((e) => ({
+		], i = /* @__PURE__ */ G(String(n.options.initialTab || "manage")), a = /* @__PURE__ */ G("installed"), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(""), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G(""), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G([]), p = /* @__PURE__ */ G(null), m = /* @__PURE__ */ G({}), h = /* @__PURE__ */ Ct({}), g = /* @__PURE__ */ G({}), _ = null, v = 0, y = $(() => n.state.payload?.runtime || {}), b = $(() => n.state.payload?.shop || {}), x = $(() => n.state.payload?.tabs || {}), S = $(() => Array.isArray(y.value.items) ? y.value.items : []), C = $(() => Array.isArray(b.value.installed) ? b.value.installed : []), w = $(() => Array.isArray(b.value.catalog) ? b.value.catalog : []), T = $(() => w.value.filter((e) => !e.installed).sort(re)), E = $(() => C.value.filter((e) => e.update_available)), D = $(() => S.value.filter((e) => !!e.running).length), O = $(() => (Array.isArray(x.value.tabs) ? x.value.tabs : []).filter((e) => F(e.core_key)).map((e) => ({
 			...e,
-			core_key: P(e.core_key)
-		}))), k = $(() => /* @__PURE__ */ new Set(["manage", ...O.value.map((e) => e.core_key)])), A = $(() => O.value.find((e) => e.core_key === i.value) || null), j = $(() => h[i.value] || null), ee = $(() => j.value?.payload || {}), M = $(() => P(ee.value?.ui?.appearance).toLowerCase() === "music_library"), te = $(() => new Map(S.value.map((e) => [F(e.key), e]))), N = $(() => {
+			core_key: F(e.core_key)
+		}))), k = $(() => /* @__PURE__ */ new Set(["manage", ...O.value.map((e) => e.core_key)])), A = $(() => O.value.find((e) => e.core_key === i.value) || null), j = $(() => h[i.value] || null), M = $(() => j.value?.payload || {}), N = $(() => F(M.value?.ui?.appearance).toLowerCase() === "music_library"), ee = $(() => new Map(S.value.map((e) => [I(e.key), e]))), P = $(() => {
 			let e = /* @__PURE__ */ new Map();
 			return C.value.forEach((t) => {
-				let n = P(t.module_key || `${t.id}_core`);
-				n && e.set(F(n), t), t.id && e.set(F(t.id), t);
+				let n = F(t.module_key || `${t.id}_core`);
+				n && e.set(I(n), t), t.id && e.set(I(t.id), t);
 			}), e;
-		}), ne = $(() => {
+		}), te = $(() => {
 			let e = /* @__PURE__ */ new Set(), t = S.value.map((t) => {
-				let n = P(t.key), r = N.value.get(F(n)) || N.value.get(F(L(n))) || null;
-				return r && e.add(F(r.id)), {
+				let n = F(t.key), r = P.value.get(I(n)) || P.value.get(I(R(n))) || null;
+				return r && e.add(I(r.id)), {
 					key: n,
 					runtime: t,
 					shop: r
 				};
 			});
 			return C.value.forEach((n) => {
-				e.has(F(n.id)) || t.push({
-					key: P(n.module_key || `${n.id}_core`),
+				e.has(I(n.id)) || t.push({
+					key: F(n.module_key || `${n.id}_core`),
 					runtime: null,
 					shop: n
 				});
-			}), t.sort((e, t) => ae(e).localeCompare(ae(t), void 0, {
+			}), t.sort((e, t) => ie(e).localeCompare(ie(t), void 0, {
 				sensitivity: "base",
 				numeric: !0
 			}));
-		}), re = $(() => {
+		}), ne = $(() => {
 			let e = A.value?.core_key;
 			if (!e) return null;
 			let t = encodeURIComponent(e);
 			return {
-				initialPayload: ee.value,
+				initialPayload: M.value,
 				coreKey: e,
 				tabEndpoint: `${n.options.endpoints.runtime}/${t}/tab`,
 				actionEndpoint: `${n.options.endpoints.runtime}/${t}/tab-action`,
 				eventsEndpoint: `${n.options.endpoints.runtime}/${t}/tab-events`
 			};
 		});
-		function P(e) {
+		function F(e) {
 			return String(e ?? "").trim();
 		}
-		function F(e) {
-			return P(e).toLowerCase();
-		}
 		function I(e) {
-			return encodeURIComponent(P(e));
+			return F(e).toLowerCase();
 		}
 		function L(e) {
-			return P(e).replace(/_core$/i, "");
+			return encodeURIComponent(F(e));
 		}
-		function ie(e, t) {
-			return P(e.name || e.id).localeCompare(P(t.name || t.id), void 0, {
+		function R(e) {
+			return F(e).replace(/_core$/i, "");
+		}
+		function re(e, t) {
+			return F(e.name || e.id).localeCompare(F(t.name || t.id), void 0, {
 				sensitivity: "base",
 				numeric: !0
 			});
 		}
-		function ae(e) {
-			return P(e.runtime?.label || e.shop?.name || L(e.key));
+		function ie(e) {
+			return F(e.runtime?.label || e.shop?.name || R(e.key));
 		}
-		function R(e) {
-			return P(e.shop?.description || "Local Core module.");
+		function ae(e) {
+			return F(e.shop?.description || "Local Core module.");
 		}
 		function B(e) {
-			let t = P(e.module_key || `${e.id}_core`);
-			return te.value.get(F(t)) || te.value.get(F(e.id)) || null;
+			let t = F(e.module_key || `${e.id}_core`);
+			return ee.value.get(I(t)) || ee.value.get(I(e.id)) || null;
 		}
 		function V(e) {
 			return e ? e.running ? "Running" : e.desired_running ? "Pending start" : "Stopped" : "Unavailable";
@@ -5698,7 +5698,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		async function le(e, t = !1) {
-			let r = P(e);
+			let r = F(e);
 			if (!r || r === "manage") {
 				await ce(t);
 				return;
@@ -5708,7 +5708,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				[r]: !0
 			};
 			try {
-				let e = await xs(`${n.options.endpoints.runtime}/${I(r)}/tab`);
+				let e = await xs(`${n.options.endpoints.runtime}/${L(r)}/tab`);
 				H(r).payload = e || {}, r === i.value && !ue(e) && fe(r, e);
 			} catch (e) {
 				H(r).payload = { error: e instanceof Error ? e.message : "Core panel failed to load." };
@@ -5720,13 +5720,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		function ue(e) {
-			return P(e?.ui?.appearance).toLowerCase() === "music_library";
+			return F(e?.ui?.appearance).toLowerCase() === "music_library";
 		}
 		function de() {
 			_?.close(), _ = null, v && window.clearTimeout(v), v = 0;
 		}
 		function fe(e, t) {
-			de(), !(i.value !== e || ue(t) || !t?.ui?.live_updates) && (_ = new EventSource(`${n.options.endpoints.runtime}/${I(e)}/tab-events`), _.addEventListener("core-tab", (t) => {
+			de(), !(i.value !== e || ue(t) || !t?.ui?.live_updates) && (_ = new EventSource(`${n.options.endpoints.runtime}/${L(e)}/tab-events`), _.addEventListener("core-tab", (t) => {
 				try {
 					H(e).payload = JSON.parse(t.data);
 				} catch {}
@@ -5742,11 +5742,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		async function me(e, t) {
-			let r = P(e.key);
+			let r = F(e.key);
 			if (r) {
 				o.value = `${t === "start" ? "Starting" : "Stopping"} ${r}…`;
 				try {
-					await Ss(`${n.options.endpoints.runtime}/${I(r)}/${t}`), oe(`${P(e.label || r)} ${t === "start" ? "started" : "stopped"}.`), await ce(!0), n.options.onHealthRefresh?.();
+					await Ss(`${n.options.endpoints.runtime}/${L(r)}/${t}`), oe(`${F(e.label || r)} ${t === "start" ? "started" : "stopped"}.`), await ce(!0), n.options.onHealthRefresh?.();
 				} catch (e) {
 					oe(e instanceof Error ? e.message : `Core ${t} failed.`, "error");
 				} finally {
@@ -5761,7 +5761,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					let r = t ? { id: t } : {};
 					e === "remove" && (r.purge_redis = !!l.value[t]);
 					let i = await Ss(`${n.options.endpoints.shop}/${e}`, r), o = Array.isArray(i.updated) ? i.updated.length : 0, s = Array.isArray(i.failed) ? i.failed.length : 0;
-					oe(P(i.message) || (e === "update-all" ? `Update-all completed. Updated ${o}, failed ${s}.` : "Core action completed."), s ? "error" : "success"), await ce(!0), e === "install" && (a.value = "installed"), n.options.onHealthRefresh?.();
+					oe(F(i.message) || (e === "update-all" ? `Update-all completed. Updated ${o}, failed ${s}.` : "Core action completed."), s ? "error" : "success"), await ce(!0), e === "install" && (a.value = "installed"), n.options.onHealthRefresh?.();
 				} catch (e) {
 					oe(e instanceof Error ? e.message : "Core action failed.", "error");
 				} finally {
@@ -5770,18 +5770,18 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		function he(e) {
-			let t = e.value ?? e.default ?? "", n = P(e.type).toLowerCase();
+			let t = e.value ?? e.default ?? "", n = F(e.type).toLowerCase();
 			return n === "checkbox" ? typeof t == "string" ? [
 				"1",
 				"true",
 				"yes",
 				"on",
 				"enabled"
-			].includes(t.toLowerCase()) : !!t : n === "number" || n === "range" ? t === "" ? "" : Number(t) : n === "multiselect" ? Array.isArray(t) ? [...t] : P(t).split(",").map((e) => e.trim()).filter(Boolean) : t;
+			].includes(t.toLowerCase()) : !!t : n === "number" || n === "range" ? t === "" ? "" : Number(t) : n === "multiselect" ? Array.isArray(t) ? [...t] : F(t).split(",").map((e) => e.trim()).filter(Boolean) : t;
 		}
 		function ge(e) {
 			return (Array.isArray(e.show_when_all) ? e.show_when_all : e.show_when && typeof e.show_when == "object" ? [e.show_when] : []).every((e) => {
-				let t = P(e.source_key ?? e.key);
+				let t = F(e.source_key ?? e.key);
 				if (!t) return !0;
 				let n = [
 					...e.any_of || [],
@@ -5793,22 +5793,22 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			});
 		}
 		function _e(e) {
-			p.value = e, m.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => P(e.key)).map((e) => [P(e.key), he(e)]));
+			p.value = e, m.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => F(e.key)).map((e) => [F(e.key), he(e)]));
 		}
 		async function ve() {
 			let e = p.value;
 			if (!e) return;
-			let t = P(e.key);
-			o.value = `Saving ${P(e.label || t)}…`;
+			let t = F(e.key);
+			o.value = `Saving ${F(e.label || t)}…`;
 			try {
-				let r = Object.fromEntries((e.settings || []).filter((e) => P(e.key) && ![
+				let r = Object.fromEntries((e.settings || []).filter((e) => F(e.key) && ![
 					"section",
 					"header",
 					"readonly",
 					"read_only",
 					"led_preview"
-				].includes(P(e.type).toLowerCase()) && ge(e)).map((e) => [P(e.key), m.value[P(e.key)]]));
-				await Ss(`${n.options.endpoints.runtime}/${I(t)}/settings`, { values: r }), oe(`Saved settings for ${P(e.label || t)}.`), p.value = null, await ce(!0);
+				].includes(F(e.type).toLowerCase()) && ge(e)).map((e) => [F(e.key), m.value[F(e.key)]]));
+				await Ss(`${n.options.endpoints.runtime}/${L(t)}/settings`, { values: r }), oe(`Saved settings for ${F(e.label || t)}.`), p.value = null, await ce(!0);
 			} catch (e) {
 				oe(e instanceof Error ? e.message : "Core settings save failed.", "error");
 			} finally {
@@ -5821,7 +5821,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				oe("Repository URL is required.", "error");
 				return;
 			}
-			if (f.value.some((t) => P(t.url).toLowerCase() === e.toLowerCase())) {
+			if (f.value.some((t) => F(t.url).toLowerCase() === e.toLowerCase())) {
 				oe("That repository is already added.", "error");
 				return;
 			}
@@ -5888,15 +5888,15 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				type: "button",
 				class: z({ active: a.value === e.id }),
 				onClick: (t) => a.value = e.id
-			}, [Z(U(e.label), 1), e.id === "manage" && E.value.length ? (J(), Y("span", Bd, U(E.value.length), 1)) : Q("", !0)], 10, zd)), 64))]), a.value === "installed" ? (J(), Y("div", Vd, [(J(!0), Y(q, null, K(ne.value, (e) => (J(), Y("article", {
+			}, [Z(U(e.label), 1), e.id === "manage" && E.value.length ? (J(), Y("span", Bd, U(E.value.length), 1)) : Q("", !0)], 10, zd)), 64))]), a.value === "installed" ? (J(), Y("div", Vd, [(J(!0), Y(q, null, K(te.value, (e) => (J(), Y("article", {
 				key: e.key,
 				class: "tv-panel tcx-core-card"
 			}, [
-				X("header", null, [X("div", null, [X("span", Hd, U(e.key), 1), X("h2", null, U(ae(e)), 1)]), X("span", { class: z(["tv-state", {
+				X("header", null, [X("div", null, [X("span", Hd, U(e.key), 1), X("h2", null, U(ie(e)), 1)]), X("span", { class: z(["tv-state", {
 					good: e.runtime?.running,
 					pending: e.runtime?.desired_running && !e.runtime?.running
 				}]) }, U(V(e.runtime)), 3)]),
-				X("p", null, U(R(e)), 1),
+				X("p", null, U(ae(e)), 1),
 				X("div", Ud, [
 					X("span", null, "Installed " + U(e.shop?.installed_ver || "0.0.0"), 1),
 					X("span", null, "Store " + U(e.shop?.store_ver || "-"), 1),
@@ -5913,7 +5913,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					type: "button",
 					onClick: (t) => me(e.runtime, e.runtime.running ? "stop" : "start")
 				}, U(e.runtime.running ? "Stop" : "Start"), 11, Kd)) : Q("", !0)])
-			]))), 128)), ne.value.length ? Q("", !0) : (J(), Y("div", qd, "No installed Cores found."))])) : a.value === "store" ? (J(), Y("div", Jd, [(J(!0), Y(q, null, K(T.value, (e) => (J(), Y("article", {
+			]))), 128)), te.value.length ? Q("", !0) : (J(), Y("div", qd, "No installed Cores found."))])) : a.value === "store" ? (J(), Y("div", Jd, [(J(!0), Y(q, null, K(T.value, (e) => (J(), Y("article", {
 				key: e.id,
 				class: "tv-panel tcx-core-card"
 			}, [
@@ -5935,7 +5935,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					disabled: !E.value.length,
 					onClick: n[2] ||= (e) => W("update-all")
 				}, "Update all", 8, tf)]),
-				(J(!0), Y(q, null, K(C.value.slice().sort(ie), (e) => (J(), Y("article", {
+				(J(!0), Y(q, null, K(C.value.slice().sort(re), (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel tcx-manage-row"
 				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-") + " · " + U(V(B(e))), 1)]), X("div", nf, [
@@ -6006,13 +6006,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				class: "core-top-tab-panel active tcx-core-panel",
 				"data-core-tab-panel": i.value,
 				"data-core-tab-loaded": g.value[i.value] ? "loading" : "1"
-			}, [g.value[i.value] && !Object.keys(ee.value).length ? (J(), Y("div", Id, "Loading " + U(A.value?.label || i.value) + "…", 1)) : A.value && j.value && M.value && re.value ? (J(), ia(Xu, {
+			}, [g.value[i.value] && !Object.keys(M.value).length ? (J(), Y("div", Id, "Loading " + U(A.value?.label || i.value) + "…", 1)) : A.value && j.value && N.value && ne.value ? (J(), ia(Xu, {
 				key: 1,
 				state: j.value,
-				options: re.value
+				options: ne.value
 			}, null, 8, ["state", "options"])) : A.value && j.value ? (J(), ia(Td, {
 				key: 2,
-				payload: ee.value,
+				payload: M.value,
 				tab: A.value,
 				render: e.options.renderCorePanel,
 				clear: e.options.clearCorePanel
@@ -6128,15 +6128,15 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function j(e, n = "success") {
 			t.options.onToast?.(e, n);
 		}
-		function ee(e) {
+		function M(e) {
 			t.state.payload = e, t.options.onPayloadChange?.(e);
 		}
-		async function M(e = {}) {
+		async function N(e = {}) {
 			if (!(r.value && e.quiet)) {
 				e.quiet || (r.value = e.snapshot ? "Refreshing live snapshot…" : "Refreshing dashboard…"), i.value = "";
 				try {
 					let n = t.options.dashboardEndpoint.includes("?") ? "&" : "?";
-					ee(await xs(e.snapshot ? `${t.options.dashboardEndpoint}${n}refresh_snapshot=true` : t.options.dashboardEndpoint)), e.quiet || j("Dashboard refreshed.");
+					M(await xs(e.snapshot ? `${t.options.dashboardEndpoint}${n}refresh_snapshot=true` : t.options.dashboardEndpoint)), e.quiet || j("Dashboard refreshed.");
 				} catch (t) {
 					i.value = t instanceof Error ? t.message : "Dashboard refresh failed.", e.quiet || j(i.value, "error");
 				} finally {
@@ -6144,38 +6144,38 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}
 		}
-		async function te() {
+		async function ee() {
 			r.value = "Generating fresh briefs…", i.value = "";
 			try {
-				ee(await Ss(t.options.refreshBriefsEndpoint, { brief_id: null })), j("Dashboard brief refresh queued.");
+				M(await Ss(t.options.refreshBriefsEndpoint, { brief_id: null })), j("Dashboard brief refresh queued.");
 			} catch (e) {
 				i.value = e instanceof Error ? e.message : "Brief refresh failed.", j(i.value, "error");
 			} finally {
 				r.value = "";
 			}
 		}
-		async function N(e, n) {
+		async function P(e, n) {
 			r.value = "Saving dashboard controls…", i.value = "";
 			try {
-				ee(await Ss(t.options.settingsEndpoint, e)), j(n);
+				M(await Ss(t.options.settingsEndpoint, e)), j(n);
 			} catch (e) {
 				i.value = e instanceof Error ? e.message : "Dashboard settings failed to save.", j(i.value, "error");
 			} finally {
 				r.value = "";
 			}
 		}
-		function ne() {
+		function te() {
 			t.options.onPreferencesChange?.({
 				showMetrics: a.value,
 				showMedia: o.value
 			});
 		}
-		function re() {
+		function ne() {
 			window.clearInterval(s);
 			let e = Number(y.value.refresh_interval_seconds || x.value || 0);
-			e > 0 && (s = window.setInterval(() => void M({ quiet: !0 }), Math.max(15, e) * 1e3));
+			e > 0 && (s = window.setInterval(() => void N({ quiet: !0 }), Math.max(15, e) * 1e3));
 		}
-		function P() {
+		function F() {
 			c = 0;
 			let e = u.value;
 			if (!e) return;
@@ -6187,22 +6187,22 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				e.style.gridRowEnd = `span ${i}`;
 			});
 		}
-		function F() {
-			window.cancelAnimationFrame(c), c = window.requestAnimationFrame(P);
-		}
 		function I() {
+			window.cancelAnimationFrame(c), c = window.requestAnimationFrame(F);
+		}
+		function L() {
 			l?.disconnect();
 			let e = u.value;
-			e && (l = new ResizeObserver(F), l.observe(e), Array.from(e.children).forEach((e) => l?.observe(e)), F());
+			e && (l = new ResizeObserver(I), l.observe(e), Array.from(e.children).forEach((e) => l?.observe(e)), I());
 		}
-		En([a, o], ne), En(() => t.state.payload, () => {
-			b.value = T(v.value.person_id), x.value = Number(y.value.refresh_interval_seconds ?? 300), S.value = Number(y.value.brief_refresh_interval_seconds ?? 3600), re(), sn().then(I);
+		En([a, o], te), En(() => t.state.payload, () => {
+			b.value = T(v.value.person_id), x.value = Number(y.value.refresh_interval_seconds ?? 300), S.value = Number(y.value.brief_refresh_interval_seconds ?? 3600), ne(), sn().then(L);
 		}, { immediate: !0 }), br(() => {
-			M({ quiet: !0 }), sn().then(I);
+			N({ quiet: !0 }), sn().then(L);
 		}), Cr(() => {
 			window.clearInterval(s), window.cancelAnimationFrame(c), l?.disconnect();
 		});
-		let L = [
+		let R = [
 			[0, "Off"],
 			[30, "30 seconds"],
 			[60, "1 minute"],
@@ -6212,7 +6212,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			[3600, "1 hour"],
 			[7200, "2 hours"],
 			[14400, "4 hours"]
-		], ie = [
+		], re = [
 			[0, "Off"],
 			[300, "5 minutes"],
 			[900, "15 minutes"],
@@ -6297,11 +6297,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						}, null, 512), [[$o, o.value]]), t[20] ||= X("span", null, [X("strong", null, "Media"), X("small", null, "Show snapshots and satellite images when available.")], -1)]),
 						X("label", null, [t[21] ||= X("span", null, "Dashboard refresh", -1), bn(X("select", {
 							"onUpdate:modelValue": t[4] ||= (e) => x.value = e,
-							onChange: t[5] ||= (e) => N({
+							onChange: t[5] ||= (e) => P({
 								refresh_interval_seconds: x.value,
 								brief_refresh_interval_seconds: S.value
 							}, "Dashboard refresh updated.")
-						}, [(J(), Y(q, null, K(L, (e) => X("option", {
+						}, [(J(), Y(q, null, K(R, (e) => X("option", {
 							key: e[0],
 							value: e[0]
 						}, U(e[1]), 9, Uf)), 64))], 544), [[
@@ -6312,11 +6312,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						]])]),
 						X("label", null, [t[22] ||= X("span", null, "Brief refresh", -1), bn(X("select", {
 							"onUpdate:modelValue": t[6] ||= (e) => S.value = e,
-							onChange: t[7] ||= (e) => N({
+							onChange: t[7] ||= (e) => P({
 								refresh_interval_seconds: x.value,
 								brief_refresh_interval_seconds: S.value
 							}, "Brief refresh updated.")
-						}, [(J(), Y(q, null, K(ie, (e) => X("option", {
+						}, [(J(), Y(q, null, K(re, (e) => X("option", {
 							key: e[0],
 							value: e[0]
 						}, U(e[1]), 9, Wf)), 64))], 544), [[
@@ -6327,7 +6327,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						]])]),
 						X("label", null, [t[24] ||= X("span", null, "Personal profile", -1), bn(X("select", {
 							"onUpdate:modelValue": t[8] ||= (e) => b.value = e,
-							onChange: t[9] ||= (e) => N({ personal_person_id: b.value || null }, "Personal dashboard profile updated.")
+							onChange: t[9] ||= (e) => P({ personal_person_id: b.value || null }, "Personal dashboard profile updated.")
 						}, [t[23] ||= X("option", { value: "" }, "All people", -1), (J(!0), Y(q, null, K(v.value.people_options || [], (e) => (J(), Y("option", {
 							key: T(e.value),
 							value: T(e.value)
@@ -6336,11 +6336,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("footer", null, [X("span", null, U(r.value || i.value), 1), X("div", null, [X("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: t[10] ||= (e) => M({ snapshot: !0 })
+						onClick: t[10] ||= (e) => N({ snapshot: !0 })
 					}, "Refresh snapshot"), X("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: te
+						onClick: ee
 					}, "Generate briefs")])])
 				])]),
 				_: 1
@@ -6440,35 +6440,35 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			"devices",
 			"rooms",
 			"runtime"
-		].includes(t.options.initialTab || "") ? String(t.options.initialTab) : "manager"), r = /* @__PURE__ */ G("installed"), i = /* @__PURE__ */ G(""), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(null), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G({}), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G([]), m = /* @__PURE__ */ G(t.state.settings.integration_device_registry || {}), h = /* @__PURE__ */ G(t.state.settings.integration_runtime || {}), g = /* @__PURE__ */ G({}), _ = /* @__PURE__ */ G({}), v = /* @__PURE__ */ G(""), y = /* @__PURE__ */ G({}), b = /* @__PURE__ */ G({}), x = 0, S = !1, C = !1, w = !1, T = $(() => t.state.settings || {}), E = $(() => Array.isArray(T.value.integrations) ? T.value.integrations : []), D = $(() => T.value.integration_shop || {}), O = $(() => Array.isArray(D.value.installed) ? D.value.installed : []), k = $(() => Array.isArray(D.value.catalog) ? D.value.catalog.filter((e) => !e.installed) : []), A = $(() => O.value.filter((e) => e.update_available)), j = $(() => O.value.filter((e) => e.enabled).length || (O.value.length ? 0 : E.value.length)), ee = $(() => new Map(E.value.map((e) => [I(e.id), e]))), M = $(() => {
+		].includes(t.options.initialTab || "") ? String(t.options.initialTab) : "manager"), r = /* @__PURE__ */ G("installed"), i = /* @__PURE__ */ G(""), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(null), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G({}), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G([]), m = /* @__PURE__ */ G(t.state.settings.integration_device_registry || {}), h = /* @__PURE__ */ G(t.state.settings.integration_runtime || {}), g = /* @__PURE__ */ G({}), _ = /* @__PURE__ */ G({}), v = /* @__PURE__ */ G(""), y = /* @__PURE__ */ G({}), b = /* @__PURE__ */ G({}), x = 0, S = !1, C = !1, w = !1, T = $(() => t.state.settings || {}), E = $(() => Array.isArray(T.value.integrations) ? T.value.integrations : []), D = $(() => T.value.integration_shop || {}), O = $(() => Array.isArray(D.value.installed) ? D.value.installed : []), k = $(() => Array.isArray(D.value.catalog) ? D.value.catalog.filter((e) => !e.installed) : []), A = $(() => O.value.filter((e) => e.update_available)), j = $(() => O.value.filter((e) => e.enabled).length || (O.value.length ? 0 : E.value.length)), M = $(() => new Map(E.value.map((e) => [L(e.id), e]))), N = $(() => {
 			let e = /* @__PURE__ */ new Set(), t = O.value.map((t) => {
-				let n = F(t.id || t.module_key || t.key);
-				return e.add(I(n)), {
+				let n = I(t.id || t.module_key || t.key);
+				return e.add(L(n)), {
 					id: n,
 					shop: t,
-					integration: ee.value.get(I(n)) || null
+					integration: M.value.get(L(n)) || null
 				};
 			});
 			return E.value.forEach((n) => {
-				let r = F(n.id);
-				r && !e.has(I(r)) && t.push({
+				let r = I(n.id);
+				r && !e.has(L(r)) && t.push({
 					id: r,
 					shop: null,
 					integration: n
 				});
-			}), t.sort((e, t) => F(e.integration?.name || e.shop?.name || e.id).localeCompare(F(t.integration?.name || t.shop?.name || t.id)));
-		}), te = $(() => Array.isArray(m.value.categories) ? m.value.categories.filter((e) => Number(e.device_count || 0) > 0) : []), N = $(() => te.value.find((e) => F(e.id) === s.value) || te.value[0] || null), ne = $(() => {
-			let e = Array.isArray(m.value.rooms) ? m.value.rooms.slice() : [], t = Array.isArray(m.value.room_overrides?.rooms) ? m.value.room_overrides.rooms : [], n = new Set(e.map((e) => F(e.id)));
+			}), t.sort((e, t) => I(e.integration?.name || e.shop?.name || e.id).localeCompare(I(t.integration?.name || t.shop?.name || t.id)));
+		}), ee = $(() => Array.isArray(m.value.categories) ? m.value.categories.filter((e) => Number(e.device_count || 0) > 0) : []), P = $(() => ee.value.find((e) => I(e.id) === s.value) || ee.value[0] || null), te = $(() => {
+			let e = Array.isArray(m.value.rooms) ? m.value.rooms.slice() : [], t = Array.isArray(m.value.room_overrides?.rooms) ? m.value.room_overrides.rooms : [], n = new Set(e.map((e) => I(e.id)));
 			return t.forEach((t) => {
-				n.has(F(t.id)) || e.push({
+				n.has(I(t.id)) || e.push({
 					...t,
 					devices: [],
 					categories: [],
 					source: "tater"
 				});
-			}), e.sort((e, t) => F(e.name).localeCompare(F(t.name)));
-		}), re = $(() => Array.isArray(m.value.room_media_player_options) ? m.value.room_media_player_options : []), P = $(() => (Array.isArray(_.value.events) ? _.value.events : []).filter((e) => {
-			let t = F(e.kind || e.type).toLowerCase();
+			}), e.sort((e, t) => I(e.name).localeCompare(I(t.name)));
+		}), ne = $(() => Array.isArray(m.value.room_media_player_options) ? m.value.room_media_player_options : []), F = $(() => (Array.isArray(_.value.events) ? _.value.events : []).filter((e) => {
+			let t = I(e.kind || e.type).toLowerCase();
 			return ![
 				"snapshot",
 				"poll",
@@ -6476,34 +6476,34 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				"runtime_status"
 			].some((e) => t.includes(e));
 		}).sort((e, t) => Number(t.ts || 0) - Number(e.ts || 0)).slice(0, 40));
-		function F(e) {
+		function I(e) {
 			return String(e ?? "").trim();
 		}
-		function I(e) {
-			let t = F(e);
+		function L(e) {
+			let t = I(e);
 			return t === "ecobee_homekit" ? "homekit" : t;
 		}
-		function L(e) {
-			return encodeURIComponent(F(e));
+		function R(e) {
+			return encodeURIComponent(I(e));
 		}
-		function ie(e, n = "success") {
+		function re(e, n = "success") {
 			a.value = e, t.options.onToast?.(e, n);
 		}
-		function ae(e) {
-			return F(e.name || e.friendly_name || e.label || e.title || e.id || e.ref || "Device");
+		function ie(e) {
+			return I(e.name || e.friendly_name || e.label || e.title || e.id || e.ref || "Device");
 		}
-		function R(e) {
-			return F(e.id || "unassigned") || "unassigned";
+		function ae(e) {
+			return I(e.id || "unassigned") || "unassigned";
 		}
 		function B(e) {
-			return F(e.id || e.ref);
+			return I(e.id || e.ref);
 		}
 		function V(e) {
-			return F(e.integration_id);
+			return I(e.integration_id);
 		}
 		function oe(e, t) {
 			let n = e.values && Object.prototype.hasOwnProperty.call(e.values, t.key) ? e.values[t.key] : t.default ?? "";
-			return F(t.type).toLowerCase() === "checkbox" ? typeof n == "string" ? [
+			return I(t.type).toLowerCase() === "checkbox" ? typeof n == "string" ? [
 				"1",
 				"true",
 				"yes",
@@ -6513,8 +6513,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function se(e) {
 			let t = { ...l.value };
 			return (Array.isArray(e.fields) ? e.fields : []).forEach((e) => {
-				let n = F(e.key);
-				n && F(e.type).toLowerCase() === "number" && (t[n] = Number(t[n] ?? e.default ?? 0));
+				let n = I(e.key);
+				n && I(e.type).toLowerCase() === "number" && (t[n] = Number(t[n] ?? e.default ?? 0));
 			}), t;
 		}
 		function H(e) {
@@ -6522,11 +6522,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		}
 		function ce(e) {
 			let t = H(e);
-			return F(t.name || t.friendly_name || t.device_name || t.entity_name || t.entity_id || t.ref || e.provider || "Device change");
+			return I(t.name || t.friendly_name || t.device_name || t.entity_name || t.entity_id || t.ref || e.provider || "Device change");
 		}
 		function le(e) {
 			let t = H(e);
-			return F(t.state ?? t.value ?? t.status ?? t.current_state ?? e.kind ?? "changed").replaceAll("_", " ");
+			return I(t.state ?? t.value ?? t.status ?? t.current_state ?? e.kind ?? "changed").replaceAll("_", " ");
 		}
 		function ue(e) {
 			let t = Math.max(0, Date.now() / 1e3 - Number(e || 0));
@@ -6537,7 +6537,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			try {
 				t.state.settings = await xs(t.options.endpoints.settings), m.value = t.state.settings.integration_device_registry || m.value, h.value = t.state.settings.integration_runtime || h.value, p.value = Array.isArray(t.state.settings.integration_shop?.repos?.additional) ? t.state.settings.integration_shop.repos.additional.map((e) => ({ ...e })) : [];
 			} catch (t) {
-				o.value = t instanceof Error ? t.message : "Integration refresh failed.", e || ie(o.value, "error");
+				o.value = t instanceof Error ? t.message : "Integration refresh failed.", e || re(o.value, "error");
 			} finally {
 				e || (i.value = "");
 			}
@@ -6547,25 +6547,25 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				i.value = `${e.replaceAll("-", " ")} ${n || "integrations"}…`, o.value = "";
 				try {
 					let r = n ? { id: n } : {};
-					e === "remove" && (r.purge_redis = !!u.value[n]), ie(F((await Ss(`${t.options.endpoints.shop}/${e}`, r)).message) || "Integration action completed."), await de(!0);
+					e === "remove" && (r.purge_redis = !!u.value[n]), re(I((await Ss(`${t.options.endpoints.shop}/${e}`, r)).message) || "Integration action completed."), await de(!0);
 				} catch (e) {
-					o.value = e instanceof Error ? e.message : "Integration action failed.", ie(o.value, "error");
+					o.value = e instanceof Error ? e.message : "Integration action failed.", re(o.value, "error");
 				} finally {
 					i.value = "";
 				}
 			}
 		}
 		function pe(e) {
-			c.value = e, l.value = Object.fromEntries((Array.isArray(e.fields) ? e.fields : []).map((t) => [F(t.key), oe(e, t)]));
+			c.value = e, l.value = Object.fromEntries((Array.isArray(e.fields) ? e.fields : []).map((t) => [I(t.key), oe(e, t)]));
 		}
 		async function me() {
 			let e = c.value;
 			if (e) {
-				i.value = `Saving ${ae(e)}…`;
+				i.value = `Saving ${ie(e)}…`;
 				try {
-					await Ss(`${t.options.endpoints.integrationSettings}/${L(e.id)}/settings`, { settings: se(e) }), ie(`${ae(e)} settings saved.`), c.value = null, await de(!0);
+					await Ss(`${t.options.endpoints.integrationSettings}/${R(e.id)}/settings`, { settings: se(e) }), re(`${ie(e)} settings saved.`), c.value = null, await de(!0);
 				} catch (e) {
-					ie(e instanceof Error ? e.message : "Settings save failed.", "error");
+					re(e instanceof Error ? e.message : "Settings save failed.", "error");
 				} finally {
 					i.value = "";
 				}
@@ -6574,15 +6574,15 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function W(e) {
 			let n = c.value;
 			if (n) {
-				i.value = F(e.status || `Running ${e.label || e.id}…`);
+				i.value = I(e.status || `Running ${e.label || e.id}…`);
 				try {
-					let r = await Ss(`${t.options.endpoints.integrationActions}/${L(n.id)}/actions/${L(e.id)}`, { payload: se(n) }), i = r.values && typeof r.values == "object" ? r.values : r, a = new Set((n.fields || []).map((e) => F(e.key)));
+					let r = await Ss(`${t.options.endpoints.integrationActions}/${R(n.id)}/actions/${R(e.id)}`, { payload: se(n) }), i = r.values && typeof r.values == "object" ? r.values : r, a = new Set((n.fields || []).map((e) => I(e.key)));
 					l.value = {
 						...l.value,
 						...Object.fromEntries(Object.entries(i).filter(([e]) => a.has(e)))
-					}, ie(F(r.message) || `${e.label || e.id} complete.`, r.ok === !1 ? "error" : "success");
+					}, re(I(r.message) || `${e.label || e.id} complete.`, r.ok === !1 ? "error" : "success");
 				} catch (e) {
-					ie(e instanceof Error ? e.message : "Integration action failed.", "error");
+					re(e instanceof Error ? e.message : "Integration action failed.", "error");
 				} finally {
 					i.value = "";
 				}
@@ -6591,9 +6591,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function he() {
 			i.value = "Saving integration repositories…";
 			try {
-				await Ss(`${t.options.endpoints.shop}/repos`, { repos: p.value }), ie("Integration repositories saved."), await de(!0);
+				await Ss(`${t.options.endpoints.shop}/repos`, { repos: p.value }), re("Integration repositories saved."), await de(!0);
 			} catch (e) {
-				ie(e instanceof Error ? e.message : "Repository save failed.", "error");
+				re(e instanceof Error ? e.message : "Repository save failed.", "error");
 			} finally {
 				i.value = "";
 			}
@@ -6601,11 +6601,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function ge() {
 			let e = f.value.trim();
 			if (!e) {
-				ie("Repo URL is required.", "error");
+				re("Repo URL is required.", "error");
 				return;
 			}
-			if (p.value.some((t) => F(t.url).toLowerCase() === e.toLowerCase())) {
-				ie("That repo is already added.", "error");
+			if (p.value.some((t) => I(t.url).toLowerCase() === e.toLowerCase())) {
+				re("That repo is already added.", "error");
 				return;
 			}
 			p.value.push({
@@ -6616,9 +6616,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function _e(e = !1) {
 			try {
 				let n = await xs(e ? t.options.endpoints.rooms : t.options.endpoints.deviceRegistry);
-				m.value = n.registry || n, s.value ||= F(te.value[0]?.id), F(m.value.cache?.source) === "building" && ve();
+				m.value = n.registry || n, s.value ||= I(ee.value[0]?.id), I(m.value.cache?.source) === "building" && ve();
 			} catch (e) {
-				ie(e instanceof Error ? e.message : "Device load failed.", "error");
+				re(e instanceof Error ? e.message : "Device load failed.", "error");
 			}
 		}
 		async function ve() {
@@ -6628,8 +6628,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					for (let e = 0; e < 120 && !w; e += 1) {
 						await new Promise((e) => window.setTimeout(e, 500));
 						let e = await xs(n.value === "rooms" ? t.options.endpoints.rooms : t.options.endpoints.deviceRegistry), r = e.registry || e;
-						if (F(r.cache?.source) !== "building") {
-							m.value = r, s.value ||= F(te.value[0]?.id);
+						if (I(r.cache?.source) !== "building") {
+							m.value = r, s.value ||= I(ee.value[0]?.id);
 							return;
 						}
 					}
@@ -6645,16 +6645,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					let e = await Ss(`${t.options.endpoints.systemTasks}/integration_device_registry/run`), r = Number(e.task?.run_count || 0);
 					for (let e = 0; e < 120 && !w; e += 1) {
 						await new Promise((e) => window.setTimeout(e, 500));
-						let e = await xs(t.options.endpoints.systemTasks), i = (Array.isArray(e.tasks) ? e.tasks : []).find((e) => F(e.id) === "integration_device_registry");
+						let e = await xs(t.options.endpoints.systemTasks), i = (Array.isArray(e.tasks) ? e.tasks : []).find((e) => I(e.id) === "integration_device_registry");
 						if (!(!i || i.running || Number(i.run_count || 0) <= r)) {
-							if (F(i.last_error)) throw Error(F(i.last_error));
-							await _e(n.value === "rooms"), ie("Integration devices refreshed.");
+							if (I(i.last_error)) throw Error(I(i.last_error));
+							await _e(n.value === "rooms"), re("Integration devices refreshed.");
 							return;
 						}
 					}
 					if (!w) throw Error("The integration device refresh is still running. You can follow it in System Tasks.");
 				} catch (e) {
-					ie(e instanceof Error ? e.message : "Device refresh failed.", "error");
+					re(e instanceof Error ? e.message : "Device refresh failed.", "error");
 				} finally {
 					S = !1, i.value = "";
 				}
@@ -6667,9 +6667,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					action: e,
 					payload: n
 				});
-				m.value = r.registry || r, ie("Organization changes saved.");
+				m.value = r.registry || r, re("Organization changes saved.");
 			} catch (e) {
-				ie(e instanceof Error ? e.message : "Organization update failed.", "error");
+				re(e instanceof Error ? e.message : "Organization update failed.", "error");
 			} finally {
 				i.value = "";
 			}
@@ -6679,9 +6679,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			e && (await be("create_room", { name: e }), v.value = "");
 		}
 		async function Se(e) {
-			let t = F(y.value[R(e)] || e.name);
+			let t = I(y.value[ae(e)] || e.name);
 			t && await be("rename_room", {
-				room_id: R(e),
+				room_id: ae(e),
 				name: t
 			});
 		}
@@ -6693,11 +6693,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				integration_id: V(e),
 				device_id: B(e),
 				room_id: t,
-				room_name: F(ne.value.find((e) => R(e) === t)?.name)
+				room_name: I(te.value.find((e) => ae(e) === t)?.name)
 			});
 		}
 		async function we(e) {
-			let t = F(b.value[`${V(e)}:${B(e)}`] || ae(e));
+			let t = I(b.value[`${V(e)}:${B(e)}`] || ie(e));
 			t && await be("rename_device", {
 				integration_id: V(e),
 				device_id: B(e),
@@ -6706,10 +6706,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		}
 		async function Te(e, t) {
 			t ? await be("set_room_preferred_media_player", {
-				room_id: R(e),
+				room_id: ae(e),
 				room_name: e.name,
 				target: t
-			}) : await be("clear_room_preferred_media_player", { room_id: R(e) });
+			}) : await be("clear_room_preferred_media_player", { room_id: ae(e) });
 		}
 		async function Ee(e = !1) {
 			e || (i.value = "Refreshing activity…");
@@ -6721,7 +6721,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				]);
 				h.value = e.runtime || e, g.value = n, _.value = r;
 			} catch (t) {
-				e || ie(t instanceof Error ? t.message : "Activity refresh failed.", "error");
+				e || re(t instanceof Error ? t.message : "Activity refresh failed.", "error");
 			} finally {
 				e || (i.value = "");
 			}
@@ -6731,13 +6731,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		}
 		return En(() => t.state.settings, () => {
 			m.value = t.state.settings.integration_device_registry || m.value, h.value = t.state.settings.integration_runtime || h.value;
-		}), En(te, (e) => {
-			e.some((e) => F(e.id) === s.value) || (s.value = F(e[0]?.id));
-		}, { immediate: !0 }), En(ne, (e) => {
+		}), En(ee, (e) => {
+			e.some((e) => I(e.id) === s.value) || (s.value = I(e[0]?.id));
+		}, { immediate: !0 }), En(te, (e) => {
 			let t = {}, n = {};
 			e.forEach((e) => {
-				t[R(e)] = F(e.name), (e.devices || []).forEach((e) => {
-					n[`${V(e)}:${B(e)}`] = ae(e);
+				t[ae(e)] = I(e.name), (e.devices || []).forEach((e) => {
+					n[`${V(e)}:${B(e)}`] = ie(e);
 				});
 			}), y.value = t, b.value = n;
 		}, { immediate: !0 }), En(n, (e) => {
@@ -6812,7 +6812,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					onClick: (t) => r.value = e.id
 				}, [Z(U(e.label), 1), e.id === "manage" && A.value.length ? (J(), Y("span", np, U(A.value.length), 1)) : Q("", !0)], 10, tp)), 64))]),
 				D.value.errors?.length ? (J(), Y("div", rp, U(D.value.errors.join(" • ")), 1)) : Q("", !0),
-				r.value === "installed" ? (J(), Y("div", ip, [(J(!0), Y(q, null, K(M.value, (e) => (J(), Y("article", {
+				r.value === "installed" ? (J(), Y("div", ip, [(J(!0), Y(q, null, K(N.value, (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel ti-integration-card"
 				}, [
@@ -6831,7 +6831,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						type: "button",
 						onClick: (t) => fe(e.shop.enabled ? "disable" : "enable", e.id)
 					}, U(e.shop.enabled ? "Disable" : "Enable"), 9, up)) : Q("", !0)])
-				]))), 128)), M.value.length ? Q("", !0) : (J(), Y("div", dp, "No installed integrations found."))])) : r.value === "store" ? (J(), Y("div", fp, [(J(!0), Y(q, null, K(k.value, (e) => (J(), Y("article", {
+				]))), 128)), N.value.length ? Q("", !0) : (J(), Y("div", dp, "No installed integrations found."))])) : r.value === "store" ? (J(), Y("div", fp, [(J(!0), Y(q, null, K(k.value, (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel ti-integration-card"
 				}, [
@@ -6920,29 +6920,29 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				class: "tv-button",
 				type: "button",
 				onClick: t[4] ||= (e) => ye(!1)
-			}, "Refresh devices")]), te.value.length ? (J(), Y("div", Np, [X("aside", null, [(J(!0), Y(q, null, K(te.value, (e) => (J(), Y("button", {
+			}, "Refresh devices")]), ee.value.length ? (J(), Y("div", Np, [X("aside", null, [(J(!0), Y(q, null, K(ee.value, (e) => (J(), Y("button", {
 				key: e.id,
 				type: "button",
-				class: z({ active: N.value?.id === e.id }),
-				onClick: (t) => s.value = F(e.id)
+				class: z({ active: P.value?.id === e.id }),
+				onClick: (t) => s.value = I(e.id)
 			}, [X("strong", null, U(e.name), 1), X("span", null, U(e.device_count) + " devices · " + U(e.room_count) + " rooms", 1)], 10, Pp))), 128))]), X("div", Fp, [X("header", null, [X("div", null, [
-				X("span", Ip, U(N.value?.id), 1),
-				X("h2", null, U(N.value?.name), 1),
-				X("p", null, U(N.value?.description), 1)
-			])]), (J(!0), Y(q, null, K(N.value?.rooms || [], (e) => (J(), Y("div", {
+				X("span", Ip, U(P.value?.id), 1),
+				X("h2", null, U(P.value?.name), 1),
+				X("p", null, U(P.value?.description), 1)
+			])]), (J(!0), Y(q, null, K(P.value?.rooms || [], (e) => (J(), Y("div", {
 				key: e.id,
 				class: "ti-device-room"
 			}, [X("div", null, [X("strong", null, U(e.name), 1), X("span", null, U(e.devices?.length || 0) + " devices", 1)]), (J(!0), Y(q, null, K(e.devices || [], (e) => (J(), Y("article", {
 				key: B(e),
 				class: "ti-device-row"
 			}, [
-				X("div", null, [X("strong", null, U(ae(e)), 1), X("span", null, U([
+				X("div", null, [X("strong", null, U(ie(e)), 1), X("span", null, U([
 					e.integration_name || e.integration_id,
 					e.type,
 					e.ref || e.id
 				].filter(Boolean).join(" / ")), 1)]),
 				X("div", null, [X("span", Lp, U(e.state || e.status || "unknown"), 1), X("small", null, U(e.room || e.area || "Unassigned"), 1)]),
-				X("div", Rp, [(J(!0), Y(q, null, K((e.features?.length ? e.features : e.actions || e.capabilities || []).slice(0, 6), (e) => (J(), Y("span", { key: e }, U(F(e).replaceAll("_", " ")), 1))), 128))])
+				X("div", Rp, [(J(!0), Y(q, null, K((e.features?.length ? e.features : e.actions || e.capabilities || []).slice(0, 6), (e) => (J(), Y("span", { key: e }, U(I(e).replaceAll("_", " ")), 1))), 128))])
 			]))), 128))]))), 128))])])) : (J(), Y("div", zp, "No devices are available from enabled integrations yet."))])) : n.value === "rooms" ? (J(), Y("section", Bp, [X("div", Vp, [t[23] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "Organization"),
 				X("h2", null, "Rooms and device names"),
@@ -6964,15 +6964,15 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					type: "button",
 					onClick: t[6] ||= (e) => ye(!0)
 				}, "Refresh")
-			])]), X("div", Hp, [(J(!0), Y(q, null, K(ne.value, (e) => (J(), Y("article", {
-				key: R(e),
+			])]), X("div", Hp, [(J(!0), Y(q, null, K(te.value, (e) => (J(), Y("article", {
+				key: ae(e),
 				class: "tv-panel ti-room-card"
 			}, [
 				X("header", null, [X("div", null, [X("span", Up, U(e.source || "integration"), 1), X("h2", null, U(e.name || "Unassigned"), 1)]), X("span", null, U(e.devices?.length || 0) + " devices", 1)]),
-				R(e) === "unassigned" ? Q("", !0) : (J(), Y("div", Wp, [X("label", null, [t[24] ||= X("span", null, "Room name", -1), X("div", null, [bn(X("input", {
-					"onUpdate:modelValue": (t) => y.value[R(e)] = t,
+				ae(e) === "unassigned" ? Q("", !0) : (J(), Y("div", Wp, [X("label", null, [t[24] ||= X("span", null, "Room name", -1), X("div", null, [bn(X("input", {
+					"onUpdate:modelValue": (t) => y.value[ae(e)] = t,
 					type: "text"
-				}, null, 8, Gp), [[Qo, y.value[R(e)]]]), X("button", {
+				}, null, 8, Gp), [[Qo, y.value[ae(e)]]]), X("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: (t) => Se(e)
@@ -6981,23 +6981,23 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					onChange: (t) => Te(e, t.target.value)
 				}, [
 					t[25] ||= X("option", { value: "" }, "Auto", -1),
-					e.preferred_media_player && !re.value.some((t) => F(t.value) === F(e.preferred_media_player)) ? (J(), Y("option", {
+					e.preferred_media_player && !ne.value.some((t) => I(t.value) === I(e.preferred_media_player)) ? (J(), Y("option", {
 						key: 0,
 						value: e.preferred_media_player
 					}, U(e.preferred_media_player) + " (saved)", 9, Jp)) : Q("", !0),
-					(J(!0), Y(q, null, K(re.value, (e) => (J(), Y("option", {
+					(J(!0), Y(q, null, K(ne.value, (e) => (J(), Y("option", {
 						key: e.value,
 						value: e.value
 					}, U(e.label || e.value), 9, Yp))), 128))
 				], 40, qp)])])),
 				X("div", Xp, [(J(!0), Y(q, null, K(e.devices || [], (n) => (J(), Y("article", { key: `${V(n)}:${B(n)}` }, [
-					X("div", null, [X("strong", null, U(ae(n)), 1), X("span", null, U(n.integration_name || n.integration_id) + " · " + U(n.type || "device"), 1)]),
+					X("div", null, [X("strong", null, U(ie(n)), 1), X("span", null, U(n.integration_name || n.integration_id) + " · " + U(n.type || "device"), 1)]),
 					X("label", null, [t[28] ||= X("span", null, "Room", -1), X("select", {
-						value: n.room_id || R(e),
+						value: n.room_id || ae(e),
 						onChange: (e) => Ce(n, e.target.value)
-					}, [t[27] ||= X("option", { value: "unassigned" }, "Unassigned", -1), (J(!0), Y(q, null, K(ne.value.filter((e) => R(e) !== "unassigned"), (e) => (J(), Y("option", {
-						key: R(e),
-						value: R(e)
+					}, [t[27] ||= X("option", { value: "unassigned" }, "Unassigned", -1), (J(!0), Y(q, null, K(te.value.filter((e) => ae(e) !== "unassigned"), (e) => (J(), Y("option", {
+						key: ae(e),
+						value: ae(e)
 					}, U(e.name), 9, Qp))), 128))], 40, Zp)]),
 					X("label", null, [t[29] ||= X("span", null, "Tater name", -1), X("div", null, [
 						bn(X("input", {
@@ -7031,16 +7031,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					onClick: t[7] ||= (e) => Ee()
 				}, "Refresh")]),
 				X("div", am, [
-					(J(!0), Y(q, null, K(h.value.enabled_integrations || [], (e) => (J(), Y("div", { key: e }, [X("span", null, U(F(e).replaceAll("_", " ")), 1), X("strong", null, U(h.value[`${e}_ws_connected`] || h.value[`${e}_connected`] ? "Connected" : "Enabled"), 1)]))), 128)),
+					(J(!0), Y(q, null, K(h.value.enabled_integrations || [], (e) => (J(), Y("div", { key: e }, [X("span", null, U(I(e).replaceAll("_", " ")), 1), X("strong", null, U(h.value[`${e}_ws_connected`] || h.value[`${e}_connected`] ? "Connected" : "Enabled"), 1)]))), 128)),
 					X("div", null, [t[31] ||= X("span", null, "Events", -1), X("strong", null, U(h.value.last_event_seq || 0), 1)]),
 					X("div", null, [t[32] ||= X("span", null, "Tracked states", -1), X("strong", null, U(g.value.count || h.value.state_count || 0), 1)])
 				]),
-				X("div", om, [(J(!0), Y(q, null, K(P.value, (e) => (J(), Y("article", { key: e.seq }, [
-					X("span", sm, U(F(e.provider).replaceAll("_", " ")), 1),
+				X("div", om, [(J(!0), Y(q, null, K(F.value, (e) => (J(), Y("article", { key: e.seq }, [
+					X("span", sm, U(I(e.provider).replaceAll("_", " ")), 1),
 					X("div", null, [X("strong", null, U(ce(e)), 1), X("small", null, U(H(e).room || H(e).area || H(e).entity_id || H(e).ref || ""), 1)]),
 					X("span", cm, U(le(e)), 1),
 					X("time", null, U(ue(e.ts)), 1)
-				]))), 128)), P.value.length ? Q("", !0) : (J(), Y("div", lm, "No recent device changes in the current activity window."))])
+				]))), 128)), F.value.length ? Q("", !0) : (J(), Y("div", lm, "No recent device changes in the current activity window."))])
 			])),
 			la(yl, {
 				open: !!c.value,
@@ -7050,7 +7050,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					class: "tv-modal",
 					onSubmit: ds(me, ["prevent"])
 				}, [
-					X("header", null, [X("div", null, [X("span", um, U(c.value?.id), 1), X("h2", null, U(c.value ? ae(c.value) : "") + " settings", 1)]), X("button", {
+					X("header", null, [X("div", null, [X("span", um, U(c.value?.id), 1), X("h2", null, U(c.value ? ie(c.value) : "") + " settings", 1)]), X("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: t[8] ||= (e) => c.value = null
@@ -7206,58 +7206,58 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			let t = w(e.module_key || `${e.id}_portal`);
 			return x.value.get(E(t)) || x.value.get(E(e.id)) || null;
 		}
-		function ee(e) {
+		function M(e) {
 			return e ? e.running ? "Running" : e.desired_running ? "Pending start" : "Stopped" : "Unavailable";
 		}
-		function M(e, n = "success") {
+		function N(e, n = "success") {
 			a.value = e, o.value = n === "error" ? e : "", t.options.onToast?.(e, n);
 		}
-		function te() {
+		function ee() {
 			u.value = Array.isArray(m.value.repos?.additional) ? m.value.repos.additional.map((e) => ({ ...e })) : [];
 		}
-		async function N(e = !1) {
+		async function P(e = !1) {
 			e || (i.value = "Refreshing Portals…"), o.value = "";
 			try {
 				let [e, n] = await Promise.all([xs(t.options.endpoints.runtime), xs(t.options.endpoints.shop)]);
 				t.state.payload = {
 					runtime: e,
 					shop: n
-				}, te();
+				}, ee();
 			} catch (e) {
-				M(e instanceof Error ? e.message : "Portal refresh failed.", "error");
+				N(e instanceof Error ? e.message : "Portal refresh failed.", "error");
 			} finally {
 				e || (i.value = "");
 			}
 		}
-		async function ne(e, n) {
+		async function te(e, n) {
 			let r = w(e.key);
 			if (r) {
 				i.value = `${n === "start" ? "Starting" : "Stopping"} ${r}…`;
 				try {
-					await Ss(`${t.options.endpoints.runtime}/${T(r)}/${n}`), M(`${r} ${n === "start" ? "started" : "stopped"}.`), await N(!0), t.options.onHealthRefresh?.();
+					await Ss(`${t.options.endpoints.runtime}/${T(r)}/${n}`), N(`${r} ${n === "start" ? "started" : "stopped"}.`), await P(!0), t.options.onHealthRefresh?.();
 				} catch (e) {
-					M(e instanceof Error ? e.message : `Portal ${n} failed.`, "error");
+					N(e instanceof Error ? e.message : `Portal ${n} failed.`, "error");
 				} finally {
 					i.value = "";
 				}
 			}
 		}
-		async function re(e, n = "") {
+		async function ne(e, n = "") {
 			if (!(e === "remove" && !window.confirm(`Remove ${n}?${s.value[n] ? " Its saved data will also be deleted." : ""}`))) {
 				i.value = `${e.replaceAll("-", " ")} ${n || "Portals"}…`, o.value = "";
 				try {
 					let i = n ? { id: n } : {};
 					e === "remove" && (i.purge_redis = !!s.value[n]);
 					let a = await Ss(`${t.options.endpoints.shop}/${e}`, i), o = Array.isArray(a.updated) ? a.updated.length : 0, c = Array.isArray(a.failed) ? a.failed.length : 0, l = e === "update-all" ? `Update-all completed. Updated ${o}, failed ${c}.` : "Portal action completed.";
-					M(w(a.message) || l, c ? "error" : "success"), await N(!0), e === "install" && (r.value = "installed"), t.options.onHealthRefresh?.();
+					N(w(a.message) || l, c ? "error" : "success"), await P(!0), e === "install" && (r.value = "installed"), t.options.onHealthRefresh?.();
 				} catch (e) {
-					M(e instanceof Error ? e.message : "Portal action failed.", "error");
+					N(e instanceof Error ? e.message : "Portal action failed.", "error");
 				} finally {
 					i.value = "";
 				}
 			}
 		}
-		function P(e) {
+		function F(e) {
 			let t = e.value ?? e.default ?? "", n = w(e.type).toLowerCase();
 			if (n === "checkbox") return typeof t == "string" ? [
 				"1",
@@ -7279,7 +7279,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 			return t;
 		}
-		function F(e) {
+		function I(e) {
 			return (Array.isArray(e.show_when_all) ? e.show_when_all : e.show_when && typeof e.show_when == "object" ? [e.show_when] : []).every((e) => {
 				let t = w(e.source_key ?? e.key);
 				if (!t) return !0;
@@ -7294,10 +7294,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				return n.includes(r);
 			});
 		}
-		function I(e) {
-			d.value = e, f.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => w(e.key)).map((e) => [w(e.key), P(e)]));
+		function L(e) {
+			d.value = e, f.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => w(e.key)).map((e) => [w(e.key), F(e)]));
 		}
-		async function L() {
+		async function R() {
 			let e = d.value;
 			if (!e) return;
 			let n = w(e.key);
@@ -7311,23 +7311,23 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						"readonly",
 						"read_only",
 						"led_preview"
-					].includes(t) && F(e);
+					].includes(t) && I(e);
 				}).map((e) => [w(e.key), f.value[w(e.key)]]));
-				await Ss(`${t.options.endpoints.runtime}/${T(n)}/settings`, { values: r }), M(`Saved settings for ${w(e.label || n)}.`), d.value = null, await N(!0);
+				await Ss(`${t.options.endpoints.runtime}/${T(n)}/settings`, { values: r }), N(`Saved settings for ${w(e.label || n)}.`), d.value = null, await P(!0);
 			} catch (e) {
-				M(e instanceof Error ? e.message : "Portal settings save failed.", "error");
+				N(e instanceof Error ? e.message : "Portal settings save failed.", "error");
 			} finally {
 				i.value = "";
 			}
 		}
-		function ie() {
+		function re() {
 			let e = l.value.trim();
 			if (!e) {
-				M("Repository URL is required.", "error");
+				N("Repository URL is required.", "error");
 				return;
 			}
 			if (u.value.some((t) => w(t.url).toLowerCase() === e.toLowerCase())) {
-				M("That repository is already added.", "error");
+				N("That repository is already added.", "error");
 				return;
 			}
 			u.value.push({
@@ -7335,20 +7335,20 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				url: e
 			}), c.value = "", l.value = "", a.value = "Repository added. Save repositories to apply it.", o.value = "";
 		}
-		async function ae() {
+		async function ie() {
 			i.value = "Saving Portal repositories…";
 			try {
-				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), M("Portal repositories saved."), await N(!0);
+				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), N("Portal repositories saved."), await P(!0);
 			} catch (e) {
-				M(e instanceof Error ? e.message : "Repository save failed.", "error");
+				N(e instanceof Error ? e.message : "Repository save failed.", "error");
 			} finally {
 				i.value = "";
 			}
 		}
-		function R(e) {
+		function ae(e) {
 			e.key === "Escape" && (d.value = null);
 		}
-		return En(() => t.state.payload, te, { deep: !1 }), te(), window.addEventListener("keydown", R), Cr(() => window.removeEventListener("keydown", R)), (e, t) => (J(), Y("div", ym, [
+		return En(() => t.state.payload, ee, { deep: !1 }), ee(), window.addEventListener("keydown", ae), Cr(() => window.removeEventListener("keydown", ae)), (e, t) => (J(), Y("div", ym, [
 			X("header", bm, [t[8] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "Conversation surfaces"),
 				X("h1", null, "Portals"),
@@ -7356,7 +7356,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			], -1), X("div", xm, [X("span", { class: z(["tv-live-pill", { busy: !!i.value }]) }, [t[7] ||= X("i", null, null, -1), Z(U(i.value || "Live"), 1)], 2), X("button", {
 				class: "tv-button",
 				type: "button",
-				onClick: t[0] ||= (e) => N()
+				onClick: t[0] ||= (e) => P()
 			}, "Refresh")])]),
 			X("div", Sm, [
 				X("div", null, [t[9] ||= X("span", null, "Installed", -1), X("strong", null, U(g.value.length || h.value.length), 1)]),
@@ -7382,7 +7382,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				X("header", null, [X("div", null, [X("span", Om, U(e.key), 1), X("h2", null, U(k(e)), 1)]), X("span", { class: z(["tv-state", {
 					good: e.runtime?.running,
 					pending: e.runtime?.desired_running && !e.runtime?.running
-				}]) }, U(ee(e.runtime)), 3)]),
+				}]) }, U(M(e.runtime)), 3)]),
 				X("p", null, U(A(e)), 1),
 				X("div", km, [
 					X("span", null, "Installed " + U(e.shop?.installed_ver || "0.0.0"), 1),
@@ -7393,12 +7393,12 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					key: 0,
 					class: "tv-button",
 					type: "button",
-					onClick: (t) => I(e.runtime)
+					onClick: (t) => L(e.runtime)
 				}, "Settings", 8, Am)) : (J(), Y("span", jm, U(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (J(), Y("button", {
 					key: 2,
 					class: z(["tv-button", { primary: !e.runtime.running }]),
 					type: "button",
-					onClick: (t) => ne(e.runtime, e.runtime.running ? "stop" : "start")
+					onClick: (t) => te(e.runtime, e.runtime.running ? "stop" : "start")
 				}, U(e.runtime.running ? "Stop" : "Start"), 11, Mm)) : Q("", !0)])
 			]))), 128)), C.value.length ? Q("", !0) : (J(), Y("div", Nm, "No installed Portals found."))])) : r.value === "store" ? (J(), Y("section", Pm, [(J(!0), Y(q, null, K(v.value, (e) => (J(), Y("article", {
 				key: e.id,
@@ -7409,7 +7409,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				X("footer", null, [X("span", null, U(e.source_label || "Tater Shop"), 1), X("button", {
 					class: "tv-button primary",
 					type: "button",
-					onClick: (t) => re("install", e.id)
+					onClick: (t) => ne("install", e.id)
 				}, "Install", 8, Lm)])
 			]))), 128)), v.value.length ? Q("", !0) : (J(), Y("div", Rm, "No additional Portals are available from the configured repositories."))])) : r.value === "manage" ? (J(), Y("section", zm, [
 				X("div", Bm, [X("div", null, [
@@ -7420,23 +7420,23 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					class: "tv-button primary",
 					type: "button",
 					disabled: !y.value.length,
-					onClick: t[1] ||= (e) => re("update-all")
+					onClick: t[1] ||= (e) => ne("update-all")
 				}, "Update all", 8, Vm)]),
 				(J(!0), Y(q, null, K(g.value.slice().sort(O), (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel tp-manage-row"
-				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-") + " · " + U(ee(j(e))), 1)]), X("div", Hm, [
+				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-") + " · " + U(M(j(e))), 1)]), X("div", Hm, [
 					X("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !e.update_available,
-						onClick: (t) => re("update", e.id)
+						onClick: (t) => ne("update", e.id)
 					}, U(e.update_available ? "Update" : "Current"), 9, Um),
 					j(e) ? (J(), Y("button", {
 						key: 0,
 						class: "tv-button",
 						type: "button",
-						onClick: (t) => ne(j(e), j(e)?.running ? "stop" : "start")
+						onClick: (t) => te(j(e), j(e)?.running ? "stop" : "start")
 					}, U(j(e)?.running ? "Stop" : "Start"), 9, Wm)) : Q("", !0),
 					X("label", Gm, [bn(X("input", {
 						"onUpdate:modelValue": (t) => s.value[e.id] = t,
@@ -7445,7 +7445,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("button", {
 						class: "tv-button danger",
 						type: "button",
-						onClick: (t) => re("remove", e.id)
+						onClick: (t) => ne("remove", e.id)
 					}, "Remove", 8, qm)
 				])]))), 128)),
 				g.value.length ? Q("", !0) : (J(), Y("div", Jm, "No installed Portals found."))
@@ -7475,17 +7475,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						"onUpdate:modelValue": t[3] ||= (e) => l.value = e,
 						type: "url",
 						placeholder: "https://example.com/portals.json",
-						onKeyup: ps(ie, ["enter"])
+						onKeyup: ps(re, ["enter"])
 					}, null, 544), [[Qo, l.value]])]),
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: ie
+						onClick: re
 					}, "Add"),
 					X("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: ae
+						onClick: ie
 					}, "Save repositories")
 				])
 			])),
@@ -7495,7 +7495,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}, {
 				default: yn(() => [X("form", {
 					class: "tv-modal tp-settings-modal",
-					onSubmit: ds(L, ["prevent"])
+					onSubmit: ds(R, ["prevent"])
 				}, [
 					X("header", null, [X("div", null, [X("span", eh, U(d.value?.key), 1), X("h2", null, U(d.value?.label || d.value?.key) + " settings", 1)]), X("button", {
 						class: "tv-button",
@@ -7508,8 +7508,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						"onUpdate:modelValue": (t) => f.value[e.key] = t,
 						field: e,
 						"all-values": f.value,
-						onError: t[5] ||= (e) => M(e, "error"),
-						onNotify: M
+						onError: t[5] ||= (e) => N(e, "error"),
+						onNotify: N
 					}, null, 8, [
 						"modelValue",
 						"onUpdate:modelValue",
@@ -7525,84 +7525,94 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}, 8, ["open"])
 		]));
 	}
-}), rh = { class: "tater-vue-surface tsx-spudex" }, ih = { class: "tv-page-heading" }, ah = { class: "tv-heading-actions" }, oh = { class: "tv-metrics" }, sh = {
+}), rh = { class: "tater-vue-surface tsx-spudex" }, ih = { class: "tsx-spudex-header" }, ah = {
 	class: "tv-tabs tsx-tabs",
 	"aria-label": "Spudex sections"
-}, ch = ["onClick"], lh = { key: 0 }, uh = {
+}, oh = ["onClick"], sh = { key: 0 }, ch = { class: "tsx-header-actions" }, lh = {
 	key: 1,
 	class: "tsx-workbench"
-}, dh = { class: "tv-panel tsx-session-bar" }, fh = { class: "tsx-session-actions" }, ph = ["disabled"], mh = ["disabled"], hh = { class: "tsx-session-list" }, gh = ["onClick"], _h = ["onClick"], vh = {
+}, uh = { class: "tsx-spud-bar" }, dh = { class: "tsx-session-switcher" }, fh = { class: "tsx-bar-label" }, ph = ["value"], mh = {
 	key: 0,
-	class: "tv-empty compact"
-}, yh = { class: "tsx-workbench-grid" }, bh = { class: "tv-panel tsx-console-card" }, xh = { class: "tsx-console-head" }, Sh = { class: "tsx-workbench-feed" }, Ch = {
+	value: ""
+}, hh = ["value"], gh = ["disabled"], _h = { class: "tsx-runtime-strip" }, vh = { class: "tsx-bar-label" }, yh = { class: "tsx-process-strip" }, bh = {
+	key: 0,
+	class: "tsx-runtime-quiet"
+}, xh = ["title"], Sh = ["onClick"], Ch = { class: "tsx-session-tools" }, wh = ["disabled"], Th = ["disabled"], Eh = ["disabled"], Dh = { class: "tsx-workbench-grid" }, Oh = { class: "tv-panel tsx-chat-card" }, kh = { class: "tsx-pane-head" }, Ah = { class: "tsx-chat-scroll" }, jh = {
 	key: 0,
 	class: "tsx-chat-feed"
-}, wh = {
+}, Mh = {
 	key: 1,
-	class: "tsx-log-list"
-}, Th = {
-	key: 2,
-	class: "tv-empty"
-}, Eh = ["disabled"], Dh = ["disabled"], Oh = { class: "tv-panel tsx-processes" }, kh = ["onClick"], Ah = {
+	class: "tsx-chat-empty"
+}, Nh = ["disabled"], Ph = ["disabled"], Fh = { class: "tv-panel tsx-terminal-card" }, Ih = { class: "tsx-console-head" }, Lh = { class: "tsx-terminal-actions" }, Rh = ["disabled"], zh = {
+	class: "tsx-terminal-body",
+	role: "log",
+	"aria-label": "Spudex command output",
+	"aria-live": "polite"
+}, Bh = {
 	key: 0,
-	class: "tv-empty compact"
-}, jh = {
+	class: "tsx-log-list"
+}, Vh = {
+	key: 1,
+	class: "tsx-terminal-empty"
+}, Hh = { class: "tsx-terminal-status" }, Uh = {
 	key: 2,
 	class: "tsx-manual"
-}, Mh = { class: "tv-panel tsx-run-card" }, Nh = { class: "tv-state" }, Ph = { class: "tsx-check" }, Fh = ["disabled"], Ih = { class: "tv-panel tsx-manual-console" }, Lh = { class: "tsx-console-head" }, Rh = { class: "tsx-session-actions" }, zh = ["disabled"], Bh = ["disabled"], Vh = { class: "tsx-manual-console-body" }, Hh = {
+}, Wh = { class: "tsx-manual-terminal" }, Gh = { class: "tsx-manual-head" }, Kh = { class: "tsx-manual-actions" }, qh = { class: "tsx-manual-state" }, Jh = ["disabled"], Yh = ["disabled"], Xh = ["disabled"], Zh = {
+	class: "tsx-manual-console-body",
+	role: "log",
+	"aria-label": "Manual terminal output",
+	"aria-live": "polite"
+}, Qh = {
 	key: 0,
-	class: "tv-empty"
-}, Uh = { class: "tv-panel tsx-manual-history" }, Wh = ["onClick"], Gh = {
-	key: 0,
-	class: "tv-empty compact"
-}, Kh = {
+	class: "tsx-manual-welcome"
+}, $h = { class: "tsx-prompt-line" }, eg = ["disabled"], tg = { class: "tsx-terminal-check" }, ng = ["disabled"], rg = { class: "tsx-manual-footer" }, ig = {
 	key: 3,
 	class: "tsx-settings"
-}, qh = { class: "tv-panel tsx-access-card" }, Jh = { class: "tsx-master-toggle" }, Yh = { class: "tsx-settings-grid" }, Xh = { class: "tsx-platforms" }, Zh = ["checked", "onChange"], Qh = { class: "tv-panel tsx-policy-card" }, $h = { class: "tsx-policy-grid" }, eg = ["onUpdate:modelValue"], tg = { class: "tsx-settings-save" }, ng = ["disabled"], rg = {
+}, ag = { class: "tv-panel tsx-access-card" }, og = { class: "tsx-master-toggle" }, sg = { class: "tsx-settings-grid" }, cg = { class: "tsx-platforms" }, lg = ["checked", "onChange"], ug = { class: "tv-panel tsx-policy-card" }, dg = { class: "tsx-policy-grid" }, fg = ["onUpdate:modelValue"], pg = { class: "tsx-settings-save" }, mg = ["disabled"], hg = {
 	class: "tv-modal tsx-details",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-label": "Session details"
-}, ig = {
+}, gg = {
 	key: 0,
 	class: "tsx-insights"
-}, ag = {
+}, _g = {
 	key: 0,
 	class: "tsx-policy-notice danger"
-}, og = { key: 0 }, sg = {
+}, vg = { key: 0 }, yg = {
 	key: 0,
 	class: "tsx-plan"
-}, cg = {
+}, bg = {
 	key: 1,
 	class: "tv-empty compact"
-}, lg = { key: 0 }, ug = {
+}, xg = { key: 0 }, Sg = {
 	key: 1,
 	class: "tv-empty compact"
-}, dg = {
+}, Cg = {
 	key: 0,
 	class: "tsx-preview-list"
-}, fg = ["href"], pg = {
-	key: 1,
-	class: "tv-empty compact"
-}, mg = {
-	key: 0,
-	class: "tsx-git"
-}, hg = { key: 0 }, gg = {
-	key: 1,
-	class: "tv-empty compact"
-}, _g = { class: "wide" }, vg = {
-	key: 0,
-	class: "tsx-file-list"
-}, yg = { key: 0 }, bg = ["onClick"], xg = ["onClick"], Sg = {
-	key: 1,
-	class: "tv-empty compact"
-}, Cg = { class: "wide" }, wg = { key: 0 }, Tg = {
+}, wg = ["href"], Tg = {
 	key: 1,
 	class: "tv-empty compact"
 }, Eg = {
+	key: 0,
+	class: "tsx-git"
+}, Dg = { key: 0 }, Og = {
+	key: 1,
+	class: "tv-empty compact"
+}, kg = { class: "wide" }, Ag = {
+	key: 0,
+	class: "tsx-file-list"
+}, jg = { key: 0 }, Mg = ["onClick"], Ng = ["onClick"], Pg = {
+	key: 1,
+	class: "tv-empty compact"
+}, Fg = { class: "wide" }, Ig = { key: 0 }, Lg = {
+	key: 1,
+	class: "tv-empty compact"
+}, Rg = {
 	key: 1,
 	class: "tv-empty"
-}, Dg = /* @__PURE__ */ ar({
+}, zg = /* @__PURE__ */ ar({
 	__name: "SpudexApp",
 	props: {
 		state: {},
@@ -7678,48 +7688,48 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				"Allow inline eval",
 				"Allows python -c, node -e, ruby -e, and similar interpreter execution."
 			]
-		], a = /* @__PURE__ */ G(ae(n.options.initialTab)), o = /* @__PURE__ */ G(I(n.options.initialSessionId)), s = /* @__PURE__ */ G(I(n.options.initialManualSessionId)), c = /* @__PURE__ */ G([]), l = /* @__PURE__ */ G(0), u = /* @__PURE__ */ G([]), d = /* @__PURE__ */ G(0), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G(""), m = /* @__PURE__ */ G(!1), h = /* @__PURE__ */ G(""), g = /* @__PURE__ */ G(""), _ = /* @__PURE__ */ G(""), v = /* @__PURE__ */ G(!1), y = /* @__PURE__ */ G(!1), b = /* @__PURE__ */ Ct({}), x = 0, S = !1, C = $(() => n.state.payload || {}), w = $(() => Array.isArray(C.value.sessions) ? C.value.sessions : []), T = $(() => w.value.filter((e) => L(e.source) === "ui")), E = $(() => Array.isArray(C.value.model_processes) ? C.value.model_processes : []), D = $(() => w.value.find((e) => I(e.id) === o.value) || null), O = $(() => T.value.find((e) => I(e.id) === s.value) || null), k = $(() => a.value === "manual" ? O.value : D.value), A = $(() => Number(C.value.active_count || w.value.filter(R).length)), j = $(() => Number(C.value.model_process_count || E.value.length)), ee = $(() => R(D.value)), M = $(() => R(O.value)), te = $(() => L(D.value?.source) === "spudex_chat" ? D.value : null), N = $(() => !!(h.value === "chat" || R(te.value))), ne = $(() => se(C.value.platform_options, b.allowed_platforms)), re = $(() => {
+		], a = /* @__PURE__ */ G(ie(n.options.initialTab)), o = /* @__PURE__ */ G(L(n.options.initialSessionId)), s = /* @__PURE__ */ G(L(n.options.initialManualSessionId)), c = /* @__PURE__ */ G([]), l = /* @__PURE__ */ G(0), u = /* @__PURE__ */ G([]), d = /* @__PURE__ */ G(0), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G(""), m = /* @__PURE__ */ G(!1), h = /* @__PURE__ */ G(""), g = /* @__PURE__ */ G(""), _ = /* @__PURE__ */ G(""), v = /* @__PURE__ */ G(!1), y = /* @__PURE__ */ G(!1), b = /* @__PURE__ */ Ct({}), x = 0, S = !1, C = $(() => n.state.payload || {}), w = $(() => Array.isArray(C.value.sessions) ? C.value.sessions : []), T = $(() => w.value.filter((e) => R(e.source) === "ui")), E = $(() => Array.isArray(C.value.model_processes) ? C.value.model_processes : []), D = $(() => w.value.find((e) => L(e.id) === o.value) || null), O = $(() => T.value.find((e) => L(e.id) === s.value) || null), k = $(() => a.value === "manual" ? O.value : D.value), A = $(() => Number(C.value.active_count || w.value.filter(ae).length)), j = $(() => Number(C.value.model_process_count || E.value.length)), M = $(() => ae(D.value)), N = $(() => ae(O.value)), ee = $(() => R(D.value?.source) === "spudex_chat" ? D.value : null), P = $(() => !!(h.value === "chat" || ae(ee.value))), te = $(() => se(C.value.platform_options, b.allowed_platforms)), ne = $(() => {
 			let e = c.value.map((e) => {
-				let t = L(e.stream), r = I(e.text);
+				let t = R(e.stream), r = L(e.text);
 				return r ? t === "user" ? {
 					role: "user",
 					username: n.options.profile?.username,
 					content: r
-				} : t === "assistant" || t === "system" && L(e.level) === "error" ? {
+				} : t === "assistant" ? {
 					role: "assistant",
 					content: r
 				} : null : null;
 			}).filter(Boolean);
-			return N.value ? [...e.slice(-20), {
+			return P.value ? [...e.slice(-20), {
 				role: "assistant",
 				content: { marker: "typing" }
 			}] : e.slice(-20);
-		}), P = $(() => c.value.filter((e) => !["user", "assistant"].includes(L(e.stream)))), F = $(() => {
-			let e = te.value || D.value;
+		}), F = $(() => c.value.filter((e) => !["user", "assistant"].includes(R(e.stream)))), I = $(() => {
+			let e = ee.value || D.value;
 			if (h.value === "chat") return "Starting Spudex chat…";
 			if (!e) return A.value ? `${A.value} active Spudex process${A.value === 1 ? "" : "es"}` : "Ready for a Spudex task.";
-			let t = (Array.isArray(e.plan) ? e.plan : []).find((e) => L(e.status) === "in_progress");
-			return t?.step ? `Working: ${t.step}` : `${B(e.status)}${I(e.label || e.command || e.goal) ? `: ${I(e.label || e.command || e.goal)}` : ""}`;
+			let t = (Array.isArray(e.plan) ? e.plan : []).find((e) => R(e.status) === "in_progress");
+			return t?.step ? `Working: ${t.step}` : `${B(e.status)}${L(e.label || e.command || e.goal) ? `: ${L(e.label || e.command || e.goal)}` : ""}`;
 		});
-		function I(e) {
+		function L(e) {
 			return String(e ?? "").trim();
 		}
-		function L(e) {
-			return I(e).toLowerCase();
+		function R(e) {
+			return L(e).toLowerCase();
+		}
+		function re(e) {
+			return encodeURIComponent(L(e));
 		}
 		function ie(e) {
-			return encodeURIComponent(I(e));
-		}
-		function ae(e) {
-			let t = L(e);
+			let t = R(e);
 			return t === "manual" || t === "settings" || t === "policy" ? t === "policy" ? "settings" : t : "workbench";
 		}
-		function R(e) {
-			let t = L(e?.status);
+		function ae(e) {
+			let t = R(e?.status);
 			return !!e?.active || t === "running" || t === "queued";
 		}
 		function B(e) {
-			let t = L(e) || "queued";
+			let t = R(e) || "queued";
 			return {
 				succeeded: "Done",
 				completed: "Complete",
@@ -7740,16 +7750,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			return n < 60 ? `${n}s ago` : n < 3600 ? `${Math.floor(n / 60)}m ago` : n < 86400 ? `${Math.floor(n / 3600)}h ago` : `${Math.floor(n / 86400)}d ago`;
 		}
 		function oe(e, t, n) {
-			let r = n ? [] : [...e], i = new Set(r.map((e) => I(e.seq) || `${e.ts ?? ""}\u0000${e.stream ?? ""}\u0000${e.text ?? ""}`));
+			let r = n ? [] : [...e], i = (e) => `${e._session_id ?? ""}\u0000${L(e.seq) || `${e.ts ?? ""}\u0000${e.stream ?? ""}\u0000${e.text ?? ""}`}`, a = new Set(r.map(i));
 			return t.forEach((e) => {
-				let t = I(e.seq) || `${e.ts ?? ""}\u0000${e.stream ?? ""}\u0000${e.text ?? ""}`;
-				i.has(t) || (i.add(t), r.push(e));
+				let t = i(e);
+				a.has(t) || (a.add(t), r.push(e));
 			}), r.slice(-1e3);
 		}
 		function se(e, t) {
-			let n = new Set((Array.isArray(t) ? t : ["webui"]).map(L).filter(Boolean)), r = /* @__PURE__ */ new Map();
+			let n = new Set((Array.isArray(t) ? t : ["webui"]).map(R).filter(Boolean)), r = /* @__PURE__ */ new Map();
 			return (Array.isArray(e) ? e : []).forEach((e) => {
-				let t = L(e.value);
+				let t = R(e.value);
 				t && !r.has(t) && r.set(t, {
 					...e,
 					value: t
@@ -7772,7 +7782,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			_.value = e, g.value = t === "error" ? e : "", n.options.onToast?.(e, t);
 		}
 		function ce(e, t = "") {
-			return `${n.options.endpoints.sessions}/${ie(e)}${t}`;
+			return `${n.options.endpoints.sessions}/${re(e)}${t}`;
 		}
 		async function le(e) {
 			return bs(await fetch(e, {
@@ -7799,24 +7809,24 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				allow_network: !!t.allow_network,
 				allow_installs: !!t.allow_installs,
 				allowed_platforms: Array.isArray(t.allowed_platforms) ? [...t.allowed_platforms] : ["webui"],
-				default_cwd: I(t.default_cwd || "workspace"),
+				default_cwd: L(t.default_cwd || "workspace"),
 				max_task_steps: Number(t.max_task_steps || 6),
 				command_timeout_sec: Number(t.command_timeout_sec || 45)
 			}), y.value = !1;
 		}
 		function de() {
-			w.value.some((e) => I(e.id) === o.value) || pe(I(w.value[0]?.id), !1), T.value.some((e) => I(e.id) === s.value) || me(I(T.value[0]?.id), !1);
+			w.value.some((e) => L(e.id) === o.value) || pe(L(w.value[0]?.id), !1), T.value.some((e) => L(e.id) === s.value) || me(L(T.value[0]?.id), !1);
 		}
 		function fe(e) {
-			a.value = ae(e), v.value = !1, n.options.onTabChange?.(a.value);
+			a.value = ie(e), v.value = !1, n.options.onTabChange?.(a.value);
 		}
 		function pe(e, t = !0) {
-			let r = I(e);
+			let r = L(e);
 			r !== o.value && (o.value = r, c.value = [], l.value = 0, n.options.onSessionChange?.(r), t && ge(!0));
 		}
-		function me(e, t = !0) {
-			let r = I(e);
-			r !== s.value && (s.value = r, u.value = [], d.value = 0, n.options.onManualSessionChange?.(r), r && (o.value = r, n.options.onSessionChange?.(r)), t && _e(!0));
+		function me(e, t = !0, r = !1) {
+			let i = L(e);
+			i !== s.value && (s.value = i, r || (u.value = []), d.value = 0, n.options.onManualSessionChange?.(i), i && (o.value = i, n.options.onSessionChange?.(i)), t && _e(!r));
 		}
 		async function W(e = !1) {
 			e || (h.value = "refresh");
@@ -7829,7 +7839,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		async function he(e, t) {
-			return xs(`${ce(e, "/logs")}?after_seq=${ie(t)}&limit=500`);
+			return xs(`${ce(e, "/logs")}?after_seq=${re(t)}&limit=500`);
 		}
 		async function ge(e = !1) {
 			let t = o.value;
@@ -7838,9 +7848,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				return;
 			}
 			let n = await he(t, e ? 0 : l.value), r = Array.isArray(n.entries) ? n.entries : [];
-			c.value = oe(c.value, r, e), l.value = Number(n.last_seq || (e ? 0 : l.value)), await sn();
-			let i = document.querySelector(".tsx-workbench-feed");
-			i instanceof HTMLElement && (e || i.scrollHeight - i.scrollTop - i.clientHeight < 120) && (i.scrollTop = i.scrollHeight);
+			c.value = oe(c.value, r, e), l.value = Number(n.last_seq || (e ? 0 : l.value)), await sn(), document.querySelectorAll(".tsx-chat-scroll, .tsx-terminal-body").forEach((t) => {
+				t instanceof HTMLElement && (e || t.scrollHeight - t.scrollTop - t.clientHeight < 120) && (t.scrollTop = t.scrollHeight);
+			});
 		}
 		async function _e(e = !1) {
 			let t = s.value;
@@ -7848,7 +7858,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				u.value = [], d.value = 0;
 				return;
 			}
-			let n = await he(t, e ? 0 : d.value), r = Array.isArray(n.entries) ? n.entries : [];
+			let n = await he(t, e ? 0 : d.value), r = (Array.isArray(n.entries) ? n.entries : []).map((e) => ({
+				...e,
+				_session_id: t
+			}));
 			u.value = oe(u.value, r, e), d.value = Number(n.last_seq || (e ? 0 : d.value)), await sn();
 			let i = document.querySelector(".tsx-manual-console-body");
 			i instanceof HTMLElement && (e || i.scrollHeight - i.scrollTop - i.clientHeight < 100) && (i.scrollTop = i.scrollHeight);
@@ -7875,13 +7888,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				H("Enter a Spudex chat message first.", "error");
 				return;
 			}
-			if (N.value) {
+			if (P.value) {
 				H("Spudex is still working in this chat.", "error");
 				return;
 			}
 			h.value = "chat";
 			try {
-				let t = L(D.value?.source) === "spudex_chat" ? o.value : "", r = I((await Ss(n.options.endpoints.chat, {
+				let t = R(D.value?.source) === "spudex_chat" ? o.value : "", r = L((await Ss(n.options.endpoints.chat, {
 					message: e,
 					session_id: t || null
 				})).session?.id);
@@ -7895,7 +7908,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function xe() {
 			h.value = "new-chat";
 			try {
-				pe(I((await Ss(n.options.endpoints.chatSession, { label: "New Spudex chat" })).session?.id), !1), f.value = "", H("New Spudex chat created."), await W(!0), await ge(!0);
+				pe(L((await Ss(n.options.endpoints.chatSession, { label: "New Spudex chat" })).session?.id), !1), f.value = "", H("New Spudex chat created."), await W(!0), await ge(!0);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "New Spudex chat failed.", "error");
 			} finally {
@@ -7910,12 +7923,12 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 			h.value = "run";
 			try {
-				let t = I((await Ss(n.options.endpoints.run, {
+				let t = L((await Ss(n.options.endpoints.run, {
 					command: e,
 					label: e.slice(0, 80),
 					background: m.value
 				})).session?.id);
-				pe(t, !1), me(t, !1), p.value = "", H("Spudex session started."), await W(!0), await Promise.all([ge(!0), _e(!0)]);
+				pe(t, !1), me(t, !1, !0), p.value = "", H("Spudex session started."), await W(!0), await Promise.all([ge(!0), _e(!1)]);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "Command failed.", "error");
 			} finally {
@@ -7935,8 +7948,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		async function we(e) {
-			let t = I(e.id);
-			if (t && !(R(e) && !window.confirm("Close this running Spudex session? Its active command will be stopped."))) {
+			let t = L(e.id);
+			if (t && !(ae(e) && !window.confirm("Close this running Spudex session? Its active command will be stopped."))) {
 				h.value = `close-${t}`;
 				try {
 					await le(ce(t)), t === o.value && pe("", !1), t === s.value && me("", !1), H("Spudex session closed."), await W(!0);
@@ -7971,232 +7984,281 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 		}
 		function De(e, t) {
-			let n = new Set((Array.isArray(b.allowed_platforms) ? b.allowed_platforms : []).map(L));
+			let n = new Set((Array.isArray(b.allowed_platforms) ? b.allowed_platforms : []).map(R));
 			t ? (e === "all" && n.clear(), n.add(e)) : n.delete(e), e !== "all" && t && n.delete("all"), b.allowed_platforms = [...n], y.value = !0;
 		}
 		function Oe(e) {
 			e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && (e.preventDefault(), be());
 		}
 		function ke(e) {
+			pe(e.target.value);
+		}
+		function Ae() {
+			c.value = c.value.filter((e) => ["user", "assistant"].includes(R(e.stream)));
+		}
+		function je() {
+			D.value && we(D.value);
+		}
+		function Me(e) {
 			e.key === "Escape" && (v.value = !1);
 		}
 		return En(() => n.state.payload, () => {
 			de(), ue();
-		}, { deep: !1 }), ue(!0), de(), window.addEventListener("keydown", ke), Promise.all([ge(!0), _e(!0)]).catch(() => {}), ye(), Cr(() => {
-			x && window.clearTimeout(x), window.removeEventListener("keydown", ke);
+		}, { deep: !1 }), ue(!0), de(), window.addEventListener("keydown", Me), Promise.all([ge(!0), _e(!0)]).catch(() => {}), ye(), Cr(() => {
+			x && window.clearTimeout(x), window.removeEventListener("keydown", Me);
 		}), t({ refresh: () => ve(!1) }), (t, n) => (J(), Y(q, null, [X("div", rh, [
-			X("header", ih, [n[24] ||= X("div", null, [
-				X("span", { class: "tv-eyebrow" }, "Sandboxed agent workspace"),
-				X("h1", null, "Spudex"),
-				X("p", null, "Inspect, run, and guide local agent tasks inside Tater’s protected agent_lab workspace.")
-			], -1), X("div", ah, [X("span", { class: z(["tv-live-pill", { busy: !!h.value }]) }, [n[23] ||= X("i", null, null, -1), Z(U(h.value ? "Working" : "Live"), 1)], 2), X("button", {
-				class: "tv-button",
-				type: "button",
-				onClick: n[0] ||= (e) => ve(!1)
-			}, "Refresh")])]),
-			X("div", oh, [
-				X("div", null, [n[25] ||= X("span", null, "Sessions", -1), X("strong", null, U(w.value.length), 1)]),
-				X("div", null, [n[26] ||= X("span", null, "Active", -1), X("strong", null, U(A.value), 1)]),
-				X("div", null, [n[27] ||= X("span", null, "Processes", -1), X("strong", null, U(j.value), 1)]),
-				X("div", null, [n[28] ||= X("span", null, "Policy", -1), X("strong", null, U(b.policy_enabled ? "On" : "Off"), 1)])
+			X("header", ih, [
+				n[23] ||= X("div", { class: "tsx-brand" }, [X("span", {
+					class: "tsx-spud-mark",
+					"aria-hidden": "true"
+				}, [
+					X("i"),
+					X("i"),
+					X("i")
+				]), X("div", null, [X("span", { class: "tv-eyebrow" }, "Tater agent workspace"), X("h1", null, "Spudex")])], -1),
+				X("nav", ah, [(J(), Y(q, null, K(r, (e) => X("button", {
+					key: e.id,
+					type: "button",
+					class: z({ active: a.value === e.id }),
+					onClick: (t) => fe(e.id)
+				}, [Z(U(e.label), 1), e.id === "workbench" && A.value ? (J(), Y("span", sh, U(A.value), 1)) : Q("", !0)], 10, oh)), 64))]),
+				X("div", ch, [X("span", { class: z(["tv-live-pill", { busy: !!h.value }]) }, [n[22] ||= X("i", null, null, -1), Z(U(h.value ? "Working" : "Live"), 1)], 2), X("button", {
+					class: "tv-button tsx-icon-button",
+					type: "button",
+					"aria-label": "Refresh Spudex",
+					title: "Refresh",
+					onClick: n[0] ||= (e) => ve(!1)
+				}, "↻")])
 			]),
 			_.value || g.value ? (J(), Y("div", {
 				key: 0,
 				class: z(["tv-notice", { error: !!g.value }])
 			}, U(g.value || _.value), 3)) : Q("", !0),
-			X("nav", sh, [(J(), Y(q, null, K(r, (e) => X("button", {
-				key: e.id,
-				type: "button",
-				class: z({ active: a.value === e.id }),
-				onClick: (t) => fe(e.id)
-			}, [Z(U(e.label), 1), e.id === "workbench" && A.value ? (J(), Y("span", lh, U(A.value), 1)) : Q("", !0)], 10, ch)), 64))]),
-			a.value === "workbench" ? (J(), Y("section", uh, [X("div", dh, [X("header", null, [X("div", null, [
-				n[29] ||= X("span", { class: "tv-eyebrow" }, "Sessions", -1),
-				X("h2", null, U(D.value?.label || D.value?.command || "New chat"), 1),
-				X("p", null, U(F.value), 1)
-			]), X("div", fh, [
-				X("button", {
-					class: "tv-button",
-					type: "button",
-					disabled: !D.value,
-					onClick: n[1] ||= (e) => v.value = !0
-				}, "Details", 8, ph),
-				X("button", {
-					class: "tv-button",
-					type: "button",
-					onClick: n[2] ||= (e) => c.value = []
-				}, "Clear"),
-				X("button", {
-					class: "tv-button danger",
-					type: "button",
-					disabled: !ee.value,
-					onClick: n[3] ||= (e) => Ce(o.value)
-				}, "Stop", 8, mh)
-			])]), X("div", hh, [(J(!0), Y(q, null, K(w.value, (e) => (J(), Y("article", {
-				key: e.id,
-				class: z({ selected: String(e.id) === o.value })
-			}, [X("button", {
-				type: "button",
-				onClick: (t) => pe(String(e.id))
-			}, [
-				X("strong", null, U(e.label || e.command || "Spudex session"), 1),
-				X("small", null, U(e.command || e.goal || (e.status === "draft" ? "Ready for first message" : "")), 1),
-				X("span", null, [X("b", { class: z(["tv-state", { good: R(e) }]) }, U(B(e.status)), 3), X("time", null, U(V(e.updated_ts)), 1)])
-			], 8, gh), X("button", {
-				class: "tsx-session-close",
-				type: "button",
-				"aria-label": "Close Spudex session",
-				title: "Close session",
-				onClick: (t) => we(e)
-			}, "×", 8, _h)], 2))), 128)), w.value.length ? Q("", !0) : (J(), Y("div", vh, "No Spudex sessions yet."))])]), X("div", yh, [X("section", bh, [
-				X("header", xh, [X("div", null, [X("span", { class: z(["tsx-live-dot", { live: ee.value }]) }, null, 2), X("div", null, [X("strong", null, U(D.value?.label || D.value?.command || "Spudex console"), 1), X("small", null, U(D.value ? `Session ${String(D.value.id).slice(0, 8)}` : "Start a new chat below"), 1)])]), X("span", null, U(A.value) + " active · " + U(j.value) + " model process" + U(j.value === 1 ? "" : "es"), 1)]),
-				X("div", Sh, [
-					te.value && re.value.length ? (J(), Y("div", Ch, [(J(!0), Y(q, null, K(re.value, (t, n) => (J(), ia(Qs, {
-						key: `${n}-${t.role}`,
-						message: t,
-						profile: e.options.profile || {},
-						"files-endpoint": e.options.endpoints.chatFiles
-					}, null, 8, [
-						"message",
-						"profile",
-						"files-endpoint"
-					]))), 128))])) : Q("", !0),
-					P.value.length ? (J(), Y("div", wh, [(J(!0), Y(q, null, K(P.value, (e) => (J(), Y("article", {
-						key: e.seq || `${e.ts}-${e.text}`,
-						class: z(L(e.stream))
-					}, [
-						X("time", null, U(V(e.ts)), 1),
-						X("span", null, U(e.stream || "log"), 1),
-						X("pre", null, U(e.text), 1)
-					], 2))), 128))])) : Q("", !0),
-					!c.value.length && !N.value ? (J(), Y("div", Th, "Ask Spudex to inspect, run, or fix something inside agent_lab.")) : Q("", !0)
+			a.value === "workbench" ? (J(), Y("section", lh, [X("div", uh, [
+				X("div", dh, [
+					X("span", fh, [X("i", { class: z({ live: M.value }) }, null, 2), n[24] ||= Z("Session", -1)]),
+					X("select", {
+						value: o.value,
+						"aria-label": "Selected Spudex session",
+						onChange: ke
+					}, [w.value.length ? Q("", !0) : (J(), Y("option", mh, "No sessions yet")), (J(!0), Y(q, null, K(w.value, (e) => (J(), Y("option", {
+						key: e.id,
+						value: String(e.id)
+					}, U(e.label || e.command || "Spudex session") + " · " + U(B(e.status)), 9, hh))), 128))], 40, ph),
+					X("button", {
+						class: "tv-button primary tsx-new-chat",
+						type: "button",
+						disabled: h.value === "new-chat",
+						onClick: xe
+					}, [...n[25] ||= [X("span", { "aria-hidden": "true" }, "＋", -1), Z(" New chat", -1)]], 8, gh)
 				]),
+				X("div", _h, [X("span", vh, [
+					X("i", { class: z({ live: E.value.length }) }, null, 2),
+					n[26] ||= Z("Runtime ", -1),
+					X("b", null, U(j.value), 1)
+				]), X("div", yh, [E.value.length ? Q("", !0) : (J(), Y("span", bh, "No tracked processes")), (J(!0), Y(q, null, K(E.value, (e) => (J(), Y("article", {
+					key: e.session_id,
+					title: [e.command, e.cwd].filter(Boolean).join(" · ")
+				}, [
+					X("span", null, U(e.label || e.command || "Spudex process"), 1),
+					X("small", null, U(e.pid ? `PID ${e.pid}` : "Starting"), 1),
+					X("button", {
+						type: "button",
+						"aria-label": "Stop model process",
+						title: "Kill process",
+						onClick: (t) => Ce(String(e.session_id), "Model process")
+					}, "×", 8, Sh)
+				], 8, xh))), 128))])]),
+				X("div", Ch, [
+					X("button", {
+						class: "tv-button",
+						type: "button",
+						disabled: !D.value,
+						onClick: n[1] ||= (e) => v.value = !0
+					}, "Details", 8, wh),
+					X("button", {
+						class: "tv-button danger",
+						type: "button",
+						disabled: !M.value,
+						onClick: n[2] ||= (e) => Ce(o.value)
+					}, "Stop", 8, Th),
+					X("button", {
+						class: "tv-button tsx-icon-button",
+						type: "button",
+						disabled: !D.value,
+						"aria-label": "Close selected session",
+						title: "Close session",
+						onClick: je
+					}, "×", 8, Eh)
+				])
+			]), X("div", Dh, [X("section", Oh, [
+				X("header", kh, [X("div", null, [n[28] ||= X("span", {
+					class: "tsx-pane-icon chat",
+					"aria-hidden": "true"
+				}, "✦", -1), X("div", null, [n[27] ||= X("strong", null, "Chat with Tater", -1), X("small", null, U(D.value?.label || D.value?.command || "A fresh Spudex chat"), 1)])]), X("span", { class: z(["tv-state", { good: M.value }]) }, U(D.value ? B(D.value.status) : "Ready"), 3)]),
+				X("div", Ah, [ee.value && ne.value.length ? (J(), Y("div", jh, [(J(!0), Y(q, null, K(ne.value, (t, n) => (J(), ia(Qs, {
+					key: `${n}-${t.role}`,
+					message: t,
+					profile: e.options.profile || {},
+					"files-endpoint": e.options.endpoints.chatFiles
+				}, null, 8, [
+					"message",
+					"profile",
+					"files-endpoint"
+				]))), 128))])) : P.value ? Q("", !0) : (J(), Y("div", Mh, [...n[29] ||= [
+					X("span", {
+						class: "tsx-spud-mark large",
+						"aria-hidden": "true"
+					}, [
+						X("i"),
+						X("i"),
+						X("i")
+					], -1),
+					X("h2", null, "What are we building?", -1),
+					X("p", null, "Ask Tater to inspect, run, or fix something in the protected Spudex workspace.", -1)
+				]]))]),
 				X("form", {
 					class: "tsx-composer",
 					onSubmit: ds(be, ["prevent"])
 				}, [
 					bn(X("textarea", {
-						"onUpdate:modelValue": n[4] ||= (e) => f.value = e,
+						"onUpdate:modelValue": n[3] ||= (e) => f.value = e,
 						rows: "1",
 						placeholder: "Message Tater through Spudex…",
-						disabled: N.value,
+						disabled: P.value,
 						onKeydown: Oe
-					}, null, 40, Eh), [[Qo, f.value]]),
-					X("button", {
-						class: "tv-button",
-						type: "button",
-						onClick: xe
-					}, "New chat"),
+					}, null, 40, Nh), [[Qo, f.value]]),
 					X("button", {
 						class: "tv-button primary",
 						type: "submit",
-						disabled: N.value || !f.value.trim()
-					}, U(N.value ? "Working…" : "Send"), 9, Dh),
-					X("small", null, U(F.value), 1)
+						disabled: P.value || !f.value.trim()
+					}, U(P.value ? "Working…" : "Send"), 9, Ph),
+					X("small", null, U(I.value), 1)
 				], 32)
-			]), X("aside", Oh, [
-				X("header", null, [n[30] ||= X("div", null, [X("span", { class: "tv-eyebrow" }, "Tracked runtime"), X("h2", null, "Processes")], -1), X("span", { class: z(["tv-state", { good: E.value.length }]) }, U(E.value.length), 3)]),
-				(J(!0), Y(q, null, K(E.value, (e) => (J(), Y("article", { key: e.session_id }, [X("div", null, [X("strong", null, U(e.label || e.command || "Spudex process"), 1), X("small", null, U([
-					e.pid ? `PID ${e.pid}` : "PID pending",
-					e.source,
-					e.cwd
-				].filter(Boolean).join(" · ")), 1)]), X("button", {
-					class: "tv-button danger",
-					type: "button",
-					onClick: (t) => Ce(String(e.session_id), "Model process")
-				}, "Kill", 8, kh)]))), 128)),
-				E.value.length ? Q("", !0) : (J(), Y("div", Ah, "No model-launched processes running."))
-			])])])) : a.value === "manual" ? (J(), Y("section", jh, [
-				X("div", Mh, [X("header", null, [n[31] ||= X("div", null, [
-					X("span", { class: "tv-eyebrow" }, "agent_lab"),
-					X("h2", null, "Manual Session"),
-					X("p", null, "Run one policy-controlled command from Tater’s working area.")
-				], -1), X("span", Nh, U(C.value.agent_lab || "agent_lab"), 1)]), X("form", { onSubmit: ds(Se, ["prevent"]) }, [
-					X("label", null, [n[32] ||= X("span", null, "Command", -1), bn(X("input", {
-						"onUpdate:modelValue": n[5] ||= (e) => p.value = e,
-						type: "text",
-						autocomplete: "off",
-						placeholder: "python --version"
-					}, null, 512), [[Qo, p.value]])]),
-					X("label", Ph, [bn(X("input", {
-						"onUpdate:modelValue": n[6] ||= (e) => m.value = e,
-						class: "tv-checkbox",
-						type: "checkbox"
-					}, null, 512), [[$o, m.value]]), n[33] ||= X("span", null, "Keep running", -1)]),
-					X("button", {
-						class: "tv-button primary",
-						type: "submit",
-						disabled: h.value === "run"
-					}, "Run", 8, Fh)
-				], 32)]),
-				X("section", Ih, [X("header", Lh, [X("div", null, [n[34] ||= X("span", { class: "tsx-window-dots" }, [
+			]), X("section", Fh, [
+				X("header", Ih, [X("div", null, [n[31] ||= X("span", {
+					class: "tsx-window-dots",
+					"aria-hidden": "true"
+				}, [
 					X("i"),
 					X("i"),
 					X("i")
-				], -1), X("div", null, [X("strong", null, U(O.value?.command || O.value?.label || "Manual console"), 1), X("small", null, "tater@spudex:" + U(O.value?.cwd_display || "workspace"), 1)])]), X("div", Rh, [
+				], -1), X("div", null, [n[30] ||= X("strong", null, "Activity terminal", -1), X("small", null, "tater@spudex:" + U(D.value?.cwd_display || "workspace"), 1)])]), X("div", Lh, [n[32] ||= X("span", null, "Read only", -1), X("button", {
+					class: "tv-button",
+					type: "button",
+					disabled: !F.value.length,
+					onClick: Ae
+				}, "Clear", 8, Rh)])]),
+				X("div", zh, [F.value.length ? (J(), Y("div", Bh, [(J(!0), Y(q, null, K(F.value, (e) => (J(), Y("article", {
+					key: e.seq || `${e.ts}-${e.text}`,
+					class: z(R(e.stream))
+				}, [
+					X("time", null, U(V(e.ts)), 1),
+					X("span", null, U(e.stream === "command" ? "$" : e.stream || "log"), 1),
+					X("pre", null, U(String(e.text || "").replace(/^\$\s*/, "")), 1)
+				], 2))), 128))])) : (J(), Y("div", Vh, [...n[33] ||= [
+					X("span", null, ">_", -1),
+					X("strong", null, "Waiting for activity", -1),
+					X("small", null, "Commands, tool output, and system messages will appear here.", -1)
+				]]))]),
+				X("footer", Hh, [X("span", null, [X("i", { class: z({ live: M.value }) }, null, 2), Z(U(M.value ? "Session active" : "Standing by"), 1)]), X("span", null, U(D.value ? `#${String(D.value.id).slice(0, 8)}` : "No session"), 1)])
+			])])])) : a.value === "manual" ? (J(), Y("section", Uh, [X("section", Wh, [
+				X("header", Gh, [X("div", null, [n[35] ||= X("span", {
+					class: "tsx-window-dots",
+					"aria-hidden": "true"
+				}, [
+					X("i"),
+					X("i"),
+					X("i")
+				], -1), X("div", null, [n[34] ||= X("strong", null, "Spudex Terminal", -1), X("small", null, "tater@spudex:" + U(O.value?.cwd_display || C.value.agent_lab || "agent_lab"), 1)])]), X("div", Kh, [
+					X("span", qh, [X("i", { class: z({ live: N.value || h.value === "run" }) }, null, 2), Z(U(h.value === "run" || N.value ? "Running" : O.value ? B(O.value.status) : "Ready"), 1)]),
 					X("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !O.value,
-						onClick: n[7] ||= (e) => v.value = !0
-					}, "Details", 8, zh),
+						onClick: n[4] ||= (e) => v.value = !0
+					}, "Details", 8, Jh),
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: n[8] ||= (e) => u.value = []
-					}, "Clear"),
+						disabled: !u.value.length,
+						onClick: n[5] ||= (e) => u.value = []
+					}, "Clear", 8, Yh),
 					X("button", {
 						class: "tv-button danger",
 						type: "button",
-						disabled: !M.value,
-						onClick: n[9] ||= (e) => Ce(s.value, "Manual session")
-					}, "Stop", 8, Bh)
-				])]), X("div", Vh, [(J(!0), Y(q, null, K(u.value, (e) => (J(), Y("article", {
-					key: e.seq || `${e.ts}-${e.text}`,
-					class: z(L(e.stream))
-				}, [X("span", null, U(e.stream === "command" ? "$" : e.stream || "log"), 1), X("pre", null, U(String(e.text || "").replace(/^\$\s*/, "")), 1)], 2))), 128)), u.value.length ? Q("", !0) : (J(), Y("div", Hh, U(s.value ? "Console is waiting for output." : "Run a command to open a manual console session."), 1))])]),
-				X("div", Uh, [n[35] ||= X("header", null, [X("div", null, [X("span", { class: "tv-eyebrow" }, "Recent commands"), X("h2", null, "Manual History")])], -1), X("div", null, [(J(!0), Y(q, null, K(T.value.slice(0, 10), (e) => (J(), Y("button", {
-					key: e.id,
-					type: "button",
-					class: z({ selected: String(e.id) === s.value }),
-					onClick: (t) => me(String(e.id))
-				}, [X("span", null, [X("strong", null, U(e.command || e.label || "Manual run"), 1), X("small", null, U(V(e.updated_ts)), 1)]), X("b", { class: z(["tv-state", { good: R(e) }]) }, U(B(e.status)), 3)], 10, Wh))), 128)), T.value.length ? Q("", !0) : (J(), Y("div", Gh, "No manual runs yet."))])])
-			])) : (J(), Y("section", Kh, [
-				X("div", qh, [
-					X("header", null, [n[36] ||= X("div", null, [
+						disabled: !N.value,
+						onClick: n[6] ||= (e) => Ce(s.value, "Manual session")
+					}, "Stop", 8, Xh)
+				])]),
+				X("div", Zh, [(J(!0), Y(q, null, K(u.value, (e) => (J(), Y("article", {
+					key: `${e._session_id || ""}-${e.seq || e.ts || ""}-${e.text || ""}`,
+					class: z(R(e.stream))
+				}, [X("span", null, U(e.stream === "command" ? "$" : e.stream || "log"), 1), X("pre", null, U(String(e.text || "").replace(/^\$\s*/, "")), 1)], 2))), 128)), u.value.length ? Q("", !0) : (J(), Y("div", Qh, [...n[36] ||= [
+					X("span", { class: "tsx-terminal-glyph" }, ">_", -1),
+					X("strong", null, "Manual terminal ready.", -1),
+					X("small", null, "Commands run inside Tater’s protected agent_lab workspace.", -1)
+				]]))]),
+				X("form", {
+					class: "tsx-manual-prompt",
+					onSubmit: ds(Se, ["prevent"])
+				}, [
+					X("label", $h, [n[37] ||= X("span", { "aria-hidden": "true" }, "$", -1), bn(X("input", {
+						"onUpdate:modelValue": n[7] ||= (e) => p.value = e,
+						type: "text",
+						autocomplete: "off",
+						"aria-label": "Terminal command",
+						placeholder: "Type a command…",
+						disabled: h.value === "run"
+					}, null, 8, eg), [[Qo, p.value]])]),
+					X("label", tg, [bn(X("input", {
+						"onUpdate:modelValue": n[8] ||= (e) => m.value = e,
+						class: "tv-checkbox",
+						type: "checkbox"
+					}, null, 512), [[$o, m.value]]), n[38] ||= X("span", null, "Keep running", -1)]),
+					X("button", {
+						class: "tv-button primary tsx-terminal-run",
+						type: "submit",
+						disabled: h.value === "run" || !p.value.trim()
+					}, [n[39] ||= X("span", { "aria-hidden": "true" }, "↵", -1), Z(U(h.value === "run" ? "Running…" : "Run"), 1)], 8, ng)
+				], 32),
+				X("footer", rg, [n[40] ||= X("span", null, "Policy checked", -1), X("span", null, U(C.value.agent_lab || "agent_lab"), 1)])
+			])])) : (J(), Y("section", ig, [
+				X("div", ag, [
+					X("header", null, [n[41] ||= X("div", null, [
 						X("span", { class: "tv-eyebrow" }, "Hydra access"),
 						X("h2", null, "Spudex availability"),
 						X("p", null, "Expose policy-controlled Spudex tools only on the Tater surfaces you choose.")
-					], -1), X("label", Jh, [X("span", null, U(b.enabled ? "Enabled" : "Off"), 1), bn(X("input", {
-						"onUpdate:modelValue": n[10] ||= (e) => b.enabled = e,
+					], -1), X("label", og, [X("span", null, U(b.enabled ? "Enabled" : "Off"), 1), bn(X("input", {
+						"onUpdate:modelValue": n[9] ||= (e) => b.enabled = e,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[11] ||= (e) => y.value = !0
+						onChange: n[10] ||= (e) => y.value = !0
 					}, null, 544), [[$o, b.enabled]])])]),
-					X("div", Yh, [
-						X("label", null, [n[37] ||= X("span", null, "Default working folder", -1), bn(X("input", {
-							"onUpdate:modelValue": n[12] ||= (e) => b.default_cwd = e,
+					X("div", sg, [
+						X("label", null, [n[42] ||= X("span", null, "Default working folder", -1), bn(X("input", {
+							"onUpdate:modelValue": n[11] ||= (e) => b.default_cwd = e,
 							type: "text",
-							onInput: n[13] ||= (e) => y.value = !0
+							onInput: n[12] ||= (e) => y.value = !0
 						}, null, 544), [[Qo, b.default_cwd]])]),
-						X("label", null, [n[38] ||= X("span", null, "Max task steps", -1), bn(X("input", {
-							"onUpdate:modelValue": n[14] ||= (e) => b.max_task_steps = e,
+						X("label", null, [n[43] ||= X("span", null, "Max task steps", -1), bn(X("input", {
+							"onUpdate:modelValue": n[13] ||= (e) => b.max_task_steps = e,
 							type: "number",
 							min: "1",
 							max: "50",
-							onInput: n[15] ||= (e) => y.value = !0
+							onInput: n[14] ||= (e) => y.value = !0
 						}, null, 544), [[
 							Qo,
 							b.max_task_steps,
 							void 0,
 							{ number: !0 }
 						]])]),
-						X("label", null, [n[39] ||= X("span", null, "Command timeout (seconds)", -1), bn(X("input", {
-							"onUpdate:modelValue": n[16] ||= (e) => b.command_timeout_sec = e,
+						X("label", null, [n[44] ||= X("span", null, "Command timeout (seconds)", -1), bn(X("input", {
+							"onUpdate:modelValue": n[15] ||= (e) => b.command_timeout_sec = e,
 							type: "number",
 							min: "5",
 							max: "3600",
-							onInput: n[17] ||= (e) => y.value = !0
+							onInput: n[16] ||= (e) => y.value = !0
 						}, null, 544), [[
 							Qo,
 							b.command_timeout_sec,
@@ -8204,7 +8266,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							{ number: !0 }
 						]])])
 					]),
-					X("div", Xh, [n[40] ||= X("div", null, [X("strong", null, "Platforms"), X("small", null, "Select where Hydra can expose Spudex.")], -1), (J(!0), Y(q, null, K(ne.value, (e) => (J(), Y("label", {
+					X("div", cg, [n[45] ||= X("div", null, [X("strong", null, "Platforms"), X("small", null, "Select where Hydra can expose Spudex.")], -1), (J(!0), Y(q, null, K(te.value, (e) => (J(), Y("label", {
 						key: e.value,
 						class: z({ running: e.running })
 					}, [X("span", null, [X("strong", null, U(e.label || e.value), 1), X("small", null, U(e.value === "all" ? "Every platform" : e.running ? "Running" : "Stopped") + " · " + U(e.description || "Available platform"), 1)]), X("input", {
@@ -8212,21 +8274,21 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						type: "checkbox",
 						checked: b.allowed_platforms?.includes(e.value),
 						onChange: (t) => De(String(e.value), t.target.checked)
-					}, null, 40, Zh)], 2))), 128))])
+					}, null, 40, lg)], 2))), 128))])
 				]),
-				X("div", Qh, [
-					X("header", null, [n[41] ||= X("div", null, [
+				X("div", ug, [
+					X("header", null, [n[46] ||= X("div", null, [
 						X("span", { class: "tv-eyebrow" }, "Defense in depth"),
 						X("h2", null, "Spudex policy"),
 						X("p", null, "Keep command safety on, then allow only the categories a workflow actually needs.")
 					], -1), X("label", { class: z(["tsx-master-toggle", { danger: !b.policy_enabled }]) }, [X("span", null, U(b.policy_enabled ? "Policy on" : "Policy off"), 1), bn(X("input", {
-						"onUpdate:modelValue": n[18] ||= (e) => b.policy_enabled = e,
+						"onUpdate:modelValue": n[17] ||= (e) => b.policy_enabled = e,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[19] ||= (e) => y.value = !0
+						onChange: n[18] ||= (e) => y.value = !0
 					}, null, 544), [[$o, b.policy_enabled]])], 2)]),
 					X("div", { class: z(["tsx-policy-notice", { danger: !b.policy_enabled }]) }, [X("strong", null, U(b.policy_enabled ? "Policy is active." : "Command safety policy is off."), 1), Z(" " + U(b.policy_enabled ? "Tater checks commands, paths, network use, installs, and the configurable categories below." : "Spudex can use shells, host paths, network commands, installs, and host-affecting tools."), 1)], 2),
-					n[42] ||= X("div", { class: "tsx-guardrails" }, [
+					n[47] ||= X("div", { class: "tsx-guardrails" }, [
 						X("span", null, [
 							Z("Commands start inside "),
 							X("code", null, "agent_lab"),
@@ -8239,84 +8301,84 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						]),
 						X("span", null, "Model processes stay tracked and stoppable.")
 					], -1),
-					X("div", $h, [(J(), Y(q, null, K(i, (e) => X("label", { key: e[0] }, [X("span", null, [X("strong", null, U(e[1]), 1), X("small", null, U(e[2]), 1)]), bn(X("input", {
+					X("div", dg, [(J(), Y(q, null, K(i, (e) => X("label", { key: e[0] }, [X("span", null, [X("strong", null, U(e[1]), 1), X("small", null, U(e[2]), 1)]), bn(X("input", {
 						"onUpdate:modelValue": (t) => b[e[0]] = t,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[20] ||= (e) => y.value = !0
-					}, null, 40, eg), [[$o, b[e[0]]]])])), 64))])
+						onChange: n[19] ||= (e) => y.value = !0
+					}, null, 40, fg), [[$o, b[e[0]]]])])), 64))])
 				]),
-				X("div", tg, [n[43] ||= X("span", null, "Model routing remains in Settings → Models.", -1), X("button", {
+				X("div", pg, [n[48] ||= X("span", null, "Model routing remains in Settings → Models.", -1), X("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: h.value === "settings" || !y.value,
 					onClick: Ee
-				}, U(h.value === "settings" ? "Saving…" : "Save settings"), 9, ng)])
+				}, U(h.value === "settings" ? "Saving…" : "Save settings"), 9, mg)])
 			]))
 		]), la(yl, {
 			open: v.value,
-			onClose: n[22] ||= (e) => v.value = !1
+			onClose: n[21] ||= (e) => v.value = !1
 		}, {
-			default: yn(() => [X("section", rg, [X("header", null, [X("div", null, [n[44] ||= X("span", { class: "tv-eyebrow" }, "Session details", -1), X("h2", null, U(k.value?.label || k.value?.command || "No session selected"), 1)]), X("button", {
+			default: yn(() => [X("section", hg, [X("header", null, [X("div", null, [n[49] ||= X("span", { class: "tv-eyebrow" }, "Session details", -1), X("h2", null, U(k.value?.label || k.value?.command || "No session selected"), 1)]), X("button", {
 				class: "tv-button",
 				type: "button",
-				onClick: n[21] ||= (e) => v.value = !1
-			}, "Close")]), k.value ? (J(), Y("div", ig, [
-				k.value.last_policy_block ? (J(), Y("div", ag, [
+				onClick: n[20] ||= (e) => v.value = !1
+			}, "Close")]), k.value ? (J(), Y("div", gg, [
+				k.value.last_policy_block ? (J(), Y("div", _g, [
 					X("strong", null, U(k.value.last_policy_block.title || "Command blocked"), 1),
 					Z(" " + U(k.value.last_policy_block.reason || k.value.last_policy_block.message), 1),
-					k.value.last_policy_block.toggle ? (J(), Y("small", og, "Policy toggle: " + U(k.value.last_policy_block.toggle), 1)) : Q("", !0)
+					k.value.last_policy_block.toggle ? (J(), Y("small", vg, "Policy toggle: " + U(k.value.last_policy_block.toggle), 1)) : Q("", !0)
 				])) : Q("", !0),
-				X("article", null, [n[45] ||= X("h3", null, "Plan", -1), k.value.plan?.length ? (J(), Y("ol", sg, [(J(!0), Y(q, null, K(k.value.plan, (e) => (J(), Y("li", {
+				X("article", null, [n[50] ||= X("h3", null, "Plan", -1), k.value.plan?.length ? (J(), Y("ol", yg, [(J(!0), Y(q, null, K(k.value.plan, (e) => (J(), Y("li", {
 					key: e.step,
-					class: z(L(e.status))
-				}, [X("span", null, U(e.step || "Step"), 1), X("small", null, [Z(U(String(e.status || "pending").replaceAll("_", " ")), 1), e.detail ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.detail), 1)], 64)) : Q("", !0)])], 2))), 128))])) : (J(), Y("div", cg, "No task plan yet."))]),
-				X("article", null, [n[46] ||= X("h3", null, "Verification", -1), k.value.verification ? (J(), Y("div", {
+					class: z(R(e.status))
+				}, [X("span", null, U(e.step || "Step"), 1), X("small", null, [Z(U(String(e.status || "pending").replaceAll("_", " ")), 1), e.detail ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.detail), 1)], 64)) : Q("", !0)])], 2))), 128))])) : (J(), Y("div", bg, "No task plan yet."))]),
+				X("article", null, [n[51] ||= X("h3", null, "Verification", -1), k.value.verification ? (J(), Y("div", {
 					key: 0,
-					class: z(["tsx-verification", L(k.value.verification.status)])
+					class: z(["tsx-verification", R(k.value.verification.status)])
 				}, [
 					X("strong", null, U(k.value.verification.status === "passed" ? "Verification passed" : k.value.verification.status === "failed" ? "Verification failed" : "Verification recorded"), 1),
 					X("small", null, U(k.value.verification.command), 1),
-					k.value.verification.summary ? (J(), Y("pre", lg, U(k.value.verification.summary), 1)) : Q("", !0)
-				], 2)) : (J(), Y("div", ug, "No verification run yet."))]),
-				X("article", null, [n[47] ||= X("h3", null, "App previews", -1), k.value.previews?.length ? (J(), Y("div", dg, [(J(!0), Y(q, null, K(k.value.previews.slice(-6).reverse(), (e) => (J(), Y("a", {
+					k.value.verification.summary ? (J(), Y("pre", xg, U(k.value.verification.summary), 1)) : Q("", !0)
+				], 2)) : (J(), Y("div", Sg, "No verification run yet."))]),
+				X("article", null, [n[52] ||= X("h3", null, "App previews", -1), k.value.previews?.length ? (J(), Y("div", Cg, [(J(!0), Y(q, null, K(k.value.previews.slice(-6).reverse(), (e) => (J(), Y("a", {
 					key: e.url,
 					href: e.url,
 					target: "_blank",
 					rel: "noreferrer"
-				}, [X("span", null, U(e.url), 1), X("small", null, U(e.source || "preview"), 1)], 8, fg))), 128))])) : (J(), Y("div", pg, "No app previews detected yet."))]),
-				X("article", null, [n[48] ||= X("h3", null, "Git", -1), C.value.git?.ok ? (J(), Y("div", mg, [
+				}, [X("span", null, U(e.url), 1), X("small", null, U(e.source || "preview"), 1)], 8, wg))), 128))])) : (J(), Y("div", Tg, "No app previews detected yet."))]),
+				X("article", null, [n[53] ||= X("h3", null, "Git", -1), C.value.git?.ok ? (J(), Y("div", Eg, [
 					X("div", null, [X("strong", null, U(C.value.git.branch || "detached"), 1), X("small", null, U(C.value.git.repo), 1)]),
 					X("span", { class: z(["tv-state", { good: !C.value.git.dirty }]) }, U(C.value.git.dirty ? `${C.value.git.changed_count || C.value.git.changed_files?.length || 0} changed` : "Clean"), 3),
-					C.value.git.changed_files?.length ? (J(), Y("pre", hg, U(C.value.git.changed_files.slice(0, 24).join("\n")), 1)) : Q("", !0)
-				])) : (J(), Y("div", gg, "No Git repository detected."))]),
-				X("article", _g, [n[49] ||= X("h3", null, "File changes", -1), k.value.file_changes?.length ? (J(), Y("div", vg, [(J(!0), Y(q, null, K(k.value.file_changes.slice(-6).reverse(), (e) => (J(), Y("section", {
+					C.value.git.changed_files?.length ? (J(), Y("pre", Dg, U(C.value.git.changed_files.slice(0, 24).join("\n")), 1)) : Q("", !0)
+				])) : (J(), Y("div", Og, "No Git repository detected."))]),
+				X("article", kg, [n[54] ||= X("h3", null, "File changes", -1), k.value.file_changes?.length ? (J(), Y("div", Ag, [(J(!0), Y(q, null, K(k.value.file_changes.slice(-6).reverse(), (e) => (J(), Y("section", {
 					key: e.id,
 					class: z({
 						pending: e.pending,
 						applied: e.applied
 					})
-				}, [X("header", null, [X("div", null, [X("strong", null, U(e.path_display || e.path || "File change"), 1), X("small", null, [Z(U(e.pending ? "Pending" : e.applied ? "Applied" : "Rejected"), 1), e.bytes ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.bytes) + " bytes", 1)], 64)) : Q("", !0)])]), e.pending ? (J(), Y("div", yg, [X("button", {
+				}, [X("header", null, [X("div", null, [X("strong", null, U(e.path_display || e.path || "File change"), 1), X("small", null, [Z(U(e.pending ? "Pending" : e.applied ? "Applied" : "Rejected"), 1), e.bytes ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.bytes) + " bytes", 1)], 64)) : Q("", !0)])]), e.pending ? (J(), Y("div", jg, [X("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: (t) => Te(String(k.value.id), String(e.id), "approve")
-				}, "Approve", 8, bg), X("button", {
+				}, "Approve", 8, Mg), X("button", {
 					class: "tv-button danger",
 					type: "button",
 					onClick: (t) => Te(String(k.value.id), String(e.id), "reject")
-				}, "Reject", 8, xg)])) : Q("", !0)]), X("pre", null, U(e.diff || "No textual diff available."), 1)], 2))), 128))])) : (J(), Y("div", Sg, "No file changes yet."))]),
-				X("article", Cg, [n[50] ||= X("h3", null, "Session memory", -1), k.value.memory_summary ? (J(), Y("p", wg, U(k.value.memory_summary), 1)) : (J(), Y("div", Tg, "No session memory yet."))])
-			])) : (J(), Y("div", Eg, "Select a session to see its details."))])]),
+				}, "Reject", 8, Ng)])) : Q("", !0)]), X("pre", null, U(e.diff || "No textual diff available."), 1)], 2))), 128))])) : (J(), Y("div", Pg, "No file changes yet."))]),
+				X("article", Fg, [n[55] ||= X("h3", null, "Session memory", -1), k.value.memory_summary ? (J(), Y("p", Ig, U(k.value.memory_summary), 1)) : (J(), Y("div", Lg, "No session memory yet."))])
+			])) : (J(), Y("div", Rg, "Select a session to see its details."))])]),
 			_: 1
 		}, 8, ["open"])], 64));
 	}
-}), Og = { class: "tater-vue-surface tset-settings" }, kg = { class: "tv-page-heading" }, Ag = { class: "tv-heading-actions" }, jg = { class: "tv-metrics tset-metrics" }, Mg = {
+}), Bg = { class: "tater-vue-surface tset-settings" }, Vg = { class: "tv-page-heading" }, Hg = { class: "tv-heading-actions" }, Ug = { class: "tv-metrics tset-metrics" }, Wg = {
 	class: "tv-tabs tset-tabs",
 	"aria-label": "Settings sections"
-}, Ng = ["data-settings-vue-tab", "onClick"], Pg = {
+}, Gg = ["data-settings-vue-tab", "onClick"], Kg = {
 	class: "tset-context",
 	"aria-live": "polite"
-}, Fg = /* @__PURE__ */ ar({
+}, qg = /* @__PURE__ */ ar({
 	__name: "SettingsApp",
 	props: {
 		state: {},
@@ -8387,86 +8449,86 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			let r = a(e);
 			o.value = r, t && n.options.onTabChange?.(r);
 		}
-		return t({ select: (e) => l(e, !1) }), (e, t) => (J(), Y("div", Og, [
-			X("header", kg, [t[1] ||= X("div", null, [
+		return t({ select: (e) => l(e, !1) }), (e, t) => (J(), Y("div", Bg, [
+			X("header", Vg, [t[1] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "Tater configuration"),
 				X("h1", null, "Settings"),
 				X("p", null, "Configure identity, intelligence, voice, storage, security, and diagnostics from one workspace.")
-			], -1), X("div", Ag, [X("span", { class: z(["tv-live-pill", { warning: !c.value.redisConnected }]) }, [t[0] ||= X("i", null, null, -1), Z(U(c.value.redisConnected ? "Services connected" : "Redis needs attention"), 1)], 2)])]),
-			X("div", jg, [
+			], -1), X("div", Hg, [X("span", { class: z(["tv-live-pill", { warning: !c.value.redisConnected }]) }, [t[0] ||= X("i", null, null, -1), Z(U(c.value.redisConnected ? "Services connected" : "Redis needs attention"), 1)], 2)])]),
+			X("div", Ug, [
 				X("div", null, [t[2] ||= X("span", null, "Redis", -1), X("strong", null, U(c.value.redisConnected ? "Connected" : "Setup needed"), 1)]),
 				X("div", null, [t[3] ||= X("span", null, "Admin gated", -1), X("strong", null, U(Number(c.value.adminGateCount || 0)), 1)]),
 				X("div", null, [t[4] ||= X("span", null, "Integrations", -1), X("strong", null, U(Number(c.value.integrationCount || 0)), 1)])
 			]),
-			X("nav", Mg, [(J(), Y(q, null, K(r, (e) => X("button", {
+			X("nav", Wg, [(J(), Y(q, null, K(r, (e) => X("button", {
 				key: e.id,
 				type: "button",
 				class: z({ active: o.value === e.id }),
 				"data-settings-vue-tab": e.id,
 				onClick: (t) => l(e.id, !0)
-			}, U(e.label), 11, Ng)), 64))]),
-			X("div", Pg, [X("span", null, U(s.value.label), 1), X("p", null, U(s.value.description), 1)])
+			}, U(e.label), 11, Gg)), 64))]),
+			X("div", Kg, [X("span", null, U(s.value.label), 1), X("p", null, U(s.value.description), 1)])
 		]));
 	}
-}), Ig = { class: "tr-pill-main" }, Lg = {
+}), Jg = { class: "tr-pill-main" }, Yg = {
 	key: 0,
 	class: "tr-pill-metrics"
-}, Rg = { class: "tr-pill-models" }, zg = { class: "tr-pill-resources" }, Bg = {
+}, Xg = { class: "tr-pill-models" }, Zg = { class: "tr-pill-resources" }, Qg = {
 	class: "tv-modal tr-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-label": "Runtime statistics"
-}, Vg = { class: "tr-modal-head" }, Hg = { class: "tr-modal-actions" }, Ug = ["disabled"], Wg = {
+}, $g = { class: "tr-modal-head" }, e_ = { class: "tr-modal-actions" }, t_ = ["disabled"], n_ = {
 	key: 1,
 	class: "tv-empty"
-}, Gg = {
+}, r_ = {
 	key: 2,
 	class: "tr-grid"
-}, Kg = { class: "tv-panel tr-card wide models" }, qg = { class: "tr-meter-grid" }, Jg = { class: "tr-meter-track" }, Yg = { key: 0 }, Xg = {
+}, i_ = { class: "tv-panel tr-card wide models" }, a_ = { class: "tr-meter-grid" }, o_ = { class: "tr-meter-track" }, s_ = { key: 0 }, c_ = {
 	key: 0,
 	class: "tr-block"
-}, Zg = { class: "tr-list" }, Qg = { class: "tv-state good" }, $g = { class: "tr-block" }, e_ = {
+}, l_ = { class: "tr-list" }, u_ = { class: "tv-state good" }, d_ = { class: "tr-block" }, f_ = {
 	key: 0,
 	class: "tr-list"
-}, t_ = { key: 0 }, n_ = {
+}, p_ = { key: 0 }, m_ = {
 	key: 1,
 	class: "danger"
-}, r_ = ["disabled", "onClick"], i_ = {
+}, h_ = ["disabled", "onClick"], g_ = {
 	key: 1,
 	class: "tv-state good"
-}, a_ = {
+}, __ = {
 	key: 1,
 	class: "tv-empty compact"
-}, o_ = { class: "tv-panel tr-card wide hydra" }, s_ = { class: "tr-block" }, c_ = {
+}, v_ = { class: "tv-panel tr-card wide hydra" }, y_ = { class: "tr-block" }, b_ = {
 	key: 0,
 	class: "tr-turns"
-}, l_ = { class: "tv-state good" }, u_ = { key: 0 }, d_ = { key: 1 }, f_ = { key: 0 }, p_ = { key: 1 }, m_ = {
+}, x_ = { class: "tv-state good" }, S_ = { key: 0 }, C_ = { key: 1 }, w_ = { key: 0 }, T_ = { key: 1 }, E_ = {
 	key: 1,
 	class: "tv-empty compact"
-}, h_ = { class: "tv-panel tr-card calls" }, g_ = { class: "tr-block" }, __ = {
+}, D_ = { class: "tv-panel tr-card calls" }, O_ = { class: "tr-block" }, k_ = {
 	key: 0,
 	class: "tr-list"
-}, v_ = { class: "tv-state good" }, y_ = {
+}, A_ = { class: "tv-state good" }, j_ = {
 	key: 1,
 	class: "tv-empty compact"
-}, b_ = { class: "tv-panel tr-card vision" }, x_ = { class: "tr-block" }, S_ = {
+}, M_ = { class: "tv-panel tr-card vision" }, N_ = { class: "tr-block" }, P_ = {
 	key: 0,
 	class: "tr-list"
-}, C_ = { class: "tv-state good" }, w_ = {
+}, F_ = { class: "tv-state good" }, I_ = {
 	key: 1,
 	class: "tv-empty compact"
-}, T_ = { class: "tv-panel tr-card wide context" }, E_ = { key: 0 }, D_ = { key: 1 }, O_ = { key: 2 }, k_ = {
+}, L_ = { class: "tv-panel tr-card wide context" }, R_ = { key: 0 }, z_ = { key: 1 }, B_ = { key: 2 }, V_ = {
 	key: 0,
 	class: "tr-block"
-}, A_ = { class: "tr-list dense" }, j_ = { class: "tv-state" }, M_ = /* @__PURE__ */ ar({
+}, H_ = { class: "tr-list dense" }, U_ = { class: "tv-state" }, W_ = /* @__PURE__ */ ar({
 	__name: "RuntimeStatus",
 	props: {
 		state: {},
 		options: {}
 	},
 	setup(e, { expose: t }) {
-		let n = e, r = /* @__PURE__ */ G(!1), i = /* @__PURE__ */ G(!1), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G({}), l = /* @__PURE__ */ G(null), u = /* @__PURE__ */ G(""), d = 0, f = $(() => n.state.health || {}), p = $(() => L(f.value.loaded_models || f.value.loadedModels)), m = $(() => L(p.value.system)), h = $(() => L(m.value.cpu)), g = $(() => L(m.value.ram)), _ = $(() => L(m.value.vram)), v = $(() => V(p.value.loaded_count)), y = $(() => n.state.text || `${V(f.value.verbas_enabled)} verba enabled • ${V(f.value.portals_running)} portals running • ${V(f.value.cores_running)} cores running • ${V(f.value.hydra_jobs_active ?? f.value.chat_jobs_active)} hydra jobs • ${V(f.value.llm_calls_active)} llm calls • ${V(f.value.vision_calls_active ?? f.value.voice_calls_active)} vision calls`), b = $(() => {
-			let e = V(L(p.value.totals).estimated_total_bytes);
+		let n = e, r = /* @__PURE__ */ G(!1), i = /* @__PURE__ */ G(!1), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G({}), l = /* @__PURE__ */ G(null), u = /* @__PURE__ */ G(""), d = 0, f = $(() => n.state.health || {}), p = $(() => R(f.value.loaded_models || f.value.loadedModels)), m = $(() => R(p.value.system)), h = $(() => R(m.value.cpu)), g = $(() => R(m.value.ram)), _ = $(() => R(m.value.vram)), v = $(() => V(p.value.loaded_count)), y = $(() => n.state.text || `${V(f.value.verbas_enabled)} verba enabled • ${V(f.value.portals_running)} portals running • ${V(f.value.cores_running)} cores running • ${V(f.value.hydra_jobs_active ?? f.value.chat_jobs_active)} hydra jobs • ${V(f.value.llm_calls_active)} llm calls • ${V(f.value.vision_calls_active ?? f.value.voice_calls_active)} vision calls`), b = $(() => {
+			let e = V(R(p.value.totals).estimated_total_bytes);
 			return `${v.value} model${v.value === 1 ? "" : "s"} loaded${e > 0 ? ` • est ${ce(e)}` : ""}`;
 		}), x = $(() => {
 			let e = V(g.value.total_bytes), t = V(g.value.used_bytes), n = V(_.value.total_bytes), r = V(_.value.used_bytes), i = se(_.value.utilization_percent), a = !!(m.value.unified_memory || _.value.unified), o = [
@@ -8475,8 +8537,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				le(a ? "Unified" : "RAM", e > 0 ? g.value.percent ?? t / e * 100 : null, e <= 0)
 			];
 			return a || o.push(le("VRAM", n > 0 ? _.value.percent ?? r / n * 100 : null, n <= 0)), o;
-		}), S = $(() => L(c.value.hydra_jobs || c.value.chat_jobs)), C = $(() => L(c.value.llm_calls)), w = $(() => L(c.value.vision_calls || c.value.voice_calls)), T = $(() => L(c.value.chat_context_window)), E = $(() => L(c.value.loaded_models)), D = $(() => L(E.value.system)), O = $(() => L(D.value.cpu)), k = $(() => L(D.value.ram)), A = $(() => L(D.value.vram)), j = $(() => ie(E.value.models)), ee = $(() => ie(A.value.devices)), M = $(() => ie(S.value.active_turns)), te = $(() => ie(C.value.active_calls)), N = $(() => ie(w.value.active_calls)), ne = $(() => {
-			let e = L(E.value.totals);
+		}), S = $(() => R(c.value.hydra_jobs || c.value.chat_jobs)), C = $(() => R(c.value.llm_calls)), w = $(() => R(c.value.vision_calls || c.value.voice_calls)), T = $(() => R(c.value.chat_context_window)), E = $(() => R(c.value.loaded_models)), D = $(() => R(E.value.system)), O = $(() => R(D.value.cpu)), k = $(() => R(D.value.ram)), A = $(() => R(D.value.vram)), j = $(() => re(E.value.models)), M = $(() => re(A.value.devices)), N = $(() => re(S.value.active_turns)), ee = $(() => re(C.value.active_calls)), P = $(() => re(w.value.active_calls)), te = $(() => {
+			let e = R(E.value.totals);
 			return [
 				`${V(E.value.loaded_count ?? j.value.length)} loaded`,
 				V(E.value.local_llm_loaded_count) ? `${V(E.value.local_llm_loaded_count)} LLM` : "",
@@ -8486,8 +8548,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				V(e.estimated_ram_bytes) ? `RAM est ${ce(e.estimated_ram_bytes)}` : "",
 				V(e.estimated_unified_bytes) ? `unified est ${ce(e.estimated_unified_bytes)}` : ""
 			].filter(Boolean).join(" • ") || "No loaded runtime models";
-		}), re = $(() => {
-			let e = L(T.value.breakdown), t = V(T.value.history_messages), n = V(T.value.max_history_messages) || t, r = [
+		}), ne = $(() => {
+			let e = R(T.value.breakdown), t = V(T.value.history_messages), n = V(T.value.max_history_messages) || t, r = [
 				["System prompt", e.system_tokens],
 				["Runtime status", e.status_tokens],
 				["Core context + preamble", V(e.core_context_tokens) + V(e.platform_preamble_tokens)],
@@ -8498,27 +8560,27 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				label: String(e),
 				tokens: V(t)
 			}));
-		}), P = $(() => [
+		}), F = $(() => [
 			`Prompt ${oe(T.value.prompt_tokens)} tok`,
 			`Reply budget ${oe(T.value.completion_budget_tokens)} tok`,
 			V(T.value.capability_context_reserve_tokens) ? `Capability reserve ${oe(T.value.capability_context_reserve_tokens)} tok` : "",
 			V(T.value.burst_context_reserve_tokens) ? `Burst reserve ${oe(T.value.burst_context_reserve_tokens)} tok` : "",
 			`Min window ${oe(T.value.minimum_context_window)}`,
 			`Recommended ${oe(T.value.recommended_context_window)}`
-		].filter(Boolean).join(" • ")), F = $(() => {
-			let e = L(T.value.breakdown), t = ae(e.high_context_verba_examples).slice(0, 4);
+		].filter(Boolean).join(" • ")), I = $(() => {
+			let e = R(T.value.breakdown), t = ie(e.high_context_verba_examples).slice(0, 4);
 			return [V(T.value.burst_context_reserve_tokens) ? `Recommended window includes ${oe(T.value.burst_context_reserve_tokens)} tokens of burst reserve for heavy or multi-tool turns.` : "", V(e.high_context_verbas) || V(e.heavy_cores) ? `High-context signals: ${V(e.high_context_verbas)} high-context verbas • ${V(e.heavy_cores)} heavy cores${t.length ? ` • e.g. ${t.join(", ")}` : ""}` : ""].filter(Boolean);
 		});
-		function L(e) {
+		function R(e) {
 			return e && typeof e == "object" && !Array.isArray(e) ? e : {};
 		}
-		function ie(e) {
+		function re(e) {
 			return Array.isArray(e) ? e.filter((e) => e && typeof e == "object") : [];
 		}
-		function ae(e) {
+		function ie(e) {
 			return Array.isArray(e) ? e.map((e) => B(e)).filter(Boolean) : [];
 		}
-		function R(e) {
+		function ae(e) {
 			return Array.isArray(e) ? e.map((e) => Number(e)).filter(Number.isFinite) : [];
 		}
 		function B(e) {
@@ -8586,7 +8648,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			].filter(Boolean).join(" • ");
 		}
 		function pe(e) {
-			return [...ae(e.details), e.managed ? B(e.managed_by || "Managed by settings") : ""].filter(Boolean);
+			return [...ie(e.details), e.managed ? B(e.managed_by || "Managed by settings") : ""].filter(Boolean);
 		}
 		function me(e) {
 			let t = Number(e.power_draw_w), n = Number(e.power_limit_w);
@@ -8622,11 +8684,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				he("CPU Usage", 0, 0, O.value.percent, [
 					V(O.value.logical_count) ? `${V(O.value.logical_count)} logical cores` : "",
 					V(O.value.physical_count) ? `${V(O.value.physical_count)} physical cores` : "",
-					R(O.value.load_average).length ? `load ${R(O.value.load_average).map((e) => e.toFixed(2)).join(" / ")}` : ""
+					ae(O.value.load_average).length ? `load ${ae(O.value.load_average).map((e) => e.toFixed(2)).join(" / ")}` : ""
 				].filter(Boolean).join(" • ")),
 				he("GPU Usage", 0, 0, A.value.utilization_percent, [
 					B(A.value.backend) ? `Backend ${B(A.value.backend)}` : "",
-					ee.value.length ? `${ee.value.length} device${ee.value.length === 1 ? "" : "s"}` : "",
+					M.value.length ? `${M.value.length} device${M.value.length === 1 ? "" : "s"}` : "",
 					e ? "shared/unified memory" : "",
 					se(A.value.utilization_percent) === null ? "GPU load unavailable from this runtime" : ""
 				].filter(Boolean).join(" • ")),
@@ -8690,34 +8752,34 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			type: "button",
 			title: "Open loaded models, CPU/GPU usage, memory, Hydra jobs, LLM calls, and vision calls",
 			onClick: be
-		}, [X("span", Ig, [n[1] ||= X("i", null, null, -1), Z(U(y.value), 1)]), e.state.health ? (J(), Y("span", Lg, [X("span", Rg, U(b.value), 1), X("span", zg, [(J(!0), Y(q, null, K(x.value, (e) => (J(), Y("span", {
+		}, [X("span", Jg, [n[1] ||= X("i", null, null, -1), Z(U(y.value), 1)]), e.state.health ? (J(), Y("span", Yg, [X("span", Xg, U(b.value), 1), X("span", Zg, [(J(!0), Y(q, null, K(x.value, (e) => (J(), Y("span", {
 			key: e.label,
 			class: z(["tr-resource", { unavailable: e.unavailable }])
 		}, [
 			X("b", null, U(e.label), 1),
-			X("span", null, [X("i", { style: I({ width: `${e.percent}%` }) }, null, 4)]),
+			X("span", null, [X("i", { style: L({ width: `${e.percent}%` }) }, null, 4)]),
 			X("em", null, U(e.value), 1)
 		], 2))), 128))])])) : Q("", !0)], 2), la(yl, {
 			open: r.value,
 			"backdrop-class": "tv-modal-backdrop tr-backdrop",
 			onClose: xe
 		}, {
-			default: yn(() => [X("section", Bg, [
-				X("header", Vg, [
+			default: yn(() => [X("section", Qg, [
+				X("header", $g, [
 					n[2] ||= X("span", { class: "tr-modal-badge" }, "RT", -1),
 					n[3] ||= X("div", null, [
 						X("span", { class: "tv-eyebrow" }, "Runtime stats"),
 						X("h2", null, "Live Activity"),
 						X("p", null, "Loaded models, compute and memory usage, Hydra turns, model calls, vision work, and context budget.")
 					], -1),
-					X("div", Hg, [
+					X("div", e_, [
 						X("span", null, U(s.value ? `Updated ${s.value}` : "Live data"), 1),
 						X("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: i.value,
 							onClick: n[0] ||= (e) => _e(!1)
-						}, U(i.value ? "Refreshing…" : "Refresh"), 9, Ug),
+						}, U(i.value ? "Refreshing…" : "Refresh"), 9, t_),
 						X("button", {
 							ref_key: "closeButton",
 							ref: l,
@@ -8731,117 +8793,117 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					key: 0,
 					class: z(["tv-notice", { error: !!a.value }])
 				}, U(a.value || o.value), 3)) : Q("", !0),
-				!Object.keys(c.value).length && i.value ? (J(), Y("div", Wg, "Loading runtime state…")) : (J(), Y("div", Gg, [
-					X("article", Kg, [
+				!Object.keys(c.value).length && i.value ? (J(), Y("div", n_, "Loading runtime state…")) : (J(), Y("div", r_, [
+					X("article", i_, [
 						X("header", null, [X("div", null, [
 							n[4] ||= X("span", { class: "tv-eyebrow" }, "Compute and memory", -1),
 							n[5] ||= X("h2", null, "Loaded Runtime Models", -1),
-							X("p", null, U(ne.value), 1)
+							X("p", null, U(te.value), 1)
 						])]),
-						X("div", qg, [(J(!0), Y(q, null, K(ge.value, (e) => (J(), Y("div", {
+						X("div", a_, [(J(!0), Y(q, null, K(ge.value, (e) => (J(), Y("div", {
 							key: e.label,
 							class: z(["tr-meter", { unavailable: e.unavailable }])
 						}, [
 							X("div", null, [X("strong", null, U(e.label), 1), X("span", null, U(e.value), 1)]),
-							X("span", Jg, [X("i", { style: I({ width: `${e.percent}%` }) }, null, 4)]),
-							e.detail ? (J(), Y("small", Yg, U(e.detail), 1)) : Q("", !0)
+							X("span", o_, [X("i", { style: L({ width: `${e.percent}%` }) }, null, 4)]),
+							e.detail ? (J(), Y("small", s_, U(e.detail), 1)) : Q("", !0)
 						], 2))), 128))]),
-						ee.value.length ? (J(), Y("section", Xg, [n[6] ||= X("h3", null, "GPU Devices", -1), X("div", Zg, [(J(!0), Y(q, null, K(ee.value, (e, t) => (J(), Y("article", { key: e.index ?? t }, [X("div", null, [X("strong", null, U(e.name || `GPU ${e.index ?? ""}`), 1), X("small", null, U(me(e)), 1)]), X("span", Qg, U(H(e.utilization_percent)), 1)]))), 128))])])) : Q("", !0),
-						X("section", $g, [n[7] ||= X("h3", null, "Loaded Model Entries", -1), j.value.length ? (J(), Y("div", e_, [(J(!0), Y(q, null, K(j.value, (e) => (J(), Y("article", { key: e.cache_key || `${e.provider}:${e.model}` }, [X("div", null, [
+						M.value.length ? (J(), Y("section", c_, [n[6] ||= X("h3", null, "GPU Devices", -1), X("div", l_, [(J(!0), Y(q, null, K(M.value, (e, t) => (J(), Y("article", { key: e.index ?? t }, [X("div", null, [X("strong", null, U(e.name || `GPU ${e.index ?? ""}`), 1), X("small", null, U(me(e)), 1)]), X("span", u_, U(H(e.utilization_percent)), 1)]))), 128))])])) : Q("", !0),
+						X("section", d_, [n[7] ||= X("h3", null, "Loaded Model Entries", -1), j.value.length ? (J(), Y("div", f_, [(J(!0), Y(q, null, K(j.value, (e) => (J(), Y("article", { key: e.cache_key || `${e.provider}:${e.model}` }, [X("div", null, [
 							X("strong", null, U(e.model || "model"), 1),
 							X("small", null, U(fe(e)), 1),
-							pe(e).length ? (J(), Y("small", t_, U(pe(e).join(" • ")), 1)) : Q("", !0),
-							e.warning ? (J(), Y("small", n_, U(e.warning), 1)) : Q("", !0)
+							pe(e).length ? (J(), Y("small", p_, U(pe(e).join(" • ")), 1)) : Q("", !0),
+							e.warning ? (J(), Y("small", m_, U(e.warning), 1)) : Q("", !0)
 						]), e.unloadable && !e.managed ? (J(), Y("button", {
 							key: 0,
 							class: "tv-button danger",
 							type: "button",
 							disabled: !!u.value,
 							onClick: (t) => Se(e)
-						}, U(u.value === B(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, r_)) : (J(), Y("span", i_, U(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))]))), 128))])) : (J(), Y("div", a_, "No runtime models are loaded right now."))])
+						}, U(u.value === B(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, h_)) : (J(), Y("span", g_, U(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))]))), 128))])) : (J(), Y("div", __, "No runtime models are loaded right now."))])
 					]),
-					X("article", o_, [X("header", null, [X("div", null, [
+					X("article", v_, [X("header", null, [X("div", null, [
 						n[8] ||= X("span", { class: "tv-eyebrow" }, "Orchestration", -1),
 						n[9] ||= X("h2", null, "Hydra Jobs", -1),
-						X("p", null, U(V(S.value.total)) + " total • Active turns " + U(M.value.length) + " • WebUI queue " + U(V(S.value.webui_jobs)) + " • Surface turns " + U(V(S.value.surface_running_turns)), 1)
-					])]), X("section", s_, [n[10] ||= X("h3", null, "Active Turns", -1), M.value.length ? (J(), Y("div", c_, [(J(!0), Y(q, null, K(M.value, (e) => (J(), Y("article", { key: e.id }, [
-						X("header", null, [X("strong", null, U(e.task_name || "Hydra task"), 1), X("span", l_, "Running " + U(ue(e.age_seconds)), 1)]),
+						X("p", null, U(V(S.value.total)) + " total • Active turns " + U(N.value.length) + " • WebUI queue " + U(V(S.value.webui_jobs)) + " • Surface turns " + U(V(S.value.surface_running_turns)), 1)
+					])]), X("section", y_, [n[10] ||= X("h3", null, "Active Turns", -1), N.value.length ? (J(), Y("div", b_, [(J(!0), Y(q, null, K(N.value, (e) => (J(), Y("article", { key: e.id }, [
+						X("header", null, [X("strong", null, U(e.task_name || "Hydra task"), 1), X("span", x_, "Running " + U(ue(e.age_seconds)), 1)]),
 						X("div", null, [
 							X("span", null, U(e.platform_label || e.platform || "Unknown"), 1),
-							e.source ? (J(), Y("span", u_, U(e.source), 1)) : Q("", !0),
-							e.id ? (J(), Y("span", d_, "Drop " + U(B(e.id).slice(0, 8)), 1)) : Q("", !0)
+							e.source ? (J(), Y("span", S_, U(e.source), 1)) : Q("", !0),
+							e.id ? (J(), Y("span", C_, "Drop " + U(B(e.id).slice(0, 8)), 1)) : Q("", !0)
 						]),
-						e.current_tool ? (J(), Y("small", f_, "Current verba/tool: " + U(e.current_tool), 1)) : Q("", !0),
-						e.scope ? (J(), Y("small", p_, "Scope: " + U(e.scope), 1)) : Q("", !0)
-					]))), 128))])) : (J(), Y("div", m_, "No active Hydra turns right now."))])]),
-					X("article", h_, [X("header", null, [X("div", null, [
+						e.current_tool ? (J(), Y("small", w_, "Current verba/tool: " + U(e.current_tool), 1)) : Q("", !0),
+						e.scope ? (J(), Y("small", T_, "Scope: " + U(e.scope), 1)) : Q("", !0)
+					]))), 128))])) : (J(), Y("div", E_, "No active Hydra turns right now."))])]),
+					X("article", D_, [X("header", null, [X("div", null, [
 						n[11] ||= X("span", { class: "tv-eyebrow" }, "Language models", -1),
 						n[12] ||= X("h2", null, "LLM Calls", -1),
 						X("p", null, U(V(C.value.active_total)) + " active • Started " + U(V(C.value.totals?.started)) + " • Completed " + U(V(C.value.totals?.completed)) + " • Failed " + U(V(C.value.totals?.failed)), 1)
-					])]), X("section", g_, [n[13] ||= X("h3", null, "Active Calls", -1), te.value.length ? (J(), Y("div", __, [(J(!0), Y(q, null, K(te.value, (e, t) => (J(), Y("article", { key: e.id || t }, [X("div", null, [X("strong", null, U(e.source_label || e.label || "Unknown source"), 1), X("small", null, U(W(e, "llm")), 1)]), X("span", v_, U(ue(e.age_seconds)), 1)]))), 128))])) : (J(), Y("div", y_, "No active LLM calls right now."))])]),
-					X("article", b_, [X("header", null, [X("div", null, [
+					])]), X("section", O_, [n[13] ||= X("h3", null, "Active Calls", -1), ee.value.length ? (J(), Y("div", k_, [(J(!0), Y(q, null, K(ee.value, (e, t) => (J(), Y("article", { key: e.id || t }, [X("div", null, [X("strong", null, U(e.source_label || e.label || "Unknown source"), 1), X("small", null, U(W(e, "llm")), 1)]), X("span", A_, U(ue(e.age_seconds)), 1)]))), 128))])) : (J(), Y("div", j_, "No active LLM calls right now."))])]),
+					X("article", M_, [X("header", null, [X("div", null, [
 						n[14] ||= X("span", { class: "tv-eyebrow" }, "Vision", -1),
 						n[15] ||= X("h2", null, "Vision Calls", -1),
 						X("p", null, U(V(w.value.active_total)) + " active • Started " + U(V(w.value.totals?.started)) + " • Completed " + U(V(w.value.totals?.completed)) + " • Failed " + U(V(w.value.totals?.failed)), 1)
-					])]), X("section", x_, [n[16] ||= X("h3", null, "Active Calls", -1), N.value.length ? (J(), Y("div", S_, [(J(!0), Y(q, null, K(N.value, (e, t) => (J(), Y("article", { key: e.id || t }, [X("div", null, [X("strong", null, U(e.source_label || e.label || "Unknown source"), 1), X("small", null, U(W(e, "vision")), 1)]), X("span", C_, U(ue(e.age_seconds)), 1)]))), 128))])) : (J(), Y("div", w_, "No active vision calls right now."))])]),
-					X("article", T_, [X("header", null, [X("div", null, [
+					])]), X("section", N_, [n[16] ||= X("h3", null, "Active Calls", -1), P.value.length ? (J(), Y("div", P_, [(J(!0), Y(q, null, K(P.value, (e, t) => (J(), Y("article", { key: e.id || t }, [X("div", null, [X("strong", null, U(e.source_label || e.label || "Unknown source"), 1), X("small", null, U(W(e, "vision")), 1)]), X("span", F_, U(ue(e.age_seconds)), 1)]))), 128))])) : (J(), Y("div", I_, "No active vision calls right now."))])]),
+					X("article", L_, [X("header", null, [X("div", null, [
 						n[17] ||= X("span", { class: "tv-eyebrow" }, "Prompt budget", -1),
 						n[18] ||= X("h2", null, "Estimated Chat Context Window", -1),
-						T.value.error ? (J(), Y("p", E_, U(T.value.error), 1)) : V(T.value.prompt_tokens) || V(T.value.minimum_context_window) ? (J(), Y("p", D_, U(P.value), 1)) : (J(), Y("p", O_, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))
-					])]), re.value.length && !T.value.error ? (J(), Y("section", k_, [
+						T.value.error ? (J(), Y("p", R_, U(T.value.error), 1)) : V(T.value.prompt_tokens) || V(T.value.minimum_context_window) ? (J(), Y("p", z_, U(F.value), 1)) : (J(), Y("p", B_, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))
+					])]), ne.value.length && !T.value.error ? (J(), Y("section", V_, [
 						n[19] ||= X("h3", null, "Prompt Composition", -1),
-						X("div", A_, [(J(!0), Y(q, null, K(re.value, (e) => (J(), Y("article", { key: e.label }, [X("strong", null, U(e.label), 1), X("span", j_, U(oe(e.tokens)), 1)]))), 128))]),
+						X("div", H_, [(J(!0), Y(q, null, K(ne.value, (e) => (J(), Y("article", { key: e.label }, [X("strong", null, U(e.label), 1), X("span", U_, U(oe(e.tokens)), 1)]))), 128))]),
 						X("small", null, "Active stack: " + U(V(T.value.enabled_verbas)) + " verbas enabled • " + U(V(T.value.connected_portals)) + " portals connected • " + U(V(T.value.running_cores)) + " cores running", 1),
-						(J(!0), Y(q, null, K(F.value, (e) => (J(), Y("small", { key: e }, U(e), 1))), 128))
+						(J(!0), Y(q, null, K(I.value, (e) => (J(), Y("small", { key: e }, U(e), 1))), 128))
 					])) : Q("", !0)])
 				]))
 			])]),
 			_: 1
 		}, 8, ["open"])], 64));
 	}
-}), N_ = { class: "tater-vue-surface tvb-verbas" }, P_ = { class: "tv-page-heading" }, F_ = { class: "tv-heading-actions" }, I_ = { class: "tv-metrics" }, L_ = {
+}), G_ = { class: "tater-vue-surface tvb-verbas" }, K_ = { class: "tv-page-heading" }, q_ = { class: "tv-heading-actions" }, J_ = { class: "tv-metrics" }, Y_ = {
 	key: 1,
 	class: "tv-notice error"
-}, R_ = {
+}, X_ = {
 	class: "tv-tabs tvb-tabs",
 	"aria-label": "Verba sections"
-}, z_ = ["onClick"], B_ = { key: 0 }, V_ = {
+}, Z_ = ["onClick"], Q_ = { key: 0 }, $_ = {
 	key: 2,
 	class: "tvb-card-grid"
-}, H_ = { class: "tv-eyebrow" }, U_ = { class: "tvb-version" }, W_ = {
+}, ev = { class: "tv-eyebrow" }, tv = { class: "tvb-version" }, nv = {
 	key: 0,
 	class: "ti-tags"
-}, G_ = ["onClick"], K_ = { key: 1 }, q_ = ["onClick"], J_ = {
+}, rv = ["onClick"], iv = { key: 1 }, av = ["onClick"], ov = {
 	key: 0,
 	class: "tv-empty"
-}, Y_ = {
+}, sv = {
 	key: 3,
 	class: "tvb-card-grid"
-}, X_ = { class: "tv-eyebrow" }, Z_ = { class: "tv-state" }, Q_ = {
+}, cv = { class: "tv-eyebrow" }, lv = { class: "tv-state" }, uv = {
 	key: 0,
 	class: "ti-tags"
-}, $_ = ["onClick"], ev = {
+}, dv = ["onClick"], fv = {
 	key: 0,
 	class: "tv-empty"
-}, tv = {
+}, pv = {
 	key: 4,
 	class: "tvb-manage-list"
-}, nv = { class: "tv-panel tvb-manage-toolbar" }, rv = ["disabled"], iv = { class: "ti-row-actions" }, av = ["disabled", "onClick"], ov = ["onClick"], sv = {
+}, mv = { class: "tv-panel tvb-manage-toolbar" }, hv = ["disabled"], gv = { class: "ti-row-actions" }, _v = ["disabled", "onClick"], vv = ["onClick"], yv = {
 	key: 1,
 	class: "ti-purge"
-}, cv = ["onUpdate:modelValue"], lv = ["onClick"], uv = {
+}, bv = ["onUpdate:modelValue"], xv = ["onClick"], Sv = {
 	key: 3,
 	class: "tv-state good"
-}, dv = {
+}, Cv = {
 	key: 0,
 	class: "tv-empty"
-}, fv = {
+}, wv = {
 	key: 5,
 	class: "tv-panel tvb-repos"
-}, pv = { class: "ti-repo-row builtin" }, mv = ["onClick"], hv = {
+}, Tv = { class: "ti-repo-row builtin" }, Ev = ["onClick"], Dv = {
 	key: 0,
 	class: "tv-empty compact"
-}, gv = { class: "tvb-repo-form" }, _v = { class: "tv-eyebrow" }, vv = { class: "tvb-field-grid" }, yv = /* @__PURE__ */ ar({
+}, Ov = { class: "tvb-repo-form" }, kv = { class: "tv-eyebrow" }, Av = { class: "tvb-field-grid" }, jv = /* @__PURE__ */ ar({
 	__name: "VerbasApp",
 	props: {
 		state: {},
@@ -8916,7 +8978,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function j() {
 			u.value = Array.isArray(m.value.repos?.additional) ? m.value.repos.additional.map((e) => ({ ...e })) : [];
 		}
-		async function ee(e = !1) {
+		async function M(e = !1) {
 			e || (i.value = "Refreshing Verba…"), o.value = "";
 			try {
 				let [e, n] = await Promise.all([xs(t.options.endpoints.runtime), xs(t.options.endpoints.shop)]);
@@ -8930,24 +8992,24 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				e || (i.value = "");
 			}
 		}
-		async function M(e, n) {
+		async function N(e, n) {
 			i.value = `${n ? "Enabling" : "Disabling"} ${e}…`;
 			try {
-				await Ss(`${t.options.endpoints.runtime}/${w(e)}/enabled`, { enabled: n }), A(`${e} ${n ? "enabled" : "disabled"}.`), await ee(!0), t.options.onHealthRefresh?.();
+				await Ss(`${t.options.endpoints.runtime}/${w(e)}/enabled`, { enabled: n }), A(`${e} ${n ? "enabled" : "disabled"}.`), await M(!0), t.options.onHealthRefresh?.();
 			} catch (e) {
 				A(e instanceof Error ? e.message : "Verba toggle failed.", "error");
 			} finally {
 				i.value = "";
 			}
 		}
-		async function te(e, n = "") {
+		async function ee(e, n = "") {
 			if (!(e === "remove" && !window.confirm(`Remove ${n}?${s.value[n] ? " Its saved data will also be deleted." : ""}`))) {
 				i.value = `${e.replaceAll("-", " ")} ${n || "Verba"}…`, o.value = "";
 				try {
 					let i = n ? { id: n } : {};
 					e === "remove" && (i.purge_redis = !!s.value[n]);
 					let a = await Ss(`${t.options.endpoints.shop}/${e}`, i), o = Array.isArray(a.updated) ? a.updated.length : 0, c = Array.isArray(a.failed) ? a.failed.length : 0, l = e === "update-all" ? `Update-all completed. Updated ${o}, failed ${c}.` : "Verba action completed.";
-					A(C(a.message) || l, c ? "error" : "success"), await ee(!0), e === "install" && (r.value = "installed"), t.options.onHealthRefresh?.();
+					A(C(a.message) || l, c ? "error" : "success"), await M(!0), e === "install" && (r.value = "installed"), t.options.onHealthRefresh?.();
 				} catch (e) {
 					A(e instanceof Error ? e.message : "Verba action failed.", "error");
 				} finally {
@@ -8955,7 +9017,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}
 		}
-		function N(e) {
+		function P(e) {
 			let t = e.value ?? e.default ?? "", n = C(e.type).toLowerCase();
 			if (n === "checkbox") return typeof t == "string" ? [
 				"1",
@@ -8977,7 +9039,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}
 			return t;
 		}
-		function ne(e) {
+		function te(e) {
 			return (Array.isArray(e.show_when_all) ? e.show_when_all : e.show_when && typeof e.show_when == "object" ? [e.show_when] : []).every((e) => {
 				let t = C(e.source_key ?? e.key);
 				if (!t) return !0;
@@ -8992,10 +9054,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				return n.includes(r);
 			});
 		}
-		function re(e) {
-			d.value = e, f.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => C(e.key)).map((e) => [C(e.key), N(e)]));
+		function ne(e) {
+			d.value = e, f.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => C(e.key)).map((e) => [C(e.key), P(e)]));
 		}
-		async function P() {
+		async function F() {
 			let e = d.value;
 			if (e) {
 				i.value = `Saving ${C(e.name || e.id)}…`;
@@ -9008,9 +9070,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							"readonly",
 							"read_only",
 							"led_preview"
-						].includes(t) && ne(e);
+						].includes(t) && te(e);
 					}).map((e) => [C(e.key), f.value[C(e.key)]]));
-					await Ss(`${t.options.endpoints.runtime}/${w(e.id)}/settings`, { values: n }), A(`Saved settings for ${C(e.name || e.id)}.`), d.value = null, await ee(!0);
+					await Ss(`${t.options.endpoints.runtime}/${w(e.id)}/settings`, { values: n }), A(`Saved settings for ${C(e.name || e.id)}.`), d.value = null, await M(!0);
 				} catch (e) {
 					A(e instanceof Error ? e.message : "Settings save failed.", "error");
 				} finally {
@@ -9018,7 +9080,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}
 		}
-		function F() {
+		function I() {
 			let e = l.value.trim();
 			if (!e) {
 				A("Repo URL is required.", "error");
@@ -9033,30 +9095,30 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				url: e
 			}), c.value = "", l.value = "", a.value = "Repository added. Save repositories to apply it.", o.value = "";
 		}
-		async function I() {
+		async function L() {
 			i.value = "Saving Verba repositories…";
 			try {
-				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), A("Verba repositories saved."), await ee(!0);
+				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), A("Verba repositories saved."), await M(!0);
 			} catch (e) {
 				A(e instanceof Error ? e.message : "Repository save failed.", "error");
 			} finally {
 				i.value = "";
 			}
 		}
-		function L(e) {
+		function R(e) {
 			e.key === "Escape" && (d.value = null);
 		}
-		return En(() => t.state.payload, j, { deep: !1 }), j(), window.addEventListener("keydown", L), Cr(() => window.removeEventListener("keydown", L)), (e, t) => (J(), Y("div", N_, [
-			X("header", P_, [t[8] ||= X("div", null, [
+		return En(() => t.state.payload, j, { deep: !1 }), j(), window.addEventListener("keydown", R), Cr(() => window.removeEventListener("keydown", R)), (e, t) => (J(), Y("div", G_, [
+			X("header", K_, [t[8] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "Tater tools"),
 				X("h1", null, "Verba"),
 				X("p", null, "Enable Tater’s tools, manage their settings, and keep every Verba current.")
-			], -1), X("div", F_, [X("span", { class: z(["tv-live-pill", { busy: !!i.value }]) }, [t[7] ||= X("i", null, null, -1), Z(U(i.value || "Ready"), 1)], 2), X("button", {
+			], -1), X("div", q_, [X("span", { class: z(["tv-live-pill", { busy: !!i.value }]) }, [t[7] ||= X("i", null, null, -1), Z(U(i.value || "Ready"), 1)], 2), X("button", {
 				class: "tv-button",
 				type: "button",
-				onClick: t[0] ||= (e) => ee()
+				onClick: t[0] ||= (e) => M()
 			}, "Refresh")])]),
-			X("div", I_, [
+			X("div", J_, [
 				X("div", null, [t[9] ||= X("span", null, "Installed", -1), X("strong", null, U(g.value.length || h.value.length), 1)]),
 				X("div", null, [t[10] ||= X("span", null, "Enabled", -1), X("strong", null, U(b.value), 1)]),
 				X("div", null, [t[11] ||= X("span", null, "Store", -1), X("strong", null, U(_.value.length), 1)]),
@@ -9066,50 +9128,50 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				key: 0,
 				class: z(["tv-notice", { error: !!o.value }])
 			}, U(o.value || a.value), 3)) : Q("", !0),
-			m.value.errors?.length ? (J(), Y("div", L_, U(m.value.errors.join(" • ")), 1)) : Q("", !0),
-			X("nav", R_, [(J(), Y(q, null, K(n, (e) => X("button", {
+			m.value.errors?.length ? (J(), Y("div", Y_, U(m.value.errors.join(" • ")), 1)) : Q("", !0),
+			X("nav", X_, [(J(), Y(q, null, K(n, (e) => X("button", {
 				key: e.id,
 				type: "button",
 				class: z({ active: r.value === e.id }),
 				onClick: (t) => r.value = e.id
-			}, [Z(U(e.label), 1), e.id === "manage" && y.value.length ? (J(), Y("span", B_, U(y.value.length), 1)) : Q("", !0)], 10, z_)), 64))]),
-			r.value === "installed" ? (J(), Y("section", V_, [(J(!0), Y(q, null, K(S.value, (e) => (J(), Y("article", {
+			}, [Z(U(e.label), 1), e.id === "manage" && y.value.length ? (J(), Y("span", Q_, U(y.value.length), 1)) : Q("", !0)], 10, Z_)), 64))]),
+			r.value === "installed" ? (J(), Y("section", $_, [(J(!0), Y(q, null, K(S.value, (e) => (J(), Y("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				X("header", null, [X("div", null, [X("span", H_, U(e.id), 1), X("h2", null, U(D(e)), 1)]), X("span", { class: z(["tv-state", { good: e.runtime?.enabled }]) }, U(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
+				X("header", null, [X("div", null, [X("span", ev, U(e.id), 1), X("h2", null, U(D(e)), 1)]), X("span", { class: z(["tv-state", { good: e.runtime?.enabled }]) }, U(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
 				X("p", null, U(O(e)), 1),
-				X("div", U_, [
+				X("div", tv, [
 					X("span", null, "Installed " + U(e.shop?.installed_ver || "0.0.0"), 1),
 					X("span", null, "Store " + U(e.shop?.store_ver || "-"), 1),
 					X("span", null, U(e.shop?.source_label || "local"), 1)
 				]),
-				k(e).length ? (J(), Y("div", W_, [(J(!0), Y(q, null, K(k(e).slice(0, 12), (e) => (J(), Y("span", { key: e }, U(e), 1))), 128))])) : Q("", !0),
+				k(e).length ? (J(), Y("div", nv, [(J(!0), Y(q, null, K(k(e).slice(0, 12), (e) => (J(), Y("span", { key: e }, U(e), 1))), 128))])) : Q("", !0),
 				X("footer", null, [e.runtime?.settings?.length ? (J(), Y("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
-					onClick: (t) => re(e.runtime)
-				}, "Settings", 8, G_)) : (J(), Y("span", K_, U(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (J(), Y("button", {
+					onClick: (t) => ne(e.runtime)
+				}, "Settings", 8, rv)) : (J(), Y("span", iv, U(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (J(), Y("button", {
 					key: 2,
 					class: z(["tv-button", { primary: !e.runtime.enabled }]),
 					type: "button",
-					onClick: (t) => M(e.id, !e.runtime.enabled)
-				}, U(e.runtime.enabled ? "Disable" : "Enable"), 11, q_)) : Q("", !0)])
-			]))), 128)), S.value.length ? Q("", !0) : (J(), Y("div", J_, "No installed Verba found."))])) : r.value === "store" ? (J(), Y("section", Y_, [(J(!0), Y(q, null, K(v.value, (e) => (J(), Y("article", {
+					onClick: (t) => N(e.id, !e.runtime.enabled)
+				}, U(e.runtime.enabled ? "Disable" : "Enable"), 11, av)) : Q("", !0)])
+			]))), 128)), S.value.length ? Q("", !0) : (J(), Y("div", ov, "No installed Verba found."))])) : r.value === "store" ? (J(), Y("section", sv, [(J(!0), Y(q, null, K(v.value, (e) => (J(), Y("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				X("header", null, [X("div", null, [X("span", X_, U(e.id), 1), X("h2", null, U(e.name || e.id), 1)]), X("span", Z_, "v" + U(e.version || "-"), 1)]),
+				X("header", null, [X("div", null, [X("span", cv, U(e.id), 1), X("h2", null, U(e.name || e.id), 1)]), X("span", lv, "v" + U(e.version || "-"), 1)]),
 				X("p", null, U(e.description || "No description provided."), 1),
-				e.platforms?.length ? (J(), Y("div", Q_, [(J(!0), Y(q, null, K(e.platforms.slice(0, 12), (e) => (J(), Y("span", { key: e }, U(C(e).replaceAll("_", " ")), 1))), 128))])) : Q("", !0),
+				e.platforms?.length ? (J(), Y("div", uv, [(J(!0), Y(q, null, K(e.platforms.slice(0, 12), (e) => (J(), Y("span", { key: e }, U(C(e).replaceAll("_", " ")), 1))), 128))])) : Q("", !0),
 				X("footer", null, [X("span", null, U(e.source_label || "Tater Shop"), 1), X("button", {
 					class: "tv-button primary",
 					type: "button",
-					onClick: (t) => te("install", e.id)
-				}, "Install", 8, $_)])
-			]))), 128)), v.value.length ? Q("", !0) : (J(), Y("div", ev, "No additional Verba are available from the configured repositories."))])) : r.value === "manage" ? (J(), Y("section", tv, [
-				X("div", nv, [X("div", null, [
+					onClick: (t) => ee("install", e.id)
+				}, "Install", 8, dv)])
+			]))), 128)), v.value.length ? Q("", !0) : (J(), Y("div", fv, "No additional Verba are available from the configured repositories."))])) : r.value === "manage" ? (J(), Y("section", pv, [
+				X("div", mv, [X("div", null, [
 					t[13] ||= X("span", { class: "tv-eyebrow" }, "Maintenance", -1),
 					t[14] ||= X("h2", null, "Manage installed Verba", -1),
 					X("p", null, U(y.value.length) + " update" + U(y.value.length === 1 ? "" : "s") + " available.", 1)
@@ -9117,43 +9179,43 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					class: "tv-button primary",
 					type: "button",
 					disabled: !y.value.length,
-					onClick: t[1] ||= (e) => te("update-all")
-				}, "Update all", 8, rv)]),
+					onClick: t[1] ||= (e) => ee("update-all")
+				}, "Update all", 8, hv)]),
 				(J(!0), Y(q, null, K(g.value.slice().sort(E), (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel tvb-manage-row"
-				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-"), 1)]), X("div", iv, [
+				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-"), 1)]), X("div", gv, [
 					X("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !e.update_available,
-						onClick: (t) => te("update", e.id)
-					}, U(e.update_available ? "Update" : "Current"), 9, av),
+						onClick: (t) => ee("update", e.id)
+					}, U(e.update_available ? "Update" : "Current"), 9, _v),
 					x.value.has(T(e.id)) ? (J(), Y("button", {
 						key: 0,
 						class: "tv-button",
 						type: "button",
-						onClick: (t) => M(e.id, !x.value.get(T(e.id))?.enabled)
-					}, U(x.value.get(T(e.id))?.enabled ? "Disable" : "Enable"), 9, ov)) : Q("", !0),
-					e.required ? Q("", !0) : (J(), Y("label", sv, [bn(X("input", {
+						onClick: (t) => N(e.id, !x.value.get(T(e.id))?.enabled)
+					}, U(x.value.get(T(e.id))?.enabled ? "Disable" : "Enable"), 9, vv)) : Q("", !0),
+					e.required ? Q("", !0) : (J(), Y("label", yv, [bn(X("input", {
 						"onUpdate:modelValue": (t) => s.value[e.id] = t,
 						type: "checkbox"
-					}, null, 8, cv), [[$o, s.value[e.id]]]), t[15] ||= Z(" Delete data", -1)])),
-					e.required ? (J(), Y("span", uv, "Required")) : (J(), Y("button", {
+					}, null, 8, bv), [[$o, s.value[e.id]]]), t[15] ||= Z(" Delete data", -1)])),
+					e.required ? (J(), Y("span", Sv, "Required")) : (J(), Y("button", {
 						key: 2,
 						class: "tv-button danger",
 						type: "button",
-						onClick: (t) => te("remove", e.id)
-					}, "Remove", 8, lv))
+						onClick: (t) => ee("remove", e.id)
+					}, "Remove", 8, xv))
 				])]))), 128)),
-				g.value.length ? Q("", !0) : (J(), Y("div", dv, "No installed Verba found."))
-			])) : (J(), Y("section", fv, [
+				g.value.length ? Q("", !0) : (J(), Y("div", Cv, "No installed Verba found."))
+			])) : (J(), Y("section", wv, [
 				t[19] ||= X("header", null, [X("div", null, [
 					X("span", { class: "tv-eyebrow" }, "Trusted sources"),
 					X("h2", null, "Verba repositories"),
 					X("p", null, "The built-in repository stays available. Add other trusted manifests below.")
 				])], -1),
-				X("article", pv, [X("div", null, [X("strong", null, U(m.value.repos?.default?.name || "Default"), 1), X("code", null, U(m.value.repos?.default?.url || "(not set)"), 1)]), t[16] ||= X("span", null, "Built-in", -1)]),
+				X("article", Tv, [X("div", null, [X("strong", null, U(m.value.repos?.default?.name || "Default"), 1), X("code", null, U(m.value.repos?.default?.url || "(not set)"), 1)]), t[16] ||= X("span", null, "Built-in", -1)]),
 				(J(!0), Y(q, null, K(u.value, (e, t) => (J(), Y("article", {
 					key: `${e.url}-${t}`,
 					class: "ti-repo-row"
@@ -9161,9 +9223,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					class: "tv-button",
 					type: "button",
 					onClick: (e) => u.value.splice(t, 1)
-				}, "Remove", 8, mv)]))), 128)),
-				u.value.length ? Q("", !0) : (J(), Y("div", hv, "No additional repositories configured.")),
-				X("div", gv, [
+				}, "Remove", 8, Ev)]))), 128)),
+				u.value.length ? Q("", !0) : (J(), Y("div", Dv, "No additional repositories configured.")),
+				X("div", Ov, [
 					X("label", null, [t[17] ||= X("span", null, "Name (optional)", -1), bn(X("input", {
 						"onUpdate:modelValue": t[2] ||= (e) => c.value = e,
 						type: "text",
@@ -9173,17 +9235,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						"onUpdate:modelValue": t[3] ||= (e) => l.value = e,
 						type: "url",
 						placeholder: "https://example.com/verbas.json",
-						onKeyup: ps(F, ["enter"])
+						onKeyup: ps(I, ["enter"])
 					}, null, 544), [[Qo, l.value]])]),
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: F
+						onClick: I
 					}, "Add"),
 					X("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: I
+						onClick: L
 					}, "Save repositories")
 				])
 			])),
@@ -9193,14 +9255,14 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}, {
 				default: yn(() => [X("form", {
 					class: "tv-modal tvb-settings-modal",
-					onSubmit: ds(P, ["prevent"])
+					onSubmit: ds(F, ["prevent"])
 				}, [
-					X("header", null, [X("div", null, [X("span", _v, U(d.value?.id), 1), X("h2", null, U(d.value?.name || d.value?.id) + " settings", 1)]), X("button", {
+					X("header", null, [X("div", null, [X("span", kv, U(d.value?.id), 1), X("h2", null, U(d.value?.name || d.value?.id) + " settings", 1)]), X("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: t[4] ||= (e) => d.value = null
 					}, "Close")]),
-					X("div", vv, [(J(!0), Y(q, null, K(d.value?.settings || [], (e, n) => (J(), ia(wd, {
+					X("div", Av, [(J(!0), Y(q, null, K(d.value?.settings || [], (e, n) => (J(), ia(wd, {
 						key: e.key || n,
 						modelValue: f.value[e.key],
 						"onUpdate:modelValue": (t) => f.value[e.key] = t,
@@ -9226,7 +9288,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 });
 //#endregion
 //#region src/entry.ts
-function bv(e, t) {
+function Mv(e, t) {
 	let n = /* @__PURE__ */ Ct({
 		profile: t.initialProfile || {},
 		messages: t.initialMessages || [],
@@ -9247,7 +9309,7 @@ function bv(e, t) {
 		}
 	};
 }
-function xv(e, t) {
+function Nv(e, t) {
 	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(Kf, {
 		state: n,
 		options: t
@@ -9261,7 +9323,7 @@ function xv(e, t) {
 		}
 	};
 }
-function Sv(e, t) {
+function Pv(e, t) {
 	let n = /* @__PURE__ */ Ct({ settings: t.initialSettings }), r = _s(vm, {
 		state: n,
 		options: t
@@ -9275,8 +9337,8 @@ function Sv(e, t) {
 		}
 	};
 }
-function Cv(e, t) {
-	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(yv, {
+function Fv(e, t) {
+	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(jv, {
 		state: n,
 		options: t
 	});
@@ -9289,7 +9351,7 @@ function Cv(e, t) {
 		}
 	};
 }
-function wv(e, t) {
+function Iv(e, t) {
 	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(nh, {
 		state: n,
 		options: t
@@ -9303,7 +9365,7 @@ function wv(e, t) {
 		}
 	};
 }
-function Tv(e, t) {
+function Lv(e, t) {
 	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(_f, {
 		state: n,
 		options: t
@@ -9323,8 +9385,8 @@ function Tv(e, t) {
 		}
 	};
 }
-function Ev(e, t) {
-	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(Dg, {
+function Rv(e, t) {
+	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(zg, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -9340,8 +9402,8 @@ function Ev(e, t) {
 		}
 	};
 }
-function Dv(e, t) {
-	let n = /* @__PURE__ */ Ct({ summary: t.initialSummary || {} }), r = _s(Fg, {
+function zv(e, t) {
+	let n = /* @__PURE__ */ Ct({ summary: t.initialSummary || {} }), r = _s(qg, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -9357,12 +9419,12 @@ function Dv(e, t) {
 		}
 	};
 }
-function Ov(e, t) {
+function Bv(e, t) {
 	let n = /* @__PURE__ */ Ct({
 		health: t.initialState?.health || null,
 		text: t.initialState?.text || "Checking system…",
 		tone: t.initialState?.tone || "normal"
-	}), r = _s(M_, {
+	}), r = _s(W_, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -9381,7 +9443,7 @@ function Ov(e, t) {
 		}
 	};
 }
-function kv(e, t) {
+function Vv(e, t) {
 	let n = /* @__PURE__ */ Ct({ payload: t.initialPayload }), r = _s(Xu, {
 		state: n,
 		options: t
@@ -9396,4 +9458,4 @@ function kv(e, t) {
 	};
 }
 //#endregion
-export { bv as mountChat, Tv as mountCores, xv as mountDashboard, Sv as mountIntegrations, kv as mountMusicCore, wv as mountPortals, Ov as mountRuntimeStatus, Dv as mountSettings, Ev as mountSpudex, Cv as mountVerbas };
+export { Mv as mountChat, Lv as mountCores, Nv as mountDashboard, Pv as mountIntegrations, Vv as mountMusicCore, Iv as mountPortals, Bv as mountRuntimeStatus, zv as mountSettings, Rv as mountSpudex, Fv as mountVerbas };

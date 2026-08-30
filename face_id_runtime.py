@@ -36,6 +36,7 @@ DEEPFACE_VERSION = "0.0.100"
 TENSORFLOW_VERSION = "2.21.0"
 TENSORFLOW_MACOS_VERSION = "2.18.0"
 MODEL_PACK_VERSION = "5"
+EMBEDDING_DIMENSIONS = 512
 
 _RUNTIME_MODULES = ("cv2", "deepface", "retinaface", "tensorflow", "tf_keras")
 
@@ -185,8 +186,8 @@ def _public_state(redis_client: Any = None) -> str:
     return "idle"
 
 
-def status(redis_client: Any = None) -> Dict[str, Any]:
-    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
+def status(redis_client: Any = None, *, force_local: bool = False) -> Dict[str, Any]:
+    if not force_local and spud_link_should_use_hub("face_id", redis_conn=redis_client):
         return {
             "enabled": True,
             "installed": True,
@@ -259,6 +260,19 @@ def status(redis_client: Any = None) -> Dict[str, Any]:
 
 def settings_payload(redis_client: Any = None) -> Dict[str, Any]:
     return status(redis_client)
+
+
+def embedding_model_metadata() -> Dict[str, Any]:
+    """Describe embeddings without exposing runtime paths or device details."""
+    return {
+        "model_name": MODEL_NAME,
+        "detector_backend": DETECTOR_BACKEND,
+        "distance_metric": DISTANCE_METRIC,
+        "match_threshold": MATCH_THRESHOLD,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS,
+        "model_pack_version": MODEL_PACK_VERSION,
+        "deepface_version": DEEPFACE_VERSION,
+    }
 
 
 def _worker_environment() -> Dict[str, str]:
@@ -524,20 +538,20 @@ def _load_thread_main(generation: int, redis_client: Any) -> None:
         start_model_load(redis_client)
 
 
-def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
+def start_model_load(redis_client: Any = None, *, force_local: bool = False) -> Dict[str, Any]:
     global _generation, _load_thread, _state
-    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
+    if not force_local and spud_link_should_use_hub("face_id", redis_conn=redis_client):
         if _model_loaded or (_load_thread is not None and _load_thread.is_alive()):
             unload_model()
-        return status(redis_client)
+        return status(redis_client, force_local=force_local)
     if not is_enabled(redis_client):
-        return status(redis_client)
+        return status(redis_client, force_local=force_local)
     with _condition:
         if _model_loaded:
             _state = "ready"
-            return status(redis_client)
+            return status(redis_client, force_local=force_local)
         if _load_thread is not None and _load_thread.is_alive():
-            return status(redis_client)
+            return status(redis_client, force_local=force_local)
         _generation += 1
         generation = _generation
         _state = "loading"
@@ -548,16 +562,16 @@ def start_model_load(redis_client: Any = None) -> Dict[str, Any]:
             daemon=True,
         )
         _load_thread.start()
-    return status(redis_client)
+    return status(redis_client, force_local=force_local)
 
 
-def load_model(redis_client: Any = None, *, timeout: float = 2700.0) -> bool:
-    if spud_link_should_use_hub("face_id", redis_conn=redis_client):
-        start_model_load(redis_client)
+def load_model(redis_client: Any = None, *, timeout: float = 2700.0, force_local: bool = False) -> bool:
+    if not force_local and spud_link_should_use_hub("face_id", redis_conn=redis_client):
+        start_model_load(redis_client, force_local=force_local)
         return True
     if not is_enabled(redis_client):
         raise RuntimeError("Face ID is disabled in Settings > Models.")
-    start_model_load(redis_client)
+    start_model_load(redis_client, force_local=force_local)
     deadline = time.monotonic() + max(1.0, float(timeout))
     with _condition:
         while not _model_loaded and _state in {"idle", "loading"}:
@@ -602,10 +616,15 @@ def set_enabled(redis_client: Any, enabled: bool) -> Dict[str, Any]:
     return status(redis_client)
 
 
-def analyze_image(image_bytes: bytes, redis_client: Any = None) -> List[Dict[str, Any]]:
+def analyze_image(
+    image_bytes: bytes,
+    redis_client: Any = None,
+    *,
+    force_local: bool = False,
+) -> List[Dict[str, Any]]:
     if not image_bytes:
         return []
-    load_model(redis_client)
+    load_model(redis_client, force_local=force_local)
     with _inference_lock:
         if not is_enabled(redis_client):
             raise RuntimeError("Face ID is disabled in Settings > Models.")

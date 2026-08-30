@@ -284,9 +284,47 @@ def _model_source() -> str:
     return _get_text_setting("VOICE_SPEAKER_ID_MODEL_SOURCE", DEFAULT_SPEAKER_ID_MODEL_SOURCE)
 
 
+def speaker_embedding_model_metadata(*, dimensions: int = 0) -> Dict[str, Any]:
+    """Describe voice embeddings without exposing model cache paths."""
+    return {
+        "provider": "speechbrain",
+        "model_source": _model_source(),
+        "distance_metric": "cosine_similarity",
+        "embedding_dimensions": max(0, int(dimensions or 0)),
+    }
+
+
+def _normalize_embedding_model(raw: Any = None, *, dimensions: int = 0) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    local = speaker_embedding_model_metadata(dimensions=dimensions)
+    return {
+        "provider": _vp()._text(source.get("provider")) or _vp()._text(local.get("provider")),
+        "model_source": _vp()._text(source.get("model_source")) or _vp()._text(local.get("model_source")),
+        "distance_metric": _vp()._text(source.get("distance_metric"))
+        or _vp()._text(local.get("distance_metric")),
+        "embedding_dimensions": max(
+            0,
+            int(dimensions or source.get("embedding_dimensions") or local.get("embedding_dimensions") or 0),
+        ),
+    }
+
+
+def _embedding_model_signature(metadata: Any, *, dimensions: int = 0) -> str:
+    normalized = _normalize_embedding_model(metadata, dimensions=dimensions)
+    return "|".join(
+        (
+            _vp()._text(normalized.get("provider")).lower(),
+            _vp()._text(normalized.get("model_source")).lower(),
+            _vp()._text(normalized.get("distance_metric")).lower(),
+            str(max(0, int(dimensions or normalized.get("embedding_dimensions") or 0))),
+        )
+    )
+
+
 def settings_fields() -> List[Dict[str, Any]]:
     vp = _vp()
     current = _settings()
+    routed_via_hub = spud_link_should_use_hub("speaker_id", redis_conn=redis_client)
     rows: List[Dict[str, Any]] = []
     for spec in _setting_specs():
         row = dict(spec)
@@ -304,6 +342,13 @@ def settings_fields() -> List[Dict[str, Any]]:
             )
         else:
             row["value"] = vp._text(raw_value if raw_value is not None else row.get("default"))
+        if routed_via_hub and key in {"VOICE_SPEAKER_ID_ENABLED", "VOICE_SPEAKER_ID_MODEL_SOURCE"}:
+            row["disabled"] = True
+            if key == "VOICE_SPEAKER_ID_ENABLED":
+                row["value"] = True
+                row["description"] = "Enabled by the Speaker ID route in SpudLink settings."
+            else:
+                row["description"] = "The paired Spud Hub controls the embedding model."
         rows.append(row)
     return rows
 
@@ -438,11 +483,15 @@ def _normalize_speaker_row(row: Dict[str, Any]) -> Dict[str, Any]:
         with contextlib.suppress(Exception):
             vector = [float(item) for item in embedding]
             if vector:
+                model = _normalize_embedding_model(sample.get("embedding_model"), dimensions=len(vector))
                 samples.append(
                     {
                         "embedding": vector,
                         "created_ts": float(sample.get("created_ts") or time.time()),
                         "speech_s": float(sample.get("speech_s") or 0.0),
+                        "embedding_model": model,
+                        "embedding_model_signature": _vp()._text(sample.get("embedding_model_signature"))
+                        or _embedding_model_signature(model, dimensions=len(vector)),
                     }
                 )
     speaker["samples"] = samples
@@ -474,11 +523,14 @@ def _save_speakers(rows: List[Dict[str, Any]]) -> None:
     _save_profiles(payload)
 
 
-def _speaker_average_embedding(row: Dict[str, Any]) -> List[float]:
+def _speaker_average_embedding(row: Dict[str, Any], *, model_signature: str = "") -> List[float]:
     samples = list(row.get("samples") or [])
     vectors = []
     for sample in samples:
         if not isinstance(sample, dict):
+            continue
+        sample_signature = _vp()._text(sample.get("embedding_model_signature"))
+        if model_signature and sample_signature and sample_signature != model_signature:
             continue
         vector = sample.get("embedding")
         if isinstance(vector, list) and vector:
@@ -843,6 +895,20 @@ def _speechbrain_state() -> Tuple[bool, str]:
 
 
 def runtime_availability() -> Dict[str, Any]:
+    if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
+        return {
+            "available": True,
+            "label": "available",
+            "detail": "Voice embeddings run on Spud Hub; speaker profiles and People links stay on this Tater.",
+            "model_source": "Spud Hub",
+            "model_dir": "",
+            "huggingface_cache_dir": "",
+            "huggingface_auth": "Hub managed",
+            "device": "Spud Hub",
+            "acceleration": "remote",
+            "routed_via": "spud_link",
+            "identity_owner": "This Tater",
+        }
     available, detail = _speechbrain_import_state()
     source = _model_source()
     requested_device = _vp()._speechbrain_device()
@@ -984,32 +1050,70 @@ def _compute_embedding(audio_bytes: bytes, audio_format: Dict[str, Any]) -> List
     return [float(item) for item in vector.tolist()]
 
 
+def speaker_embedding_for_audio(
+    *,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create one local embedding without reading or changing speaker profiles."""
+    embedding = _compute_embedding(audio_bytes, audio_format)
+    return {
+        "embedding": embedding,
+        "model": speaker_embedding_model_metadata(dimensions=len(embedding)),
+        "stored": False,
+    }
+
+
+def _routed_speaker_embedding(
+    *,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    allow_disabled_local: bool = False,
+) -> Tuple[List[float], Dict[str, Any], Dict[str, Any]]:
+    if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
+        try:
+            remote = spud_link_request_json(
+                "models/speaker-id",
+                payload={
+                    "operation": "embed",
+                    "data_base64": base64.b64encode(bytes(audio_bytes or b"")).decode("ascii"),
+                    "audio_format": dict(audio_format or {}),
+                },
+                redis_conn=redis_client,
+                timeout=120.0,
+            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            embedding = result.get("embedding")
+            if not isinstance(embedding, list) or not embedding or result.get("stored") is not False:
+                raise RuntimeError(
+                    "The Spud Hub needs the stateless Speaker ID embedding update before this Spudlet can use Hub Speaker ID."
+                )
+            vector = [float(item) for item in embedding]
+            model = _normalize_embedding_model(result.get("model"), dimensions=len(vector))
+            return vector, model, {
+                "routed_via": "spud_link",
+                "loaded_on": "Spud Hub",
+                "identity_owner": "This Tater",
+            }
+        except Exception:
+            if not spud_link_allow_local_fallback("speaker_id", redis_conn=redis_client):
+                raise
+            if not allow_disabled_local and not speaker_id_enabled():
+                raise
+    local = speaker_embedding_for_audio(audio_bytes=audio_bytes, audio_format=audio_format)
+    vector = [float(item) for item in list(local.get("embedding") or [])]
+    model = _normalize_embedding_model(local.get("model"), dimensions=len(vector))
+    return vector, model, {"identity_owner": "This Tater"}
+
+
 def match_speaker_for_audio(
     *,
     audio_bytes: bytes,
     audio_format: Dict[str, Any],
     speech_s: float = 0.0,
 ) -> Dict[str, Any]:
-    if spud_link_should_use_hub("speaker_id", redis_conn=redis_client):
-        try:
-            remote = spud_link_request_json(
-                "models/speaker-id",
-                payload={
-                    "data_base64": base64.b64encode(bytes(audio_bytes or b"")).decode("ascii"),
-                    "audio_format": dict(audio_format or {}),
-                    "speech_s": float(speech_s or 0.0),
-                },
-                redis_conn=redis_client,
-                timeout=120.0,
-            )
-            result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
-            result["routed_via"] = "spud_link"
-            result["loaded_on"] = "Spud Hub"
-            return result
-        except Exception:
-            if not spud_link_allow_local_fallback("speaker_id", redis_conn=redis_client):
-                raise
-    if not speaker_id_enabled():
+    uses_hub = spud_link_should_use_hub("speaker_id", redis_conn=redis_client)
+    if not uses_hub and not speaker_id_enabled():
         _debug("match skipped reason=disabled")
         return {"matched": False, "reason": "disabled"}
     effective_speech_s = max(
@@ -1027,22 +1131,40 @@ def match_speaker_for_audio(
     speakers = _all_speakers()
     if not speakers:
         _debug("match skipped reason=no_speakers")
-        return {"matched": False, "reason": "no_speakers"}
+        return {
+            "matched": False,
+            "reason": "no_speakers",
+            "identity_owner": "This Tater",
+            **({"routed_via": "spud_link", "loaded_on": "Spud Hub"} if uses_hub else {}),
+        }
     _log_info("match start speech_s=%.2f speakers=%s", effective_speech_s, len(speakers))
     _debug(f"match start speech_s={effective_speech_s:.2f} speakers={len(speakers)}")
-    query = _compute_embedding(audio_bytes, audio_format)
+    query, embedding_model, routing = _routed_speaker_embedding(
+        audio_bytes=audio_bytes,
+        audio_format=audio_format,
+    )
+    model_signature = _embedding_model_signature(embedding_model, dimensions=len(query))
     scored: List[Dict[str, Any]] = []
     for speaker in speakers:
-        avg = _speaker_average_embedding(speaker)
+        avg = _speaker_average_embedding(speaker, model_signature=model_signature)
         if not avg:
             continue
+        compatible_samples = [
+            sample
+            for sample in list(speaker.get("samples") or [])
+            if isinstance(sample, dict)
+            and (
+                not _vp()._text(sample.get("embedding_model_signature"))
+                or _vp()._text(sample.get("embedding_model_signature")) == model_signature
+            )
+        ]
         score = _cosine_similarity(query, avg)
         scored.append(
             {
                 "speaker_id": _vp()._text(speaker.get("id")),
                 "speaker_name": _vp()._text(speaker.get("name")),
                 "score": float(score),
-                "sample_count": len(list(speaker.get("samples") or [])),
+                "sample_count": len(compatible_samples),
             }
         )
     if not scored:
@@ -1051,8 +1173,10 @@ def match_speaker_for_audio(
             "matched": False,
             "reason": "no_embeddings",
             "speech_s": effective_speech_s,
-            "model_source": _model_source(),
+            "model_source": _vp()._text(embedding_model.get("model_source")),
+            "embedding_model": embedding_model,
             "updated_ts": time.time(),
+            **routing,
         }
         _save_last_result(result)
         return result
@@ -1104,8 +1228,10 @@ def match_speaker_for_audio(
         "sample_count": int(best.get("sample_count") or 0),
         "candidates": scored[:3],
         "speech_s": effective_speech_s,
-        "model_source": _model_source(),
+        "model_source": _vp()._text(embedding_model.get("model_source")),
+        "embedding_model": embedding_model,
         "updated_ts": time.time(),
+        **routing,
     }
     _save_last_result(result)
     return result
@@ -1133,11 +1259,20 @@ def add_enrollment_sample(
     target_index = next((index for index, row in enumerate(speakers) if _vp()._text(row.get("id")) == _vp()._text(speaker_id)), -1)
     if target_index < 0:
         raise KeyError("Speaker not found.")
-    embedding = _compute_embedding(audio_bytes, audio_format)
+    embedding, embedding_model, routing = _routed_speaker_embedding(
+        audio_bytes=audio_bytes,
+        audio_format=audio_format,
+        allow_disabled_local=True,
+    )
     sample = {
         "embedding": embedding,
         "created_ts": time.time(),
         "speech_s": effective_speech_s,
+        "embedding_model": embedding_model,
+        "embedding_model_signature": _embedding_model_signature(
+            embedding_model,
+            dimensions=len(embedding),
+        ),
     }
     speaker = dict(speakers[target_index])
     samples = list(speaker.get("samples") or [])
@@ -1160,6 +1295,7 @@ def add_enrollment_sample(
         "speaker_id": _vp()._text(speaker.get("id")),
         "speaker_name": _vp()._text(speaker.get("name")),
         "sample_count": len(samples),
+        **routing,
     }
 
 
@@ -1236,17 +1372,22 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
         pending["selector"] = _canonical_selector(pending.get("selector"), status)
         pending["selector_label"] = _selector_label_from_options(pending.get("selector"), selector_options)
     availability = runtime_availability()
+    routed_via_hub = _vp()._text(availability.get("routed_via")) == "spud_link"
     last = last_result()
     return {
         "availability": availability,
         "summary_metrics": [
-            {"label": "Enabled", "value": "Yes" if speaker_id_enabled() else "No"},
+            {
+                "label": "Enabled",
+                "value": "Yes (Spud Hub)" if routed_via_hub else ("Yes" if speaker_id_enabled() else "No"),
+            },
             {"label": "Mode", "value": "Best match" if _best_match_enabled() else "Threshold"},
             {"label": "Enrolled Speakers", "value": len(speakers)},
+            {"label": "Profile Storage", "value": "This Tater"},
             {"label": "Last Speaker", "value": vp._text(last.get("speaker_name")) or "-"},
             {"label": "Last Score", "value": f"{float(last.get('score') or 0.0):.2f}" if last else "-"},
             {"label": "Pending Capture", "value": pending.get("speaker_name") or "-"},
-            {"label": "Model", "value": _model_source()},
+            {"label": "Model", "value": _vp()._text(availability.get("model_source")) or _model_source()},
         ],
         "settings_sections": [
             {
@@ -1387,9 +1528,9 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any], status: Dic
         target = next((row for row in speakers if esphome_runtime.text(row.get("id")) == speaker_id), None)
         if not isinstance(target, dict):
             raise KeyError("Speaker not found.")
-        available, detail = _speechbrain_state()
-        if not available:
-            raise RuntimeError(detail or "SpeechBrain model is unavailable.")
+        availability = runtime_availability()
+        if not bool(availability.get("available")):
+            raise RuntimeError(_vp()._text(availability.get("detail")) or "Speaker ID model is unavailable.")
         selector = _canonical_selector(
             esphome_runtime.text(values.get("preferred_selector")) or esphome_runtime.text(target.get("preferred_selector")),
             status,

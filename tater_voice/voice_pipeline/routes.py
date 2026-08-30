@@ -137,6 +137,11 @@ async def startup() -> None:
     voice_cfg = vp._voice_config_snapshot()
     eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
     selected_vad_backend = vp._normalize_vad_backend(eou_cfg.get("backend"))
+    local_vad_backend = selected_vad_backend
+    if local_vad_backend == "spud_link":
+        local_vad_backend = vp._normalize_vad_backend(eou_cfg.get("local_backend"), default="webrtc")
+        if local_vad_backend in {"auto", "spud_link"}:
+            local_vad_backend = "webrtc" if vp.remote_only_enabled() else "silero"
     vp.logger.info(
         "[voice_core] startup version=%s backend=tater_native_satellite legacy_api=false",
         vp.__version__,
@@ -160,8 +165,9 @@ async def startup() -> None:
     else:
         vp.logger.info("[native-voice] audioop fast path active")
     vp.logger.info(
-        "[native-voice] vad backend selected=%s threshold=%.2f neg_threshold=%.2f webrtc_aggressiveness=%s",
+        "[native-voice] vad backend selected=%s local_fallback=%s threshold=%.2f neg_threshold=%.2f webrtc_aggressiveness=%s",
         selected_vad_backend,
+        local_vad_backend,
         vp._as_float(eou_cfg.get("silero_threshold"), vp.DEFAULT_SILERO_THRESHOLD, minimum=0.01, maximum=0.99),
         vp._as_float(eou_cfg.get("silero_neg_threshold"), vp.DEFAULT_SILERO_NEG_THRESHOLD, minimum=0.0, maximum=0.99),
         int(eou_cfg.get("webrtc_aggressiveness") or vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS),
@@ -211,7 +217,7 @@ async def startup() -> None:
     if tts_backend_note:
         vp.logger.warning("[native-voice] tts backend note: %s", tts_backend_note)
 
-    if selected_vad_backend in {"silero", "auto"}:
+    if local_vad_backend in {"silero", "auto"}:
         try:
             vp.SileroVadBackend._ensure_shared()
             if vp.SileroVadBackend._shared_ready:
@@ -238,7 +244,7 @@ async def startup() -> None:
                 vp.logger.warning("[native-voice] silero VAD model pre-load failed: %s", vp.SileroVadBackend._shared_error)
         except Exception as exc:
             vp.logger.warning("[native-voice] silero VAD model pre-load error: %s", exc)
-    if selected_vad_backend in {"webrtc", "auto"}:
+    if local_vad_backend in {"webrtc", "auto"}:
         try:
             vp.importlib.import_module("webrtcvad")
             vp.logger.info("[native-voice] webrtc VAD dependency available")
@@ -295,6 +301,11 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
     voice_cfg = vp._voice_config_snapshot()
     eou_cfg = voice_cfg.get("eou") if isinstance(voice_cfg.get("eou"), dict) else {}
     selected_vad_backend = vp._normalize_vad_backend(eou_cfg.get("backend"))
+    local_vad_backend = selected_vad_backend
+    if local_vad_backend == "spud_link":
+        local_vad_backend = vp._normalize_vad_backend(eou_cfg.get("local_backend"), default="webrtc")
+        if local_vad_backend in {"auto", "spud_link"}:
+            local_vad_backend = "webrtc" if vp.remote_only_enabled() else "silero"
     webrtc_vad_error = ""
     try:
         vp.importlib.import_module("webrtcvad")
@@ -329,6 +340,7 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "acceleration": voice_cfg.get("acceleration"),
         "vad": eou_cfg,
         "vad_backend_selected": selected_vad_backend,
+        "vad_backend_local_fallback": local_vad_backend,
         "silero_vad_available": bool(vp.SileroVadBackend._shared_ready),
         "silero_vad_error": vp._text(vp.SileroVadBackend._shared_error),
         "webrtc_vad_available": not bool(webrtc_vad_error),

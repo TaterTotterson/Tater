@@ -12484,6 +12484,41 @@ function bindModelSettingsTabs(root = document) {
   activate(initial);
 }
 
+function bindSpeechSettingsTabs(root = document) {
+  const host =
+    root instanceof HTMLElement
+      ? root.querySelector("[data-speech-settings-shell]")
+      : document.querySelector("[data-speech-settings-shell]");
+  if (!(host instanceof HTMLElement)) {
+    return;
+  }
+  const buttons = Array.from(host.querySelectorAll("[data-speech-settings-tab]"));
+  const panels = Array.from(host.querySelectorAll("[data-speech-settings-panel]"));
+  if (!buttons.length || !panels.length) {
+    return;
+  }
+  const activate = (tabKey) => {
+    const normalized = String(tabKey || "listening").trim() || "listening";
+    host.dataset.speechSettingsActiveTab = normalized;
+    buttons.forEach((button) => {
+      const active = button.dataset.speechSettingsTab === normalized;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.speechSettingsPanel === normalized);
+    });
+  };
+  buttons.forEach((button) => {
+    if (button.dataset.speechSettingsTabBound === "1") {
+      return;
+    }
+    button.dataset.speechSettingsTabBound = "1";
+    button.addEventListener("click", () => activate(button.dataset.speechSettingsTab));
+  });
+  activate(host.dataset.speechSettingsActiveTab || "listening");
+}
+
 function renderCoreTabPending(tabSpec, message = "Open this tab to load data.") {
   const safeTabLabel = escapeHtml(tabSpec?.label || tabSpec?.core_key || "Core");
   const safeCoreKey = escapeHtml(tabSpec?.core_key || "");
@@ -23388,6 +23423,68 @@ function openPeoplePersonModal(card) {
   window.setTimeout(() => body.querySelector("[data-people-field='display_name']")?.focus(), 40);
 }
 
+function stopPeopleFaceEnrollCamera(modal) {
+  modal?.querySelectorAll?.("video[data-core-camera-video]").forEach((video) => {
+    const stream = video.srcObject;
+    if (stream && typeof stream.getTracks === "function") {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    video.srcObject = null;
+  });
+}
+
+function ensurePeopleFaceEnrollModal() {
+  let modal = document.getElementById("people-face-enroll-modal");
+  if (modal) return modal;
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    `
+      <div id="people-face-enroll-modal" class="cerb-modal" aria-hidden="true">
+        <div class="cerb-modal-dialog card people-face-enroll-dialog" role="dialog" aria-modal="true" aria-labelledby="people-face-enroll-modal-title">
+          <div class="card-head people-face-enroll-modal-head">
+            <div>
+              <div class="small">Face ID Enrollment</div>
+              <h3 id="people-face-enroll-modal-title" class="card-title">Add a Face</h3>
+              <p>Choose a Person and provide one clear, front-facing photo.</p>
+            </div>
+            <button type="button" id="people-face-enroll-modal-close" class="inline-btn">Close</button>
+          </div>
+          <div id="people-face-enroll-modal-body" class="cerb-modal-body people-face-enroll-modal-body"></div>
+        </div>
+      </div>
+    `
+  );
+  modal = document.getElementById("people-face-enroll-modal");
+  const close = () => {
+    stopPeopleFaceEnrollCamera(modal);
+    closePopupModal(modal);
+  };
+  document.getElementById("people-face-enroll-modal-close")?.addEventListener("click", close);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal?.classList.contains("active")) close();
+  });
+  return modal;
+}
+
+function openPeopleFaceEnrollModal() {
+  const template = document.getElementById("people-face-enroll-template");
+  const modal = ensurePeopleFaceEnrollModal();
+  const body = modal?.querySelector("#people-face-enroll-modal-body");
+  if (!(template instanceof HTMLTemplateElement) || !(body instanceof HTMLElement)) {
+    showToast("Face enrollment is unavailable. Refresh the page and try again.", "error", 3200);
+    return null;
+  }
+  stopPeopleFaceEnrollCamera(modal);
+  body.innerHTML = template.innerHTML;
+  openPopupModal(modal);
+  bindCoreCameraCaptureFields(body);
+  window.setTimeout(() => body.querySelector("[data-core-field-key='person_id']")?.focus(), 40);
+  return modal;
+}
+
 function ensurePeopleFaceReviewModal() {
   let modal = document.getElementById("people-face-review-modal");
   if (modal) return modal;
@@ -23643,9 +23740,57 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
     ? `<div class="people-face-grid">${faces.map((face) => renderPeopleFaceCard(face, faces, people)).join("")}</div>`
     : renderNotice(
         boolFromAny(faceStatus?.enabled, false)
-          ? "No faces have been captured yet. A Face ID-enabled Awareness source or Automation will add them here."
+          ? "No faces have been added yet. Use Add a Face above, or let a Face ID-enabled camera source discover one."
           : "Face ID is disabled. Enable it in Settings › Models › Face ID to begin recognizing faces."
       );
+  const faceEnrollmentTemplate = `
+    <template id="people-face-enroll-template">
+      <div class="people-face-enroll-form" data-people-face-enroll-form>
+        <div class="form-grid">
+          ${renderCoreManagerField({
+            key: "person_id",
+            label: "Person",
+            type: "select",
+            value: "",
+            options: [
+              { value: "", label: "Choose a person" },
+              ...people.map((person) => ({
+                value: String(person?.id || "").trim(),
+                label: String(person?.display_name || person?.id || "Person").trim() || "Person",
+              })),
+            ],
+            disabled: people.length === 0,
+            description: people.length
+              ? "The saved face will be linked to this existing Tater Person."
+              : "Create a Person first, then return to the Faces tab.",
+          })}
+          ${renderCoreManagerField({
+            key: "face_image",
+            label: "Face Photo",
+            type: "file",
+            value: "",
+            accept: "image/jpeg,image/png,image/webp",
+            file_encoding: "base64",
+            max_bytes: 8 * 1024 * 1024,
+            camera_capture: true,
+            camera_facing_mode: "user",
+            disabled: people.length === 0,
+            full_width: true,
+            description: "Upload a clear photo containing one face, or use the camera when this page is opened over HTTPS or localhost.",
+          })}
+        </div>
+        <div class="people-face-enroll-note">
+          ${boolFromAny(faceStatus?.loaded, false)
+            ? "Face ID is ready. The photo will be checked before anything is saved."
+            : "The Face ID model is not ready. Enable or load it in Settings › Models before adding a face."}
+        </div>
+        <div class="inline-row people-face-enroll-actions">
+          <button type="button" class="action-btn" data-people-face-enroll-submit ${people.length ? "" : "disabled"}>Add Face to Person</button>
+          <span class="small core-manager-status"></span>
+        </div>
+      </div>
+    </template>
+  `;
 
   const identitiesHtml = identities.length
     ? `<div class="people-identity-list">
@@ -23750,9 +23895,13 @@ function renderPeopleSettingsPanel(peoplePayload = {}) {
               <h3>Face ID</h3>
               <p>Link recognized faces to People, separate incorrect captures, or merge duplicate profiles.</p>
             </div>
-            <span class="people-badge ${boolFromAny(faceStatus?.loaded, false) ? "linked" : "muted"}">${boolFromAny(faceStatus?.loaded, false) ? "Model Ready" : "Model Not Ready"}</span>
+            <div class="people-panel-head-actions">
+              <span class="people-badge ${boolFromAny(faceStatus?.loaded, false) ? "linked" : "muted"}">${boolFromAny(faceStatus?.loaded, false) ? "Model Ready" : "Model Not Ready"}</span>
+              <button type="button" class="action-btn" data-people-face-enroll-open ${people.length ? "" : "disabled"}>Add a Face</button>
+            </div>
           </div>
           ${facesHtml}
+          ${faceEnrollmentTemplate}
         </section>
         <section class="people-tab-panel ${activePeopleTab === "identities" ? "active" : ""}" data-people-tab-panel="identities">
           <div class="people-panel-head">
@@ -23847,7 +23996,10 @@ function bindSettingsPeopleActions() {
       });
       state.settingsTab = "people";
       showToast(String(result?.message || fallbackMessage).trim() || fallbackMessage);
-      if (modal && !keepPersonModalOpen) closePopupModal(modal);
+      if (modal && !keepPersonModalOpen) {
+        if (modal.id === "people-face-enroll-modal") stopPeopleFaceEnrollCamera(modal);
+        closePopupModal(modal);
+      }
       await loadSettingsView();
       if (modal && keepPersonModalOpen && openPersonId) {
         const refreshedCard = Array.from(document.querySelectorAll(".people-person-card")).find(
@@ -23887,6 +24039,43 @@ function bindSettingsPeopleActions() {
       await runPeopleAction(host, "people_create", { values: { display_name: displayName } }, "Person created.");
     });
   }
+
+  bindPeopleButton("[data-people-face-enroll-open]", () => {
+    const modal = openPeopleFaceEnrollModal();
+    const dialog = modal?.querySelector?.(".people-face-enroll-dialog");
+    const form = modal?.querySelector?.("[data-people-face-enroll-form]");
+    const submit = modal?.querySelector?.("[data-people-face-enroll-submit]");
+    if (!(dialog instanceof HTMLElement) || !(form instanceof HTMLElement) || !(submit instanceof HTMLButtonElement)) {
+      return;
+    }
+    submit.addEventListener("click", async () => {
+      submit.disabled = true;
+      let actionStarted = false;
+      try {
+        const values = await collectCoreManagerValuesWithFiles(form);
+        if (!String(values.person_id || "").trim()) {
+          throw new Error("Choose a Person for this face.");
+        }
+        if (!values.face_image) {
+          throw new Error("Choose a face photo or take one with the camera first.");
+        }
+        actionStarted = true;
+        await runPeopleAction(
+          dialog,
+          "people_face_enroll",
+          { values },
+          "Face added to Person."
+        );
+      } catch (error) {
+        submit.disabled = false;
+        if (!actionStarted) {
+          const message = String(error?.message || "Face enrollment failed.");
+          setCoreManagerStatus(dialog, `Failed: ${message}`);
+          showToast(`Failed: ${message}`, "error", 3600);
+        }
+      }
+    });
+  });
 
   bindPeopleButton(".people-person-save", async (event) => {
     const card = event.currentTarget?.closest?.(".people-person-editor");
@@ -24699,22 +24888,36 @@ async function loadSettingsView() {
   const spudLinkModelRoutingEnabled = Boolean(
     settings?.spud_link_model_routing_enabled ?? spudLink.model_routing_enabled ?? spudLinkModelRouting.enabled
   );
+  const spudLinkVoiceModelSections = Array.isArray(settings?.voice_model_ui?.sections)
+    ? settings.voice_model_ui.sections
+    : [];
+  const savedVadBackend = String(
+    spudLinkVoiceModelSections
+      .flatMap((section) => (Array.isArray(section?.fields) ? section.fields : []))
+      .find((field) => String(field?.key || "").trim() === "VOICE_VAD_BACKEND")?.value || ""
+  )
+    .trim()
+    .toLowerCase();
   const spudLinkModelRouteSpecs = [
     { id: "llm", label: "LLM", note: "Hydra planning, tools, chat, and final answers" },
-    { id: "stt", label: "Speech to Text", note: "Transcription runs on the Hub; wake word and VAD stay here" },
+    { id: "vad", label: "Speech-End Detection (VAD)", note: "The Hub detects when the user has finished speaking; this Tater keeps a local fallback" },
+    { id: "stt", label: "Speech to Text", note: "Transcription runs on the Hub; speech-end detection can be local or use the Hub" },
     { id: "tts", label: "Text to Speech", note: "The Hub returns ready-to-play speech audio" },
     { id: "vision", label: "Vision", note: "Image descriptions and camera snapshots" },
     { id: "audio", label: "Audio Understanding", note: "Music and general audio analysis" },
     { id: "video", label: "Video Understanding", note: "Camera clips and attached video analysis" },
-    { id: "speaker_id", label: "Speaker ID", note: "Voice identity matching uses the Hub profiles" },
+    { id: "speaker_id", label: "Speaker ID", note: "The Hub processes voice embeddings; this Spudlet keeps its speaker profiles and People links" },
     { id: "emotion_id", label: "Emotion ID", note: "Voice tone analysis" },
-    { id: "face_id", label: "Face ID", note: "Face matching uses the Hub People library" },
+    { id: "face_id", label: "Face ID", note: "The Hub processes faces; this Spudlet keeps its own People and face library" },
   ];
   const spudLinkModelRouteValue = (kind) => {
     const configured = String(
       settings?.[`spud_link_model_route_${kind}`] || spudLinkModelRouting?.routes?.[kind] || (kind === "llm" ? "hub" : "auto")
     ).trim().toLowerCase();
-    return ["auto", "hub", "local"].includes(configured) ? configured : kind === "llm" ? "hub" : "auto";
+    const normalized = ["auto", "hub", "local"].includes(configured) ? configured : kind === "llm" ? "hub" : "auto";
+    // Preserve the earlier direct VAD backend choice and migrate it into the
+    // first-class SpudLink route the next time Hub settings are saved.
+    return kind === "vad" && normalized === "auto" && savedVadBackend === "spud_link" ? "hub" : normalized;
   };
   const renderSpudLinkModelRoutes = () => `
     <div class="spud-link-model-grid">
@@ -24877,10 +25080,18 @@ async function loadSettingsView() {
     const activeSpecs = spudLinkModelRouteSpecs.filter((spec) => kinds.includes(spec.id) && spudLinkRouteUsesHub(spec.id));
     if (!activeSpecs.length) return "";
     const labels = activeSpecs.map((spec) => spec.label).join(" and ");
+    const isSpeechNotice = kinds.length > 0 && kinds.every((kind) => kind === "vad" || kind === "stt" || kind === "tts");
+    const routeDescription = isSpeechNotice
+      ? `${labels} ${activeSpecs.length === 1 ? "is" : "are"} controlled by the paired Hub. Those Hub-owned controls are locked, while other local speech and playback settings remain available.`
+      : kinds.length === 1 && kinds[0] === "speaker_id"
+        ? "The paired Hub creates voice embeddings. This Spudlet still owns speaker profiles, enrollment samples, People links, and matching controls; only Hub-owned model controls are locked."
+      : kinds.length === 1 && kinds[0] === "face_id"
+        ? "The paired Hub creates face embeddings. This Spudlet still owns its People links and face gallery; only the local Face ID runtime controls are locked."
+      : `${labels} ${activeSpecs.length === 1 ? "is" : "are"} controlled by the paired Hub, including whether ${activeSpecs.length === 1 ? "it is" : "they are"} enabled. Local settings are locked while this route uses the Hub.`;
     return `
       <div class="spud-link-route-notice">
         <span class="spud-link-route-notice-icon" aria-hidden="true">↗</span>
-        <span><strong>Using Spud Hub</strong><small>${escapeHtml(labels)} ${activeSpecs.length === 1 ? "is" : "are"} controlled by the paired Hub, including whether ${activeSpecs.length === 1 ? "it is" : "they are"} enabled. Local settings are locked while this route uses the Hub.</small></span>
+        <span><strong>Using Spud Hub</strong><small>${escapeHtml(routeDescription)}</small></span>
         <button type="button" class="inline-btn" data-settings-tab-target="spudhub" data-spud-link-tab-target="spudlet">SpudLink settings</button>
       </div>
     `;
@@ -25012,7 +25223,7 @@ async function loadSettingsView() {
             <div class="spud-link-model-heading">
               <div>
                 <div class="small core-inline-section-title">Hub Model Settings</div>
-                <p class="spud-link-pairing-copy">Choose which heavy models run on the Spud Hub. Wake word detection and voice activity detection always stay on this device.</p>
+                <p class="spud-link-pairing-copy">Choose which AI and voice processing runs on the Spud Hub. Wake word detection always stays on this device; speech-end detection can run here or on the Hub.</p>
               </div>
               <label class="spud-link-model-master">
                 <span><strong>Use Spud Hub for all models</strong><small>Recommended for Reachy, Edge, and low-power installs</small></span>
@@ -25261,8 +25472,14 @@ async function loadSettingsView() {
       return "";
     }
 	    const sectionId = label === "Faster Whisper" ? ' id="speech-faster-whisper-settings-wrap"' : "";
+	    const routeLock =
+	      (label === "Voice Activity Detection" && spudLinkRouteUsesHub("vad")) ||
+	      (label === "Faster Whisper" && spudLinkRouteUsesHub("stt")) ||
+	      (label === "SpeechBrain Models" && spudLinkRouteUsesHub("speaker_id") && spudLinkRouteUsesHub("emotion_id"))
+	        ? ' data-spud-link-route-locked="true"'
+	        : "";
     return `
-      <div${sectionId} class="hydra-model-panel is-active voice-model-settings-panel">
+      <div${sectionId}${routeLock} class="hydra-model-panel is-active voice-model-settings-panel">
 	        <div class="hydra-model-panel-title">${escapeHtml(label || "Voice Model Settings")}</div>
 	        <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
 	          ${escapeHtml(
@@ -26048,11 +26265,23 @@ async function loadSettingsView() {
 	              <div id="settings-models-wake-verifier" style="margin-top:16px;">
 	                ${renderNotice("Open Wake Word to load wake verification settings.")}
 	              </div>
-	              ${voiceVadSettingsHtml}
 	              </div>
 
-              <div class="settings-subpanel" data-models-panel="speech">
-              ${renderSpudLinkRouteNotice("stt", "tts")}
+              <div class="settings-subpanel" data-models-panel="speech" data-spud-link-partial-lock="speech">
+              ${renderSpudLinkRouteNotice("vad", "stt", "tts")}
+              <div class="speech-settings-shell" data-speech-settings-shell>
+                <div class="settings-subtabs speech-settings-tabs" role="tablist" aria-label="Speech model settings">
+                  <button type="button" class="settings-subtab-btn active" data-speech-settings-tab="listening">Listening & STT</button>
+                  <button type="button" class="settings-subtab-btn" data-speech-settings-tab="replies">Reply Voice</button>
+                  <button type="button" class="settings-subtab-btn" data-speech-settings-tab="announcements">Announcements</button>
+                  <button type="button" class="settings-subtab-btn" data-speech-settings-tab="playback">Playback & Test</button>
+                </div>
+
+                <div class="speech-settings-subpanel active" data-speech-settings-panel="listening">
+                <div class="speech-settings-hero listening">
+                  <span class="speech-settings-hero-icon" aria-hidden="true">◉</span>
+                  <span><strong>Listening & Speech Recognition</strong><small>Choose where speech ends are detected, then configure the model that turns speech into text.</small></span>
+                </div>
               <div class="hydra-model-panel is-active">
                 <div class="hydra-model-panel-title">Voice Acceleration</div>
                 <div class="small hydra-model-panel-note">
@@ -26065,8 +26294,10 @@ async function loadSettingsView() {
                 </label>
               </div>
 
-              <div class="hydra-model-panel is-active">
-                <div class="hydra-model-panel-title">STT</div>
+              ${voiceVadSettingsHtml}
+
+              <div class="hydra-model-panel is-active" data-spud-link-route-locked="${spudLinkRouteUsesHub("stt") ? "true" : "false"}">
+                <div class="hydra-model-panel-title">Speech to Text</div>
                 <div class="small hydra-model-panel-note">
                   Shared globally across Tater, cores, and verbas.
                 </div>
@@ -26090,12 +26321,19 @@ async function loadSettingsView() {
 
               ${fasterWhisperSettingsHtml}
 
-              <div class="hydra-model-panel is-active">
-                <div class="hydra-model-panel-title">TTS</div>
-                <div class="small hydra-model-panel-note">
-                  Shared globally across Tater, cores, and verbas.
                 </div>
-                <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Direct TTS</div>
+
+                <div class="speech-settings-subpanel" data-speech-settings-panel="replies">
+                <div class="speech-settings-hero replies">
+                  <span class="speech-settings-hero-icon" aria-hidden="true">✦</span>
+                  <span><strong>Reply Voice</strong><small>The voice Tater uses for conversational replies on satellites and other Voice Core clients.</small></span>
+                </div>
+
+              <div class="hydra-model-panel is-active" data-spud-link-route-locked="${spudLinkRouteUsesHub("tts") ? "true" : "false"}">
+                <div class="hydra-model-panel-title">Direct Reply TTS</div>
+                <div class="small hydra-model-panel-note">
+                  Shared globally for Tater's spoken conversational replies.
+                </div>
                 <label>TTS Backend
                   <select id="set_speech_tts_backend">
                     ${renderSettingsSelectOptions(displayedSpeechTtsBackendOptions, currentSpeechTtsBackend)}
@@ -26229,7 +26467,7 @@ async function loadSettingsView() {
                     step="0.1"
                     value="${escapeHtml(settings.speech_kokoro_output_gain || "1.5")}"
                   />
-                  <div class="small">1.0 is raw model volume. Applies to Direct and Announcement Kokoro output.</div>
+                  <div class="small">1.0 is raw model volume for Direct Reply TTS.</div>
                 </label>
                 <label id="speech-pocket-tts-output-gain-wrap">Pocket TTS Output Gain
                   <input
@@ -26240,7 +26478,7 @@ async function loadSettingsView() {
                     step="0.1"
                     value="${escapeHtml(settings.speech_pocket_tts_output_gain || "1.5")}"
                   />
-                  <div class="small">1.0 is raw model volume. Applies to Direct and Announcement Pocket TTS output.</div>
+                  <div class="small">1.0 is raw model volume for Direct Reply TTS.</div>
                 </label>
                 <section id="speech-qwen-tts-profile-wrap" class="core-inline-section" style="grid-column: 1 / -1;">
                   <div class="small core-inline-section-title">Qwen3-TTS Voice</div>
@@ -26363,34 +26601,28 @@ async function loadSettingsView() {
                   <div id="speech-wyoming-tts-voice-status" class="small"></div>
                 </label>
 
-                <div class="small core-inline-section-title" style="grid-column: 1 / -1; margin-top: 8px;">Announcement TTS</div>
-                <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-                  Default for Voice Core announcement flows used by cores and verbas.
+              </div>
                 </div>
-                <div class="small core-inline-section-title" style="grid-column: 1 / -1;">Satellite Media Ducking</div>
-                <div class="small hydra-model-panel-note" style="grid-column: 1 / -1;">
-                  Applied when ordinary TTS plays over an active native-satellite media session. Individual audio scenes can override these values.
+
+                <div class="speech-settings-subpanel" data-speech-settings-panel="announcements">
+                <div class="speech-settings-hero announcements">
+                  <span class="speech-settings-hero-icon" aria-hidden="true">◆</span>
+                  <span><strong>Announcement TTS</strong><small>The default voice for Voice Core announcements used by cores and verbas.</small></span>
                 </div>
-                <label>Ducked Media Level (%)
-                  <input id="set_speech_satellite_ducking_target_percent" type="number" min="0" max="100" value="${escapeHtml(
-                    settings.speech_satellite_ducking_target_percent ?? 20
-                  )}" />
-                </label>
-                <label>Duck Attack (ms)
-                  <input id="set_speech_satellite_ducking_attack_ms" type="number" min="0" max="10000" value="${escapeHtml(
-                    settings.speech_satellite_ducking_attack_ms ?? 150
-                  )}" />
-                </label>
-                <label>Volume Restore (ms)
-                  <input id="set_speech_satellite_ducking_release_ms" type="number" min="0" max="10000" value="${escapeHtml(
-                    settings.speech_satellite_ducking_release_ms ?? 350
-                  )}" />
-                </label>
+              <div class="hydra-model-panel is-active" data-spud-link-route-locked="${spudLinkRouteUsesHub("tts") ? "true" : "false"}">
+                <div class="hydra-model-panel-title">Announcement Voice Model</div>
+                <div class="small hydra-model-panel-note">
+                  Select the announcement backend first; its matching model, voice, and connection controls stay together below.
+                </div>
                 <label>Announcement Backend
                   <select id="set_speech_announcement_tts_backend">
                     ${renderSettingsSelectOptions(announcementTtsBackendOptions, currentAnnouncementTtsBackend)}
                   </select>
                 </label>
+                <div id="speech-announcement-direct-reuse-note" class="speech-tts-reuse-note" style="grid-column: 1 / -1;">
+                  <span class="speech-tts-reuse-icon" aria-hidden="true">↻</span>
+                  <span><strong>Sharing Direct Reply TTS</strong><small>Announcements use the same backend, model, voice profile, and connection settings. Only one voice setup is loaded.</small></span>
+                </div>
                 <label id="speech-announcement-openai-tts-base-url-wrap" style="grid-column: 1 / -1;">OpenAI-Compatible TTS Base URL
                   <input id="set_speech_announcement_openai_tts_base_url" type="text" value="${escapeHtml(
                     settings.speech_announcement_openai_tts_base_url || ""
@@ -26512,6 +26744,111 @@ async function loadSettingsView() {
                     ${renderSettingsSelectOptions(initialAnnouncementTtsVoiceOptions, settings.speech_announcement_tts_voice || "")}
                   </select>
                 </label>
+                <label id="speech-announcement-kokoro-output-gain-wrap">Announcement Kokoro Output Gain
+                  <input
+                    id="set_speech_announcement_kokoro_output_gain"
+                    type="number"
+                    min="0.1"
+                    max="4"
+                    step="0.1"
+                    value="${escapeHtml(settings.speech_announcement_kokoro_output_gain || "1.5")}"
+                  />
+                  <div class="small">1.0 is raw model volume for announcements.</div>
+                </label>
+                <label id="speech-announcement-pocket-tts-output-gain-wrap">Announcement Pocket TTS Output Gain
+                  <input
+                    id="set_speech_announcement_pocket_tts_output_gain"
+                    type="number"
+                    min="0.1"
+                    max="4"
+                    step="0.1"
+                    value="${escapeHtml(settings.speech_announcement_pocket_tts_output_gain || "1.5")}"
+                  />
+                  <div class="small">1.0 is raw model volume for announcements.</div>
+                </label>
+                <section id="speech-announcement-qwen-tts-profile-wrap" class="core-inline-section" style="grid-column: 1 / -1;">
+                  <div class="small core-inline-section-title">Announcement Qwen3-TTS Voice</div>
+                  <div class="small hydra-model-panel-note">
+                    This profile is separate from Direct Reply TTS. Upload a different reference voice, or choose VoiceDesign and describe the announcement voice.
+                  </div>
+                  <div class="form-grid">
+                    <label style="grid-column: 1 / -1;">Clone Audio
+                      <input id="set_speech_announcement_qwen_tts_clone_audio" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac" />
+                    </label>
+                    <div class="inline-row" style="grid-column: 1 / -1;">
+                      <button type="button" id="settings-speech-announcement-qwen-tts-clone-upload" class="inline-btn">Upload Clone Audio</button>
+                      <button type="button" id="settings-speech-announcement-qwen-tts-clone-play" class="inline-btn" ${settings.speech_announcement_qwen_tts_clone_audio?.configured ? "" : "disabled"}>Play Saved Audio</button>
+                      <button type="button" id="settings-speech-announcement-qwen-tts-clone-remove" class="inline-btn" ${settings.speech_announcement_qwen_tts_clone_audio?.configured ? "" : "disabled"}>Remove</button>
+                      <span id="speech-announcement-qwen-tts-clone-status" class="small">${escapeHtml(
+                        settings.speech_announcement_qwen_tts_clone_audio?.configured
+                          ? `Saved: ${settings.speech_announcement_qwen_tts_clone_audio.name || "reference audio"}`
+                          : "No announcement clone audio saved."
+                      )}</span>
+                    </div>
+                    <details style="grid-column: 1 / -1;">
+                      <summary>Reference transcript (optional)</summary>
+                      <div class="small">Tater fills this when the announcement sample is uploaded.</div>
+                      <label>Detected Transcript
+                        <textarea id="set_speech_announcement_qwen_tts_clone_text" rows="3" placeholder="Detected automatically when clone audio is uploaded.">${escapeHtml(
+                          settings.speech_announcement_qwen_tts_clone_text || ""
+                        )}</textarea>
+                      </label>
+                    </details>
+                    <label>Language
+                      <select id="set_speech_announcement_qwen_tts_language">
+                        ${renderSettingsSelectOptions(
+                          ["Auto", "Chinese", "English", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"].map((value) => ({ value, label: value })),
+                          settings.speech_announcement_qwen_tts_language || "English"
+                        )}
+                      </select>
+                    </label>
+                    <label style="grid-column: 1 / -1;">VoiceDesign Description (optional)
+                      <textarea id="set_speech_announcement_qwen_tts_instruct" rows="2" placeholder="For example: A clear, upbeat voice for household announcements.">${escapeHtml(
+                        settings.speech_announcement_qwen_tts_instruct || ""
+                      )}</textarea>
+                    </label>
+                  </div>
+                </section>
+                <section id="speech-announcement-omnivoice-tts-profile-wrap" class="core-inline-section" style="grid-column: 1 / -1;">
+                  <div class="small core-inline-section-title">Announcement OmniVoice Voice</div>
+                  <div class="small hydra-model-panel-note">
+                    This profile is separate from Direct Reply TTS. Upload a different reference, or leave it empty and describe the announcement voice.
+                  </div>
+                  <div class="form-grid">
+                    <label style="grid-column: 1 / -1;">Clone Audio
+                      <input id="set_speech_announcement_omnivoice_tts_clone_audio" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg,.opus,.aac" />
+                    </label>
+                    <div class="inline-row" style="grid-column: 1 / -1;">
+                      <button type="button" id="settings-speech-announcement-omnivoice-tts-clone-upload" class="inline-btn">Upload Clone Audio</button>
+                      <button type="button" id="settings-speech-announcement-omnivoice-tts-clone-play" class="inline-btn" ${settings.speech_announcement_omnivoice_tts_clone_audio?.configured ? "" : "disabled"}>Play Saved Audio</button>
+                      <button type="button" id="settings-speech-announcement-omnivoice-tts-clone-remove" class="inline-btn" ${settings.speech_announcement_omnivoice_tts_clone_audio?.configured ? "" : "disabled"}>Remove</button>
+                      <span id="speech-announcement-omnivoice-tts-clone-status" class="small">${escapeHtml(
+                        settings.speech_announcement_omnivoice_tts_clone_audio?.configured
+                          ? `Saved: ${settings.speech_announcement_omnivoice_tts_clone_audio.name || "reference audio"}`
+                          : "No announcement clone audio saved."
+                      )}</span>
+                    </div>
+                    <details style="grid-column: 1 / -1;">
+                      <summary>Reference transcript (optional)</summary>
+                      <div class="small">Tater fills this when the announcement sample is uploaded.</div>
+                      <label>Detected Transcript
+                        <textarea id="set_speech_announcement_omnivoice_tts_clone_text" rows="3" placeholder="Detected automatically when clone audio is uploaded.">${escapeHtml(
+                          settings.speech_announcement_omnivoice_tts_clone_text || ""
+                        )}</textarea>
+                      </label>
+                    </details>
+                    <label>Language
+                      <input id="set_speech_announcement_omnivoice_tts_language" type="text" value="${escapeHtml(
+                        settings.speech_announcement_omnivoice_tts_language || "English"
+                      )}" placeholder="English or en" />
+                    </label>
+                    <label style="grid-column: 1 / -1;">Voice Description (optional)
+                      <textarea id="set_speech_announcement_omnivoice_tts_instruct" rows="2" placeholder="Used when no announcement clone audio is configured.">${escapeHtml(
+                        settings.speech_announcement_omnivoice_tts_instruct || ""
+                      )}</textarea>
+                    </label>
+                  </div>
+                </section>
                 <label id="speech-announcement-openai-tts-voice-wrap">Announcement Voice
                   <select id="set_speech_announcement_openai_tts_voice">
                     ${renderSettingsSelectOptions(
@@ -26554,6 +26891,35 @@ async function loadSettingsView() {
                   </select>
                   <div id="speech-announcement-wyoming-tts-voice-status" class="small"></div>
                 </label>
+              </div>
+                </div>
+
+                <div class="speech-settings-subpanel" data-speech-settings-panel="playback">
+                <div class="speech-settings-hero playback">
+                  <span class="speech-settings-hero-icon" aria-hidden="true">♪</span>
+                  <span><strong>Playback & Testing</strong><small>Control how satellite media makes room for Tater's voice and preview the current speech setup.</small></span>
+                </div>
+              <div class="hydra-model-panel is-active">
+                <div class="hydra-model-panel-title">Satellite Media Ducking</div>
+                <div class="small hydra-model-panel-note">
+                  Applied when ordinary TTS plays over an active native-satellite media session. Individual audio scenes can override these values.
+                </div>
+                <label>Ducked Media Level (%)
+                  <input id="set_speech_satellite_ducking_target_percent" type="number" min="0" max="100" value="${escapeHtml(
+                    settings.speech_satellite_ducking_target_percent ?? 20
+                  )}" />
+                </label>
+                <label>Duck Attack (ms)
+                  <input id="set_speech_satellite_ducking_attack_ms" type="number" min="0" max="10000" value="${escapeHtml(
+                    settings.speech_satellite_ducking_attack_ms ?? 150
+                  )}" />
+                </label>
+                <label>Volume Restore (ms)
+                  <input id="set_speech_satellite_ducking_release_ms" type="number" min="0" max="10000" value="${escapeHtml(
+                    settings.speech_satellite_ducking_release_ms ?? 350
+                  )}" />
+                </label>
+                <div class="small core-inline-section-title" style="grid-column: 1 / -1; margin-top: 8px;">Test Speech Output</div>
                 <label style="grid-column: 1 / -1;">TTS Sample Text
                   <textarea id="set_speech_tts_sample_text" rows="3">Hello from Tater. This is a voice preview.</textarea>
                 </label>
@@ -26561,6 +26927,8 @@ async function loadSettingsView() {
                   <button type="button" id="settings-speech-tts-preview" class="inline-btn">Test Voice</button>
                   <button type="button" id="settings-speech-tts-download" class="inline-btn">Download Sample</button>
                   <span id="settings-speech-tts-preview-status" class="small"></span>
+                </div>
+              </div>
                 </div>
               </div>
               <div class="inline-row hydra-section-actions" style="grid-column: 1 / -1;">
@@ -26597,7 +26965,7 @@ async function loadSettingsView() {
               </div>
               </div>
 
-              <div class="settings-subpanel" data-models-panel="speakerid">
+              <div class="settings-subpanel" data-models-panel="speakerid" data-spud-link-identity-owner="local">
                 ${renderSpudLinkRouteNotice("speaker_id")}
                 ${speechBrainSettingsHtml}
                 ${renderSettingsSectionIntro(
@@ -27182,6 +27550,23 @@ async function loadSettingsView() {
   document.querySelectorAll("[data-models-panel]").forEach((panel) => {
     const routeNotice = Array.from(panel.children).find((child) => child.classList?.contains("spud-link-route-notice"));
     const locksWithoutNotice = panel.dataset.spudLinkLockWithoutNotice === "true";
+    if (panel.dataset.spudLinkPartialLock === "speech") {
+      panel.querySelectorAll('[data-spud-link-route-locked="true"]').forEach((child) => {
+        child.classList.add("is-spud-link-routed-locked");
+        child.setAttribute("inert", "");
+        child.setAttribute("aria-disabled", "true");
+      });
+      return;
+    }
+    if (panel.dataset.spudLinkIdentityOwner === "local") {
+      panel.classList.add("is-spud-link-identity-local");
+      panel.querySelectorAll('[data-spud-link-route-locked="true"]').forEach((child) => {
+        child.classList.add("is-spud-link-routed-locked");
+        child.setAttribute("inert", "");
+        child.setAttribute("aria-disabled", "true");
+      });
+      return;
+    }
     if (!routeNotice && !locksWithoutNotice) return;
     panel.classList.add("is-spud-link-locked");
     Array.from(panel.children).forEach((child) => {
@@ -30199,6 +30584,29 @@ async function loadSettingsView() {
   const speechChatterboxTtsLanguageWrapEl = document.getElementById("speech-chatterbox-tts-language-wrap");
   const speechChatterboxTtsLanguageEl = document.getElementById("set_speech_chatterbox_tts_language");
   const announcementTtsBackendEl = document.getElementById("set_speech_announcement_tts_backend");
+  const announcementDirectReuseNoteEl = document.getElementById("speech-announcement-direct-reuse-note");
+  const announcementKokoroOutputGainWrapEl = document.getElementById("speech-announcement-kokoro-output-gain-wrap");
+  const announcementKokoroOutputGainEl = document.getElementById("set_speech_announcement_kokoro_output_gain");
+  const announcementPocketTtsOutputGainWrapEl = document.getElementById("speech-announcement-pocket-tts-output-gain-wrap");
+  const announcementPocketTtsOutputGainEl = document.getElementById("set_speech_announcement_pocket_tts_output_gain");
+  const announcementQwenTtsProfileWrapEl = document.getElementById("speech-announcement-qwen-tts-profile-wrap");
+  const announcementQwenTtsCloneAudioEl = document.getElementById("set_speech_announcement_qwen_tts_clone_audio");
+  const announcementQwenTtsCloneUploadBtnEl = document.getElementById("settings-speech-announcement-qwen-tts-clone-upload");
+  const announcementQwenTtsClonePlayBtnEl = document.getElementById("settings-speech-announcement-qwen-tts-clone-play");
+  const announcementQwenTtsCloneRemoveBtnEl = document.getElementById("settings-speech-announcement-qwen-tts-clone-remove");
+  const announcementQwenTtsCloneStatusEl = document.getElementById("speech-announcement-qwen-tts-clone-status");
+  const announcementQwenTtsCloneTextEl = document.getElementById("set_speech_announcement_qwen_tts_clone_text");
+  const announcementQwenTtsLanguageEl = document.getElementById("set_speech_announcement_qwen_tts_language");
+  const announcementQwenTtsInstructEl = document.getElementById("set_speech_announcement_qwen_tts_instruct");
+  const announcementOmnivoiceTtsProfileWrapEl = document.getElementById("speech-announcement-omnivoice-tts-profile-wrap");
+  const announcementOmnivoiceTtsCloneAudioEl = document.getElementById("set_speech_announcement_omnivoice_tts_clone_audio");
+  const announcementOmnivoiceTtsCloneUploadBtnEl = document.getElementById("settings-speech-announcement-omnivoice-tts-clone-upload");
+  const announcementOmnivoiceTtsClonePlayBtnEl = document.getElementById("settings-speech-announcement-omnivoice-tts-clone-play");
+  const announcementOmnivoiceTtsCloneRemoveBtnEl = document.getElementById("settings-speech-announcement-omnivoice-tts-clone-remove");
+  const announcementOmnivoiceTtsCloneStatusEl = document.getElementById("speech-announcement-omnivoice-tts-clone-status");
+  const announcementOmnivoiceTtsCloneTextEl = document.getElementById("set_speech_announcement_omnivoice_tts_clone_text");
+  const announcementOmnivoiceTtsLanguageEl = document.getElementById("set_speech_announcement_omnivoice_tts_language");
+  const announcementOmnivoiceTtsInstructEl = document.getElementById("set_speech_announcement_omnivoice_tts_instruct");
   const announcementOpenAiTtsBaseUrlWrapEl = document.getElementById("speech-announcement-openai-tts-base-url-wrap");
   const announcementOpenAiTtsBaseUrlEl = document.getElementById("set_speech_announcement_openai_tts_base_url");
   const announcementOpenAiTtsApiKeyWrapEl = document.getElementById("speech-announcement-openai-tts-api-key-wrap");
@@ -30561,6 +30969,16 @@ async function loadSettingsView() {
     const sttBackend = String(speechSttBackendEl?.value || "").trim();
     const ttsBackend = String(speechTtsBackendEl?.value || "").trim();
     const announcementTtsBackend = String(announcementTtsBackendEl?.value || "").trim();
+    const announcementUsesDirect = announcementTtsBackend === "same_as_direct";
+    const directBackendLabel = String(
+      speechTtsBackendEl?.selectedOptions?.[0]?.textContent || ttsBackend || "Direct Reply TTS"
+    ).trim();
+    const reuseOption = Array.from(announcementTtsBackendEl?.options || []).find(
+      (option) => option.value === "same_as_direct"
+    );
+    if (reuseOption) {
+      reuseOption.textContent = `Same as Direct Reply TTS (${directBackendLabel})`;
+    }
     setElementVisible(speechWyomingSttHostWrapEl, sttBackend === "wyoming");
     setElementVisible(speechWyomingSttPortWrapEl, sttBackend === "wyoming");
     setElementVisible(speechFasterWhisperSettingsWrapEl, sttBackend === "faster_whisper");
@@ -30571,10 +30989,10 @@ async function loadSettingsView() {
     const showsChatterbox = isChatterboxTtsBackend(ttsBackend);
     const showsWyoming = ttsBackend === "wyoming";
     const showsSharedOpenAiConfig = showsOpenAiCompatible || isOpenAiCompatibleTtsBackend(announcementTtsBackend);
-    const showsKokoroOutputGain = ttsBackend === "kokoro" || announcementTtsBackend === "kokoro";
-    const showsPocketTtsOutputGain = ttsBackend === "pocket_tts" || announcementTtsBackend === "pocket_tts";
-    const showsQwenTtsProfile = ttsBackend === "qwen3_tts" || announcementTtsBackend === "qwen3_tts";
-    const showsOmnivoiceTtsProfile = ttsBackend === "omnivoice" || announcementTtsBackend === "omnivoice";
+    const showsKokoroOutputGain = ttsBackend === "kokoro";
+    const showsPocketTtsOutputGain = ttsBackend === "pocket_tts";
+    const showsQwenTtsProfile = ttsBackend === "qwen3_tts";
+    const showsOmnivoiceTtsProfile = ttsBackend === "omnivoice";
 
     syncSpeechTtsModelOptions({ forceReset: resetTtsSelection });
     syncSpeechTtsVoiceOptions({ forceReset: resetTtsSelection });
@@ -30642,11 +31060,18 @@ async function loadSettingsView() {
     const showsAnnouncementChatterbox = isChatterboxTtsBackend(announcementTtsBackend);
     const showsAnnouncementWyoming = announcementTtsBackend === "wyoming";
 
-    syncAnnouncementTtsModelOptions({ forceReset: resetTtsSelection });
-    syncAnnouncementTtsVoiceOptions({ forceReset: resetTtsSelection });
+    if (!announcementUsesDirect) {
+      syncAnnouncementTtsModelOptions({ forceReset: resetTtsSelection });
+      syncAnnouncementTtsVoiceOptions({ forceReset: resetTtsSelection });
+    }
 
+    setElementVisible(announcementDirectReuseNoteEl, announcementUsesDirect);
     setElementVisible(announcementTtsModelWrapEl, showsAnnouncementLocalModel);
     setElementVisible(announcementTtsVoiceWrapEl, showsAnnouncementVoiceSelect);
+    setElementVisible(announcementKokoroOutputGainWrapEl, announcementTtsBackend === "kokoro");
+    setElementVisible(announcementPocketTtsOutputGainWrapEl, announcementTtsBackend === "pocket_tts");
+    setElementVisible(announcementQwenTtsProfileWrapEl, announcementTtsBackend === "qwen3_tts");
+    setElementVisible(announcementOmnivoiceTtsProfileWrapEl, announcementTtsBackend === "omnivoice");
     setElementVisible(announcementOpenAiTtsBaseUrlWrapEl, showsAnnouncementOpenAiCompatible);
     setElementVisible(announcementOpenAiTtsApiKeyWrapEl, showsAnnouncementOpenAiCompatible);
     setElementVisible(announcementOpenAiTtsModelsToolsWrapEl, showsAnnouncementOpenAiCompatible);
@@ -31319,37 +31744,38 @@ async function loadSettingsView() {
     return Number.isFinite(parsed) ? parsed : null;
   };
 
-  const managedTtsProfileElements = (backend) => {
+  const managedTtsProfileElements = (backend, scope = "direct") => {
     const token = String(backend || "").trim();
+    const isAnnouncement = String(scope || "").trim() === "announcement";
     if (token === "qwen3_tts") {
       return {
-        file: speechQwenTtsCloneAudioEl,
-        upload: speechQwenTtsCloneUploadBtnEl,
-        play: speechQwenTtsClonePlayBtnEl,
-        remove: speechQwenTtsCloneRemoveBtnEl,
-        status: speechQwenTtsCloneStatusEl,
-        cloneText: speechQwenTtsCloneTextEl,
-        language: speechQwenTtsLanguageEl,
-        instruct: speechQwenTtsInstructEl,
+        file: isAnnouncement ? announcementQwenTtsCloneAudioEl : speechQwenTtsCloneAudioEl,
+        upload: isAnnouncement ? announcementQwenTtsCloneUploadBtnEl : speechQwenTtsCloneUploadBtnEl,
+        play: isAnnouncement ? announcementQwenTtsClonePlayBtnEl : speechQwenTtsClonePlayBtnEl,
+        remove: isAnnouncement ? announcementQwenTtsCloneRemoveBtnEl : speechQwenTtsCloneRemoveBtnEl,
+        status: isAnnouncement ? announcementQwenTtsCloneStatusEl : speechQwenTtsCloneStatusEl,
+        cloneText: isAnnouncement ? announcementQwenTtsCloneTextEl : speechQwenTtsCloneTextEl,
+        language: isAnnouncement ? announcementQwenTtsLanguageEl : speechQwenTtsLanguageEl,
+        instruct: isAnnouncement ? announcementQwenTtsInstructEl : speechQwenTtsInstructEl,
       };
     }
     if (token === "omnivoice") {
       return {
-        file: speechOmnivoiceTtsCloneAudioEl,
-        upload: speechOmnivoiceTtsCloneUploadBtnEl,
-        play: speechOmnivoiceTtsClonePlayBtnEl,
-        remove: speechOmnivoiceTtsCloneRemoveBtnEl,
-        status: speechOmnivoiceTtsCloneStatusEl,
-        cloneText: speechOmnivoiceTtsCloneTextEl,
-        language: speechOmnivoiceTtsLanguageEl,
-        instruct: speechOmnivoiceTtsInstructEl,
+        file: isAnnouncement ? announcementOmnivoiceTtsCloneAudioEl : speechOmnivoiceTtsCloneAudioEl,
+        upload: isAnnouncement ? announcementOmnivoiceTtsCloneUploadBtnEl : speechOmnivoiceTtsCloneUploadBtnEl,
+        play: isAnnouncement ? announcementOmnivoiceTtsClonePlayBtnEl : speechOmnivoiceTtsClonePlayBtnEl,
+        remove: isAnnouncement ? announcementOmnivoiceTtsCloneRemoveBtnEl : speechOmnivoiceTtsCloneRemoveBtnEl,
+        status: isAnnouncement ? announcementOmnivoiceTtsCloneStatusEl : speechOmnivoiceTtsCloneStatusEl,
+        cloneText: isAnnouncement ? announcementOmnivoiceTtsCloneTextEl : speechOmnivoiceTtsCloneTextEl,
+        language: isAnnouncement ? announcementOmnivoiceTtsLanguageEl : speechOmnivoiceTtsLanguageEl,
+        instruct: isAnnouncement ? announcementOmnivoiceTtsInstructEl : speechOmnivoiceTtsInstructEl,
       };
     }
     return null;
   };
 
-  const updateManagedCloneAudioState = (backend, audio = {}, transcription = null, cloneText = undefined) => {
-    const controls = managedTtsProfileElements(backend);
+  const updateManagedCloneAudioState = (backend, audio = {}, transcription = null, cloneText = undefined, scope = "direct") => {
+    const controls = managedTtsProfileElements(backend, scope);
     if (!controls) {
       return;
     }
@@ -31381,8 +31807,8 @@ async function loadSettingsView() {
     clearSpeechTtsPreviewCache();
   };
 
-  const uploadManagedCloneAudio = async (backend) => {
-    const controls = managedTtsProfileElements(backend);
+  const uploadManagedCloneAudio = async (backend, scope = "direct") => {
+    const controls = managedTtsProfileElements(backend, scope);
     const file = controls?.file?.files?.[0] || null;
     if (!controls || !file) {
       if (controls?.status) {
@@ -31393,7 +31819,7 @@ async function loadSettingsView() {
     controls.upload.disabled = true;
     controls.status.textContent = "Uploading and detecting transcript...";
     try {
-      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`), {
+      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}?scope=${encodeURIComponent(scope)}`), {
         method: "POST",
         headers: {
           "Content-Type": file.type || "application/octet-stream",
@@ -31405,7 +31831,7 @@ async function loadSettingsView() {
       if (!response.ok) {
         throw new Error(String(body?.detail || "Clone audio upload failed."));
       }
-      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text);
+      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text, scope);
     } catch (error) {
       controls.status.textContent = `Upload failed: ${String(error?.message || error)}`;
     } finally {
@@ -31413,30 +31839,30 @@ async function loadSettingsView() {
     }
   };
 
-  const removeManagedCloneAudio = async (backend) => {
-    const controls = managedTtsProfileElements(backend);
+  const removeManagedCloneAudio = async (backend, scope = "direct") => {
+    const controls = managedTtsProfileElements(backend, scope);
     if (!controls) {
       return;
     }
     controls.remove.disabled = true;
     controls.status.textContent = "Removing clone audio...";
     try {
-      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`), {
+      const response = await fetch(withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}?scope=${encodeURIComponent(scope)}`), {
         method: "DELETE",
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(body?.detail || "Could not remove clone audio."));
       }
-      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text);
+      updateManagedCloneAudioState(backend, body?.audio || {}, body?.transcription || null, body?.clone_text, scope);
     } catch (error) {
       controls.status.textContent = `Remove failed: ${String(error?.message || error)}`;
       controls.remove.disabled = false;
     }
   };
 
-  const playManagedCloneAudio = (backend) => {
-    const controls = managedTtsProfileElements(backend);
+  const playManagedCloneAudio = (backend, scope = "direct") => {
+    const controls = managedTtsProfileElements(backend, scope);
     if (!controls || controls.play?.disabled) {
       return;
     }
@@ -31444,7 +31870,7 @@ async function loadSettingsView() {
       speechClonePreviewAudio.pause();
     }
     speechClonePreviewAudio = new Audio(
-      `${withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`)}?ts=${Date.now()}`
+      `${withBasePath(`/api/settings/speech/clone-audio/${encodeURIComponent(backend)}`)}?scope=${encodeURIComponent(scope)}&ts=${Date.now()}`
     );
     speechClonePreviewAudio.play().catch((error) => {
       controls.status.textContent = `Playback failed: ${String(error?.message || error)}`;
@@ -31681,6 +32107,12 @@ async function loadSettingsView() {
     speechOmnivoiceTtsCloneTextEl,
     speechOmnivoiceTtsLanguageEl,
     speechOmnivoiceTtsInstructEl,
+    announcementQwenTtsCloneTextEl,
+    announcementQwenTtsLanguageEl,
+    announcementQwenTtsInstructEl,
+    announcementOmnivoiceTtsCloneTextEl,
+    announcementOmnivoiceTtsLanguageEl,
+    announcementOmnivoiceTtsInstructEl,
   ].forEach((element) => {
     element?.addEventListener("input", clearSpeechTtsPreviewCache);
     element?.addEventListener("change", clearSpeechTtsPreviewCache);
@@ -31691,6 +32123,12 @@ async function loadSettingsView() {
   speechOmnivoiceTtsCloneUploadBtnEl?.addEventListener("click", () => uploadManagedCloneAudio("omnivoice"));
   speechOmnivoiceTtsClonePlayBtnEl?.addEventListener("click", () => playManagedCloneAudio("omnivoice"));
   speechOmnivoiceTtsCloneRemoveBtnEl?.addEventListener("click", () => removeManagedCloneAudio("omnivoice"));
+  announcementQwenTtsCloneUploadBtnEl?.addEventListener("click", () => uploadManagedCloneAudio("qwen3_tts", "announcement"));
+  announcementQwenTtsClonePlayBtnEl?.addEventListener("click", () => playManagedCloneAudio("qwen3_tts", "announcement"));
+  announcementQwenTtsCloneRemoveBtnEl?.addEventListener("click", () => removeManagedCloneAudio("qwen3_tts", "announcement"));
+  announcementOmnivoiceTtsCloneUploadBtnEl?.addEventListener("click", () => uploadManagedCloneAudio("omnivoice", "announcement"));
+  announcementOmnivoiceTtsClonePlayBtnEl?.addEventListener("click", () => playManagedCloneAudio("omnivoice", "announcement"));
+  announcementOmnivoiceTtsCloneRemoveBtnEl?.addEventListener("click", () => removeManagedCloneAudio("omnivoice", "announcement"));
   speechOpenAiTtsModelEl?.addEventListener("change", () => {
     if (speechOpenAiTtsManualModelEl) {
       speechOpenAiTtsManualModelEl.value = "";
@@ -32107,6 +32545,14 @@ async function loadSettingsView() {
     speech_announcement_tts_backend: String(document.getElementById("set_speech_announcement_tts_backend")?.value || "").trim(),
     speech_announcement_tts_model: getAnnouncementTtsModelValue(),
     speech_announcement_tts_voice: getAnnouncementTtsVoiceValue(),
+    speech_announcement_kokoro_output_gain: readTtsOutputGainValue(announcementKokoroOutputGainEl),
+    speech_announcement_pocket_tts_output_gain: readTtsOutputGainValue(announcementPocketTtsOutputGainEl),
+    speech_announcement_qwen_tts_clone_text: String(announcementQwenTtsCloneTextEl?.value || "").trim(),
+    speech_announcement_qwen_tts_language: String(announcementQwenTtsLanguageEl?.value || "").trim(),
+    speech_announcement_qwen_tts_instruct: String(announcementQwenTtsInstructEl?.value || "").trim(),
+    speech_announcement_omnivoice_tts_clone_text: String(announcementOmnivoiceTtsCloneTextEl?.value || "").trim(),
+    speech_announcement_omnivoice_tts_language: String(announcementOmnivoiceTtsLanguageEl?.value || "").trim(),
+    speech_announcement_omnivoice_tts_instruct: String(announcementOmnivoiceTtsInstructEl?.value || "").trim(),
     speech_satellite_ducking_target_percent: readOptionalNumberValue(
       document.getElementById("set_speech_satellite_ducking_target_percent")
     ),
@@ -32433,6 +32879,7 @@ async function loadSettingsView() {
   });
   activateHydraSubtab("settings");
   bindModelSettingsTabs(root);
+  bindSpeechSettingsTabs(root);
   bindEspHomeSettingsTabs(root);
 
   const metricsStatusEl = document.getElementById("settings-cerb-metrics-status");

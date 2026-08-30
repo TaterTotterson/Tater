@@ -30,6 +30,7 @@ from spud_link_models import request_tts_wav_async as spud_link_request_tts_wav_
 from spud_link_models import should_use_hub as spud_link_should_use_hub
 from tateros import integration_store as integration_store_module
 from speech_settings import (
+    ANNOUNCEMENT_TTS_DIRECT_BACKEND,
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
     DEFAULT_CHATTERBOX_TTS_BASE_URL,
     DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE,
@@ -2766,6 +2767,13 @@ async def speak_announcement_targets(
     chatterbox_seed: Any = None,
     chatterbox_speed_factor: Any = None,
     chatterbox_language: Any = None,
+    acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
     voice_core_backend: str = DEFAULT_TTS_BACKEND,
     voice_core_model: str = "",
     voice_core_voice: str = "",
@@ -2808,6 +2816,55 @@ async def speak_announcement_targets(
         return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
 
     selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
+    shared_speech = get_speech_settings() or {}
+    uses_direct_tts = selected_backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND
+    if uses_direct_tts:
+        selected_backend = normalize_tts_backend(shared_speech.get("tts_backend"))
+        model = _text(shared_speech.get("tts_model"))
+        voice = _text(shared_speech.get("tts_voice"))
+        wyoming_host = _text(shared_speech.get("wyoming_tts_host"))
+        wyoming_port = shared_speech.get("wyoming_tts_port")
+        wyoming_voice = _text(shared_speech.get("wyoming_tts_voice"))
+        openai_base_url = shared_speech.get("openai_tts_base_url")
+        openai_api_key = shared_speech.get("openai_tts_api_key")
+        chatterbox_base_url = shared_speech.get("chatterbox_tts_base_url")
+        chatterbox_voice_mode = shared_speech.get("chatterbox_tts_voice_mode")
+        chatterbox_chunk_size = shared_speech.get("chatterbox_tts_chunk_size")
+        chatterbox_temperature = shared_speech.get("chatterbox_tts_temperature")
+        chatterbox_exaggeration = shared_speech.get("chatterbox_tts_exaggeration")
+        chatterbox_cfg_weight = shared_speech.get("chatterbox_tts_cfg_weight")
+        chatterbox_seed = shared_speech.get("chatterbox_tts_seed")
+        chatterbox_speed_factor = shared_speech.get("chatterbox_tts_speed_factor")
+        chatterbox_language = shared_speech.get("chatterbox_tts_language")
+        kokoro_output_gain = shared_speech.get("kokoro_output_gain")
+        pocket_tts_output_gain = shared_speech.get("pocket_tts_output_gain")
+        profile_prefix = "qwen_tts" if selected_backend == "qwen3_tts" else "omnivoice_tts"
+    else:
+        model = _text(model) or _text(shared_speech.get("announcement_tts_model"))
+        voice = _text(voice) or _text(shared_speech.get("announcement_tts_voice"))
+        wyoming_host = _text(wyoming_host) or _text(shared_speech.get("announcement_wyoming_tts_host"))
+        wyoming_port = wyoming_port if wyoming_port is not None else shared_speech.get("announcement_wyoming_tts_port")
+        wyoming_voice = _text(wyoming_voice) or _text(shared_speech.get("announcement_wyoming_tts_voice"))
+        openai_base_url = openai_base_url if openai_base_url is not None else shared_speech.get("announcement_openai_tts_base_url")
+        openai_api_key = openai_api_key if openai_api_key is not None else shared_speech.get("announcement_openai_tts_api_key")
+        chatterbox_base_url = chatterbox_base_url if chatterbox_base_url is not None else shared_speech.get("announcement_chatterbox_tts_base_url")
+        chatterbox_voice_mode = chatterbox_voice_mode if chatterbox_voice_mode is not None else shared_speech.get("announcement_chatterbox_tts_voice_mode")
+        chatterbox_chunk_size = chatterbox_chunk_size if chatterbox_chunk_size is not None else shared_speech.get("announcement_chatterbox_tts_chunk_size")
+        chatterbox_temperature = chatterbox_temperature if chatterbox_temperature is not None else shared_speech.get("announcement_chatterbox_tts_temperature")
+        chatterbox_exaggeration = chatterbox_exaggeration if chatterbox_exaggeration is not None else shared_speech.get("announcement_chatterbox_tts_exaggeration")
+        chatterbox_cfg_weight = chatterbox_cfg_weight if chatterbox_cfg_weight is not None else shared_speech.get("announcement_chatterbox_tts_cfg_weight")
+        chatterbox_seed = chatterbox_seed if chatterbox_seed is not None else shared_speech.get("announcement_chatterbox_tts_seed")
+        chatterbox_speed_factor = chatterbox_speed_factor if chatterbox_speed_factor is not None else shared_speech.get("announcement_chatterbox_tts_speed_factor")
+        chatterbox_language = chatterbox_language if chatterbox_language is not None else shared_speech.get("announcement_chatterbox_tts_language")
+        kokoro_output_gain = kokoro_output_gain if kokoro_output_gain is not None else shared_speech.get("announcement_kokoro_output_gain")
+        pocket_tts_output_gain = pocket_tts_output_gain if pocket_tts_output_gain is not None else shared_speech.get("announcement_pocket_tts_output_gain")
+        profile_prefix = "announcement_qwen_tts" if selected_backend == "qwen3_tts" else "announcement_omnivoice_tts"
+    acceleration = acceleration if acceleration is not None else shared_speech.get("acceleration")
+    if selected_backend in {"qwen3_tts", "omnivoice"}:
+        clone_audio = clone_audio if clone_audio is not None else shared_speech.get(f"{profile_prefix}_clone_audio")
+        clone_text = clone_text if clone_text is not None else shared_speech.get(f"{profile_prefix}_clone_text")
+        managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
+        managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
     warnings: list[str] = []
     sent_count = 0
     result: Dict[str, Any] = {
@@ -2839,6 +2896,13 @@ async def speak_announcement_targets(
         chatterbox_seed=chatterbox_seed,
         chatterbox_speed_factor=chatterbox_speed_factor,
         chatterbox_language=chatterbox_language,
+        acceleration=acceleration,
+        kokoro_output_gain=kokoro_output_gain,
+        pocket_tts_output_gain=pocket_tts_output_gain,
+        clone_audio=clone_audio,
+        clone_text=clone_text,
+        managed_language=managed_language,
+        managed_instruct=managed_instruct,
     )
     result["bytes"] = len(wav_bytes or b"")
     logger.info(
@@ -3030,6 +3094,8 @@ async def play_announcement_audio_targets(
         + len(integration_devices)
     )
     selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
+    if selected_backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND:
+        selected_backend = normalize_tts_backend((get_speech_settings() or {}).get("tts_backend"))
     logger.info(
         "[speech_tts] play_announcement_audio_targets backend=%s raw_targets=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
         selected_backend,

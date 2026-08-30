@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -48,6 +49,13 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
             redis = self.paired()
             self.assertTrue(spud_link_models.should_use_hub("llm", redis_conn=redis))
             self.assertFalse(spud_link_models.should_use_hub("stt", redis_conn=redis))
+            self.assertFalse(spud_link_models.should_use_hub("vad", redis_conn=redis))
+
+    def test_vad_can_be_routed_independently_or_with_all_models(self):
+        explicit = self.paired(model_routing_enabled="false", model_route_vad="hub")
+        self.assertTrue(spud_link_models.should_use_hub("vad", redis_conn=explicit))
+        local = self.paired(model_routing_enabled="true", model_route_vad="local")
+        self.assertFalse(spud_link_models.should_use_hub("vad", redis_conn=local))
 
     def test_edge_auto_and_explicit_routes(self):
         with patch.object(spud_link_models, "remote_only_enabled", return_value=True):
@@ -83,6 +91,28 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
         self.assertEqual(captured["url"], "http://hub.local:8501/api/spudlink/v1/models/capabilities")
         self.assertEqual(captured["authorization"], "Bearer secret-token")
         self.assertEqual(captured["body"], {"probe": True})
+
+    def test_stream_url_carries_audio_endpointing_and_stt_choices(self):
+        endpoint = spud_link_models._stt_stream_url(
+            "https://hub.example/tater",
+            audio_format={"rate": 16000, "width": 2, "channels": 1},
+            language="en",
+            user="Sally",
+            device="Reachy Kitchen",
+            transcribe=False,
+            vad_ignore_s=0.35,
+        )
+        parsed = urlparse(endpoint)
+        query = parse_qs(parsed.query)
+
+        self.assertEqual(parsed.scheme, "wss")
+        self.assertEqual(parsed.path, "/tater/api/spudlink/v1/stt/stream")
+        self.assertEqual(query["rate"], ["16000"])
+        self.assertEqual(query["bits"], ["16"])
+        self.assertEqual(query["channels"], ["1"])
+        self.assertEqual(query["transcribe"], ["0"])
+        self.assertEqual(query["vad_ignore_ms"], ["350"])
+        self.assertEqual(query["device"], ["Reachy Kitchen"])
 
     def test_remote_runtime_inventory_groups_shared_base_model_roles(self):
         model = "TaterTotterson/gemma-4-26B-A4B-it-GGUF-Tater-NoThink::gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
@@ -153,6 +183,31 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
         self.assertNotIn('"model_path"', public_inventory)
         self.assertNotIn('"model_root"', public_inventory)
         self.assertNotIn('"cache_key"', public_inventory)
+
+    def test_hub_face_embedding_operation_is_stateless(self):
+        source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")
+        endpoint = source[
+            source.index('def spud_link_model_face_id(') : source.index(
+                '@app.post("/api/spudlink/v1/tts/speech")'
+            )
+        ]
+
+        self.assertIn('{"embed", "encode", "embedding", "embeddings"}', endpoint)
+        self.assertIn("face_id_runtime.analyze_image", endpoint)
+        self.assertIn('"stored": False', endpoint)
+        self.assertIn('"model": face_id_runtime.embedding_model_metadata()', endpoint)
+
+    def test_hub_speaker_embedding_operation_is_stateless(self):
+        source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")
+        endpoint = source[
+            source.index('def spud_link_model_speaker_id(') : source.index(
+                '@app.post("/api/spudlink/v1/models/emotion-id")'
+            )
+        ]
+
+        self.assertIn('{"embed", "encode", "embedding", "embeddings"}', endpoint)
+        self.assertIn("speaker_embedding_for_audio", endpoint)
+        self.assertIn("Speaker ID is disabled on the Spud Hub", endpoint)
 
 
 if __name__ == "__main__":

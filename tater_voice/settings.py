@@ -9,6 +9,10 @@ from . import ui_helpers as esphome_ui_helpers
 
 VOICE_MODEL_SETTING_GROUPS = [
     (
+        "Voice Activity Detection",
+        ["VOICE_VAD_BACKEND"],
+    ),
+    (
         "Faster Whisper",
         [
             "VOICE_FASTER_WHISPER_BEAM_SIZE",
@@ -50,7 +54,6 @@ VOICE_STANDALONE_SETTING_KEYS = {
     "VOICE_CONTINUED_CHAT_ENABLED",
 }
 VOICE_INTERNAL_TUNING_KEYS = {
-    "VOICE_VAD_BACKEND",
     "VOICE_VAD_SILENCE_SECONDS",
     "VOICE_VAD_TIMEOUT_SECONDS",
     "VOICE_VAD_NO_SPEECH_TIMEOUT_S",
@@ -375,7 +378,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
         },
         {
             "key": "VOICE_VAD_BACKEND",
-            "label": "VAD Backend",
+            "label": "Speech-End Detection (VAD)",
             "type": "select",
             "default": vp.DEFAULT_VAD_BACKEND,
             "options": [
@@ -383,7 +386,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
                 {"value": "webrtc", "label": "WebRTC (lightweight)"},
                 {"value": "auto", "label": "Auto"},
             ],
-            "description": "Silero is the best default. WebRTC is much lighter for low-power PCs and Pi-class hosts.",
+            "description": "Choose the local endpointing engine and Hub fallback. To run VAD on the paired Hub, select Spud Hub under Settings > Spud Link > Use a Spud Hub.",
         },
         {
             "key": "VOICE_VAD_SILENCE_SECONDS",
@@ -716,7 +719,7 @@ def settings_item_form() -> Dict[str, Any]:
         "id": "voice_settings",
         "group": "settings",
         "title": "Voice Pipeline Settings",
-        "subtitle": "Manage optional native voice features here. Tater automatically tunes listening and endpoint detection.",
+        "subtitle": "Choose where speech-end detection runs and manage optional native voice features.",
         "sections": list(settings_sections()),
         "save_action": "voice_settings_save",
         "save_label": "Save Settings",

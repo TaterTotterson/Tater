@@ -1477,6 +1477,34 @@ async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason
 async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
     vp = _vp()
     backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
+    spud_stream = getattr(session, "spud_link_stt_stream", None)
+    if spud_stream is not None and bool(getattr(session, "spud_link_endpointing_reuse_stt", False)):
+        try:
+            remote = await spud_stream.wait_final(timeout=120.0)
+            session.stt_backend_effective = "spud_link"
+            session.stt_transcript = vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            vp._native_debug(
+                f"Spud Hub streaming STT transcript selector={session.selector} "
+                f"session_id={session.session_id} transcript_len={len(session.stt_transcript)}"
+            )
+            return session.stt_transcript
+        except Exception as exc:
+            session.spud_link_endpointing_error = vp._text(exc) or type(exc).__name__
+            vp.logger.warning(
+                "[native-voice] Spud Hub streaming STT failed; retrying configured route selector=%s session_id=%s error=%s",
+                session.selector,
+                session.session_id,
+                session.spud_link_endpointing_error,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await spud_stream.close()
+            session.spud_link_stt_stream = None
+    elif spud_stream is not None:
+        with contextlib.suppress(Exception):
+            await spud_stream.close()
+        session.spud_link_stt_stream = None
+
     if spud_link_should_use_hub("stt", redis_conn=vp.redis_client):
         try:
             audio_bytes = vp._stt_audio_bytes_for_transcription(session)

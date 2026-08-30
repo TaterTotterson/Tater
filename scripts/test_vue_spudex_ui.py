@@ -51,6 +51,36 @@ class VueSpudexTests(unittest.TestCase):
         self.assertNotIn("location.reload", source)
         self.assertNotIn("innerHTML", source)
 
+    def test_workbench_keeps_chat_and_runtime_output_separate(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="tsx-spud-bar"', source)
+        self.assertIn('class="tv-panel tsx-chat-card"', source)
+        self.assertIn('class="tv-panel tsx-terminal-card"', source)
+        self.assertIn('role="log"', source)
+        self.assertIn("const nonChatLogs", source)
+        self.assertIn("grid-template-columns: minmax(0, 1.06fr) minmax(0, .94fr)", styles)
+
+    def test_manual_session_is_a_single_interactive_terminal(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="tsx-manual-terminal"', source)
+        self.assertIn('class="tsx-manual-prompt"', source)
+        self.assertIn('aria-label="Terminal command"', source)
+        self.assertIn("preserveLogs", source)
+        self.assertNotIn('class="tv-panel tsx-run-card"', source)
+        self.assertNotIn('class="tv-panel tsx-manual-history"', source)
+        self.assertIn(".tsx-terminal-check input.tv-checkbox", styles)
+
+    def test_settings_checkboxes_keep_compact_dimensions(self) -> None:
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+
+        self.assertIn(".tater-vue-surface.tsx-spudex input.tv-checkbox", styles)
+        self.assertIn("width: 17px !important", styles)
+        self.assertIn("height: 17px !important", styles)
+
     def test_spudex_includes_complete_session_insights_and_policy(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")

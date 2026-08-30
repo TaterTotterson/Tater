@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 import wave
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from tater_runtime_profile import remote_only_enabled
 
@@ -16,6 +16,7 @@ from tater_runtime_profile import remote_only_enabled
 SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
 MODEL_KINDS = (
     "llm",
+    "vad",
     "stt",
     "tts",
     "vision",
@@ -29,6 +30,7 @@ ROUTE_CHOICES = frozenset({"auto", "hub", "local"})
 
 _RUNTIME_KIND_LABELS = {
     "llm": "LLM",
+    "vad": "Voice Activity Detection",
     "stt": "STT",
     "tts": "TTS",
     "vision": "Vision",
@@ -42,6 +44,9 @@ _RUNTIME_ROLE_KINDS = {
     "base": "llm",
     "base llm": "llm",
     "llm": "llm",
+    "vad": "vad",
+    "voice activity detection": "vad",
+    "speech end detection": "vad",
     "image": "vision",
     "vision": "vision",
     "audio": "audio",
@@ -281,6 +286,213 @@ def _connection(*, redis_conn: Any = None) -> tuple[str, str]:
     if settings.get("mode") != "spudlet" or not hub_url or not token:
         raise RuntimeError("Spud Link model routing is not paired. Connect this Spudlet to a Spud Hub first.")
     return hub_url, token
+
+
+def _stt_stream_url(
+    hub_url: str,
+    *,
+    audio_format: Dict[str, Any],
+    language: str = "",
+    user: str = "",
+    device: str = "",
+    transcribe: bool = True,
+    vad_ignore_s: float = 0.0,
+) -> str:
+    parsed = urlparse(_text(hub_url).rstrip("/"))
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    base_path = str(parsed.path or "").rstrip("/")
+    query = urlencode(
+        {
+            "rate": max(1, int(audio_format.get("rate") or 16000)),
+            "bits": max(8, int(audio_format.get("width") or 2) * 8),
+            "channels": max(1, int(audio_format.get("channels") or 1)),
+            "language": _text(language),
+            "user": _text(user),
+            "device": _text(device),
+            "transcribe": "1" if transcribe else "0",
+            "vad_ignore_ms": max(0, min(2000, int(round(float(vad_ignore_s or 0.0) * 1000.0)))),
+        }
+    )
+    return urlunparse(
+        parsed._replace(
+            scheme=scheme,
+            path=f"{base_path}/api/spudlink/v1/stt/stream",
+            params="",
+            query=query,
+            fragment="",
+        )
+    )
+
+
+class SpudLinkSttStream:
+    """Live Spud Hub endpointing stream with an optional reusable STT result."""
+
+    def __init__(self, *, client_session: Any, websocket: Any) -> None:
+        self._client_session = client_session
+        self._websocket = websocket
+        self._events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        self._ready: asyncio.Future[Dict[str, Any]] = loop.create_future()
+        self._final: asyncio.Future[Dict[str, Any]] = loop.create_future()
+        self._reader_task = asyncio.create_task(self._reader())
+        self._closed = False
+        self._stop_requested = False
+
+    @staticmethod
+    def _result_error(message: Any) -> Dict[str, Any]:
+        return {"ok": False, "type": "error", "error": _text(message) or "Spud Hub stream closed unexpectedly."}
+
+    async def _reader(self) -> None:
+        try:
+            import aiohttp
+
+            async for message in self._websocket:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        event = json.loads(str(message.data or "{}"))
+                    except Exception:
+                        event = self._result_error("Spud Hub returned an invalid stream event.")
+                    if not isinstance(event, dict):
+                        event = self._result_error("Spud Hub returned an invalid stream event.")
+                    await self._events.put(event)
+                    event_type = _text(event.get("type")).lower()
+                    if event_type == "listening" and not self._ready.done():
+                        self._ready.set_result(event)
+                    if event_type in {"final", "error", "cancelled"}:
+                        if not self._final.done():
+                            self._final.set_result(event)
+                        if event_type == "error" and not self._ready.done():
+                            self._ready.set_result(event)
+                elif message.type in {
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                }:
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = self._result_error(exc)
+            await self._events.put(error)
+            if not self._ready.done():
+                self._ready.set_result(error)
+            if not self._final.done():
+                self._final.set_result(error)
+        finally:
+            error = self._result_error("Spud Hub stream closed before a final result.")
+            if not self._ready.done():
+                self._ready.set_result(error)
+            if not self._final.done():
+                self._final.set_result(error)
+
+    async def wait_until_ready(self, *, timeout: float = 5.0) -> Dict[str, Any]:
+        event = await asyncio.wait_for(asyncio.shield(self._ready), timeout=max(0.25, float(timeout)))
+        if event.get("ok") is False or _text(event.get("type")).lower() == "error":
+            raise RuntimeError(_text(event.get("error")) or "Spud Hub rejected the endpointing stream.")
+        return event
+
+    async def send_audio(self, audio_bytes: bytes) -> None:
+        if self._closed or self._websocket.closed:
+            raise RuntimeError("Spud Hub endpointing stream is closed.")
+        data = bytes(audio_bytes or b"")
+        if data:
+            await self._websocket.send_bytes(data)
+
+    def drain_events(self) -> list[Dict[str, Any]]:
+        events: list[Dict[str, Any]] = []
+        while True:
+            try:
+                events.append(self._events.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return events
+
+    async def wait_final(self, *, timeout: float = 120.0) -> Dict[str, Any]:
+        event = await asyncio.wait_for(asyncio.shield(self._final), timeout=max(1.0, float(timeout)))
+        if event.get("ok") is False or _text(event.get("type")).lower() == "error":
+            raise RuntimeError(_text(event.get("error")) or "Spud Hub endpointing failed.")
+        return event
+
+    async def finish(self) -> None:
+        if self._closed or self._stop_requested or self._websocket.closed:
+            return
+        self._stop_requested = True
+        await self._websocket.send_json({"type": "stop"})
+
+    async def close(self, *, abort: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self._websocket.closed:
+            try:
+                if abort:
+                    await self._websocket.send_json({"type": "cancel"})
+                elif not self._stop_requested:
+                    await self._websocket.send_json({"type": "stop"})
+            except Exception:
+                pass
+            try:
+                await self._websocket.close()
+            except Exception:
+                pass
+        if self._reader_task is not asyncio.current_task() and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except BaseException:
+                pass
+        try:
+            await self._client_session.close()
+        except Exception:
+            pass
+
+
+async def open_stt_stream(
+    *,
+    audio_format: Dict[str, Any],
+    language: str = "",
+    user: str = "",
+    device: str = "",
+    transcribe: bool = True,
+    vad_ignore_s: float = 0.0,
+    redis_conn: Any = None,
+    connect_timeout: float = 5.0,
+) -> SpudLinkSttStream:
+    import aiohttp
+
+    hub_url, token = _connection(redis_conn=redis_conn)
+    endpoint = _stt_stream_url(
+        hub_url,
+        audio_format=audio_format,
+        language=language,
+        user=user,
+        device=device,
+        transcribe=transcribe,
+        vad_ignore_s=vad_ignore_s,
+    )
+    timeout_s = max(0.5, float(connect_timeout))
+    client_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=timeout_s))
+    stream: Optional[SpudLinkSttStream] = None
+    try:
+        websocket = await client_session.ws_connect(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-SpudLink-Client": "tater-spudlet",
+                "X-SpudLink-User": _text(user),
+                "X-SpudLink-Device": _text(device),
+            },
+            heartbeat=30.0,
+        )
+        stream = SpudLinkSttStream(client_session=client_session, websocket=websocket)
+        await stream.wait_until_ready(timeout=timeout_s)
+        return stream
+    except Exception:
+        if stream is not None:
+            await stream.close(abort=True)
+        else:
+            await client_session.close()
+        raise
 
 
 def _request(

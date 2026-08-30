@@ -66,7 +66,6 @@ const chatMessages = computed<ChatMessageType[]>(() => {
     if (!body) return null;
     if (stream === "user") return { role: "user", username: props.options.profile?.username, content: body };
     if (stream === "assistant") return { role: "assistant", content: body };
-    if (stream === "system" && canonical(entry.level) === "error") return { role: "assistant", content: body };
     return null;
   }).filter(Boolean) as ChatMessageType[];
   return chatBusy.value ? [...rows.slice(-20), { role: "assistant", content: { marker: "typing" } }] : rows.slice(-20);
@@ -103,9 +102,10 @@ function relativeTime(value: unknown): string {
 }
 function mergeLogRows(current: JsonRow[], incoming: JsonRow[], reset: boolean): JsonRow[] {
   const rows = reset ? [] : [...current];
-  const seen = new Set(rows.map((entry) => text(entry.seq) || `${entry.ts ?? ""}\u0000${entry.stream ?? ""}\u0000${entry.text ?? ""}`));
+  const keyFor = (entry: JsonRow) => `${entry._session_id ?? ""}\u0000${text(entry.seq) || `${entry.ts ?? ""}\u0000${entry.stream ?? ""}\u0000${entry.text ?? ""}`}`;
+  const seen = new Set(rows.map(keyFor));
   incoming.forEach((entry) => {
-    const key = text(entry.seq) || `${entry.ts ?? ""}\u0000${entry.stream ?? ""}\u0000${entry.text ?? ""}`;
+    const key = keyFor(entry);
     if (seen.has(key)) return;
     seen.add(key);
     rows.push(entry);
@@ -159,12 +159,12 @@ function selectSession(id: string, load = true) {
   selectedSessionId.value = next; logs.value = []; logCursor.value = 0; props.options.onSessionChange?.(next);
   if (load) void refreshLogs(true);
 }
-function selectManualSession(id: string, load = true) {
+function selectManualSession(id: string, load = true, preserveLogs = false) {
   const next = text(id);
   if (next === manualSessionId.value) return;
-  manualSessionId.value = next; manualLogs.value = []; manualLogCursor.value = 0; props.options.onManualSessionChange?.(next);
+  manualSessionId.value = next; if (!preserveLogs) manualLogs.value = []; manualLogCursor.value = 0; props.options.onManualSessionChange?.(next);
   if (next) { selectedSessionId.value = next; props.options.onSessionChange?.(next); }
-  if (load) void refreshManualLogs(true);
+  if (load) void refreshManualLogs(!preserveLogs);
 }
 
 async function refreshState(quiet = false) {
@@ -187,14 +187,15 @@ async function refreshLogs(reset = false) {
   logs.value = mergeLogRows(logs.value, rows, reset);
   logCursor.value = Number(result.last_seq || (reset ? 0 : logCursor.value));
   await nextTick();
-  const panel = document.querySelector(".tsx-workbench-feed");
-  if (panel instanceof HTMLElement && (reset || panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120)) panel.scrollTop = panel.scrollHeight;
+  document.querySelectorAll(".tsx-chat-scroll, .tsx-terminal-body").forEach((panel) => {
+    if (panel instanceof HTMLElement && (reset || panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120)) panel.scrollTop = panel.scrollHeight;
+  });
 }
 async function refreshManualLogs(reset = false) {
   const id = manualSessionId.value;
   if (!id) { manualLogs.value = []; manualLogCursor.value = 0; return; }
   const result = await fetchLogs(id, reset ? 0 : manualLogCursor.value);
-  const rows = Array.isArray(result.entries) ? result.entries : [];
+  const rows = (Array.isArray(result.entries) ? result.entries : []).map((entry: JsonRow) => ({ ...entry, _session_id: id }));
   manualLogs.value = mergeLogRows(manualLogs.value, rows, reset);
   manualLogCursor.value = Number(result.last_seq || (reset ? 0 : manualLogCursor.value));
   await nextTick();
@@ -248,8 +249,8 @@ async function runCommand() {
   busy.value = "run";
   try {
     const result = await postJson<JsonRow>(props.options.endpoints.run, { command: value, label: value.slice(0, 80), background: background.value });
-    const id = text(result.session?.id); selectSession(id, false); selectManualSession(id, false); command.value = ""; notify("Spudex session started.");
-    await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(true)]);
+    const id = text(result.session?.id); selectSession(id, false); selectManualSession(id, false, true); command.value = ""; notify("Spudex session started.");
+    await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(false)]);
   } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Command failed.", "error"); }
   finally { busy.value = ""; }
 }
@@ -294,6 +295,9 @@ function togglePlatform(value: string, checked: boolean) {
   settingsDraft.allowed_platforms = [...next]; settingsDirty.value = true;
 }
 function chatKeydown(event: KeyboardEvent) { if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) { event.preventDefault(); void sendChat(); } }
+function selectSessionFromEvent(event: Event) { selectSession((event.target as HTMLSelectElement).value); }
+function clearTerminal() { logs.value = logs.value.filter((entry: JsonRow) => ["user", "assistant"].includes(canonical(entry.stream))); }
+function closeSelectedSession() { if (selectedSession.value) void closeSession(selectedSession.value); }
 function handleEscape(event: KeyboardEvent) { if (event.key === "Escape") detailsOpen.value = false; }
 
 watch(() => props.state.payload, () => { ensureSelections(); syncSettings(); }, { deep: false });
@@ -307,36 +311,75 @@ defineExpose({ refresh: () => refreshAll(false) });
 
 <template>
   <div class="tater-vue-surface tsx-spudex">
-    <header class="tv-page-heading"><div><span class="tv-eyebrow">Sandboxed agent workspace</span><h1>Spudex</h1><p>Inspect, run, and guide local agent tasks inside Tater’s protected agent_lab workspace.</p></div><div class="tv-heading-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy ? 'Working' : 'Live' }}</span><button class="tv-button" type="button" @click="refreshAll(false)">Refresh</button></div></header>
-    <div class="tv-metrics"><div><span>Sessions</span><strong>{{ sessions.length }}</strong></div><div><span>Active</span><strong>{{ activeCount }}</strong></div><div><span>Processes</span><strong>{{ modelProcessCount }}</strong></div><div><span>Policy</span><strong>{{ settingsDraft.policy_enabled ? 'On' : 'Off' }}</strong></div></div>
+    <header class="tsx-spudex-header">
+      <div class="tsx-brand"><span class="tsx-spud-mark" aria-hidden="true"><i /><i /><i /></span><div><span class="tv-eyebrow">Tater agent workspace</span><h1>Spudex</h1></div></div>
+      <nav class="tv-tabs tsx-tabs" aria-label="Spudex sections"><button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'workbench' && activeCount">{{ activeCount }}</span></button></nav>
+      <div class="tsx-header-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy ? 'Working' : 'Live' }}</span><button class="tv-button tsx-icon-button" type="button" aria-label="Refresh Spudex" title="Refresh" @click="refreshAll(false)">↻</button></div>
+    </header>
     <div v-if="notice || error" class="tv-notice" :class="{ error: Boolean(error) }">{{ error || notice }}</div>
-    <nav class="tv-tabs tsx-tabs" aria-label="Spudex sections"><button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'workbench' && activeCount">{{ activeCount }}</span></button></nav>
 
     <section v-if="activeTab === 'workbench'" class="tsx-workbench">
-      <div class="tv-panel tsx-session-bar">
-        <header><div><span class="tv-eyebrow">Sessions</span><h2>{{ selectedSession?.label || selectedSession?.command || 'New chat' }}</h2><p>{{ liveStatus }}</p></div><div class="tsx-session-actions"><button class="tv-button" type="button" :disabled="!selectedSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" @click="logs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!selectedActive" @click="stopSession(selectedSessionId)">Stop</button></div></header>
-        <div class="tsx-session-list"><article v-for="session in sessions" :key="session.id" :class="{ selected: String(session.id) === selectedSessionId }"><button type="button" @click="selectSession(String(session.id))"><strong>{{ session.label || session.command || 'Spudex session' }}</strong><small>{{ session.command || session.goal || (session.status === 'draft' ? 'Ready for first message' : '') }}</small><span><b class="tv-state" :class="{ good: isActive(session) }">{{ statusLabel(session.status) }}</b><time>{{ relativeTime(session.updated_ts) }}</time></span></button><button class="tsx-session-close" type="button" aria-label="Close Spudex session" title="Close session" @click="closeSession(session)">×</button></article><div v-if="!sessions.length" class="tv-empty compact">No Spudex sessions yet.</div></div>
+      <div class="tsx-spud-bar">
+        <div class="tsx-session-switcher">
+          <span class="tsx-bar-label"><i :class="{ live: selectedActive }" />Session</span>
+          <select :value="selectedSessionId" aria-label="Selected Spudex session" @change="selectSessionFromEvent">
+            <option v-if="!sessions.length" value="">No sessions yet</option>
+            <option v-for="session in sessions" :key="session.id" :value="String(session.id)">{{ session.label || session.command || 'Spudex session' }} · {{ statusLabel(session.status) }}</option>
+          </select>
+          <button class="tv-button primary tsx-new-chat" type="button" :disabled="busy === 'new-chat'" @click="newChat"><span aria-hidden="true">＋</span> New chat</button>
+        </div>
+        <div class="tsx-runtime-strip">
+          <span class="tsx-bar-label"><i :class="{ live: modelProcesses.length }" />Runtime <b>{{ modelProcessCount }}</b></span>
+          <div class="tsx-process-strip">
+            <span v-if="!modelProcesses.length" class="tsx-runtime-quiet">No tracked processes</span>
+            <article v-for="process in modelProcesses" :key="process.session_id" :title="[process.command, process.cwd].filter(Boolean).join(' · ')"><span>{{ process.label || process.command || 'Spudex process' }}</span><small>{{ process.pid ? `PID ${process.pid}` : 'Starting' }}</small><button type="button" aria-label="Stop model process" title="Kill process" @click="stopSession(String(process.session_id), 'Model process')">×</button></article>
+          </div>
+        </div>
+        <div class="tsx-session-tools">
+          <button class="tv-button" type="button" :disabled="!selectedSession" @click="detailsOpen = true">Details</button>
+          <button class="tv-button danger" type="button" :disabled="!selectedActive" @click="stopSession(selectedSessionId)">Stop</button>
+          <button class="tv-button tsx-icon-button" type="button" :disabled="!selectedSession" aria-label="Close selected session" title="Close session" @click="closeSelectedSession">×</button>
+        </div>
       </div>
 
       <div class="tsx-workbench-grid">
-        <section class="tv-panel tsx-console-card">
-          <header class="tsx-console-head"><div><span class="tsx-live-dot" :class="{ live: selectedActive }" /><div><strong>{{ selectedSession?.label || selectedSession?.command || 'Spudex console' }}</strong><small>{{ selectedSession ? `Session ${String(selectedSession.id).slice(0, 8)}` : 'Start a new chat below' }}</small></div></div><span>{{ activeCount }} active · {{ modelProcessCount }} model process{{ modelProcessCount === 1 ? '' : 'es' }}</span></header>
-          <div class="tsx-workbench-feed">
+        <section class="tv-panel tsx-chat-card">
+          <header class="tsx-pane-head"><div><span class="tsx-pane-icon chat" aria-hidden="true">✦</span><div><strong>Chat with Tater</strong><small>{{ selectedSession?.label || selectedSession?.command || 'A fresh Spudex chat' }}</small></div></div><span class="tv-state" :class="{ good: selectedActive }">{{ selectedSession ? statusLabel(selectedSession.status) : 'Ready' }}</span></header>
+          <div class="tsx-chat-scroll">
             <div v-if="currentChatSession && chatMessages.length" class="tsx-chat-feed"><ChatMessage v-for="(message, index) in chatMessages" :key="`${index}-${message.role}`" :message="message" :profile="options.profile || {}" :files-endpoint="options.endpoints.chatFiles" /></div>
-            <div v-if="nonChatLogs.length" class="tsx-log-list"><article v-for="entry in nonChatLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><time>{{ relativeTime(entry.ts) }}</time><span>{{ entry.stream || 'log' }}</span><pre>{{ entry.text }}</pre></article></div>
-            <div v-if="!logs.length && !chatBusy" class="tv-empty">Ask Spudex to inspect, run, or fix something inside agent_lab.</div>
+            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something in the protected Spudex workspace.</p></div>
           </div>
-          <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Spudex…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button" type="button" @click="newChat">New chat</button><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
+          <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Spudex…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
         </section>
 
-        <aside class="tv-panel tsx-processes"><header><div><span class="tv-eyebrow">Tracked runtime</span><h2>Processes</h2></div><span class="tv-state" :class="{ good: modelProcesses.length }">{{ modelProcesses.length }}</span></header><article v-for="process in modelProcesses" :key="process.session_id"><div><strong>{{ process.label || process.command || 'Spudex process' }}</strong><small>{{ [process.pid ? `PID ${process.pid}` : 'PID pending', process.source, process.cwd].filter(Boolean).join(' · ') }}</small></div><button class="tv-button danger" type="button" @click="stopSession(String(process.session_id), 'Model process')">Kill</button></article><div v-if="!modelProcesses.length" class="tv-empty compact">No model-launched processes running.</div></aside>
+        <section class="tv-panel tsx-terminal-card">
+          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@spudex:{{ selectedSession?.cwd_display || 'workspace' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
+          <div class="tsx-terminal-body" role="log" aria-label="Spudex command output" aria-live="polite">
+            <div v-if="nonChatLogs.length" class="tsx-log-list"><article v-for="entry in nonChatLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><time>{{ relativeTime(entry.ts) }}</time><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article></div>
+            <div v-else class="tsx-terminal-empty"><span>&gt;_</span><strong>Waiting for activity</strong><small>Commands, tool output, and system messages will appear here.</small></div>
+          </div>
+          <footer class="tsx-terminal-status"><span><i :class="{ live: selectedActive }" />{{ selectedActive ? 'Session active' : 'Standing by' }}</span><span>{{ selectedSession ? `#${String(selectedSession.id).slice(0, 8)}` : 'No session' }}</span></footer>
+        </section>
       </div>
     </section>
 
     <section v-else-if="activeTab === 'manual'" class="tsx-manual">
-      <div class="tv-panel tsx-run-card"><header><div><span class="tv-eyebrow">agent_lab</span><h2>Manual Session</h2><p>Run one policy-controlled command from Tater’s working area.</p></div><span class="tv-state">{{ payload.agent_lab || 'agent_lab' }}</span></header><form @submit.prevent="runCommand"><label><span>Command</span><input v-model="command" type="text" autocomplete="off" placeholder="python --version" /></label><label class="tsx-check"><input v-model="background" class="tv-checkbox" type="checkbox" /><span>Keep running</span></label><button class="tv-button primary" type="submit" :disabled="busy === 'run'">Run</button></form></div>
-      <section class="tv-panel tsx-manual-console"><header class="tsx-console-head"><div><span class="tsx-window-dots"><i /><i /><i /></span><div><strong>{{ selectedManualSession?.command || selectedManualSession?.label || 'Manual console' }}</strong><small>tater@spudex:{{ selectedManualSession?.cwd_display || 'workspace' }}</small></div></div><div class="tsx-session-actions"><button class="tv-button" type="button" :disabled="!selectedManualSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" @click="manualLogs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!manualActive" @click="stopSession(manualSessionId, 'Manual session')">Stop</button></div></header><div class="tsx-manual-console-body"><article v-for="entry in manualLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article><div v-if="!manualLogs.length" class="tv-empty">{{ manualSessionId ? 'Console is waiting for output.' : 'Run a command to open a manual console session.' }}</div></div></section>
-      <div class="tv-panel tsx-manual-history"><header><div><span class="tv-eyebrow">Recent commands</span><h2>Manual History</h2></div></header><div><button v-for="session in manualSessions.slice(0, 10)" :key="session.id" type="button" :class="{ selected: String(session.id) === manualSessionId }" @click="selectManualSession(String(session.id))"><span><strong>{{ session.command || session.label || 'Manual run' }}</strong><small>{{ relativeTime(session.updated_ts) }}</small></span><b class="tv-state" :class="{ good: isActive(session) }">{{ statusLabel(session.status) }}</b></button><div v-if="!manualSessions.length" class="tv-empty compact">No manual runs yet.</div></div></div>
+      <section class="tsx-manual-terminal">
+        <header class="tsx-manual-head">
+          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Spudex Terminal</strong><small>tater@spudex:{{ selectedManualSession?.cwd_display || payload.agent_lab || 'agent_lab' }}</small></div></div>
+          <div class="tsx-manual-actions"><span class="tsx-manual-state"><i :class="{ live: manualActive || busy === 'run' }" />{{ busy === 'run' || manualActive ? 'Running' : selectedManualSession ? statusLabel(selectedManualSession.status) : 'Ready' }}</span><button class="tv-button" type="button" :disabled="!selectedManualSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" :disabled="!manualLogs.length" @click="manualLogs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!manualActive" @click="stopSession(manualSessionId, 'Manual session')">Stop</button></div>
+        </header>
+        <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
+          <article v-for="entry in manualLogs" :key="`${entry._session_id || ''}-${entry.seq || entry.ts || ''}-${entry.text || ''}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article>
+          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Commands run inside Tater’s protected agent_lab workspace.</small></div>
+        </div>
+        <form class="tsx-manual-prompt" @submit.prevent="runCommand">
+          <label class="tsx-prompt-line"><span aria-hidden="true">$</span><input v-model="command" type="text" autocomplete="off" aria-label="Terminal command" placeholder="Type a command…" :disabled="busy === 'run'" /></label>
+          <label class="tsx-terminal-check"><input v-model="background" class="tv-checkbox" type="checkbox" /><span>Keep running</span></label>
+          <button class="tv-button primary tsx-terminal-run" type="submit" :disabled="busy === 'run' || !command.trim()"><span aria-hidden="true">↵</span>{{ busy === 'run' ? 'Running…' : 'Run' }}</button>
+        </form>
+        <footer class="tsx-manual-footer"><span>Policy checked</span><span>{{ payload.agent_lab || 'agent_lab' }}</span></footer>
+      </section>
     </section>
 
     <section v-else class="tsx-settings">

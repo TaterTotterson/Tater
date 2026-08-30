@@ -55,6 +55,34 @@ class ManagedTtsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             managed_tts.validate_clone_audio_path("qwen3_tts", self.root / "outside.wav")
 
+    def test_direct_and_announcement_clone_audio_are_independent(self) -> None:
+        direct_path = managed_tts.store_clone_audio(
+            "omnivoice",
+            filename="direct.wav",
+            data=b"RIFF-direct",
+        )
+        announcement_path = managed_tts.store_clone_audio(
+            "omnivoice",
+            filename="announcement.wav",
+            data=b"RIFF-announcement",
+            profile="announcement",
+        )
+
+        self.assertEqual(Path(direct_path).name, "reference.wav")
+        self.assertEqual(Path(announcement_path).name, "announcement-reference.wav")
+        self.assertEqual(Path(direct_path).read_bytes(), b"RIFF-direct")
+        self.assertEqual(Path(announcement_path).read_bytes(), b"RIFF-announcement")
+
+        self.assertTrue(
+            managed_tts.remove_clone_audio(
+                "omnivoice",
+                announcement_path,
+                profile="announcement",
+            )
+        )
+        self.assertTrue(Path(direct_path).is_file())
+        self.assertFalse(Path(announcement_path).exists())
+
     def test_qwen_clone_requires_audio_but_transcript_is_optional(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "reference audio"):
             managed_tts.synthesize_managed_tts_pcm(
