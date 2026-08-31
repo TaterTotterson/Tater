@@ -147,19 +147,68 @@ def _self_ota_session(session_id: str, version: str, created_ts: float) -> dict[
 
 
 class NativeFirmwareOtaCompletionTests(unittest.TestCase):
-    def test_thirdreality_ota_completes_after_device_accepts_handoff(self) -> None:
-        session_id = "fw_thirdreality_handoff"
+    def test_slow_appliance_ota_completes_after_device_accepts_handoff(self) -> None:
+        cases = (
+            ("thirdreality_s420", "native:tater-thirdreality-test", "Office S420"),
+            ("satellite1_rpi_satellite", "native:tater-sat1-satellite-test", "Garage SAT1"),
+            ("satellite1_rpi_standalone", "native:tater-sat1-standalone-test", "Game Room SAT1"),
+        )
+        for template_key, selector, display_name in cases:
+            with self.subTest(template_key=template_key):
+                session_id = f"fw_{template_key}_handoff"
+                session = _session()
+                session.update(
+                    {
+                        "id": session_id,
+                        "selector": selector,
+                        "template_key": template_key,
+                        "display_name": display_name,
+                        "firmware_version": "test-firmware-1.2.3",
+                        "ota_url": "http://tater.test/firmware.bin",
+                        "binary_sha256": "a" * 64,
+                        "binary_size": 118391808,
+                    }
+                )
+                firmware._FIRMWARE_SESSIONS[session_id] = session
+                try:
+                    with (
+                        mock.patch.object(
+                            firmware,
+                            "_native_client_status",
+                            return_value={"connected": True, "connected_ts": 100.0},
+                        ),
+                        mock.patch.object(firmware, "_native_logs_fetch", return_value={"cursor": 0}),
+                        mock.patch(
+                            "tater_voice.native_satellite.send_command",
+                            new=mock.Mock(return_value=object()),
+                        ),
+                        mock.patch(
+                            "tater_voice.native_satellite.run_on_runtime_loop",
+                            return_value={"ok": True},
+                        ),
+                        mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version,
+                    ):
+                        firmware._native_tater_ota_session_worker(session_id)
+
+                    result = firmware._FIRMWARE_SESSIONS[session_id]
+                    self.assertFalse(result["active"])
+                    self.assertEqual("completed", result["phase"])
+                    self.assertEqual(100.0, result["progress_percent"])
+                    self.assertEqual(0, result["returncode"])
+                    self.assertIn("finish installing it in the background", str(result["message"]))
+                    save_version.assert_called_once()
+                finally:
+                    firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+
+    def test_fast_native_ota_still_waits_for_reboot_verification(self) -> None:
+        session_id = "fw_voicepe_verification"
         session = _session()
         session.update(
             {
                 "id": session_id,
-                "selector": "native:tater-thirdreality-test",
-                "template_key": "thirdreality_s420",
-                "display_name": "Office S420",
-                "firmware_version": "tater-thirdreality-0.2.11",
-                "ota_url": "http://tater.test/firmware.swu",
+                "ota_url": "http://tater.test/firmware.bin",
                 "binary_sha256": "a" * 64,
-                "binary_size": 118391808,
+                "binary_size": 1024,
             }
         )
         firmware._FIRMWARE_SESSIONS[session_id] = session
@@ -184,12 +233,10 @@ class NativeFirmwareOtaCompletionTests(unittest.TestCase):
                 firmware._native_tater_ota_session_worker(session_id)
 
             result = firmware._FIRMWARE_SESSIONS[session_id]
-            self.assertFalse(result["active"])
-            self.assertEqual("completed", result["phase"])
-            self.assertEqual(100.0, result["progress_percent"])
-            self.assertEqual(0, result["returncode"])
-            self.assertIn("finish installing it in the background", str(result["message"]))
-            save_version.assert_called_once()
+            self.assertTrue(result["active"])
+            self.assertEqual("awaiting_device_logs", result["phase"])
+            self.assertIsNone(result["returncode"])
+            save_version.assert_not_called()
         finally:
             firmware._FIRMWARE_SESSIONS.pop(session_id, None)
 

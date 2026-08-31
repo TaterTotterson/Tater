@@ -48,6 +48,11 @@ _FIRMWARE_SESSION_TTL_SECONDS = 45 * 60.0
 _FIRMWARE_DEVICE_LOG_RETRY_SECONDS = 2.5
 _NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 5 * 60.0
 _SAT1_RPI_NATIVE_OTA_VERIFY_TIMEOUT_SECONDS = 60 * 60.0
+_NATIVE_OTA_BACKGROUND_HANDOFF_TEMPLATE_KEYS = {
+    "satellite1_rpi_satellite",
+    "satellite1_rpi_standalone",
+    "thirdreality_s420",
+}
 _SAT1_RPI_SELF_OTA_STATE_ENV = "TATER_SAT1_SELF_OTA_STATE_DIR"
 _SAT1_RPI_SELF_OTA_HANDOFF_NAME = "tater-self-ota-session.json"
 _SAT1_RPI_SELF_OTA_SUCCESS_NAME = "last-success.json"
@@ -3288,6 +3293,7 @@ def _complete_native_ota_handoff_locked(session: Dict[str, Any]) -> None:
         display_name=session.get("display_name"),
         source="native_tater_ota_handoff",
     )
+    _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
 def _apply_native_ota_update_locked(
@@ -3822,13 +3828,13 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         )
         session["returncode"] = None
         session["ota_command_sent"] = True
-        if _lower(session.get("template_key")) == "thirdreality_s420":
+        if _lower(session.get("template_key")) in _NATIVE_OTA_BACKGROUND_HANDOFF_TEMPLATE_KEYS:
             _append_session_entry_locked(
                 session,
                 level="info",
                 message=(
-                    "The S420 accepted the signed OTA command. It will download, install, and restart "
-                    "in the background."
+                    f"{_text(session.get('display_name')) or 'The satellite'} accepted the signed OTA command. "
+                    "It will download, install, and restart in the background."
                 ),
                 source="session",
             )

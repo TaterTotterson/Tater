@@ -14,15 +14,15 @@ fast OTA handoff experience for ThirdReality S420 satellites.
 - Verifies package size and SHA-256 while downloading, removes incomplete
   files after failures, and only publishes fully verified cache entries.
 
-### ThirdReality S420 OTA
+### Slow Appliance OTA
 
-- Marks an S420 firmware task successful once the satellite accepts the signed
-  OTA command, then lets the speaker download, install, and restart in the
-  background.
-- Avoids false five-minute failures for S420 updates that commonly need much
-  longer to download over Wi-Fi.
-- Retains full post-restart version and rollback verification for SAT1
-  appliance updates.
+- Marks ThirdReality S420 and SAT1 RPi firmware tasks successful once the
+  satellite accepts the signed OTA command, then lets the device download,
+  install, and restart in the background.
+- Avoids false completion timeouts and keeps the interface available while
+  these slower appliance updates finish.
+- Retains signed installation plus SAT1's device-side post-restart health check
+  and automatic rollback protection.
 
 ## Updating
 
