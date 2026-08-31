@@ -194,6 +194,7 @@ _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "s3_box",
 }
 _PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+_PREBUILT_FIRMWARE_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _PREBUILT_OTA_PORT = 3232
 _PREBUILT_OTA_BLOCK_SIZE = 8192
 _PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
@@ -1244,6 +1245,30 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest().lower()
 
 
+def _stream_prebuilt_firmware_response(response: Any, target_path: Path, artifact: Dict[str, Any]) -> None:
+    expected_size = _as_int(artifact.get("size_bytes"), 0, minimum=0)
+    expected_sha = _lower(artifact.get("sha256"))
+    digest = hashlib.sha256() if expected_sha else None
+    received_size = 0
+
+    with target_path.open("wb") as output:
+        while True:
+            chunk = response.read(_PREBUILT_FIRMWARE_DOWNLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            received_size += len(chunk)
+            if expected_size and received_size > expected_size:
+                raise RuntimeError(f"Downloaded prebuilt firmware exceeded its expected size: {target_path.name}.")
+            output.write(chunk)
+            if digest is not None:
+                digest.update(chunk)
+
+    if expected_size and received_size != expected_size:
+        raise RuntimeError(f"Downloaded prebuilt firmware has the wrong size: {target_path.name}.")
+    if digest is not None and digest.hexdigest().lower() != expected_sha:
+        raise RuntimeError(f"Downloaded prebuilt firmware failed checksum verification: {target_path.name}.")
+
+
 def _download_prebuilt_firmware_binary(
     context: Dict[str, Any],
     kind: str,
@@ -1293,7 +1318,7 @@ def _download_prebuilt_firmware_binary(
                 },
             )
             with urllib_request.urlopen(req, timeout=_PREBUILT_FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
-                tmp_path.write_bytes(response.read())
+                _stream_prebuilt_firmware_response(response, tmp_path, artifact)
         if not _prebuilt_binary_is_valid(tmp_path, artifact):
             raise RuntimeError(f"Downloaded prebuilt firmware failed verification: {target_path.name}.")
         tmp_path.replace(target_path)
@@ -3243,6 +3268,28 @@ def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) ->
     _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
+def _complete_native_ota_handoff_locked(session: Dict[str, Any]) -> None:
+    version = _text(session.get("firmware_version"))
+    display_name = _text(session.get("display_name")) or "The satellite"
+    message = (
+        f"{display_name} accepted the signed firmware update and will finish installing it in the background."
+    )
+    session["active"] = False
+    session["returncode"] = 0
+    session["error"] = ""
+    session["message"] = message
+    _set_session_progress_locked(session, 100.0)
+    _set_session_phase_locked(session, "completed")
+    session["status_text"] = message
+    _save_recorded_firmware_version(
+        session.get("selector"),
+        session.get("template_key"),
+        version,
+        display_name=session.get("display_name"),
+        source="native_tater_ota_handoff",
+    )
+
+
 def _apply_native_ota_update_locked(
     session: Dict[str, Any],
     entries: List[Dict[str, Any]],
@@ -3775,6 +3822,18 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         )
         session["returncode"] = None
         session["ota_command_sent"] = True
+        if _lower(session.get("template_key")) == "thirdreality_s420":
+            _append_session_entry_locked(
+                session,
+                level="info",
+                message=(
+                    "The S420 accepted the signed OTA command. It will download, install, and restart "
+                    "in the background."
+                ),
+                source="session",
+            )
+            _complete_native_ota_handoff_locked(session)
+            return
         session["message"] = "Native OTA command sent. Waiting for device OTA progress."
         session["device_log_next_retry_ts"] = time.time()
         session["device_log_retry_count"] = 0

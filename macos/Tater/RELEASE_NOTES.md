@@ -1,43 +1,36 @@
-# Tater v1.1.16
+# Tater v1.1.17
 
-Tater v1.1.16 tightens the refreshed Spudex workspace and makes Reachy Mini's
-ambient room comments more dependable.
+Tater v1.1.17 makes embedded firmware downloads more reliable and restores the
+fast OTA handoff experience for ThirdReality S420 satellites.
 
 ## What's Changed
 
-### Spudex Workbench
+### Embedded Firmware Updates
 
-- Locks the side-by-side chat and activity terminal to their original
-  empty-state height so long conversations no longer stretch the entire
-  workbench.
-- Keeps chat and command output independently scrollable inside their fixed
-  panes on desktop, tablet, and mobile layouts.
-- Starts Manual Session at the visible protected `agent_lab` root instead of
-  silently starting in the nearly empty `/workspace` directory.
-- Adds persistent `cd` navigation to Manual Session, updates the displayed
-  working directory after each change, and keeps `ls` and `pwd` operating from
-  the selected directory.
-- Preserves the `agent_lab` security boundary: directory changes outside the
-  protected root are rejected.
+- Streams native firmware packages to disk in small chunks instead of loading
+  the complete package into memory.
+- Prevents large SAT1 and S420 firmware downloads from exhausting memory on a
+  Raspberry Pi Zero 2 W or another memory-constrained Tater host.
+- Verifies package size and SHA-256 while downloading, removes incomplete
+  files after failures, and only publishes fully verified cache entries.
 
-### Reachy Mini Ambient Life
+### ThirdReality S420 OTA
 
-- Updates Reachy's ambient vision prompt to follow the scheduler's decision
-  and return one short, visible-scene-based comment instead of independently
-  choosing silence again.
-- Distinguishes vision request failures and empty responses from an intentional
-  silent result in runtime logs, making unavailable models and other failures
-  easier to diagnose.
-- Retains the existing privacy rules that prevent identifying people or
-  inferring sensitive personal traits from ambient snapshots.
+- Marks an S420 firmware task successful once the satellite accepts the signed
+  OTA command, then lets the speaker download, install, and restart in the
+  background.
+- Avoids false five-minute failures for S420 updates that commonly need much
+  longer to download over Wi-Fi.
+- Retains full post-restart version and rollback verification for SAT1
+  appliance updates.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.16 through
+- macOS users already running v1.0.1 or later can install v1.1.17 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.16` or `latest` for the CPU image and
-  `v1.1.16-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.17` or `latest` for the CPU image and
+  `v1.1.17-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

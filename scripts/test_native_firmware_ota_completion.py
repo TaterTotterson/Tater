@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -15,6 +16,83 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tater_voice import firmware
+
+
+class _ChunkedResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.offset = 0
+        self.read_sizes: list[int] = []
+
+    def __enter__(self) -> _ChunkedResponse:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 1:
+            raise AssertionError("Firmware downloads must use bounded reads.")
+        self.read_sizes.append(size)
+        chunk = self.payload[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+def _prebuilt_context(payload: bytes, *, size_bytes: int | None = None) -> dict[str, object]:
+    return {
+        "template_key": "satellite1_rpi_standalone",
+        "firmware_version": "tater-sat1-standalone-v0.2.0",
+        "prebuilt_firmware": {
+            "native": True,
+            "version": "tater-sat1-standalone-v0.2.0",
+            "manifest_url": "https://example.test/manifest.json",
+            "artifacts": {
+                "ota": {
+                    "kind": "ota",
+                    "path": "https://example.test/tater-sat1-standalone-v0.2.0-ota.sat1",
+                    "size_bytes": len(payload) if size_bytes is None else size_bytes,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            },
+        },
+    }
+
+
+class PrebuiltFirmwareDownloadTests(unittest.TestCase):
+    def test_remote_firmware_download_streams_in_bounded_chunks(self) -> None:
+        payload = b"0123456789"
+        response = _ChunkedResponse(payload)
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = pathlib.Path(temporary)
+            with (
+                mock.patch.object(firmware, "FIRMWARE_PREBUILT_ROOT", cache_root),
+                mock.patch.object(firmware, "_PREBUILT_FIRMWARE_DOWNLOAD_CHUNK_BYTES", 4),
+                mock.patch.object(firmware.urllib_request, "urlopen", return_value=response),
+            ):
+                result = firmware._download_prebuilt_firmware_binary(_prebuilt_context(payload), "ota")
+
+            self.assertEqual(payload, pathlib.Path(result["path"]).read_bytes())
+            self.assertFalse(result["cached"])
+            self.assertEqual([4, 4, 4, 4], response.read_sizes)
+
+    def test_failed_stream_download_removes_partial_file(self) -> None:
+        payload = b"0123456789"
+        response = _ChunkedResponse(payload)
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = pathlib.Path(temporary)
+            with (
+                mock.patch.object(firmware, "FIRMWARE_PREBUILT_ROOT", cache_root),
+                mock.patch.object(firmware, "_PREBUILT_FIRMWARE_DOWNLOAD_CHUNK_BYTES", 4),
+                mock.patch.object(firmware.urllib_request, "urlopen", return_value=response),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exceeded its expected size"):
+                    firmware._download_prebuilt_firmware_binary(
+                        _prebuilt_context(payload, size_bytes=len(payload) - 1),
+                        "ota",
+                    )
+
+            self.assertEqual([], [path for path in cache_root.rglob("*") if path.is_file()])
 
 
 def _session() -> dict[str, object]:
@@ -69,6 +147,52 @@ def _self_ota_session(session_id: str, version: str, created_ts: float) -> dict[
 
 
 class NativeFirmwareOtaCompletionTests(unittest.TestCase):
+    def test_thirdreality_ota_completes_after_device_accepts_handoff(self) -> None:
+        session_id = "fw_thirdreality_handoff"
+        session = _session()
+        session.update(
+            {
+                "id": session_id,
+                "selector": "native:tater-thirdreality-test",
+                "template_key": "thirdreality_s420",
+                "display_name": "Office S420",
+                "firmware_version": "tater-thirdreality-0.2.11",
+                "ota_url": "http://tater.test/firmware.swu",
+                "binary_sha256": "a" * 64,
+                "binary_size": 118391808,
+            }
+        )
+        firmware._FIRMWARE_SESSIONS[session_id] = session
+        try:
+            with (
+                mock.patch.object(
+                    firmware,
+                    "_native_client_status",
+                    return_value={"connected": True, "connected_ts": 100.0},
+                ),
+                mock.patch.object(firmware, "_native_logs_fetch", return_value={"cursor": 0}),
+                mock.patch(
+                    "tater_voice.native_satellite.send_command",
+                    new=mock.Mock(return_value=object()),
+                ),
+                mock.patch(
+                    "tater_voice.native_satellite.run_on_runtime_loop",
+                    return_value={"ok": True},
+                ),
+                mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version,
+            ):
+                firmware._native_tater_ota_session_worker(session_id)
+
+            result = firmware._FIRMWARE_SESSIONS[session_id]
+            self.assertFalse(result["active"])
+            self.assertEqual("completed", result["phase"])
+            self.assertEqual(100.0, result["progress_percent"])
+            self.assertEqual(0, result["returncode"])
+            self.assertIn("finish installing it in the background", str(result["message"]))
+            save_version.assert_called_once()
+        finally:
+            firmware._FIRMWARE_SESSIONS.pop(session_id, None)
+
     def test_writing_progress_waits_for_reboot_verification(self) -> None:
         session = _session()
 
