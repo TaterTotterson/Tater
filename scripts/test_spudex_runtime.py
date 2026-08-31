@@ -180,6 +180,38 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["output_truncated"])
         self.assertLessEqual(len(result["stdout"].encode("utf-8")), 16384)
 
+    async def test_manual_terminal_can_change_directories_inside_agent_lab(self) -> None:
+        result = await runner.start_spudex_command(
+            command="cd ..",
+            cwd=str(self.workspace),
+            source="ui",
+            redis_client=self._redis(policy_enabled=True),
+            label="cd ..",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["builtin"], "cd")
+        self.assertEqual(pathlib.Path(result["session"]["cwd"]).resolve(), self.root.resolve())
+        self.assertEqual(result["session"]["cwd_display"], "/")
+        self.assertEqual(result["session"]["status"], "succeeded")
+        logs = runner.read_spudex_logs(result["session"]["id"])["entries"]
+        self.assertTrue(any(row["stream"] == "stdout" and row["text"] == "/" for row in logs))
+
+    async def test_manual_terminal_cd_rejects_agent_lab_escape(self) -> None:
+        result = await runner.start_spudex_command(
+            command="cd ..",
+            cwd=str(self.root),
+            source="ui",
+            redis_client=self._redis(policy_enabled=True),
+            label="cd ..",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["session"]["status"], "failed")
+        self.assertEqual(pathlib.Path(result["session"]["cwd"]).resolve(), self.root.resolve())
+        logs = runner.read_spudex_logs(result["session"]["id"])["entries"]
+        self.assertTrue(any("stay inside agent_lab" in row["text"] for row in logs))
+
     @unittest.skipUnless(platform.system() == "Darwin", "macOS sandbox integration")
     async def test_macos_policy_runner_uses_os_network_sandbox(self) -> None:
         session_id = self._session("macOS isolation")

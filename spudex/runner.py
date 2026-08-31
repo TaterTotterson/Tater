@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 from kernel_tools import AGENT_LAB_DIR
 
-from .policy import display_agent_path, explain_policy_block, normalize_argv, resolve_spudex_cwd, resolve_spudex_file_path, validate_spudex_command
+from .policy import display_agent_path, explain_policy_block, normalize_argv, resolve_spudex_cwd, resolve_spudex_directory, resolve_spudex_file_path, validate_spudex_command
 from .settings import get_spudex_settings
 
 
@@ -1009,6 +1009,43 @@ async def start_spudex_command(
     settings = get_spudex_settings(redis_client)
     parsed_argv = normalize_argv(command=command, argv=argv)
     resolved_cwd = resolve_spudex_cwd(cwd or settings.get("default_cwd"))
+    if parsed_argv and Path(parsed_argv[0]).name.lower() == "cd":
+        session = create_spudex_session(
+            label=label,
+            argv=parsed_argv,
+            cwd=str(resolved_cwd),
+            source=source,
+            platform=platform,
+        )
+        session_id = str(session.get("id") or "")
+        append_session_log(session_id, stream="command", text=f"$ {' '.join(parsed_argv)}", level="info")
+        try:
+            if len(parsed_argv) > 2:
+                raise ValueError("cd accepts one directory at a time.")
+            next_cwd = resolve_spudex_directory(parsed_argv[1] if len(parsed_argv) > 1 else "/", cwd=resolved_cwd)
+            cwd_display = display_agent_path(next_cwd)
+            append_session_log(session_id, stream="stdout", text=cwd_display, level="info")
+            append_session_log(session_id, stream="system", text="Working directory changed.", level="info")
+            session = update_spudex_session(
+                session_id,
+                status="succeeded",
+                returncode=0,
+                cwd=str(next_cwd),
+                cwd_display=cwd_display,
+                started_ts=_now(),
+                finished_ts=_now(),
+            )
+        except ValueError as exc:
+            message = str(exc) or "Directory change failed."
+            append_session_log(session_id, stream="stderr", text=message, level="error")
+            session = update_spudex_session(
+                session_id,
+                status="failed",
+                returncode=1,
+                started_ts=_now(),
+                finished_ts=_now(),
+            )
+        return {"ok": True, "builtin": "cd", "session": session}
     session = create_spudex_session(
         label=label,
         argv=parsed_argv,

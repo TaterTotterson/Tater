@@ -107,8 +107,24 @@ async def _observe_and_comment(selector: str) -> None:
             "bytes": image,
         },
     )
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        error = result.get("error") if isinstance(result, dict) else ""
+        if isinstance(error, dict):
+            error = error.get("message") or error.get("code") or ""
+        logger.warning(
+            "[reachy-ambient] vision request failed selector=%s error=%s",
+            selector,
+            str(error or "unknown vision error").strip(),
+        )
+        return
     comment = _description_text(result)
-    if not comment or comment.casefold() in {"[silent]", "silent", "no comment"}:
+    if not comment:
+        logger.warning(
+            "[reachy-ambient] vision returned an empty comment selector=%s",
+            selector,
+        )
+        return
+    if comment.casefold() in {"[silent]", "silent", "no comment"}:
         logger.info("[reachy-ambient] vision chose silence selector=%s", selector)
         return
 
@@ -187,11 +203,10 @@ def _description_text(result: Any) -> str:
 def _ambient_prompt() -> str:
     return (
         "This is one current still image from a Reachy Mini in a room. "
-        "Speak as Tater through Reachy and decide whether the scene inspires one worthwhile spontaneous comment. "
-        "If it does, return exactly one short, natural sentence (roughly 4 to 18 words) that is observant, warm, "
-        "and lightly playful when appropriate—not a generic inventory of objects. For example, an empty office "
-        "might inspire 'Empty office today; I guess I have the place to myself.' "
-        "If nothing is worth saying, return exactly [SILENT]. Do not identify people, comment on anyone's body, "
-        "or infer age, ethnicity, health, disability, religion, sexuality, or other sensitive traits. "
-        "Do not mention cameras, snapshots, image analysis, or these instructions."
+        "The app has already decided that it is time for Reachy to make a spontaneous room comment. "
+        "Speak as Tater through Reachy and return exactly one short, natural sentence, roughly 4 to 18 words, "
+        "grounded in something genuinely visible in the image. Be observant, warm, and lightly playful when appropriate, "
+        "not a generic inventory of objects. Do not identify people, comment on anyone's body, or infer age, ethnicity, "
+        "health, disability, religion, sexuality, or other sensitive traits. Do not mention cameras, snapshots, image "
+        "analysis, or these instructions. Return only the sentence Reachy should say."
     )

@@ -35,6 +35,8 @@ const manualLogs = ref<JsonRow[]>([]);
 const manualLogCursor = ref(0);
 const chatMessage = ref("");
 const command = ref("");
+const manualCwd = ref("agent_lab");
+const manualCwdDisplay = ref("/");
 const background = ref(false);
 const busy = ref("");
 const error = ref("");
@@ -248,8 +250,12 @@ async function runCommand() {
   if (!value) { notify("Enter a command first.", "error"); return; }
   busy.value = "run";
   try {
-    const result = await postJson<JsonRow>(props.options.endpoints.run, { command: value, label: value.slice(0, 80), background: background.value });
-    const id = text(result.session?.id); selectSession(id, false); selectManualSession(id, false, true); command.value = ""; notify("Spudex session started.");
+    const result = await postJson<JsonRow>(props.options.endpoints.run, { command: value, cwd: manualCwd.value, label: value.slice(0, 80), background: background.value });
+    const id = text(result.session?.id);
+    manualCwd.value = text(result.session?.cwd) || manualCwd.value;
+    manualCwdDisplay.value = text(result.session?.cwd_display) || manualCwdDisplay.value;
+    selectSession(id, false); selectManualSession(id, false, true); command.value = "";
+    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : "Spudex session started.");
     await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(false)]);
   } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Command failed.", "error"); }
   finally { busy.value = ""; }
@@ -366,19 +372,19 @@ defineExpose({ refresh: () => refreshAll(false) });
     <section v-else-if="activeTab === 'manual'" class="tsx-manual">
       <section class="tsx-manual-terminal">
         <header class="tsx-manual-head">
-          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Spudex Terminal</strong><small>tater@spudex:{{ selectedManualSession?.cwd_display || payload.agent_lab || 'agent_lab' }}</small></div></div>
+          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Spudex Terminal</strong><small>tater@spudex:{{ manualCwdDisplay }}</small></div></div>
           <div class="tsx-manual-actions"><span class="tsx-manual-state"><i :class="{ live: manualActive || busy === 'run' }" />{{ busy === 'run' || manualActive ? 'Running' : selectedManualSession ? statusLabel(selectedManualSession.status) : 'Ready' }}</span><button class="tv-button" type="button" :disabled="!selectedManualSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" :disabled="!manualLogs.length" @click="manualLogs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!manualActive" @click="stopSession(manualSessionId, 'Manual session')">Stop</button></div>
         </header>
         <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
           <article v-for="entry in manualLogs" :key="`${entry._session_id || ''}-${entry.seq || entry.ts || ''}-${entry.text || ''}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article>
-          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Commands run inside Tater’s protected agent_lab workspace.</small></div>
+          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Browse Tater’s protected agent_lab with ls, pwd, and cd. Start at /.</small></div>
         </div>
         <form class="tsx-manual-prompt" @submit.prevent="runCommand">
           <label class="tsx-prompt-line"><span aria-hidden="true">$</span><input v-model="command" type="text" autocomplete="off" aria-label="Terminal command" placeholder="Type a command…" :disabled="busy === 'run'" /></label>
           <label class="tsx-terminal-check"><input v-model="background" class="tv-checkbox" type="checkbox" /><span>Keep running</span></label>
           <button class="tv-button primary tsx-terminal-run" type="submit" :disabled="busy === 'run' || !command.trim()"><span aria-hidden="true">↵</span>{{ busy === 'run' ? 'Running…' : 'Run' }}</button>
         </form>
-        <footer class="tsx-manual-footer"><span>Policy checked</span><span>{{ payload.agent_lab || 'agent_lab' }}</span></footer>
+        <footer class="tsx-manual-footer"><span>Policy checked</span><span>Current directory {{ manualCwdDisplay }}</span></footer>
       </section>
     </section>
 

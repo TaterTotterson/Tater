@@ -27,23 +27,23 @@ var t = {}, n = [], r = () => {}, i = () => !1, a = (e) => e.charCodeAt(0) === 1
 	let t = g(e) ? Number(e) : NaN;
 	return isNaN(t) ? e : t;
 }, F, I = () => F ||= typeof globalThis < "u" ? globalThis : typeof self < "u" ? self : typeof window < "u" ? window : typeof global < "u" ? global : {};
-function L(e) {
+function re(e) {
 	if (d(e)) {
 		let t = {};
 		for (let n = 0; n < e.length; n++) {
-			let r = e[n], i = g(r) ? ae(r) : L(r);
+			let r = e[n], i = g(r) ? ae(r) : re(r);
 			if (i) for (let e in i) t[e] = i[e];
 		}
 		return t;
 	}
 	if (g(e) || v(e)) return e;
 }
-var R = /;(?![^(]*\))/g, re = /:([^]+)/, ie = /\/\*[^]*?\*\//g;
+var ie = /;(?![^(]*\))/g, L = /:([^]+)/, R = /\/\*[^]*?\*\//g;
 function ae(e) {
 	let t = {};
-	return e.replace(ie, "").split(R).forEach((e) => {
+	return e.replace(R, "").split(ie).forEach((e) => {
 		if (e) {
-			let n = e.split(re);
+			let n = e.split(L);
 			n.length > 1 && (t[n[0].trim()] = n[1].trim());
 		}
 	}), t;
@@ -66,10 +66,10 @@ function oe(e) {
 function se(e, t) {
 	if (e.length !== t.length) return !1;
 	let n = !0;
-	for (let r = 0; n && r < e.length; r++) n = H(e[r], t[r]);
+	for (let r = 0; n && r < e.length; r++) n = ce(e[r], t[r]);
 	return n;
 }
-function H(e, t) {
+function ce(e, t) {
 	if (e === t) return !0;
 	let n = m(e), r = m(t);
 	if (n || r) return n && r ? e.getTime() === t.getTime() : !1;
@@ -79,15 +79,15 @@ function H(e, t) {
 		if (!n || !r || Object.keys(e).length !== Object.keys(t).length) return !1;
 		for (let n in e) {
 			let r = e.hasOwnProperty(n), i = t.hasOwnProperty(n);
-			if (r && !i || !r && i || !H(e[n], t[n])) return !1;
+			if (r && !i || !r && i || !ce(e[n], t[n])) return !1;
 		}
 	}
 	return String(e) === String(t);
 }
-function ce(e, t) {
-	return e.findIndex((e) => H(e, t));
+function le(e, t) {
+	return e.findIndex((e) => ce(e, t));
 }
-var le = (e) => !!(e && e.__v_isRef === !0), U = (e) => g(e) ? e : e == null ? "" : d(e) || v(e) && (e.toString === b || !h(e.toString)) ? le(e) ? U(e.value) : JSON.stringify(e, ue, 2) : String(e), ue = (e, t) => le(t) ? ue(e, t.value) : f(t) ? { [`Map(${t.size})`]: [...t.entries()].reduce((e, [t, n], r) => (e[de(t, r) + " =>"] = n, e), {}) } : p(t) ? { [`Set(${t.size})`]: [...t.values()].map((e) => de(e)) } : _(t) ? de(t) : v(t) && !d(t) && !C(t) ? String(t) : t, de = (e, t = "") => _(e) ? `Symbol(${e.description ?? t})` : e, fe, pe = class {
+var H = (e) => !!(e && e.__v_isRef === !0), U = (e) => g(e) ? e : e == null ? "" : d(e) || v(e) && (e.toString === b || !h(e.toString)) ? H(e) ? U(e.value) : JSON.stringify(e, ue, 2) : String(e), ue = (e, t) => H(t) ? ue(e, t.value) : f(t) ? { [`Map(${t.size})`]: [...t.entries()].reduce((e, [t, n], r) => (e[de(t, r) + " =>"] = n, e), {}) } : p(t) ? { [`Set(${t.size})`]: [...t.values()].map((e) => de(e)) } : _(t) ? de(t) : v(t) && !d(t) && !C(t) ? String(t) : t, de = (e, t = "") => _(e) ? `Symbol(${e.description ?? t})` : e, fe, pe = class {
 	constructor(e = !1) {
 		this.detached = e, this._active = !0, this._on = 0, this.effects = [], this.cleanups = [], this._isPaused = !1, this._warnOnRun = !0, this.__v_skip = !0, !e && fe && (fe.active ? (this.parent = fe, this.index = (fe.scopes || (fe.scopes = [])).push(this) - 1) : (this._active = !1, this._warnOnRun = !1));
 	}
@@ -1884,7 +1884,7 @@ function hi(e, t, n) {
 }
 function gi(e, t, n) {
 	let r = e[n], i = t[n];
-	return n === "style" && v(r) && v(i) ? !H(r, i) : r !== i;
+	return n === "style" && v(r) && v(i) ? !ce(r, i) : r !== i;
 }
 function _i({ vnode: e, parent: t, suspense: n }, r) {
 	for (; t;) {
@@ -2059,7 +2059,7 @@ function Ri(e, i) {
 			case q:
 				M(e, t, n, r, i, a, o, s, c);
 				break;
-			default: d & 1 ? w(e, t, n, r, i, a, o, s, c) : d & 6 ? N(e, t, n, r, i, a, o, s, c) : (d & 64 || d & 128) && l.process(e, t, n, r, i, a, o, s, c, le);
+			default: d & 1 ? w(e, t, n, r, i, a, o, s, c) : d & 6 ? N(e, t, n, r, i, a, o, s, c) : (d & 64 || d & 128) && l.process(e, t, n, r, i, a, o, s, c, H);
 		}
 		u != null && i ? lr(u, e && e.ref, a, t || e, !t) : u == null && e && e.ref != null && lr(e.ref, null, a, e, !0);
 	}, y = (e, t, n, r) => {
@@ -2121,7 +2121,7 @@ function Ri(e, i) {
 		let l = n.el = e.el, { patchFlag: u, dynamicChildren: d, dirs: f } = n;
 		u |= e.patchFlag & 16;
 		let m = e.props || t, h = n.props || t, g;
-		if (r && Bi(r, !1), (g = h.onVnodeBeforeUpdate) && _a(g, r, n, e), f && xn(n, e, r, "beforeUpdate"), r && Bi(r, !0), d && (!e.dynamicChildren || e.dynamicChildren.length !== d.length) && (u = 0, s = !1, d = null), (m.innerHTML && h.innerHTML == null || m.textContent && h.textContent == null) && p(l, ""), d ? A(e.dynamicChildren, d, l, r, i, zi(n, a), o) : s || L(e, n, l, null, r, i, zi(n, a), o, !1), u > 0) {
+		if (r && Bi(r, !1), (g = h.onVnodeBeforeUpdate) && _a(g, r, n, e), f && xn(n, e, r, "beforeUpdate"), r && Bi(r, !0), d && (!e.dynamicChildren || e.dynamicChildren.length !== d.length) && (u = 0, s = !1, d = null), (m.innerHTML && h.innerHTML == null || m.textContent && h.textContent == null) && p(l, ""), d ? A(e.dynamicChildren, d, l, r, i, zi(n, a), o) : s || re(e, n, l, null, r, i, zi(n, a), o, !1), u > 0) {
 			if (u & 16) j(l, m, h, r, a);
 			else if (u & 2 && m.class !== h.class && c(l, "class", null, h.class, a), u & 4 && c(l, "style", m.style, h.style, a), u & 8) {
 				let e = n.dynamicProps;
@@ -2152,12 +2152,12 @@ function Ri(e, i) {
 		}
 	}, M = (e, t, n, r, i, a, s, c, l) => {
 		let d = t.el = e ? e.el : u(""), f = t.anchor = e ? e.anchor : u(""), { patchFlag: p, dynamicChildren: m, slotScopeIds: h } = t;
-		h && (c = c ? c.concat(h) : h), e == null ? (o(d, n, r), o(f, n, r), O(t.children || [], n, f, i, a, s, c, l)) : p > 0 && p & 64 && m && e.dynamicChildren && e.dynamicChildren.length === m.length ? (A(e.dynamicChildren, m, n, i, a, s, c), (t.key != null || i && t === i.subTree) && Hi(e, t, !0)) : L(e, t, n, f, i, a, s, c, l);
+		h && (c = c ? c.concat(h) : h), e == null ? (o(d, n, r), o(f, n, r), O(t.children || [], n, f, i, a, s, c, l)) : p > 0 && p & 64 && m && e.dynamicChildren && e.dynamicChildren.length === m.length ? (A(e.dynamicChildren, m, n, i, a, s, c), (t.key != null || i && t === i.subTree) && Hi(e, t, !0)) : re(e, t, n, f, i, a, s, c, l);
 	}, N = (e, t, n, r, i, a, o, s, c) => {
 		t.slotScopeIds = s, e == null ? t.shapeFlag & 512 ? i.ctx.activate(t, n, r, o, c) : P(t, n, r, i, a, o, c) : te(e, t, c);
 	}, P = (e, t, n, r, i, a, o) => {
 		let s = e.component = ba(e, r, i);
-		if (fr(e) && (s.ctx.renderer = le), ka(s, !1, o), s.asyncDep) {
+		if (fr(e) && (s.ctx.renderer = H), ka(s, !1, o), s.asyncDep) {
 			if (i && i.registerDep(s, ne, o), !e.el) {
 				let r = s.subTree = la(Xi);
 				b(null, r, t, n), e.placeholder = r.el;
@@ -2217,20 +2217,20 @@ function Ri(e, i) {
 		t.component = e;
 		let r = e.vnode.props;
 		e.vnode = t, e.next = null, Si(e, t.props, r, n), Fi(e, t.children, n), je(), fn(e), Me();
-	}, L = (e, t, n, r, i, a, o, s, c = !1) => {
+	}, re = (e, t, n, r, i, a, o, s, c = !1) => {
 		let l = e && e.children, u = e ? e.shapeFlag : 0, d = t.children, { patchFlag: f, shapeFlag: m } = t;
 		if (f > 0) {
 			if (f & 128) {
-				re(l, d, n, r, i, a, o, s, c);
+				L(l, d, n, r, i, a, o, s, c);
 				return;
 			}
 			if (f & 256) {
-				R(l, d, n, r, i, a, o, s, c);
+				ie(l, d, n, r, i, a, o, s, c);
 				return;
 			}
 		}
-		m & 8 ? (u & 16 && oe(l, i, a), d !== l && p(n, d)) : u & 16 ? m & 16 ? re(l, d, n, r, i, a, o, s, c) : oe(l, i, a, !0) : (u & 8 && p(n, ""), m & 16 && O(d, n, r, i, a, o, s, c));
-	}, R = (e, t, r, i, a, o, s, c, l) => {
+		m & 8 ? (u & 16 && oe(l, i, a), d !== l && p(n, d)) : u & 16 ? m & 16 ? L(l, d, n, r, i, a, o, s, c) : oe(l, i, a, !0) : (u & 8 && p(n, ""), m & 16 && O(d, n, r, i, a, o, s, c));
+	}, ie = (e, t, r, i, a, o, s, c, l) => {
 		e ||= n, t ||= n;
 		let u = e.length, d = t.length, f = Math.min(u, d), p;
 		for (p = 0; p < f; p++) {
@@ -2238,7 +2238,7 @@ function Ri(e, i) {
 			v(e[p], n, r, null, a, o, s, c, l);
 		}
 		u > d ? oe(e, a, o, !0, !1, f) : O(t, r, i, a, o, s, c, l, f);
-	}, re = (e, t, r, i, a, o, s, c, l) => {
+	}, L = (e, t, r, i, a, o, s, c, l) => {
 		let u = 0, d = t.length, f = e.length - 1, p = d - 1;
 		for (; u <= f && u <= p;) {
 			let n = e[u], i = t[u] = l ? ma(t[u]) : pa(t[u]);
@@ -2283,13 +2283,13 @@ function Ri(e, i) {
 			let w = x ? Ui(C) : n;
 			for (_ = w.length - 1, u = b - 1; u >= 0; u--) {
 				let e = h + u, n = t[e], f = t[e + 1], p = e + 1 < d ? f.el || Ki(f) : i;
-				C[u] === 0 ? v(null, n, r, p, a, o, s, c, l) : x && (_ < 0 || u !== w[_] ? ie(n, r, p, 2) : _--);
+				C[u] === 0 ? v(null, n, r, p, a, o, s, c, l) : x && (_ < 0 || u !== w[_] ? R(n, r, p, 2) : _--);
 			}
 		}
-	}, ie = (e, t, n, r, i = null) => {
+	}, R = (e, t, n, r, i = null) => {
 		let { el: a, type: c, transition: l, children: u, shapeFlag: d } = e;
 		if (d & 6) {
-			ie(e.component.subTree, t, n, r);
+			R(e.component.subTree, t, n, r);
 			return;
 		}
 		if (d & 128) {
@@ -2297,12 +2297,12 @@ function Ri(e, i) {
 			return;
 		}
 		if (d & 64) {
-			c.move(e, t, n, le);
+			c.move(e, t, n, H);
 			return;
 		}
 		if (c === q) {
 			o(a, t, n);
-			for (let e = 0; e < u.length; e++) ie(u[e], t, n, r);
+			for (let e = 0; e < u.length; e++) R(u[e], t, n, r);
 			o(e.anchor, t, n);
 			return;
 		}
@@ -2336,7 +2336,7 @@ function Ri(e, i) {
 				e.suspense.unmount(n, r);
 				return;
 			}
-			h && xn(e, null, t, "beforeUnmount"), u & 64 ? e.type.remove(e, t, n, le, r) : l && !l.hasOnce && (a !== q || d > 0 && d & 64) ? oe(l, t, n, !1, !0) : (a === q && d & 384 || !i && u & 16) && oe(c, t, n), r && z(e);
+			h && xn(e, null, t, "beforeUnmount"), u & 64 ? e.type.remove(e, t, n, H, r) : l && !l.hasOnce && (a !== q || d > 0 && d & 64) ? oe(l, t, n, !1, !0) : (a === q && d & 384 || !i && u & 16) && oe(c, t, n), r && z(e);
 		}
 		let v = m != null && p == null;
 		(g && (_ = o && o.onVnodeUnmounted) || h || v) && Ii(() => {
@@ -2375,25 +2375,25 @@ function Ri(e, i) {
 		if (e.shapeFlag & 128) return e.suspense.next();
 		let t = h(e.anchor || e.el), n = t && t[jn];
 		return n ? h(n) : t;
-	}, H = !1, ce = (e, t, n) => {
+	}, ce = !1, le = (e, t, n) => {
 		let r;
-		e == null ? t._vnode && (ae(t._vnode, null, null, !0), r = t._vnode.component) : v(t._vnode || null, e, t, null, null, null, n), t._vnode = e, H ||= (H = !0, fn(r), pn(), !1);
-	}, le = {
+		e == null ? t._vnode && (ae(t._vnode, null, null, !0), r = t._vnode.component) : v(t._vnode || null, e, t, null, null, null, n), t._vnode = e, ce ||= (ce = !0, fn(r), pn(), !1);
+	}, H = {
 		p: v,
 		um: ae,
-		m: ie,
+		m: R,
 		r: z,
 		mt: P,
 		mc: O,
-		pc: L,
+		pc: re,
 		pbc: A,
 		n: se,
 		o: e
 	}, U, ue;
-	return i && ([U, ue] = i(le)), {
-		render: ce,
+	return i && ([U, ue] = i(H)), {
+		render: le,
 		hydrate: U,
-		createApp: ii(ce, U)
+		createApp: ii(le, U)
 	};
 }
 function zi({ type: e, props: t }, n) {
@@ -2517,7 +2517,7 @@ function ua(e, t = null, n = null, r = 0, i = null, a = !1) {
 	if (za(e) && (e = e.__vccOpts), t) {
 		t = da(t);
 		let { class: e, style: n } = t;
-		e && !g(e) && (t.class = z(e)), v(n) && (/* @__PURE__ */ At(n) && !d(n) && (n = s({}, n)), t.style = L(n));
+		e && !g(e) && (t.class = z(e)), v(n) && (/* @__PURE__ */ At(n) && !d(n) && (n = s({}, n)), t.style = re(n));
 	}
 	let o = g(e) ? 1 : qi(e) ? 128 : Mn(e) ? 64 : v(e) ? 4 : h(e) ? 2 : 0;
 	return X(e, t, n, r, i, o, a, !0);
@@ -2601,7 +2601,7 @@ function ga(...e) {
 	for (let n = 0; n < e.length; n++) {
 		let r = e[n];
 		for (let e in r) if (e === "class") t.class !== r.class && (t.class = z([t.class, r.class]));
-		else if (e === "style") t.style = L([t.style, r.style]);
+		else if (e === "style") t.style = re([t.style, r.style]);
 		else if (a(e)) {
 			let n = t[e], i = r[e];
 			i && n !== i && !(d(n) && n.includes(i)) ? t[e] = n ? [].concat(n, i) : i : i == null && n == null && !o(e) && (t[e] = i);
@@ -3148,7 +3148,7 @@ var Qo = {
 		e[Xo] = qo(n), Mo(e, "change", () => {
 			let t = e._modelValue, n = is(e), r = e.checked, i = e[Xo];
 			if (d(t)) {
-				let e = ce(t, n), a = e !== -1;
+				let e = le(t, n), a = e !== -1;
 				if (r && !a) i(t.concat(n));
 				else if (!r && a) {
 					let n = [...t];
@@ -3168,22 +3168,22 @@ var Qo = {
 function es(e, { value: t, oldValue: n }, r) {
 	e._modelValue = t;
 	let i;
-	if (d(t)) i = ce(t, r.props.value) > -1;
+	if (d(t)) i = le(t, r.props.value) > -1;
 	else if (p(t)) i = t.has(r.props.value);
 	else {
 		if (t === n) return;
-		i = H(t, as(e, !0));
+		i = ce(t, as(e, !0));
 	}
 	e.checked !== i && (e.checked = i);
 }
 var ts = {
 	created(e, { value: t }, n) {
-		e.checked = H(t, n.props.value), e[Xo] = qo(n), Mo(e, "change", () => {
+		e.checked = ce(t, n.props.value), e[Xo] = qo(n), Mo(e, "change", () => {
 			e[Xo](is(e));
 		});
 	},
 	beforeUpdate(e, { value: t, oldValue: n }, r) {
-		e[Xo] = qo(r), t !== n && (e.checked = H(t, r.props.value));
+		e[Xo] = qo(r), t !== n && (e.checked = ce(t, r.props.value));
 	}
 }, ns = {
 	deep: !0,
@@ -3212,9 +3212,9 @@ function rs(e, t) {
 			let a = e.options[i], o = is(a);
 			if (n) if (r) {
 				let e = typeof o;
-				a.selected = e === "string" || e === "number" ? t.some((e) => String(e) === String(o)) : ce(t, o) > -1;
+				a.selected = e === "string" || e === "number" ? t.some((e) => String(e) === String(o)) : le(t, o) > -1;
 			} else a.selected = t.has(o);
-			else if (H(is(a), t)) {
+			else if (ce(is(a), t)) {
 				e.selectedIndex !== i && (e.selectedIndex = i);
 				return;
 			}
@@ -3735,28 +3735,28 @@ var Ds = {
 				}
 			}, Math.max(250, n ?? (t.options.isIngress ? 900 : 2e3))));
 		}
-		function L(e) {
+		function re(e) {
 			try {
 				return JSON.parse(String(e.data || "{}"));
 			} catch {
 				return {};
 			}
 		}
-		function R(e, n = {}) {
+		function ie(e, n = {}) {
 			if (!e || (A(e, {
 				status: "queued",
 				...n
 			}), O(e), I(e), typeof EventSource != "function")) return;
 			let r = new EventSource(`${t.options.endpoints.jobs}/${encodeURIComponent(e)}/events`);
-			m[e] = r, r.addEventListener("status", (t) => F(e, L(t))), r.addEventListener("tool", (t) => {
-				let n = L(t);
+			m[e] = r, r.addEventListener("status", (t) => F(e, re(t))), r.addEventListener("tool", (t) => {
+				let n = re(t);
 				A(e, {
 					status: "running",
 					current_tool: String(n.current_tool || "tool"),
 					task_name: String(n.task_name || f.value[e]?.task_name || "")
 				});
 			}), r.addEventListener("waiting", (e) => {
-				let t = String(L(e).wait_text || "").trim();
+				let t = String(re(e).wait_text || "").trim();
 				t && (u.value = [...u.value, {
 					role: "assistant",
 					content: {
@@ -3765,22 +3765,22 @@ var Ds = {
 					}
 				}], N());
 			}), r.addEventListener("response_chunk", (t) => {
-				let n = String(L(t).chunk || "");
+				let n = String(re(t).chunk || "");
 				n && (d.value = {
 					...d.value,
 					[e]: String(d.value[e] || "") + n
 				}, N());
 			}), r.addEventListener("done", (t) => {
-				let n = L(t);
+				let n = re(t);
 				ne(e, "Complete.", Array.isArray(n.responses) ? n.responses : []);
 			}), r.addEventListener("job_error", (t) => {
-				ne(e, `Job failed: ${String(L(t).error || "unknown error")}`);
+				ne(e, `Job failed: ${String(re(t).error || "unknown error")}`);
 			}), r.onerror = () => O(e);
 		}
-		function re(e) {
+		function L(e) {
 			return e < 1024 ? `${e} B` : e < 1024 ** 2 ? `${(e / 1024).toFixed(1)} KB` : `${(e / 1024 ** 2).toFixed(1)} MB`;
 		}
-		function ie(e) {
+		function R(e) {
 			let t = e.target, n = Array.from(t.files || []), r = Number(g.value.attach_max_mb_each || 0) * 1024 ** 2, i = Number(g.value.attach_max_mb_total || 0) * 1024 ** 2, a = [], s = 0;
 			for (let e of n) {
 				if (r > 0 && e.size > r) {
@@ -3830,7 +3830,7 @@ var Ds = {
 				a && (l.value = a, t.options.onSessionChange?.(a));
 				let o = String(i.job_id || "").trim();
 				if (!o) throw Error("Backend did not return a job id.");
-				await P(), R(o, {
+				await P(), ie(o, {
 					status: "queued",
 					task_name: String(i.task_name || "")
 				}), c.value = i.task_name ? `Job queued: ${i.task_name}` : "Job queued…", t.options.onHealthRefresh?.(), M();
@@ -3855,7 +3855,7 @@ var Ds = {
 			() => x.value.map(([e, t]) => `${e}:${t.length}`).join("|"),
 			b
 		], N), En(a, se), br(() => {
-			Object.entries(f.value).forEach(([e, t]) => R(e, t)), M();
+			Object.entries(f.value).forEach(([e, t]) => ie(e, t)), M();
 		}), Cr(() => {
 			Object.keys(m).forEach(O), Object.keys(h).forEach(k);
 		}), (t, c) => (J(), Y("div", $s, [X("section", ec, [
@@ -3927,7 +3927,7 @@ var Ds = {
 				onClick: (e) => ae(t)
 			}, [
 				X("span", null, U(e.name), 1),
-				X("small", null, U(re(e.size)), 1),
+				X("small", null, U(L(e.size)), 1),
 				c[2] ||= X("b", { "aria-hidden": "true" }, "×", -1)
 			], 8, oc))), 128))]), X("button", {
 				type: "button",
@@ -3946,7 +3946,7 @@ var Ds = {
 					class: "tc-file-input",
 					type: "file",
 					multiple: "",
-					onChange: ie
+					onChange: R
 				}, null, 544), c[4] ||= X("span", {
 					class: "chat-composer-icon chat-composer-plus",
 					"aria-hidden": "true"
@@ -4667,7 +4667,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}
 			}, "sync-test");
 		}
-		function R(e, t) {
+		function ie(e, t) {
 			i.value = {
 				...i.value,
 				[e.key]: t
@@ -4695,7 +4695,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				X("div", Al, [c.value ? (J(), Y("label", {
 					key: 0,
 					class: "tm-player-volume",
-					style: L(f.value)
+					style: re(f.value)
 				}, [
 					a[1] ||= X("span", { "aria-hidden": "true" }, "♪", -1),
 					X("input", {
@@ -4770,7 +4770,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						key: e.key,
 						field: e,
 						"model-value": i.value[e.key],
-						"onUpdate:modelValue": (t) => R(e, t)
+						"onUpdate:modelValue": (t) => ie(e, t)
 					}, null, 8, [
 						"field",
 						"model-value",
@@ -5598,7 +5598,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				id: "repos",
 				label: "Repositories"
 			}
-		], i = /* @__PURE__ */ G(String(n.options.initialTab || "manage")), a = /* @__PURE__ */ G("installed"), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(""), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G(""), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G([]), p = /* @__PURE__ */ G(null), m = /* @__PURE__ */ G({}), h = /* @__PURE__ */ Ct({}), g = /* @__PURE__ */ G({}), _ = null, v = 0, y = $(() => n.state.payload?.runtime || {}), b = $(() => n.state.payload?.shop || {}), x = $(() => n.state.payload?.tabs || {}), S = $(() => Array.isArray(y.value.items) ? y.value.items : []), C = $(() => Array.isArray(b.value.installed) ? b.value.installed : []), w = $(() => Array.isArray(b.value.catalog) ? b.value.catalog : []), T = $(() => w.value.filter((e) => !e.installed).sort(re)), E = $(() => C.value.filter((e) => e.update_available)), D = $(() => S.value.filter((e) => !!e.running).length), O = $(() => (Array.isArray(x.value.tabs) ? x.value.tabs : []).filter((e) => F(e.core_key)).map((e) => ({
+		], i = /* @__PURE__ */ G(String(n.options.initialTab || "manage")), a = /* @__PURE__ */ G("installed"), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(""), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G(""), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G([]), p = /* @__PURE__ */ G(null), m = /* @__PURE__ */ G({}), h = /* @__PURE__ */ Ct({}), g = /* @__PURE__ */ G({}), _ = null, v = 0, y = $(() => n.state.payload?.runtime || {}), b = $(() => n.state.payload?.shop || {}), x = $(() => n.state.payload?.tabs || {}), S = $(() => Array.isArray(y.value.items) ? y.value.items : []), C = $(() => Array.isArray(b.value.installed) ? b.value.installed : []), w = $(() => Array.isArray(b.value.catalog) ? b.value.catalog : []), T = $(() => w.value.filter((e) => !e.installed).sort(L)), E = $(() => C.value.filter((e) => e.update_available)), D = $(() => S.value.filter((e) => !!e.running).length), O = $(() => (Array.isArray(x.value.tabs) ? x.value.tabs : []).filter((e) => F(e.core_key)).map((e) => ({
 			...e,
 			core_key: F(e.core_key)
 		}))), k = $(() => /* @__PURE__ */ new Set(["manage", ...O.value.map((e) => e.core_key)])), A = $(() => O.value.find((e) => e.core_key === i.value) || null), j = $(() => h[i.value] || null), M = $(() => j.value?.payload || {}), N = $(() => F(M.value?.ui?.appearance).toLowerCase() === "music_library"), ee = $(() => new Map(S.value.map((e) => [I(e.key), e]))), P = $(() => {
@@ -5609,7 +5609,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}), e;
 		}), te = $(() => {
 			let e = /* @__PURE__ */ new Set(), t = S.value.map((t) => {
-				let n = F(t.key), r = P.value.get(I(n)) || P.value.get(I(R(n))) || null;
+				let n = F(t.key), r = P.value.get(I(n)) || P.value.get(I(ie(n))) || null;
 				return r && e.add(I(r.id)), {
 					key: n,
 					runtime: t,
@@ -5622,7 +5622,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					runtime: null,
 					shop: n
 				});
-			}), t.sort((e, t) => ie(e).localeCompare(ie(t), void 0, {
+			}), t.sort((e, t) => R(e).localeCompare(R(t), void 0, {
 				sensitivity: "base",
 				numeric: !0
 			}));
@@ -5644,20 +5644,20 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function I(e) {
 			return F(e).toLowerCase();
 		}
-		function L(e) {
+		function re(e) {
 			return encodeURIComponent(F(e));
 		}
-		function R(e) {
+		function ie(e) {
 			return F(e).replace(/_core$/i, "");
 		}
-		function re(e, t) {
+		function L(e, t) {
 			return F(e.name || e.id).localeCompare(F(t.name || t.id), void 0, {
 				sensitivity: "base",
 				numeric: !0
 			});
 		}
-		function ie(e) {
-			return F(e.runtime?.label || e.shop?.name || R(e.key));
+		function R(e) {
+			return F(e.runtime?.label || e.shop?.name || ie(e.key));
 		}
 		function ae(e) {
 			return F(e.shop?.description || "Local Core module.");
@@ -5675,10 +5675,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function se() {
 			f.value = Array.isArray(b.value.repos?.additional) ? b.value.repos.additional.map((e) => ({ ...e })) : [];
 		}
-		function H(e) {
+		function ce(e) {
 			return h[e] || (h[e] = { payload: {} }), h[e];
 		}
-		async function ce(e = !1) {
+		async function le(e = !1) {
 			e || (o.value = "Refreshing Cores…"), c.value = "";
 			try {
 				let [e, t, r] = await Promise.all([
@@ -5690,17 +5690,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					runtime: e,
 					shop: t,
 					tabs: r
-				}, se(), k.value.has(i.value) ? i.value !== "manage" && await le(i.value, !0) : await pe("manage");
+				}, se(), k.value.has(i.value) ? i.value !== "manage" && await H(i.value, !0) : await pe("manage");
 			} catch (e) {
 				oe(e instanceof Error ? e.message : "Core refresh failed.", "error");
 			} finally {
 				e || (o.value = "");
 			}
 		}
-		async function le(e, t = !1) {
+		async function H(e, t = !1) {
 			let r = F(e);
 			if (!r || r === "manage") {
-				await ce(t);
+				await le(t);
 				return;
 			}
 			g.value = {
@@ -5708,10 +5708,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				[r]: !0
 			};
 			try {
-				let e = await xs(`${n.options.endpoints.runtime}/${L(r)}/tab`);
-				H(r).payload = e || {}, r === i.value && !ue(e) && fe(r, e);
+				let e = await xs(`${n.options.endpoints.runtime}/${re(r)}/tab`);
+				ce(r).payload = e || {}, r === i.value && !ue(e) && fe(r, e);
 			} catch (e) {
-				H(r).payload = { error: e instanceof Error ? e.message : "Core panel failed to load." };
+				ce(r).payload = { error: e instanceof Error ? e.message : "Core panel failed to load." };
 			} finally {
 				g.value = {
 					...g.value,
@@ -5726,19 +5726,19 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			_?.close(), _ = null, v && window.clearTimeout(v), v = 0;
 		}
 		function fe(e, t) {
-			de(), !(i.value !== e || ue(t) || !t?.ui?.live_updates) && (_ = new EventSource(`${n.options.endpoints.runtime}/${L(e)}/tab-events`), _.addEventListener("core-tab", (t) => {
+			de(), !(i.value !== e || ue(t) || !t?.ui?.live_updates) && (_ = new EventSource(`${n.options.endpoints.runtime}/${re(e)}/tab-events`), _.addEventListener("core-tab", (t) => {
 				try {
-					H(e).payload = JSON.parse(t.data);
+					ce(e).payload = JSON.parse(t.data);
 				} catch {}
 			}), _.addEventListener("error", () => {
-				_?.close(), _ = null, i.value === e && (v = window.setTimeout(() => fe(e, H(e).payload), 3e3));
+				_?.close(), _ = null, i.value === e && (v = window.setTimeout(() => fe(e, ce(e).payload), 3e3));
 			}));
 		}
 		async function pe(e) {
 			let t = k.value.has(e) ? e : "manage";
 			if (i.value = t, n.options.onTabChange?.(t), de(), t !== "manage") {
-				let e = H(t);
-				Object.keys(e.payload).length ? ue(e.payload) || fe(t, e.payload) : await le(t);
+				let e = ce(t);
+				Object.keys(e.payload).length ? ue(e.payload) || fe(t, e.payload) : await H(t);
 			}
 		}
 		async function me(e, t) {
@@ -5746,7 +5746,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			if (r) {
 				o.value = `${t === "start" ? "Starting" : "Stopping"} ${r}…`;
 				try {
-					await Ss(`${n.options.endpoints.runtime}/${L(r)}/${t}`), oe(`${F(e.label || r)} ${t === "start" ? "started" : "stopped"}.`), await ce(!0), n.options.onHealthRefresh?.();
+					await Ss(`${n.options.endpoints.runtime}/${re(r)}/${t}`), oe(`${F(e.label || r)} ${t === "start" ? "started" : "stopped"}.`), await le(!0), n.options.onHealthRefresh?.();
 				} catch (e) {
 					oe(e instanceof Error ? e.message : `Core ${t} failed.`, "error");
 				} finally {
@@ -5761,7 +5761,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					let r = t ? { id: t } : {};
 					e === "remove" && (r.purge_redis = !!l.value[t]);
 					let i = await Ss(`${n.options.endpoints.shop}/${e}`, r), o = Array.isArray(i.updated) ? i.updated.length : 0, s = Array.isArray(i.failed) ? i.failed.length : 0;
-					oe(F(i.message) || (e === "update-all" ? `Update-all completed. Updated ${o}, failed ${s}.` : "Core action completed."), s ? "error" : "success"), await ce(!0), e === "install" && (a.value = "installed"), n.options.onHealthRefresh?.();
+					oe(F(i.message) || (e === "update-all" ? `Update-all completed. Updated ${o}, failed ${s}.` : "Core action completed."), s ? "error" : "success"), await le(!0), e === "install" && (a.value = "installed"), n.options.onHealthRefresh?.();
 				} catch (e) {
 					oe(e instanceof Error ? e.message : "Core action failed.", "error");
 				} finally {
@@ -5808,7 +5808,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					"read_only",
 					"led_preview"
 				].includes(F(e.type).toLowerCase()) && ge(e)).map((e) => [F(e.key), m.value[F(e.key)]]));
-				await Ss(`${n.options.endpoints.runtime}/${L(t)}/settings`, { values: r }), oe(`Saved settings for ${F(e.label || t)}.`), p.value = null, await ce(!0);
+				await Ss(`${n.options.endpoints.runtime}/${re(t)}/settings`, { values: r }), oe(`Saved settings for ${F(e.label || t)}.`), p.value = null, await le(!0);
 			} catch (e) {
 				oe(e instanceof Error ? e.message : "Core settings save failed.", "error");
 			} finally {
@@ -5833,7 +5833,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function be() {
 			o.value = "Saving Core repositories…";
 			try {
-				await Ss(`${n.options.endpoints.shop}/repos`, { repos: f.value }), oe("Core repositories saved."), await ce(!0);
+				await Ss(`${n.options.endpoints.shop}/repos`, { repos: f.value }), oe("Core repositories saved."), await le(!0);
 			} catch (e) {
 				oe(e instanceof Error ? e.message : "Repository save failed.", "error");
 			} finally {
@@ -5848,8 +5848,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		}, { immediate: !0 }), se(), window.addEventListener("keydown", xe), Cr(() => {
 			de(), window.removeEventListener("keydown", xe);
 		}), sn(() => void pe(i.value)), t({
-			refresh: () => ce(!1),
-			refreshTab: (e) => le(e, !0)
+			refresh: () => le(!1),
+			refreshTab: (e) => H(e, !0)
 		}), (t, n) => (J(), Y(q, null, [X("div", Ed, [
 			X("header", Dd, [n[8] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "System capabilities"),
@@ -5858,7 +5858,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			], -1), X("div", Od, [X("span", { class: z(["tv-live-pill", { busy: !!o.value }]) }, [n[7] ||= X("i", null, null, -1), Z(U(o.value || "Live"), 1)], 2), X("button", {
 				class: "tv-button",
 				type: "button",
-				onClick: n[0] ||= (e) => ce()
+				onClick: n[0] ||= (e) => le()
 			}, "Refresh")])]),
 			X("div", kd, [
 				X("div", null, [n[9] ||= X("span", null, "Installed", -1), X("strong", null, U(C.value.length || S.value.length), 1)]),
@@ -5892,7 +5892,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				key: e.key,
 				class: "tv-panel tcx-core-card"
 			}, [
-				X("header", null, [X("div", null, [X("span", Hd, U(e.key), 1), X("h2", null, U(ie(e)), 1)]), X("span", { class: z(["tv-state", {
+				X("header", null, [X("div", null, [X("span", Hd, U(e.key), 1), X("h2", null, U(R(e)), 1)]), X("span", { class: z(["tv-state", {
 					good: e.runtime?.running,
 					pending: e.runtime?.desired_running && !e.runtime?.running
 				}]) }, U(V(e.runtime)), 3)]),
@@ -5935,7 +5935,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					disabled: !E.value.length,
 					onClick: n[2] ||= (e) => W("update-all")
 				}, "Update all", 8, tf)]),
-				(J(!0), Y(q, null, K(C.value.slice().sort(re), (e) => (J(), Y("article", {
+				(J(!0), Y(q, null, K(C.value.slice().sort(L), (e) => (J(), Y("article", {
 					key: e.id,
 					class: "tv-panel tcx-manage-row"
 				}, [X("div", null, [X("strong", null, U(e.name || e.id), 1), X("span", null, U(e.installed_ver || "0.0.0") + " → " + U(e.store_ver || "-") + " · " + U(V(B(e))), 1)]), X("div", nf, [
@@ -6190,19 +6190,19 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function I() {
 			window.cancelAnimationFrame(c), c = window.requestAnimationFrame(F);
 		}
-		function L() {
+		function re() {
 			l?.disconnect();
 			let e = u.value;
 			e && (l = new ResizeObserver(I), l.observe(e), Array.from(e.children).forEach((e) => l?.observe(e)), I());
 		}
 		En([a, o], te), En(() => t.state.payload, () => {
-			b.value = T(v.value.person_id), x.value = Number(y.value.refresh_interval_seconds ?? 300), S.value = Number(y.value.brief_refresh_interval_seconds ?? 3600), ne(), sn().then(L);
+			b.value = T(v.value.person_id), x.value = Number(y.value.refresh_interval_seconds ?? 300), S.value = Number(y.value.brief_refresh_interval_seconds ?? 3600), ne(), sn().then(re);
 		}, { immediate: !0 }), br(() => {
-			N({ quiet: !0 }), sn().then(L);
+			N({ quiet: !0 }), sn().then(re);
 		}), Cr(() => {
 			window.clearInterval(s), window.cancelAnimationFrame(c), l?.disconnect();
 		});
-		let R = [
+		let ie = [
 			[0, "Off"],
 			[30, "30 seconds"],
 			[60, "1 minute"],
@@ -6212,7 +6212,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			[3600, "1 hour"],
 			[7200, "2 hours"],
 			[14400, "4 hours"]
-		], re = [
+		], L = [
 			[0, "Off"],
 			[300, "5 minutes"],
 			[900, "15 minutes"],
@@ -6301,7 +6301,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 								refresh_interval_seconds: x.value,
 								brief_refresh_interval_seconds: S.value
 							}, "Dashboard refresh updated.")
-						}, [(J(), Y(q, null, K(R, (e) => X("option", {
+						}, [(J(), Y(q, null, K(ie, (e) => X("option", {
 							key: e[0],
 							value: e[0]
 						}, U(e[1]), 9, Uf)), 64))], 544), [[
@@ -6316,7 +6316,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 								refresh_interval_seconds: x.value,
 								brief_refresh_interval_seconds: S.value
 							}, "Brief refresh updated.")
-						}, [(J(), Y(q, null, K(re, (e) => X("option", {
+						}, [(J(), Y(q, null, K(L, (e) => X("option", {
 							key: e[0],
 							value: e[0]
 						}, U(e[1]), 9, Wf)), 64))], 544), [[
@@ -6440,18 +6440,18 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			"devices",
 			"rooms",
 			"runtime"
-		].includes(t.options.initialTab || "") ? String(t.options.initialTab) : "manager"), r = /* @__PURE__ */ G("installed"), i = /* @__PURE__ */ G(""), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(null), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G({}), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G([]), m = /* @__PURE__ */ G(t.state.settings.integration_device_registry || {}), h = /* @__PURE__ */ G(t.state.settings.integration_runtime || {}), g = /* @__PURE__ */ G({}), _ = /* @__PURE__ */ G({}), v = /* @__PURE__ */ G(""), y = /* @__PURE__ */ G({}), b = /* @__PURE__ */ G({}), x = 0, S = !1, C = !1, w = !1, T = $(() => t.state.settings || {}), E = $(() => Array.isArray(T.value.integrations) ? T.value.integrations : []), D = $(() => T.value.integration_shop || {}), O = $(() => Array.isArray(D.value.installed) ? D.value.installed : []), k = $(() => Array.isArray(D.value.catalog) ? D.value.catalog.filter((e) => !e.installed) : []), A = $(() => O.value.filter((e) => e.update_available)), j = $(() => O.value.filter((e) => e.enabled).length || (O.value.length ? 0 : E.value.length)), M = $(() => new Map(E.value.map((e) => [L(e.id), e]))), N = $(() => {
+		].includes(t.options.initialTab || "") ? String(t.options.initialTab) : "manager"), r = /* @__PURE__ */ G("installed"), i = /* @__PURE__ */ G(""), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G(null), l = /* @__PURE__ */ G({}), u = /* @__PURE__ */ G({}), d = /* @__PURE__ */ G(""), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G([]), m = /* @__PURE__ */ G(t.state.settings.integration_device_registry || {}), h = /* @__PURE__ */ G(t.state.settings.integration_runtime || {}), g = /* @__PURE__ */ G({}), _ = /* @__PURE__ */ G({}), v = /* @__PURE__ */ G(""), y = /* @__PURE__ */ G({}), b = /* @__PURE__ */ G({}), x = 0, S = !1, C = !1, w = !1, T = $(() => t.state.settings || {}), E = $(() => Array.isArray(T.value.integrations) ? T.value.integrations : []), D = $(() => T.value.integration_shop || {}), O = $(() => Array.isArray(D.value.installed) ? D.value.installed : []), k = $(() => Array.isArray(D.value.catalog) ? D.value.catalog.filter((e) => !e.installed) : []), A = $(() => O.value.filter((e) => e.update_available)), j = $(() => O.value.filter((e) => e.enabled).length || (O.value.length ? 0 : E.value.length)), M = $(() => new Map(E.value.map((e) => [re(e.id), e]))), N = $(() => {
 			let e = /* @__PURE__ */ new Set(), t = O.value.map((t) => {
 				let n = I(t.id || t.module_key || t.key);
-				return e.add(L(n)), {
+				return e.add(re(n)), {
 					id: n,
 					shop: t,
-					integration: M.value.get(L(n)) || null
+					integration: M.value.get(re(n)) || null
 				};
 			});
 			return E.value.forEach((n) => {
 				let r = I(n.id);
-				r && !e.has(L(r)) && t.push({
+				r && !e.has(re(r)) && t.push({
 					id: r,
 					shop: null,
 					integration: n
@@ -6479,17 +6479,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function I(e) {
 			return String(e ?? "").trim();
 		}
-		function L(e) {
+		function re(e) {
 			let t = I(e);
 			return t === "ecobee_homekit" ? "homekit" : t;
 		}
-		function R(e) {
+		function ie(e) {
 			return encodeURIComponent(I(e));
 		}
-		function re(e, n = "success") {
+		function L(e, n = "success") {
 			a.value = e, t.options.onToast?.(e, n);
 		}
-		function ie(e) {
+		function R(e) {
 			return I(e.name || e.friendly_name || e.label || e.title || e.id || e.ref || "Device");
 		}
 		function ae(e) {
@@ -6517,15 +6517,15 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				n && I(e.type).toLowerCase() === "number" && (t[n] = Number(t[n] ?? e.default ?? 0));
 			}), t;
 		}
-		function H(e) {
+		function ce(e) {
 			return e.payload && typeof e.payload == "object" ? e.payload : {};
 		}
-		function ce(e) {
-			let t = H(e);
+		function le(e) {
+			let t = ce(e);
 			return I(t.name || t.friendly_name || t.device_name || t.entity_name || t.entity_id || t.ref || e.provider || "Device change");
 		}
-		function le(e) {
-			let t = H(e);
+		function H(e) {
+			let t = ce(e);
 			return I(t.state ?? t.value ?? t.status ?? t.current_state ?? e.kind ?? "changed").replaceAll("_", " ");
 		}
 		function ue(e) {
@@ -6537,7 +6537,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			try {
 				t.state.settings = await xs(t.options.endpoints.settings), m.value = t.state.settings.integration_device_registry || m.value, h.value = t.state.settings.integration_runtime || h.value, p.value = Array.isArray(t.state.settings.integration_shop?.repos?.additional) ? t.state.settings.integration_shop.repos.additional.map((e) => ({ ...e })) : [];
 			} catch (t) {
-				o.value = t instanceof Error ? t.message : "Integration refresh failed.", e || re(o.value, "error");
+				o.value = t instanceof Error ? t.message : "Integration refresh failed.", e || L(o.value, "error");
 			} finally {
 				e || (i.value = "");
 			}
@@ -6547,9 +6547,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				i.value = `${e.replaceAll("-", " ")} ${n || "integrations"}…`, o.value = "";
 				try {
 					let r = n ? { id: n } : {};
-					e === "remove" && (r.purge_redis = !!u.value[n]), re(I((await Ss(`${t.options.endpoints.shop}/${e}`, r)).message) || "Integration action completed."), await de(!0);
+					e === "remove" && (r.purge_redis = !!u.value[n]), L(I((await Ss(`${t.options.endpoints.shop}/${e}`, r)).message) || "Integration action completed."), await de(!0);
 				} catch (e) {
-					o.value = e instanceof Error ? e.message : "Integration action failed.", re(o.value, "error");
+					o.value = e instanceof Error ? e.message : "Integration action failed.", L(o.value, "error");
 				} finally {
 					i.value = "";
 				}
@@ -6561,11 +6561,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function me() {
 			let e = c.value;
 			if (e) {
-				i.value = `Saving ${ie(e)}…`;
+				i.value = `Saving ${R(e)}…`;
 				try {
-					await Ss(`${t.options.endpoints.integrationSettings}/${R(e.id)}/settings`, { settings: se(e) }), re(`${ie(e)} settings saved.`), c.value = null, await de(!0);
+					await Ss(`${t.options.endpoints.integrationSettings}/${ie(e.id)}/settings`, { settings: se(e) }), L(`${R(e)} settings saved.`), c.value = null, await de(!0);
 				} catch (e) {
-					re(e instanceof Error ? e.message : "Settings save failed.", "error");
+					L(e instanceof Error ? e.message : "Settings save failed.", "error");
 				} finally {
 					i.value = "";
 				}
@@ -6576,13 +6576,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			if (n) {
 				i.value = I(e.status || `Running ${e.label || e.id}…`);
 				try {
-					let r = await Ss(`${t.options.endpoints.integrationActions}/${R(n.id)}/actions/${R(e.id)}`, { payload: se(n) }), i = r.values && typeof r.values == "object" ? r.values : r, a = new Set((n.fields || []).map((e) => I(e.key)));
+					let r = await Ss(`${t.options.endpoints.integrationActions}/${ie(n.id)}/actions/${ie(e.id)}`, { payload: se(n) }), i = r.values && typeof r.values == "object" ? r.values : r, a = new Set((n.fields || []).map((e) => I(e.key)));
 					l.value = {
 						...l.value,
 						...Object.fromEntries(Object.entries(i).filter(([e]) => a.has(e)))
-					}, re(I(r.message) || `${e.label || e.id} complete.`, r.ok === !1 ? "error" : "success");
+					}, L(I(r.message) || `${e.label || e.id} complete.`, r.ok === !1 ? "error" : "success");
 				} catch (e) {
-					re(e instanceof Error ? e.message : "Integration action failed.", "error");
+					L(e instanceof Error ? e.message : "Integration action failed.", "error");
 				} finally {
 					i.value = "";
 				}
@@ -6591,9 +6591,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		async function he() {
 			i.value = "Saving integration repositories…";
 			try {
-				await Ss(`${t.options.endpoints.shop}/repos`, { repos: p.value }), re("Integration repositories saved."), await de(!0);
+				await Ss(`${t.options.endpoints.shop}/repos`, { repos: p.value }), L("Integration repositories saved."), await de(!0);
 			} catch (e) {
-				re(e instanceof Error ? e.message : "Repository save failed.", "error");
+				L(e instanceof Error ? e.message : "Repository save failed.", "error");
 			} finally {
 				i.value = "";
 			}
@@ -6601,11 +6601,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function ge() {
 			let e = f.value.trim();
 			if (!e) {
-				re("Repo URL is required.", "error");
+				L("Repo URL is required.", "error");
 				return;
 			}
 			if (p.value.some((t) => I(t.url).toLowerCase() === e.toLowerCase())) {
-				re("That repo is already added.", "error");
+				L("That repo is already added.", "error");
 				return;
 			}
 			p.value.push({
@@ -6618,7 +6618,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				let n = await xs(e ? t.options.endpoints.rooms : t.options.endpoints.deviceRegistry);
 				m.value = n.registry || n, s.value ||= I(ee.value[0]?.id), I(m.value.cache?.source) === "building" && ve();
 			} catch (e) {
-				re(e instanceof Error ? e.message : "Device load failed.", "error");
+				L(e instanceof Error ? e.message : "Device load failed.", "error");
 			}
 		}
 		async function ve() {
@@ -6648,13 +6648,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						let e = await xs(t.options.endpoints.systemTasks), i = (Array.isArray(e.tasks) ? e.tasks : []).find((e) => I(e.id) === "integration_device_registry");
 						if (!(!i || i.running || Number(i.run_count || 0) <= r)) {
 							if (I(i.last_error)) throw Error(I(i.last_error));
-							await _e(n.value === "rooms"), re("Integration devices refreshed.");
+							await _e(n.value === "rooms"), L("Integration devices refreshed.");
 							return;
 						}
 					}
 					if (!w) throw Error("The integration device refresh is still running. You can follow it in System Tasks.");
 				} catch (e) {
-					re(e instanceof Error ? e.message : "Device refresh failed.", "error");
+					L(e instanceof Error ? e.message : "Device refresh failed.", "error");
 				} finally {
 					S = !1, i.value = "";
 				}
@@ -6667,9 +6667,9 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					action: e,
 					payload: n
 				});
-				m.value = r.registry || r, re("Organization changes saved.");
+				m.value = r.registry || r, L("Organization changes saved.");
 			} catch (e) {
-				re(e instanceof Error ? e.message : "Organization update failed.", "error");
+				L(e instanceof Error ? e.message : "Organization update failed.", "error");
 			} finally {
 				i.value = "";
 			}
@@ -6697,7 +6697,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			});
 		}
 		async function we(e) {
-			let t = I(b.value[`${V(e)}:${B(e)}`] || ie(e));
+			let t = I(b.value[`${V(e)}:${B(e)}`] || R(e));
 			t && await be("rename_device", {
 				integration_id: V(e),
 				device_id: B(e),
@@ -6721,7 +6721,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				]);
 				h.value = e.runtime || e, g.value = n, _.value = r;
 			} catch (t) {
-				e || re(t instanceof Error ? t.message : "Activity refresh failed.", "error");
+				e || L(t instanceof Error ? t.message : "Activity refresh failed.", "error");
 			} finally {
 				e || (i.value = "");
 			}
@@ -6737,7 +6737,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			let t = {}, n = {};
 			e.forEach((e) => {
 				t[ae(e)] = I(e.name), (e.devices || []).forEach((e) => {
-					n[`${V(e)}:${B(e)}`] = ie(e);
+					n[`${V(e)}:${B(e)}`] = R(e);
 				});
 			}), y.value = t, b.value = n;
 		}, { immediate: !0 }), En(n, (e) => {
@@ -6936,7 +6936,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				key: B(e),
 				class: "ti-device-row"
 			}, [
-				X("div", null, [X("strong", null, U(ie(e)), 1), X("span", null, U([
+				X("div", null, [X("strong", null, U(R(e)), 1), X("span", null, U([
 					e.integration_name || e.integration_id,
 					e.type,
 					e.ref || e.id
@@ -6991,7 +6991,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					}, U(e.label || e.value), 9, Yp))), 128))
 				], 40, qp)])])),
 				X("div", Xp, [(J(!0), Y(q, null, K(e.devices || [], (n) => (J(), Y("article", { key: `${V(n)}:${B(n)}` }, [
-					X("div", null, [X("strong", null, U(ie(n)), 1), X("span", null, U(n.integration_name || n.integration_id) + " · " + U(n.type || "device"), 1)]),
+					X("div", null, [X("strong", null, U(R(n)), 1), X("span", null, U(n.integration_name || n.integration_id) + " · " + U(n.type || "device"), 1)]),
 					X("label", null, [t[28] ||= X("span", null, "Room", -1), X("select", {
 						value: n.room_id || ae(e),
 						onChange: (e) => Ce(n, e.target.value)
@@ -7037,8 +7037,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				]),
 				X("div", om, [(J(!0), Y(q, null, K(F.value, (e) => (J(), Y("article", { key: e.seq }, [
 					X("span", sm, U(I(e.provider).replaceAll("_", " ")), 1),
-					X("div", null, [X("strong", null, U(ce(e)), 1), X("small", null, U(H(e).room || H(e).area || H(e).entity_id || H(e).ref || ""), 1)]),
-					X("span", cm, U(le(e)), 1),
+					X("div", null, [X("strong", null, U(le(e)), 1), X("small", null, U(ce(e).room || ce(e).area || ce(e).entity_id || ce(e).ref || ""), 1)]),
+					X("span", cm, U(H(e)), 1),
 					X("time", null, U(ue(e.ts)), 1)
 				]))), 128)), F.value.length ? Q("", !0) : (J(), Y("div", lm, "No recent device changes in the current activity window."))])
 			])),
@@ -7050,7 +7050,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					class: "tv-modal",
 					onSubmit: ds(me, ["prevent"])
 				}, [
-					X("header", null, [X("div", null, [X("span", um, U(c.value?.id), 1), X("h2", null, U(c.value ? ie(c.value) : "") + " settings", 1)]), X("button", {
+					X("header", null, [X("div", null, [X("span", um, U(c.value?.id), 1), X("h2", null, U(c.value ? R(c.value) : "") + " settings", 1)]), X("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: t[8] ||= (e) => c.value = null
@@ -7294,10 +7294,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				return n.includes(r);
 			});
 		}
-		function L(e) {
+		function re(e) {
 			d.value = e, f.value = Object.fromEntries((Array.isArray(e.settings) ? e.settings : []).filter((e) => w(e.key)).map((e) => [w(e.key), F(e)]));
 		}
-		async function R() {
+		async function ie() {
 			let e = d.value;
 			if (!e) return;
 			let n = w(e.key);
@@ -7320,7 +7320,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				i.value = "";
 			}
 		}
-		function re() {
+		function L() {
 			let e = l.value.trim();
 			if (!e) {
 				N("Repository URL is required.", "error");
@@ -7335,7 +7335,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				url: e
 			}), c.value = "", l.value = "", a.value = "Repository added. Save repositories to apply it.", o.value = "";
 		}
-		async function ie() {
+		async function R() {
 			i.value = "Saving Portal repositories…";
 			try {
 				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), N("Portal repositories saved."), await P(!0);
@@ -7393,7 +7393,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					key: 0,
 					class: "tv-button",
 					type: "button",
-					onClick: (t) => L(e.runtime)
+					onClick: (t) => re(e.runtime)
 				}, "Settings", 8, Am)) : (J(), Y("span", jm, U(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (J(), Y("button", {
 					key: 2,
 					class: z(["tv-button", { primary: !e.runtime.running }]),
@@ -7475,17 +7475,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						"onUpdate:modelValue": t[3] ||= (e) => l.value = e,
 						type: "url",
 						placeholder: "https://example.com/portals.json",
-						onKeyup: ps(re, ["enter"])
+						onKeyup: ps(L, ["enter"])
 					}, null, 544), [[Qo, l.value]])]),
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: re
+						onClick: L
 					}, "Add"),
 					X("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: ie
+						onClick: R
 					}, "Save repositories")
 				])
 			])),
@@ -7495,7 +7495,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}, {
 				default: yn(() => [X("form", {
 					class: "tv-modal tp-settings-modal",
-					onSubmit: ds(R, ["prevent"])
+					onSubmit: ds(ie, ["prevent"])
 				}, [
 					X("header", null, [X("div", null, [X("span", eh, U(d.value?.key), 1), X("h2", null, U(d.value?.label || d.value?.key) + " settings", 1)]), X("button", {
 						class: "tv-button",
@@ -7688,7 +7688,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				"Allow inline eval",
 				"Allows python -c, node -e, ruby -e, and similar interpreter execution."
 			]
-		], a = /* @__PURE__ */ G(ie(n.options.initialTab)), o = /* @__PURE__ */ G(L(n.options.initialSessionId)), s = /* @__PURE__ */ G(L(n.options.initialManualSessionId)), c = /* @__PURE__ */ G([]), l = /* @__PURE__ */ G(0), u = /* @__PURE__ */ G([]), d = /* @__PURE__ */ G(0), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G(""), m = /* @__PURE__ */ G(!1), h = /* @__PURE__ */ G(""), g = /* @__PURE__ */ G(""), _ = /* @__PURE__ */ G(""), v = /* @__PURE__ */ G(!1), y = /* @__PURE__ */ G(!1), b = /* @__PURE__ */ Ct({}), x = 0, S = !1, C = $(() => n.state.payload || {}), w = $(() => Array.isArray(C.value.sessions) ? C.value.sessions : []), T = $(() => w.value.filter((e) => R(e.source) === "ui")), E = $(() => Array.isArray(C.value.model_processes) ? C.value.model_processes : []), D = $(() => w.value.find((e) => L(e.id) === o.value) || null), O = $(() => T.value.find((e) => L(e.id) === s.value) || null), k = $(() => a.value === "manual" ? O.value : D.value), A = $(() => Number(C.value.active_count || w.value.filter(ae).length)), j = $(() => Number(C.value.model_process_count || E.value.length)), M = $(() => ae(D.value)), N = $(() => ae(O.value)), ee = $(() => R(D.value?.source) === "spudex_chat" ? D.value : null), P = $(() => !!(h.value === "chat" || ae(ee.value))), te = $(() => se(C.value.platform_options, b.allowed_platforms)), ne = $(() => {
+		], a = /* @__PURE__ */ G(B(n.options.initialTab)), o = /* @__PURE__ */ G(L(n.options.initialSessionId)), s = /* @__PURE__ */ G(L(n.options.initialManualSessionId)), c = /* @__PURE__ */ G([]), l = /* @__PURE__ */ G(0), u = /* @__PURE__ */ G([]), d = /* @__PURE__ */ G(0), f = /* @__PURE__ */ G(""), p = /* @__PURE__ */ G(""), m = /* @__PURE__ */ G("agent_lab"), h = /* @__PURE__ */ G("/"), g = /* @__PURE__ */ G(!1), _ = /* @__PURE__ */ G(""), v = /* @__PURE__ */ G(""), y = /* @__PURE__ */ G(""), b = /* @__PURE__ */ G(!1), x = /* @__PURE__ */ G(!1), S = /* @__PURE__ */ Ct({}), C = 0, w = !1, T = $(() => n.state.payload || {}), E = $(() => Array.isArray(T.value.sessions) ? T.value.sessions : []), D = $(() => E.value.filter((e) => R(e.source) === "ui")), O = $(() => Array.isArray(T.value.model_processes) ? T.value.model_processes : []), k = $(() => E.value.find((e) => L(e.id) === o.value) || null), A = $(() => D.value.find((e) => L(e.id) === s.value) || null), j = $(() => a.value === "manual" ? A.value : k.value), M = $(() => Number(T.value.active_count || E.value.filter(V).length)), N = $(() => Number(T.value.model_process_count || O.value.length)), ee = $(() => V(k.value)), P = $(() => V(A.value)), te = $(() => R(k.value?.source) === "spudex_chat" ? k.value : null), ne = $(() => !!(_.value === "chat" || V(te.value))), F = $(() => le(T.value.platform_options, S.allowed_platforms)), I = $(() => {
 			let e = c.value.map((e) => {
 				let t = R(e.stream), r = L(e.text);
 				return r ? t === "user" ? {
@@ -7700,16 +7700,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					content: r
 				} : null : null;
 			}).filter(Boolean);
-			return P.value ? [...e.slice(-20), {
+			return ne.value ? [...e.slice(-20), {
 				role: "assistant",
 				content: { marker: "typing" }
 			}] : e.slice(-20);
-		}), F = $(() => c.value.filter((e) => !["user", "assistant"].includes(R(e.stream)))), I = $(() => {
-			let e = ee.value || D.value;
-			if (h.value === "chat") return "Starting Spudex chat…";
-			if (!e) return A.value ? `${A.value} active Spudex process${A.value === 1 ? "" : "es"}` : "Ready for a Spudex task.";
+		}), re = $(() => c.value.filter((e) => !["user", "assistant"].includes(R(e.stream)))), ie = $(() => {
+			let e = te.value || k.value;
+			if (_.value === "chat") return "Starting Spudex chat…";
+			if (!e) return M.value ? `${M.value} active Spudex process${M.value === 1 ? "" : "es"}` : "Ready for a Spudex task.";
 			let t = (Array.isArray(e.plan) ? e.plan : []).find((e) => R(e.status) === "in_progress");
-			return t?.step ? `Working: ${t.step}` : `${B(e.status)}${L(e.label || e.command || e.goal) ? `: ${L(e.label || e.command || e.goal)}` : ""}`;
+			return t?.step ? `Working: ${t.step}` : `${oe(e.status)}${L(e.label || e.command || e.goal) ? `: ${L(e.label || e.command || e.goal)}` : ""}`;
 		});
 		function L(e) {
 			return String(e ?? "").trim();
@@ -7717,18 +7717,18 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		function R(e) {
 			return L(e).toLowerCase();
 		}
-		function re(e) {
+		function ae(e) {
 			return encodeURIComponent(L(e));
 		}
-		function ie(e) {
+		function B(e) {
 			let t = R(e);
 			return t === "manual" || t === "settings" || t === "policy" ? t === "policy" ? "settings" : t : "workbench";
 		}
-		function ae(e) {
+		function V(e) {
 			let t = R(e?.status);
 			return !!e?.active || t === "running" || t === "queued";
 		}
-		function B(e) {
+		function oe(e) {
 			let t = R(e) || "queued";
 			return {
 				succeeded: "Done",
@@ -7743,20 +7743,20 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				draft: "Draft"
 			}[t] || t.replaceAll("_", " ").replace(/^./, (e) => e.toUpperCase());
 		}
-		function V(e) {
+		function se(e) {
 			let t = Number(e || 0);
 			if (!t) return "";
 			let n = Math.max(0, Math.floor(Date.now() / 1e3 - t));
 			return n < 60 ? `${n}s ago` : n < 3600 ? `${Math.floor(n / 60)}m ago` : n < 86400 ? `${Math.floor(n / 3600)}h ago` : `${Math.floor(n / 86400)}d ago`;
 		}
-		function oe(e, t, n) {
+		function ce(e, t, n) {
 			let r = n ? [] : [...e], i = (e) => `${e._session_id ?? ""}\u0000${L(e.seq) || `${e.ts ?? ""}\u0000${e.stream ?? ""}\u0000${e.text ?? ""}`}`, a = new Set(r.map(i));
 			return t.forEach((e) => {
 				let t = i(e);
 				a.has(t) || (a.add(t), r.push(e));
 			}), r.slice(-1e3);
 		}
-		function se(e, t) {
+		function le(e, t) {
 			let n = new Set((Array.isArray(t) ? t : ["webui"]).map(R).filter(Boolean)), r = /* @__PURE__ */ new Map();
 			return (Array.isArray(e) ? e : []).forEach((e) => {
 				let t = R(e.value);
@@ -7779,22 +7779,22 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			}), [...r.values()];
 		}
 		function H(e, t = "success") {
-			_.value = e, g.value = t === "error" ? e : "", n.options.onToast?.(e, t);
+			y.value = e, v.value = t === "error" ? e : "", n.options.onToast?.(e, t);
 		}
-		function ce(e, t = "") {
-			return `${n.options.endpoints.sessions}/${re(e)}${t}`;
+		function ue(e, t = "") {
+			return `${n.options.endpoints.sessions}/${ae(e)}${t}`;
 		}
-		async function le(e) {
+		async function de(e) {
 			return bs(await fetch(e, {
 				method: "DELETE",
 				credentials: "same-origin",
 				headers: { Accept: "application/json" }
 			}));
 		}
-		function ue(e = !1) {
-			if (y.value && !e) return;
-			let t = C.value.settings || {};
-			Object.assign(b, {
+		function fe(e = !1) {
+			if (x.value && !e) return;
+			let t = T.value.settings || {};
+			Object.assign(S, {
 				enabled: !!t.enabled,
 				policy_enabled: t.policy_enabled !== !1,
 				require_approval: !!t.require_approval,
@@ -7812,201 +7812,202 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				default_cwd: L(t.default_cwd || "workspace"),
 				max_task_steps: Number(t.max_task_steps || 6),
 				command_timeout_sec: Number(t.command_timeout_sec || 45)
-			}), y.value = !1;
+			}), x.value = !1;
 		}
-		function de() {
-			w.value.some((e) => L(e.id) === o.value) || pe(L(w.value[0]?.id), !1), T.value.some((e) => L(e.id) === s.value) || me(L(T.value[0]?.id), !1);
+		function pe() {
+			E.value.some((e) => L(e.id) === o.value) || W(L(E.value[0]?.id), !1), D.value.some((e) => L(e.id) === s.value) || he(L(D.value[0]?.id), !1);
 		}
-		function fe(e) {
-			a.value = ie(e), v.value = !1, n.options.onTabChange?.(a.value);
+		function me(e) {
+			a.value = B(e), b.value = !1, n.options.onTabChange?.(a.value);
 		}
-		function pe(e, t = !0) {
+		function W(e, t = !0) {
 			let r = L(e);
-			r !== o.value && (o.value = r, c.value = [], l.value = 0, n.options.onSessionChange?.(r), t && ge(!0));
+			r !== o.value && (o.value = r, c.value = [], l.value = 0, n.options.onSessionChange?.(r), t && ve(!0));
 		}
-		function me(e, t = !0, r = !1) {
+		function he(e, t = !0, r = !1) {
 			let i = L(e);
-			i !== s.value && (s.value = i, r || (u.value = []), d.value = 0, n.options.onManualSessionChange?.(i), i && (o.value = i, n.options.onSessionChange?.(i)), t && _e(!r));
+			i !== s.value && (s.value = i, r || (u.value = []), d.value = 0, n.options.onManualSessionChange?.(i), i && (o.value = i, n.options.onSessionChange?.(i)), t && ye(!r));
 		}
-		async function W(e = !1) {
-			e || (h.value = "refresh");
+		async function ge(e = !1) {
+			e || (_.value = "refresh");
 			try {
-				n.state.payload = await xs(n.options.endpoints.root), de(), ue();
+				n.state.payload = await xs(n.options.endpoints.root), pe(), fe();
 			} catch (t) {
 				e || H(t instanceof Error ? t.message : "Spudex refresh failed.", "error");
 			} finally {
-				!e && h.value === "refresh" && (h.value = "");
+				!e && _.value === "refresh" && (_.value = "");
 			}
 		}
-		async function he(e, t) {
-			return xs(`${ce(e, "/logs")}?after_seq=${re(t)}&limit=500`);
+		async function _e(e, t) {
+			return xs(`${ue(e, "/logs")}?after_seq=${ae(t)}&limit=500`);
 		}
-		async function ge(e = !1) {
+		async function ve(e = !1) {
 			let t = o.value;
 			if (!t) {
 				c.value = [], l.value = 0;
 				return;
 			}
-			let n = await he(t, e ? 0 : l.value), r = Array.isArray(n.entries) ? n.entries : [];
-			c.value = oe(c.value, r, e), l.value = Number(n.last_seq || (e ? 0 : l.value)), await sn(), document.querySelectorAll(".tsx-chat-scroll, .tsx-terminal-body").forEach((t) => {
+			let n = await _e(t, e ? 0 : l.value), r = Array.isArray(n.entries) ? n.entries : [];
+			c.value = ce(c.value, r, e), l.value = Number(n.last_seq || (e ? 0 : l.value)), await sn(), document.querySelectorAll(".tsx-chat-scroll, .tsx-terminal-body").forEach((t) => {
 				t instanceof HTMLElement && (e || t.scrollHeight - t.scrollTop - t.clientHeight < 120) && (t.scrollTop = t.scrollHeight);
 			});
 		}
-		async function _e(e = !1) {
+		async function ye(e = !1) {
 			let t = s.value;
 			if (!t) {
 				u.value = [], d.value = 0;
 				return;
 			}
-			let n = await he(t, e ? 0 : d.value), r = (Array.isArray(n.entries) ? n.entries : []).map((e) => ({
+			let n = await _e(t, e ? 0 : d.value), r = (Array.isArray(n.entries) ? n.entries : []).map((e) => ({
 				...e,
 				_session_id: t
 			}));
-			u.value = oe(u.value, r, e), d.value = Number(n.last_seq || (e ? 0 : d.value)), await sn();
+			u.value = ce(u.value, r, e), d.value = Number(n.last_seq || (e ? 0 : d.value)), await sn();
 			let i = document.querySelector(".tsx-manual-console-body");
 			i instanceof HTMLElement && (e || i.scrollHeight - i.scrollTop - i.clientHeight < 100) && (i.scrollTop = i.scrollHeight);
 		}
-		async function ve(e = !1) {
-			await W(e), await Promise.all([ge(!1), _e(!1)]);
+		async function be(e = !1) {
+			await ge(e), await Promise.all([ve(!1), ye(!1)]);
 		}
-		function ye() {
-			x && window.clearTimeout(x), x = window.setTimeout(async () => {
-				if (!S) {
-					S = !0;
+		function xe() {
+			C && window.clearTimeout(C), C = window.setTimeout(async () => {
+				if (!w) {
+					w = !0;
 					try {
-						await ve(!0);
+						await be(!0);
 					} catch {} finally {
-						S = !1;
+						w = !1;
 					}
 				}
-				ye();
+				xe();
 			}, 2e3);
 		}
-		async function be() {
+		async function Se() {
 			let e = f.value.trim();
 			if (!e) {
 				H("Enter a Spudex chat message first.", "error");
 				return;
 			}
-			if (P.value) {
+			if (ne.value) {
 				H("Spudex is still working in this chat.", "error");
 				return;
 			}
-			h.value = "chat";
+			_.value = "chat";
 			try {
-				let t = R(D.value?.source) === "spudex_chat" ? o.value : "", r = L((await Ss(n.options.endpoints.chat, {
+				let t = R(k.value?.source) === "spudex_chat" ? o.value : "", r = L((await Ss(n.options.endpoints.chat, {
 					message: e,
 					session_id: t || null
 				})).session?.id);
-				r && pe(r, !1), f.value = "", H("Spudex task started."), await W(!0), await ge(!0);
+				r && W(r, !1), f.value = "", H("Spudex task started."), await ge(!0), await ve(!0);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "Spudex chat failed.", "error");
 			} finally {
-				h.value = "";
+				_.value = "";
 			}
 		}
-		async function xe() {
-			h.value = "new-chat";
+		async function Ce() {
+			_.value = "new-chat";
 			try {
-				pe(L((await Ss(n.options.endpoints.chatSession, { label: "New Spudex chat" })).session?.id), !1), f.value = "", H("New Spudex chat created."), await W(!0), await ge(!0);
+				W(L((await Ss(n.options.endpoints.chatSession, { label: "New Spudex chat" })).session?.id), !1), f.value = "", H("New Spudex chat created."), await ge(!0), await ve(!0);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "New Spudex chat failed.", "error");
 			} finally {
-				h.value = "";
+				_.value = "";
 			}
 		}
-		async function Se() {
+		async function we() {
 			let e = p.value.trim();
 			if (!e) {
 				H("Enter a command first.", "error");
 				return;
 			}
-			h.value = "run";
+			_.value = "run";
 			try {
-				let t = L((await Ss(n.options.endpoints.run, {
+				let t = await Ss(n.options.endpoints.run, {
 					command: e,
+					cwd: m.value,
 					label: e.slice(0, 80),
-					background: m.value
-				})).session?.id);
-				pe(t, !1), me(t, !1, !0), p.value = "", H("Spudex session started."), await W(!0), await Promise.all([ge(!0), _e(!1)]);
+					background: g.value
+				}), r = L(t.session?.id);
+				m.value = L(t.session?.cwd) || m.value, h.value = L(t.session?.cwd_display) || h.value, W(r, !1), he(r, !1, !0), p.value = "", H(t.builtin === "cd" ? `Working directory: ${h.value}` : "Spudex session started."), await ge(!0), await Promise.all([ve(!0), ye(!1)]);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "Command failed.", "error");
 			} finally {
-				h.value = "";
+				_.value = "";
 			}
 		}
-		async function Ce(e, t = "Spudex session") {
+		async function Te(e, t = "Spudex session") {
 			if (e) {
-				h.value = `stop-${e}`;
+				_.value = `stop-${e}`;
 				try {
-					await Ss(ce(e, "/stop")), H(`${t} stop requested.`), await W(!0);
+					await Ss(ue(e, "/stop")), H(`${t} stop requested.`), await ge(!0);
 				} catch (e) {
 					H(e instanceof Error ? e.message : "Stop failed.", "error");
 				} finally {
-					h.value = "";
+					_.value = "";
 				}
 			}
 		}
-		async function we(e) {
+		async function Ee(e) {
 			let t = L(e.id);
-			if (t && !(ae(e) && !window.confirm("Close this running Spudex session? Its active command will be stopped."))) {
-				h.value = `close-${t}`;
+			if (t && !(V(e) && !window.confirm("Close this running Spudex session? Its active command will be stopped."))) {
+				_.value = `close-${t}`;
 				try {
-					await le(ce(t)), t === o.value && pe("", !1), t === s.value && me("", !1), H("Spudex session closed."), await W(!0);
+					await de(ue(t)), t === o.value && W("", !1), t === s.value && he("", !1), H("Spudex session closed."), await ge(!0);
 				} catch (e) {
 					H(e instanceof Error ? e.message : "Close failed.", "error");
 				} finally {
-					h.value = "";
+					_.value = "";
 				}
 			}
 		}
-		async function Te(e, t, n) {
-			h.value = `${n}-${t}`;
+		async function De(e, t, n) {
+			_.value = `${n}-${t}`;
 			try {
-				await Ss(ce(e, `/file-changes/${n}`), { change_id: t }), H(`File change ${n === "approve" ? "approved" : "rejected"}.`), await W(!0);
+				await Ss(ue(e, `/file-changes/${n}`), { change_id: t }), H(`File change ${n === "approve" ? "approved" : "rejected"}.`), await ge(!0);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "File change update failed.", "error");
 			} finally {
-				h.value = "";
+				_.value = "";
 			}
 		}
-		async function Ee() {
-			h.value = "settings";
+		async function Oe() {
+			_.value = "settings";
 			try {
 				await Ss(n.options.endpoints.settings, { values: {
-					...b,
-					allowed_platforms: b.allowed_platforms?.length ? b.allowed_platforms : ["webui"]
-				} }), y.value = !1, H("Spudex settings saved."), await W(!0), ue(!0);
+					...S,
+					allowed_platforms: S.allowed_platforms?.length ? S.allowed_platforms : ["webui"]
+				} }), x.value = !1, H("Spudex settings saved."), await ge(!0), fe(!0);
 			} catch (e) {
 				H(e instanceof Error ? e.message : "Spudex settings failed.", "error");
 			} finally {
-				h.value = "";
+				_.value = "";
 			}
 		}
-		function De(e, t) {
-			let n = new Set((Array.isArray(b.allowed_platforms) ? b.allowed_platforms : []).map(R));
-			t ? (e === "all" && n.clear(), n.add(e)) : n.delete(e), e !== "all" && t && n.delete("all"), b.allowed_platforms = [...n], y.value = !0;
+		function ke(e, t) {
+			let n = new Set((Array.isArray(S.allowed_platforms) ? S.allowed_platforms : []).map(R));
+			t ? (e === "all" && n.clear(), n.add(e)) : n.delete(e), e !== "all" && t && n.delete("all"), S.allowed_platforms = [...n], x.value = !0;
 		}
-		function Oe(e) {
-			e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && (e.preventDefault(), be());
+		function Ae(e) {
+			e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && (e.preventDefault(), Se());
 		}
-		function ke(e) {
-			pe(e.target.value);
+		function je(e) {
+			W(e.target.value);
 		}
-		function Ae() {
+		function Me() {
 			c.value = c.value.filter((e) => ["user", "assistant"].includes(R(e.stream)));
 		}
-		function je() {
-			D.value && we(D.value);
+		function Ne() {
+			k.value && Ee(k.value);
 		}
-		function Me(e) {
-			e.key === "Escape" && (v.value = !1);
+		function Pe(e) {
+			e.key === "Escape" && (b.value = !1);
 		}
 		return En(() => n.state.payload, () => {
-			de(), ue();
-		}, { deep: !1 }), ue(!0), de(), window.addEventListener("keydown", Me), Promise.all([ge(!0), _e(!0)]).catch(() => {}), ye(), Cr(() => {
-			x && window.clearTimeout(x), window.removeEventListener("keydown", Me);
-		}), t({ refresh: () => ve(!1) }), (t, n) => (J(), Y(q, null, [X("div", rh, [
+			pe(), fe();
+		}, { deep: !1 }), fe(!0), pe(), window.addEventListener("keydown", Pe), Promise.all([ve(!0), ye(!0)]).catch(() => {}), xe(), Cr(() => {
+			C && window.clearTimeout(C), window.removeEventListener("keydown", Pe);
+		}), t({ refresh: () => be(!1) }), (t, n) => (J(), Y(q, null, [X("div", rh, [
 			X("header", ih, [
 				n[23] ||= X("div", { class: "tsx-brand" }, [X("span", {
 					class: "tsx-spud-mark",
@@ -8020,43 +8021,43 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					key: e.id,
 					type: "button",
 					class: z({ active: a.value === e.id }),
-					onClick: (t) => fe(e.id)
-				}, [Z(U(e.label), 1), e.id === "workbench" && A.value ? (J(), Y("span", sh, U(A.value), 1)) : Q("", !0)], 10, oh)), 64))]),
-				X("div", ch, [X("span", { class: z(["tv-live-pill", { busy: !!h.value }]) }, [n[22] ||= X("i", null, null, -1), Z(U(h.value ? "Working" : "Live"), 1)], 2), X("button", {
+					onClick: (t) => me(e.id)
+				}, [Z(U(e.label), 1), e.id === "workbench" && M.value ? (J(), Y("span", sh, U(M.value), 1)) : Q("", !0)], 10, oh)), 64))]),
+				X("div", ch, [X("span", { class: z(["tv-live-pill", { busy: !!_.value }]) }, [n[22] ||= X("i", null, null, -1), Z(U(_.value ? "Working" : "Live"), 1)], 2), X("button", {
 					class: "tv-button tsx-icon-button",
 					type: "button",
 					"aria-label": "Refresh Spudex",
 					title: "Refresh",
-					onClick: n[0] ||= (e) => ve(!1)
+					onClick: n[0] ||= (e) => be(!1)
 				}, "↻")])
 			]),
-			_.value || g.value ? (J(), Y("div", {
+			y.value || v.value ? (J(), Y("div", {
 				key: 0,
-				class: z(["tv-notice", { error: !!g.value }])
-			}, U(g.value || _.value), 3)) : Q("", !0),
+				class: z(["tv-notice", { error: !!v.value }])
+			}, U(v.value || y.value), 3)) : Q("", !0),
 			a.value === "workbench" ? (J(), Y("section", lh, [X("div", uh, [
 				X("div", dh, [
-					X("span", fh, [X("i", { class: z({ live: M.value }) }, null, 2), n[24] ||= Z("Session", -1)]),
+					X("span", fh, [X("i", { class: z({ live: ee.value }) }, null, 2), n[24] ||= Z("Session", -1)]),
 					X("select", {
 						value: o.value,
 						"aria-label": "Selected Spudex session",
-						onChange: ke
-					}, [w.value.length ? Q("", !0) : (J(), Y("option", mh, "No sessions yet")), (J(!0), Y(q, null, K(w.value, (e) => (J(), Y("option", {
+						onChange: je
+					}, [E.value.length ? Q("", !0) : (J(), Y("option", mh, "No sessions yet")), (J(!0), Y(q, null, K(E.value, (e) => (J(), Y("option", {
 						key: e.id,
 						value: String(e.id)
-					}, U(e.label || e.command || "Spudex session") + " · " + U(B(e.status)), 9, hh))), 128))], 40, ph),
+					}, U(e.label || e.command || "Spudex session") + " · " + U(oe(e.status)), 9, hh))), 128))], 40, ph),
 					X("button", {
 						class: "tv-button primary tsx-new-chat",
 						type: "button",
-						disabled: h.value === "new-chat",
-						onClick: xe
+						disabled: _.value === "new-chat",
+						onClick: Ce
 					}, [...n[25] ||= [X("span", { "aria-hidden": "true" }, "＋", -1), Z(" New chat", -1)]], 8, gh)
 				]),
 				X("div", _h, [X("span", vh, [
-					X("i", { class: z({ live: E.value.length }) }, null, 2),
+					X("i", { class: z({ live: O.value.length }) }, null, 2),
 					n[26] ||= Z("Runtime ", -1),
-					X("b", null, U(j.value), 1)
-				]), X("div", yh, [E.value.length ? Q("", !0) : (J(), Y("span", bh, "No tracked processes")), (J(!0), Y(q, null, K(E.value, (e) => (J(), Y("article", {
+					X("b", null, U(N.value), 1)
+				]), X("div", yh, [O.value.length ? Q("", !0) : (J(), Y("span", bh, "No tracked processes")), (J(!0), Y(q, null, K(O.value, (e) => (J(), Y("article", {
 					key: e.session_id,
 					title: [e.command, e.cwd].filter(Boolean).join(" · ")
 				}, [
@@ -8066,37 +8067,37 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						type: "button",
 						"aria-label": "Stop model process",
 						title: "Kill process",
-						onClick: (t) => Ce(String(e.session_id), "Model process")
+						onClick: (t) => Te(String(e.session_id), "Model process")
 					}, "×", 8, Sh)
 				], 8, xh))), 128))])]),
 				X("div", Ch, [
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						disabled: !D.value,
-						onClick: n[1] ||= (e) => v.value = !0
+						disabled: !k.value,
+						onClick: n[1] ||= (e) => b.value = !0
 					}, "Details", 8, wh),
 					X("button", {
 						class: "tv-button danger",
 						type: "button",
-						disabled: !M.value,
-						onClick: n[2] ||= (e) => Ce(o.value)
+						disabled: !ee.value,
+						onClick: n[2] ||= (e) => Te(o.value)
 					}, "Stop", 8, Th),
 					X("button", {
 						class: "tv-button tsx-icon-button",
 						type: "button",
-						disabled: !D.value,
+						disabled: !k.value,
 						"aria-label": "Close selected session",
 						title: "Close session",
-						onClick: je
+						onClick: Ne
 					}, "×", 8, Eh)
 				])
 			]), X("div", Dh, [X("section", Oh, [
 				X("header", kh, [X("div", null, [n[28] ||= X("span", {
 					class: "tsx-pane-icon chat",
 					"aria-hidden": "true"
-				}, "✦", -1), X("div", null, [n[27] ||= X("strong", null, "Chat with Tater", -1), X("small", null, U(D.value?.label || D.value?.command || "A fresh Spudex chat"), 1)])]), X("span", { class: z(["tv-state", { good: M.value }]) }, U(D.value ? B(D.value.status) : "Ready"), 3)]),
-				X("div", Ah, [ee.value && ne.value.length ? (J(), Y("div", jh, [(J(!0), Y(q, null, K(ne.value, (t, n) => (J(), ia(Qs, {
+				}, "✦", -1), X("div", null, [n[27] ||= X("strong", null, "Chat with Tater", -1), X("small", null, U(k.value?.label || k.value?.command || "A fresh Spudex chat"), 1)])]), X("span", { class: z(["tv-state", { good: ee.value }]) }, U(k.value ? oe(k.value.status) : "Ready"), 3)]),
+				X("div", Ah, [te.value && I.value.length ? (J(), Y("div", jh, [(J(!0), Y(q, null, K(I.value, (t, n) => (J(), ia(Qs, {
 					key: `${n}-${t.role}`,
 					message: t,
 					profile: e.options.profile || {},
@@ -8105,7 +8106,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					"message",
 					"profile",
 					"files-endpoint"
-				]))), 128))])) : P.value ? Q("", !0) : (J(), Y("div", Mh, [...n[29] ||= [
+				]))), 128))])) : ne.value ? Q("", !0) : (J(), Y("div", Mh, [...n[29] ||= [
 					X("span", {
 						class: "tsx-spud-mark large",
 						"aria-hidden": "true"
@@ -8119,21 +8120,21 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				]]))]),
 				X("form", {
 					class: "tsx-composer",
-					onSubmit: ds(be, ["prevent"])
+					onSubmit: ds(Se, ["prevent"])
 				}, [
 					bn(X("textarea", {
 						"onUpdate:modelValue": n[3] ||= (e) => f.value = e,
 						rows: "1",
 						placeholder: "Message Tater through Spudex…",
-						disabled: P.value,
-						onKeydown: Oe
+						disabled: ne.value,
+						onKeydown: Ae
 					}, null, 40, Nh), [[Qo, f.value]]),
 					X("button", {
 						class: "tv-button primary",
 						type: "submit",
-						disabled: P.value || !f.value.trim()
-					}, U(P.value ? "Working…" : "Send"), 9, Ph),
-					X("small", null, U(I.value), 1)
+						disabled: ne.value || !f.value.trim()
+					}, U(ne.value ? "Working…" : "Send"), 9, Ph),
+					X("small", null, U(ie.value), 1)
 				], 32)
 			]), X("section", Fh, [
 				X("header", Ih, [X("div", null, [n[31] ||= X("span", {
@@ -8143,17 +8144,17 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("i"),
 					X("i"),
 					X("i")
-				], -1), X("div", null, [n[30] ||= X("strong", null, "Activity terminal", -1), X("small", null, "tater@spudex:" + U(D.value?.cwd_display || "workspace"), 1)])]), X("div", Lh, [n[32] ||= X("span", null, "Read only", -1), X("button", {
+				], -1), X("div", null, [n[30] ||= X("strong", null, "Activity terminal", -1), X("small", null, "tater@spudex:" + U(k.value?.cwd_display || "workspace"), 1)])]), X("div", Lh, [n[32] ||= X("span", null, "Read only", -1), X("button", {
 					class: "tv-button",
 					type: "button",
-					disabled: !F.value.length,
-					onClick: Ae
+					disabled: !re.value.length,
+					onClick: Me
 				}, "Clear", 8, Rh)])]),
-				X("div", zh, [F.value.length ? (J(), Y("div", Bh, [(J(!0), Y(q, null, K(F.value, (e) => (J(), Y("article", {
+				X("div", zh, [re.value.length ? (J(), Y("div", Bh, [(J(!0), Y(q, null, K(re.value, (e) => (J(), Y("article", {
 					key: e.seq || `${e.ts}-${e.text}`,
 					class: z(R(e.stream))
 				}, [
-					X("time", null, U(V(e.ts)), 1),
+					X("time", null, U(se(e.ts)), 1),
 					X("span", null, U(e.stream === "command" ? "$" : e.stream || "log"), 1),
 					X("pre", null, U(String(e.text || "").replace(/^\$\s*/, "")), 1)
 				], 2))), 128))])) : (J(), Y("div", Vh, [...n[33] ||= [
@@ -8161,7 +8162,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("strong", null, "Waiting for activity", -1),
 					X("small", null, "Commands, tool output, and system messages will appear here.", -1)
 				]]))]),
-				X("footer", Hh, [X("span", null, [X("i", { class: z({ live: M.value }) }, null, 2), Z(U(M.value ? "Session active" : "Standing by"), 1)]), X("span", null, U(D.value ? `#${String(D.value.id).slice(0, 8)}` : "No session"), 1)])
+				X("footer", Hh, [X("span", null, [X("i", { class: z({ live: ee.value }) }, null, 2), Z(U(ee.value ? "Session active" : "Standing by"), 1)]), X("span", null, U(k.value ? `#${String(k.value.id).slice(0, 8)}` : "No session"), 1)])
 			])])])) : a.value === "manual" ? (J(), Y("section", Uh, [X("section", Wh, [
 				X("header", Gh, [X("div", null, [n[35] ||= X("span", {
 					class: "tsx-window-dots",
@@ -8170,13 +8171,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("i"),
 					X("i"),
 					X("i")
-				], -1), X("div", null, [n[34] ||= X("strong", null, "Spudex Terminal", -1), X("small", null, "tater@spudex:" + U(O.value?.cwd_display || C.value.agent_lab || "agent_lab"), 1)])]), X("div", Kh, [
-					X("span", qh, [X("i", { class: z({ live: N.value || h.value === "run" }) }, null, 2), Z(U(h.value === "run" || N.value ? "Running" : O.value ? B(O.value.status) : "Ready"), 1)]),
+				], -1), X("div", null, [n[34] ||= X("strong", null, "Spudex Terminal", -1), X("small", null, "tater@spudex:" + U(h.value), 1)])]), X("div", Kh, [
+					X("span", qh, [X("i", { class: z({ live: P.value || _.value === "run" }) }, null, 2), Z(U(_.value === "run" || P.value ? "Running" : A.value ? oe(A.value.status) : "Ready"), 1)]),
 					X("button", {
 						class: "tv-button",
 						type: "button",
-						disabled: !O.value,
-						onClick: n[4] ||= (e) => v.value = !0
+						disabled: !A.value,
+						onClick: n[4] ||= (e) => b.value = !0
 					}, "Details", 8, Jh),
 					X("button", {
 						class: "tv-button",
@@ -8187,8 +8188,8 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("button", {
 						class: "tv-button danger",
 						type: "button",
-						disabled: !N.value,
-						onClick: n[6] ||= (e) => Ce(s.value, "Manual session")
+						disabled: !P.value,
+						onClick: n[6] ||= (e) => Te(s.value, "Manual session")
 					}, "Stop", 8, Xh)
 				])]),
 				X("div", Zh, [(J(!0), Y(q, null, K(u.value, (e) => (J(), Y("article", {
@@ -8197,11 +8198,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}, [X("span", null, U(e.stream === "command" ? "$" : e.stream || "log"), 1), X("pre", null, U(String(e.text || "").replace(/^\$\s*/, "")), 1)], 2))), 128)), u.value.length ? Q("", !0) : (J(), Y("div", Qh, [...n[36] ||= [
 					X("span", { class: "tsx-terminal-glyph" }, ">_", -1),
 					X("strong", null, "Manual terminal ready.", -1),
-					X("small", null, "Commands run inside Tater’s protected agent_lab workspace.", -1)
+					X("small", null, "Browse Tater’s protected agent_lab with ls, pwd, and cd. Start at /.", -1)
 				]]))]),
 				X("form", {
 					class: "tsx-manual-prompt",
-					onSubmit: ds(Se, ["prevent"])
+					onSubmit: ds(we, ["prevent"])
 				}, [
 					X("label", $h, [n[37] ||= X("span", { "aria-hidden": "true" }, "$", -1), bn(X("input", {
 						"onUpdate:modelValue": n[7] ||= (e) => p.value = e,
@@ -8209,71 +8210,71 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						autocomplete: "off",
 						"aria-label": "Terminal command",
 						placeholder: "Type a command…",
-						disabled: h.value === "run"
+						disabled: _.value === "run"
 					}, null, 8, eg), [[Qo, p.value]])]),
 					X("label", tg, [bn(X("input", {
-						"onUpdate:modelValue": n[8] ||= (e) => m.value = e,
+						"onUpdate:modelValue": n[8] ||= (e) => g.value = e,
 						class: "tv-checkbox",
 						type: "checkbox"
-					}, null, 512), [[$o, m.value]]), n[38] ||= X("span", null, "Keep running", -1)]),
+					}, null, 512), [[$o, g.value]]), n[38] ||= X("span", null, "Keep running", -1)]),
 					X("button", {
 						class: "tv-button primary tsx-terminal-run",
 						type: "submit",
-						disabled: h.value === "run" || !p.value.trim()
-					}, [n[39] ||= X("span", { "aria-hidden": "true" }, "↵", -1), Z(U(h.value === "run" ? "Running…" : "Run"), 1)], 8, ng)
+						disabled: _.value === "run" || !p.value.trim()
+					}, [n[39] ||= X("span", { "aria-hidden": "true" }, "↵", -1), Z(U(_.value === "run" ? "Running…" : "Run"), 1)], 8, ng)
 				], 32),
-				X("footer", rg, [n[40] ||= X("span", null, "Policy checked", -1), X("span", null, U(C.value.agent_lab || "agent_lab"), 1)])
+				X("footer", rg, [n[40] ||= X("span", null, "Policy checked", -1), X("span", null, "Current directory " + U(h.value), 1)])
 			])])) : (J(), Y("section", ig, [
 				X("div", ag, [
 					X("header", null, [n[41] ||= X("div", null, [
 						X("span", { class: "tv-eyebrow" }, "Hydra access"),
 						X("h2", null, "Spudex availability"),
 						X("p", null, "Expose policy-controlled Spudex tools only on the Tater surfaces you choose.")
-					], -1), X("label", og, [X("span", null, U(b.enabled ? "Enabled" : "Off"), 1), bn(X("input", {
-						"onUpdate:modelValue": n[9] ||= (e) => b.enabled = e,
+					], -1), X("label", og, [X("span", null, U(S.enabled ? "Enabled" : "Off"), 1), bn(X("input", {
+						"onUpdate:modelValue": n[9] ||= (e) => S.enabled = e,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[10] ||= (e) => y.value = !0
-					}, null, 544), [[$o, b.enabled]])])]),
+						onChange: n[10] ||= (e) => x.value = !0
+					}, null, 544), [[$o, S.enabled]])])]),
 					X("div", sg, [
 						X("label", null, [n[42] ||= X("span", null, "Default working folder", -1), bn(X("input", {
-							"onUpdate:modelValue": n[11] ||= (e) => b.default_cwd = e,
+							"onUpdate:modelValue": n[11] ||= (e) => S.default_cwd = e,
 							type: "text",
-							onInput: n[12] ||= (e) => y.value = !0
-						}, null, 544), [[Qo, b.default_cwd]])]),
+							onInput: n[12] ||= (e) => x.value = !0
+						}, null, 544), [[Qo, S.default_cwd]])]),
 						X("label", null, [n[43] ||= X("span", null, "Max task steps", -1), bn(X("input", {
-							"onUpdate:modelValue": n[13] ||= (e) => b.max_task_steps = e,
+							"onUpdate:modelValue": n[13] ||= (e) => S.max_task_steps = e,
 							type: "number",
 							min: "1",
 							max: "50",
-							onInput: n[14] ||= (e) => y.value = !0
+							onInput: n[14] ||= (e) => x.value = !0
 						}, null, 544), [[
 							Qo,
-							b.max_task_steps,
+							S.max_task_steps,
 							void 0,
 							{ number: !0 }
 						]])]),
 						X("label", null, [n[44] ||= X("span", null, "Command timeout (seconds)", -1), bn(X("input", {
-							"onUpdate:modelValue": n[15] ||= (e) => b.command_timeout_sec = e,
+							"onUpdate:modelValue": n[15] ||= (e) => S.command_timeout_sec = e,
 							type: "number",
 							min: "5",
 							max: "3600",
-							onInput: n[16] ||= (e) => y.value = !0
+							onInput: n[16] ||= (e) => x.value = !0
 						}, null, 544), [[
 							Qo,
-							b.command_timeout_sec,
+							S.command_timeout_sec,
 							void 0,
 							{ number: !0 }
 						]])])
 					]),
-					X("div", cg, [n[45] ||= X("div", null, [X("strong", null, "Platforms"), X("small", null, "Select where Hydra can expose Spudex.")], -1), (J(!0), Y(q, null, K(te.value, (e) => (J(), Y("label", {
+					X("div", cg, [n[45] ||= X("div", null, [X("strong", null, "Platforms"), X("small", null, "Select where Hydra can expose Spudex.")], -1), (J(!0), Y(q, null, K(F.value, (e) => (J(), Y("label", {
 						key: e.value,
 						class: z({ running: e.running })
 					}, [X("span", null, [X("strong", null, U(e.label || e.value), 1), X("small", null, U(e.value === "all" ? "Every platform" : e.running ? "Running" : "Stopped") + " · " + U(e.description || "Available platform"), 1)]), X("input", {
 						class: "tv-checkbox",
 						type: "checkbox",
-						checked: b.allowed_platforms?.includes(e.value),
-						onChange: (t) => De(String(e.value), t.target.checked)
+						checked: S.allowed_platforms?.includes(e.value),
+						onChange: (t) => ke(String(e.value), t.target.checked)
 					}, null, 40, lg)], 2))), 128))])
 				]),
 				X("div", ug, [
@@ -8281,13 +8282,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						X("span", { class: "tv-eyebrow" }, "Defense in depth"),
 						X("h2", null, "Spudex policy"),
 						X("p", null, "Keep command safety on, then allow only the categories a workflow actually needs.")
-					], -1), X("label", { class: z(["tsx-master-toggle", { danger: !b.policy_enabled }]) }, [X("span", null, U(b.policy_enabled ? "Policy on" : "Policy off"), 1), bn(X("input", {
-						"onUpdate:modelValue": n[17] ||= (e) => b.policy_enabled = e,
+					], -1), X("label", { class: z(["tsx-master-toggle", { danger: !S.policy_enabled }]) }, [X("span", null, U(S.policy_enabled ? "Policy on" : "Policy off"), 1), bn(X("input", {
+						"onUpdate:modelValue": n[17] ||= (e) => S.policy_enabled = e,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[18] ||= (e) => y.value = !0
-					}, null, 544), [[$o, b.policy_enabled]])], 2)]),
-					X("div", { class: z(["tsx-policy-notice", { danger: !b.policy_enabled }]) }, [X("strong", null, U(b.policy_enabled ? "Policy is active." : "Command safety policy is off."), 1), Z(" " + U(b.policy_enabled ? "Tater checks commands, paths, network use, installs, and the configurable categories below." : "Spudex can use shells, host paths, network commands, installs, and host-affecting tools."), 1)], 2),
+						onChange: n[18] ||= (e) => x.value = !0
+					}, null, 544), [[$o, S.policy_enabled]])], 2)]),
+					X("div", { class: z(["tsx-policy-notice", { danger: !S.policy_enabled }]) }, [X("strong", null, U(S.policy_enabled ? "Policy is active." : "Command safety policy is off."), 1), Z(" " + U(S.policy_enabled ? "Tater checks commands, paths, network use, installs, and the configurable categories below." : "Spudex can use shells, host paths, network commands, installs, and host-affecting tools."), 1)], 2),
 					n[47] ||= X("div", { class: "tsx-guardrails" }, [
 						X("span", null, [
 							Z("Commands start inside "),
@@ -8302,57 +8303,57 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 						X("span", null, "Model processes stay tracked and stoppable.")
 					], -1),
 					X("div", dg, [(J(), Y(q, null, K(i, (e) => X("label", { key: e[0] }, [X("span", null, [X("strong", null, U(e[1]), 1), X("small", null, U(e[2]), 1)]), bn(X("input", {
-						"onUpdate:modelValue": (t) => b[e[0]] = t,
+						"onUpdate:modelValue": (t) => S[e[0]] = t,
 						class: "tv-checkbox",
 						type: "checkbox",
-						onChange: n[19] ||= (e) => y.value = !0
-					}, null, 40, fg), [[$o, b[e[0]]]])])), 64))])
+						onChange: n[19] ||= (e) => x.value = !0
+					}, null, 40, fg), [[$o, S[e[0]]]])])), 64))])
 				]),
 				X("div", pg, [n[48] ||= X("span", null, "Model routing remains in Settings → Models.", -1), X("button", {
 					class: "tv-button primary",
 					type: "button",
-					disabled: h.value === "settings" || !y.value,
-					onClick: Ee
-				}, U(h.value === "settings" ? "Saving…" : "Save settings"), 9, mg)])
+					disabled: _.value === "settings" || !x.value,
+					onClick: Oe
+				}, U(_.value === "settings" ? "Saving…" : "Save settings"), 9, mg)])
 			]))
 		]), la(yl, {
-			open: v.value,
-			onClose: n[21] ||= (e) => v.value = !1
+			open: b.value,
+			onClose: n[21] ||= (e) => b.value = !1
 		}, {
-			default: yn(() => [X("section", hg, [X("header", null, [X("div", null, [n[49] ||= X("span", { class: "tv-eyebrow" }, "Session details", -1), X("h2", null, U(k.value?.label || k.value?.command || "No session selected"), 1)]), X("button", {
+			default: yn(() => [X("section", hg, [X("header", null, [X("div", null, [n[49] ||= X("span", { class: "tv-eyebrow" }, "Session details", -1), X("h2", null, U(j.value?.label || j.value?.command || "No session selected"), 1)]), X("button", {
 				class: "tv-button",
 				type: "button",
-				onClick: n[20] ||= (e) => v.value = !1
-			}, "Close")]), k.value ? (J(), Y("div", gg, [
-				k.value.last_policy_block ? (J(), Y("div", _g, [
-					X("strong", null, U(k.value.last_policy_block.title || "Command blocked"), 1),
-					Z(" " + U(k.value.last_policy_block.reason || k.value.last_policy_block.message), 1),
-					k.value.last_policy_block.toggle ? (J(), Y("small", vg, "Policy toggle: " + U(k.value.last_policy_block.toggle), 1)) : Q("", !0)
+				onClick: n[20] ||= (e) => b.value = !1
+			}, "Close")]), j.value ? (J(), Y("div", gg, [
+				j.value.last_policy_block ? (J(), Y("div", _g, [
+					X("strong", null, U(j.value.last_policy_block.title || "Command blocked"), 1),
+					Z(" " + U(j.value.last_policy_block.reason || j.value.last_policy_block.message), 1),
+					j.value.last_policy_block.toggle ? (J(), Y("small", vg, "Policy toggle: " + U(j.value.last_policy_block.toggle), 1)) : Q("", !0)
 				])) : Q("", !0),
-				X("article", null, [n[50] ||= X("h3", null, "Plan", -1), k.value.plan?.length ? (J(), Y("ol", yg, [(J(!0), Y(q, null, K(k.value.plan, (e) => (J(), Y("li", {
+				X("article", null, [n[50] ||= X("h3", null, "Plan", -1), j.value.plan?.length ? (J(), Y("ol", yg, [(J(!0), Y(q, null, K(j.value.plan, (e) => (J(), Y("li", {
 					key: e.step,
 					class: z(R(e.status))
 				}, [X("span", null, U(e.step || "Step"), 1), X("small", null, [Z(U(String(e.status || "pending").replaceAll("_", " ")), 1), e.detail ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.detail), 1)], 64)) : Q("", !0)])], 2))), 128))])) : (J(), Y("div", bg, "No task plan yet."))]),
-				X("article", null, [n[51] ||= X("h3", null, "Verification", -1), k.value.verification ? (J(), Y("div", {
+				X("article", null, [n[51] ||= X("h3", null, "Verification", -1), j.value.verification ? (J(), Y("div", {
 					key: 0,
-					class: z(["tsx-verification", R(k.value.verification.status)])
+					class: z(["tsx-verification", R(j.value.verification.status)])
 				}, [
-					X("strong", null, U(k.value.verification.status === "passed" ? "Verification passed" : k.value.verification.status === "failed" ? "Verification failed" : "Verification recorded"), 1),
-					X("small", null, U(k.value.verification.command), 1),
-					k.value.verification.summary ? (J(), Y("pre", xg, U(k.value.verification.summary), 1)) : Q("", !0)
+					X("strong", null, U(j.value.verification.status === "passed" ? "Verification passed" : j.value.verification.status === "failed" ? "Verification failed" : "Verification recorded"), 1),
+					X("small", null, U(j.value.verification.command), 1),
+					j.value.verification.summary ? (J(), Y("pre", xg, U(j.value.verification.summary), 1)) : Q("", !0)
 				], 2)) : (J(), Y("div", Sg, "No verification run yet."))]),
-				X("article", null, [n[52] ||= X("h3", null, "App previews", -1), k.value.previews?.length ? (J(), Y("div", Cg, [(J(!0), Y(q, null, K(k.value.previews.slice(-6).reverse(), (e) => (J(), Y("a", {
+				X("article", null, [n[52] ||= X("h3", null, "App previews", -1), j.value.previews?.length ? (J(), Y("div", Cg, [(J(!0), Y(q, null, K(j.value.previews.slice(-6).reverse(), (e) => (J(), Y("a", {
 					key: e.url,
 					href: e.url,
 					target: "_blank",
 					rel: "noreferrer"
 				}, [X("span", null, U(e.url), 1), X("small", null, U(e.source || "preview"), 1)], 8, wg))), 128))])) : (J(), Y("div", Tg, "No app previews detected yet."))]),
-				X("article", null, [n[53] ||= X("h3", null, "Git", -1), C.value.git?.ok ? (J(), Y("div", Eg, [
-					X("div", null, [X("strong", null, U(C.value.git.branch || "detached"), 1), X("small", null, U(C.value.git.repo), 1)]),
-					X("span", { class: z(["tv-state", { good: !C.value.git.dirty }]) }, U(C.value.git.dirty ? `${C.value.git.changed_count || C.value.git.changed_files?.length || 0} changed` : "Clean"), 3),
-					C.value.git.changed_files?.length ? (J(), Y("pre", Dg, U(C.value.git.changed_files.slice(0, 24).join("\n")), 1)) : Q("", !0)
+				X("article", null, [n[53] ||= X("h3", null, "Git", -1), T.value.git?.ok ? (J(), Y("div", Eg, [
+					X("div", null, [X("strong", null, U(T.value.git.branch || "detached"), 1), X("small", null, U(T.value.git.repo), 1)]),
+					X("span", { class: z(["tv-state", { good: !T.value.git.dirty }]) }, U(T.value.git.dirty ? `${T.value.git.changed_count || T.value.git.changed_files?.length || 0} changed` : "Clean"), 3),
+					T.value.git.changed_files?.length ? (J(), Y("pre", Dg, U(T.value.git.changed_files.slice(0, 24).join("\n")), 1)) : Q("", !0)
 				])) : (J(), Y("div", Og, "No Git repository detected."))]),
-				X("article", kg, [n[54] ||= X("h3", null, "File changes", -1), k.value.file_changes?.length ? (J(), Y("div", Ag, [(J(!0), Y(q, null, K(k.value.file_changes.slice(-6).reverse(), (e) => (J(), Y("section", {
+				X("article", kg, [n[54] ||= X("h3", null, "File changes", -1), j.value.file_changes?.length ? (J(), Y("div", Ag, [(J(!0), Y(q, null, K(j.value.file_changes.slice(-6).reverse(), (e) => (J(), Y("section", {
 					key: e.id,
 					class: z({
 						pending: e.pending,
@@ -8361,13 +8362,13 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				}, [X("header", null, [X("div", null, [X("strong", null, U(e.path_display || e.path || "File change"), 1), X("small", null, [Z(U(e.pending ? "Pending" : e.applied ? "Applied" : "Rejected"), 1), e.bytes ? (J(), Y(q, { key: 0 }, [Z(" · " + U(e.bytes) + " bytes", 1)], 64)) : Q("", !0)])]), e.pending ? (J(), Y("div", jg, [X("button", {
 					class: "tv-button",
 					type: "button",
-					onClick: (t) => Te(String(k.value.id), String(e.id), "approve")
+					onClick: (t) => De(String(j.value.id), String(e.id), "approve")
 				}, "Approve", 8, Mg), X("button", {
 					class: "tv-button danger",
 					type: "button",
-					onClick: (t) => Te(String(k.value.id), String(e.id), "reject")
+					onClick: (t) => De(String(j.value.id), String(e.id), "reject")
 				}, "Reject", 8, Ng)])) : Q("", !0)]), X("pre", null, U(e.diff || "No textual diff available."), 1)], 2))), 128))])) : (J(), Y("div", Pg, "No file changes yet."))]),
-				X("article", Fg, [n[55] ||= X("h3", null, "Session memory", -1), k.value.memory_summary ? (J(), Y("p", Ig, U(k.value.memory_summary), 1)) : (J(), Y("div", Lg, "No session memory yet."))])
+				X("article", Fg, [n[55] ||= X("h3", null, "Session memory", -1), j.value.memory_summary ? (J(), Y("p", Ig, U(j.value.memory_summary), 1)) : (J(), Y("div", Lg, "No session memory yet."))])
 			])) : (J(), Y("div", Rg, "Select a session to see its details."))])]),
 			_: 1
 		}, 8, ["open"])], 64));
@@ -8527,29 +8528,29 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 		options: {}
 	},
 	setup(e, { expose: t }) {
-		let n = e, r = /* @__PURE__ */ G(!1), i = /* @__PURE__ */ G(!1), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G({}), l = /* @__PURE__ */ G(null), u = /* @__PURE__ */ G(""), d = 0, f = $(() => n.state.health || {}), p = $(() => R(f.value.loaded_models || f.value.loadedModels)), m = $(() => R(p.value.system)), h = $(() => R(m.value.cpu)), g = $(() => R(m.value.ram)), _ = $(() => R(m.value.vram)), v = $(() => V(p.value.loaded_count)), y = $(() => n.state.text || `${V(f.value.verbas_enabled)} verba enabled • ${V(f.value.portals_running)} portals running • ${V(f.value.cores_running)} cores running • ${V(f.value.hydra_jobs_active ?? f.value.chat_jobs_active)} hydra jobs • ${V(f.value.llm_calls_active)} llm calls • ${V(f.value.vision_calls_active ?? f.value.voice_calls_active)} vision calls`), b = $(() => {
-			let e = V(R(p.value.totals).estimated_total_bytes);
-			return `${v.value} model${v.value === 1 ? "" : "s"} loaded${e > 0 ? ` • est ${ce(e)}` : ""}`;
+		let n = e, r = /* @__PURE__ */ G(!1), i = /* @__PURE__ */ G(!1), a = /* @__PURE__ */ G(""), o = /* @__PURE__ */ G(""), s = /* @__PURE__ */ G(""), c = /* @__PURE__ */ G({}), l = /* @__PURE__ */ G(null), u = /* @__PURE__ */ G(""), d = 0, f = $(() => n.state.health || {}), p = $(() => ie(f.value.loaded_models || f.value.loadedModels)), m = $(() => ie(p.value.system)), h = $(() => ie(m.value.cpu)), g = $(() => ie(m.value.ram)), _ = $(() => ie(m.value.vram)), v = $(() => V(p.value.loaded_count)), y = $(() => n.state.text || `${V(f.value.verbas_enabled)} verba enabled • ${V(f.value.portals_running)} portals running • ${V(f.value.cores_running)} cores running • ${V(f.value.hydra_jobs_active ?? f.value.chat_jobs_active)} hydra jobs • ${V(f.value.llm_calls_active)} llm calls • ${V(f.value.vision_calls_active ?? f.value.voice_calls_active)} vision calls`), b = $(() => {
+			let e = V(ie(p.value.totals).estimated_total_bytes);
+			return `${v.value} model${v.value === 1 ? "" : "s"} loaded${e > 0 ? ` • est ${le(e)}` : ""}`;
 		}), x = $(() => {
 			let e = V(g.value.total_bytes), t = V(g.value.used_bytes), n = V(_.value.total_bytes), r = V(_.value.used_bytes), i = se(_.value.utilization_percent), a = !!(m.value.unified_memory || _.value.unified), o = [
-				le("CPU", h.value.percent, h.value.available === !1),
-				le("GPU", i, i === null),
-				le(a ? "Unified" : "RAM", e > 0 ? g.value.percent ?? t / e * 100 : null, e <= 0)
+				H("CPU", h.value.percent, h.value.available === !1),
+				H("GPU", i, i === null),
+				H(a ? "Unified" : "RAM", e > 0 ? g.value.percent ?? t / e * 100 : null, e <= 0)
 			];
-			return a || o.push(le("VRAM", n > 0 ? _.value.percent ?? r / n * 100 : null, n <= 0)), o;
-		}), S = $(() => R(c.value.hydra_jobs || c.value.chat_jobs)), C = $(() => R(c.value.llm_calls)), w = $(() => R(c.value.vision_calls || c.value.voice_calls)), T = $(() => R(c.value.chat_context_window)), E = $(() => R(c.value.loaded_models)), D = $(() => R(E.value.system)), O = $(() => R(D.value.cpu)), k = $(() => R(D.value.ram)), A = $(() => R(D.value.vram)), j = $(() => re(E.value.models)), M = $(() => re(A.value.devices)), N = $(() => re(S.value.active_turns)), ee = $(() => re(C.value.active_calls)), P = $(() => re(w.value.active_calls)), te = $(() => {
-			let e = R(E.value.totals);
+			return a || o.push(H("VRAM", n > 0 ? _.value.percent ?? r / n * 100 : null, n <= 0)), o;
+		}), S = $(() => ie(c.value.hydra_jobs || c.value.chat_jobs)), C = $(() => ie(c.value.llm_calls)), w = $(() => ie(c.value.vision_calls || c.value.voice_calls)), T = $(() => ie(c.value.chat_context_window)), E = $(() => ie(c.value.loaded_models)), D = $(() => ie(E.value.system)), O = $(() => ie(D.value.cpu)), k = $(() => ie(D.value.ram)), A = $(() => ie(D.value.vram)), j = $(() => L(E.value.models)), M = $(() => L(A.value.devices)), N = $(() => L(S.value.active_turns)), ee = $(() => L(C.value.active_calls)), P = $(() => L(w.value.active_calls)), te = $(() => {
+			let e = ie(E.value.totals);
 			return [
 				`${V(E.value.loaded_count ?? j.value.length)} loaded`,
 				V(E.value.local_llm_loaded_count) ? `${V(E.value.local_llm_loaded_count)} LLM` : "",
 				V(E.value.managed_loaded_count) ? `${V(E.value.managed_loaded_count)} managed` : "",
-				V(e.estimated_total_bytes) ? `est ${ce(e.estimated_total_bytes)}` : "",
-				V(e.estimated_vram_bytes) ? `VRAM est ${ce(e.estimated_vram_bytes)}` : "",
-				V(e.estimated_ram_bytes) ? `RAM est ${ce(e.estimated_ram_bytes)}` : "",
-				V(e.estimated_unified_bytes) ? `unified est ${ce(e.estimated_unified_bytes)}` : ""
+				V(e.estimated_total_bytes) ? `est ${le(e.estimated_total_bytes)}` : "",
+				V(e.estimated_vram_bytes) ? `VRAM est ${le(e.estimated_vram_bytes)}` : "",
+				V(e.estimated_ram_bytes) ? `RAM est ${le(e.estimated_ram_bytes)}` : "",
+				V(e.estimated_unified_bytes) ? `unified est ${le(e.estimated_unified_bytes)}` : ""
 			].filter(Boolean).join(" • ") || "No loaded runtime models";
 		}), ne = $(() => {
-			let e = R(T.value.breakdown), t = V(T.value.history_messages), n = V(T.value.max_history_messages) || t, r = [
+			let e = ie(T.value.breakdown), t = V(T.value.history_messages), n = V(T.value.max_history_messages) || t, r = [
 				["System prompt", e.system_tokens],
 				["Runtime status", e.status_tokens],
 				["Core context + preamble", V(e.core_context_tokens) + V(e.platform_preamble_tokens)],
@@ -8568,16 +8569,16 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			`Min window ${oe(T.value.minimum_context_window)}`,
 			`Recommended ${oe(T.value.recommended_context_window)}`
 		].filter(Boolean).join(" • ")), I = $(() => {
-			let e = R(T.value.breakdown), t = ie(e.high_context_verba_examples).slice(0, 4);
+			let e = ie(T.value.breakdown), t = R(e.high_context_verba_examples).slice(0, 4);
 			return [V(T.value.burst_context_reserve_tokens) ? `Recommended window includes ${oe(T.value.burst_context_reserve_tokens)} tokens of burst reserve for heavy or multi-tool turns.` : "", V(e.high_context_verbas) || V(e.heavy_cores) ? `High-context signals: ${V(e.high_context_verbas)} high-context verbas • ${V(e.heavy_cores)} heavy cores${t.length ? ` • e.g. ${t.join(", ")}` : ""}` : ""].filter(Boolean);
 		});
-		function R(e) {
+		function ie(e) {
 			return e && typeof e == "object" && !Array.isArray(e) ? e : {};
 		}
-		function re(e) {
+		function L(e) {
 			return Array.isArray(e) ? e.filter((e) => e && typeof e == "object") : [];
 		}
-		function ie(e) {
+		function R(e) {
 			return Array.isArray(e) ? e.map((e) => B(e)).filter(Boolean) : [];
 		}
 		function ae(e) {
@@ -8598,11 +8599,11 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			let t = Number(e);
 			return Number.isFinite(t) && t >= 0 ? Math.max(0, Math.min(100, t)) : null;
 		}
-		function H(e) {
+		function ce(e) {
 			let t = se(e);
 			return t === null ? "n/a" : `${Math.round(t)}%`;
 		}
-		function ce(e) {
+		function le(e) {
 			let t = V(e);
 			if (!t) return "0 B";
 			let n = [
@@ -8615,7 +8616,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			for (; t >= 1024 && r < n.length - 1;) t /= 1024, r += 1;
 			return `${t >= 10 || r === 0 ? t.toFixed(0) : t.toFixed(1)} ${n[r]}`;
 		}
-		function le(e, t, n) {
+		function H(e, t, n) {
 			let r = se(t);
 			return {
 				label: e,
@@ -8638,7 +8639,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			})}` : "";
 		}
 		function fe(e) {
-			let t = e.remote ? "" : V(e.estimated_bytes) ? `${B(e.memory_kind || "ram").toUpperCase()} est ${ce(e.estimated_bytes)}` : "Estimate unavailable";
+			let t = e.remote ? "" : V(e.estimated_bytes) ? `${B(e.memory_kind || "ram").toUpperCase()} est ${le(e.estimated_bytes)}` : "Estimate unavailable";
 			return [
 				B(e.kind_label || e.category),
 				B(e.provider_label || e.provider || "Local"),
@@ -8648,14 +8649,14 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			].filter(Boolean).join(" • ");
 		}
 		function pe(e) {
-			return [...ie(e.details), e.managed ? B(e.managed_by || "Managed by settings") : ""].filter(Boolean);
+			return [...R(e.details), e.managed ? B(e.managed_by || "Managed by settings") : ""].filter(Boolean);
 		}
 		function me(e) {
 			let t = Number(e.power_draw_w), n = Number(e.power_limit_w);
 			return [
-				se(e.utilization_percent) === null ? "GPU load n/a" : `GPU ${H(e.utilization_percent)}`,
-				V(e.total_bytes) ? `${e.unified ? "GPU memory" : "VRAM"} ${ce(e.used_bytes)} / ${ce(e.total_bytes)}` : "",
-				V(e.shared_memory_total_bytes) ? `Shared RAM ${ce(e.shared_memory_used_bytes)} / ${ce(e.shared_memory_total_bytes)}` : "",
+				se(e.utilization_percent) === null ? "GPU load n/a" : `GPU ${ce(e.utilization_percent)}`,
+				V(e.total_bytes) ? `${e.unified ? "GPU memory" : "VRAM"} ${le(e.used_bytes)} / ${le(e.total_bytes)}` : "",
+				V(e.shared_memory_total_bytes) ? `Shared RAM ${le(e.shared_memory_used_bytes)} / ${le(e.shared_memory_total_bytes)}` : "",
 				Number.isFinite(Number(e.temperature_c)) ? `${Number(e.temperature_c).toFixed(0)} C` : "",
 				Number.isFinite(t) ? `${t.toFixed(0)} W${Number.isFinite(n) && n > 0 ? ` / ${n.toFixed(0)} W` : ""}` : "",
 				B(e.detail)
@@ -8674,7 +8675,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			return {
 				label: e,
 				percent: s ?? 0,
-				value: r === void 0 ? a > 0 ? `${ce(o)} / ${ce(a)}` : "Unavailable" : H(r),
+				value: r === void 0 ? a > 0 ? `${le(o)} / ${le(a)}` : "Unavailable" : ce(r),
 				unavailable: s === null,
 				detail: i
 			};
@@ -8757,7 +8758,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 			class: z(["tr-resource", { unavailable: e.unavailable }])
 		}, [
 			X("b", null, U(e.label), 1),
-			X("span", null, [X("i", { style: L({ width: `${e.percent}%` }) }, null, 4)]),
+			X("span", null, [X("i", { style: re({ width: `${e.percent}%` }) }, null, 4)]),
 			X("em", null, U(e.value), 1)
 		], 2))), 128))])])) : Q("", !0)], 2), la(yl, {
 			open: r.value,
@@ -8805,10 +8806,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 							class: z(["tr-meter", { unavailable: e.unavailable }])
 						}, [
 							X("div", null, [X("strong", null, U(e.label), 1), X("span", null, U(e.value), 1)]),
-							X("span", o_, [X("i", { style: L({ width: `${e.percent}%` }) }, null, 4)]),
+							X("span", o_, [X("i", { style: re({ width: `${e.percent}%` }) }, null, 4)]),
 							e.detail ? (J(), Y("small", s_, U(e.detail), 1)) : Q("", !0)
 						], 2))), 128))]),
-						M.value.length ? (J(), Y("section", c_, [n[6] ||= X("h3", null, "GPU Devices", -1), X("div", l_, [(J(!0), Y(q, null, K(M.value, (e, t) => (J(), Y("article", { key: e.index ?? t }, [X("div", null, [X("strong", null, U(e.name || `GPU ${e.index ?? ""}`), 1), X("small", null, U(me(e)), 1)]), X("span", u_, U(H(e.utilization_percent)), 1)]))), 128))])])) : Q("", !0),
+						M.value.length ? (J(), Y("section", c_, [n[6] ||= X("h3", null, "GPU Devices", -1), X("div", l_, [(J(!0), Y(q, null, K(M.value, (e, t) => (J(), Y("article", { key: e.index ?? t }, [X("div", null, [X("strong", null, U(e.name || `GPU ${e.index ?? ""}`), 1), X("small", null, U(me(e)), 1)]), X("span", u_, U(ce(e.utilization_percent)), 1)]))), 128))])])) : Q("", !0),
 						X("section", d_, [n[7] ||= X("h3", null, "Loaded Model Entries", -1), j.value.length ? (J(), Y("div", f_, [(J(!0), Y(q, null, K(j.value, (e) => (J(), Y("article", { key: e.cache_key || `${e.provider}:${e.model}` }, [X("div", null, [
 							X("strong", null, U(e.model || "model"), 1),
 							X("small", null, U(fe(e)), 1),
@@ -9095,7 +9096,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				url: e
 			}), c.value = "", l.value = "", a.value = "Repository added. Save repositories to apply it.", o.value = "";
 		}
-		async function L() {
+		async function re() {
 			i.value = "Saving Verba repositories…";
 			try {
 				await Ss(`${t.options.endpoints.shop}/repos`, { repos: u.value }), A("Verba repositories saved."), await M(!0);
@@ -9105,10 +9106,10 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 				i.value = "";
 			}
 		}
-		function R(e) {
+		function ie(e) {
 			e.key === "Escape" && (d.value = null);
 		}
-		return En(() => t.state.payload, j, { deep: !1 }), j(), window.addEventListener("keydown", R), Cr(() => window.removeEventListener("keydown", R)), (e, t) => (J(), Y("div", G_, [
+		return En(() => t.state.payload, j, { deep: !1 }), j(), window.addEventListener("keydown", ie), Cr(() => window.removeEventListener("keydown", ie)), (e, t) => (J(), Y("div", G_, [
 			X("header", K_, [t[8] ||= X("div", null, [
 				X("span", { class: "tv-eyebrow" }, "Tater tools"),
 				X("h1", null, "Verba"),
@@ -9245,7 +9246,7 @@ var kc = ["checked", "disabled"], Ac = { key: 0 }, jc = {
 					X("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: L
+						onClick: re
 					}, "Save repositories")
 				])
 			])),

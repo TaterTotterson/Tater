@@ -61,6 +61,10 @@ class VueSpudexTests(unittest.TestCase):
         self.assertIn('role="log"', source)
         self.assertIn("const nonChatLogs", source)
         self.assertIn("grid-template-columns: minmax(0, 1.06fr) minmax(0, .94fr)", styles)
+        self.assertIn("height: max(620px, min(690px, calc(100dvh - 225px)))", styles)
+        self.assertIn("grid-template-rows: minmax(0, 1fr)", styles)
+        self.assertIn(".tsx-chat-card, .tsx-terminal-card { display: flex; height: 100%; min-height: 0", styles)
+        self.assertGreaterEqual(styles.count("overscroll-behavior: contain"), 2)
 
     def test_manual_session_is_a_single_interactive_terminal(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
@@ -70,6 +74,10 @@ class VueSpudexTests(unittest.TestCase):
         self.assertIn('class="tsx-manual-prompt"', source)
         self.assertIn('aria-label="Terminal command"', source)
         self.assertIn("preserveLogs", source)
+        self.assertIn('const manualCwd = ref("agent_lab")', source)
+        self.assertIn("cwd: manualCwd.value", source)
+        self.assertIn('result.builtin === "cd"', source)
+        self.assertIn("Browse Tater’s protected agent_lab with ls, pwd, and cd", source)
         self.assertNotIn('class="tv-panel tsx-run-card"', source)
         self.assertNotIn('class="tv-panel tsx-manual-history"', source)
         self.assertIn(".tsx-terminal-check input.tv-checkbox", styles)

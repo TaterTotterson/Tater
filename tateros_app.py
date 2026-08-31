@@ -9420,6 +9420,7 @@ class SpudexSettingsRequest(BaseModel):
 class SpudexRunRequest(BaseModel):
     command: Optional[str] = None
     argv: List[str] = Field(default_factory=list)
+    cwd: Optional[str] = None
     label: Optional[str] = None
     background: bool = False
 
@@ -14424,7 +14425,7 @@ async def run_spudex_command(payload: SpudexRunRequest) -> Dict[str, Any]:
     return await start_spudex_command(
         command=payload.command,
         argv=payload.argv,
-        cwd="",
+        cwd=payload.cwd or "",
         label=payload.label or "Spudex command",
         source="ui",
         platform="webui",

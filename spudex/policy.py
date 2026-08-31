@@ -146,6 +146,36 @@ def resolve_spudex_cwd(value: Any) -> Path:
     return resolved
 
 
+def resolve_spudex_directory(value: Any, *, cwd: Path) -> Path:
+    """Resolve a terminal-style directory without allowing agent_lab escapes."""
+    raw = str(value or "").strip()
+    if raw in {"", "~", "~/", "/", "agent_lab", "/agent_lab"}:
+        candidate = AGENT_LAB_DIR
+    elif raw in {"workspace", "/workspace"}:
+        candidate = AGENT_WORKSPACE_DIR
+    elif raw.startswith("~/"):
+        candidate = AGENT_LAB_DIR / raw[2:]
+    elif raw.startswith("/agent_lab/"):
+        candidate = AGENT_LAB_DIR / raw.removeprefix("/agent_lab/")
+    elif raw.startswith("/workspace/"):
+        candidate = AGENT_WORKSPACE_DIR / raw.removeprefix("/workspace/")
+    else:
+        requested = Path(raw).expanduser()
+        if requested.is_absolute():
+            candidate = requested if _is_under(requested, AGENT_LAB_DIR) else AGENT_LAB_DIR / raw.lstrip("/")
+        else:
+            candidate = cwd / requested
+
+    resolved = candidate.resolve()
+    if not _is_under(resolved, AGENT_LAB_DIR):
+        raise ValueError("Spudex directory must stay inside agent_lab.")
+    if not resolved.exists():
+        raise ValueError(f"Directory does not exist: {display_agent_path(resolved)}")
+    if not resolved.is_dir():
+        raise ValueError(f"Not a directory: {display_agent_path(resolved)}")
+    return resolved
+
+
 def resolve_spudex_file_path(value: Any, *, cwd: Path | None = None) -> Path:
     raw = str(value or "").strip()
     if not raw:

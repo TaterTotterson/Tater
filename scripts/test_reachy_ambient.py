@@ -28,6 +28,15 @@ def test_description_text_normalizes_a_short_spoken_comment() -> None:
     )
 
 
+def test_ambient_prompt_uses_the_scheduler_decision_and_requires_one_sentence() -> None:
+    prompt = reachy_ambient._ambient_prompt()
+
+    assert "already decided" in prompt
+    assert "grounded in something genuinely visible" in prompt
+    assert "Return only the sentence Reachy should say" in prompt
+    assert "[SILENT]" not in prompt
+
+
 def test_observation_queues_comment_through_native_satellite(monkeypatch) -> None:
     commands = []
     synthesis_values = []
@@ -92,6 +101,36 @@ def test_observation_queues_comment_through_native_satellite(monkeypatch) -> Non
             "VOICE_TTS_VOICE": "configured-voice.wav",
         }
     ]
+
+
+def test_observation_reports_a_vision_failure_instead_of_silence(
+    monkeypatch,
+    caplog,
+) -> None:
+    encoded = base64.b64encode(b"reachy-jpeg").decode("ascii")
+
+    async def has_capability(_selector: str, _capability: str) -> bool:
+        return True
+
+    async def snapshot_request(*_args, **_kwargs) -> dict:
+        return {"ok": True, "image_base64": encoded}
+
+    monkeypatch.setattr(native_satellite, "client_has_capability", has_capability)
+    monkeypatch.setattr(native_satellite, "send_request", snapshot_request)
+    monkeypatch.setattr(
+        kernel_tools,
+        "image_describe",
+        lambda **_kwargs: {
+            "ok": False,
+            "error": {"code": "vision_request_failed", "message": "model unavailable"},
+        },
+    )
+
+    asyncio.run(reachy_ambient._observe_and_comment("native:reachy"))
+
+    assert "vision request failed" in caplog.text
+    assert "model unavailable" in caplog.text
+    assert "vision chose silence" not in caplog.text
 
 
 def test_standalone_synthesis_resolves_the_configured_tts_backend(monkeypatch) -> None:
