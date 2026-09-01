@@ -176,7 +176,9 @@ def resolve_spudex_file_path(value: Any, *, cwd: Path | None = None) -> Path:
 
 def normalize_argv(command: Any = None, argv: Any = None) -> List[str]:
     if isinstance(argv, (list, tuple)):
-        return [str(item) for item in argv if str(item or "").strip()]
+        normalized_argv = [str(item) for item in argv if str(item or "").strip()]
+        if normalized_argv:
+            return normalized_argv
     if isinstance(command, (list, tuple)):
         return [str(item) for item in command if str(item or "").strip()]
     text = str(command or "").strip()

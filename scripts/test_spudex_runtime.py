@@ -142,6 +142,9 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(absolute["ok"])
         self.assertTrue(allowed["ok"])
 
+    def test_empty_api_argv_falls_back_to_manual_command_text(self) -> None:
+        self.assertEqual(policy.normalize_argv(command="ls -la", argv=[]), ["ls", "-la"])
+
     def test_macos_isolation_blocks_network_unless_enabled(self) -> None:
         base_settings = settings.normalize_spudex_settings(
             {"policy_enabled": True, "allow_network": False}
@@ -249,6 +252,7 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             ls_result = await runner.start_spudex_command(
                 command=f"ls -la {self.host_root}",
+                argv=[],
                 cwd=str(self.root),
                 source="ui",
                 redis_client=self._redis(policy_enabled=True),

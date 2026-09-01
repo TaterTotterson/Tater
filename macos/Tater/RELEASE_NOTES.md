@@ -1,54 +1,28 @@
-# Tater v1.1.18
+# Tater v1.1.19
 
-Tater v1.1.18 keeps simultaneous Spudlet requests from overwhelming a shared
-local model and turns Spudex Manual Session into a more natural host terminal.
+Tater v1.1.19 fixes typed commands in the Spudex Manual Session terminal.
 
 ## What's Changed
 
-### Shared Local Model Queue
+### Spudex Manual Terminal
 
-- Adds one bounded, priority-aware queue for every caller sharing a local
-  llama.cpp model, so simultaneous Spudlets wait for an available model slot
-  instead of all starting generation at once.
-- Gives direct Spudlet replies priority over background memory, discovery,
-  cleanup, summary, and verification work.
-- Keeps only the latest queued request from each Spudlet and returns clear,
-  retryable responses when the queue is full or a request waits too long.
-- Shows queued and running calls separately in Runtime, with the originating
-  Spudlet name visible for each request.
-
-### Local Model Stability
-
-- Uses a single generation slot for Gemma 4 26B A4B MTP models on Apple
-  Silicon, preventing parallel-slot stalls while retaining MTP acceleration.
-- Keeps a scheduler slot reserved until an in-flight native generation really
-  exits and performs stronger cleanup when a managed llama.cpp server does not
-  stop normally.
-- Applies bounded Spudlet queue and generation timeouts so stalled work cannot
-  occupy the local model indefinitely.
-- Keeps an explicit `auto` draft GPU-layer setting distinct from inheriting
-  the target model's full-offload setting.
-
-### Spudex Terminal Access
-
-- Starts new Spudex sessions in `agent_lab`, presented as the home folder `~`,
-  while allowing normal access to the rest of the host filesystem.
-- Uses real path behavior: `/` is the host root, absolute paths remain
-  absolute, and `cd` can move outside `agent_lab` subject to normal OS account
-  permissions.
-- Adds dependable `ls`, `dir`, and `pwd` terminal commands without launching a
-  Python fallback, preventing repeated Python quit dialogs on macOS.
-- Updates the Workbench, Manual Session, Settings, and legacy fallback UI to
-  describe the new filesystem behavior while retaining the existing command,
-  network, install, and admin safety controls.
+- Fixes a request parsing issue where the Manual tab sent the typed command
+  together with an empty argument list and the empty list incorrectly won.
+- Prevents valid commands such as `ls` from turning into repeated
+  "No command was provided" policy messages.
+- Restores normal single-command terminal use for commands such as `ls`,
+  `mkdir new-folder`, `cd new-folder`, `pwd`, Git commands, and installed
+  executables allowed by the current Spudex policy.
+- Adds regression coverage using the same empty-argument request shape sent by
+  the browser, including a complete `ls` execution through Manual Session.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.18 through
+- macOS users already running v1.0.1 or later can install v1.1.19 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.18` or `latest` for the CPU image and
-  `v1.1.18-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.19` or `latest` for the CPU image and
+  `v1.1.19-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.
