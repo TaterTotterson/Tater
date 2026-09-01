@@ -12,7 +12,7 @@ PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
 REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
 EDGE_REQUIREMENTS_FILE="${TATER_EDGE_REQUIREMENTS_FILE:-requirements-edge.txt}"
 LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
-LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-fe2120bc9db242c4349a6f71810af1cd52ee8580}"
 LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
 LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/llama-server}"
 ROCM_LIBXML2_COMPAT_DIR="${TATER_ROCM_LIBXML2_COMPAT_DIR:-${RUNTIME_DIR}/rocm-libxml2-compat}"
@@ -1171,12 +1171,12 @@ install_llama_cpp_native() {
   mkdir -p "${RUNTIME_DIR}"
   if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
     info "Cloning native llama.cpp runtime"
-    git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}" || { handle_llama_cpp_build_failure "Could not clone llama.cpp."; return; }
+    git clone --depth 1 --filter=blob:none --no-checkout "${LLAMA_CPP_REPO}" "${LLAMA_CPP_DIR}" || { handle_llama_cpp_build_failure "Could not clone llama.cpp."; return; }
   else
     info "Updating native llama.cpp runtime"
-    git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || warn "Could not fetch llama.cpp ${LLAMA_CPP_REF}; using existing checkout."
-    git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
   fi
+  git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || { handle_llama_cpp_build_failure "Could not fetch pinned llama.cpp revision ${LLAMA_CPP_REF}."; return; }
+  git -C "${LLAMA_CPP_DIR}" checkout --detach FETCH_HEAD >/dev/null 2>&1 || { handle_llama_cpp_build_failure "Could not check out pinned llama.cpp revision ${LLAMA_CPP_REF}."; return; }
   if [ "${profile}" = "rocm" ] && [ "${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED:-hip}" = "hip" ]; then
     prepare_rocm_linker_compat
   fi

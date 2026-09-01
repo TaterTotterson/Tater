@@ -15,7 +15,7 @@ NATIVE_RESOURCES_DIR="${RESOURCES_DIR}/Native"
 CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
 CODESIGN_ENTITLEMENTS="${TATER_CODESIGN_ENTITLEMENTS:-${PROJECT_DIR}/Resources/Tater.entitlements}"
 LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
-LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-fe2120bc9db242c4349a6f71810af1cd52ee8580}"
 NATIVE_BUILD_DIR="${PROJECT_DIR}/build/native"
 LLAMA_CPP_DIR="${TATER_MACOS_LLAMA_CPP_DIR:-${NATIVE_BUILD_DIR}/llama.cpp}"
 MLX_ENGINE_DIR="${TATER_MACOS_MLX_ENGINE_DIR:-${NATIVE_BUILD_DIR}/mlx-engine}"
@@ -193,11 +193,10 @@ prepare_bundled_llama_cpp_runtime() {
 
   mkdir -p "${NATIVE_BUILD_DIR}"
   if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
-    clone_with_retries "${LLAMA_CPP_DIR}" git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}"
-  else
-    run_with_retries git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}"
-    git -C "${LLAMA_CPP_DIR}" checkout FETCH_HEAD >/dev/null 2>&1 || true
+    clone_with_retries "${LLAMA_CPP_DIR}" git clone --depth 1 --filter=blob:none --no-checkout "${LLAMA_CPP_REPO}"
   fi
+  run_with_retries git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}"
+  git -C "${LLAMA_CPP_DIR}" checkout --detach FETCH_HEAD >/dev/null 2>&1
 
   # Avoid packaging stale dylibs left behind by earlier llama.cpp versions.
   rm -rf "${LLAMA_CPP_DIR}/build"

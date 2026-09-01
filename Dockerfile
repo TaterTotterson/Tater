@@ -11,7 +11,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     TATER_SHAIRPORT_SYNC_PATH=/usr/local/bin/shairport-sync \
     TATER_FFMPEG_PATH=/usr/bin/ffmpeg
 
-ARG LLAMA_CPP_REF=master
+ARG LLAMA_CPP_REF=fe2120bc9db242c4349a6f71810af1cd52ee8580
 ARG TARGETARCH
 ARG AIRPLAY_CLI_VERSION=0.4.12
 ARG SHAIRPORT_SYNC_VERSION=5.2.1
@@ -93,7 +93,9 @@ RUN python -m pip install --upgrade pip \
  && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
  && python -c "import onnx_asr, onnxruntime as ort; providers=ort.get_available_providers(); assert 'CPUExecutionProvider' in providers, providers; print('onnx-asr ready providers=' + ','.join(providers))"
 
-RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+RUN git clone --depth 1 --filter=blob:none --no-checkout https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+ && git -C /opt/llama.cpp fetch --depth 1 origin "${LLAMA_CPP_REF}" \
+ && git -C /opt/llama.cpp checkout --detach FETCH_HEAD \
  && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
  && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
  && "$TATER_LLAMA_CPP_SERVER_BIN" --version

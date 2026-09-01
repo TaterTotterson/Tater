@@ -1,6 +1,6 @@
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
-ARG LLAMA_CPP_REF=master
+ARG LLAMA_CPP_REF=fe2120bc9db242c4349a6f71810af1cd52ee8580
 ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
 ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04
 
@@ -21,7 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+RUN git clone --depth 1 --filter=blob:none --no-checkout https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+ && git -C /opt/llama.cpp fetch --depth 1 origin "${LLAMA_CPP_REF}" \
+ && git -C /opt/llama.cpp checkout --detach FETCH_HEAD \
  && test -f /usr/local/cuda/lib64/stubs/libcuda.so \
  && ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 \
  && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF ${LLAMA_CPP_CMAKE_ARGS} \

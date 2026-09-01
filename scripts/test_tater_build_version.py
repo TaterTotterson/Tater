@@ -11,11 +11,38 @@ import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+LLAMA_CPP_PIN = "fe2120bc9db242c4349a6f71810af1cd52ee8580"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
 class TaterBuildVersionTests(unittest.TestCase):
+    def test_llama_cpp_builds_use_the_known_good_pinned_revision(self) -> None:
+        shell_sources = (
+            REPO_ROOT / "setup_tater.sh",
+            REPO_ROOT / "macos" / "Tater" / "scripts" / "build_app.sh",
+        )
+
+        for source_path in shell_sources:
+            with self.subTest(source=str(source_path.relative_to(REPO_ROOT))):
+                source = source_path.read_text(encoding="utf-8")
+                self.assertIn(
+                    f'LLAMA_CPP_REF="${{TATER_LLAMA_CPP_REF:-{LLAMA_CPP_PIN}}}"',
+                    source,
+                )
+                self.assertNotIn('--branch "${LLAMA_CPP_REF}"', source)
+                self.assertIn('fetch --depth 1 origin "${LLAMA_CPP_REF}"', source)
+                self.assertIn('checkout --detach FETCH_HEAD', source)
+
+        docker_sources = (REPO_ROOT / "Dockerfile", REPO_ROOT / "Dockerfile.nvidia")
+        for source_path in docker_sources:
+            with self.subTest(source=str(source_path.relative_to(REPO_ROOT))):
+                source = source_path.read_text(encoding="utf-8")
+                self.assertIn(f"ARG LLAMA_CPP_REF={LLAMA_CPP_PIN}", source)
+                self.assertNotIn('--branch "${LLAMA_CPP_REF}"', source)
+                self.assertIn('fetch --depth 1 origin "${LLAMA_CPP_REF}"', source)
+                self.assertIn('checkout --detach FETCH_HEAD', source)
+
     def test_macos_app_declares_local_network_usage(self) -> None:
         info_plist = REPO_ROOT / "macos" / "Tater" / "Resources" / "Info.plist"
         with info_plist.open("rb") as handle:
