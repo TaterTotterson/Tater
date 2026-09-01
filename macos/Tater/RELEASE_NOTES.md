@@ -1,28 +1,31 @@
-# Tater v1.1.19
+# Tater v1.1.20
 
-Tater v1.1.19 fixes typed commands in the Spudex Manual Session terminal.
+Tater v1.1.20 gives compatible single satellites the same buffered announcement
+playback used by stereo pairs, eliminating crackling when an automation speaks
+over a background audio loop.
 
 ## What's Changed
 
-### Spudex Manual Terminal
+### Clean Single-Satellite Announcements
 
-- Fixes a request parsing issue where the Manual tab sent the typed command
-  together with an empty argument list and the empty list incorrectly won.
-- Prevents valid commands such as `ls` from turning into repeated
-  "No command was provided" policy messages.
-- Restores normal single-command terminal use for commands such as `ls`,
-  `mkdir new-folder`, `cd new-folder`, `pwd`, Git commands, and installed
-  executables allowed by the current Spudex policy.
-- Adds regression coverage using the same empty-argument request shape sent by
-  the browser, including a complete `ls` execution through Manual Session.
+- Routes capable single satellites through Tater's buffered media-session and
+  audio-overlay path instead of the older on-device audio-scene mixer.
+- Keeps background loops synchronized while ducking them beneath automation
+  speech, then stops the loop when the announcement finishes.
+- Uses the same scheduled playback and completion reporting already proven by
+  stereo pairs.
+- Retains the existing audio-scene and simple playback routes for older
+  satellite firmware that does not support the buffered path.
+- Adds regression coverage for modern satellites, legacy firmware, playback
+  failures, synchronized overlay timing, ducking, and completion handling.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.19 through
+- macOS users already running v1.0.1 or later can install v1.1.20 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.19` or `latest` for the CPU image and
-  `v1.1.19-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.20` or `latest` for the CPU image and
+  `v1.1.20-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

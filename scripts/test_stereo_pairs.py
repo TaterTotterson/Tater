@@ -780,6 +780,91 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 session_id="background-1",
             )
 
+    async def test_single_overlay_uses_prepared_session_and_stops_scene_media(self) -> None:
+        now_us = native_satellite._monotonic_us()
+        native_satellite._stereo_sessions["single-1"] = {
+            "group_id": "single-1",
+            "pair_selector": "native:kitchen",
+            "session_id": "background-single-1",
+            "selectors": ["native:kitchen"],
+            "clock_offsets_us": {"native:kitchen": 1250},
+        }
+        sent = []
+
+        async def fake_command(selector, message_type, payload):
+            sent.append((selector, message_type, dict(payload)))
+            return {"ok": True}
+
+        with (
+            mock.patch.object(native_satellite, "send_command", side_effect=fake_command),
+            mock.patch.object(native_satellite, "_stop_stereo_members", mock.AsyncMock()) as stop_mock,
+        ):
+            result = await native_satellite.start_single_overlay(
+                "native:kitchen",
+                group_id="single-1",
+                overlay_id="overlay-single-1",
+                foreground_url="http://tater/media/tts",
+                foreground_volume_percent=90,
+                ducking={"target_percent": 35},
+                start_server_us=now_us + 500_000,
+                stop_media_when_finished=True,
+            )
+
+            self.assertTrue(result["single_overlay_started"])
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0][0], "native:kitchen")
+            self.assertEqual(sent[0][1], "audio.overlay.start")
+            self.assertEqual(sent[0][2]["group_id"], "single-1")
+            self.assertEqual(sent[0][2]["foreground"]["volume_percent"], 90)
+            self.assertEqual(sent[0][2]["ducking"]["target_percent"], 35)
+            self.assertEqual(sent[0][2]["start_at_us"], now_us + 501_250)
+
+            native_satellite._record_stereo_overlay_finished(
+                "native:kitchen",
+                {"overlay_id": "overlay-single-1", "ok": True},
+            )
+            await asyncio.sleep(0)
+            stop_mock.assert_awaited_once_with(
+                ["native:kitchen"],
+                session_id="background-single-1",
+            )
+
+    async def test_single_overlay_can_wait_for_exact_completion(self) -> None:
+        native_satellite._stereo_sessions["single-2"] = {
+            "group_id": "single-2",
+            "pair_selector": "native:office",
+            "session_id": "background-single-2",
+            "selectors": ["native:office"],
+            "clock_offsets_us": {"native:office": 0},
+        }
+
+        async def fake_command(_selector, _message_type, _payload):
+            return {"ok": True}
+
+        with mock.patch.object(native_satellite, "send_command", side_effect=fake_command):
+            playback = asyncio.create_task(
+                native_satellite.start_single_overlay(
+                    "native:office",
+                    group_id="single-2",
+                    overlay_id="reply-single-2",
+                    foreground_url="http://tater/media/reply.wav",
+                    start_server_us=native_satellite._monotonic_us() + 500_000,
+                    wait_for_completion=True,
+                    completion_timeout_s=2.0,
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.done())
+            native_satellite._record_stereo_overlay_finished(
+                "native:office",
+                {"overlay_id": "reply-single-2", "ok": True},
+            )
+            result = await playback
+
+        self.assertTrue(result["playback_completed"])
+        self.assertTrue(result["playback_ok"])
+        self.assertEqual(result["finished_members"], ["native:office"])
+
     async def test_stereo_overlay_waits_for_both_members_before_completing_reply(self) -> None:
         native_satellite._stereo_sessions["pair1"] = {
             "group_id": "pair1",

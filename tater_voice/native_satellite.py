@@ -2776,6 +2776,145 @@ async def start_stereo_overlay(
     return result
 
 
+async def start_single_overlay(
+    selector: str,
+    *,
+    group_id: str,
+    overlay_id: str,
+    foreground_url: str,
+    foreground_kind: str = "tts",
+    foreground_volume_percent: int = 100,
+    ducking: Optional[Dict[str, Any]] = None,
+    start_server_us: int = 0,
+    stop_media_when_finished: bool = False,
+    wait_for_completion: bool = False,
+    completion_timeout_s: float = 180.0,
+) -> Dict[str, Any]:
+    token = _canonical_selector(selector)
+    group_token = _text(group_id)
+    overlay_token = _text(overlay_id)
+    foreground = _text(foreground_url)
+    if not token or not group_token or not overlay_token or not foreground:
+        raise ValueError("selector, group_id, overlay_id, and foreground_url are required")
+
+    session = _stereo_sessions.get(group_token)
+    if not isinstance(session, dict) or token not in set(_session_members(session)):
+        raise RuntimeError("The satellite does not have the prepared media session.")
+
+    previous_future = session.get("overlay_completion_future")
+    if isinstance(previous_future, asyncio.Future) and not previous_future.done():
+        previous_future.set_result(
+            {
+                "ok": False,
+                "members": _overlay_session_members(session),
+                "overlay_id": _text(session.get("active_overlay_id")),
+                "group_id": group_token,
+                "error": "The overlay was replaced by a newer reply.",
+            }
+        )
+    completion_future = (
+        asyncio.get_running_loop().create_future()
+        if wait_for_completion
+        else None
+    )
+    session["active_overlay_id"] = overlay_token
+    session["overlay_target_selectors"] = [token]
+    session["overlay_finished_selectors"] = []
+    session["overlay_finished_ok"] = {}
+    session["overlay_completion_future"] = completion_future
+    session["overlay_stop_media_when_finished"] = bool(stop_media_when_finished)
+    session["stop_on_overlay_id"] = overlay_token if stop_media_when_finished else ""
+    session["stop_requested"] = False
+
+    requested_start_server_us = _as_int(start_server_us, 0)
+    minimum_start_server_us = _monotonic_us() + 100_000
+    if requested_start_server_us >= minimum_start_server_us:
+        offsets = (
+            session.get("clock_offsets_us")
+            if isinstance(session.get("clock_offsets_us"), dict)
+            else {}
+        )
+        offset_us = _as_int(offsets.get(token), 0)
+        synchronized_start_server_us = requested_start_server_us
+    else:
+        clock = await _stereo_clock_probe(token)
+        offset_us = _as_int(clock.get("offset_us"), 0)
+        session["clock_offsets_us"] = {token: offset_us}
+        session["clock_round_trip_us"] = {
+            token: _as_int(clock.get("round_trip_us"), 0)
+        }
+        session["clock_sync_server_us"] = _monotonic_us()
+        synchronized_start_server_us = _monotonic_us() + (STEREO_START_LEAD_MS * 1000)
+
+    start_at_us = synchronized_start_server_us + offset_us
+    duck = ducking if isinstance(ducking, dict) else {}
+    try:
+        member = await send_command(
+            token,
+            "audio.overlay.start",
+            {
+                "overlay_id": overlay_token,
+                "foreground": {
+                    "url": foreground,
+                    "kind": _text(foreground_kind) or "tts",
+                    "volume_percent": max(
+                        0,
+                        min(100, _as_int(foreground_volume_percent, 100)),
+                    ),
+                },
+                "ducking": dict(duck),
+                "start_at_us": start_at_us,
+                "group_id": group_token,
+            },
+        )
+    except Exception:
+        session["active_overlay_id"] = ""
+        session["overlay_target_selectors"] = []
+        session["overlay_completion_future"] = None
+        session["overlay_stop_media_when_finished"] = False
+        session["stop_on_overlay_id"] = ""
+        if isinstance(completion_future, asyncio.Future) and not completion_future.done():
+            completion_future.cancel()
+        await _stop_stereo_members([token], session_id=_text(session.get("session_id")))
+        raise
+
+    member_result = member if isinstance(member, dict) else {}
+    result = {
+        "ok": True,
+        "single_overlay_started": True,
+        "overlay_id": overlay_token,
+        "group_id": group_token,
+        "start_server_us": synchronized_start_server_us,
+        "stop_media_when_finished": bool(stop_media_when_finished),
+        "members": [{**member_result, "selector": token, "start_at_us": start_at_us}],
+        "playback_completed": False,
+    }
+    if wait_for_completion and isinstance(completion_future, asyncio.Future):
+        timeout_s = max(1.0, min(600.0, float(completion_timeout_s or 180.0)))
+        try:
+            completion = await asyncio.wait_for(
+                asyncio.shield(completion_future),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            if _text(session.get("active_overlay_id")) == overlay_token:
+                session["active_overlay_id"] = ""
+                session["overlay_target_selectors"] = []
+                session["overlay_completion_future"] = None
+                session["overlay_stop_media_when_finished"] = False
+                session["stop_on_overlay_id"] = ""
+            if not completion_future.done():
+                completion_future.cancel()
+            await _stop_stereo_members([token], session_id=_text(session.get("session_id")))
+            raise RuntimeError(
+                "Timed out waiting for the satellite to finish the reply."
+            ) from exc
+        result["playback_completed"] = True
+        result["playback_ok"] = _as_bool((completion or {}).get("ok"), False)
+        result["finished_members"] = list((completion or {}).get("members") or [])
+    return result
+
+
 def _session_members(session: Dict[str, Any]) -> list[str]:
     members: list[str] = []
     raw_members = session.get("selectors") if isinstance(session.get("selectors"), list) else []

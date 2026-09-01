@@ -190,6 +190,8 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.vp = FakeVoicePipeline()
         self.commands = []
         self.stereo_calls = []
+        self.single_overlay_calls = []
+        self.single_overlay_error = None
         self.group_calls = []
         self.stereo_pair = {}
         self.scene_supported = True
@@ -199,6 +201,10 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             "audio_scenes": True,
             "persistent_media_sessions": True,
             "tts_overlays": True,
+            "synchronized_media_sessions": True,
+            "synchronized_tts_overlays": True,
+            "media_playhead_telemetry": True,
+            "media_drift_correction": True,
         }
 
         native = types.ModuleType("tater_voice.native_satellite")
@@ -254,6 +260,12 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             self.stereo_calls.append(("overlay", pair, kwargs))
             return {"stereo_overlay_started": True}
 
+        async def start_single_overlay(selector, **kwargs):
+            self.single_overlay_calls.append((selector, kwargs))
+            if self.single_overlay_error is not None:
+                raise self.single_overlay_error
+            return {"single_overlay_started": True}
+
         native.client_has_capability = client_has_capability
         native.client_media_session_active = client_media_session_active
         native.send_command = send_command
@@ -261,6 +273,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         native.prepare_group_media_session = prepare_group_media_session
         native.media_group_member_status = media_group_member_status
         native.start_stereo_overlay = start_stereo_overlay
+        native.start_single_overlay = start_single_overlay
         native.stereo_pair_media_active = lambda _pair: self.media_session_active
 
         stereo_pairs = types.ModuleType("tater_voice.stereo_pairs")
@@ -318,16 +331,51 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             },
         }
 
-    def test_supported_satellite_receives_audio_scene_command(self) -> None:
+    def test_supported_satellite_audio_scene_uses_buffered_session_and_overlay(self) -> None:
         result = asyncio.run(self.routes.native_satellite_play(self._payload(), None))
 
         self.assertTrue(result["audio_scene_started"])
-        self.assertEqual(self.commands[0][1], "audio.scene.start")
-        scene = self.commands[0][2]
-        self.assertEqual(scene["foreground"]["url"], "http://voice-core/media/foreground")
-        self.assertEqual(scene["background"]["url"], "http://voice-core/media/background")
-        self.assertEqual(scene["ducking"]["target_percent"], 35)
+        self.assertTrue(result["media_session_started"])
+        self.assertTrue(result["audio_overlay_started"])
+        self.assertEqual(self.commands, [])
+        members, background = self.group_calls[0]
+        self.assertEqual(members[0]["selector"], "native:kitchen")
+        self.assertEqual(members[0]["channel"], "mono")
+        self.assertEqual(members[0]["volume_percent"], 60)
+        self.assertEqual(background["media_url"], "http://voice-core/media/background")
+        self.assertTrue(background["loop"])
+        selector, overlay = self.single_overlay_calls[0]
+        self.assertEqual(selector, "native:kitchen")
+        self.assertEqual(overlay["foreground_url"], "http://voice-core/media/foreground")
+        self.assertEqual(overlay["ducking"]["target_percent"], 35)
+        self.assertTrue(overlay["stop_media_when_finished"])
         self.assertEqual(self.vp.background_source_url, "https://example.test/morning.mp3")
+
+    def test_older_scene_satellite_keeps_compatibility_mixer(self) -> None:
+        self.capabilities["synchronized_media_sessions"] = False
+
+        result = asyncio.run(self.routes.native_satellite_play(self._payload(), None))
+
+        self.assertTrue(result["audio_scene_started"])
+        self.assertFalse(result["media_session_started"])
+        self.assertFalse(result["audio_overlay_started"])
+        self.assertEqual(self.commands[0][1], "audio.scene.start")
+        self.assertEqual(self.group_calls, [])
+        self.assertEqual(self.single_overlay_calls, [])
+
+    def test_buffered_scene_failure_does_not_race_the_legacy_mixer(self) -> None:
+        self.single_overlay_error = RuntimeError("overlay rejected")
+
+        with self.assertRaises(FakeHttpException) as raised:
+            asyncio.run(self.routes.native_satellite_play(self._payload(), None))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("Buffered audio scene failed", raised.exception.detail)
+        self.assertEqual(self.single_overlay_calls[0][0], "native:kitchen")
+        self.assertEqual(
+            [message_type for _selector, message_type, _payload in self.commands],
+            ["media.session.stop"],
+        )
 
     def test_multi_satellite_music_route_flattens_one_synchronized_group(self) -> None:
         payload = {
@@ -455,6 +503,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
 
     def test_older_satellite_falls_back_to_play_url(self) -> None:
         self.scene_supported = False
+        self.capabilities["synchronized_media_sessions"] = False
         result = asyncio.run(self.routes.native_satellite_play(self._payload(), None))
 
         self.assertFalse(result["audio_scene_started"])
