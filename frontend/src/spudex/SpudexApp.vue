@@ -36,7 +36,7 @@ const manualLogCursor = ref(0);
 const chatMessage = ref("");
 const command = ref("");
 const manualCwd = ref("agent_lab");
-const manualCwdDisplay = ref("/");
+const manualCwdDisplay = ref("~");
 const background = ref(false);
 const busy = ref("");
 const error = ref("");
@@ -144,7 +144,7 @@ function syncSettings(force = false) {
     allow_network: Boolean(source.allow_network),
     allow_installs: Boolean(source.allow_installs),
     allowed_platforms: Array.isArray(source.allowed_platforms) ? [...source.allowed_platforms] : ["webui"],
-    default_cwd: text(source.default_cwd || "workspace"),
+    default_cwd: text(source.default_cwd || "agent_lab"),
     max_task_steps: Number(source.max_task_steps || 6),
     command_timeout_sec: Number(source.command_timeout_sec || 45),
   });
@@ -255,7 +255,7 @@ async function runCommand() {
     manualCwd.value = text(result.session?.cwd) || manualCwd.value;
     manualCwdDisplay.value = text(result.session?.cwd_display) || manualCwdDisplay.value;
     selectSession(id, false); selectManualSession(id, false, true); command.value = "";
-    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : "Spudex session started.");
+    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : result.builtin ? "Command completed." : "Spudex session started.");
     await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(false)]);
   } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Command failed.", "error"); }
   finally { busy.value = ""; }
@@ -353,13 +353,13 @@ defineExpose({ refresh: () => refreshAll(false) });
           <header class="tsx-pane-head"><div><span class="tsx-pane-icon chat" aria-hidden="true">✦</span><div><strong>Chat with Tater</strong><small>{{ selectedSession?.label || selectedSession?.command || 'A fresh Spudex chat' }}</small></div></div><span class="tv-state" :class="{ good: selectedActive }">{{ selectedSession ? statusLabel(selectedSession.status) : 'Ready' }}</span></header>
           <div class="tsx-chat-scroll">
             <div v-if="currentChatSession && chatMessages.length" class="tsx-chat-feed"><ChatMessage v-for="(message, index) in chatMessages" :key="`${index}-${message.role}`" :message="message" :profile="options.profile || {}" :files-endpoint="options.endpoints.chatFiles" /></div>
-            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something in the protected Spudex workspace.</p></div>
+            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something through Spudex.</p></div>
           </div>
           <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Spudex…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
         </section>
 
         <section class="tv-panel tsx-terminal-card">
-          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@spudex:{{ selectedSession?.cwd_display || 'workspace' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
+          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@spudex:{{ selectedSession?.cwd_display || '~' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
           <div class="tsx-terminal-body" role="log" aria-label="Spudex command output" aria-live="polite">
             <div v-if="nonChatLogs.length" class="tsx-log-list"><article v-for="entry in nonChatLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><time>{{ relativeTime(entry.ts) }}</time><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article></div>
             <div v-else class="tsx-terminal-empty"><span>&gt;_</span><strong>Waiting for activity</strong><small>Commands, tool output, and system messages will appear here.</small></div>
@@ -377,7 +377,7 @@ defineExpose({ refresh: () => refreshAll(false) });
         </header>
         <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
           <article v-for="entry in manualLogs" :key="`${entry._session_id || ''}-${entry.seq || entry.ts || ''}-${entry.text || ''}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article>
-          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Browse Tater’s protected agent_lab with ls, pwd, and cd. Start at /.</small></div>
+          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Starts in agent_lab (~) with access to the host filesystem. Use ls or dir, pwd, and cd.</small></div>
         </div>
         <form class="tsx-manual-prompt" @submit.prevent="runCommand">
           <label class="tsx-prompt-line"><span aria-hidden="true">$</span><input v-model="command" type="text" autocomplete="off" aria-label="Terminal command" placeholder="Type a command…" :disabled="busy === 'run'" /></label>
@@ -390,7 +390,7 @@ defineExpose({ refresh: () => refreshAll(false) });
 
     <section v-else class="tsx-settings">
       <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Spudex availability</h2><p>Expose policy-controlled Spudex tools only on the Tater surfaces you choose.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Default working folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Spudex.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
-      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Defense in depth</span><h2>Spudex policy</h2><p>Keep command safety on, then allow only the categories a workflow actually needs.</p></div><label class="tsx-master-toggle" :class="{ danger: !settingsDraft.policy_enabled }"><span>{{ settingsDraft.policy_enabled ? 'Policy on' : 'Policy off' }}</span><input v-model="settingsDraft.policy_enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: !settingsDraft.policy_enabled }"><strong>{{ settingsDraft.policy_enabled ? 'Policy is active.' : 'Command safety policy is off.' }}</strong> {{ settingsDraft.policy_enabled ? 'Tater checks commands, paths, network use, installs, and the configurable categories below.' : 'Spudex can use shells, host paths, network commands, installs, and host-affecting tools.' }}</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code>.</span><span>File writes stay inside <code>agent_lab</code>.</span><span>Model processes stay tracked and stoppable.</span></div><div class="tsx-policy-grid"><label v-for="rule in policyRules" :key="rule[0]"><span><strong>{{ rule[1] }}</strong><small>{{ rule[2] }}</small></span><input v-model="settingsDraft[rule[0]]" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></div></div>
+      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Defense in depth</span><h2>Spudex policy</h2><p>Keep command safety on, then allow only the categories a workflow actually needs.</p></div><label class="tsx-master-toggle" :class="{ danger: !settingsDraft.policy_enabled }"><span>{{ settingsDraft.policy_enabled ? 'Policy on' : 'Policy off' }}</span><input v-model="settingsDraft.policy_enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: !settingsDraft.policy_enabled }"><strong>{{ settingsDraft.policy_enabled ? 'Policy is active.' : 'Command safety policy is off.' }}</strong> {{ settingsDraft.policy_enabled ? 'Tater checks command categories, network use, installs, and the configurable options below.' : 'Spudex can use shells, network commands, installs, and host-affecting tools.' }}</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code> as <code>~</code>.</span><span>Filesystem paths are unrestricted.</span><span>Model processes stay tracked and stoppable.</span></div><div class="tsx-policy-grid"><label v-for="rule in policyRules" :key="rule[0]"><span><strong>{{ rule[1] }}</strong><small>{{ rule[2] }}</small></span><input v-model="settingsDraft[rule[0]]" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></div></div>
       <div class="tsx-settings-save"><span>Model routing remains in Settings → Models.</span><button class="tv-button primary" type="button" :disabled="busy === 'settings' || !settingsDirty" @click="saveSettings">{{ busy === 'settings' ? 'Saving…' : 'Save settings' }}</button></div>
     </section>
   </div>

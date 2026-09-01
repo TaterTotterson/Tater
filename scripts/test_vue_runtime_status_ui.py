@@ -52,6 +52,15 @@ class VueRuntimeStatusTests(unittest.TestCase):
         ):
             self.assertIn(heading, source)
 
+    def test_llm_calls_show_queued_and_running_states(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
+        fallback = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        for contract in ("llm.running_total", "llm.queued_total", "call.state_label", "call.state_age_seconds"):
+            self.assertIn(contract, source)
+        for contract in ("llmCalls.running_total", "llmCalls.queued_total", "row?.state_age_seconds"):
+            self.assertIn(contract, fallback)
+
     def test_remote_models_show_hub_status_without_fake_memory_estimates(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 

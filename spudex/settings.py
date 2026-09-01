@@ -26,7 +26,8 @@ DEFAULT_SPUDEX_SETTINGS: Dict[str, Any] = {
     "allow_network": False,
     "allow_installs": False,
     "sandbox_mode": "agent_lab",
-    "default_cwd": "workspace",
+    "filesystem_scope": "host",
+    "default_cwd": "agent_lab",
     "llm_provider": "",
     "llm_host": "",
     "llm_model": "",
@@ -107,8 +108,13 @@ def _normalize_platforms(value: Any) -> list[str]:
 
 def normalize_spudex_settings(values: Dict[str, Any] | None = None) -> Dict[str, Any]:
     source = dict(DEFAULT_SPUDEX_SETTINGS)
+    legacy_agent_lab_scope = isinstance(values, dict) and "filesystem_scope" not in values
     if isinstance(values, dict):
         source.update(values)
+    if legacy_agent_lab_scope:
+        source["filesystem_scope"] = "host"
+        if str(source.get("default_cwd") or "").strip() in {"", "workspace", "/workspace"}:
+            source["default_cwd"] = "agent_lab"
 
     out: Dict[str, Any] = {}
     for key, default in DEFAULT_SPUDEX_SETTINGS.items():

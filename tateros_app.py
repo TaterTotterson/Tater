@@ -164,6 +164,9 @@ from helpers import (
     HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
     LLAMA_CPP_SPECULATIVE_METHODS,
     HfLlmDownloadCancelled,
+    LocalLlmQueueFullError,
+    LocalLlmQueueTimeoutError,
+    LocalLlmRequestSupersededError,
     decrypt_current_redis_snapshot,
     download_hf_transformers_llm_model,
     download_llama_cpp_llm_model,
@@ -183,6 +186,7 @@ from helpers import (
     get_llm_debug_runtime_snapshot,
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
+    llm_request_context,
     preload_hf_transformers_llm_model,
     preload_llama_cpp_llm_model,
     preload_mlx_lm_llm_model,
@@ -7203,6 +7207,11 @@ async def _run_spud_link_native_llm_completion(
     messages: List[Dict[str, str]],
 ) -> Dict[str, Any]:
     generation_kwargs: Dict[str, Any] = {"activity": "spud_link_model"}
+    try:
+        run_timeout = float(os.getenv("TATER_SPUD_LINK_LLM_RUN_TIMEOUT_SECONDS") or "70")
+    except Exception:
+        run_timeout = 70.0
+    generation_kwargs["timeout"] = max(30.0, min(85.0, run_timeout))
     fields_set = getattr(payload, "model_fields_set", None)
     if fields_set is None:
         fields_set = getattr(payload, "__fields_set__", set())
@@ -14441,7 +14450,7 @@ def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, A
     from spudex.settings import get_spudex_settings
 
     settings = get_spudex_settings(redis_client)
-    cwd_value = settings.get("default_cwd") or "workspace"
+    cwd_value = settings.get("default_cwd") or "agent_lab"
     cwd = resolve_spudex_cwd(cwd_value)
     label = str(payload.label or "").strip() or "New Spudex chat"
     session = create_spudex_session(
@@ -14472,7 +14481,7 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="Spudex chat message is required.")
     settings = get_spudex_settings(redis_client)
-    cwd_value = settings.get("default_cwd") or "workspace"
+    cwd_value = settings.get("default_cwd") or "agent_lab"
     cwd = resolve_spudex_cwd(cwd_value)
     wanted_session_id = str(payload.session_id or "").strip()
     session = get_spudex_session(wanted_session_id) if wanted_session_id else {}
@@ -16414,7 +16423,30 @@ async def spud_link_tater_llm(
     )
     _spud_link_store_node(node)
 
-    return await _run_spud_link_native_llm_completion(payload, messages)
+    node_id = str(node.get("id") or "").strip()
+    node_name = str(node.get("name") or node_id or "Spudlet").strip()[:120] or "Spudlet"
+    try:
+        queue_timeout = float(os.getenv("TATER_SPUD_LINK_LLM_QUEUE_TIMEOUT_SECONDS") or "15")
+    except Exception:
+        queue_timeout = 15.0
+    try:
+        with llm_request_context(
+            kind="spudlet",
+            source=node_name,
+            source_label=f"Spudlet - {node_name}",
+            module="spud_link",
+            function="direct_reply",
+            queue_key=f"spudlet:{node_id or node_name}",
+            priority=0,
+            queue_timeout=max(3.0, min(60.0, queue_timeout)),
+        ):
+            return await _run_spud_link_native_llm_completion(payload, messages)
+    except LocalLlmRequestSupersededError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LocalLlmQueueFullError as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "2"}) from exc
+    except LocalLlmQueueTimeoutError as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "2"}) from exc
 
 
 @app.post("/api/spudlink/v1/chat/completions")

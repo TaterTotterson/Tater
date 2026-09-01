@@ -274,7 +274,7 @@ function withBasePath(path) {
 const VIEW_META = {
   dashboard: { title: "Dashboard", subtitle: "Tater status, live signals, and generated briefs." },
   chat: { title: "Chat", subtitle: "Talk to Tater Totterson" },
-  spudex: { title: "Spudex", subtitle: "Sandboxed agent_lab command sessions for Tater." },
+  spudex: { title: "Spudex", subtitle: "Policy-controlled terminal sessions for Tater." },
   verbas: { title: "Verba", subtitle: "Enable tools and manage Verba settings + shop updates." },
   portals: { title: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
   cores: { title: "Cores", subtitle: "Core runtime controls and full Core Shop manager." },
@@ -6129,7 +6129,8 @@ function _renderRuntimeLlmCallRows(llmCalls) {
               if (messageCount > 0) {
                 extraLineParts.push(`${messageCount} msgs`);
               }
-              const age = _runtimeAgeLabel(row?.age_seconds);
+              const state = String(row?.state || "running").trim().toLowerCase() === "queued" ? "Queued" : "Running";
+              const age = _runtimeAgeLabel(row?.state_age_seconds ?? row?.age_seconds);
               return `
                 <div class="runtime-breakdown-row">
                   <div class="runtime-breakdown-main">
@@ -6137,7 +6138,7 @@ function _renderRuntimeLlmCallRows(llmCalls) {
                     <div class="small muted">${escapeHtml(detailLineParts.join(" • "))}</div>
                     ${extraLineParts.length ? `<div class="small muted">${escapeHtml(extraLineParts.join(" • "))}</div>` : ""}
                   </div>
-                  <div class="runtime-breakdown-status"><span class="status-chip running">${escapeHtml(age)}</span></div>
+                  <div class="runtime-breakdown-status"><span class="status-chip ${state === "Queued" ? "" : "running"}">${escapeHtml(`${state} ${age}`)}</span></div>
                 </div>
               `;
             })
@@ -6148,7 +6149,7 @@ function _renderRuntimeLlmCallRows(llmCalls) {
 
   return `
     <div class="runtime-breakdown-block">
-      <div class="runtime-breakdown-subtitle">Active Calls</div>
+      <div class="runtime-breakdown-subtitle">Current Calls</div>
       ${activeCallsHtml}
     </div>
   `;
@@ -6583,7 +6584,9 @@ function renderRuntimeBreakdown(payload) {
   const hydraSummary = `${Number(hydraJobs.total ?? 0)} total • Active turns ${activeTurnCount} • WebUI queue ${Number(
     hydraJobs.webui_jobs ?? 0
   )} • Surface turns ${Number(hydraJobs.surface_running_turns ?? 0)}`;
-  const llmSummary = `${Number(llmCalls.active_total ?? 0)} active • Started ${Number(
+  const llmSummary = `${Number(llmCalls.running_total ?? llmCalls.active_total ?? 0)} running • ${Number(
+    llmCalls.queued_total ?? 0
+  )} queued • Started ${Number(
     llmCalls?.totals?.started ?? 0
   )} • Completed ${Number(llmCalls?.totals?.completed ?? 0)} • Failed ${Number(llmCalls?.totals?.failed ?? 0)}`;
   const visionSummary = `${Number(visionCalls.active_total ?? 0)} active • Started ${Number(
@@ -33746,7 +33749,7 @@ function normalizeSpudexSettings(settings = {}) {
     command_timeout_sec: Number(value.command_timeout_sec || 45),
     max_log_entries: Number(value.max_log_entries || 4000),
     max_sessions: Number(value.max_sessions || 80),
-    default_cwd: String(value.default_cwd || "workspace"),
+    default_cwd: String(value.default_cwd || "agent_lab"),
     sandbox_mode: String(value.sandbox_mode || "agent_lab"),
     llm_host: String(value.llm_host || ""),
     llm_model: String(value.llm_model || ""),
@@ -33973,11 +33976,11 @@ function spudexPolicyToggle(id, title, description, checked) {
 function renderSpudexPolicyCard(settings) {
   const policyWarning = settings.policy_enabled
     ? `<div class="spudex-policy-note">
-        Policy is active. Tater checks direct commands, paths, and the configurable categories below. This is defense in depth, not OS-level isolation.
+        Policy is active. Tater checks direct command categories, network use, installs, and the configurable options below.
       </div>`
     : `<div class="spudex-policy-warning">
         <strong>Command safety policy is off.</strong>
-        Spudex commands can use shells, host paths, network commands, installs, and host-affecting tools. Only use this when you trust the active model and are watching the session.
+        Spudex commands can use shells, network commands, installs, and host-affecting tools. Only use this when you trust the active model and are watching the session.
       </div>`;
   return `
     <section class="spudex-card spudex-policy-card">
@@ -33991,15 +33994,15 @@ function renderSpudexPolicyCard(settings) {
       <div class="spudex-policy-master">
         ${spudexSettingSwitch("spudex-policy-enabled", "Enable command safety policy", settings.policy_enabled, "spudex-policy-toggle")}
         <div class="spudex-settings-hint spudex-policy-hint">
-          Turning this off bypasses blocked shells, host command checks, network/install checks, and path-argument checks for spudex commands.
+          Turning this off bypasses blocked shells, host command checks, and network/install checks for spudex commands.
         </div>
       </div>
       ${policyWarning}
       <div class="spudex-policy-section">
-        <h4>Locked Guardrails</h4>
+        <h4>Starting Point &amp; Access</h4>
         <div class="spudex-policy-locks">
-          <span>Commands start inside <code>agent_lab</code>.</span>
-          <span>Spudex file writes stay inside <code>agent_lab</code>.</span>
+          <span>Commands start inside <code>agent_lab</code> as <code>~</code>.</span>
+          <span>Filesystem paths are unrestricted.</span>
           <span>Model-started processes are tracked and can be killed from the UI.</span>
         </div>
       </div>
@@ -34042,9 +34045,9 @@ function renderSpudexRunCard(settings) {
       <div class="spudex-card-head">
         <div>
           <h3>Manual Session</h3>
-          <p>Run one policy-controlled command from Tater's agent_lab working area.</p>
+          <p>Run a policy-controlled command starting from Tater's agent_lab home folder.</p>
         </div>
-        <span class="spudex-console-badge">agent_lab</span>
+        <span class="spudex-console-badge">~</span>
       </div>
       <form id="spudex-run-form" class="spudex-run-form">
         <label>
@@ -34057,7 +34060,7 @@ function renderSpudexRunCard(settings) {
         </label>
         <button class="primary-btn" type="submit">Run</button>
       </form>
-      <p class="spudex-sandbox-note">Sandbox root: <code>${escapeHtml(state.spudexPayload?.agent_lab || "agent_lab")}</code></p>
+      <p class="spudex-sandbox-note">Home folder: <code>${escapeHtml(state.spudexPayload?.agent_lab || "agent_lab")}</code> · host filesystem access enabled</p>
     </section>
   `;
 }
@@ -34624,7 +34627,7 @@ function renderSpudexChatMessages() {
           });
         })
         .join("")
-    : `<div class="spudex-chat-empty">Ask the spudex loop to inspect, run, or fix something inside agent_lab.</div>`;
+    : `<div class="spudex-chat-empty">Ask the spudex loop to inspect, run, or fix something on this host.</div>`;
   if (!busy) {
     return rows;
   }
@@ -35168,7 +35171,7 @@ function bindSpudexView() {
       allow_network: checkboxValue("spudex-allow-network", current.allow_network),
       allow_installs: checkboxValue("spudex-allow-installs", current.allow_installs),
       allowed_platforms: selectedPlatforms.length ? selectedPlatforms : ["webui"],
-      default_cwd: stringValue("spudex-default-cwd", current.default_cwd || "workspace"),
+      default_cwd: stringValue("spudex-default-cwd", current.default_cwd || "agent_lab"),
       max_task_steps: numberValue("spudex-max-steps", current.max_task_steps || 6),
       command_timeout_sec: numberValue("spudex-timeout", current.command_timeout_sec || 45),
     };

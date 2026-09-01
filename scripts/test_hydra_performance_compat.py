@@ -30,6 +30,121 @@ def _local_result(text: str = "ok"):
     }
 
 
+class LocalLlmSchedulerTests(unittest.TestCase):
+    def test_spudlet_context_overrides_webui_label_and_tracks_queue_state(self):
+        with (
+            mock.patch.object(
+                helpers,
+                "_infer_llm_call_origin",
+                return_value={
+                    "kind": "webui",
+                    "source": "webui",
+                    "module": "tateros_app",
+                    "path": "tateros_app.py",
+                    "function": "spud_link_tater_llm",
+                },
+            ),
+            mock.patch.object(helpers, "_persist_llm_runtime_counter_delta"),
+            mock.patch.object(helpers, "_persist_llm_runtime_history_row"),
+            helpers.llm_request_context(
+                kind="spudlet",
+                source="Game Room",
+                source_label="Spudlet - Game Room",
+                queue_key="spudlet:game-room",
+                priority=0,
+            ),
+        ):
+            call_id = helpers._register_active_llm_call(
+                host="llama-cpp://local",
+                model="model",
+                stream=False,
+                message_count=2,
+                messages=[{"role": "user", "content": "hello"}],
+                initial_state="queued",
+            )
+            try:
+                queued = next(
+                    row for row in helpers.get_active_llm_calls_snapshot() if row["id"] == call_id
+                )
+                self.assertEqual(queued["source_label"], "Spudlet - Game Room")
+                self.assertEqual(queued["state"], "queued")
+                helpers._set_active_llm_call_state(call_id, "running")
+                running = next(
+                    row for row in helpers.get_active_llm_calls_snapshot() if row["id"] == call_id
+                )
+                self.assertEqual(running["state"], "running")
+            finally:
+                helpers._finish_active_llm_call(call_id)
+
+    def test_direct_spudlet_work_runs_before_background_queue(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=1, max_pending=8)
+        _first_id, first_future = scheduler.submit(
+            call_id="first",
+            priority=10,
+            queue_key="",
+        )
+        first_lease = first_future.result(timeout=1)
+        _background_id, background_future = scheduler.submit(
+            call_id="memory",
+            priority=50,
+            queue_key="",
+        )
+        _direct_id, direct_future = scheduler.submit(
+            call_id="spudlet",
+            priority=0,
+            queue_key="spudlet:kitchen",
+        )
+
+        first_lease.release()
+        direct_lease = direct_future.result(timeout=1)
+        self.assertFalse(background_future.done())
+        direct_lease.release()
+        background_future.result(timeout=1).release()
+
+    def test_same_spudlet_keeps_only_latest_waiting_request(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=1, max_pending=8)
+        _active_id, active_future = scheduler.submit(
+            call_id="active",
+            priority=10,
+            queue_key="",
+        )
+        active_lease = active_future.result(timeout=1)
+        _stale_id, stale_future = scheduler.submit(
+            call_id="stale",
+            priority=0,
+            queue_key="spudlet:game-room",
+        )
+        _latest_id, latest_future = scheduler.submit(
+            call_id="latest",
+            priority=0,
+            queue_key="spudlet:game-room",
+        )
+
+        with self.assertRaises(helpers.LocalLlmRequestSupersededError):
+            stale_future.result(timeout=1)
+        active_lease.release()
+        latest_future.result(timeout=1).release()
+
+    def test_running_spudlet_reply_is_marked_stale_when_newer_work_arrives(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=1, max_pending=8)
+        _first_id, first_future = scheduler.submit(
+            call_id="first",
+            priority=0,
+            queue_key="spudlet:office",
+        )
+        first_lease = first_future.result(timeout=1)
+        _latest_id, latest_future = scheduler.submit(
+            call_id="latest",
+            priority=0,
+            queue_key="spudlet:office",
+        )
+
+        self.assertTrue(first_lease.is_superseded())
+        self.assertFalse(latest_future.done())
+        first_lease.release()
+        latest_future.result(timeout=1).release()
+
+
 class LlamaCppPerformanceTests(unittest.TestCase):
     def test_native_backend_is_detected_from_bundled_vulkan_library(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -391,6 +506,24 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertTrue(metadata["mtp_single_slot_workaround"])
         self.assertEqual(metadata["mtp_stall_timeout_seconds"], 120.0)
 
+    def test_gemma4_hybrid_mtp_uses_single_slot_on_apple_silicon(self):
+        with (
+            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+            mock.patch.object(helpers.platform, "machine", return_value="arm64"),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_MTP_SINGLE_SLOT": ""},
+                clear=False,
+            ),
+        ):
+            enabled = helpers._llama_cpp_mtp_single_slot_workaround(
+                "TaterTotterson/gemma-4-26B-A4B-it-GGUF-Tater-NoThink::gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+                mtp_enabled=True,
+                spec_type="draft-mtp",
+            )
+
+        self.assertTrue(enabled)
+
     def test_qwen_hybrid_mtp_watchdog_streams_progress_and_uses_auto_slot(self):
         state = {"base_url": "http://127.0.0.1:1234"}
         metadata = {
@@ -599,6 +732,41 @@ class LlamaCppPerformanceTests(unittest.TestCase):
             helpers._LLAMA_CPP_ENGINE_CACHE.pop(engine.cache_key, None)
 
         self.assertEqual(engine.shutdown_calls, 1)
+
+    def test_native_shutdown_verifies_a_server_that_does_not_exit(self):
+        class Process:
+            pid = 43210
+
+            def __init__(self):
+                self.kill_calls = 0
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.kill_calls += 1
+
+            def wait(self, timeout=None):
+                raise TimeoutError(f"still running after {timeout}")
+
+        process = Process()
+        state = {
+            "process": process,
+            "metadata": {"server_bin": "/tmp/llama-server"},
+        }
+        with (
+            mock.patch.object(helpers.sys, "platform", "darwin"),
+            mock.patch.object(
+                helpers,
+                "_terminate_managed_llama_cpp_server_pids",
+                return_value={"requested": [43210], "terminated": [43210], "remaining": []},
+            ) as terminate,
+        ):
+            helpers._llama_cpp_native_shutdown_state(state)
+
+        self.assertGreaterEqual(process.kill_calls, 1)
+        terminate.assert_called_once()
+        self.assertEqual(state, {})
 
     def test_engine_worker_uses_posix_spawn_compatible_options_on_macos(self):
         process = SimpleNamespace(
@@ -1179,6 +1347,45 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("max_tokens", client.calls[0])
         self.assertIn("max_tokens", client.calls[1])
         self.assertIsNone(client.calls[1]["max_tokens"])
+
+    async def test_spud_link_endpoint_sets_node_queue_identity(self):
+        import tateros_app
+
+        captured = {}
+
+        async def run_completion(_payload, _messages):
+            captured.update(helpers._llm_request_context_snapshot())
+            return {"ok": True}
+
+        payload = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        node = {
+            "id": "spud-game-room",
+            "name": "Game Room",
+            "role": tateros_app.SPUD_LINK_MODE_SPUDLET,
+        }
+        with (
+            mock.patch.object(
+                tateros_app,
+                "_require_spud_link_node_request",
+                return_value=({"mode": tateros_app.SPUD_LINK_MODE_HUB}, node),
+            ),
+            mock.patch.object(tateros_app, "_spud_link_touch_node_from_request"),
+            mock.patch.object(tateros_app, "_spud_link_store_node"),
+            mock.patch.object(
+                tateros_app,
+                "_run_spud_link_native_llm_completion",
+                side_effect=run_completion,
+            ),
+        ):
+            result = await tateros_app.spud_link_tater_llm(payload, SimpleNamespace())
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured["kind"], "spudlet")
+        self.assertEqual(captured["source_label"], "Spudlet - Game Room")
+        self.assertEqual(captured["queue_key"], "spudlet:spud-game-room")
+        self.assertEqual(captured["priority"], 0)
 
     async def test_round_robin_is_role_affine_but_plain_calls_still_rotate(self):
         class Client:

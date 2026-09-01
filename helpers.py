@@ -7,6 +7,7 @@ import contextlib
 import gc
 import io
 import functools
+import heapq
 import queue
 import shutil
 import signal
@@ -17,6 +18,7 @@ import tempfile
 import hashlib
 import shlex
 import weakref
+from contextvars import ContextVar
 from openai import AsyncOpenAI
 import requests
 import nest_asyncio
@@ -30,7 +32,7 @@ import websocket
 import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.parse import urlparse, urlunparse
 try:
     import httpx
@@ -658,6 +660,12 @@ _LLM_CALL_HISTORY_MAX = 5000
 _LLM_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 _LLM_CALL_COUNTERS_REDIS_KEY = "tater:llm:runtime:counters"
 _LLM_CALL_HISTORY_REDIS_KEY = "tater:llm:runtime:history"
+_LLM_REQUEST_CONTEXT: ContextVar[Dict[str, Any]] = ContextVar(
+    "tater_llm_request_context",
+    default={},
+)
+_LOCAL_LLM_SCHEDULERS_LOCK = threading.RLock()
+_LOCAL_LLM_SCHEDULERS: Dict[str, Any] = {}
 _LLM_DEBUG_EVENTS_LOCK = threading.RLock()
 _LLM_DEBUG_EVENTS: List[Dict[str, Any]] = []
 _LLM_DEBUG_EVENTS_MAX = 1200
@@ -705,8 +713,225 @@ _LLM_ORIGIN_KIND_LABELS = {
     "verba": "Verba",
     "portal": "Portal",
     "core": "Core",
+    "spudlet": "Spudlet",
     "other": "Other",
 }
+
+
+class LocalLlmSchedulingError(RuntimeError):
+    """Base error for requests rejected before local model generation."""
+
+
+class LocalLlmQueueFullError(LocalLlmSchedulingError):
+    """Raised when the bounded local-model waiting room is full."""
+
+
+class LocalLlmQueueTimeoutError(LocalLlmSchedulingError):
+    """Raised when a local-model request waits too long to start."""
+
+
+class LocalLlmRequestSupersededError(LocalLlmSchedulingError):
+    """Raised when a newer request replaces stale work from the same Spudlet."""
+
+
+@contextlib.contextmanager
+def llm_request_context(**metadata: Any):
+    """Attach request identity and scheduling hints across async LLM calls."""
+    current = _LLM_REQUEST_CONTEXT.get()
+    merged = dict(current) if isinstance(current, dict) else {}
+    merged.update({key: value for key, value in metadata.items() if value is not None})
+    token = _LLM_REQUEST_CONTEXT.set(merged)
+    try:
+        yield
+    finally:
+        _LLM_REQUEST_CONTEXT.reset(token)
+
+
+def _llm_request_context_snapshot() -> Dict[str, Any]:
+    value = _LLM_REQUEST_CONTEXT.get()
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _local_llm_queue_limit() -> int:
+    raw = str(os.getenv("TATER_LOCAL_LLM_QUEUE_MAX") or "32").strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = 32
+    return max(1, min(256, value))
+
+
+def _local_llm_effective_capacity(model_identifier: Any) -> int:
+    configured = _llama_cpp_slot_count()
+    if _llama_cpp_mtp_single_slot_workaround(
+        model_identifier,
+        mtp_enabled=_llama_cpp_mtp_enabled(),
+        spec_type=_llama_cpp_mtp_spec_type(),
+    ):
+        return 1
+    return max(1, configured)
+
+
+class _LocalLlmLease:
+    def __init__(self, scheduler: "_LocalLlmRequestScheduler", item_id: str):
+        self._scheduler = scheduler
+        self.item_id = str(item_id)
+        self._released = False
+
+    def is_superseded(self) -> bool:
+        return self._scheduler.is_superseded(self.item_id)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._scheduler.release(self.item_id)
+
+
+class _LocalLlmRequestScheduler:
+    """Thread-safe priority queue shared by every loop using one local model."""
+
+    def __init__(self, *, max_active: int, max_pending: int):
+        self._lock = threading.RLock()
+        self._max_active = max(1, int(max_active))
+        self._max_pending = max(1, int(max_pending))
+        self._sequence = 0
+        self._pending: List[Tuple[int, int, str]] = []
+        self._items: Dict[str, Dict[str, Any]] = {}
+        self._active: Dict[str, Dict[str, Any]] = {}
+
+    def configure(self, *, max_active: int, max_pending: int) -> None:
+        with self._lock:
+            self._max_active = max(1, int(max_active))
+            self._max_pending = max(1, int(max_pending))
+            self._dispatch_locked()
+
+    def submit(self, *, call_id: str, priority: int, queue_key: str) -> Tuple[str, Future]:
+        future: Future = Future()
+        item_id = str(uuid.uuid4())
+        queue_token = str(queue_key or "").strip()
+        with self._lock:
+            if queue_token:
+                for existing in list(self._items.values()):
+                    if (
+                        str(existing.get("queue_key") or "") == queue_token
+                        and str(existing.get("status") or "") == "pending"
+                    ):
+                        self._cancel_locked(
+                            str(existing.get("item_id") or ""),
+                            LocalLlmRequestSupersededError(
+                                "A newer request from this Spudlet replaced the queued request."
+                            ),
+                        )
+                for existing in self._active.values():
+                    if str(existing.get("queue_key") or "") == queue_token:
+                        existing["superseded"] = True
+
+            pending_count = sum(
+                1 for item in self._items.values() if str(item.get("status") or "") == "pending"
+            )
+            if pending_count >= self._max_pending:
+                raise LocalLlmQueueFullError(
+                    "Tater's local model queue is full. Please try again in a moment."
+                )
+
+            self._sequence += 1
+            item = {
+                "item_id": item_id,
+                "call_id": str(call_id or ""),
+                "priority": int(priority),
+                "sequence": int(self._sequence),
+                "queue_key": queue_token,
+                "future": future,
+                "status": "pending",
+                "superseded": False,
+            }
+            self._items[item_id] = item
+            heapq.heappush(self._pending, (int(priority), int(self._sequence), item_id))
+            self._dispatch_locked()
+        return item_id, future
+
+    def _active_queue_keys_locked(self) -> set[str]:
+        return {
+            str(item.get("queue_key") or "")
+            for item in self._active.values()
+            if str(item.get("queue_key") or "")
+        }
+
+    def _dispatch_locked(self) -> None:
+        while len(self._active) < self._max_active:
+            active_keys = self._active_queue_keys_locked()
+            deferred: List[Tuple[int, int, str]] = []
+            selected: Optional[Dict[str, Any]] = None
+            while self._pending:
+                entry = heapq.heappop(self._pending)
+                item = self._items.get(entry[2])
+                if not isinstance(item, dict) or str(item.get("status") or "") != "pending":
+                    continue
+                queue_key = str(item.get("queue_key") or "")
+                if queue_key and queue_key in active_keys:
+                    deferred.append(entry)
+                    continue
+                selected = item
+                break
+            for entry in deferred:
+                heapq.heappush(self._pending, entry)
+            if selected is None:
+                return
+            item_id = str(selected.get("item_id") or "")
+            future = selected.get("future")
+            selected["status"] = "active"
+            self._active[item_id] = selected
+            if isinstance(future, Future) and not future.done():
+                future.set_result(_LocalLlmLease(self, item_id))
+
+    def _cancel_locked(self, item_id: str, error: Exception) -> bool:
+        item = self._items.get(str(item_id or ""))
+        if not isinstance(item, dict):
+            return False
+        status = str(item.get("status") or "")
+        if status not in {"pending", "active"}:
+            return False
+        item["status"] = "cancelled"
+        self._active.pop(str(item_id or ""), None)
+        future = item.get("future")
+        if isinstance(future, Future) and not future.done():
+            future.set_exception(error)
+        self._items.pop(str(item_id or ""), None)
+        self._dispatch_locked()
+        return True
+
+    def cancel(self, item_id: str, error: Exception) -> bool:
+        with self._lock:
+            return self._cancel_locked(item_id, error)
+
+    def release(self, item_id: str) -> None:
+        with self._lock:
+            self._active.pop(str(item_id or ""), None)
+            self._items.pop(str(item_id or ""), None)
+            self._dispatch_locked()
+
+    def is_superseded(self, item_id: str) -> bool:
+        with self._lock:
+            item = self._items.get(str(item_id or ""))
+            return bool(isinstance(item, dict) and item.get("superseded"))
+
+
+def _local_llm_scheduler(model_identifier: Any) -> _LocalLlmRequestScheduler:
+    model_key = str(model_identifier or "").strip() or "__default__"
+    max_active = _local_llm_effective_capacity(model_key)
+    max_pending = _local_llm_queue_limit()
+    with _LOCAL_LLM_SCHEDULERS_LOCK:
+        scheduler = _LOCAL_LLM_SCHEDULERS.get(model_key)
+        if not isinstance(scheduler, _LocalLlmRequestScheduler):
+            scheduler = _LocalLlmRequestScheduler(
+                max_active=max_active,
+                max_pending=max_pending,
+            )
+            _LOCAL_LLM_SCHEDULERS[model_key] = scheduler
+        else:
+            scheduler.configure(max_active=max_active, max_pending=max_pending)
+        return scheduler
 _GENERIC_LLM_CALL_FUNCTIONS = {
     "",
     "__call__",
@@ -1716,8 +1941,10 @@ def _detect_amd_rocm_gfx_target(profile: str, override: str) -> str:
 
 def _llama_cpp_gpu_layers_value(raw: Any, *, default: int = -1) -> int:
     token = str(raw or "").strip().lower()
-    if token in {"", "auto"}:
+    if not token:
         return int(default)
+    if token == "auto":
+        return -1
     if token in {"all", "gpu"}:
         return -2
     if token in {"none", "off", "false", "cpu"}:
@@ -1812,7 +2039,7 @@ def _llama_cpp_mtp_single_slot_workaround(
     mtp_enabled: bool,
     spec_type: str = DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
 ) -> bool:
-    """Protect affected Qwen hybrid MTP models from Metal parallel-slot stalls."""
+    """Protect affected hybrid MTP models from Metal parallel-slot stalls."""
     if not mtp_enabled or str(spec_type or "").strip().lower() != "draft-mtp":
         return False
     if platform.system().lower() != "darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
@@ -1820,11 +2047,13 @@ def _llama_cpp_mtp_single_slot_workaround(
     if not _boolish(os.getenv("TATER_LLAMA_CPP_MTP_SINGLE_SLOT"), default=True):
         return False
     token = re.sub(r"[^a-z0-9]+", "", str(model_identifier or "").lower())
-    return (
+    qwen_hybrid = (
         any(version in token for version in ("qwen35", "qwen36"))
         and "35b" in token
         and "a3b" in token
     )
+    gemma_hybrid = "gemma4" in token and "26b" in token and "a4b" in token
+    return bool(qwen_hybrid or gemma_hybrid)
 
 
 def _llama_cpp_mtp_stall_timeout_seconds(
@@ -7164,6 +7393,10 @@ def _llama_cpp_native_drain_stream(stream: Any, tail: List[str], prefix: str) ->
 
 def _llama_cpp_native_shutdown_state(state: Dict[str, Any]) -> None:
     proc = state.get("process")
+    try:
+        server_pid = int(getattr(proc, "pid", 0) or 0)
+    except Exception:
+        server_pid = 0
     if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
         try:
             if sys.platform == "darwin":
@@ -7180,6 +7413,28 @@ def _llama_cpp_native_shutdown_state(state: Dict[str, Any]) -> None:
                 proc.kill()
             except Exception:
                 pass
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                pass
+    if server_pid > 0 and proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        server_bin = str((metadata or {}).get("server_bin") or "").strip()
+        cleanup_result = _terminate_managed_llama_cpp_server_pids(
+            [server_pid],
+            server_bins=([server_bin] if server_bin else _llama_cpp_native_server_candidates()),
+            aliases={"tater-llama"},
+            timeout=3.0,
+        )
+        if cleanup_result.get("remaining"):
+            logger.warning(
+                "[llama-cpp-native] managed server remained after shutdown pid=%s",
+                server_pid,
+            )
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
     temp_dir = state.get("temp_dir")
     if temp_dir:
         try:
@@ -9175,14 +9430,26 @@ def _register_active_llm_call(
     message_count: int,
     messages: List[Dict[str, Any]],
     activity_hint: str = "",
+    initial_state: str = "running",
 ) -> str:
     origin = _infer_llm_call_origin()
+    request_context = _llm_request_context_snapshot()
+    for key in ("kind", "source", "module", "path", "function"):
+        value = str(request_context.get(key) or "").strip()
+        if value:
+            origin[key] = value
     activity = _normalize_llm_activity_hint(activity_hint) or _infer_llm_call_activity(
         origin=origin,
         messages=(messages if isinstance(messages, list) else []),
     )
     call_id = str(uuid.uuid4())
     started_at = time.time()
+    state = str(initial_state or "running").strip().lower()
+    if state not in {"queued", "running"}:
+        state = "running"
+    source_label = str(request_context.get("source_label") or "").strip()
+    if not source_label:
+        source_label = f"{_llm_origin_kind_label(origin.get('kind'))} - {origin.get('source') or 'unknown'}"
     row = {
         "id": call_id,
         "host": str(host or "").strip(),
@@ -9190,21 +9457,28 @@ def _register_active_llm_call(
         "stream": bool(stream),
         "message_count": max(0, int(message_count)),
         "started_at": started_at,
+        "queued_at": started_at,
+        "running_at": started_at if state == "running" else 0.0,
+        "state": state,
         "kind": str(origin.get("kind") or "other"),
         "source": str(origin.get("source") or "unknown"),
+        "source_label": source_label,
         "module": str(origin.get("module") or ""),
         "path": str(origin.get("path") or ""),
         "function": str(origin.get("function") or ""),
         "activity": str(activity or "").strip(),
+        "queue_key": str(request_context.get("queue_key") or "").strip(),
+        "priority": request_context.get("priority"),
+        "queue_timeout": request_context.get("queue_timeout"),
     }
     with _ACTIVE_LLM_CALLS_LOCK:
         _ACTIVE_LLM_CALLS[call_id] = row
         _LLM_CALL_COUNTERS["started"] = int(_LLM_CALL_COUNTERS.get("started") or 0) + 1
     _persist_llm_runtime_counter_delta(started=1)
     _append_llm_debug_event(
-        phase="start",
+        phase=state,
         level="info",
-        message="LLM call started",
+        message=("LLM call queued" if state == "queued" else "LLM call started"),
         call_id=call_id,
         host=row["host"],
         model=row["model"],
@@ -9214,6 +9488,67 @@ def _register_active_llm_call(
         detail=f"messages={row['message_count']} stream={str(bool(row['stream'])).lower()}",
     )
     return call_id
+
+
+def _set_active_llm_call_state(call_id: str, state: str) -> None:
+    call_token = str(call_id or "").strip()
+    state_token = str(state or "").strip().lower()
+    if not call_token or state_token not in {"queued", "running"}:
+        return
+    changed = False
+    row: Dict[str, Any] = {}
+    with _ACTIVE_LLM_CALLS_LOCK:
+        current = _ACTIVE_LLM_CALLS.get(call_token)
+        if not isinstance(current, dict):
+            return
+        if str(current.get("state") or "") != state_token:
+            current["state"] = state_token
+            if state_token == "running":
+                current["running_at"] = time.time()
+            changed = True
+        row = dict(current)
+    if changed:
+        _append_llm_debug_event(
+            phase=state_token,
+            level="info",
+            message=f"LLM call {state_token}",
+            call_id=call_token,
+            host=str(row.get("host") or ""),
+            model=str(row.get("model") or ""),
+            activity=str(row.get("activity") or ""),
+            kind=str(row.get("kind") or ""),
+            source=str(row.get("source") or ""),
+        )
+
+
+def _local_llm_priority_for_call(row: Dict[str, Any]) -> int:
+    explicit = row.get("priority") if isinstance(row, dict) else None
+    if explicit is not None and str(explicit).strip() != "":
+        try:
+            return max(0, min(100, int(explicit)))
+        except Exception:
+            pass
+    kind = str((row or {}).get("kind") or "other").strip().lower()
+    activity = str((row or {}).get("activity") or "").strip().lower()
+    if kind == "spudlet":
+        return 0
+    if activity in {"memory", "summary", "discovery", "cleanup", "verification"}:
+        return 50
+    if kind in {"webui", "hydra"}:
+        return 10
+    if kind == "core":
+        return 40
+    return 20
+
+
+def _local_llm_queue_timeout_for_call(row: Dict[str, Any]) -> float:
+    explicit = row.get("queue_timeout") if isinstance(row, dict) else None
+    raw = explicit if explicit is not None and str(explicit).strip() else os.getenv("TATER_LOCAL_LLM_QUEUE_TIMEOUT_SECONDS")
+    try:
+        value = float(raw) if raw is not None and str(raw).strip() else 60.0
+    except Exception:
+        value = 60.0
+    return max(1.0, min(600.0, value))
 
 
 def _finish_active_llm_call(
@@ -9291,11 +9626,18 @@ def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
     with _ACTIVE_LLM_CALLS_LOCK:
         rows = [dict(item) for item in _ACTIVE_LLM_CALLS.values() if isinstance(item, dict)]
 
-    rows.sort(key=lambda row: float(row.get("started_at") or 0.0))
+    rows.sort(key=lambda row: float(row.get("queued_at") or row.get("started_at") or 0.0))
     out: List[Dict[str, Any]] = []
     for row in rows[-max_items:]:
         started_at = float(row.get("started_at") or 0.0)
         age_seconds = max(0, int(now - started_at)) if started_at > 0 else 0
+        state = str(row.get("state") or "running").strip().lower()
+        if state not in {"queued", "running"}:
+            state = "running"
+        state_started_at = float(
+            row.get("running_at") if state == "running" else row.get("queued_at") or started_at
+        )
+        state_age_seconds = max(0, int(now - state_started_at)) if state_started_at > 0 else 0
         kind = str(row.get("kind") or "other")
         source = str(row.get("source") or "unknown")
         out.append(
@@ -9304,7 +9646,8 @@ def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
                 "kind": kind,
                 "kind_label": _llm_origin_kind_label(kind),
                 "source": source,
-                "source_label": f"{_llm_origin_kind_label(kind)} - {source}",
+                "source_label": str(row.get("source_label") or "").strip()
+                or f"{_llm_origin_kind_label(kind)} - {source}",
                 "module": str(row.get("module") or ""),
                 "path": str(row.get("path") or ""),
                 "function": str(row.get("function") or ""),
@@ -9315,6 +9658,9 @@ def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
                 "message_count": max(0, int(row.get("message_count") or 0)),
                 "started_at": started_at,
                 "age_seconds": age_seconds,
+                "state": state,
+                "state_label": state.capitalize(),
+                "state_age_seconds": state_age_seconds,
             }
         )
     return out
@@ -9447,8 +9793,12 @@ def get_llm_call_runtime_summary(*, include_history: bool = False) -> Dict[str, 
         }
         history_rows = [dict(item) for item in _LLM_CALL_HISTORY] if include_history else []
 
+    running_total = sum(1 for row in active_calls if str(row.get("state") or "running") == "running")
+    queued_total = sum(1 for row in active_calls if str(row.get("state") or "running") == "queued")
     out = {
         "active_total": int(len(active_calls)),
+        "running_total": int(running_total),
+        "queued_total": int(queued_total),
         "totals": totals,
         "active_by_kind": by_kind,
         "active_by_source": by_source,
@@ -11298,6 +11648,7 @@ class LlamaCppLLMClientWrapper:
         except Exception:
             messages = messages if isinstance(messages, list) else []
 
+        schedule_local = self.provider == HYDRA_LLM_PROVIDER_LLAMA_CPP
         call_id = _register_active_llm_call(
             host=self.host,
             model=str(self.model or "").strip(),
@@ -11305,12 +11656,16 @@ class LlamaCppLLMClientWrapper:
             message_count=(len(messages) if isinstance(messages, list) else 0),
             messages=(messages if isinstance(messages, list) else []),
             activity_hint=str(activity_hint or ""),
+            initial_state=("queued" if schedule_local else "running"),
         )
         call_error: Optional[Exception] = None
         final_model = str(self.model or "").strip()
         event_loop = asyncio.get_running_loop()
         started_at = event_loop.time()
         stream_futures: List[Any] = []
+        scheduler: Optional[_LocalLlmRequestScheduler] = None
+        scheduler_item_id = ""
+        scheduler_lease: Optional[_LocalLlmLease] = None
 
         def thread_stream_callback(chunk: str) -> None:
             if not callable(stream_callback):
@@ -11333,6 +11688,35 @@ class LlamaCppLLMClientWrapper:
             vision=vision_requested,
         )
         try:
+            if schedule_local:
+                call_row = _llm_debug_row_for_call(call_id)
+                scheduler = _local_llm_scheduler(self.model)
+                scheduler_item_id, scheduler_future = scheduler.submit(
+                    call_id=call_id,
+                    priority=_local_llm_priority_for_call(call_row),
+                    queue_key=str(call_row.get("queue_key") or ""),
+                )
+                queue_timeout = _local_llm_queue_timeout_for_call(call_row)
+                try:
+                    scheduler_lease = await asyncio.wait_for(
+                        asyncio.shield(asyncio.wrap_future(scheduler_future)),
+                        timeout=queue_timeout,
+                    )
+                except asyncio.TimeoutError as exc:
+                    queue_error = LocalLlmQueueTimeoutError(
+                        f"Tater's local model did not become available within {int(queue_timeout)} seconds."
+                    )
+                    scheduler.cancel(scheduler_item_id, queue_error)
+                    raise queue_error from exc
+                except asyncio.CancelledError:
+                    scheduler.cancel(
+                        scheduler_item_id,
+                        LocalLlmRequestSupersededError("The queued local-model request was cancelled."),
+                    )
+                    raise
+                _set_active_llm_call_state(call_id, "running")
+                started_at = event_loop.time()
+
             provider_label = "Remote" if self.provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE else "Local"
             _append_llm_debug_event(
                 phase="prompt",
@@ -11348,20 +11732,37 @@ class LlamaCppLLMClientWrapper:
                     f"{f' cache={cache_namespace}' if cache_namespace else ''}"
                 ),
             )
-            result = await asyncio.to_thread(
-                self._chat_sync,
-                messages,
-                timeout=timeout,
-                _cache_namespace=cache_namespace,
-                _stream_callback=(
-                    thread_stream_callback if callable(stream_callback) else None
-                ),
-                **kwargs,
+            generation_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._chat_sync,
+                    messages,
+                    timeout=timeout,
+                    _cache_namespace=cache_namespace,
+                    _stream_callback=(
+                        thread_stream_callback if callable(stream_callback) else None
+                    ),
+                    **kwargs,
+                )
             )
+            try:
+                result = await asyncio.shield(generation_task)
+            except asyncio.CancelledError:
+                # asyncio cannot stop a thread already inside llama-server. Keep
+                # its scheduler lease until native generation exits so another
+                # request cannot overrun the configured slot capacity.
+                try:
+                    await generation_task
+                except Exception:
+                    pass
+                raise
             if stream_futures:
                 await asyncio.gather(
                     *(asyncio.wrap_future(item) for item in stream_futures),
                     return_exceptions=True,
+                )
+            if scheduler_lease is not None and scheduler_lease.is_superseded():
+                raise LocalLlmRequestSupersededError(
+                    "A newer request from this Spudlet replaced this reply."
                 )
             elapsed = max(0.0, float(event_loop.time() - started_at))
             usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
@@ -11398,7 +11799,12 @@ class LlamaCppLLMClientWrapper:
         except Exception as exc:
             call_error = exc
             raise
+        except asyncio.CancelledError as exc:
+            call_error = exc
+            raise
         finally:
+            if scheduler_lease is not None:
+                scheduler_lease.release()
             _finish_active_llm_call(
                 call_id,
                 error=call_error,

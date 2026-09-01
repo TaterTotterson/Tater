@@ -1,6 +1,6 @@
 import shlex
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from kernel_tools import AGENT_LAB_DIR, AGENT_WORKSPACE_DIR
 
@@ -92,11 +92,6 @@ POLICY_EXPLANATIONS = {
         "reason": "Tool-environment installs are disabled unless explicitly allowed.",
         "toggle": "Allow package/tool installs",
     },
-    "path_outside_agent_lab": {
-        "title": "Path leaves agent_lab",
-        "reason": "A path argument pointed outside the agent_lab sandbox root.",
-        "toggle": "Turn off command safety policy",
-    },
     "empty_command": {
         "title": "Empty command",
         "reason": "The spudex did not receive a command to run.",
@@ -105,23 +100,15 @@ POLICY_EXPLANATIONS = {
 }
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        resolved = path.expanduser().resolve()
-        root_resolved = root.expanduser().resolve()
-    except Exception:
-        return False
-    return resolved == root_resolved or root_resolved in resolved.parents
-
-
 def display_agent_path(path: Any) -> str:
     try:
         resolved = Path(path).expanduser().resolve()
         root = AGENT_LAB_DIR.resolve()
         if resolved == root:
-            return "/"
+            return "~"
         if root in resolved.parents:
-            return "/" + str(resolved.relative_to(root))
+            return "~/" + str(resolved.relative_to(root))
+        return str(resolved)
     except Exception:
         pass
     return str(path or "")
@@ -129,46 +116,37 @@ def display_agent_path(path: Any) -> str:
 
 def resolve_spudex_cwd(value: Any) -> Path:
     raw = str(value or "").strip()
-    if not raw or raw in {".", "/"}:
-        raw = str(AGENT_WORKSPACE_DIR)
-    elif raw == "workspace" or raw == "/workspace":
-        raw = str(AGENT_WORKSPACE_DIR)
-    elif raw == "agent_lab" or raw == "/agent_lab":
-        raw = str(AGENT_LAB_DIR)
-
-    candidate = Path(raw).expanduser()
-    if not candidate.is_absolute():
-        candidate = AGENT_LAB_DIR / raw.lstrip("/")
+    if not raw or raw in {".", "~", "~/", "agent_lab"}:
+        candidate = AGENT_LAB_DIR
+    elif raw == "workspace":
+        candidate = AGENT_WORKSPACE_DIR
+    elif raw.startswith("~/"):
+        candidate = AGENT_LAB_DIR / raw[2:]
+    else:
+        requested = Path(raw)
+        candidate = requested if requested.is_absolute() else AGENT_LAB_DIR / requested
     resolved = candidate.resolve()
-    if not _is_under(resolved, AGENT_LAB_DIR):
-        raise ValueError("Spudex cwd must stay inside agent_lab.")
-    resolved.mkdir(parents=True, exist_ok=True)
+    if resolved == AGENT_LAB_DIR.resolve():
+        resolved.mkdir(parents=True, exist_ok=True)
+    if not resolved.exists():
+        raise ValueError(f"Directory does not exist: {display_agent_path(resolved)}")
+    if not resolved.is_dir():
+        raise ValueError(f"Not a directory: {display_agent_path(resolved)}")
     return resolved
 
 
 def resolve_spudex_directory(value: Any, *, cwd: Path) -> Path:
-    """Resolve a terminal-style directory without allowing agent_lab escapes."""
+    """Resolve a terminal-style directory with agent_lab acting as HOME."""
     raw = str(value or "").strip()
-    if raw in {"", "~", "~/", "/", "agent_lab", "/agent_lab"}:
+    if raw in {"", "~", "~/"}:
         candidate = AGENT_LAB_DIR
-    elif raw in {"workspace", "/workspace"}:
-        candidate = AGENT_WORKSPACE_DIR
     elif raw.startswith("~/"):
         candidate = AGENT_LAB_DIR / raw[2:]
-    elif raw.startswith("/agent_lab/"):
-        candidate = AGENT_LAB_DIR / raw.removeprefix("/agent_lab/")
-    elif raw.startswith("/workspace/"):
-        candidate = AGENT_WORKSPACE_DIR / raw.removeprefix("/workspace/")
     else:
-        requested = Path(raw).expanduser()
-        if requested.is_absolute():
-            candidate = requested if _is_under(requested, AGENT_LAB_DIR) else AGENT_LAB_DIR / raw.lstrip("/")
-        else:
-            candidate = cwd / requested
+        requested = Path(raw)
+        candidate = requested if requested.is_absolute() else cwd / requested
 
     resolved = candidate.resolve()
-    if not _is_under(resolved, AGENT_LAB_DIR):
-        raise ValueError("Spudex directory must stay inside agent_lab.")
     if not resolved.exists():
         raise ValueError(f"Directory does not exist: {display_agent_path(resolved)}")
     if not resolved.is_dir():
@@ -180,24 +158,17 @@ def resolve_spudex_file_path(value: Any, *, cwd: Path | None = None) -> Path:
     raw = str(value or "").strip()
     if not raw:
         raise ValueError("Spudex file path is required.")
-    if raw in {".", "/", "workspace", "/workspace"}:
+    if raw in {".", "/", "~", "~/"}:
         raise ValueError("Spudex file path must name a file, not a directory.")
 
-    if raw.startswith("workspace/") or raw.startswith("/workspace/"):
-        raw = raw.lstrip("/")
-        candidate = AGENT_LAB_DIR / raw
-    elif raw.startswith("agent_lab/") or raw.startswith("/agent_lab/"):
-        raw = raw.lstrip("/")
-        candidate = AGENT_LAB_DIR / raw.removeprefix("agent_lab/")
+    if raw.startswith("~/"):
+        candidate = AGENT_LAB_DIR / raw[2:]
     else:
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            base = cwd if cwd is not None else AGENT_WORKSPACE_DIR
-            candidate = base / candidate
+        requested = Path(raw)
+        base = cwd if cwd is not None else AGENT_LAB_DIR
+        candidate = requested if requested.is_absolute() else base / requested
 
     resolved = candidate.resolve()
-    if not _is_under(resolved, AGENT_LAB_DIR):
-        raise ValueError("Spudex file path must stay inside agent_lab.")
     if resolved.is_dir():
         raise ValueError("Spudex file path must name a file, not a directory.")
     return resolved
@@ -255,34 +226,6 @@ def _uses_inline_eval(argv: List[str]) -> bool:
     return any(str(arg or "").strip().lower() in flags for arg in argv[1:3])
 
 
-def _validate_path_arg(arg: str, cwd: Path) -> Tuple[bool, str]:
-    text = str(arg or "").strip()
-    if not text or "://" in text:
-        return True, ""
-    path_text = text
-    if text.startswith("-") and "=" in text:
-        _flag, _separator, flag_value = text.partition("=")
-        path_text = flag_value.strip()
-    elif text.startswith("-"):
-        absolute_markers = [
-            index
-            for index in (text.find("/"), text.find("\\"))
-            if index >= 0
-        ]
-        if not absolute_markers:
-            return True, ""
-        marker = min(absolute_markers)
-        path_text = text[marker:].strip()
-    if not path_text or ("/" not in path_text and "\\" not in path_text):
-        return True, ""
-    candidate = Path(path_text).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    if not _is_under(candidate, AGENT_LAB_DIR):
-        return False, f"Path argument `{path_text}` leaves agent_lab."
-    return True, ""
-
-
 def validate_spudex_command(argv: List[str], cwd: Path, settings: Dict[str, Any]) -> Dict[str, Any]:
     if not argv:
         return {"ok": False, "code": "empty_command", "message": "No command was provided."}
@@ -306,16 +249,11 @@ def validate_spudex_command(argv: List[str], cwd: Path, settings: Dict[str, Any]
             "message": f"`{command}` is a host package manager. Host app installs need a dedicated installer workflow, not the sandbox spudex.",
         }
     if _uses_inline_eval(argv) and not bool(settings.get("allow_inline_eval")):
-        return {"ok": False, "code": "inline_eval_blocked", "message": "Inline interpreter eval is blocked. Put scripts in agent_lab and run the script file."}
+        return {"ok": False, "code": "inline_eval_blocked", "message": "Inline interpreter eval is blocked. Write a script file and run it instead."}
     if _looks_like_network(argv) and not bool(settings.get("allow_network")):
         return {"ok": False, "code": "network_blocked", "message": f"`{command}` needs network access, which is disabled."}
     if _looks_like_install(argv) and not bool(settings.get("allow_installs")):
         return {"ok": False, "code": "install_blocked", "message": "Install commands are disabled for the Tater spudex sandbox."}
-
-    for arg in argv[1:]:
-        ok, message = _validate_path_arg(arg, cwd)
-        if not ok:
-            return {"ok": False, "code": "path_outside_agent_lab", "message": message}
 
     return {"ok": True}
 

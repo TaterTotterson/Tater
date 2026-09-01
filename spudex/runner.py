@@ -6,6 +6,7 @@ import platform as host_platform
 import re
 import shutil
 import signal
+import stat as stat_module
 import subprocess
 import time
 import uuid
@@ -25,6 +26,7 @@ _ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
 _ACTIVE_TASKS: dict[str, asyncio.Task[Any]] = {}
 _SESSION_LOCK = asyncio.Lock()
 _DEFAULT_SUBPROCESS_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_TERMINAL_BUILTINS = {"dir", "ls", "pwd"}
 
 
 def _now() -> float:
@@ -73,10 +75,6 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def _sandbox_profile_path(value: Any) -> str:
-    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
-
-
 def _isolated_exec_argv(
     argv: List[str],
     *,
@@ -91,8 +89,6 @@ def _isolated_exec_argv(
     system = host_platform.system().strip().lower()
     allow_network = bool(settings.get("allow_network"))
     if system == "darwin" and shutil.which("sandbox-exec"):
-        root = _sandbox_profile_path(AGENT_LAB_DIR.resolve())
-        temp_root = _sandbox_profile_path((SPUDEX_DIR / "tmp").resolve())
         network_rule = "(allow network*)" if allow_network else ""
         profile = " ".join(
             part
@@ -102,10 +98,7 @@ def _isolated_exec_argv(
                 "(allow process*)",
                 "(allow sysctl-read)",
                 "(allow file-read*)",
-                (
-                    f'(allow file-write* (subpath "{root}") '
-                    f'(subpath "{temp_root}") (subpath "/private/tmp") (literal "/dev/null"))'
-                ),
+                "(allow file-write*)",
                 network_rule,
             )
             if part
@@ -114,17 +107,13 @@ def _isolated_exec_argv(
 
     bubblewrap = shutil.which("bwrap") if system == "linux" else None
     if bubblewrap:
-        root = str(AGENT_LAB_DIR.resolve())
         wrapped = [
             bubblewrap,
             "--die-with-parent",
             "--new-session",
-            "--ro-bind",
-            "/",
-            "/",
             "--bind",
-            root,
-            root,
+            "/",
+            "/",
             "--chdir",
             str(cwd),
         ]
@@ -177,6 +166,217 @@ def _command_start_error(exc: Exception, argv: List[str]) -> Dict[str, Any]:
         "exception_type": type(exc).__name__,
         "argv": list(argv),
     }
+
+
+def _human_file_size(value: int) -> str:
+    amount = float(max(0, int(value or 0)))
+    units = ("B", "K", "M", "G", "T")
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if amount < 1024.0 or candidate == units[-1]:
+            break
+        amount /= 1024.0
+    if unit == "B":
+        return str(int(amount))
+    return f"{amount:.1f}{unit}" if amount < 10 else f"{amount:.0f}{unit}"
+
+
+def _terminal_listing(argv: List[str], *, cwd: Path) -> Dict[str, Any]:
+    command = Path(str(argv[0] or "")).name.lower()
+    show_all = False
+    long_format = False
+    human_sizes = False
+    targets: List[str] = []
+    parse_flags = True
+    for raw_arg in argv[1:]:
+        arg = str(raw_arg or "").strip()
+        if not arg:
+            continue
+        lowered = arg.lower()
+        if parse_flags and arg == "--":
+            parse_flags = False
+            continue
+        if parse_flags and command == "dir" and lowered in {"/a", "/b", "/w"}:
+            show_all = show_all or lowered == "/a"
+            continue
+        if parse_flags and arg.startswith("--"):
+            if lowered == "--all":
+                show_all = True
+            elif lowered == "--long":
+                long_format = True
+            elif lowered == "--human-readable":
+                human_sizes = True
+            else:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "terminal_builtin_option",
+                        "message": f"Unsupported {command} option: {arg}",
+                    },
+                }
+            continue
+        if parse_flags and arg.startswith("-") and arg != "-":
+            flags = set(arg[1:])
+            unsupported = flags - {"1", "a", "h", "l"}
+            if unsupported:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "terminal_builtin_option",
+                        "message": f"Unsupported {command} option: {arg}",
+                    },
+                }
+            show_all = show_all or "a" in flags
+            long_format = long_format or "l" in flags
+            human_sizes = human_sizes or "h" in flags
+            continue
+        targets.append(arg)
+
+    if len(targets) > 1:
+        return {
+            "ok": False,
+            "error": {
+                "code": "terminal_builtin_usage",
+                "message": f"{command} accepts one directory at a time in Spudex Terminal.",
+            },
+        }
+    try:
+        target = targets[0] if targets else "."
+        try:
+            resolved_target = resolve_spudex_directory(target, cwd=cwd)
+        except ValueError:
+            resolved_target = resolve_spudex_file_path(target, cwd=cwd)
+            if not resolved_target.exists():
+                raise ValueError(f"Path does not exist: {display_agent_path(resolved_target)}")
+        entries = (
+            sorted(resolved_target.iterdir(), key=lambda path: path.name.casefold())
+            if resolved_target.is_dir()
+            else [resolved_target]
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "terminal_builtin_path",
+                "message": str(exc),
+            },
+        }
+
+    if not show_all:
+        entries = [path for path in entries if not path.name.startswith(".")]
+    rows: List[str] = []
+    for path in entries:
+        name = path.name + ("/" if path.is_dir() and not path.is_symlink() else "")
+        if not long_format:
+            rows.append(name)
+            continue
+        try:
+            info = path.lstat()
+            size = _human_file_size(info.st_size) if human_sizes else str(info.st_size)
+            modified = time.strftime("%b %d %H:%M", time.localtime(info.st_mtime))
+            rows.append(f"{stat_module.filemode(info.st_mode)} {size:>8} {modified} {name}")
+        except OSError:
+            rows.append(f"?????????? {'?':>8} {'?':>12} {name}")
+    return {
+        "ok": True,
+        "stdout": "\n".join(rows) + ("\n" if rows else ""),
+        "cwd": str(cwd),
+        "cwd_display": display_agent_path(cwd),
+    }
+
+
+def _run_terminal_builtin_in_session(
+    session_id: str,
+    *,
+    argv: List[str],
+    cwd: Path,
+    settings: Dict[str, Any],
+    capture_output: bool,
+) -> Dict[str, Any] | None:
+    command = Path(str(argv[0] or "")).name.lower() if argv else ""
+    if command not in _TERMINAL_BUILTINS:
+        return None
+
+    started_at = _now()
+    append_session_log(session_id, stream="command", text=f"$ {' '.join(argv)}", level="info")
+    append_session_log(
+        session_id,
+        stream="policy",
+        text="Execution: terminal builtin (no subprocess launched).",
+        level="info",
+    )
+    update_spudex_session(
+        session_id,
+        status="running",
+        argv=list(argv),
+        command=" ".join(str(item) for item in argv),
+        cwd=str(cwd),
+        cwd_display=display_agent_path(cwd),
+        started_ts=started_at,
+    )
+
+    if command == "pwd":
+        if len(argv) > 1:
+            builtin = {
+                "ok": False,
+                "error": {
+                    "code": "terminal_builtin_usage",
+                    "message": "pwd does not accept arguments in Spudex Terminal.",
+                },
+            }
+        else:
+            builtin = {"ok": True, "stdout": f"{cwd.resolve()}\n"}
+    else:
+        builtin = _terminal_listing(argv, cwd=cwd)
+
+    max_output_bytes = max(16384, int(settings.get("max_output_bytes") or 262144))
+    stdout = str(builtin.get("stdout") or "")
+    output_truncated = len(stdout.encode("utf-8")) > max_output_bytes
+    if output_truncated:
+        stdout = stdout.encode("utf-8")[:max_output_bytes].decode("utf-8", errors="ignore")
+    ok = bool(builtin.get("ok"))
+    error = builtin.get("error") if isinstance(builtin.get("error"), dict) else {}
+    stderr = "" if ok else str(error.get("message") or f"{command} failed.")
+    if stdout.strip():
+        append_session_log(session_id, stream="stdout", text=stdout.rstrip("\n"), level="info")
+    if stderr:
+        append_session_log(session_id, stream="stderr", text=stderr, level="error")
+    if output_truncated:
+        append_session_log(
+            session_id,
+            stream="system",
+            text=f"Command output was truncated after {max_output_bytes} bytes.",
+            level="warning",
+        )
+    status = "succeeded" if ok else "failed"
+    finished_at = _now()
+    update_spudex_session(
+        session_id,
+        status=status,
+        returncode=0 if ok else 1,
+        finished_ts=finished_at,
+    )
+    append_session_log(
+        session_id,
+        stream="system",
+        text=f"Command finished with status {status} ({0 if ok else 1}).",
+        level="info" if ok else "error",
+    )
+    result: Dict[str, Any] = {
+        "ok": ok,
+        "session_id": session_id,
+        "status": status,
+        "returncode": 0 if ok else 1,
+        "builtin": command,
+        "isolation_backend": "terminal_builtin",
+        "output_truncated": output_truncated,
+    }
+    if error:
+        result["error"] = error
+    if capture_output:
+        result.update({"stdout": stdout, "stderr": stderr})
+    return result
 
 
 def _paths(session_id: str) -> tuple[Path, Path]:
@@ -743,6 +943,16 @@ async def run_argv_in_session(
             level="warning",
         )
 
+    builtin_result = _run_terminal_builtin_in_session(
+        session_id,
+        argv=argv,
+        cwd=cwd,
+        settings=settings,
+        capture_output=capture_output,
+    )
+    if builtin_result is not None:
+        return builtin_result
+
     timeout_sec = max(5, int(settings.get("command_timeout_sec") or 45))
     max_output_bytes = max(16384, int(settings.get("max_output_bytes") or 262144))
     max_processes = max(1, int(settings.get("max_concurrent_processes") or 4))
@@ -1022,7 +1232,7 @@ async def start_spudex_command(
         try:
             if len(parsed_argv) > 2:
                 raise ValueError("cd accepts one directory at a time.")
-            next_cwd = resolve_spudex_directory(parsed_argv[1] if len(parsed_argv) > 1 else "/", cwd=resolved_cwd)
+            next_cwd = resolve_spudex_directory(parsed_argv[1] if len(parsed_argv) > 1 else "~", cwd=resolved_cwd)
             cwd_display = display_agent_path(next_cwd)
             append_session_log(session_id, stream="stdout", text=cwd_display, level="info")
             append_session_log(session_id, stream="system", text="Working directory changed.", level="info")
@@ -1046,6 +1256,26 @@ async def start_spudex_command(
                 finished_ts=_now(),
             )
         return {"ok": True, "builtin": "cd", "session": session}
+    if parsed_argv and Path(parsed_argv[0]).name.lower() in _TERMINAL_BUILTINS:
+        session = create_spudex_session(
+            label=label,
+            argv=parsed_argv,
+            cwd=str(resolved_cwd),
+            source=source,
+            platform=platform,
+        )
+        result = await run_argv_in_session(
+            session["id"],
+            argv=parsed_argv,
+            cwd=resolved_cwd,
+            settings=settings,
+            background=False,
+        )
+        return {
+            **result,
+            "builtin": Path(parsed_argv[0]).name.lower(),
+            "session": _load_meta(session["id"]),
+        }
     session = create_spudex_session(
         label=label,
         argv=parsed_argv,
