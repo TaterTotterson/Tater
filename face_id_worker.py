@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import platform
 import sys
 import sysconfig
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List
 
 
@@ -19,7 +21,11 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 RESULT_PREFIX = "TATER_FACE_RESULT:"
 _DEEPFACE: Any = None
+_ADAFACE_MODELS: Dict[str, Any] = {}
 _DEVICE_INFO: Dict[str, Any] = {}
+
+FACENET_MODEL_ID = "facenet512"
+ADAFACE_MODEL_ID = "adaface_ir50_webface4m"
 
 
 def _text(value: Any) -> str:
@@ -75,6 +81,78 @@ def _load_deepface() -> Any:
         sysconfig.get_scheme_names = original_get_scheme_names
 
 
+def _model_id(value: Any) -> str:
+    token = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"adaface", "adaface_ir50", ADAFACE_MODEL_ID}:
+        return ADAFACE_MODEL_ID
+    return FACENET_MODEL_ID
+
+
+def _adaface_model_dir() -> Path:
+    root = Path(_text(os.environ.get("TATER_FACE_MODEL_DIR")) or ".")
+    return (root / "adaface-ir50-webface4m").resolve()
+
+
+def _load_adaface() -> Any:
+    model_id = ADAFACE_MODEL_ID
+    if model_id in _ADAFACE_MODELS:
+        return _ADAFACE_MODELS[model_id]
+
+    from huggingface_hub import snapshot_download
+
+    repo_id = _text(os.environ.get("TATER_ADAFACE_REPO_ID")) or "minchul/cvlface_adaface_ir50_webface4m"
+    revision = _text(os.environ.get("TATER_ADAFACE_REVISION")) or None
+    model_dir = _adaface_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    required = (
+        model_dir / "wrapper.py",
+        model_dir / "models" / "__init__.py",
+        model_dir / "models" / "iresnet" / "model.py",
+        model_dir / "pretrained_model" / "model.yaml",
+        model_dir / "pretrained_model" / "model.pt",
+    )
+    if not all(path.is_file() for path in required):
+        snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            local_dir=str(model_dir),
+            allow_patterns=[
+                "config.json",
+                "wrapper.py",
+                "models/*.py",
+                "models/**/*.py",
+                "models/**/*.yaml",
+                "pretrained_model/*.yaml",
+                "pretrained_model/model.pt",
+            ],
+        )
+
+    import torch
+
+    old_cwd = Path.cwd()
+    sys.path.insert(0, str(model_dir))
+    try:
+        os.chdir(model_dir)
+        from wrapper import CVLFaceRecognitionModel, ModelConfig
+
+        model = CVLFaceRecognitionModel(ModelConfig())
+    finally:
+        os.chdir(old_cwd)
+        with contextlib.suppress(ValueError):
+            sys.path.remove(str(model_dir))
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    model = model.to(device)
+    model.eval()
+    _ADAFACE_MODELS[model_id] = (model, device)
+    return _ADAFACE_MODELS[model_id]
+
+
 def _number(value: Any, default: float, minimum: float, maximum: float) -> float:
     try:
         parsed = float(value)
@@ -113,15 +191,95 @@ def _face_crop(image: Any, area: Dict[str, Any]) -> str:
 
 def warmup_models(model_name: str, detector_backend: str) -> Dict[str, Any]:
     deepface = _load_deepface()
-    deepface.build_model(model_name or "Facenet512")
+    model_id = _model_id(model_name)
+    if model_id == ADAFACE_MODEL_ID:
+        _load_adaface()
+    else:
+        deepface.build_model("Facenet512")
     deepface.build_model(detector_backend or "retinaface", task="face_detector")
     return {
         "ok": True,
         "warmup": True,
-        "model_name": model_name or "Facenet512",
+        "model_id": model_id,
+        "model_name": "AdaFace IR-50 WebFace4M" if model_id == ADAFACE_MODEL_ID else "Facenet512",
         "detector_backend": detector_backend or "retinaface",
         **_DEVICE_INFO,
     }
+
+
+def _adaface_represent(
+    deepface: Any,
+    image: Any,
+    *,
+    detector_backend: str,
+    maximum: int,
+    minimum_confidence: float,
+) -> List[Dict[str, Any]]:
+    import cv2
+    import numpy as np
+    import torch
+
+    faces = deepface.extract_faces(
+        img_path=image,
+        detector_backend=detector_backend,
+        enforce_detection=True,
+        align=True,
+        color_face="rgb",
+        normalize_face=True,
+    )
+    rows = faces if isinstance(faces, list) else [faces]
+    accepted = [
+        row
+        for row in rows[:maximum]
+        if isinstance(row, dict)
+        and isinstance(row.get("face"), np.ndarray)
+        and _number(row.get("confidence"), 1.0, 0.0, 1.0) >= minimum_confidence
+    ]
+    if not accepted:
+        return []
+
+    batch: List[Any] = []
+    for row in accepted:
+        face = row["face"]
+        if face.shape[:2] != (112, 112):
+            face = cv2.resize(face, (112, 112), interpolation=cv2.INTER_AREA)
+        tensor = torch.from_numpy(np.ascontiguousarray(face.transpose(2, 0, 1))).float()
+        batch.append((tensor - 0.5) / 0.5)
+
+    model, device = _load_adaface()
+    input_batch = torch.stack(batch, dim=0).to(device)
+    with torch.inference_mode():
+        features = model(input_batch)
+        if isinstance(features, (tuple, list)):
+            features = features[0]
+        elif isinstance(features, dict):
+            output = features
+            features = output.get("embeddings")
+            if features is None:
+                features = output.get("last_hidden_state")
+        if features is None:
+            raise RuntimeError("AdaFace did not return an embedding tensor.")
+        features = torch.nn.functional.normalize(features.float(), p=2, dim=1)
+        vectors = features.detach().cpu().tolist()
+
+    out: List[Dict[str, Any]] = []
+    for row, embedding in zip(accepted, vectors):
+        area = row.get("facial_area") if isinstance(row.get("facial_area"), dict) else {}
+        out.append(
+            {
+                "embedding": [float(value) for value in embedding],
+                "facial_area": {
+                    "x": int(area.get("x") or 0),
+                    "y": int(area.get("y") or 0),
+                    "w": int(area.get("w") or area.get("width") or 0),
+                    "h": int(area.get("h") or area.get("height") or 0),
+                },
+                "confidence": _number(row.get("confidence"), 1.0, 0.0, 1.0),
+                "crop_b64": _face_crop(image, area),
+                "crop_content_type": "image/jpeg",
+            }
+        )
+    return out
 
 
 def represent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -130,11 +288,22 @@ def represent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     deepface = _load_deepface()
     settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+    model_id = _model_id(settings.get("model_id") or settings.get("model_name"))
     raw_image = base64.b64decode(_text(payload.get("image_b64")), validate=True)
     image = cv2.imdecode(np.frombuffer(raw_image, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Snapshot could not be decoded as an image.")
+    maximum = _integer(settings.get("max_faces"), 8, 1, 32)
+    minimum_confidence = _number(settings.get("minimum_confidence"), 0.0, 0.0, 1.0)
     try:
+        if model_id == ADAFACE_MODEL_ID:
+            return _adaface_represent(
+                deepface,
+                image,
+                detector_backend=_text(settings.get("detector_backend")) or "retinaface",
+                maximum=maximum,
+                minimum_confidence=minimum_confidence,
+            )
         represented = deepface.represent(
             img_path=image,
             model_name=_text(settings.get("model_name")) or "Facenet512",
@@ -149,8 +318,6 @@ def represent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         raise
 
     rows = represented if isinstance(represented, list) else [represented]
-    maximum = _integer(settings.get("max_faces"), 8, 1, 32)
-    minimum_confidence = _number(settings.get("minimum_confidence"), 0.0, 0.0, 1.0)
     out: List[Dict[str, Any]] = []
     for row in rows[:maximum]:
         if not isinstance(row, dict) or not isinstance(row.get("embedding"), list):
@@ -185,7 +352,7 @@ def handle(payload: Dict[str, Any]) -> Dict[str, Any]:
     action = _text(payload.get("action")).lower()
     if action == "warmup":
         result = warmup_models(
-            _text(payload.get("model_name")) or "Facenet512",
+            _text(payload.get("model_id") or payload.get("model_name")) or FACENET_MODEL_ID,
             _text(payload.get("detector_backend")) or "retinaface",
         )
         result["request_id"] = request_id

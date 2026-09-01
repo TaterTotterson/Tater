@@ -45,6 +45,10 @@ psutil
 # Face ID runtime. Setup installs these with Tater's regular dependencies;
 # enabling Face ID only downloads model weights and starts its worker process.
 deepface==0.0.100
+# AdaFace IR-50 uses the official pinned CVLFace checkpoint. Torch,
+# Transformers, Accelerate, and huggingface-hub are shared with other models.
+omegaconf>=2.3.0,<3
+fvcore>=0.1.5.post20221221,<0.2
 tf-keras==2.18.0 ; sys_platform == "darwin" and platform_machine == "arm64"
 tensorflow==2.18.0 ; sys_platform == "darwin" and platform_machine == "arm64"
 tensorflow-metal==1.2.0 ; sys_platform == "darwin" and platform_machine == "arm64"

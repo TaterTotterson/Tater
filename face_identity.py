@@ -30,8 +30,11 @@ FACE_ALIAS_PLATFORM = "face_id"
 DELETED_IDENTITY = "__deleted__"
 OBSERVATION_LIMIT = 500
 REFERENCE_LIMIT = 24
+MODEL_SWITCH_STATE_KEY = "tater:face_id:model_switch:v1"
 
 _identity_lock = threading.RLock()
+_model_switch_lock = threading.RLock()
+_model_switch_thread: Optional[threading.Thread] = None
 
 
 def _text(value: Any) -> str:
@@ -225,10 +228,16 @@ def valid_embedding(raw: Any, dimensions: int = 0) -> List[float]:
     return embedding
 
 
-def _embedding_model_metadata(raw: Any = None, *, dimensions: int = 0) -> Dict[str, Any]:
+def _embedding_model_metadata(
+    raw: Any = None,
+    *,
+    dimensions: int = 0,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
-    local = face_id_runtime.embedding_model_metadata()
+    local = face_id_runtime.embedding_model_metadata(redis_client)
     metadata = {
+        "model_id": _text(source.get("model_id")) or _text(local.get("model_id")),
         "model_name": _text(source.get("model_name")) or _text(local.get("model_name")),
         "detector_backend": _text(source.get("detector_backend")) or _text(local.get("detector_backend")),
         "distance_metric": _text(source.get("distance_metric")) or _text(local.get("distance_metric")),
@@ -239,19 +248,22 @@ def _embedding_model_metadata(raw: Any = None, *, dimensions: int = 0) -> Dict[s
         ),
         "model_pack_version": _text(source.get("model_pack_version")) or _text(local.get("model_pack_version")),
         "deepface_version": _text(source.get("deepface_version")) or _text(local.get("deepface_version")),
+        "model_revision": _text(source.get("model_revision")) or _text(local.get("model_revision")),
     }
     return metadata
 
 
 def _embedding_model_signature(metadata: Any, *, dimensions: int = 0) -> str:
     normalized = _embedding_model_metadata(metadata, dimensions=dimensions)
-    return "|".join(
-        (
-            _text(normalized.get("model_name")).lower(),
-            _text(normalized.get("distance_metric")).lower(),
-            str(_int(dimensions or normalized.get("embedding_dimensions"), minimum=0)),
-        )
-    )
+    parts = [
+        _text(normalized.get("model_name")).lower(),
+        _text(normalized.get("distance_metric")).lower(),
+        str(_int(dimensions or normalized.get("embedding_dimensions"), minimum=0)),
+    ]
+    revision = _text(normalized.get("model_revision"))
+    if revision and _text(normalized.get("model_id")) != face_id_runtime.DEFAULT_MODEL_ID:
+        parts.append(revision[:12].lower())
+    return "|".join(parts)
 
 
 def _annotate_detection(detection: Dict[str, Any], metadata: Any) -> Dict[str, Any]:
@@ -293,11 +305,41 @@ def image_backed_observations(identity: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
         row
         for row in observations(identity)
-        if _text(row.get("face_b64")) and valid_embedding(row.get("embedding"))
+        if _text(row.get("face_b64")) and (
+            valid_embedding(row.get("embedding")) or isinstance(row.get("embeddings"), dict)
+        )
     ]
 
 
-def reference_embeddings(identity: Dict[str, Any]) -> List[List[float]]:
+def observation_embedding(
+    observation: Dict[str, Any],
+    model_signature: str = "",
+    *,
+    fallback_signature: str = "",
+) -> List[float]:
+    wanted = _text(model_signature)
+    primary_signature = _text(observation.get("embedding_model_signature")) or _text(fallback_signature)
+    if not wanted or wanted == primary_signature:
+        primary = valid_embedding(observation.get("embedding"))
+        if primary:
+            return primary
+    cached = observation.get("embeddings") if isinstance(observation.get("embeddings"), dict) else {}
+    entry = cached.get(wanted) if wanted else None
+    if isinstance(entry, dict):
+        return valid_embedding(entry.get("embedding"))
+    if isinstance(entry, list):
+        return valid_embedding(entry)
+    return []
+
+
+def _embedding_profiles(identity: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    raw = identity.get("embedding_profiles")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): dict(value) for key, value in raw.items() if isinstance(value, dict)}
+
+
+def reference_embeddings(identity: Dict[str, Any], model_signature: str = "") -> List[List[float]]:
     image_rows = image_backed_observations(identity)
     if not image_rows:
         return []
@@ -313,15 +355,25 @@ def reference_embeddings(identity: Dict[str, Any]) -> List[List[float]]:
             return
         references.append(embedding)
 
-    stored = identity.get("reference_centroids")
+    wanted = _text(model_signature)
+    profile = _embedding_profiles(identity).get(wanted) if wanted else None
+    stored = None
+    if isinstance(profile, dict):
+        stored = profile.get("reference_centroids")
+    elif not wanted or _text(identity.get("embedding_model_signature")) == wanted:
+        stored = identity.get("reference_centroids")
     if isinstance(stored, list):
         for raw in stored:
             add(raw)
     if references:
         return references
-    add(identity.get("centroid"))
+    if isinstance(profile, dict):
+        add(profile.get("centroid"))
+    elif not wanted or _text(identity.get("embedding_model_signature")) == wanted:
+        add(identity.get("centroid"))
+    fallback_signature = _text(identity.get("embedding_model_signature"))
     for row in image_rows:
-        add(row.get("embedding"))
+        add(observation_embedding(row, wanted, fallback_signature=fallback_signature))
     return references
 
 
@@ -329,6 +381,7 @@ def curate_reference_embeddings(
     identity: Dict[str, Any],
     *,
     limit: int = REFERENCE_LIMIT,
+    model_signature: str = "",
 ) -> List[List[float]]:
     maximum = max(1, int(limit))
     best_quality = max(1.0, _float(identity.get("best_quality")))
@@ -351,9 +404,19 @@ def curate_reference_embeddings(
             return
         candidates.append(candidate)
 
-    add(identity.get("centroid"), quality=1.0)
+    wanted = _text(model_signature)
+    profile = _embedding_profiles(identity).get(wanted) if wanted else None
+    if isinstance(profile, dict):
+        add(profile.get("centroid"), quality=1.0)
+    elif not wanted or _text(identity.get("embedding_model_signature")) == wanted:
+        add(identity.get("centroid"), quality=1.0)
+    fallback_signature = _text(identity.get("embedding_model_signature"))
     for row in image_backed_observations(identity):
-        add(row.get("embedding"), quality=_float(row.get("quality")), seen_at=row.get("seen_at"))
+        add(
+            observation_embedding(row, wanted, fallback_signature=fallback_signature),
+            quality=_float(row.get("quality")),
+            seen_at=row.get("seen_at"),
+        )
     if len(candidates) <= maximum:
         return [row["embedding"] for row in candidates]
 
@@ -383,11 +446,11 @@ def match_identity(
     best_id = ""
     best_distance = float("inf")
     for identity_id, identity in identities.items():
-        stored_signature = _text(identity.get("embedding_model_signature"))
-        if model_signature and stored_signature and stored_signature != model_signature:
-            continue
         distance = min(
-            (cosine_distance(embedding, reference) for reference in reference_embeddings(identity)),
+            (
+                cosine_distance(embedding, reference)
+                for reference in reference_embeddings(identity, model_signature=model_signature)
+            ),
             default=float("inf"),
         )
         if distance < best_distance:
@@ -435,6 +498,107 @@ def _detection_observation(
     return row
 
 
+def _observation_signatures(observation: Dict[str, Any], fallback_signature: str = "") -> List[str]:
+    signatures: List[str] = []
+    primary = _text(observation.get("embedding_model_signature")) or _text(fallback_signature)
+    if primary and valid_embedding(observation.get("embedding")):
+        signatures.append(primary)
+    cached = observation.get("embeddings") if isinstance(observation.get("embeddings"), dict) else {}
+    for signature, entry in cached.items():
+        raw = entry.get("embedding") if isinstance(entry, dict) else entry
+        if _text(signature) and valid_embedding(raw) and _text(signature) not in signatures:
+            signatures.append(_text(signature))
+    return signatures
+
+
+def _observation_model_metadata(
+    observation: Dict[str, Any],
+    model_signature: str,
+    fallback_metadata: Any = None,
+) -> Dict[str, Any]:
+    if _text(observation.get("embedding_model_signature")) == _text(model_signature):
+        raw = observation.get("embedding_model")
+        if isinstance(raw, dict):
+            return dict(raw)
+    cached = observation.get("embeddings") if isinstance(observation.get("embeddings"), dict) else {}
+    entry = cached.get(model_signature)
+    if isinstance(entry, dict) and isinstance(entry.get("embedding_model"), dict):
+        return dict(entry["embedding_model"])
+    return dict(fallback_metadata) if isinstance(fallback_metadata, dict) else {}
+
+
+def _rebuild_embedding_profiles(
+    identity: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload = dict(identity)
+    fallback_signature = _text(payload.get("embedding_model_signature"))
+    fallback_metadata = payload.get("embedding_model") if isinstance(payload.get("embedding_model"), dict) else {}
+    signatures: List[str] = []
+    for row in rows:
+        for signature in _observation_signatures(row, fallback_signature):
+            if signature not in signatures:
+                signatures.append(signature)
+
+    profiles: Dict[str, Dict[str, Any]] = {}
+    for signature in signatures:
+        vectors = [
+            observation_embedding(row, signature, fallback_signature=fallback_signature)
+            for row in rows
+        ]
+        vectors = [vector for vector in vectors if vector]
+        if not vectors:
+            continue
+        dimensions = len(vectors[0])
+        vectors = [vector for vector in vectors if len(vector) == dimensions]
+        if not vectors:
+            continue
+        metadata: Dict[str, Any] = {}
+        for row in rows:
+            metadata = _observation_model_metadata(row, signature, fallback_metadata)
+            if metadata:
+                break
+        centroid = [sum(vector[index] for vector in vectors) / len(vectors) for index in range(dimensions)]
+        profile = {
+            "embedding_model": _embedding_model_metadata(metadata, dimensions=dimensions),
+            "centroid": centroid,
+            "centroid_count": len(vectors),
+            "updated_at": _now_iso(),
+        }
+        temporary = {
+            **payload,
+            "observations": rows,
+            "embedding_profiles": {signature: profile},
+            "embedding_model_signature": fallback_signature,
+        }
+        profile["reference_centroids"] = curate_reference_embeddings(
+            temporary,
+            model_signature=signature,
+        )
+        profiles[signature] = profile
+
+    if profiles:
+        payload["embedding_profiles"] = profiles
+        preferred = fallback_signature if fallback_signature in profiles else next(iter(profiles))
+        active = profiles[preferred]
+        payload["embedding_model_signature"] = preferred
+        payload["embedding_model"] = dict(active.get("embedding_model") or {})
+        payload["centroid"] = list(active.get("centroid") or [])
+        payload["centroid_count"] = _int(active.get("centroid_count"), minimum=0)
+        payload["reference_centroids"] = list(active.get("reference_centroids") or [])
+    else:
+        for key in (
+            "embedding_profiles",
+            "embedding_model",
+            "embedding_model_signature",
+            "centroid",
+            "centroid_count",
+            "reference_centroids",
+        ):
+            payload.pop(key, None)
+    return payload
+
+
 def rebuild_identity(
     identity: Dict[str, Any],
     rows: List[Dict[str, Any]],
@@ -446,23 +610,7 @@ def rebuild_identity(
     normalized = image_backed_observations({"observations": rows})
     payload["observations"] = normalized
     payload["observation_count"] = len(normalized)
-    embeddings = [valid_embedding(row.get("embedding")) for row in normalized]
-    embeddings = [row for row in embeddings if row]
-    dimensions = len(embeddings[0]) if embeddings else 0
-    embeddings = [row for row in embeddings if len(row) == dimensions]
-    if embeddings and dimensions:
-        payload["centroid"] = [sum(row[index] for row in embeddings) / len(embeddings) for index in range(dimensions)]
-        payload["centroid_count"] = len(embeddings)
-        payload["reference_centroids"] = curate_reference_embeddings(
-            {
-                "centroid": payload["centroid"],
-                "observations": normalized,
-                "best_quality": payload.get("best_quality"),
-            }
-        )
-    else:
-        for key in ("centroid", "centroid_count", "reference_centroids"):
-            payload.pop(key, None)
+    payload = _rebuild_embedding_profiles(payload, normalized)
     event_ids = {_text(row.get("event_id")) for row in normalized if _text(row.get("event_id"))}
     payload["event_count"] = len(event_ids)
     if normalized:
@@ -505,7 +653,11 @@ def record_detection(
     confidence = _float(detection.get("confidence"))
     area_pixels = max(1, _int(area.get("w"), 1, minimum=1) * _int(area.get("h"), 1, minimum=1))
     quality = max(0.0, confidence) + min(2.0, area_pixels / 100_000.0)
-    embedding_model = _embedding_model_metadata(detection.get("embedding_model"), dimensions=len(embedding))
+    embedding_model = _embedding_model_metadata(
+        detection.get("embedding_model"),
+        dimensions=len(embedding),
+        redis_client=client,
+    )
     model_signature = _text(detection.get("embedding_model_signature")) or _embedding_model_signature(
         embedding_model,
         dimensions=len(embedding),
@@ -513,7 +665,12 @@ def record_detection(
 
     with _identity_lock:
         identities = identity_rows(client)
-        identity_id, distance = match_identity(identities, embedding, model_signature=model_signature)
+        identity_id, distance = match_identity(
+            identities,
+            embedding,
+            threshold=_float(embedding_model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+            model_signature=model_signature,
+        )
         identity = dict(identities.get(identity_id) or {})
         if not identity_id:
             identity_id = f"face_{uuid.uuid4().hex[:16]}"
@@ -524,18 +681,11 @@ def record_detection(
                 "first_seen": timestamp,
                 "observation_count": 0,
                 "event_count": 0,
-                "centroid": embedding,
-                "centroid_count": 0,
-                "reference_centroids": [embedding],
                 "best_quality": 0.0,
                 "embedding_model": embedding_model,
                 "embedding_model_signature": model_signature,
             }
             distance = 0.0
-        else:
-            identity["embedding_model"] = embedding_model
-            identity["embedding_model_signature"] = model_signature
-
         existing = observations(identity)
         event_token = _text(event_id)
         duplicate = next(
@@ -544,7 +694,14 @@ def record_detection(
                 for row in existing
                 if event_token
                 and _text(row.get("event_id")) == event_token
-                and cosine_distance(valid_embedding(row.get("embedding")), embedding) < 0.005
+                and cosine_distance(
+                    observation_embedding(
+                        row,
+                        model_signature,
+                        fallback_signature=_text(identity.get("embedding_model_signature")),
+                    ),
+                    embedding,
+                ) < 0.005
             ),
             None,
         )
@@ -552,18 +709,6 @@ def record_detection(
             _save_event_identity_ids(client, event_token, [*_event_identity_ids(client, event_token), identity_id])
             return identity
 
-        if existing or identity.get("centroid_count"):
-            centroid = valid_embedding(identity.get("centroid"), len(embedding)) or embedding
-            centroid_count = _int(identity.get("centroid_count"), 0, minimum=0)
-            next_count = centroid_count + 1
-            identity["centroid"] = [
-                ((float(old) * centroid_count) + float(new)) / next_count
-                for old, new in zip(centroid, embedding)
-            ]
-            identity["centroid_count"] = next_count
-        else:
-            identity["centroid"] = embedding
-            identity["centroid_count"] = 1
         identity["observation_count"] = _int(identity.get("observation_count"), 0, minimum=0) + 1
         if _text(identity.get("last_event_id")) != event_token:
             identity["event_count"] = _int(identity.get("event_count"), 0, minimum=0) + 1
@@ -586,7 +731,7 @@ def record_detection(
             identity["best_quality"] = round(quality, 5)
             identity["face_b64"] = _text(detection.get("crop_b64"))
             identity["face_content_type"] = _text(detection.get("crop_content_type")) or "image/jpeg"
-        identity["reference_centroids"] = curate_reference_embeddings(identity)
+        identity = _rebuild_embedding_profiles(identity, identity["observations"])
         saved = save_identity(identity, client)
         _save_event_identity_ids(client, event_token, [*_event_identity_ids(client, event_token), identity_id])
         return saved
@@ -597,6 +742,269 @@ def runtime_status(redis_client: Any = None) -> Dict[str, Any]:
         return dict(face_id_runtime.status(_client(redis_client)) or {})
     except Exception as exc:
         return {"enabled": False, "loaded": False, "state": "error", "error": _text(exc)}
+
+
+def _save_model_switch_state(client: Any, state: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(state)
+    payload["updated_at"] = _now_iso()
+    with contextlib.suppress(Exception):
+        client.set(MODEL_SWITCH_STATE_KEY, json.dumps(payload, separators=(",", ":")))
+    return payload
+
+
+def model_switch_status(redis_client: Any = None) -> Dict[str, Any]:
+    client = _client(redis_client)
+    raw = None
+    with contextlib.suppress(Exception):
+        raw = client.get(MODEL_SWITCH_STATE_KEY)
+    state = _json_object(raw)
+    active = face_id_runtime.selected_model(client)
+    if not state:
+        return {
+            "state": "idle",
+            "active_model_id": active["id"],
+            "active_model": active["label"],
+        }
+    state.setdefault("active_model_id", active["id"])
+    state.setdefault("active_model", active["label"])
+    return state
+
+
+def _choose_reembedded_detection(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    candidates = [row for row in rows if isinstance(row, dict) and valid_embedding(row.get("embedding"))]
+    if not candidates:
+        return {}
+
+    def score(row: Dict[str, Any]) -> Tuple[float, int]:
+        area = row.get("facial_area") if isinstance(row.get("facial_area"), dict) else {}
+        pixels = _int(area.get("w"), 0, minimum=0) * _int(area.get("h"), 0, minimum=0)
+        return (_float(row.get("confidence")), pixels)
+
+    return max(candidates, key=score)
+
+
+def _cache_model_embeddings(
+    client: Any,
+    target_model_id: str,
+    *,
+    linked_only: bool = False,
+) -> Dict[str, Any]:
+    model = face_id_runtime.selected_model(client, model_id=target_model_id)
+    metadata = face_id_runtime.embedding_model_metadata(client, model_id=target_model_id)
+    signature = _embedding_model_signature(metadata, dimensions=_int(metadata.get("embedding_dimensions")))
+    snapshot = identity_rows(client)
+    if linked_only:
+        snapshot = {
+            identity_id: identity
+            for identity_id, identity in snapshot.items()
+            if _text(identity.get("person_id"))
+        }
+    total = sum(len(image_backed_observations(identity)) for identity in snapshot.values())
+    processed = 0
+    generated = 0
+    failed = 0
+    _save_model_switch_state(
+        client,
+        {
+            "state": "embedding",
+            "target_model_id": model["id"],
+            "target_model": model["label"],
+            "active_model_id": face_id_runtime.selected_model_id(client),
+            "total": total,
+            "processed": 0,
+            "generated": 0,
+            "failed": 0,
+            "message": f"Preparing saved faces for {model['label']}.",
+        },
+    )
+
+    for identity_id, identity in snapshot.items():
+        cached_by_observation: Dict[str, Dict[str, Any]] = {}
+        fallback_signature = _text(identity.get("embedding_model_signature"))
+        for observation in image_backed_observations(identity):
+            observation_id = _text(observation.get("id"))
+            if observation_embedding(observation, signature, fallback_signature=fallback_signature):
+                processed += 1
+                continue
+            try:
+                raw_image = base64.b64decode(_text(observation.get("face_b64")), validate=True)
+                if spud_link_should_use_hub("face_id", redis_conn=client):
+                    remote = spud_link_request_json(
+                        "models/face-id",
+                        payload={
+                            "operation": "embed",
+                            "model_id": model["id"],
+                            "data_base64": base64.b64encode(raw_image).decode("ascii"),
+                            "filename": "saved-face.jpg",
+                            "mimetype": _text(observation.get("face_content_type")) or "image/jpeg",
+                        },
+                        redis_conn=client,
+                        timeout=180.0,
+                    )
+                    result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+                    detections = result.get("detections") if isinstance(result.get("detections"), list) else []
+                else:
+                    detections = list(
+                        face_id_runtime.analyze_image(
+                            raw_image,
+                            client,
+                            model_id=model["id"],
+                        )
+                        or []
+                    )
+                detection = _choose_reembedded_detection(detections)
+                embedding = valid_embedding(detection.get("embedding"), _int(metadata.get("embedding_dimensions")))
+                if not embedding:
+                    raise ValueError("No usable face embedding was returned.")
+                cached_by_observation[observation_id] = {
+                    "embedding": embedding,
+                    "embedding_model": metadata,
+                    "embedded_at": _now_iso(),
+                }
+                generated += 1
+            except Exception:
+                failed += 1
+            processed += 1
+            _save_model_switch_state(
+                client,
+                {
+                    "state": "embedding",
+                    "target_model_id": model["id"],
+                    "target_model": model["label"],
+                    "active_model_id": face_id_runtime.selected_model_id(client),
+                    "total": total,
+                    "processed": processed,
+                    "generated": generated,
+                    "failed": failed,
+                    "message": f"Prepared {processed} of {total} saved faces for {model['label']}.",
+                },
+            )
+        if not cached_by_observation:
+            continue
+        with _identity_lock:
+            current = dict(identity_rows(client).get(identity_id) or {})
+            if not current:
+                continue
+            current_rows = observations(current)
+            for row in current_rows:
+                entry = cached_by_observation.get(_text(row.get("id")))
+                if not entry:
+                    continue
+                cached = dict(row.get("embeddings")) if isinstance(row.get("embeddings"), dict) else {}
+                cached[signature] = entry
+                row["embeddings"] = cached
+            save_identity(rebuild_identity(current, current_rows, keep_name=True), client)
+
+    missing_linked = []
+    for identity in identity_rows(client).values():
+        if _text(identity.get("person_id")) and not reference_embeddings(identity, signature):
+            missing_linked.append(display_name(identity, client) or _text(identity.get("id")))
+    if missing_linked:
+        raise RuntimeError(
+            "Could not create a usable "
+            f"{model['label']} embedding for: {', '.join(missing_linked[:5])}. "
+            "The current Face ID model was left active."
+        )
+    return {
+        "target_model_id": model["id"],
+        "target_model": model["label"],
+        "model_signature": signature,
+        "total": total,
+        "processed": processed,
+        "generated": generated,
+        "failed": failed,
+    }
+
+
+def _model_switch_main(client: Any, target_model_id: str) -> None:
+    global _model_switch_thread
+    try:
+        result = _cache_model_embeddings(client, target_model_id)
+        face_id_runtime.set_model(client, target_model_id, load=True)
+        _save_model_switch_state(
+            client,
+            {
+                **result,
+                "state": "complete",
+                "active_model_id": target_model_id,
+                "active_model": result["target_model"],
+                "message": f"{result['target_model']} is active. Cached embeddings are ready for rollback.",
+            },
+        )
+    except Exception as exc:
+        active = face_id_runtime.selected_model(client)
+        previous = model_switch_status(client)
+        _save_model_switch_state(
+            client,
+            {
+                **previous,
+                "state": "error",
+                "active_model_id": active["id"],
+                "active_model": active["label"],
+                "error": _text(exc) or exc.__class__.__name__,
+                "message": _text(exc) or "Face ID model switch failed.",
+            },
+        )
+    finally:
+        with _model_switch_lock:
+            if _model_switch_thread is threading.current_thread():
+                _model_switch_thread = None
+
+
+def start_model_switch(redis_client: Any, model_id: Any) -> Dict[str, Any]:
+    global _model_switch_thread
+    client = _client(redis_client)
+    requested = _text(model_id)
+    target = face_id_runtime.normalize_model_id(requested)
+    normalized_requested = requested.lower().replace("-", "_").replace(" ", "_")
+    if target == face_id_runtime.DEFAULT_MODEL_ID and normalized_requested not in {
+        "facenet",
+        "facenet_512",
+        face_id_runtime.DEFAULT_MODEL_ID,
+    }:
+        raise ValueError(f"Unsupported Face ID model: {requested}")
+    if target == face_id_runtime.selected_model_id(client):
+        active = face_id_runtime.selected_model(client)
+        return _save_model_switch_state(
+            client,
+            {
+                "state": "complete",
+                "active_model_id": active["id"],
+                "active_model": active["label"],
+                "target_model_id": active["id"],
+                "target_model": active["label"],
+                "message": f"{active['label']} is already active.",
+            },
+        )
+    if not face_id_runtime.is_enabled(client):
+        raise RuntimeError("Enable Face ID before switching recognition models so saved faces can be migrated safely.")
+    with _model_switch_lock:
+        if _model_switch_thread is not None and _model_switch_thread.is_alive():
+            state = model_switch_status(client)
+            if _text(state.get("target_model_id")) != target:
+                raise RuntimeError("Another Face ID model switch is already running.")
+            return state
+        target_model = face_id_runtime.selected_model(client, model_id=target)
+        active_model = face_id_runtime.selected_model(client)
+        _save_model_switch_state(
+            client,
+            {
+                "state": "queued",
+                "target_model_id": target_model["id"],
+                "target_model": target_model["label"],
+                "active_model_id": active_model["id"],
+                "active_model": active_model["label"],
+                "message": f"Waiting to prepare saved faces for {target_model['label']}.",
+            },
+        )
+        _model_switch_thread = threading.Thread(
+            target=_model_switch_main,
+            args=(client, target),
+            name="tater-face-id-model-switch",
+            daemon=True,
+        )
+        _model_switch_thread.start()
+    return model_switch_status(client)
 
 
 def _analyze_face_image(
@@ -634,12 +1042,38 @@ def _analyze_face_image(
                 raise RuntimeError(
                     "The Spud Hub needs the stateless Face ID embedding update before this Spudlet can use Hub Face ID."
                 )
-            model = _embedding_model_metadata(result.get("model"))
+            model = _embedding_model_metadata(result.get("model"), redis_client=client)
             detections = [
                 _annotate_detection(row, model)
                 for row in result.get("detections") or []
                 if isinstance(row, dict)
             ]
+            model_signature = _embedding_model_signature(
+                model,
+                dimensions=_int(model.get("embedding_dimensions"), minimum=0),
+            )
+            linked_missing = [
+                identity
+                for identity in identity_rows(client).values()
+                if _text(identity.get("person_id"))
+                and not reference_embeddings(identity, model_signature)
+            ]
+            if linked_missing and _text(model.get("model_id")):
+                migrated = _cache_model_embeddings(
+                    client,
+                    _text(model.get("model_id")),
+                    linked_only=True,
+                )
+                _save_model_switch_state(
+                    client,
+                    {
+                        **migrated,
+                        "state": "complete",
+                        "active_model_id": _text(model.get("model_id")),
+                        "active_model": _text(model.get("model_name")),
+                        "message": "Local linked face profiles are compatible with the Spud Hub model.",
+                    },
+                )
             return detections, {
                 "routed_via": "spud_link",
                 "loaded_on": "Spud Hub",
@@ -667,7 +1101,7 @@ def _analyze_face_image(
             "identity_ids": [],
         }
     try:
-        model = _embedding_model_metadata()
+        model = _embedding_model_metadata(redis_client=client)
         detections = [
             _annotate_detection(row, model)
             for row in list(face_id_runtime.analyze_image(image_bytes, client, force_local=force_local) or [])
@@ -1141,6 +1575,7 @@ def service_status(redis_client: Any = None) -> Dict[str, Any]:
     rows = identity_rows(redis_client)
     return {
         **runtime,
+        "model_switch": model_switch_status(redis_client),
         "identity_count": len(rows),
         "known_identity_count": len([row for row in rows.values() if display_name(row, redis_client)]),
         "storage_key": SHARED_IDENTITIES_KEY,

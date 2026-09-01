@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +70,15 @@ class SharedFaceIdentityTests(unittest.TestCase):
         }
 
         self.assertEqual(face_identity.identity_rows(self.redis), {})
+
+    def test_adaface_ir50_is_a_versioned_selectable_model(self):
+        model = face_identity.face_id_runtime.selected_model(model_id="adaface_ir50_webface4m")
+        metadata = face_identity.face_id_runtime.embedding_model_metadata(model_id=model["id"])
+
+        self.assertEqual(model["label"], "AdaFace IR-50 · WebFace4M")
+        self.assertEqual(model["match_threshold"], 0.40)
+        self.assertEqual(metadata["embedding_dimensions"], 512)
+        self.assertEqual(metadata["model_revision"], face_identity.face_id_runtime.ADAFACE_REVISION)
 
     def test_recording_matches_faces_and_deduplicates_the_same_event(self):
         first = face_identity.record_detection(
@@ -283,6 +293,48 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(saved["person_id"], person["id"])
         self.assertEqual(saved["observations"][0]["source"]["kind"], "people_face_enrollment")
 
+    def test_spudlet_backfills_linked_faces_when_hub_model_changes(self):
+        person = people.create_person("Fred", self.redis)
+        facenet_embedding = [1.0, *([0.0] * 511)]
+        identity = face_identity.record_detection(
+            self.detection(facenet_embedding),
+            event_id="local-facenet-enrollment",
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
+        adaface_embedding = [0.0, 1.0, *([0.0] * 510)]
+        remote_result = {
+            "result": {
+                "status": "embedded",
+                "detections": [self.detection(adaface_embedding)],
+                "model": face_identity.face_id_runtime.embedding_model_metadata(
+                    self.redis,
+                    model_id="adaface_ir50_webface4m",
+                ),
+                "stored": False,
+            }
+        }
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity, "spud_link_should_use_hub", return_value=True),
+            patch.object(face_identity, "spud_link_request_json", return_value=remote_result) as request,
+        ):
+            result = face_identity.recognize_image(
+                b"jpeg",
+                event_id="hub-now-uses-adaface",
+                record=False,
+                redis_client=self.redis,
+            )
+
+        self.assertEqual(result["status"], "recognized")
+        self.assertEqual(result["people"], ["Fred"])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["payload"]["model_id"],
+            "adaface_ir50_webface4m",
+        )
+
     def test_face_matching_does_not_mix_incompatible_embedding_models(self):
         identity = face_identity.record_detection(
             self.detection([1.0, 0.0]),
@@ -307,6 +359,66 @@ class SharedFaceIdentityTests(unittest.TestCase):
 
         self.assertTrue(identity["embedding_model_signature"])
         self.assertEqual(matched_id, "")
+
+    def test_model_switch_caches_new_embeddings_and_keeps_facenet_rollback(self):
+        person = people.create_person("Fred", self.redis)
+        facenet_embedding = [1.0, *([0.0] * 511)]
+        identity = face_identity.record_detection(
+            self.detection(facenet_embedding),
+            event_id="facenet-enrollment",
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
+        self.redis.set(face_identity.face_id_runtime.ENABLED_KEY, "true")
+        adaface_embedding = [0.0, 1.0, *([0.0] * 510)]
+
+        def activate_model(client, model_id, *, load=True):
+            del load
+            client.set(face_identity.face_id_runtime.MODEL_KEY, model_id)
+            return {"model_id": model_id}
+
+        with (
+            patch.object(
+                face_identity.face_id_runtime,
+                "analyze_image",
+                return_value=[self.detection(adaface_embedding)],
+            ),
+            patch.object(face_identity.face_id_runtime, "set_model", side_effect=activate_model),
+        ):
+            face_identity.start_model_switch(self.redis, "adaface_ir50_webface4m")
+            deadline = time.monotonic() + 3.0
+            while face_identity.model_switch_status(self.redis).get("state") not in {"complete", "error"} and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        state = face_identity.model_switch_status(self.redis)
+        self.assertEqual(state["state"], "complete")
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        adaface_model = face_identity.face_id_runtime.embedding_model_metadata(
+            self.redis,
+            model_id="adaface_ir50_webface4m",
+        )
+        adaface_signature = face_identity._embedding_model_signature(adaface_model, dimensions=512)
+        facenet_signature = identity["embedding_model_signature"]
+
+        self.assertIn(adaface_signature, saved["embedding_profiles"])
+        self.assertEqual(
+            face_identity.match_identity(
+                {identity["id"]: saved},
+                adaface_embedding,
+                threshold=0.40,
+                model_signature=adaface_signature,
+            )[0],
+            identity["id"],
+        )
+        self.assertEqual(
+            face_identity.match_identity(
+                {identity["id"]: saved},
+                facenet_embedding,
+                threshold=0.30,
+                model_signature=facenet_signature,
+            )[0],
+            identity["id"],
+        )
 
     def test_moving_images_keeps_event_identity_resolution_current(self):
         source = face_identity.record_detection(
@@ -438,6 +550,14 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertIn(".people-subtabs::-webkit-scrollbar", styles)
         self.assertIn("flex-wrap: nowrap;", styles)
         self.assertIn("white-space: nowrap;", styles)
+
+    def test_face_id_settings_support_safe_model_switching(self):
+        app = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="set_face_id_model"', app)
+        self.assertIn("adaface_ir50_webface4m", app)
+        self.assertIn("Preparing saved faces for the new model", app)
+        self.assertIn("face_id_model:", app)
 
 
 class PeopleResolutionTests(unittest.TestCase):

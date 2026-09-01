@@ -24419,6 +24419,13 @@ async function loadSettingsView() {
     settings?.hydra_defaults && typeof settings.hydra_defaults === "object" ? settings.hydra_defaults : {};
   const peoplePayload = settings?.people && typeof settings.people === "object" ? settings.people : {};
   const faceIdSettings = settings?.face_id && typeof settings.face_id === "object" ? settings.face_id : {};
+  const faceIdModelOptions = Array.isArray(faceIdSettings.available_models)
+    ? faceIdSettings.available_models
+    : [
+        { id: "facenet512", label: "FaceNet512" },
+        { id: "adaface_ir50_webface4m", label: "AdaFace IR-50 · WebFace4M", experimental: true },
+      ];
+  const selectedFaceIdModel = String(faceIdSettings.model_id || "facenet512");
   const normalizeHydraBaseProvider = (value) => {
     const token = String(value || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
     if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token)) {
@@ -27019,6 +27026,20 @@ async function loadSettingsView() {
                       } />`
                     )}
                   </div>
+                  <label class="settings-field" style="grid-column: 1 / -1;">
+                    <span>Recognition model</span>
+                    <select id="set_face_id_model">
+                      ${faceIdModelOptions
+                        .map((option) => {
+                          const id = String(option?.id || "");
+                          const label = String(option?.label || id);
+                          const suffix = option?.experimental ? " · Experimental" : "";
+                          return `<option value="${escapeHtml(id)}" ${id === selectedFaceIdModel ? "selected" : ""}>${escapeHtml(label + suffix)}</option>`;
+                        })
+                        .join("")}
+                    </select>
+                    <small>A switch keeps the current model active while Tater builds and caches the new embeddings from saved face images.</small>
+                  </label>
                   <div class="core-metric-row" style="grid-column: 1 / -1;">
                     <div class="core-metric-pill">
                       <div class="small">Model</div>
@@ -32583,6 +32604,7 @@ async function loadSettingsView() {
   });
   const readFaceIdSettingsPayload = () => ({
     face_id_enabled: Boolean(document.getElementById("set_face_id_enabled")?.checked),
+    face_id_model: String(document.getElementById("set_face_id_model")?.value || "facenet512"),
   });
   const faceIdStatusEl = document.getElementById("settings-face-id-status");
   const faceIdProcessingEl = document.getElementById("settings-face-id-processing");
@@ -32594,6 +32616,8 @@ async function loadSettingsView() {
     const value = runtime && typeof runtime === "object" ? runtime : {};
     const stateToken = String(value.state || (value.enabled ? "idle" : "disabled")).trim().toLowerCase();
     const accelerator = String(value.accelerator || "").trim().toLowerCase();
+    const modelSwitch = value.model_switch && typeof value.model_switch === "object" ? value.model_switch : {};
+    const switchState = String(modelSwitch.state || "").trim().toLowerCase();
     if (faceIdProcessingEl instanceof HTMLElement) {
       if (accelerator === "metal") {
         faceIdProcessingEl.textContent = "GPU · Apple Metal";
@@ -32607,6 +32631,18 @@ async function loadSettingsView() {
       } else {
         faceIdProcessingEl.textContent = "Detecting";
       }
+    }
+    if (switchState === "queued" || switchState === "embedding") {
+      const processed = Number(modelSwitch.processed || 0);
+      const total = Number(modelSwitch.total || 0);
+      faceIdStatusEl.textContent = String(
+        modelSwitch.message || `Preparing saved faces for the new model (${processed}/${total})...`
+      );
+      return;
+    }
+    if (switchState === "error") {
+      faceIdStatusEl.textContent = `Model switch failed: ${String(modelSwitch.error || modelSwitch.message || "unknown error")}`;
+      return;
     }
     if (stateToken === "ready" || value.loaded) {
       const device = String(value.device_name || "").trim();
@@ -32637,7 +32673,8 @@ async function loadSettingsView() {
     try {
       const runtime = await api("/api/settings/face-id/status", { _timeoutMs: HEALTH_REQUEST_TIMEOUT_MS });
       renderFaceIdRuntimeStatus(runtime);
-      if (runtime?.loading || String(runtime?.state || "").toLowerCase() === "loading") {
+      const switchState = String(runtime?.model_switch?.state || "").toLowerCase();
+      if (runtime?.loading || String(runtime?.state || "").toLowerCase() === "loading" || ["queued", "embedding"].includes(switchState)) {
         faceIdStatusPollTimer = window.setTimeout(pollFaceIdRuntimeStatus, 1000);
       }
     } catch (error) {

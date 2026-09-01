@@ -1491,7 +1491,7 @@ if remote_only:
         raise SystemExit("Remote-only profile unexpectedly installed local model packages: " + ", ".join(unexpectedly_installed))
     print("remote_only_dependency_boundary ok")
 else:
-    face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]
+    face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras", "torch", "transformers", "huggingface_hub", "omegaconf", "fvcore"]
     face_id_missing = [name for name in face_id_required if importlib.util.find_spec(name) is None]
     if face_id_missing:
         raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))

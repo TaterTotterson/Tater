@@ -124,7 +124,7 @@ RUN python -m pip install --upgrade pip \
  && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
  && python -m pip install -r /tmp/requirements.nvidia.txt \
  && python -m pip install "tensorflow[and-cuda]==2.21.0" \
- && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
+ && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras','torch','transformers','huggingface_hub','omegaconf','fvcore'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
  && python -m pip uninstall -y onnxruntime \
  && python -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27" \
  && python -c "import pathlib; libraries=sorted(pathlib.Path('/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib').glob('libnccl.so.2*')); assert libraries, 'PyTorch did not install the NCCL runtime'; print('nccl_runtime', libraries[0])" \

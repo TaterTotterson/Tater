@@ -88,7 +88,7 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertNotIn("requirements-face.txt", self.setup_source)
         self.assertNotIn("filtered_face_id_requirements", self.setup_source)
         self.assertNotIn("install_face_id_runtime", self.setup_source)
-        self.assertIn('face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras"]', self.setup_source)
+        self.assertIn('face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras", "torch", "transformers", "huggingface_hub", "omegaconf", "fvcore"]', self.setup_source)
         self.assertIn("cleanup_legacy_runtime", self.setup_source)
         self.assertIn("aioesphomeapi", self.setup_source)
         self.assertIn("nanowakeword", self.setup_source)

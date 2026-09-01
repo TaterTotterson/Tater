@@ -194,8 +194,9 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
 
         self.assertIn('{"embed", "encode", "embedding", "embeddings"}', endpoint)
         self.assertIn("face_id_runtime.analyze_image", endpoint)
+        self.assertIn("model_id=str(payload.model_id or \"\")", endpoint)
         self.assertIn('"stored": False', endpoint)
-        self.assertIn('"model": face_id_runtime.embedding_model_metadata()', endpoint)
+        self.assertIn('"model": face_id_runtime.embedding_model_metadata(', endpoint)
 
     def test_hub_speaker_embedding_operation_is_stateless(self):
         source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")

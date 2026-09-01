@@ -9381,6 +9381,7 @@ class SpudLinkModelRequest(BaseModel):
     filename: Optional[str] = None
     mimetype: Optional[str] = None
     operation: Optional[str] = Field(default=None, max_length=40)
+    model_id: Optional[str] = Field(default=None, max_length=80)
     prompt: Optional[str] = None
     audio_format: Dict[str, Any] = Field(default_factory=dict)
     speech_s: Optional[float] = None
@@ -9539,6 +9540,7 @@ class AppSettingsRequest(BaseModel):
     video_understanding_api_key: Optional[str] = None
     video_understanding_max_seconds: Optional[int] = None
     face_id_enabled: Optional[bool] = None
+    face_id_model: Optional[str] = None
     speech_stt_backend: Optional[str] = None
     speech_acceleration: Optional[str] = None
     speech_wyoming_stt_host: Optional[str] = None
@@ -16731,7 +16733,14 @@ def spud_link_model_face_id(payload: SpudLinkModelRequest, request: Request) -> 
     operation = str(payload.operation or "recognize").strip().lower().replace("-", "_")
     if operation in {"embed", "encode", "embedding", "embeddings"}:
         try:
-            detections = list(face_id_runtime.analyze_image(image_bytes, redis_client) or [])
+            detections = list(
+                face_id_runtime.analyze_image(
+                    image_bytes,
+                    redis_client,
+                    model_id=str(payload.model_id or ""),
+                )
+                or []
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
@@ -16741,7 +16750,10 @@ def spud_link_model_face_id(payload: SpudLinkModelRequest, request: Request) -> 
             "status": "embedded" if detections else "no_faces",
             "detections": [dict(row) for row in detections if isinstance(row, dict)],
             "faces_detected": len([row for row in detections if isinstance(row, dict)]),
-            "model": face_id_runtime.embedding_model_metadata(),
+            "model": face_id_runtime.embedding_model_metadata(
+                redis_client,
+                model_id=str(payload.model_id or ""),
+            ),
             "stored": False,
         }
     else:
@@ -22559,10 +22571,17 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         redis_client.set(ADMIN_GATE_KEY, json.dumps(cleaned))
 
     if "face_id_enabled" in updates:
-        face_id_result = face_id_runtime.set_enabled(
+        face_id_runtime.set_enabled(
             redis_client,
             _as_bool_flag(updates.get("face_id_enabled"), default=False),
         )
+        face_id_result = face_identity.service_status(redis_client)
+
+    if "face_id_model" in updates:
+        requested_face_model = str(updates.get("face_id_model") or "").strip()
+        if requested_face_model:
+            face_identity.start_model_switch(redis_client, requested_face_model)
+            face_id_result = face_identity.service_status(redis_client)
 
     system_task_manager.request_run_debounced(
         "runtime_model_snapshot",
@@ -22577,5 +22596,5 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "tts_reload": tts_reload_result,
         "speech_warmup": speech_warmup_result or _speech_model_warmup_snapshot(),
         "hf_llm_warmup": hf_llm_warmup_result or _hf_llm_warmup_snapshot(),
-        "face_id": face_id_result or face_id_runtime.status(redis_client),
+        "face_id": face_id_result or face_identity.service_status(redis_client),
     }

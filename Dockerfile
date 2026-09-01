@@ -90,7 +90,7 @@ COPY requirements.txt .
 # Upgrade pip and install Python dependencies.
 RUN python -m pip install --upgrade pip \
  && python -m pip install -r requirements.txt \
- && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
+ && python -c "import importlib.util; required=('cv2','deepface','retinaface','tensorflow','tf_keras','torch','transformers','huggingface_hub','omegaconf','fvcore'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
  && python -c "import onnx_asr, onnxruntime as ort; providers=ort.get_available_providers(); assert 'CPUExecutionProvider' in providers, providers; print('onnx-asr ready providers=' + ','.join(providers))"
 
 RUN git clone --depth 1 --filter=blob:none --no-checkout https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
