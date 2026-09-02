@@ -33,7 +33,7 @@ The launcher starts Tater with `TATER_AGENT_ROOT`, `TATER_VENV_DIR`, and `TATER_
 
 If Python 3.11 is not already available, the launcher installs a standalone CPython 3.11 build under `~/.taterassistant/python/cpython-3.11` and uses that interpreter to create the private venv.
 
-The app bundle contains a source snapshot at `Contents/Resources/TaterSource`. Downloaded cores, Verba modules, portals, and integrations are intentionally stored under `~/.taterassistant/agent_lab` instead of inside the app bundle or source checkout.
+The app bundle contains a source snapshot at `Contents/Resources/TaterSource`. It also bundles the pinned Shairport Sync receiver and AirPlay sender so a clean Mac does not need Homebrew for Music Core's AirPlay support. Downloaded cores, Verba modules, portals, and integrations are intentionally stored under `~/.taterassistant/agent_lab` instead of inside the app bundle or source checkout.
 
 ## Build
 
@@ -59,6 +59,8 @@ TATER_RUNTIME_DIR="$HOME/.taterassistant/runtime" \
 TATER_AGENT_ROOT="$HOME/.taterassistant/agent_lab" \
 sh setup_tater.sh macos
 ```
+
+The launcher checks the bundled AirPlay sender and receiver plus the Python FFmpeg and discovery support during its normal environment check. If a required Python component is missing or stale, it reruns setup before starting Tater.
 
 Then it launches `run_ui.sh` on `127.0.0.1:8501` and opens that URL in a native `WKWebView` window. Closing the window does not stop Tater; use the menu bar item to open, stop, restart, show logs, or quit.
 

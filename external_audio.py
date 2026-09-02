@@ -340,7 +340,34 @@ def _find_shairport_sync(configured: Any = "") -> str:
         "/usr/bin/shairport-sync",
     ]
     for candidate in candidates:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+        if not candidate or not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
+            continue
+        try:
+            version = subprocess.run(
+                [candidate, "-V"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=5.0,
+                check=False,
+                text=True,
+            )
+            help_result = subprocess.run(
+                [candidate, "-h"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=5.0,
+                check=False,
+                text=True,
+            )
+        except Exception:
+            continue
+        help_text = _text(help_result.stdout)
+        if (
+            version.returncode == 0
+            and _text(version.stdout).startswith(f"{SHAIRPORT_SYNC_VERSION}-")
+            and "--service-type" in help_text
+            and "stdout" in help_text
+        ):
             return str(Path(candidate).resolve())
     return ""
 

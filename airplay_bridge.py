@@ -122,6 +122,12 @@ def _find_ffmpeg() -> str:
         "/usr/local/bin/ffmpeg",
         "/usr/bin/ffmpeg",
     ]
+    try:
+        import imageio_ffmpeg
+
+        candidates.append(_text(imageio_ffmpeg.get_ffmpeg_exe()))
+    except Exception:
+        pass
     for raw_path in candidates:
         path = Path(raw_path).expanduser() if raw_path else None
         if path and path.is_file() and os.access(path, os.X_OK):

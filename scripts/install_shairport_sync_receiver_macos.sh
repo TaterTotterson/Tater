@@ -31,9 +31,17 @@ if [ -x "${receiver_bin}" ] \
 fi
 
 echo "Installing Shairport Sync build dependencies with Homebrew..."
-brew install autoconf automake libtool pkg-config libconfig popt openssl@3 libsoxr
+HOMEBREW_NO_AUTO_UPDATE=1 \
+HOMEBREW_NO_INSTALL_UPGRADE=1 \
+HOMEBREW_NO_INSTALL_CLEANUP=1 \
+HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+    brew install autoconf automake libtool pkg-config libconfig popt openssl@3 libsoxr
 
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/tater-shairport-sync.XXXXXX")
+cleanup() {
+    rm -rf "${build_root}"
+}
+trap cleanup EXIT HUP INT TERM
 archive="${build_root}/shairport-sync.tar.gz"
 source_dir="${build_root}/source"
 mkdir -p "${source_dir}" "${install_dir}/bin"
@@ -59,18 +67,41 @@ export PKG_CONFIG_PATH="${openssl_prefix}/lib/pkgconfig:${libconfig_prefix}/lib/
 
 cd "${source_dir}"
 autoreconf -fi
-./configure \
-    --prefix="${install_dir}" \
-    --with-os=darwin \
-    --with-ssl=openssl \
-    --with-dns_sd \
-    --with-soxr \
-    --with-stdout \
-    --with-metadata \
-    --with-metadata-multicast
+if [ "${TATER_SHAIRPORT_STATIC_LINK:-0}" = "1" ]; then
+    ./configure \
+        --prefix="${install_dir}" \
+        --with-os=darwin \
+        --with-ssl=openssl \
+        --with-dns_sd \
+        --with-stdout \
+        --with-metadata \
+        --with-metadata-multicast
+else
+    ./configure \
+        --prefix="${install_dir}" \
+        --with-os=darwin \
+        --with-ssl=openssl \
+        --with-dns_sd \
+        --with-soxr \
+        --with-stdout \
+        --with-metadata \
+        --with-metadata-multicast
+fi
 
 rm -f "${receiver_bin}"
-make -j 4
+if [ "${TATER_SHAIRPORT_STATIC_LINK:-0}" = "1" ]; then
+    static_lib_dir="${build_root}/static-libs"
+    mkdir -p "${static_lib_dir}"
+    cp "${openssl_prefix}/lib/libssl.a" "${static_lib_dir}/"
+    cp "${openssl_prefix}/lib/libcrypto.a" "${static_lib_dir}/"
+    cp "${libconfig_prefix}/lib/libconfig.a" "${static_lib_dir}/"
+    cp "${popt_prefix}/lib/libpopt.a" "${static_lib_dir}/"
+    make -j "${TATER_SHAIRPORT_BUILD_JOBS:-4}" \
+        LDFLAGS="-L${static_lib_dir}" \
+        LIBS="-L${static_lib_dir} -lssl -lcrypto -lconfig -lpopt -liconv -lm -lpthread -framework CoreFoundation -framework Security"
+else
+    make -j "${TATER_SHAIRPORT_BUILD_JOBS:-4}"
+fi
 make install
 printf '%s\n' "${TATER_SHAIRPORT_BUILD_REVISION}" > "${revision_file}"
 
@@ -83,4 +114,3 @@ if ! [ -x "${receiver_bin}" ] \
 fi
 
 echo "Shairport Sync ${SHAIRPORT_SYNC_VERSION} is ready at ${receiver_bin}"
-echo "Build workspace retained at ${build_root} for troubleshooting."

@@ -112,7 +112,7 @@ Tater Integrations provides modular packages for devices, services, search provi
    ~/.taterassistant/
    ```
 
-   The app stores its managed Python runtime, virtual environment, runtime settings, logs, updates, and `agent_lab` data there. It does not use this source checkout's `.venv`, `.runtime`, or `agent_lab` folders.
+   The app stores its managed Python runtime, virtual environment, runtime settings, logs, updates, and `agent_lab` data there. It does not use this source checkout's `.venv`, `.runtime`, or `agent_lab` folders. The app also includes the pinned AirPlay sender and receiver, and its startup environment check repairs any missing Python-side AirPlay support automatically.
 
 4. **Finish setup in TaterOS**
 
@@ -204,7 +204,7 @@ Use the interactive setup menu to choose the right local runtime profile:
 sh setup_tater.sh
 ```
 
-The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. Tater supports Python 3.11 through 3.13. If Linux only has a newer, unsupported system Python (such as Python 3.14), setup downloads a checksum-verified private Python runtime into `.runtime/python/` without replacing the system Python. The default managed runtime is Python 3.11; supported Ryzen AI systems use Python 3.12 for AMD's validated ROCm packages. Setup rebuilds an existing `.venv` when it was made with an unsupported or hardware-incompatible Python version. Set `TATER_SETUP_INSTALL_MANAGED_PYTHON=0` to disable the private runtime download. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
+The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. It also installs and verifies the pinned Shairport Sync receiver, AirPlay sender, and FFmpeg runtime used by Music Core. On Linux, setup grants only the sender binary permission to use AirPlay 2's low-numbered PTP ports when the host requires it. Tater supports Python 3.11 through 3.13. If Linux only has a newer, unsupported system Python (such as Python 3.14), setup downloads a checksum-verified private Python runtime into `.runtime/python/` without replacing the system Python. The default managed runtime is Python 3.11; supported Ryzen AI systems use Python 3.12 for AMD's validated ROCm packages. Setup rebuilds an existing `.venv` when it was made with an unsupported or hardware-incompatible Python version. Set `TATER_SETUP_INSTALL_MANAGED_PYTHON=0` to disable the private runtime download. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
 
 Available local profiles:
 - **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. Pair it as a Spudlet to route LLM, STT, TTS, vision, audio/video understanding, Speaker ID, Emotion ID, and Face ID through a Spud Hub; wake-word detection and WebRTC VAD remain on the edge device. Standalone Wyoming and compatible remote providers remain available.

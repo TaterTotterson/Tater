@@ -126,6 +126,20 @@ class ExternalAudioTests(unittest.TestCase):
         self.assertIn("shairport-sync-v${SHAIRPORT_SYNC_VERSION}", installer)
         self.assertIn("shairport_sync_configured_port.patch", installer)
         self.assertNotIn("LSUIElement", installer)
+        linux_installer = (
+            root / "scripts" / "install_shairport_sync_receiver_linux.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            f"SHAIRPORT_SYNC_VERSION={external_audio.SHAIRPORT_SYNC_VERSION}",
+            linux_installer,
+        )
+        self.assertIn("--with-tinysvcmdns", linux_installer)
+        self.assertIn("--with-stdout", linux_installer)
+        setup = (root / "setup_tater.sh").read_text(encoding="utf-8")
+        self.assertIn("install_airplay_runtime_dependencies", setup)
+        self.assertIn("install_shairport_sync_receiver_macos.sh", setup)
+        self.assertIn("install_shairport_sync_receiver_linux.sh", setup)
+        self.assertIn("TATER_SHAIRPORT_SYNC_PATH", setup)
         patch = (root / "scripts" / "shairport_sync_configured_port.patch").read_text(
             encoding="utf-8"
         )
@@ -162,6 +176,23 @@ class ExternalAudioTests(unittest.TestCase):
         self.assertIn("volume_range_db = 30;", config)
         self.assertIn('volume_control_profile = "standard";', config)
         self.assertIn("default_airplay_volume = 0.0;", config)
+
+    def test_receiver_lookup_rejects_an_unverified_executable(self) -> None:
+        with (
+            mock.patch.object(external_audio.Path, "is_file", return_value=True),
+            mock.patch.object(external_audio.os, "access", return_value=True),
+            mock.patch.object(
+                external_audio.subprocess,
+                "run",
+                side_effect=[
+                    mock.Mock(returncode=0, stdout="4.3.0-old"),
+                    mock.Mock(returncode=0, stdout="stdout --service-type"),
+                ] * 7,
+            ),
+            mock.patch.dict("os.environ", {}, clear=True),
+            mock.patch.object(external_audio.shutil, "which", return_value=""),
+        ):
+            self.assertEqual(external_audio._find_shairport_sync("/tmp/shairport-sync"), "")
 
     def test_live_defaults_leave_enough_shared_audio_for_a_scheduled_start(self) -> None:
         runtime = external_audio._ExternalAudioRuntime()

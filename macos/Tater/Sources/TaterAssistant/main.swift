@@ -563,11 +563,12 @@ private final class BackendManager {
         let dependenciesReady = venvReady ? pinnedRuntimeDependenciesReady(using: python) : false
         let localLLMDepsReady = venvReady ? localLLMPythonDependenciesReady(using: python) : false
         let localLLMRuntimesReady = localLLMRuntimesReady()
-        guard !venvReady || !profileReady || !dependenciesReady || !localLLMDepsReady || !localLLMRuntimesReady else {
+        let airPlayRuntimeReady = venvReady ? airPlayDependenciesReady(using: python) : false
+        guard !venvReady || !profileReady || !dependenciesReady || !localLLMDepsReady || !localLLMRuntimesReady || !airPlayRuntimeReady else {
             appendLog("Private runtime is ready: \(venvDir.path)\n")
             return
         }
-        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady) localLLMDepsReady=\(localLLMDepsReady) localLLMRuntimesReady=\(localLLMRuntimesReady). Running setup.\n")
+        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady) localLLMDepsReady=\(localLLMDepsReady) localLLMRuntimesReady=\(localLLMRuntimesReady) airPlayRuntimeReady=\(airPlayRuntimeReady). Running setup.\n")
 
         guard FileManager.default.fileExists(atPath: sourceRoot.appendingPathComponent("setup_tater.sh").path) else {
             throw LauncherError("Could not find setup_tater.sh in \(sourceRoot.path)")
@@ -696,6 +697,102 @@ private final class BackendManager {
         return resources
             .appendingPathComponent("Native", isDirectory: true)
             .appendingPathComponent("mlx-engine", isDirectory: true)
+    }
+
+    private func bundledAirPlaySenderURL() -> URL? {
+        Bundle.main.resourceURL?
+            .appendingPathComponent("Native", isDirectory: true)
+            .appendingPathComponent("airplay", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("cliairplay")
+    }
+
+    private func bundledShairportSyncURL() -> URL? {
+        Bundle.main.resourceURL?
+            .appendingPathComponent("Native", isDirectory: true)
+            .appendingPathComponent("airplay", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("shairport-sync")
+    }
+
+    private func airPlayDependenciesReady(using python: URL) -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        let receiverOverride = environment["TATER_SHAIRPORT_SYNC_PATH"]
+            .map { NSString(string: $0).expandingTildeInPath }
+        let receiverCandidates = [
+            receiverOverride.map { URL(fileURLWithPath: $0) },
+            bundledShairportSyncURL(),
+            runtimeDir
+                .appendingPathComponent("external_audio", isDirectory: true)
+                .appendingPathComponent("shairport-sync-v5.2.1", isDirectory: true)
+                .appendingPathComponent("bin", isDirectory: true)
+                .appendingPathComponent("shairport-sync")
+        ].compactMap { $0 }
+        let receiverReady = receiverCandidates.contains { candidate in
+            guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
+                return false
+            }
+            guard let version = runProcessCombinedCapture(
+                executable: candidate.path,
+                arguments: ["-V"]
+            ), version.hasPrefix("5.2.1-") else {
+                return false
+            }
+            guard let help = runProcessCombinedCapture(
+                executable: candidate.path,
+                arguments: ["-h"]
+            ) else {
+                return false
+            }
+            return help.contains("--service-type") && help.contains("stdout")
+        }
+        if !receiverReady {
+            appendLog("Private runtime is missing the pinned Shairport Sync AirPlay receiver.\n")
+            return false
+        }
+
+        let senderOverride = environment["TATER_AIRPLAY_CLI_PATH"]
+            .map { NSString(string: $0).expandingTildeInPath }
+        let senderCandidates = [
+            senderOverride.map { URL(fileURLWithPath: $0) },
+            bundledAirPlaySenderURL(),
+            runtimeDir
+                .appendingPathComponent("airplay_bridge", isDirectory: true)
+                .appendingPathComponent("0.4.12", isDirectory: true)
+                .appendingPathComponent("cliairplay-macos-arm64")
+        ].compactMap { $0 }
+        let senderReady = senderCandidates.contains { candidate in
+            FileManager.default.isExecutableFile(atPath: candidate.path)
+                && runProcessCombinedCapture(
+                    executable: candidate.path,
+                    arguments: ["--check"]
+                )?.localizedCaseInsensitiveContains("cliairplay") == true
+        }
+        if !senderReady {
+            appendLog("Private runtime is missing the pinned AirPlay sender.\n")
+            return false
+        }
+
+        let ffmpegCheck = Process()
+        ffmpegCheck.executableURL = python
+        ffmpegCheck.arguments = [
+            "-c",
+            "import os, subprocess, sys\nimport imageio_ffmpeg, zeroconf\npath=imageio_ffmpeg.get_ffmpeg_exe()\nok=os.path.isfile(path) and os.access(path, os.X_OK) and subprocess.run([path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0\nsys.exit(0 if ok else 1)"
+        ]
+        ffmpegCheck.standardOutput = FileHandle.nullDevice
+        ffmpegCheck.standardError = FileHandle.nullDevice
+        do {
+            try ffmpegCheck.run()
+            ffmpegCheck.waitUntilExit()
+        } catch {
+            appendLog("Private runtime could not check the AirPlay FFmpeg runtime.\n")
+            return false
+        }
+        if ffmpegCheck.terminationStatus != 0 {
+            appendLog("Private runtime is missing its AirPlay FFmpeg or discovery dependency.\n")
+            return false
+        }
+        return true
     }
 
     private var isAppleSilicon: Bool {
@@ -932,6 +1029,14 @@ private final class BackendManager {
            let bundled = bundledMLXEngineURL(),
            FileManager.default.fileExists(atPath: bundled.appendingPathComponent("mlx_engine", isDirectory: true).path) {
             environment["TATER_MLX_ENGINE_PATH"] = bundled.path
+        }
+        if let bundled = bundledAirPlaySenderURL(),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            environment["TATER_AIRPLAY_CLI_PATH"] = bundled.path
+        }
+        if let bundled = bundledShairportSyncURL(),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            environment["TATER_SHAIRPORT_SYNC_PATH"] = bundled.path
         }
         environment["HF_HOME"] = agentRoot.appendingPathComponent("models/huggingface-cache", isDirectory: true).path
         environment["TORCH_HOME"] = agentRoot.appendingPathComponent("models/torch-cache", isDirectory: true).path
@@ -1254,6 +1359,28 @@ private final class BackendManager {
         }
         let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output
+    }
+
+    private func runProcessCombinedCapture(executable: String, arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        let data: Data
+        do {
+            try process.run()
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        return String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func waitForWebReady(timeout: TimeInterval) -> Bool {

@@ -97,6 +97,34 @@ class AirPlayBridgeTests(unittest.TestCase):
         ):
             self.assertEqual(airplay_bridge._find_ffmpeg(), "/opt/homebrew/bin/ffmpeg")
 
+    def test_native_setup_and_macos_app_check_airplay_dependencies(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+        edge_requirements = (root / "requirements-edge.txt").read_text(encoding="utf-8")
+        self.assertIn("imageio-ffmpeg==0.6.0", requirements)
+        self.assertIn("imageio-ffmpeg==0.6.0", edge_requirements)
+
+        setup = (root / "setup_tater.sh").read_text(encoding="utf-8")
+        self.assertIn('install_airplay_runtime_dependencies "${profile}" "${venv_python}"', setup)
+        self.assertIn("TATER_AIRPLAY_CLI_PATH", setup)
+        self.assertIn("TATER_FFMPEG_PATH", setup)
+        self.assertIn("cap_net_bind_service=+ep", setup)
+        self.assertIn("linux_airplay_ptp_ports_available", setup)
+
+        launcher = (
+            root / "macos" / "Tater" / "Sources" / "TaterAssistant" / "main.swift"
+        ).read_text(encoding="utf-8")
+        self.assertIn("airPlayDependenciesReady(using: python)", launcher)
+        self.assertIn('environment["TATER_AIRPLAY_CLI_PATH"]', launcher)
+        self.assertIn('environment["TATER_SHAIRPORT_SYNC_PATH"]', launcher)
+
+        app_builder = (
+            root / "macos" / "Tater" / "scripts" / "build_app.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("prepare_bundled_airplay_runtime", app_builder)
+        self.assertIn("AIRPLAY_CLI_MACOS_ARM64_SHA256", app_builder)
+        self.assertIn("copy_macos_airplay_libraries", app_builder)
+
     def test_airplay_children_use_posix_spawn_safe_options(self) -> None:
         options = airplay_bridge._safe_subprocess_options()
         self.assertFalse(options["close_fds"])

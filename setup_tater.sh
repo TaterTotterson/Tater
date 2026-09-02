@@ -12,7 +12,7 @@ PROFILE_ENV="${TATER_PROFILE_ENV:-${RUNTIME_DIR}/tater_profile.env}"
 REQUIREMENTS_FILE="${TATER_REQUIREMENTS_FILE:-requirements.txt}"
 EDGE_REQUIREMENTS_FILE="${TATER_EDGE_REQUIREMENTS_FILE:-requirements-edge.txt}"
 LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
-LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-fe2120bc9db242c4349a6f71810af1cd52ee8580}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 LLAMA_CPP_DIR="${TATER_LLAMA_CPP_DIR:-${RUNTIME_DIR}/llama.cpp}"
 LLAMA_CPP_SERVER_BIN="${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_DIR}/build/bin/llama-server}"
 ROCM_LIBXML2_COMPAT_DIR="${TATER_ROCM_LIBXML2_COMPAT_DIR:-${RUNTIME_DIR}/rocm-libxml2-compat}"
@@ -30,6 +30,11 @@ AMD_RYZEN_AI_PYTORCH_INDEX_URL="https://stable.repo.amd.com/rocm/whl-next/"
 AMD_RYZEN_AI_TORCH_VERSION="2.13.0+rocm10.0.0"
 AMD_RYZEN_AI_TORCHVISION_VERSION="0.28.0+rocm10.0.0"
 AMD_RYZEN_AI_TORCHAUDIO_VERSION="2.11.0.2+rocm10.0.0"
+AIRPLAY_CLI_VERSION="0.4.12"
+SHAIRPORT_SYNC_VERSION="5.2.1"
+AIRPLAY_SENDER_BIN=""
+AIRPLAY_RECEIVER_BIN=""
+AIRPLAY_FFMPEG_BIN=""
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -538,6 +543,191 @@ run_privileged() {
   else
     fail "System dependencies are missing and neither sudo nor doas is available."
   fi
+}
+
+check_shairport_sync_receiver() {
+  receiver_bin="$1"
+  [ -x "${receiver_bin}" ] \
+    && "${receiver_bin}" -V 2>&1 | grep -q "^${SHAIRPORT_SYNC_VERSION}-" \
+    && "${receiver_bin}" -h 2>&1 | grep -q -- "--service-type" \
+    && "${receiver_bin}" -h 2>&1 | grep -q -- "stdout"
+}
+
+install_linux_airplay_build_dependencies() {
+  if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+    fail "The pinned AirPlay receiver is missing. Install its build dependencies or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+  fi
+
+  info "Installing native AirPlay receiver dependencies"
+  if command -v apt-get >/dev/null 2>&1; then
+    run_privileged apt-get update
+    run_privileged apt-get install -y \
+      autoconf automake libtool pkg-config patch curl ca-certificates build-essential \
+      libssl-dev libconfig-dev libpopt-dev libsoxr-dev ffmpeg
+  elif command -v dnf >/dev/null 2>&1; then
+    run_privileged dnf install -y \
+      autoconf automake libtool pkgconf-pkg-config patch curl gcc gcc-c++ make \
+      openssl-devel libconfig-devel popt-devel soxr-devel ffmpeg
+  elif command -v yum >/dev/null 2>&1; then
+    run_privileged yum install -y \
+      autoconf automake libtool pkgconfig patch curl gcc gcc-c++ make \
+      openssl-devel libconfig-devel popt-devel soxr-devel ffmpeg
+  elif command -v pacman >/dev/null 2>&1; then
+    run_privileged pacman -S --needed --noconfirm \
+      base-devel autoconf automake libtool pkgconf patch curl openssl libconfig popt libsoxr ffmpeg
+  elif command -v zypper >/dev/null 2>&1; then
+    run_privileged zypper --non-interactive install -y \
+      autoconf automake libtool pkg-config patch curl gcc gcc-c++ make \
+      libopenssl-devel libconfig-devel popt-devel libsoxr-devel ffmpeg
+  elif command -v apk >/dev/null 2>&1; then
+    run_privileged apk add \
+      build-base autoconf automake libtool pkgconf patch curl openssl-dev \
+      libconfig-dev popt-dev soxr-dev ffmpeg
+  elif command -v xbps-install >/dev/null 2>&1; then
+    run_privileged xbps-install -Sy \
+      base-devel autoconf automake libtool pkg-config patch curl openssl-devel \
+      libconfig-devel popt-devel libsoxr-devel ffmpeg
+  else
+    fail "No supported package manager was found for the native AirPlay receiver dependencies."
+  fi
+}
+
+install_linux_airplay_capability_tools() {
+  if command -v getcap >/dev/null 2>&1 && command -v setcap >/dev/null 2>&1; then
+    return
+  fi
+  if ! truthy_env "${TATER_SETUP_INSTALL_SYSTEM_DEPS:-1}"; then
+    fail "The AirPlay sender needs Linux capability tools. Install them or enable TATER_SETUP_INSTALL_SYSTEM_DEPS."
+  fi
+
+  info "Installing Linux AirPlay permission tools"
+  if command -v apt-get >/dev/null 2>&1; then
+    run_privileged apt-get update
+    run_privileged apt-get install -y libcap2-bin
+  elif command -v dnf >/dev/null 2>&1; then
+    run_privileged dnf install -y libcap
+  elif command -v yum >/dev/null 2>&1; then
+    run_privileged yum install -y libcap
+  elif command -v pacman >/dev/null 2>&1; then
+    run_privileged pacman -S --needed --noconfirm libcap
+  elif command -v zypper >/dev/null 2>&1; then
+    run_privileged zypper --non-interactive install -y libcap-progs
+  elif command -v apk >/dev/null 2>&1; then
+    run_privileged apk add libcap-utils
+  elif command -v xbps-install >/dev/null 2>&1; then
+    run_privileged xbps-install -Sy libcap-progs
+  else
+    fail "No supported package manager was found for the Linux AirPlay permission tools."
+  fi
+}
+
+linux_airplay_ptp_ports_available() {
+  venv_python="$1"
+  "${venv_python}" - <<'PY'
+import socket
+
+sockets = []
+try:
+    for port in (319, 320):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", port))
+        sockets.append(sock)
+except OSError:
+    raise SystemExit(1)
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+}
+
+ensure_linux_airplay_sender_permissions() {
+  sender_bin="$1"
+  venv_python="$2"
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]; then
+    return
+  fi
+  if linux_airplay_ptp_ports_available "${venv_python}"; then
+    ok "AirPlay PTP ports are available"
+    return
+  fi
+  if command -v getcap >/dev/null 2>&1 \
+    && getcap "${sender_bin}" 2>/dev/null | grep -q "cap_net_bind_service"; then
+    ok "AirPlay sender has permission to use its PTP ports"
+    return
+  fi
+
+  install_linux_airplay_capability_tools
+  run_privileged setcap cap_net_bind_service=+ep "${sender_bin}"
+  getcap "${sender_bin}" 2>/dev/null | grep -q "cap_net_bind_service" \
+    || fail "Could not grant the AirPlay sender permission to use UDP ports 319 and 320."
+  ok "AirPlay sender has permission to use its PTP ports"
+}
+
+resolve_airplay_ffmpeg() {
+  venv_python="$1"
+  configured_ffmpeg="${TATER_FFMPEG_PATH:-${FFMPEG_PATH:-}}"
+  if [ "${configured_ffmpeg}" ] && [ -x "${configured_ffmpeg}" ]; then
+    printf '%s' "${configured_ffmpeg}"
+    return
+  fi
+  if command -v ffmpeg >/dev/null 2>&1; then
+    command -v ffmpeg
+    return
+  fi
+  "${venv_python}" - <<'PY'
+import os
+import imageio_ffmpeg
+
+path = imageio_ffmpeg.get_ffmpeg_exe()
+if not os.path.isfile(path) or not os.access(path, os.X_OK):
+    raise SystemExit("imageio-ffmpeg did not provide an executable")
+print(path)
+PY
+}
+
+install_airplay_runtime_dependencies() {
+  profile="$1"
+  venv_python="$2"
+  platform_name="$(uname -s 2>/dev/null || printf unknown)"
+  runtime_receiver="${RUNTIME_DIR}/external_audio/shairport-sync-v${SHAIRPORT_SYNC_VERSION}/bin/shairport-sync"
+  configured_receiver="${TATER_SHAIRPORT_SYNC_PATH:-}"
+  if [ "${configured_receiver}" ] && check_shairport_sync_receiver "${configured_receiver}"; then
+    AIRPLAY_RECEIVER_BIN="${configured_receiver}"
+  elif check_shairport_sync_receiver "${runtime_receiver}"; then
+    AIRPLAY_RECEIVER_BIN="${runtime_receiver}"
+  elif [ "${platform_name}" = "Darwin" ]; then
+    info "Installing the pinned AirPlay receiver for macOS"
+    TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
+      sh "${SCRIPT_DIR}/scripts/install_shairport_sync_receiver_macos.sh"
+    AIRPLAY_RECEIVER_BIN="${runtime_receiver}"
+  elif [ "${platform_name}" = "Linux" ]; then
+    install_linux_airplay_build_dependencies
+    TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
+      sh "${SCRIPT_DIR}/scripts/install_shairport_sync_receiver_linux.sh"
+    AIRPLAY_RECEIVER_BIN="${runtime_receiver}"
+  else
+    fail "Native AirPlay receiver setup is not supported on ${platform_name}."
+  fi
+  check_shairport_sync_receiver "${AIRPLAY_RECEIVER_BIN}" \
+    || fail "The AirPlay receiver did not pass its version and feature checks."
+  ok "AirPlay receiver ${SHAIRPORT_SYNC_VERSION} is ready"
+
+  AIRPLAY_FFMPEG_BIN="$(resolve_airplay_ffmpeg "${venv_python}")"
+  [ -x "${AIRPLAY_FFMPEG_BIN}" ] || fail "FFmpeg is required for AirPlay playback."
+  "${AIRPLAY_FFMPEG_BIN}" -version >/dev/null 2>&1 \
+    || fail "The selected FFmpeg executable did not pass its self-check."
+  ok "AirPlay FFmpeg runtime is ready"
+
+  AIRPLAY_SENDER_BIN="$(
+    TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
+    TATER_AIRPLAY_CLI_PATH="${TATER_AIRPLAY_CLI_PATH:-}" \
+      "${venv_python}" -c 'from airplay_bridge import ensure_airplay_cli; print(ensure_airplay_cli())'
+  )"
+  [ -x "${AIRPLAY_SENDER_BIN}" ] || fail "The AirPlay sender was not installed."
+  "${AIRPLAY_SENDER_BIN}" --check >/dev/null 2>&1 \
+    || fail "The AirPlay sender did not pass its self-check."
+  ok "AirPlay sender ${AIRPLAY_CLI_VERSION} is ready"
+  ensure_linux_airplay_sender_permissions "${AIRPLAY_SENDER_BIN}" "${venv_python}"
 }
 
 ensure_linux_build_tools() {
@@ -1175,8 +1365,8 @@ install_llama_cpp_native() {
   else
     info "Updating native llama.cpp runtime"
   fi
-  git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || { handle_llama_cpp_build_failure "Could not fetch pinned llama.cpp revision ${LLAMA_CPP_REF}."; return; }
-  git -C "${LLAMA_CPP_DIR}" checkout --detach FETCH_HEAD >/dev/null 2>&1 || { handle_llama_cpp_build_failure "Could not check out pinned llama.cpp revision ${LLAMA_CPP_REF}."; return; }
+  git -C "${LLAMA_CPP_DIR}" fetch --depth 1 origin "${LLAMA_CPP_REF}" || { handle_llama_cpp_build_failure "Could not fetch llama.cpp revision ${LLAMA_CPP_REF}."; return; }
+  git -C "${LLAMA_CPP_DIR}" checkout --detach FETCH_HEAD >/dev/null 2>&1 || { handle_llama_cpp_build_failure "Could not check out llama.cpp revision ${LLAMA_CPP_REF}."; return; }
   if [ "${profile}" = "rocm" ] && [ "${TATER_LLAMA_CPP_ROCM_BACKEND_SELECTED:-hip}" = "hip" ]; then
     prepare_rocm_linker_compat
   fi
@@ -1400,6 +1590,15 @@ write_profile_env() {
     say "export TATER_FASTER_WHISPER_COMPUTE_TYPE=\"\${TATER_FASTER_WHISPER_COMPUTE_TYPE:-${compute_type}}\""
     say "export TATER_KOKORO_ENGINE=\"\${TATER_KOKORO_ENGINE:-auto}\""
     say "export TATER_LLAMA_CPP_SERVER_BIN=\"\${TATER_LLAMA_CPP_SERVER_BIN:-${LLAMA_CPP_SERVER_BIN}}\""
+    if [ "${AIRPLAY_SENDER_BIN:-}" ]; then
+      say "export TATER_AIRPLAY_CLI_PATH=\"\${TATER_AIRPLAY_CLI_PATH:-${AIRPLAY_SENDER_BIN}}\""
+    fi
+    if [ "${AIRPLAY_RECEIVER_BIN:-}" ]; then
+      say "export TATER_SHAIRPORT_SYNC_PATH=\"\${TATER_SHAIRPORT_SYNC_PATH:-${AIRPLAY_RECEIVER_BIN}}\""
+    fi
+    if [ "${AIRPLAY_FFMPEG_BIN:-}" ]; then
+      say "export TATER_FFMPEG_PATH=\"\${TATER_FFMPEG_PATH:-${AIRPLAY_FFMPEG_BIN}}\""
+    fi
     if [ "${profile}" = "edge" ]; then
       say "export TATER_REMOTE_ONLY=\"\${TATER_REMOTE_ONLY:-1}\""
       say "export TATER_SETUP_LLAMA_CPP_NATIVE=\"\${TATER_SETUP_LLAMA_CPP_NATIVE:-0}\""
@@ -1453,10 +1652,14 @@ verify_install() {
   TATER_REMOTE_ONLY="${TATER_REMOTE_ONLY:-${remote_only_default}}" \
   TATER_MLX_ENGINE_PATH="${TATER_MLX_ENGINE_PATH:-}" \
   TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
+  TATER_AIRPLAY_CLI_PATH="${AIRPLAY_SENDER_BIN:-${TATER_AIRPLAY_CLI_PATH:-}}" \
+  TATER_SHAIRPORT_SYNC_PATH="${AIRPLAY_RECEIVER_BIN:-${TATER_SHAIRPORT_SYNC_PATH:-}}" \
+  TATER_FFMPEG_PATH="${AIRPLAY_FFMPEG_BIN:-${TATER_FFMPEG_PATH:-}}" \
   "${venv_python}" - <<'PY'
 import importlib.util
 import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1473,6 +1676,33 @@ if not redis_server and not embedded_redis:
 print(f"redis_runtime={'system:' + redis_server if redis_server else 'redislite'}")
 
 print("core imports ok")
+
+from airplay_bridge import _find_ffmpeg, ensure_airplay_cli
+from external_audio import SHAIRPORT_SYNC_VERSION, _find_shairport_sync
+
+ffmpeg = _find_ffmpeg()
+if not ffmpeg:
+    raise SystemExit("AirPlay FFmpeg runtime is unavailable")
+completed = subprocess.run([ffmpeg, "-version"], text=True, capture_output=True, timeout=10)
+if completed.returncode != 0:
+    raise SystemExit("AirPlay FFmpeg runtime failed its self-check")
+print(f"airplay_ffmpeg={ffmpeg}")
+
+sender = ensure_airplay_cli()
+print(f"airplay_sender={sender}")
+
+receiver = _find_shairport_sync()
+if not receiver:
+    raise SystemExit("Pinned Shairport Sync receiver is unavailable")
+version_check = subprocess.run([receiver, "-V"], text=True, capture_output=True, timeout=10)
+version_output = (version_check.stdout or "") + (version_check.stderr or "")
+if version_check.returncode != 0 or not version_output.strip().startswith(f"{SHAIRPORT_SYNC_VERSION}-"):
+    raise SystemExit(f"Shairport Sync {SHAIRPORT_SYNC_VERSION} is required")
+help_check = subprocess.run([receiver, "-h"], text=True, capture_output=True, timeout=10)
+help_output = (help_check.stdout or "") + (help_check.stderr or "")
+if "--service-type" not in help_output or "stdout" not in help_output:
+    raise SystemExit("Shairport Sync is missing classic/stdout receiver support")
+print(f"airplay_receiver={receiver}")
 
 remote_only = str(os.getenv("TATER_REMOTE_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
 setup_profile = str(os.getenv("TATER_SETUP_PROFILE") or "").strip().lower()
@@ -1668,6 +1898,7 @@ main() {
     jetson|thor) install_jetson_like "${venv_python}" "${profile}" ;;
   esac
 
+  install_airplay_runtime_dependencies "${profile}" "${venv_python}"
   write_profile_env "${profile}"
   verify_install "${venv_python}" "${profile}"
 

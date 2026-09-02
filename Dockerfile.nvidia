@@ -1,6 +1,6 @@
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
-ARG LLAMA_CPP_REF=fe2120bc9db242c4349a6f71810af1cd52ee8580
+ARG LLAMA_CPP_REF=master
 ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
 ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04
 

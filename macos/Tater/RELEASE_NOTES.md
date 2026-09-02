@@ -1,51 +1,48 @@
-# Tater v1.1.22
+# Tater v1.1.23
 
-Tater v1.1.22 adds AdaFace as a selectable Face ID model while preserving
-FaceNet compatibility, safe rollback, and centralized Spud Hub processing.
+Tater v1.1.23 makes Music Core's AirPlay support ready on clean native
+installs and returns llama.cpp builds to the latest upstream version now that
+the temporary Gemma 4 MTP loader regression is fixed.
 
 ## What's Changed
 
-### AdaFace Face Recognition
+### Ready-to-Use AirPlay
 
-- Adds the official AdaFace IR-50 WebFace4M model as an experimental Face ID
-  option alongside FaceNet512.
-- Adds a recognition-model selector and migration progress to Settings ›
-  Models › Face ID.
-- Pins the AdaFace checkpoint revision and validates its required runtime
-  dependencies across macOS, CPU Docker, NVIDIA Docker, and private setup.
-- Uses RetinaFace alignment and normalized 512-dimensional, model-tagged
-  embeddings with a conservative AdaFace matching threshold.
-- Adds a labeled-image bakeoff utility for comparing genuine and impostor
-  distances between FaceNet and AdaFace using real camera images.
+- Installs and verifies the complete native AirPlay runtime during local Tater
+  setup: Shairport Sync 5.2.1, cliairplay 0.4.12, FFmpeg, and discovery support.
+- Adds the same pinned and checksum-verified Shairport Sync receiver build for
+  native Linux installs that Tater already uses in Docker and on macOS.
+- Grants only the AirPlay sender executable access to UDP ports 319 and 320 on
+  Linux hosts that restrict AirPlay 2's PTP clock ports.
+- Falls back to Tater's managed FFmpeg package when a system FFmpeg executable
+  is unavailable, including lightweight Edge installs.
+- Rejects incompatible Shairport Sync installations instead of mixing an old
+  or incomplete receiver with Music Core.
 
-### Safe Model Switching
+### Self-Contained macOS AirPlay
 
-- Re-embeds saved face crops in the background before activating a newly
-  selected model.
-- Keeps separate FaceNet and AdaFace embedding profiles and never compares
-  vectors produced by different models.
-- Preserves the previous model's embeddings for immediate rollback and only
-  generates embeddings that are missing when switching again.
-- Leaves the current model active and reports an error if every linked person
-  cannot receive a usable embedding from the requested model.
+- Bundles the native AirPlay sender and receiver inside Tater.app so a clean
+  Mac does not need the manual Homebrew setup used during early testing.
+- Extends the app's normal startup environment check to verify the receiver,
+  sender, FFmpeg, and local-network discovery dependencies before Tater starts.
+- Automatically runs setup when a Python-side AirPlay dependency is missing or
+  stale, while reusing existing valid runtime components for source installs.
 
-### SpudLink Face ID Synchronization
+### Latest llama.cpp Builds
 
-- Lets Spudlets detect the Spud Hub's active Face ID model from tagged
-  embedding responses.
-- Automatically re-embeds saved crops for linked people through the Hub when
-  the Hub changes models, then resumes recognition with compatible vectors.
-- Keeps Face ID model execution and downloads on the Hub; connected Spudlets
-  store only the returned embeddings and can retain FaceNet as a local
-  fallback.
+- Returns local setup, macOS packages, CPU Docker images, and NVIDIA Docker
+  images to upstream llama.cpp `master` after the Gemma 4 MTP fixes landed.
+- Keeps `TATER_LLAMA_CPP_REF` available as an emergency rollback or development
+  override without holding normal releases to an older revision.
+- Verifies that every release build path follows the same upstream default.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.22 through
+- macOS users already running v1.0.1 or later can install v1.1.23 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.22` or `latest` for the CPU image and
-  `v1.1.22-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.23` or `latest` for the CPU image and
+  `v1.1.23-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

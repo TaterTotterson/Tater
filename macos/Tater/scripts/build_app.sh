@@ -15,11 +15,14 @@ NATIVE_RESOURCES_DIR="${RESOURCES_DIR}/Native"
 CODESIGN_IDENTITY="${TATER_CODESIGN_IDENTITY:--}"
 CODESIGN_ENTITLEMENTS="${TATER_CODESIGN_ENTITLEMENTS:-${PROJECT_DIR}/Resources/Tater.entitlements}"
 LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
-LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-fe2120bc9db242c4349a6f71810af1cd52ee8580}"
+LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 NATIVE_BUILD_DIR="${PROJECT_DIR}/build/native"
 LLAMA_CPP_DIR="${TATER_MACOS_LLAMA_CPP_DIR:-${NATIVE_BUILD_DIR}/llama.cpp}"
 MLX_ENGINE_DIR="${TATER_MACOS_MLX_ENGINE_DIR:-${NATIVE_BUILD_DIR}/mlx-engine}"
 MACOS_DEPLOYMENT_TARGET="${TATER_MACOS_DEPLOYMENT_TARGET:-15.0}"
+AIRPLAY_CLI_VERSION="0.4.12"
+AIRPLAY_CLI_MACOS_ARM64_SHA256="87cc9f230969d0c0047b909e4a16451d906864c0056581347031c23fa040f1a8"
+SHAIRPORT_SYNC_VERSION="5.2.1"
 
 # Keep SwiftPM and native CMake builds on the same deployment target. Without
 # this, native libraries can inherit the release machine's current macOS SDK
@@ -268,6 +271,104 @@ prepare_bundled_mlx_engine_runtime() {
   test -d "${bundled_engine}/mlx_engine"
 }
 
+copy_macos_airplay_libraries() {
+  airplay_root="$1"
+  airplay_bin_dir="${airplay_root}/bin"
+  airplay_lib_dir="${airplay_root}/lib"
+  mkdir -p "${airplay_lib_dir}"
+
+  # Copy non-system dependencies transitively. Fixed passes keep this POSIX
+  # shell compatible while newly copied libraries are discovered on the next
+  # pass.
+  for _pass in 1 2 3 4 5 6 7 8; do
+    find "${airplay_bin_dir}" "${airplay_lib_dir}" -type f | while IFS= read -r payload_path; do
+      file "${payload_path}" | grep -q 'Mach-O' || continue
+      otool -L "${payload_path}" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency_path; do
+        case "${dependency_path}" in
+          /System/*|/usr/lib/*|@*) continue ;;
+          /*)
+            dependency_name="$(basename "${dependency_path}")"
+            if [ ! -f "${airplay_lib_dir}/${dependency_name}" ]; then
+              cp -L "${dependency_path}" "${airplay_lib_dir}/${dependency_name}"
+              chmod 0755 "${airplay_lib_dir}/${dependency_name}"
+            fi
+            ;;
+        esac
+      done
+    done
+  done
+
+  find "${airplay_bin_dir}" "${airplay_lib_dir}" -type f | while IFS= read -r payload_path; do
+    file "${payload_path}" | grep -q 'Mach-O' || continue
+    case "${payload_path}" in
+      "${airplay_bin_dir}"/*) dependency_prefix='@executable_path/../lib' ;;
+      *) dependency_prefix='@loader_path' ;;
+    esac
+    otool -L "${payload_path}" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency_path; do
+      case "${dependency_path}" in
+        /System/*|/usr/lib/*|@*) continue ;;
+        /*)
+          dependency_name="$(basename "${dependency_path}")"
+          install_name_tool -change \
+            "${dependency_path}" \
+            "${dependency_prefix}/${dependency_name}" \
+            "${payload_path}"
+          ;;
+      esac
+    done
+    case "${payload_path}" in
+      "${airplay_lib_dir}"/*)
+        install_name_tool -id "@rpath/$(basename "${payload_path}")" "${payload_path}"
+        ;;
+    esac
+  done
+}
+
+prepare_bundled_airplay_runtime() {
+  if [ "${TATER_BUNDLE_AIRPLAY_RUNTIME:-1}" = "0" ]; then
+    return
+  fi
+  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ] || [ "$(uname -m 2>/dev/null || printf unknown)" != "arm64" ]; then
+    printf 'The packaged macOS AirPlay runtime requires an Apple Silicon build host.\n' >&2
+    exit 1
+  fi
+
+  staging_runtime="${NATIVE_BUILD_DIR}/airplay-runtime"
+  bundled_airplay_root="${NATIVE_RESOURCES_DIR}/airplay"
+  rm -rf "${staging_runtime}" "${bundled_airplay_root}"
+  mkdir -p "${staging_runtime}" "${bundled_airplay_root}/bin"
+
+  TATER_RUNTIME_DIR="${staging_runtime}" \
+  TATER_SHAIRPORT_STATIC_LINK=1 \
+    sh "${REPO_ROOT}/scripts/install_shairport_sync_receiver_macos.sh"
+  receiver_source="${staging_runtime}/external_audio/shairport-sync-v${SHAIRPORT_SYNC_VERSION}/bin/shairport-sync"
+  test -x "${receiver_source}"
+  cp "${receiver_source}" "${bundled_airplay_root}/bin/shairport-sync"
+  chmod 0755 "${bundled_airplay_root}/bin/shairport-sync"
+
+  sender_path="${bundled_airplay_root}/bin/cliairplay"
+  curl --location --fail --silent --show-error \
+    "https://github.com/music-assistant/airplay-cli/releases/download/v${AIRPLAY_CLI_VERSION}/cliairplay-macos-arm64" \
+    --output "${sender_path}"
+  actual_sender_sha="$(shasum -a 256 "${sender_path}" | awk '{print $1}')"
+  if [ "${actual_sender_sha}" != "${AIRPLAY_CLI_MACOS_ARM64_SHA256}" ]; then
+    printf 'The bundled AirPlay sender did not match its pinned checksum.\n' >&2
+    exit 1
+  fi
+  chmod 0755 "${sender_path}"
+
+  copy_macos_airplay_libraries "${bundled_airplay_root}"
+
+  "${sender_path}" --check >/dev/null
+  receiver_version="$(${bundled_airplay_root}/bin/shairport-sync -V 2>&1)"
+  case "${receiver_version}" in
+    "${SHAIRPORT_SYNC_VERSION}-"*) ;;
+    *) printf 'The bundled AirPlay receiver failed its version check.\n' >&2; exit 1 ;;
+  esac
+  "${bundled_airplay_root}/bin/shairport-sync" -h 2>&1 | grep -q -- '--service-type'
+  "${bundled_airplay_root}/bin/shairport-sync" -h 2>&1 | grep -q -- 'stdout'
+}
+
 version_exceeds_target() {
   actual_version="$1"
   target_version="$2"
@@ -325,6 +426,7 @@ verify_macos_deployment_targets() {
 
 prepare_bundled_llama_cpp_runtime
 prepare_bundled_mlx_engine_runtime
+prepare_bundled_airplay_runtime
 verify_macos_deployment_targets
 
 chmod +x "${MACOS_DIR}/TaterAssistant"
