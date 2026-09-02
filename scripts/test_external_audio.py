@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import os
+import subprocess
 import struct
 import sys
+import tempfile
 import threading
 import types
 import unittest
@@ -150,6 +153,49 @@ class ExternalAudioTests(unittest.TestCase):
             'path.startswith("/api/external-audio/v1/streams/")',
             app_source,
         )
+
+    def test_linux_receiver_resolves_relative_runtime_directory_from_tater_root(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        installer = root / "scripts" / "install_shairport_sync_receiver_linux.sh"
+        with tempfile.TemporaryDirectory(dir=root) as temp_dir:
+            runtime_dir = Path(temp_dir)
+            fake_bin = runtime_dir / "fake-bin"
+            fake_bin.mkdir()
+            fake_uname = fake_bin / "uname"
+            fake_uname.write_text("#!/bin/sh\necho Linux\n", encoding="utf-8")
+            fake_uname.chmod(0o755)
+            relative_runtime_dir = runtime_dir.relative_to(root)
+            install_dir = runtime_dir / (
+                f"external_audio/shairport-sync-v{external_audio.SHAIRPORT_SYNC_VERSION}"
+            )
+            receiver = install_dir / "bin" / "shairport-sync"
+            receiver.parent.mkdir(parents=True)
+            receiver.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                f"  -V) echo '{external_audio.SHAIRPORT_SYNC_VERSION}-test' ;;\n"
+                "  -h) echo '--service-type stdout' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            receiver.chmod(0o755)
+            (install_dir / ".tater-build-revision").write_text("1\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [str(installer)],
+                cwd="/",
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                    "TATER_RUNTIME_DIR": str(relative_runtime_dir),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(str(install_dir), completed.stdout)
 
     def test_shairport_config_is_shared_by_linux_and_macos(self) -> None:
         config = external_audio.build_shairport_sync_config_for_test(

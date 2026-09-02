@@ -12,7 +12,12 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 tater_dir=$(CDPATH= cd -- "${script_dir}/.." && pwd)
-install_dir="${TATER_RUNTIME_DIR:-${tater_dir}/.runtime}/external_audio/shairport-sync-v${SHAIRPORT_SYNC_VERSION}"
+runtime_dir="${TATER_RUNTIME_DIR:-${tater_dir}/.runtime}"
+case "${runtime_dir}" in
+    /*) ;;
+    *) runtime_dir="${tater_dir}/${runtime_dir}" ;;
+esac
+install_dir="${runtime_dir}/external_audio/shairport-sync-v${SHAIRPORT_SYNC_VERSION}"
 receiver_bin="${install_dir}/bin/shairport-sync"
 revision_file="${install_dir}/.tater-build-revision"
 
