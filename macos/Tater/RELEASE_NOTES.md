@@ -1,48 +1,42 @@
-# Tater v1.1.23
+# Tater v1.1.24
 
-Tater v1.1.23 makes Music Core's AirPlay support ready on clean native
-installs and returns llama.cpp builds to the latest upstream version now that
-the temporary Gemma 4 MTP loader regression is fixed.
+Tater v1.1.24 adds integration-owned device visibility controls and lets the
+Home Assistant integration follow the entities a user exposes to Assist.
 
 ## What's Changed
 
-### Ready-to-Use AirPlay
+### Integration-Owned Visibility
 
-- Installs and verifies the complete native AirPlay runtime during local Tater
-  setup: Shairport Sync 5.2.1, cliairplay 0.4.12, FFmpeg, and discovery support.
-- Adds the same pinned and checksum-verified Shairport Sync receiver build for
-  native Linux installs that Tater already uses in Docker and on macOS.
-- Grants only the AirPlay sender executable access to UDP ports 319 and 320 on
-  Linux hosts that restrict AirPlay 2's PTP clock ports.
-- Falls back to Tater's managed FFmpeg package when a system FFmpeg executable
-  is unavailable, including lightweight Edge installs.
-- Rejects incompatible Shairport Sync installations instead of mixing an old
-  or incomplete receiver with Music Core.
+- Adds a reusable runtime filter hook that lets any integration approve or
+  reject live device states and events before Tater stores or publishes them.
+- Supports synchronous and asynchronous integration filters so providers can
+  use local rules or refresh visibility from their own APIs.
+- Preserves existing behavior for every current integration that does not
+  implement a filter.
+- Blocks an item and reports the error if an enabled filter fails instead of
+  silently exposing provider data.
 
-### Self-Contained macOS AirPlay
+### Home Assistant Assist Exposure
 
-- Bundles the native AirPlay sender and receiver inside Tater.app so a clean
-  Mac does not need the manual Homebrew setup used during early testing.
-- Extends the app's normal startup environment check to verify the receiver,
-  sender, FFmpeg, and local-network discovery dependencies before Tater starts.
-- Automatically runs setup when a Python-side AirPlay dependency is missing or
-  stale, while reusing existing valid runtime components for source installs.
-
-### Latest llama.cpp Builds
-
-- Returns local setup, macOS packages, CPU Docker images, and NVIDIA Docker
-  images to upstream llama.cpp `master` after the Gemma 4 MTP fixes landed.
-- Keeps `TATER_LLAMA_CPP_REF` available as an emergency rollback or development
-  override without holding normal releases to an older revision.
-- Verifies that every release build path follows the same upstream default.
+- Adds a Home Assistant setting for either all entities or only entities
+  exposed through Home Assistant's Assist voice pipeline.
+- Honors explicit Assist exposure choices, Home Assistant's expose-new-entities
+  preference, and its default domain and device-class exposure rules.
+- Applies the same policy to the device catalog and live state-change events so
+  filtered entities cannot reappear through the background listener.
+- Clears old Home Assistant runtime states when the visibility mode changes and
+  refreshes the exposure policy in the background.
+- Keeps all entities as the default for existing installations and verifies
+  that Assist-only mode has the required Home Assistant administrator access.
+- Releases the downloadable Home Assistant integration as version 1.5.0.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.1.23 through
+- macOS users already running v1.0.1 or later can install v1.1.24 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.1.23` or `latest` for the CPU image and
-  `v1.1.23-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.1.24` or `latest` for the CPU image and
+  `v1.1.24-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

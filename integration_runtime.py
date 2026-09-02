@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ _EVENT_HISTORY_CACHE: Dict[str, Any] = {
 }
 _GENERIC_RUNTIME_CURSOR: Dict[str, Any] = {}
 _GENERIC_RUNTIME_NEXT_POLL: Dict[str, float] = {}
+_RUNTIME_FILTER_ERROR_LOGGED_AT: Dict[str, float] = {}
 _RUNTIME_PROVIDER_OWNER = {
     "ecobee_homekit": "homekit",
 }
@@ -449,7 +451,64 @@ def _event_payload_id(payload: Dict[str, Any]) -> str:
     return ""
 
 
-def _publish_generic_runtime_result(client: Any, integration_id: str, result: Any) -> None:
+async def _integration_runtime_event_allowed(
+    integration_id: str,
+    kind: str,
+    payload: Dict[str, Any],
+    client: Any = None,
+    *,
+    module: Any = None,
+) -> bool:
+    owner = _runtime_provider_owner(integration_id)
+    integration_module = module if module is not None else _integration_module(owner)
+    hook = (
+        getattr(integration_module, "integration_runtime_event_allowed", None)
+        if integration_module is not None
+        else None
+    )
+    if not callable(hook):
+        return True
+    try:
+        result = hook(
+            kind=_text(kind),
+            payload=dict(payload or {}),
+            client=_runtime_client(client),
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        allowed = bool(result)
+        if owner in _RUNTIME_FILTER_ERROR_LOGGED_AT:
+            _RUNTIME_FILTER_ERROR_LOGGED_AT.pop(owner, None)
+            _status_set(client, **{f"{owner}_runtime_filter_last_error": ""})
+        return allowed
+    except Exception as exc:
+        now = time.monotonic()
+        last_logged = float(_RUNTIME_FILTER_ERROR_LOGGED_AT.get(owner) or 0.0)
+        if now - last_logged >= 30.0:
+            _RUNTIME_FILTER_ERROR_LOGGED_AT[owner] = now
+            logger.warning("[integrations] %s runtime filter error; event blocked: %s", owner, exc)
+        _status_set(
+            client,
+            **{
+                f"{owner}_runtime_filter_last_error": str(exc),
+                "last_error": str(exc),
+            },
+        )
+        return False
+
+
+def _delete_runtime_state(client: Any, provider: str, state_id: Any) -> None:
+    redis_obj = _runtime_client(client)
+    token = _text(state_id)
+    if not redis_obj or not token:
+        return
+    try:
+        redis_obj.hdel(INTEGRATION_RUNTIME_STATES_KEY, f"{_text(provider)}:{token}")
+    except Exception:
+        pass
+
+
+async def _publish_generic_runtime_result(client: Any, integration_id: str, result: Any) -> None:
     if result is None:
         return
     if isinstance(result, list):
@@ -466,6 +525,10 @@ def _publish_generic_runtime_result(client: Any, integration_id: str, result: An
         if not isinstance(state, dict):
             continue
         state_id = _event_payload_id(state)
+        if not await _integration_runtime_event_allowed(integration_id, "state", state, client):
+            if state_id:
+                _delete_runtime_state(client, integration_id, state_id)
+            continue
         if state_id:
             _state_set(client, integration_id, state_id, state)
 
@@ -478,6 +541,10 @@ def _publish_generic_runtime_result(client: Any, integration_id: str, result: An
             key: value for key, value in event.items() if key not in {"kind", "type"}
         }
         state_id = _event_payload_id(payload)
+        if not await _integration_runtime_event_allowed(integration_id, kind, payload, client):
+            if state_id:
+                _delete_runtime_state(client, integration_id, state_id)
+            continue
         if state_id:
             _state_set(client, integration_id, state_id, payload)
         _publish_event(client, integration_id, kind, payload)
@@ -510,7 +577,7 @@ async def _generic_integration_poll_loop(stop_event: asyncio.Event, client: Any)
                         client=redis_obj,
                         cursor=_GENERIC_RUNTIME_CURSOR.get(integration_id),
                     )
-                    _publish_generic_runtime_result(redis_obj, integration_id, result)
+                    await _publish_generic_runtime_result(redis_obj, integration_id, result)
                     _status_set(
                         redis_obj,
                         **{
@@ -707,6 +774,16 @@ async def _homeassistant_loop(stop_event: asyncio.Event, client: Any) -> None:
                                     continue
                                 entity_id = _text(payload.get("entity_id"))
                                 new_state = payload.get("new_state") if isinstance(payload.get("new_state"), dict) else {}
+                                if not await _integration_runtime_event_allowed(
+                                    "homeassistant",
+                                    "state_changed",
+                                    payload,
+                                    redis_obj,
+                                    module=ha_module,
+                                ):
+                                    if entity_id:
+                                        _delete_runtime_state(redis_obj, "homeassistant", entity_id)
+                                    continue
                                 if entity_id:
                                     _state_set(
                                         redis_obj,
