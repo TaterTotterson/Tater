@@ -2690,6 +2690,20 @@ function settingsIntegrationValue(integration, field) {
   return field?.default ?? "";
 }
 
+function settingsIntegrationOptionValue(option) {
+  if (option && typeof option === "object") {
+    return String(option.value ?? option.id ?? option.key ?? option.label ?? "").trim();
+  }
+  return String(option ?? "").trim();
+}
+
+function settingsIntegrationOptionLabel(option) {
+  if (option && typeof option === "object") {
+    return String(option.label ?? option.name ?? option.title ?? settingsIntegrationOptionValue(option)).trim();
+  }
+  return String(option ?? "").trim();
+}
+
 function renderSettingsIntegrationField(integration, field) {
   const integrationId = String(integration?.id || "").trim();
   const key = String(field?.key || "").trim();
@@ -2727,6 +2741,24 @@ function renderSettingsIntegrationField(integration, field) {
       <textarea id="${escapeHtml(inputId)}" rows="${escapeHtml(String(Math.max(2, rows)))}"${placeholderAttr}>${escapeHtml(
         String(value ?? "")
       )}</textarea>
+      ${descHtml}
+    </label>`;
+  }
+
+  if (type === "select") {
+    const options = Array.isArray(field?.options) ? field.options : [];
+    const selectedValue = String(value ?? "");
+    const optionHtml = options
+      .map((option) => {
+        const optionValue = settingsIntegrationOptionValue(option);
+        const selected = optionValue === selectedValue ? " selected" : "";
+        return `<option value="${escapeHtml(optionValue)}"${selected}>${escapeHtml(
+          settingsIntegrationOptionLabel(option)
+        )}</option>`;
+      })
+      .join("");
+    return `<label${styleAttr}>${escapeHtml(label)}
+      <select id="${escapeHtml(inputId)}">${optionHtml}</select>
       ${descHtml}
     </label>`;
   }

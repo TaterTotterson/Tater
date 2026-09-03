@@ -79,6 +79,20 @@ const recentEvents = computed(() => {
 function text(value: unknown): string { return String(value ?? "").trim(); }
 function canonicalId(value: unknown): string { const id = text(value); return id === "ecobee_homekit" ? "homekit" : id; }
 function encode(value: unknown): string { return encodeURIComponent(text(value)); }
+function optionValue(option: unknown): string {
+  if (option && typeof option === "object") {
+    const row = option as JsonRow;
+    return text(row.value ?? row.id ?? row.key ?? row.label);
+  }
+  return text(option);
+}
+function optionLabel(option: unknown): string {
+  if (option && typeof option === "object") {
+    const row = option as JsonRow;
+    return text(row.label ?? row.name ?? row.title ?? optionValue(row));
+  }
+  return text(option);
+}
 function notify(message: string, tone = "success") { status.value = message; props.options.onToast?.(message, tone); }
 function displayName(row: JsonRow): string { return text(row.name || row.friendly_name || row.label || row.title || row.id || row.ref || "Device"); }
 function roomId(row: JsonRow): string { return text(row.id || "unassigned") || "unassigned"; }
@@ -373,6 +387,6 @@ draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repo
       <div class="ti-event-list"><article v-for="event in recentEvents" :key="event.seq"><span class="ti-provider">{{ text(event.provider).replaceAll('_', ' ') }}</span><div><strong>{{ eventTitle(event) }}</strong><small>{{ eventPayload(event).room || eventPayload(event).area || eventPayload(event).entity_id || eventPayload(event).ref || '' }}</small></div><span class="tv-state">{{ eventState(event) }}</span><time>{{ relativeTime(event.ts) }}</time></article><div v-if="!recentEvents.length" class="tv-empty">No recent device changes in the current activity window.</div></div>
     </section>
 
-    <PopupTransition :open="Boolean(settingsIntegration)" @close="settingsIntegration = null"><form class="tv-modal" @submit.prevent="saveIntegrationSettings"><header><div><span class="tv-eyebrow">{{ settingsIntegration?.id }}</span><h2>{{ settingsIntegration ? displayName(settingsIntegration) : '' }} settings</h2></div><button class="tv-button" type="button" @click="settingsIntegration = null">Close</button></header><div class="tv-form-grid"><label v-for="field in settingsIntegration?.fields || []" :key="field.key" :class="{ full: field.full_width || field.type === 'textarea' }"><span>{{ field.label || field.key }}</span><input v-if="field.type === 'checkbox'" v-model="fieldValues[field.key]" class="tv-checkbox" type="checkbox" /><textarea v-else-if="field.type === 'textarea'" v-model="fieldValues[field.key]" :rows="field.rows || 3" :placeholder="field.placeholder" /><input v-else v-model="fieldValues[field.key]" :type="['password','number','email','url'].includes(field.type) ? field.type : 'text'" :min="field.min" :max="field.max" :step="field.step" :placeholder="field.placeholder" /><small>{{ field.description }}</small></label></div><div v-if="settingsIntegration?.actions?.length" class="ti-modal-actions"><span>Actions</span><button v-for="action in settingsIntegration?.actions || []" :key="action.id" class="tv-button" type="button" @click="runIntegrationAction(action)">{{ action.label || action.id }}</button></div><footer><span>{{ busy || status }}</span><button v-if="settingsIntegration?.fields?.length" class="tv-button primary" type="submit">Save settings</button></footer></form></PopupTransition>
+    <PopupTransition :open="Boolean(settingsIntegration)" @close="settingsIntegration = null"><form class="tv-modal" @submit.prevent="saveIntegrationSettings"><header><div><span class="tv-eyebrow">{{ settingsIntegration?.id }}</span><h2>{{ settingsIntegration ? displayName(settingsIntegration) : '' }} settings</h2></div><button class="tv-button" type="button" @click="settingsIntegration = null">Close</button></header><div class="tv-form-grid"><label v-for="field in settingsIntegration?.fields || []" :key="field.key" :class="{ full: field.full_width || field.type === 'textarea' }"><span>{{ field.label || field.key }}</span><input v-if="field.type === 'checkbox'" v-model="fieldValues[field.key]" class="tv-checkbox" type="checkbox" /><textarea v-else-if="field.type === 'textarea'" v-model="fieldValues[field.key]" :rows="field.rows || 3" :placeholder="field.placeholder" /><select v-else-if="field.type === 'select'" v-model="fieldValues[field.key]"><option v-for="option in field.options || []" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><input v-else v-model="fieldValues[field.key]" :type="['password','number','email','url'].includes(field.type) ? field.type : 'text'" :min="field.min" :max="field.max" :step="field.step" :placeholder="field.placeholder" /><small>{{ field.description }}</small></label></div><div v-if="settingsIntegration?.actions?.length" class="ti-modal-actions"><span>Actions</span><button v-for="action in settingsIntegration?.actions || []" :key="action.id" class="tv-button" type="button" @click="runIntegrationAction(action)">{{ action.label || action.id }}</button></div><footer><span>{{ busy || status }}</span><button v-if="settingsIntegration?.fields?.length" class="tv-button primary" type="submit">Save settings</button></footer></form></PopupTransition>
   </div>
 </template>

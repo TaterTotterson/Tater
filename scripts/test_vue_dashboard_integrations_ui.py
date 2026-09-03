@@ -77,6 +77,18 @@ class VueDashboardIntegrationsTests(unittest.TestCase):
         self.assertIn(".ti-room-devices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));", styles)
         self.assertIn(".ti-room-devices { grid-template-columns: 1fr; }", styles)
 
+    def test_integration_select_fields_render_as_dropdowns(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")
+        legacy = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('v-else-if="field.type === \'select\'"', source)
+        self.assertIn('v-for="option in field.options || []"', source)
+        self.assertIn("optionValue(option)", source)
+        self.assertIn("optionLabel(option)", source)
+        self.assertIn('if (type === "select")', legacy)
+        self.assertIn("settingsIntegrationOptionValue(option)", legacy)
+        self.assertIn("settingsIntegrationOptionLabel(option)", legacy)
+
     def test_device_and_organize_tabs_use_background_registry_refresh(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")
 
