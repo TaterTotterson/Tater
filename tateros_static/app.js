@@ -2476,7 +2476,7 @@ function setPreferredIntegrationTab(tabKey) {
 }
 
 function parseSettingValue(raw, type) {
-  if (type === "number") {
+  if (type === "number" || type === "range") {
     const parsed = Number(raw);
     return Number.isNaN(parsed) ? 0 : parsed;
   }
@@ -5161,6 +5161,28 @@ function buildSettingInput(field, inputId) {
     return wrapRuntimeSetting(`<label>${safeLabel}<textarea id="${inputId}" data-setting-type="textarea" data-setting-key="${safeKey}">${escapeHtml(field.value ?? "")}</textarea>${safeDesc}</label>`);
   }
 
+  if (type === "range") {
+    const value = Number(field?.value ?? field?.default ?? field?.min ?? 0);
+    const safeValue = Number.isFinite(value) ? value : 0;
+    const min = field?.min !== undefined ? field.min : 0;
+    const max = field?.max !== undefined ? field.max : 100;
+    const step = field?.step !== undefined ? field.step : 1;
+    const suffix = String(field?.suffix || "");
+    return wrapRuntimeSetting(`
+      <label class="core-range-field">
+        <span class="core-range-field-head">
+          <span>${safeLabel}</span>
+          <output for="${inputId}" data-runtime-range-output>${escapeHtml(`${safeValue}${suffix}`)}</output>
+        </span>
+        <input id="${inputId}" type="range" min="${escapeHtml(min)}" max="${escapeHtml(max)}" step="${escapeHtml(
+          step
+        )}" value="${escapeHtml(safeValue)}" data-setting-type="range" data-setting-key="${safeKey}"
+          data-runtime-range-suffix="${escapeHtml(suffix)}" />
+        ${safeDesc}
+      </label>
+    `);
+  }
+
   if (type === "file") {
     const accept = String(field.accept || "").trim();
     const acceptAttr = accept ? ` accept="${escapeHtml(accept)}"` : "";
@@ -5287,6 +5309,26 @@ async function collectFormValues(formElement) {
     values[key] = parseSettingValue(await getInputValue(input), input.dataset.settingType || input.type);
   }
   return values;
+}
+
+function bindRuntimeSettingRanges(fieldsEl) {
+  if (!(fieldsEl instanceof HTMLElement)) {
+    return;
+  }
+  fieldsEl.querySelectorAll("input[data-setting-type='range']").forEach((input) => {
+    if (!(input instanceof HTMLInputElement) || input.dataset.runtimeRangeBound === "1") {
+      return;
+    }
+    const output = input.closest(".core-range-field")?.querySelector("[data-runtime-range-output]");
+    const refresh = () => {
+      if (output instanceof HTMLOutputElement) {
+        output.textContent = `${input.value}${String(input.dataset.runtimeRangeSuffix || "")}`;
+      }
+    };
+    input.addEventListener("input", refresh);
+    input.dataset.runtimeRangeBound = "1";
+    refresh();
+  });
 }
 
 function runtimeSettingFieldValue(input) {
@@ -5687,6 +5729,7 @@ function openRuntimeSettingsModal({ title, meta, fields, onSave, saveLabel, onRe
         .join("");
       bindRuntimeSettingDependentSelects(fieldsEl);
       bindRuntimeSettingConditionalFields(fieldsEl);
+      bindRuntimeSettingRanges(fieldsEl);
       bindNativeLedPreview(fieldsEl);
       fieldsEl.querySelectorAll(".runtime-generate-key-btn").forEach((button) => {
         button.addEventListener("click", () => {
