@@ -23,7 +23,7 @@ from .settings import get_spudex_settings
 SPUDEX_DIR = AGENT_LAB_DIR / "spudex"
 SESSIONS_DIR = SPUDEX_DIR / "sessions"
 
-_ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
+_ACTIVE_PROCESSES: dict[str, Any] = {}
 _ACTIVE_TASKS: dict[str, asyncio.Task[Any]] = {}
 _SESSION_LOCK = asyncio.Lock()
 _DEFAULT_SUBPROCESS_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -160,7 +160,150 @@ def _isolated_exec_argv(
     return list(argv), "policy_only"
 
 
-async def _terminate_process(process: asyncio.subprocess.Process, *, force: bool = False) -> None:
+class _PosixSpawnProcess:
+    """Small asyncio-compatible process handle for fork-safe macOS launches."""
+
+    def __init__(
+        self,
+        pid: int,
+        *,
+        stdout: asyncio.StreamReader,
+        stderr: asyncio.StreamReader,
+        transports: List[asyncio.Transport],
+    ) -> None:
+        self.pid = int(pid)
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode: int | None = None
+        self._transports = transports
+        self._wait_task = asyncio.create_task(asyncio.to_thread(os.waitpid, self.pid, 0))
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            _pid, status = await asyncio.shield(self._wait_task)
+            self.returncode = int(os.waitstatus_to_exitcode(status))
+        return self.returncode
+
+    def terminate(self) -> None:
+        os.killpg(self.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        os.killpg(self.pid, signal.SIGKILL)
+
+
+async def _stream_reader_for_fd(fd: int) -> tuple[asyncio.StreamReader, asyncio.Transport]:
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    pipe = os.fdopen(fd, "rb", buffering=0)
+    try:
+        transport, _ = await loop.connect_read_pipe(lambda: protocol, pipe)
+    except Exception:
+        pipe.close()
+        raise
+    return reader, transport
+
+
+async def _spawn_macos_process(
+    argv: List[str],
+    *,
+    cwd: Path,
+    env: Dict[str, str],
+) -> _PosixSpawnProcess:
+    """Launch without fork so native macOS at-fork handlers cannot crash the child."""
+
+    shell_argv = [
+        "/bin/sh",
+        "-c",
+        f"cd -- {shlex.quote(str(cwd))} && exec {shlex.join(str(item) for item in argv)}",
+    ]
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    file_actions = [
+        (os.POSIX_SPAWN_DUP2, stdout_write, 1),
+        (os.POSIX_SPAWN_DUP2, stderr_write, 2),
+        (os.POSIX_SPAWN_CLOSE, stdout_read),
+        (os.POSIX_SPAWN_CLOSE, stderr_read),
+        (os.POSIX_SPAWN_CLOSE, stdout_write),
+        (os.POSIX_SPAWN_CLOSE, stderr_write),
+    ]
+    try:
+        restore_signals = tuple(
+            int(value)
+            for value in (
+                getattr(signal, "SIGPIPE", None),
+                getattr(signal, "SIGXFZ", None),
+                getattr(signal, "SIGXFSZ", None),
+            )
+            if value is not None
+        )
+        pid = os.posix_spawn(
+            shell_argv[0],
+            shell_argv,
+            env,
+            file_actions=file_actions,
+            setsid=True,
+            setsigdef=restore_signals,
+        )
+    except Exception:
+        os.close(stdout_read)
+        os.close(stderr_read)
+        raise
+    finally:
+        os.close(stdout_write)
+        os.close(stderr_write)
+
+    transports: List[asyncio.Transport] = []
+    stdout_connected = False
+    try:
+        stdout, stdout_transport = await _stream_reader_for_fd(stdout_read)
+        transports.append(stdout_transport)
+        stdout_connected = True
+        stderr, stderr_transport = await _stream_reader_for_fd(stderr_read)
+        transports.append(stderr_transport)
+    except Exception:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if not stdout_connected:
+            os.close(stderr_read)
+        for transport in transports:
+            transport.close()
+        await asyncio.to_thread(os.waitpid, pid, 0)
+        raise
+    return _PosixSpawnProcess(
+        pid,
+        stdout=stdout,
+        stderr=stderr,
+        transports=transports,
+    )
+
+
+async def _spawn_command_process(
+    argv: List[str],
+    *,
+    cwd: Path,
+    env: Dict[str, str],
+) -> tuple[Any, str]:
+    if host_platform.system().strip().lower() == "darwin" and hasattr(os, "posix_spawn"):
+        return await _spawn_macos_process(argv, cwd=cwd, env=env), "posix_spawn"
+
+    process_kwargs: Dict[str, Any] = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if os.name != "nt":
+        process_kwargs["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = await asyncio.create_subprocess_exec(*argv, **process_kwargs)
+    return process, "asyncio_subprocess"
+
+
+async def _terminate_process(process: Any, *, force: bool = False) -> None:
     if process.returncode is not None:
         return
     try:
@@ -1046,21 +1189,16 @@ async def run_argv_in_session(
         level="warning" if full_access or isolation_backend == "policy_only" else "info",
     )
     update_spudex_session(session_id, isolation_backend=isolation_backend)
+    process_launcher = ""
     try:
-        process_kwargs: Dict[str, Any] = {
-            "cwd": str(cwd),
-            "env": _subprocess_env(full_access=full_access),
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-        }
-        if os.name != "nt":
-            process_kwargs["start_new_session"] = True
-        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         async with _SESSION_LOCK:
             if session_id not in _ACTIVE_PROCESSES and len(_ACTIVE_PROCESSES) >= max_processes:
                 raise RuntimeError(f"Spudex process limit reached ({max_processes}).")
-            process = await asyncio.create_subprocess_exec(*exec_argv, **process_kwargs)
+            process, process_launcher = await _spawn_command_process(
+                exec_argv,
+                cwd=cwd,
+                env=_subprocess_env(full_access=full_access),
+            )
             _ACTIVE_PROCESSES[session_id] = process
     except Exception as exc:
         error = (
@@ -1089,7 +1227,13 @@ async def run_argv_in_session(
             result.update({"stdout": "", "stderr": message, "output_truncated": False})
         return result
     meta = _load_meta(session_id)
-    meta.update({"pid": getattr(process, "pid", None), "updated_ts": _now()})
+    meta.update(
+        {
+            "pid": getattr(process, "pid", None),
+            "process_launcher": process_launcher,
+            "updated_ts": _now(),
+        }
+    )
     _save_meta(meta)
 
     async def _pump(stream: Any, name: str) -> None:
@@ -1170,6 +1314,7 @@ async def run_argv_in_session(
             "returncode": None,
             "background": True,
             "isolation_backend": isolation_backend,
+            "process_launcher": process_launcher,
         }
 
     try:
@@ -1208,6 +1353,7 @@ async def run_argv_in_session(
         "status": status,
         "returncode": returncode,
         "isolation_backend": isolation_backend,
+        "process_launcher": process_launcher,
     }
     if capture_output:
         result.update(

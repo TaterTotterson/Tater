@@ -249,8 +249,39 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["stdout"], "SPUDEX\n")
         self.assertEqual(result["isolation_backend"], "full_access_shell")
+        if platform.system() == "Darwin":
+            self.assertEqual(result["process_launcher"], "posix_spawn")
         logs = runner.read_spudex_logs(session_id)["entries"]
         self.assertTrue(any("Full access is on" in row["text"] for row in logs))
+
+    @unittest.skipUnless(platform.system() == "Darwin", "macOS process launcher")
+    async def test_macos_commands_use_fork_safe_posix_spawn(self) -> None:
+        session_id = self._session("fork-safe launch")
+        runtime_settings = settings.normalize_spudex_settings(
+            {"full_access": True, "command_timeout_sec": 10}
+        )
+
+        with mock.patch.object(
+            runner.asyncio,
+            "create_subprocess_exec",
+            new_callable=mock.AsyncMock,
+            side_effect=AssertionError("macOS command used the fork-based launcher"),
+        ):
+            result = await runner.run_argv_in_session(
+                session_id,
+                argv=["df", "-h"],
+                cwd=self.workspace,
+                settings=runtime_settings,
+                capture_output=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["process_launcher"], "posix_spawn")
+        self.assertIn("Filesystem", result["stdout"])
+        self.assertEqual(
+            runner.get_spudex_session(session_id)["process_launcher"],
+            "posix_spawn",
+        )
 
     @unittest.skipIf(sys.platform == "win32", "POSIX host shell syntax")
     async def test_manual_full_access_starts_in_agent_lab_and_keeps_shell_syntax(self) -> None:
@@ -542,6 +573,43 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("spudex_action", phases)
         self.assertIn("spudex_step_result", phases)
         self.assertIn("spudex_completed", phases)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX host shell syntax")
+    async def test_full_access_ai_command_text_keeps_shell_syntax(self) -> None:
+        glob_dir = self.host_root / "shell-glob"
+        glob_dir.mkdir()
+        (glob_dir / "first.txt").write_text("first\n", encoding="utf-8")
+        (glob_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        command = f"printf '%s\\n' {glob_dir}/*.txt | sort"
+        llm = _SequenceLlm(
+            json.dumps(
+                {
+                    "type": "command",
+                    "command": command,
+                    "reason": "Exercise host-shell glob and pipeline syntax.",
+                }
+            ),
+            '{"type":"reply","outcome":"completed","message":"Shell syntax worked."}',
+        )
+        session_id = self._session("AI shell command")
+
+        result = await chat_loop.run_spudex_chat_turn(
+            session_id=session_id,
+            message="List the matching text files through a pipeline",
+            platform="webui",
+            llm_client=llm,
+            redis_client=self._redis(full_access=True, max_task_steps=2),
+            task_mode=True,
+        )
+
+        self.assertTrue(result["ok"])
+        logs = runner.read_spudex_logs(session_id)["entries"]
+        stdout = "\n".join(
+            row["text"] for row in logs if row.get("stream") == "stdout"
+        )
+        self.assertIn(str(glob_dir / "first.txt"), stdout)
+        self.assertIn(str(glob_dir / "second.txt"), stdout)
+        self.assertTrue(any(row.get("text") == f"$ {command}" for row in logs))
 
     async def test_hydra_uses_the_shared_spudex_loop(self) -> None:
         expected = {"ok": True, "summary_for_user": "done"}

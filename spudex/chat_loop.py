@@ -79,6 +79,7 @@ async def _repair_spudex_decision(
         '{"type":"reply","outcome":"answer|completed|blocked|failed","message":"..."}\n'
         '{"type":"write_file","path":"relative/path","content":"...","reason":"..."}\n'
         '{"type":"command","argv":["command","arg"],"reason":"..."}\n'
+        '{"type":"command","command":"shell command text","reason":"..."}\n'
         '{"type":"verify","argv":["command","arg"],"reason":"..."}\n'
         '{"type":"search","query":"...","reason":"..."}\n'
         "Preserve the original intent. Do not add markdown or explanation."
@@ -175,6 +176,8 @@ def _decision_type(decision: Dict[str, Any]) -> str:
     if bool(decision.get("done")):
         return "reply"
     if decision.get("argv") is not None:
+        return "command"
+    if decision.get("command") is not None:
         return "command"
     if decision.get("path") is not None and decision.get("content") is not None:
         return "write_file"
@@ -360,9 +363,11 @@ async def run_spudex_chat_turn(
     execution_rules = (
         "- Full access is enabled. Commands run directly on the host with its environment, network, installed tools, and filesystem access.\n"
         "- Shells, pipelines, redirects, command separators, absolute executables, inline eval, installers, package managers, containers, and host-control commands are allowed when useful.\n"
+        "- For pipelines, redirects, globs, shell built-ins, variable expansion, or compound commands, return command text instead of an argv array so the host shell interprets the syntax.\n"
         if full_access
         else
         "- Restricted mode is enabled. Use argv arrays only; do not use shells, pipes, redirects, command separators, or inline eval.\n"
+        "- Do not return command text in Restricted mode.\n"
         "- Respect the execution_settings allow flags and choose a permitted alternative when an action is blocked.\n"
     )
     system_prompt = (
@@ -373,6 +378,7 @@ async def run_spudex_chat_turn(
         "{\"type\":\"reply\",\"outcome\":\"answer|completed|blocked|failed\",\"message\":\"...\"}\n"
         "{\"type\":\"write_file\",\"path\":\"<path>\",\"content\":\"...\",\"reason\":\"...\"}\n"
         "{\"type\":\"command\",\"argv\":[\"command\",\"arg\"],\"reason\":\"...\"}\n"
+        "{\"type\":\"command\",\"command\":\"shell command text\",\"reason\":\"...\"}\n"
         "{\"type\":\"verify\",\"argv\":[\"command\",\"arg\"],\"reason\":\"...\"}\n"
         "{\"type\":\"search\",\"query\":\"how to check free memory on macOS command line\",\"reason\":\"...\"}\n"
         "Rules:\n"
@@ -822,7 +828,13 @@ async def run_spudex_chat_turn(
             continue
 
         if kind == "verify":
-            argv = normalize_argv(argv=decision.get("argv") or decision.get("verify_argv"))
+            raw_argv = decision.get("argv") or decision.get("verify_argv")
+            command_text = (
+                str(decision.get("command") or "").strip()
+                if full_access and not raw_argv
+                else ""
+            )
+            argv = normalize_argv(command=command_text, argv=raw_argv)
             repeat_error = repeated_missing_executable(argv, ran_commands)
             if repeat_error:
                 append_session_log(session_id, stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
@@ -869,13 +881,14 @@ async def run_spudex_chat_turn(
                 argv=argv,
                 cwd=next_cwd,
                 settings=settings,
+                command_text=command_text,
                 capture_output=True,
                 background=False,
             )
             summary = str(result.get("stdout") or result.get("stderr") or result.get("status") or "").strip()
             set_spudex_verification(
                 session_id,
-                command=argv,
+                command=command_text or argv,
                 status="passed" if bool(result.get("ok")) else "failed",
                 summary=summary,
                 returncode=result.get("returncode"),
@@ -883,6 +896,7 @@ async def run_spudex_chat_turn(
             ran_commands.append(
                 {
                     "argv": argv,
+                    "command": command_text,
                     "cwd": str(next_cwd),
                     "ok": bool(result.get("ok")),
                     "status": result.get("status"),
@@ -927,7 +941,13 @@ async def run_spudex_chat_turn(
             update_spudex_session(session_id, status="failed", finished_ts=time.time())
             return action_failure(code="spudex_chat_bad_decision", message=final_text)
 
-        argv = normalize_argv(argv=decision.get("argv"))
+        raw_argv = decision.get("argv")
+        command_text = (
+            str(decision.get("command") or "").strip()
+            if full_access and not raw_argv
+            else ""
+        )
+        argv = normalize_argv(command=command_text, argv=raw_argv)
         repeat_error = repeated_missing_executable(argv, ran_commands)
         if repeat_error:
             append_session_log(session_id, stream="system", text=str(repeat_error.get("message") or "Repeated missing executable skipped."), level="warning")
@@ -960,7 +980,7 @@ async def run_spudex_chat_turn(
         reason = str(decision.get("reason") or "").strip()
         if reason:
             append_session_log(session_id, stream="assistant", text=reason, level="info")
-        command_label = " ".join(argv[:3]).strip() or "command"
+        command_label = command_text or " ".join(argv[:3]).strip() or "command"
         await _emit_progress(
             progress_callback,
             text=f"Spudex is running: {command_label}",
@@ -976,6 +996,7 @@ async def run_spudex_chat_turn(
             argv=argv,
             cwd=next_cwd,
             settings=settings,
+            command_text=command_text,
             capture_output=True,
             background=bool(decision.get("background")),
         )
@@ -983,6 +1004,7 @@ async def run_spudex_chat_turn(
         ran_commands.append(
             {
                 "argv": argv,
+                "command": command_text,
                 "cwd": str(next_cwd),
                 "ok": bool(result.get("ok")),
                 "status": result.get("status"),
