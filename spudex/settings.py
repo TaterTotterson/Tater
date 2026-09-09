@@ -7,6 +7,7 @@ SPUDEX_SETTINGS_KEY = "tater:spudex:settings"
 DEFAULT_SPUDEX_SETTINGS: Dict[str, Any] = {
     "enabled": False,
     "allowed_platforms": ["webui"],
+    "full_access": False,
     "policy_enabled": True,
     "require_approval": True,
     "require_file_approval": False,
@@ -35,6 +36,7 @@ DEFAULT_SPUDEX_SETTINGS: Dict[str, Any] = {
 
 _BOOL_KEYS = {
     "enabled",
+    "full_access",
     "policy_enabled",
     "require_approval",
     "require_file_approval",
@@ -109,8 +111,20 @@ def _normalize_platforms(value: Any) -> list[str]:
 def normalize_spudex_settings(values: Dict[str, Any] | None = None) -> Dict[str, Any]:
     source = dict(DEFAULT_SPUDEX_SETTINGS)
     legacy_agent_lab_scope = isinstance(values, dict) and "filesystem_scope" not in values
+    explicit_full_access = isinstance(values, dict) and "full_access" in values
     if isinstance(values, dict):
         source.update(values)
+    if explicit_full_access:
+        full_access = _as_bool(source.get("full_access"), False)
+    elif isinstance(values, dict) and "policy_enabled" in values:
+        # Older releases exposed an inverted "policy enabled" switch. Preserve an
+        # existing unrestricted setup when upgrading to the clearer full-access
+        # setting.
+        full_access = not _as_bool(source.get("policy_enabled"), True)
+    else:
+        full_access = bool(DEFAULT_SPUDEX_SETTINGS["full_access"])
+    source["full_access"] = full_access
+    source["policy_enabled"] = not full_access
     if legacy_agent_lab_scope:
         source["filesystem_scope"] = "host"
         if str(source.get("default_cwd") or "").strip() in {"", "workspace", "/workspace"}:
@@ -151,7 +165,9 @@ def get_spudex_settings(redis_client: Any = None) -> Dict[str, Any]:
 
 def save_spudex_settings(values: Dict[str, Any], redis_client: Any = None) -> Dict[str, Any]:
     current = get_spudex_settings(redis_client)
-    updates = values if isinstance(values, dict) else {}
+    updates = dict(values) if isinstance(values, dict) else {}
+    if "full_access" not in updates and "policy_enabled" in updates:
+        updates["full_access"] = not _as_bool(updates.get("policy_enabled"), True)
     next_settings = normalize_spudex_settings({**current, **updates})
     if redis_client is not None:
         try:

@@ -18,7 +18,7 @@ SPUDEX_TOOL_ROWS = [
     {
         "id": "run_terminal_task",
         "description": (
-            "send a natural-language request to run policy-controlled console or terminal work "
+            "send a natural-language request to run console or terminal work "
             "on the current PC where the assistant is running; use for local CPU/GPU/RAM/disk "
             "stats, OS/process diagnostics, scripts, file work, local servers, or other command-line tasks"
         ),
@@ -134,6 +134,8 @@ def _approval_required(
     *,
     actor: str = "Hydra",
 ) -> Optional[Dict[str, Any]]:
+    if bool(settings.get("full_access")):
+        return None
     if not bool(settings.get("require_approval")):
         return None
     label = str(actor or "Hydra").strip() or "Hydra"

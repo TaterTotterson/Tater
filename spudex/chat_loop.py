@@ -337,6 +337,7 @@ async def run_spudex_chat_turn(
     approval_callback: Optional[Callable[[List[str]], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
+    full_access = bool(settings.get("full_access"))
     user_message = str(message or "").strip()
     if not user_message:
         return action_failure(code="spudex_chat_empty", message="Spudex chat message is required.")
@@ -356,9 +357,17 @@ async def run_spudex_chat_turn(
     ran_searches: List[Dict[str, Any]] = []
     wrote_files: List[Dict[str, Any]] = []
     loop_notes: List[str] = []
+    execution_rules = (
+        "- Full access is enabled. Commands run directly on the host with its environment, network, installed tools, and filesystem access.\n"
+        "- Shells, pipelines, redirects, command separators, absolute executables, inline eval, installers, package managers, containers, and host-control commands are allowed when useful.\n"
+        if full_access
+        else
+        "- Restricted mode is enabled. Use argv arrays only; do not use shells, pipes, redirects, command separators, or inline eval.\n"
+        "- Respect the execution_settings allow flags and choose a permitted alternative when an action is blocked.\n"
+    )
     system_prompt = (
         "You are the model inside Tater's shared Spudex execution loop.\n"
-        "You can answer when appropriate, run one policy-controlled terminal command at a time, or ask Tater's websearch helper for command guidance.\n"
+        "You can answer when appropriate, run one terminal command at a time, or ask Tater's websearch helper for command guidance.\n"
         "Return exactly one strict JSON object.\n"
         "Allowed shapes:\n"
         "{\"type\":\"reply\",\"outcome\":\"answer|completed|blocked|failed\",\"message\":\"...\"}\n"
@@ -383,15 +392,14 @@ async def run_spudex_chat_turn(
         "- If the last attempt failed, returned no useful result, or did not answer the user's correction, explain in the action reason how the new approach differs or why stopping/asking is now appropriate.\n"
         "- After a command fails, never stop at 'I can try another way'. Return the next action JSON immediately.\n"
         "- If command_feedback shows error_code executable_not_found, do not retry that executable until you have installed it or completed another successful recovery action.\n"
-        "- If an executable is missing and the task truly needs it, install the package that provides it when execution_settings allow installs/package managers or policy_disabled is true; then retry after the install succeeds.\n"
+        "- If an executable is missing and the task truly needs it, install the package that provides it when execution_settings allow installs/package managers or full_access is true; then retry after the install succeeds.\n"
         "- If installing is not allowed or not worth it, choose an installed tool or a Python/stdlib fallback immediately. On Linux/Unraid, write a small Python script that reads /proc when ps, free, top, or similar utilities are unavailable.\n"
         "- Prefer direct terminal commands for ordinary inspection, filesystem, git, package, process, service, network, and OS checks.\n"
         "- Use a small Python script only when it materially simplifies multi-step logic, structured data parsing, calculations, generated file content, or when installed shell tools are missing/unavailable.\n"
-        "- Do not use inline interpreter eval such as python -c; write a script file first, then run it.\n"
         "- Use search only when you are genuinely unsure about the right command or need current external instructions.\n"
-        "- Use argv arrays only. Do not use shells, pipes, redirects, command separators, or inline eval.\n"
-        "- Commands run from the configured working folder. Do not include or change cwd.\n"
-        "- The default working folder is agent_lab, exposed as HOME (~). Commands and file writes may use absolute host paths when the task requires them.\n"
+        + execution_rules
+        + "- Commands run from the configured working folder. Do not include or change cwd.\n"
+        "- The default working folder is agent_lab. It is a starting location, not a filesystem boundary; commands and file writes may use absolute host paths when the task requires them.\n"
         "- Command results come back in commands_this_turn with raw stdout, stderr, returncode, and status.\n"
         "- File writes come back in files_this_turn with path_display and bytes.\n"
         "- Web research results come back in searches_this_turn with answer, sources, and enough.\n"
@@ -748,7 +756,7 @@ async def run_spudex_chat_turn(
                 content=content,
                 cwd=next_cwd,
                 append=bool(decision.get("append")),
-                require_approval=bool(settings.get("require_file_approval")),
+                require_approval=bool(settings.get("require_file_approval")) and not full_access,
             )
             wrote_files.append(
                 {

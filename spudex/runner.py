@@ -4,6 +4,7 @@ import json
 import os
 import platform as host_platform
 import re
+import shlex
 import shutil
 import signal
 import stat as stat_module
@@ -37,9 +38,15 @@ def _ensure_dirs() -> None:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _subprocess_env() -> dict[str, str]:
+def _full_access_enabled(settings: Dict[str, Any]) -> bool:
+    if "full_access" in settings:
+        return bool(settings.get("full_access"))
+    return not bool(settings.get("policy_enabled", True))
+
+
+def _subprocess_env(*, full_access: bool = False) -> dict[str, str]:
     source = os.environ
-    env: dict[str, str] = {}
+    env: dict[str, str] = dict(source) if full_access else {}
     current_path = str(source.get("PATH") or "").strip()
     if current_path:
         parts = [part for part in current_path.split(os.pathsep) if part]
@@ -51,11 +58,12 @@ def _subprocess_env() -> dict[str, str]:
         env["PATH"] = _DEFAULT_SUBPROCESS_PATH
     temp_dir = SPUDEX_DIR / "tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    env["HOME"] = str(AGENT_LAB_DIR)
-    env["TMPDIR"] = str(temp_dir)
-    env["TEMP"] = str(temp_dir)
-    env["TMP"] = str(temp_dir)
     env["SPUDEX_AGENT_LAB"] = str(AGENT_LAB_DIR)
+    if not full_access:
+        env["HOME"] = str(AGENT_LAB_DIR)
+        env["TMPDIR"] = str(temp_dir)
+        env["TEMP"] = str(temp_dir)
+        env["TMP"] = str(temp_dir)
     for key in (
         "LANG",
         "LC_ALL",
@@ -75,14 +83,41 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
+def _host_shell_argv(command: str) -> List[str]:
+    text = str(command or "").strip()
+    if os.name == "nt":
+        shell = str(os.environ.get("COMSPEC") or "cmd.exe").strip() or "cmd.exe"
+        return [shell, "/d", "/s", "/c", text]
+
+    preferred = str(os.environ.get("SHELL") or "").strip()
+    if not preferred or not Path(preferred).is_absolute() or not Path(preferred).exists():
+        preferred = "/bin/zsh" if host_platform.system().strip().lower() == "darwin" else "/bin/sh"
+    return [preferred, "-lc", text]
+
+
+def _is_standalone_cd(command: Any, argv: List[str]) -> bool:
+    if not argv or Path(str(argv[0] or "")).name.lower() != "cd":
+        return False
+    raw = str(command or "").strip()
+    if not raw:
+        return len(argv) <= 2
+    try:
+        lexer = shlex.shlex(raw, posix=os.name != "nt", punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    return len(tokens) <= 2 and bool(tokens) and str(tokens[0]).lower() == "cd"
+
+
 def _isolated_exec_argv(
     argv: List[str],
     *,
     cwd: Path,
     settings: Dict[str, Any],
 ) -> tuple[List[str], str]:
-    if not bool(settings.get("policy_enabled", True)):
-        return list(argv), "policy_disabled"
+    if _full_access_enabled(settings):
+        return list(argv), "full_access"
     if str(settings.get("sandbox_mode") or "agent_lab").strip().lower() != "agent_lab":
         return list(argv), "policy_only"
 
@@ -909,10 +944,12 @@ async def run_argv_in_session(
     argv: List[str],
     cwd: Path,
     settings: Dict[str, Any],
+    command_text: str = "",
     capture_output: bool = False,
     background: bool = False,
 ) -> Dict[str, Any]:
-    if bool(settings.get("policy_enabled", True)):
+    full_access = _full_access_enabled(settings)
+    if not full_access and bool(settings.get("policy_enabled", True)):
         validation = validate_spudex_command(argv, cwd, settings)
         if not bool(validation.get("ok")):
             append_session_log(session_id, stream="policy", text=str(validation.get("message") or "Command blocked."), level="error")
@@ -935,23 +972,16 @@ async def run_argv_in_session(
         meta.update({"status": "blocked", "returncode": None, "finished_ts": _now(), "updated_ts": _now()})
         _save_meta(meta)
         return {"ok": False, "session_id": session_id, "error": {"ok": False, "code": "empty_command", "message": "No command was provided."}}
-    else:
-        append_session_log(
+    if not full_access:
+        builtin_result = _run_terminal_builtin_in_session(
             session_id,
-            stream="policy",
-            text="Spudex command safety policy is disabled for this run.",
-            level="warning",
+            argv=argv,
+            cwd=cwd,
+            settings=settings,
+            capture_output=capture_output,
         )
-
-    builtin_result = _run_terminal_builtin_in_session(
-        session_id,
-        argv=argv,
-        cwd=cwd,
-        settings=settings,
-        capture_output=capture_output,
-    )
-    if builtin_result is not None:
-        return builtin_result
+        if builtin_result is not None:
+            return builtin_result
 
     timeout_sec = max(5, int(settings.get("command_timeout_sec") or 45))
     max_output_bytes = max(16384, int(settings.get("max_output_bytes") or 262144))
@@ -970,12 +1000,15 @@ async def run_argv_in_session(
                 "message": message,
             },
         }
+    displayed_command = str(command_text or "").strip() if full_access else ""
+    if not displayed_command:
+        displayed_command = shlex.join(str(item) for item in argv)
     meta = _load_meta(session_id)
     meta.update(
         {
             "status": "running",
             "argv": list(argv),
-            "command": " ".join(str(item) for item in argv),
+            "command": displayed_command,
             "cwd": str(cwd),
             "cwd_display": display_agent_path(cwd),
             "started_ts": meta.get("started_ts") or _now(),
@@ -983,8 +1016,8 @@ async def run_argv_in_session(
         }
     )
     _save_meta(meta)
-    append_session_log(session_id, stream="command", text=f"$ {' '.join(argv)}", level="info")
-    _detect_previews(session_id, " ".join(str(item) for item in argv))
+    append_session_log(session_id, stream="command", text=f"$ {displayed_command}", level="info")
+    _detect_previews(session_id, displayed_command)
 
     captured_output: dict[str, bytearray] = {
         "stdout": bytearray(),
@@ -993,22 +1026,30 @@ async def run_argv_in_session(
     output_bytes_seen = 0
     output_truncated = False
     truncation_logged = False
-    exec_argv, isolation_backend = _isolated_exec_argv(
-        argv,
-        cwd=cwd,
-        settings=settings,
-    )
+    if full_access and str(command_text or "").strip():
+        exec_argv = _host_shell_argv(command_text)
+        isolation_backend = "full_access_shell"
+    else:
+        exec_argv, isolation_backend = _isolated_exec_argv(
+            argv,
+            cwd=cwd,
+            settings=settings,
+        )
     append_session_log(
         session_id,
         stream="policy",
-        text=f"Execution isolation: {isolation_backend}.",
-        level="info" if isolation_backend not in {"policy_only", "policy_disabled"} else "warning",
+        text=(
+            "Full access is on: running directly on the host without Spudex command restrictions or execution isolation."
+            if full_access
+            else f"Execution isolation: {isolation_backend}."
+        ),
+        level="warning" if full_access or isolation_backend == "policy_only" else "info",
     )
     update_spudex_session(session_id, isolation_backend=isolation_backend)
     try:
         process_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
-            "env": _subprocess_env(),
+            "env": _subprocess_env(full_access=full_access),
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
         }
@@ -1192,6 +1233,7 @@ async def run_spudex_command_once(
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
     parsed_argv = normalize_argv(command=command, argv=argv)
+    command_text = str(command or "").strip() if _full_access_enabled(settings) and not argv else ""
     resolved_cwd = resolve_spudex_cwd(cwd or settings.get("default_cwd"))
     session = create_spudex_session(
         label=label,
@@ -1200,7 +1242,14 @@ async def run_spudex_command_once(
         source=source,
         platform=platform,
     )
-    result = await run_argv_in_session(session["id"], argv=parsed_argv, cwd=resolved_cwd, settings=settings, background=background)
+    result = await run_argv_in_session(
+        session["id"],
+        argv=parsed_argv,
+        cwd=resolved_cwd,
+        settings=settings,
+        command_text=command_text,
+        background=background,
+    )
     logs = read_spudex_logs(session["id"], after_seq=0, limit=200)
     return {**result, "session": _load_meta(session["id"]), "logs": logs.get("entries") or []}
 
@@ -1218,8 +1267,10 @@ async def start_spudex_command(
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
     parsed_argv = normalize_argv(command=command, argv=argv)
+    full_access = _full_access_enabled(settings)
+    command_text = str(command or "").strip() if full_access and not argv else ""
     resolved_cwd = resolve_spudex_cwd(cwd or settings.get("default_cwd"))
-    if parsed_argv and Path(parsed_argv[0]).name.lower() == "cd":
+    if parsed_argv and Path(parsed_argv[0]).name.lower() == "cd" and (not full_access or _is_standalone_cd(command, parsed_argv)):
         session = create_spudex_session(
             label=label,
             argv=parsed_argv,
@@ -1256,7 +1307,7 @@ async def start_spudex_command(
                 finished_ts=_now(),
             )
         return {"ok": True, "builtin": "cd", "session": session}
-    if parsed_argv and Path(parsed_argv[0]).name.lower() in _TERMINAL_BUILTINS:
+    if not full_access and parsed_argv and Path(parsed_argv[0]).name.lower() in _TERMINAL_BUILTINS:
         session = create_spudex_session(
             label=label,
             argv=parsed_argv,
@@ -1283,7 +1334,16 @@ async def start_spudex_command(
         source=source,
         platform=platform,
     )
-    task = asyncio.create_task(run_argv_in_session(session["id"], argv=parsed_argv, cwd=resolved_cwd, settings=settings, background=background))
+    task = asyncio.create_task(
+        run_argv_in_session(
+            session["id"],
+            argv=parsed_argv,
+            cwd=resolved_cwd,
+            settings=settings,
+            command_text=command_text,
+            background=background,
+        )
+    )
     register_spudex_task(session["id"], task)
     return {"ok": True, "session": _load_meta(session["id"])}
 

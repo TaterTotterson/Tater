@@ -110,6 +110,25 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["filesystem_scope"], "host")
         self.assertEqual(normalized["default_cwd"], "agent_lab")
 
+    def test_legacy_policy_off_migrates_to_full_access(self) -> None:
+        normalized = settings.normalize_spudex_settings({"policy_enabled": False})
+
+        self.assertTrue(normalized["full_access"])
+        self.assertFalse(normalized["policy_enabled"])
+
+    def test_explicit_full_access_is_the_execution_source_of_truth(self) -> None:
+        enabled = settings.normalize_spudex_settings(
+            {"full_access": True, "policy_enabled": True}
+        )
+        restricted = settings.normalize_spudex_settings(
+            {"full_access": False, "policy_enabled": False}
+        )
+
+        self.assertTrue(enabled["full_access"])
+        self.assertFalse(enabled["policy_enabled"])
+        self.assertFalse(restricted["full_access"])
+        self.assertTrue(restricted["policy_enabled"])
+
     def test_subprocess_environment_does_not_inherit_secrets(self) -> None:
         with mock.patch.dict(
             runner.os.environ,
@@ -125,6 +144,22 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("TATER_SECRET", env)
         self.assertEqual(env["HOME"], str(self.root))
+        self.assertEqual(env["SPUDEX_AGENT_LAB"], str(self.root))
+
+    def test_full_access_subprocess_environment_inherits_host_values(self) -> None:
+        with mock.patch.dict(
+            runner.os.environ,
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.host_root),
+                "SPUDEX_TEST_CREDENTIAL": "available-to-host-command",
+            },
+            clear=True,
+        ):
+            env = runner._subprocess_env(full_access=True)
+
+        self.assertEqual(env["HOME"], str(self.host_root))
+        self.assertEqual(env["SPUDEX_TEST_CREDENTIAL"], "available-to-host-command")
         self.assertEqual(env["SPUDEX_AGENT_LAB"], str(self.root))
 
     def test_policy_allows_host_paths(self) -> None:
@@ -194,6 +229,48 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["output_truncated"])
         self.assertLessEqual(len(result["stdout"].encode("utf-8")), 16384)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX host shell syntax")
+    async def test_full_access_runs_manual_text_through_the_host_shell(self) -> None:
+        session_id = self._session("full access shell")
+        runtime_settings = settings.normalize_spudex_settings(
+            {"full_access": True, "command_timeout_sec": 10}
+        )
+
+        result = await runner.run_argv_in_session(
+            session_id,
+            argv=["printf", "spudex\\n", "|", "tr", "[:lower:]", "[:upper:]"],
+            command_text="printf 'spudex\\n' | tr '[:lower:]' '[:upper:]'",
+            cwd=self.workspace,
+            settings=runtime_settings,
+            capture_output=True,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"], "SPUDEX\n")
+        self.assertEqual(result["isolation_backend"], "full_access_shell")
+        logs = runner.read_spudex_logs(session_id)["entries"]
+        self.assertTrue(any("Full access is on" in row["text"] for row in logs))
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX host shell syntax")
+    async def test_manual_full_access_starts_in_agent_lab_and_keeps_shell_syntax(self) -> None:
+        started = await runner.start_spudex_command(
+            command="sleep 0.05; printf 'manual\\n' | tr '[:lower:]' '[:upper:]'",
+            cwd="",
+            source="ui",
+            redis_client=self._redis(full_access=True),
+            label="manual shell",
+        )
+        session_id = str(started["session"]["id"])
+        task = runner._ACTIVE_TASKS.get(session_id)
+        self.assertIsNotNone(task)
+        await task
+
+        session = runner.get_spudex_session(session_id)
+        self.assertEqual(pathlib.Path(session["cwd"]).resolve(), self.root.resolve())
+        self.assertEqual(session["isolation_backend"], "full_access_shell")
+        logs = runner.read_spudex_logs(session_id)["entries"]
+        self.assertTrue(any(row["stream"] == "stdout" and row["text"] == "MANUAL" for row in logs))
 
     async def test_manual_terminal_starts_in_agent_lab_home(self) -> None:
         result = await runner.start_spudex_command(
@@ -493,7 +570,7 @@ class SpudexRuntimeTests(unittest.IsolatedAsyncioTestCase):
             args={"request": "Inspect the folder"},
             platform="webui",
             llm_client=llm,
-            redis_client=self._redis(require_approval=True, max_task_steps=1),
+            redis_client=self._redis(full_access=False, require_approval=True, max_task_steps=1),
         )
 
         self.assertFalse(result["ok"])

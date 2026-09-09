@@ -78,8 +78,9 @@ class VueSpudexTests(unittest.TestCase):
         self.assertIn('const manualCwdDisplay = ref("~")', source)
         self.assertIn("cwd: manualCwd.value", source)
         self.assertIn('result.builtin === "cd"', source)
-        self.assertIn("Starts in agent_lab (~) with access to the host filesystem", source)
-        self.assertIn("Filesystem paths are unrestricted", source)
+        self.assertIn("Starts in Agent Lab", source)
+        self.assertIn("commands run through the host shell", source)
+        self.assertIn("Full host access", source)
         self.assertNotIn('class="tv-panel tsx-run-card"', source)
         self.assertNotIn('class="tv-panel tsx-manual-history"', source)
         self.assertIn(".tsx-terminal-check input.tv-checkbox", styles)
@@ -91,7 +92,7 @@ class VueSpudexTests(unittest.TestCase):
         self.assertIn("width: 17px !important", styles)
         self.assertIn("height: 17px !important", styles)
 
-    def test_spudex_includes_complete_session_insights_and_policy(self) -> None:
+    def test_spudex_includes_complete_session_insights_and_full_access(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
@@ -102,16 +103,22 @@ class VueSpudexTests(unittest.TestCase):
             "File changes",
             "Session memory",
             "last_policy_block",
+            "full_access",
+            "Use with care.",
+            "run any command available to Tater",
+            "starting folder, not a filesystem boundary",
+            "allowed_platforms",
+        ):
+            self.assertIn(feature, source)
+        for old_policy_toggle in (
             "allow_network",
             "allow_installs",
             "allow_shell_commands",
             "allow_host_admin_commands",
-            "allowed_platforms",
         ):
-            self.assertIn(feature, source)
+            self.assertNotIn(old_policy_toggle, source)
         self.assertIn(".tsx-workbench-grid", styles)
         self.assertIn(".tsx-manual-console", styles)
-        self.assertIn(".tsx-policy-grid", styles)
         self.assertIn(".tsx-details", styles)
 
 

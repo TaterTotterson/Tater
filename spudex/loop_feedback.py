@@ -3,10 +3,12 @@ from typing import Any, Dict, List, Optional
 
 
 def execution_settings_summary(settings: Dict[str, Any]) -> Dict[str, bool]:
-    policy_enabled = bool(settings.get("policy_enabled", True))
+    full_access = bool(settings.get("full_access"))
+    policy_enabled = not full_access and bool(settings.get("policy_enabled", True))
     return {
+        "full_access": full_access,
         "policy_enabled": policy_enabled,
-        "policy_disabled": not policy_enabled,
+        "policy_disabled": full_access,
         "allow_host_package_managers": bool(settings.get("allow_host_package_managers")),
         "allow_package_tool_installs": bool(settings.get("allow_installs")),
         "allow_network": bool(settings.get("allow_network")),

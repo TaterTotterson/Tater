@@ -12,19 +12,6 @@ const tabs = [
   { id: "manual", label: "Manual Session" },
   { id: "settings", label: "Settings" },
 ];
-const policyRules = [
-  ["require_approval", "Require Hydra approval", "Hydra-triggered actions pause for approval. Spudex Chat and manual commands remain direct."],
-  ["require_file_approval", "Require file write approval", "Model-proposed file writes remain pending until approved or rejected."],
-  ["allow_network", "Allow network commands", "Allows curl, wget, and Git network actions."],
-  ["allow_installs", "Allow package and tool installs", "Allows pip, npm, uv, and similar environment installs."],
-  ["allow_absolute_executables", "Allow absolute executable paths", "Allows commands such as /usr/bin/python3."],
-  ["allow_shell_commands", "Allow shells", "Allows sh, bash, zsh, fish, cmd, and PowerShell."],
-  ["allow_host_admin_commands", "Allow host and admin commands", "Allows sudo, chmod, chown, launchctl, osascript, and open."],
-  ["allow_remote_control", "Allow remote control tools", "Allows ssh, scp, and sftp when network access is also enabled."],
-  ["allow_containers", "Allow containers", "Allows Docker and Podman commands."],
-  ["allow_host_package_managers", "Allow host package managers", "Allows brew, apt, yum, dnf, pacman, and apk."],
-  ["allow_inline_eval", "Allow inline eval", "Allows python -c, node -e, ruby -e, and similar interpreter execution."],
-] as const;
 
 const activeTab = ref(normalizeTab(props.options.initialTab));
 const selectedSessionId = ref(text(props.options.initialSessionId));
@@ -131,18 +118,7 @@ function syncSettings(force = false) {
   const source = payload.value.settings || {};
   Object.assign(settingsDraft, {
     enabled: Boolean(source.enabled),
-    policy_enabled: source.policy_enabled !== false,
-    require_approval: Boolean(source.require_approval),
-    require_file_approval: Boolean(source.require_file_approval),
-    allow_absolute_executables: Boolean(source.allow_absolute_executables),
-    allow_shell_commands: Boolean(source.allow_shell_commands),
-    allow_host_admin_commands: Boolean(source.allow_host_admin_commands),
-    allow_remote_control: Boolean(source.allow_remote_control),
-    allow_containers: Boolean(source.allow_containers),
-    allow_host_package_managers: Boolean(source.allow_host_package_managers),
-    allow_inline_eval: Boolean(source.allow_inline_eval),
-    allow_network: Boolean(source.allow_network),
-    allow_installs: Boolean(source.allow_installs),
+    full_access: Boolean(source.full_access),
     allowed_platforms: Array.isArray(source.allowed_platforms) ? [...source.allowed_platforms] : ["webui"],
     default_cwd: text(source.default_cwd || "agent_lab"),
     max_task_steps: Number(source.max_task_steps || 6),
@@ -377,20 +353,20 @@ defineExpose({ refresh: () => refreshAll(false) });
         </header>
         <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
           <article v-for="entry in manualLogs" :key="`${entry._session_id || ''}-${entry.seq || entry.ts || ''}-${entry.text || ''}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article>
-          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Starts in agent_lab (~) with access to the host filesystem. Use ls or dir, pwd, and cd.</small></div>
+          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Starts in Agent Lab. {{ settingsDraft.full_access ? 'Full access is on, so commands run through the host shell.' : 'Restricted mode is on.' }}</small></div>
         </div>
         <form class="tsx-manual-prompt" @submit.prevent="runCommand">
           <label class="tsx-prompt-line"><span aria-hidden="true">$</span><input v-model="command" type="text" autocomplete="off" aria-label="Terminal command" placeholder="Type a command…" :disabled="busy === 'run'" /></label>
           <label class="tsx-terminal-check"><input v-model="background" class="tv-checkbox" type="checkbox" /><span>Keep running</span></label>
           <button class="tv-button primary tsx-terminal-run" type="submit" :disabled="busy === 'run' || !command.trim()"><span aria-hidden="true">↵</span>{{ busy === 'run' ? 'Running…' : 'Run' }}</button>
         </form>
-        <footer class="tsx-manual-footer"><span>Policy checked</span><span>Current directory {{ manualCwdDisplay }}</span></footer>
+        <footer class="tsx-manual-footer"><span>{{ settingsDraft.full_access ? 'Full host access' : 'Restricted mode' }}</span><span>Current directory {{ manualCwdDisplay }}</span></footer>
       </section>
     </section>
 
     <section v-else class="tsx-settings">
-      <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Spudex availability</h2><p>Expose policy-controlled Spudex tools only on the Tater surfaces you choose.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Default working folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Spudex.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
-      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Defense in depth</span><h2>Spudex policy</h2><p>Keep command safety on, then allow only the categories a workflow actually needs.</p></div><label class="tsx-master-toggle" :class="{ danger: !settingsDraft.policy_enabled }"><span>{{ settingsDraft.policy_enabled ? 'Policy on' : 'Policy off' }}</span><input v-model="settingsDraft.policy_enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: !settingsDraft.policy_enabled }"><strong>{{ settingsDraft.policy_enabled ? 'Policy is active.' : 'Command safety policy is off.' }}</strong> {{ settingsDraft.policy_enabled ? 'Tater checks command categories, network use, installs, and the configurable options below.' : 'Spudex can use shells, network commands, installs, and host-affecting tools.' }}</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code> as <code>~</code>.</span><span>Filesystem paths are unrestricted.</span><span>Model processes stay tracked and stoppable.</span></div><div class="tsx-policy-grid"><label v-for="rule in policyRules" :key="rule[0]"><span><strong>{{ rule[1] }}</strong><small>{{ rule[2] }}</small></span><input v-model="settingsDraft[rule[0]]" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></div></div>
+      <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Spudex availability</h2><p>Choose where Hydra can expose Spudex terminal tools.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Starting folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Spudex.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
+      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Terminal capability</span><h2>Full access</h2><p>Use one setting for both Spudex Chat and the Manual terminal.</p></div><label class="tsx-master-toggle" :class="{ danger: settingsDraft.full_access }"><span>{{ settingsDraft.full_access ? 'Full access' : 'Restricted' }}</span><input v-model="settingsDraft.full_access" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: settingsDraft.full_access }"><strong>{{ settingsDraft.full_access ? 'Full access is on.' : 'Restricted mode is on.' }}</strong> {{ settingsDraft.full_access ? 'Spudex can run any command available to Tater, including shells, installs, network tools, containers, and host-affecting commands.' : 'Spudex applies its command allow-list and available OS isolation.' }}</div><div v-if="settingsDraft.full_access" class="tsx-policy-notice danger"><strong>Use with care.</strong> Commands may read environment credentials, change or delete host files, install software, control applications, and contact external services.</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code>.</span><span>Agent Lab is a starting folder, not a filesystem boundary.</span><span>Processes stay tracked and stoppable.</span></div></div>
       <div class="tsx-settings-save"><span>Model routing remains in Settings → Models.</span><button class="tv-button primary" type="button" :disabled="busy === 'settings' || !settingsDirty" @click="saveSettings">{{ busy === 'settings' ? 'Saving…' : 'Save settings' }}</button></div>
     </section>
   </div>

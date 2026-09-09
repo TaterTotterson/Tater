@@ -155,6 +155,13 @@ class LittleSpudSpudexTests(unittest.IsolatedAsyncioTestCase):
                 actor="Little Spud",
             )
         )
+        self.assertIsNone(
+            hydra_tools._approval_required(
+                {"full_access": True, "require_approval": True},
+                ["pwd"],
+                actor="Little Spud",
+            )
+        )
 
     def test_disabling_little_spud_tools_removes_all_kernel_tools(self) -> None:
         origin = {"kernel_tools_enabled": False}
