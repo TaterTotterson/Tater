@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
+import hashlib
 import json
 from typing import Any, Dict, List
 from urllib.error import URLError
@@ -23,6 +24,7 @@ DEFAULTS: Dict[str, Any] = {
     "wake_engine": "micro_wake_word",
     "wake_word": "hey_tater",
     "wake_word_url": "",
+    "wake_model_revision": "",
     "wake_profile_key": "hey_tater",
     "wake_profile_name": "Hey Tater",
     "wake_profile_source_url": "",
@@ -75,6 +77,7 @@ FIRMWARE_SETTING_KEYS = (
     "wake_engine",
     "wake_word",
     "wake_word_url",
+    "wake_model_revision",
     "wake_sensitivity",
     "wake_environment",
     "wake_threshold",
@@ -134,6 +137,7 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "wake_profile_sliding_window",
     "wake_profile_close_miss_threshold",
     "wake_profile_error",
+    "wake_model_revision",
 )
 GLOBAL_SATELLITE_PERSISTED_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | set(GLOBAL_WAKE_PROFILE_KEYS)
 GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
@@ -402,7 +406,7 @@ def _wake_profile_key(wake_word: str, wake_word_url: str = "") -> str:
 def _wake_profile_from_source(source: Dict[str, Any], wake_word: str, wake_word_url: str) -> Dict[str, Any]:
     builtin = BUILTIN_WAKE_PROFILES.get(wake_word)
     if builtin:
-        return dict(builtin)
+        return {**builtin, "wake_model_revision": ""}
 
     key = _wake_profile_key(wake_word, wake_word_url)
     if wake_word == "custom_url" and wake_word_url and _text(source.get("wake_profile_source_url")) == wake_word_url:
@@ -431,6 +435,7 @@ def _wake_profile_from_source(source: Dict[str, Any], wake_word: str, wake_word_
                 3,
             ),
             "wake_profile_error": _text(source.get("wake_profile_error")),
+            "wake_model_revision": _text(source.get("wake_model_revision")),
         }
 
     return {
@@ -442,6 +447,7 @@ def _wake_profile_from_source(source: Dict[str, Any], wake_word: str, wake_word_
         "wake_profile_sliding_window": int(DEFAULTS["wake_profile_sliding_window"]),
         "wake_profile_close_miss_threshold": float(DEFAULTS["wake_profile_close_miss_threshold"]),
         "wake_profile_error": "",
+        "wake_model_revision": "",
     }
 
 
@@ -525,6 +531,7 @@ def _fetch_wake_profile_json(wake_word_url: str) -> Dict[str, Any]:
         "wake_profile_sliding_window": sliding_window,
         "wake_profile_close_miss_threshold": close_miss_threshold,
         "wake_profile_error": "" if model_ref else "Wake JSON did not include a model field.",
+        "wake_model_revision": hashlib.sha256(raw).hexdigest(),
     }
 
 
@@ -940,6 +947,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "wake_engine": wake_engine,
         "wake_word": wake_word,
         "wake_word_url": wake_word_url,
+        "wake_model_revision": _text(profile.get("wake_model_revision")),
         "wake_profile_key": profile_key,
         "wake_profile_name": _text(profile.get("wake_profile_name")) or str(DEFAULTS["wake_profile_name"]),
         "wake_profile_source_url": _text(profile.get("wake_profile_source_url")),

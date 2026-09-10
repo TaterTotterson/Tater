@@ -24,6 +24,32 @@ V6_URL = (
 
 
 class WakeWordCatalogTests(unittest.TestCase):
+    def test_custom_model_revision_is_stable_until_package_changes(self) -> None:
+        class FakeResponse:
+            def __init__(self, payload: bytes) -> None:
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int) -> bytes:
+                return self.payload
+
+        first = b'{"wake_word":"Hey Test","model":"hey_test.tflite"}'
+        updated = b'{"wake_word":"Hey Test","model":"hey_test_v2.tflite"}'
+        with mock.patch.object(native_live_settings, "urlopen", return_value=FakeResponse(first)):
+            first_profile = native_live_settings._fetch_wake_profile_json("https://example.test/hey.json")
+        with mock.patch.object(native_live_settings, "urlopen", return_value=FakeResponse(first)):
+            same_profile = native_live_settings._fetch_wake_profile_json("https://example.test/hey.json")
+        with mock.patch.object(native_live_settings, "urlopen", return_value=FakeResponse(updated)):
+            updated_profile = native_live_settings._fetch_wake_profile_json("https://example.test/hey.json")
+
+        self.assertEqual(first_profile["wake_model_revision"], same_profile["wake_model_revision"])
+        self.assertNotEqual(first_profile["wake_model_revision"], updated_profile["wake_model_revision"])
+
     def test_manifest_parser_keeps_versioned_official_models_only(self) -> None:
         entries = wake_word_catalog.entries_from_manifest(
             {

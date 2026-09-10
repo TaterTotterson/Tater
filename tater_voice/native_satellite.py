@@ -4302,23 +4302,11 @@ async def handle_websocket(websocket: WebSocket) -> None:
             await send_json(_envelope("error", {"ok": False, "error": _text(auth.get("error")) or "Unauthorized."}))
             await websocket.close(code=1008)
             return
-        queue = await _record_client(selector, websocket, hello, auth)
-        async with _clients_lock:
-            row = _clients.get(selector)
-            client_row = row if isinstance(row, dict) and row.get("websocket") is websocket else None
-        bridge = client_row.get("voice_bridge") if isinstance(client_row, dict) else None
-        bridge = bridge if isinstance(bridge, _NativeVoicePipelineBridge) else None
-        if bridge is not None:
-            await bridge.start()
-        _vp().logger.info(
-            "[native-satellite] connected selector=%s board=%s firmware=%s room=%s auth=%s",
-            selector,
-            _text(payload.get("board")) or "-",
-            _text(payload.get("firmware_version")) or "-",
-            _text(payload.get("room")) or "-",
-            _text(auth.get("mode")) or "open",
-        )
 
+        # Finish the protocol handshake before registry and voice-pipeline
+        # setup. Pairing credentials are delivered in this acknowledgement,
+        # so delaying it can make a satellite's recovery watchdog close the
+        # socket before the device has saved its permanent token.
         ack_payload = {
             "ok": True,
             "protocol": PROTOCOL_VERSION,
@@ -4338,7 +4326,6 @@ async def handle_websocket(websocket: WebSocket) -> None:
         device_token = _text(auth.get("device_token"))
         if device_token:
             ack_payload["device_token"] = device_token
-
         await send_json(
             _envelope(
                 "hello.ack",
@@ -4346,6 +4333,24 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 message_id=_text(hello.get("id")),
             )
         )
+
+        queue = await _record_client(selector, websocket, hello, auth)
+        async with _clients_lock:
+            row = _clients.get(selector)
+            client_row = row if isinstance(row, dict) and row.get("websocket") is websocket else None
+        bridge = client_row.get("voice_bridge") if isinstance(client_row, dict) else None
+        bridge = bridge if isinstance(bridge, _NativeVoicePipelineBridge) else None
+        if bridge is not None:
+            await bridge.start()
+        _vp().logger.info(
+            "[native-satellite] connected selector=%s board=%s firmware=%s room=%s auth=%s",
+            selector,
+            _text(payload.get("board")) or "-",
+            _text(payload.get("firmware_version")) or "-",
+            _text(payload.get("room")) or "-",
+            _text(auth.get("mode")) or "open",
+        )
+
         await send_json(_envelope("state", {"state": "idle"}))
         await send_json(_envelope("settings", _firmware_settings_payload(selector, board=_text(payload.get("board")))))
 

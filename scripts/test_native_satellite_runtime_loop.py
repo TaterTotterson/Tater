@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -90,6 +91,60 @@ class NativeSatelliteRuntimeLoopTests(unittest.TestCase):
 
 
 class NativeSatelliteWebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hello_ack_precedes_client_runtime_setup(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.client = SimpleNamespace(host="127.0.0.1")
+                self.headers: dict[str, str] = {}
+                self.query_params: dict[str, str] = {}
+                self.sent: list[dict[str, Any]] = []
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_text(self) -> str:
+                return json.dumps(
+                    {
+                        "id": "hello-1",
+                        "type": "hello",
+                        "payload": {
+                            "device_id": "test-device",
+                            "hardware_id": "001122334455",
+                            "device_name": "Test Satellite",
+                            "board": "s3-box",
+                            "firmware_version": "test",
+                        },
+                    }
+                )
+
+            async def send_json(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        websocket = FakeWebSocket()
+        record_checked = False
+
+        async def record_client(*_args: Any, **_kwargs: Any) -> asyncio.Queue:
+            nonlocal record_checked
+            self.assertTrue(websocket.sent)
+            self.assertEqual("hello.ack", websocket.sent[0].get("type"))
+            self.assertEqual("tns_test", websocket.sent[0].get("payload", {}).get("device_token"))
+            record_checked = True
+            raise native_satellite.WebSocketDisconnect()
+
+        with (
+            mock.patch.object(
+                native_satellite,
+                "_authorize_websocket_hello",
+                return_value={"ok": True, "mode": "paired", "device_token": "tns_test"},
+            ),
+            mock.patch.object(native_satellite, "_record_client", side_effect=record_client),
+            mock.patch.object(native_satellite, "_voice_bridge_for_websocket", new=mock.AsyncMock(return_value=None)),
+            mock.patch.object(native_satellite, "_mark_disconnected", new=mock.AsyncMock(return_value=False)),
+        ):
+            await native_satellite.handle_websocket(websocket)  # type: ignore[arg-type]
+
+        self.assertTrue(record_checked)
+
     async def test_stubborn_child_task_cannot_block_websocket_cleanup(self) -> None:
         release = asyncio.Event()
 
