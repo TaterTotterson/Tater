@@ -41,6 +41,82 @@ class _FakeRedis:
 
 
 class NativeSatelliteIdentityTests(unittest.TestCase):
+    def test_pairing_retries_return_same_token_only_to_same_hardware(self) -> None:
+        pairing_code = "123456"
+        selector = "native:s3box-05469c"
+        payload = {
+            "device_id": "s3box-05469c",
+            "hardware_id": "3c842705469c",
+            "device_name": "Tater S3 Box Living Room",
+            "board": "s3-box",
+        }
+        pairing_session = {
+            "id": "pairing-session",
+            "code_hash": native_satellite._token_hash(pairing_code),
+            "display_code": "123 456",
+            "created_ts": 1000.0,
+            "expires_ts": 1600.0,
+            "state": "waiting",
+        }
+
+        with (
+            mock.patch.dict(
+                native_satellite._pairing_sessions,
+                {"pairing-session": pairing_session},
+                clear=True,
+            ),
+            mock.patch.object(native_satellite, "_now", return_value=1000.0),
+            mock.patch.object(
+                native_satellite,
+                "_new_device_token",
+                return_value="tns_retry_safe_token",
+            ),
+            mock.patch.object(native_satellite, "_save_device_credential") as save_credential,
+        ):
+            first = native_satellite._redeem_pairing_code(pairing_code, selector, payload)
+            retry = native_satellite._redeem_pairing_code(pairing_code, selector, payload)
+            wrong_hardware = native_satellite._redeem_pairing_code(
+                pairing_code,
+                selector,
+                {**payload, "hardware_id": "ffffffffffff"},
+            )
+
+        self.assertEqual(first["device_token"], "tns_retry_safe_token")
+        self.assertEqual(retry["device_token"], "tns_retry_safe_token")
+        self.assertIsNone(wrong_hardware)
+        save_credential.assert_called_once_with(selector, payload, "tns_retry_safe_token")
+
+    def test_expired_pairing_retry_cannot_recover_device_token(self) -> None:
+        pairing_code = "123456"
+        selector = "native:s3box-05469c"
+        payload = {
+            "device_id": "s3box-05469c",
+            "hardware_id": "3c842705469c",
+        }
+        pairing_session = {
+            "id": "pairing-session",
+            "code_hash": native_satellite._token_hash(pairing_code),
+            "state": "paired",
+            "selector": selector,
+            "device_id": payload["device_id"],
+            "hardware_id": payload["hardware_id"],
+            "device_token": "tns_expired_token",
+            "expires_ts": 1029.0,
+        }
+
+        with (
+            mock.patch.dict(
+                native_satellite._pairing_sessions,
+                {"pairing-session": pairing_session},
+                clear=True,
+            ),
+            mock.patch.object(native_satellite, "_now", return_value=1030.0),
+        ):
+            retry = native_satellite._redeem_pairing_code(pairing_code, selector, payload)
+
+        self.assertIsNone(retry)
+        self.assertNotIn("device_token", pairing_session)
+
     def test_legacy_selector_matches_corrected_board_by_mac_suffix(self) -> None:
         self.assertTrue(
             native_satellite._same_native_hardware(

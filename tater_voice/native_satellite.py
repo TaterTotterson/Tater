@@ -22,6 +22,7 @@ PROTOCOL_VERSION = 1
 DEFAULT_STALE_AFTER_S = 15.0
 PAIRING_CODE_LEN = 6
 PAIRING_CODE_TTL_S = 600
+PAIRING_RETRY_GRACE_S = 30
 SETUP_STATES = {"provisioning", "setup", "setup_mode", "pairing"}
 TOOL_TTS_KINDS = {"tool", "tool_progress"}
 NATIVE_AUDIO_QUEUE_MAX_CHUNKS = 120
@@ -562,6 +563,8 @@ def _prune_pairing_sessions_unlocked() -> None:
         expires_ts = float(session.get("expires_ts") or 0.0)
         if _text(session.get("state")) == "waiting" and expires_ts > 0 and now_ts >= expires_ts:
             session["state"] = "expired"
+        if _text(session.get("state")) == "paired" and expires_ts > 0 and now_ts >= expires_ts:
+            session.pop("device_token", None)
         if _text(session.get("state")) != "waiting" and expires_ts < stale_cutoff:
             _pairing_sessions.pop(session_id, None)
 
@@ -658,6 +661,32 @@ def _remove_device_credentials(selector: Any) -> int:
         return len(remove_keys)
 
 
+def _pairing_session_matches_device(
+    session: Dict[str, Any],
+    selector: str,
+    payload: Dict[str, Any],
+) -> bool:
+    device_id = _text(payload.get("device_id") or payload.get("id"))
+    hardware_id = _hardware_id(payload.get("hardware_id"))
+    if _text(session.get("selector")) != selector:
+        return False
+    if _text(session.get("device_id")) != device_id:
+        return False
+    expected_hardware_id = _hardware_id(session.get("hardware_id"))
+    return not expected_hardware_id or expected_hardware_id == hardware_id
+
+
+def _paired_auth_result(session: Dict[str, Any], device_token: str) -> Dict[str, Any]:
+    return {
+        "mode": "paired",
+        "pairing_id": _text(session.get("id")),
+        "device_token": device_token,
+        "selector": _text(session.get("selector")),
+        "device_id": _text(session.get("device_id")),
+        "device_name": _text(session.get("device_name")),
+    }
+
+
 def _valid_device_credential(token: str, selector: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     supplied_hash = _token_hash(token)
     if not supplied_hash:
@@ -711,6 +740,13 @@ def _valid_device_credential(token: str, selector: str, payload: Dict[str, Any])
                 devices[selector] = row
             _save_credentials_unlocked(data)
             matched_row = dict(row)
+        for pairing_session in _pairing_sessions.values():
+            if (
+                isinstance(pairing_session, dict)
+                and _text(pairing_session.get("state")) == "paired"
+                and _pairing_session_matches_device(pairing_session, selector, payload)
+            ):
+                pairing_session.pop("device_token", None)
         return matched_row
 
 
@@ -721,15 +757,25 @@ def _redeem_pairing_code(token: str, selector: str, payload: Dict[str, Any]) -> 
     code_hash = _token_hash(code)
     with _pairing_lock:
         _prune_pairing_sessions_unlocked()
+        now_ts = _now()
         session: Optional[Dict[str, Any]] = None
         for row in _pairing_sessions.values():
             if not isinstance(row, dict):
                 continue
-            if _text(row.get("state")) != "waiting":
+            if not hmac.compare_digest(_text(row.get("code_hash")), code_hash):
                 continue
-            if hmac.compare_digest(_text(row.get("code_hash")), code_hash):
+            state = _text(row.get("state"))
+            if state == "waiting":
                 session = row
                 break
+            if (
+                state == "paired"
+                and float(row.get("expires_ts") or 0.0) > now_ts
+                and _pairing_session_matches_device(row, selector, payload)
+            ):
+                device_token = _text(row.get("device_token"))
+                if device_token:
+                    return _paired_auth_result(row, device_token)
         if not session:
             return None
         device_token = _new_device_token()
@@ -737,17 +783,12 @@ def _redeem_pairing_code(token: str, selector: str, payload: Dict[str, Any]) -> 
         session["state"] = "paired"
         session["selector"] = selector
         session["device_id"] = _text(payload.get("device_id") or payload.get("id") or selector)
+        session["hardware_id"] = _hardware_id(payload.get("hardware_id"))
         session["device_name"] = _device_name_from_hello(payload, selector)
-        session["paired_ts"] = _now()
-        session["expires_ts"] = _now() + 30.0
-        return {
-            "mode": "paired",
-            "pairing_id": _text(session.get("id")),
-            "device_token": device_token,
-            "selector": selector,
-            "device_id": _text(session.get("device_id")),
-            "device_name": _text(session.get("device_name")),
-        }
+        session["device_token"] = device_token
+        session["paired_ts"] = now_ts
+        session["expires_ts"] = now_ts + PAIRING_RETRY_GRACE_S
+        return _paired_auth_result(session, device_token)
 
 
 def _event_name(event_type: Any) -> str:
