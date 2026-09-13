@@ -12,7 +12,7 @@
   </a>
 </p>
 
-**Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
+**Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to local OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
 ---
 
@@ -85,8 +85,14 @@ Tater Integrations provides modular packages for devices, services, search provi
 ---
 
 # Installation
-> **Note**:
-> - Tater can run any compatible local or OpenAI-compatible model. If you use a thinking model, disable thinking for best Hydra/tool behavior. Tater's built-in local providers try to suppress thinking automatically where supported.
+
+Choose the installation that matches your system:
+
+- **macOS app**, **Unraid**, and **Home Assistant** provide guided installation options.
+- **Docker** is the easiest choice for most other Linux servers.
+- **Local installation** is best when you want direct access to the hardware and Python environment.
+
+> **Model note:** Tater is designed around local models and local OpenAI-compatible servers such as Ollama, LM Studio, LocalAI, and Lemonade.
 
 ## macOS App Installation
 
@@ -116,7 +122,7 @@ Tater Integrations provides modular packages for devices, services, search provi
 
 4. **Finish setup in TaterOS**
 
-   The app starts Tater on `127.0.0.1:8501` and opens the WebUI in the native window. If Python 3.11 is not already available, the launcher downloads a standalone CPython 3.11 runtime into `~/.taterassistant/python/` and uses it to build the private venv.
+   The app listens on `0.0.0.0:8501` and opens `127.0.0.1:8501` in the native window. If Python 3.11 is not already available, the launcher downloads a standalone CPython 3.11 runtime into `~/.taterassistant/python/` and uses it to build the private venv.
 
 Closing the window keeps Tater running in the menu bar. Use the menu bar item to reopen Tater, open it in a browser, stop, restart, show logs, check for updates, install available updates, or quit.
 
@@ -131,7 +137,8 @@ Tater is available in the **Unraid Community Apps** store.
 You can install **Tater** directly from the Unraid App Store with a one-click template.
 
 Unraid note:
-- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent shares, for example `/mnt/user/appdata/tater/agent_lab` and `/mnt/user/appdata/tater/runtime`.
+
+- Add container path mappings for `/app/agent_lab` and `/app/.runtime` to persistent, preferably cache-backed storage.
 - Also set `TZ` and map `/etc/localtime` plus `/etc/timezone` if you want local time inside the container.
 
 Once the Unraid containers are installed and running, continue to **Post-Install Setup** below.
@@ -175,236 +182,110 @@ Install path:
 3. Create a satellite pairing code in Tater, enter it once in the Reachy settings, and save the connection.
 4. Optionally enable **Allow vision snapshots** for the Reachy Vision Verba, then say **Hey Reachy**.
 
+## Docker Installation
+
+Use this method on a Linux server with Docker installed.
+
+### 1. Create persistent storage
+
+Run these commands from the directory where you want to keep Tater's data:
+
+```bash
+mkdir -p tater-data/agent_lab tater-data/runtime
+```
+
+- `agent_lab` stores models, documents, logs, and Tater's internal Redis data.
+- `runtime` stores settings and native satellite pairing credentials.
+
+Keep both directories when you update or recreate the container. Fast local storage is recommended; avoid network-mounted or unusually slow storage for `agent_lab`.
+
+### 2. Start Tater
+
+```bash
+docker pull ghcr.io/tatertotterson/tater:latest
+
+docker run -d --name tater_webui \
+  --restart unless-stopped \
+  --network host \
+  --cap-add NET_BIND_SERVICE \
+  -e TZ=America/Chicago \
+  -e HTMLUI_PORT=8501 \
+  -v "$(pwd)/tater-data/agent_lab:/app/agent_lab" \
+  -v "$(pwd)/tater-data/runtime:/app/.runtime" \
+  ghcr.io/tatertotterson/tater:latest
+```
+
+Change `TZ` if needed. Tater uses host networking for WebUI, voice, discovery, and media services.
+
+### 3. Open TaterOS
+
+Open one of these addresses:
+
+- [http://localhost:8501](http://localhost:8501) on the server
+- `http://<server-ip>:8501` from another device on the same network
+
+If port 8501 is already in use, change `HTMLUI_PORT` in the command. Continue to **Post-Install Setup** after TaterOS opens.
+
+### NVIDIA Docker
+
+The NVIDIA image is available for amd64 systems with an NVIDIA driver and NVIDIA Container Toolkit installed:
+
+```bash
+docker pull ghcr.io/tatertotterson/tater:nvidia
+```
+
+Use the Docker command above, add `--gpus all`, and replace the final image name with `ghcr.io/tatertotterson/tater:nvidia`.
+
 ## Local Installation
 
-### Prerequisites
-- Python 3.11
-- A local OpenAI-compatible LLM runtime (such as **Ollama**, **LocalAI**, **LM Studio**, or **Lemonade**) or Tater's built-in **Hugging Face Transformers**, **llama.cpp GGUF**, or **MLX LM** providers
-- Docker is optional.
+Use this method on Linux or macOS when you want Tater to run directly on the host.
 
-### Set Up Tater
-
-1. **Clone the Repository**
+### 1. Download Tater
 
 ```bash
 git clone https://github.com/TaterTotterson/Tater.git
-```
-
-2. **Navigate to the Project Directory**
-
-```bash
 cd Tater
 ```
 
-3. **Run Tater Setup**
-
-Use the interactive setup menu to choose the right local runtime profile:
+### 2. Run setup
 
 ```bash
 sh setup_tater.sh
 ```
 
-The setup menu creates `.venv`, installs Tater's Python dependencies, and writes the selected runtime profile to `.runtime/tater_profile.env`. It also installs and verifies the pinned Shairport Sync receiver, AirPlay sender, and FFmpeg runtime used by Music Core. On Linux, setup grants only the sender binary permission to use AirPlay 2's low-numbered PTP ports when the host requires it. Tater supports Python 3.11 through 3.13. If Linux only has a newer, unsupported system Python (such as Python 3.14), setup downloads a checksum-verified private Python runtime into `.runtime/python/` without replacing the system Python. The default managed runtime is Python 3.11; supported Ryzen AI systems use Python 3.12 for AMD's validated ROCm packages. Setup rebuilds an existing `.venv` when it was made with an unsupported or hardware-incompatible Python version. Set `TATER_SETUP_INSTALL_MANAGED_PYTHON=0` to disable the private runtime download. On Linux, setup also installs missing build tools and Python virtual-environment support through the detected system package manager. Set `TATER_SETUP_INSTALL_SYSTEM_DEPS=0` to disable automatic system-package installation.
+The setup menu asks which runtime fits your system, creates `.venv`, installs dependencies, and saves the selected profile. Tater supports Python 3.11 through 3.13; on supported Linux systems, setup can install a private Python runtime when the system version is unsuitable.
 
-Available local profiles:
-- **Edge / remote-only**: lightweight Pi-class install that keeps the full Tater app but omits local AI model runtimes. Pair it as a Spudlet to route LLM, STT, TTS, vision, audio/video understanding, Speaker ID, Emotion ID, and Face ID through a Spud Hub; wake-word detection and WebRTC VAD remain on the edge device. Standalone Wyoming and compatible remote providers remain available.
-- **CPU**: safe default for most local Linux installs and generic ARM hosts.
-- **macOS Apple Silicon**: native Mac setup with Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro when available, plus MLX Whisper for local STT.
-- **NVIDIA desktop/server**: native amd64 CUDA setup for RTX/GTX machines.
-- **AMD ROCm / Strix Halo**: native Linux setup for ROCm-capable Radeon and Ryzen AI Max / Strix Halo systems.
-- **Jetson**: native ARM64 setup that uses JetPack/system AI packages and CUDA when compatible Python runtimes are installed.
-- **Jetson Thor**: native ARM64 setup for Thor / JetPack 7 systems and CUDA 13-compatible JetPack runtimes.
+| Profile | Choose it for |
+| --- | --- |
+| CPU | Most Linux PCs and generic ARM systems |
+| macOS | Apple Silicon Macs |
+| NVIDIA | Linux PCs and servers with NVIDIA GPUs |
+| AMD ROCm | Supported Linux systems with AMD GPUs or Ryzen AI |
+| Jetson | NVIDIA Jetson systems |
+| Thor | Jetson Thor systems |
+| Edge | Pi-class or remote-only systems that connect to a Spud Hub |
 
-Non-interactive setup is also available:
+To skip the menu, pass the profile name directly—for example:
 
 ```bash
 sh setup_tater.sh cpu
-sh setup_tater.sh edge
-sh setup_tater.sh macos
-sh setup_tater.sh nvidia
-sh setup_tater.sh rocm
-sh setup_tater.sh jetson
-sh setup_tater.sh thor
 ```
 
-The edge profile uses the operating system `redis-server` instead of compiling
-the embedded Redis package. Install it before setup (for example,
-`sudo apt install redis-server` on Raspberry Pi OS). Matrix remains available,
-but encrypted Matrix rooms are omitted from this low-memory profile because
-their native `libolm` build is not included.
+The Edge profile requires the operating system's `redis-server` package. If macOS setup reports missing build tools, install `ffmpeg` and `cmake` with Homebrew and rerun setup.
 
-### Local Voice Acceleration Notes
-
-The setup profile only prepares the runtime. Actual voice model choices are managed in TaterOS under **Settings -> Models** and **Settings -> Voice Pipeline**.
-
-macOS Apple Silicon:
-- The macOS profile writes `PYTORCH_ENABLE_MPS_FALLBACK=1` so PyTorch can fall back to CPU for unsupported MPS operations.
-- It attempts to install `mlx-whisper` and the official PyTorch `kokoro` package.
-- It builds Tater's native llama.cpp engine (`llama-server`) with Metal when available; MLX LM remains the preferred Apple-native local LLM provider.
-- Select **Settings -> Models -> STT Backend -> MLX Whisper** for Apple-native Whisper STT.
-- MLX Whisper defaults to `mlx-community/whisper-base.en-mlx`; set `TATER_MLX_WHISPER_MODEL` to use another MLX Whisper model.
-- Kokoro automatically uses the PyTorch engine on Apple Metal/MPS when available. Set `TATER_KOKORO_ENGINE=onnx` to force the existing ONNX path or `TATER_KOKORO_ENGINE=torch` to force PyTorch.
-
-If native macOS dependency builds fail, install these Homebrew packages and rerun setup:
-
-```bash
-brew install ffmpeg cmake
-```
-
-Matrix encryption and embedded Redis are enabled by default. The macOS Apple Silicon setup includes bundled native wheels for `python-olm` and `redislite` so clean app installs do not need to compile those packages during first launch. Source installs on other macOS architectures may still need native build tools plus `libolm` and `pkg-config`.
-
-AMD ROCm / Strix Halo:
-
-- The ROCm setup detects Ryzen AI Max / Strix Halo systems and defaults both the llama.cpp target and speculative draft models to full GPU-layer offload. Other AMD and NVIDIA systems keep automatic placement.
-- Set `TATER_LLAMA_CPP_N_GPU_LAYERS=auto` and `TATER_LLAMA_CPP_DRAFT_N_GPU_LAYERS=auto` to override the Strix Halo default, or use `TATER_LLAMA_CPP_STRIX_HALO_FULL_OFFLOAD=0` when no explicit layer settings are present.
-
-NVIDIA desktop/server:
-- The `nvidia` profile installs CUDA PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and builds Tater's native llama.cpp engine with CUDA.
-- To customize the llama.cpp build, set `TATER_LLAMA_CPP_CMAKE_ARGS` before running setup. The NVIDIA profile defaults to `-DGGML_CUDA=on`.
-- In TaterOS, use **Settings -> Models -> Voice Acceleration** to select Auto, CPU, NVIDIA CUDA, AMD ROCm, or Apple Metal/MPS where supported.
-- Faster Whisper compute type defaults to Auto. Auto uses `float16` on newer CUDA GPUs and switches to `int8` on older CUDA cards such as Pascal / GTX 10-series, where `float16` can fail.
-- To override Faster Whisper compute type, use **Settings -> Voice Pipeline -> Speech Recognition -> Faster Whisper Compute Type** or set `TATER_FASTER_WHISPER_COMPUTE_TYPE` to `auto`, `int8`, `float32`, `float16`, `int8_float32`, or `int8_float16`.
-- To restrict which GPUs native Tater can see, start it with `CUDA_VISIBLE_DEVICES=0 sh run_ui.sh` or use a GPU UUID.
-
-AMD ROCm / Strix Halo:
-- On Ryzen AI systems, the `rocm` profile uses Python 3.12 and pins AMD's PyTorch 2.13 package set for ROCm 10.0.0. Setup selects the architecture-specific package for known APUs, including `gfx1150` for Ryzen AI 9/HX and `gfx1151` for Ryzen AI Max / Strix Halo; set `TATER_ROCM_GFX_TARGET` to override detection.
-- Healthy existing ROCm environments are reused by default. Set `TATER_SETUP_UPGRADE_ROCM=1` when rerunning setup to explicitly move an existing Ryzen AI environment to the pinned ROCm 10 stack.
-- AMD supports that Ryzen AI package set on Ubuntu 24.04.4 and 26.04. Setup warns on other Ubuntu releases and verifies actual GPU access before reporting success.
-- If the current user cannot access `/dev/kfd`, setup adds that account to AMD's required `render` and `video` groups when automatic system dependency setup is enabled, then asks for the required reboot. Rerun setup after reboot; the managed Python download and any completed setup work are reused.
-- Other AMD systems continue to use the PyTorch ROCm wheel index and can override it with `TATER_ROCM_PYTORCH_INDEX_URL`.
-- Tater keeps the ROCm PyTorch wheel in place when installing dependencies so Hugging Face Transformers can use ROCm through PyTorch when the device is supported.
-- AMD ROCm support is Linux-only and depends on the ROCm runtime installed for the GPU/APU.
-- Tater uses ROCm for PyTorch-backed models such as Kokoro Torch and SpeechBrain Speaker ID / Emotion ID. PyTorch ROCm exposes devices through the `cuda` API internally, but Tater labels it separately as AMD ROCm in settings and logs.
-- llama.cpp uses ROCm/HIP when a full system ROCm SDK is present. When only the GPU driver/runtime is available, setup installs the small Vulkan build dependencies and builds llama.cpp with Vulkan GPU acceleration instead. Set `TATER_LLAMA_CPP_ROCM_BACKEND=hip` or `vulkan` to force either backend, or override the complete build configuration with `TATER_LLAMA_CPP_CMAKE_ARGS`.
-- When an older system ROCm SDK has the linker issue involving the removed `libxml2.so.2` ABI, setup places a checksum-verified compatibility library under the ignored `.runtime` directory for build use only. Set `TATER_SETUP_ROCM_LIBXML2_COMPAT=0` to disable this workaround.
-- Faster Whisper still falls back to CPU unless its CTranslate2 backend reports CUDA support; ROCm acceleration is not assumed for Faster Whisper.
-- Setup verification requires PyTorch to see the AMD GPU. If it does not, verify `/dev/kfd`, membership in the `render` and `video` groups, and whether a reboot is pending after driver changes.
-
-Jetson and Thor:
-- The `jetson` and `thor` profiles create a venv with `--system-site-packages` so NVIDIA JetPack-provided Python AI packages can be reused.
-- Setup intentionally avoids replacing JetPack PyTorch with generic pip wheels.
-- Hugging Face Transformers can use JetPack CUDA when the system PyTorch install exposes CUDA. Setup also attempts a native llama.cpp CUDA build for GGUF offload.
-
-General voice notes:
-- Tater warms selected local STT/TTS models at startup and after saving voice model settings. Set `TATER_SPEECH_WARMUP_ON_STARTUP=false` to disable startup warmup.
-- **Parakeet ONNX** is available as a local multilingual STT backend on Linux, macOS, and Windows-compatible Python installs. Tater downloads the approximately 670 MB INT8 [Parakeet TDT 0.6B v3 ONNX model](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) on first selection, stores it under `agent_lab/models/stt/parakeet_onnx`, and uses the best available ONNX Runtime provider for the selected voice acceleration. The model is derived from NVIDIA Parakeet and is licensed under CC BY 4.0.
-- Parakeet supports 25 European languages with automatic language detection, punctuation, and capitalization. Set `TATER_PARAKEET_ONNX_QUANTIZATION=fp32` to use the much larger unquantized model instead of the default `int8`.
-- **Qwen3-ASR (llama.cpp, Experimental)** runs the Qwen3-ASR 0.6B Q8 GGUF model in a dedicated instance of Tater's native `llama-server`. The model and audio projector download to `agent_lab/models/stt/qwen3_asr_llama_cpp` on first selection. This keeps STT independent of Tater's active llama.cpp chat model, but consumes additional memory while selected. Override the Hugging Face repository and filenames with `TATER_QWEN3_ASR_LLAMA_CPP_REPO`, `TATER_QWEN3_ASR_LLAMA_CPP_MODEL_FILE`, and `TATER_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE`.
-- When the STT backend or voice acceleration changes, Tater releases obsolete local STT model caches before warming the newly selected engine.
-- Kokoro and Pocket TTS output are boosted slightly by default for clearer satellite playback. Tune them in Settings -> Models -> Speech -> TTS, or override local runs with `TATER_KOKORO_OUTPUT_GAIN` / `TATER_POCKET_TTS_OUTPUT_GAIN`; both default to `1.5`.
-- Voice activity detection defaults to Silero VAD. Low-power hosts can switch the Voice Pipeline VAD backend to WebRTC, which uses `webrtcvad-wheels`.
-- If Speaker ID or Emotion ID is enabled, SpeechBrain can use CUDA or MPS when supported, with CPU fallback.
-
-### Run the Web UI
-
-Start the TaterOS backend/frontend:
+### 3. Start Tater
 
 ```bash
 sh run_ui.sh
 ```
 
-If `.venv` exists, `run_ui.sh` uses it automatically. It also loads `.runtime/tater_profile.env` when present.
-
-The launcher listens on `0.0.0.0:8501` by default. To change it, set `HTMLUI_PORT`:
+Tater listens on `0.0.0.0:8501` by default. Open [http://localhost:8501](http://localhost:8501), or use `http://<computer-ip>:8501` from another device. To use a different port:
 
 ```bash
 HTMLUI_PORT=8601 sh run_ui.sh
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8501
-```
-
-Once the WebUI is up, continue to **Post-Install Setup** below.
-
-## Docker Installation
-
-### 1. Pull the Image
-
-Pull the prebuilt image with the following command:
-
-```bash
-docker pull ghcr.io/tatertotterson/tater:latest
-```
-
-### 2. Run Container
-
-Recommended Docker networking:
-- Use `--network host` so Tater shares the host network directly.
-- Add `--cap-add NET_BIND_SERVICE` so Tater's shared AirPlay PTP clock can bind UDP 319/320 without requiring a privileged container user.
-- This avoids managing a growing list of `-p` mappings for WebUI, voice, and other runtime surfaces.
-- With host networking, Tater listens on the host directly, so you do not need to publish Tater ports manually.
-- To change the WebUI port, set `HTMLUI_PORT`, for example `-e HTMLUI_PORT=8601`.
-- If you are not using host networking, publish the same container port, for example `-p 8601:8601`.
-
-Important for Docker persistence:
-- Add a path mapping for `/app/agent_lab` (container) -> `/mnt/user/appdata/tater/agent_lab` (host example).
-- Without this mapping, data in `/agent_lab` (logs/downloads/documents/workspace) can be lost on container rebuilds/updates.
-- Add a path mapping for `/app/.runtime` (container) -> `/mnt/user/appdata/tater/runtime` (host example).
-- Without this mapping, local runtime settings and Tater Native satellite pairing credentials can be lost on container rebuilds/updates.
-- Both Docker images store native satellite credentials at `/app/.runtime/native_satellite_credentials.json`.
-
----
-
-Example: Docker setup
-```
-docker run -d --name tater_webui \
-  --network host \
-  --cap-add NET_BIND_SERVICE \
-  -e TZ=America/Chicago \
-  -e HTMLUI_PORT=8501 \
-  -v /etc/localtime:/etc/localtime:ro \
-  -v /etc/timezone:/etc/timezone:ro \
-  -v /agent_lab:/app/agent_lab \
-  -v /tater_runtime:/app/.runtime \
-  ghcr.io/tatertotterson/tater:latest
-```
-
-### NVIDIA Docker
-
-The NVIDIA image is amd64-only. Use the default `latest` image for CPU-first installs and ARM hosts.
-The NVIDIA image uses CUDA 12.8 PyTorch wheels, CUDA/cuDNN runtime packages, GPU ONNX Runtime, and a native CUDA llama.cpp engine for RTX 30, 40, and 50 series cards. Voice model tuning, Faster Whisper compute type, warmup, VAD, SpeechBrain acceleration, and llama.cpp GGUF offload use the same TaterOS settings described in **Local Voice Acceleration Notes**.
-
-Host requirements:
-- Install the NVIDIA driver.
-- Install NVIDIA Container Toolkit before starting the compose override.
-- The native CUDA llama.cpp engine needs `libcuda.so.1`, which is supplied by the host driver at container runtime. If diagnostics mention `libcuda.so.1`, the image built correctly but the container was not started with NVIDIA GPU access.
-
-Optional NVIDIA GPU build for Faster Whisper STT plus Kokoro TTS:
-
-```
-docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
-```
-
-Prebuilt NVIDIA image:
-```bash
-docker pull ghcr.io/tatertotterson/tater:nvidia
-```
-
-To restrict which GPUs Tater can see in the NVIDIA compose setup, set `NVIDIA_VISIBLE_DEVICES` before launching, for example `NVIDIA_VISIBLE_DEVICES=0` or a GPU UUID. Inside the container, CUDA device `0` maps to the first visible GPU.
-
-Build and push the NVIDIA image:
-
-```bash
-docker buildx build \
-  --platform linux/amd64 \
-  -f Dockerfile.nvidia \
-  -t ghcr.io/tatertotterson/tater:nvidia \
-  --push .
-```
-
-### 3. Access the Web UI
-
-Once the container is running with host networking, open your browser and navigate to:
-
-- [http://localhost:8501](http://localhost:8501) from the same machine
-- `http://<host-ip>:8501` from another device on your network
-
-If you changed `HTMLUI_PORT`, use that port in the URL.
-
-Once the WebUI is up, continue to **Post-Install Setup** below.
+Continue to **Post-Install Setup** after TaterOS opens. Model downloads and voice acceleration are configured inside TaterOS under **Settings -> Models** and **Settings -> Voice Pipeline**.
 
 ---
 
@@ -413,7 +294,7 @@ Once the WebUI is up, continue to **Post-Install Setup** below.
 After Tater is running, open TaterOS and finish the first-run setup:
 
 1. Configure your base model in **Settings -> Models -> LLM / Vision**:
-   - choose `OpenAI-Compatible API` for Ollama, LM Studio, LocalAI, Lemonade, vLLM, or a hosted compatible API
+   - choose `OpenAI-Compatible API` for a local server such as Ollama, LM Studio, LocalAI, Lemonade, or vLLM
    - choose `Hugging Face Transformers` to load a local model directly inside Tater
    - choose `llama.cpp GGUF` to load a GGUF model through Tater's native llama.cpp engine
    - choose `MLX LM (Apple Silicon)` to load an MLX model directly on an Apple Silicon Mac
