@@ -106,6 +106,88 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(saved["observation_count"], 2)
         self.assertEqual(saved["event_count"], 2)
 
+    @staticmethod
+    def stored_identity(identity_id, references, *, person_name=""):
+        return {
+            "id": identity_id,
+            "name": person_name,
+            "person_id": f"person_{identity_id}" if person_name else "",
+            "person_name": person_name,
+            "embedding_model_signature": "facenet512|cosine|2",
+            "reference_centroids": references,
+            "observations": [
+                {
+                    "id": f"observation_{identity_id}",
+                    "embedding": references[0],
+                    "embedding_model_signature": "facenet512|cosine|2",
+                    "face_b64": "ZmFjZQ==",
+                }
+            ],
+        }
+
+    def test_named_profile_wins_before_a_closer_unknown_cluster(self):
+        identities = {
+            "face_named": self.stored_identity("face_named", [[0.8, 0.6]], person_name="Fred"),
+            "face_unknown": self.stored_identity("face_unknown", [[1.0, 0.0]]),
+        }
+
+        matched_id, distance = face_identity.match_identity(
+            identities,
+            [1.0, 0.0],
+            threshold=0.30,
+        )
+
+        self.assertEqual(matched_id, "face_named")
+        self.assertAlmostEqual(distance, 0.20)
+
+    def test_facenet_accepts_supported_unambiguous_named_variation(self):
+        identities = {
+            "face_fred": self.stored_identity(
+                "face_fred",
+                [[0.60, 0.80], [0.58, 0.814616], [0.56, 0.828493]],
+                person_name="Fred",
+            ),
+            "face_wilma": self.stored_identity(
+                "face_wilma",
+                [[0.20, 0.979796], [0.18, 0.983667]],
+                person_name="Wilma",
+            ),
+        }
+
+        matched_id, distance = face_identity.match_identity(
+            identities,
+            [1.0, 0.0],
+            threshold=0.30,
+            model_signature="facenet512|cosine|2",
+        )
+
+        self.assertEqual(matched_id, "face_fred")
+        self.assertAlmostEqual(distance, 0.40)
+
+    def test_facenet_rejects_ambiguous_extended_named_match(self):
+        identities = {
+            "face_fred": self.stored_identity(
+                "face_fred",
+                [[0.60, 0.80], [0.58, 0.814616]],
+                person_name="Fred",
+            ),
+            "face_wilma": self.stored_identity(
+                "face_wilma",
+                [[0.52, 0.854166], [0.50, 0.866025]],
+                person_name="Wilma",
+            ),
+        }
+
+        matched_id, distance = face_identity.match_identity(
+            identities,
+            [1.0, 0.0],
+            threshold=0.30,
+            model_signature="facenet512|cosine|2",
+        )
+
+        self.assertEqual(matched_id, "")
+        self.assertAlmostEqual(distance, 0.40)
+
     def test_people_face_action_links_the_shared_profile(self):
         person = people.create_person("Fred", self.redis)
         identity = face_identity.record_detection(
@@ -521,42 +603,31 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(len(face_identity.ui_rows(self.redis)), 1)
 
     def test_people_ui_has_a_compact_faces_tab_and_management_actions(self):
-        app = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        styles = (ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
+        app = (ROOT / "frontend" / "src" / "settings" / "components" / "PeopleSettings.vue").read_text(encoding="utf-8")
 
-        self.assertIn('data-people-tab="faces"', app)
-        self.assertIn('data-people-tab="identities"', app)
+        self.assertIn("activeTab === 'faces'", app)
+        self.assertIn("activeTab === 'identities'", app)
         self.assertIn("people_face_move_images", app)
         self.assertIn("people_face_remove_images", app)
         self.assertIn("people_face_merge", app)
         self.assertIn("people_face_enroll", app)
-        self.assertIn("data-people-face-enroll-open", app)
-        self.assertIn('id="people-face-enroll-modal"', app)
-        self.assertIn("collectCoreManagerValuesWithFiles(form)", app)
-        self.assertIn("bindCoreCameraCaptureFields(body)", app)
-        self.assertIn('id="people-face-review-modal"', app)
-        self.assertIn("data-people-face-review", app)
-        self.assertIn('aria-pressed="false"', app)
-        self.assertIn("data-people-face-selection-count", app)
-        self.assertIn("data-people-face-select-all", app)
-        self.assertIn("Permanently Delete", app)
-        self.assertNotIn('type="checkbox" value="${escapeHtml(observationId)}" data-people-face-observation', app)
-        self.assertIn(".people-face-grid", styles)
-        self.assertIn(".people-face-gallery", styles)
-        self.assertIn(".people-face-review-dialog", styles)
-        self.assertIn(".people-face-enroll-dialog", styles)
-        self.assertIn('.people-face-capture[aria-pressed="true"]', styles)
-        self.assertIn(".people-face-selection-mark", styles)
-        self.assertIn(".people-subtabs::-webkit-scrollbar", styles)
-        self.assertIn("flex-wrap: nowrap;", styles)
-        self.assertIn("white-space: nowrap;", styles)
+        self.assertIn("const enrollmentOpen = ref(false)", app)
+        self.assertIn("const cameraActive = ref(false)", app)
+        self.assertIn('v-if="selectedFace"', app)
+        self.assertIn(':aria-pressed="selectedObservations.includes', app)
+        self.assertIn("Select all", app)
+        self.assertIn("Permanently delete", app)
+        self.assertIn("people-face-gallery", app)
+        self.assertIn("people-face-enroll-dialog", app)
 
     def test_face_id_settings_support_safe_model_switching(self):
-        app = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        app = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
+        face = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "FaceModels.vue").read_text(encoding="utf-8")
 
-        self.assertIn('id="set_face_id_model"', app)
+        self.assertIn("<FaceModels", app)
         self.assertIn("adaface_ir50_webface4m", app)
-        self.assertIn("Preparing saved faces for the new model", app)
+        self.assertIn("function chooseModel", face)
+        self.assertIn("Rebuilding face embeddings", face)
         self.assertIn("face_id_model:", app)
 
 

@@ -9,16 +9,18 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueDashboardIntegrationsTests(unittest.TestCase):
-    def test_dashboard_and_integrations_use_shared_vue_bundle(self) -> None:
+    def test_dashboard_and_integrations_are_loaded_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn("mountVueDashboard", app_js)
-        self.assertIn("mountVueIntegrations", app_js)
-        self.assertIn("module.mountDashboard", app_js)
-        self.assertIn("module.mountIntegrations", app_js)
-        self.assertIn("export function mountDashboard", entry)
-        self.assertIn("export function mountIntegrations", entry)
+        self.assertIn('import DashboardApp from "../dashboard/DashboardApp.vue"', shell)
+        self.assertIn('import IntegrationsApp from "../integrations/IntegrationsApp.vue"', shell)
+        self.assertIn("dashboard: DashboardApp", shell)
+        self.assertIn("integrations: IntegrationsApp", shell)
+        self.assertIn("createDashboardVueOptions", app_js)
+        self.assertIn("createIntegrationsVueDescriptor", app_js)
+        self.assertNotIn("mountVueDashboard", app_js)
+        self.assertNotIn("mountVueIntegrations", app_js)
 
     def test_dashboard_keeps_live_controls_and_navigation(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "dashboard" / "DashboardApp.vue").read_text(encoding="utf-8")
@@ -79,15 +81,12 @@ class VueDashboardIntegrationsTests(unittest.TestCase):
 
     def test_integration_select_fields_render_as_dropdowns(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")
-        legacy = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('v-else-if="field.type === \'select\'"', source)
         self.assertIn('v-for="option in field.options || []"', source)
         self.assertIn("optionValue(option)", source)
         self.assertIn("optionLabel(option)", source)
-        self.assertIn('if (type === "select")', legacy)
-        self.assertIn("settingsIntegrationOptionValue(option)", legacy)
-        self.assertIn("settingsIntegrationOptionLabel(option)", legacy)
+        self.assertNotIn("innerHTML", source)
 
     def test_device_and_organize_tabs_use_background_registry_refresh(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")

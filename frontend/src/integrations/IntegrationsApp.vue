@@ -305,6 +305,8 @@ function selectTab(tab: string) {
   activeTab.value = tab; props.options.onTabChange?.(tab);
 }
 
+defineExpose({ select: selectTab });
+
 watch(() => props.state.settings, () => {
   registry.value = props.state.settings.integration_device_registry || registry.value;
   runtime.value = props.state.settings.integration_runtime || runtime.value;

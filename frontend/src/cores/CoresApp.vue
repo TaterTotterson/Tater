@@ -5,14 +5,14 @@ import type { CoreTabPayload, MusicCoreMountOptions } from "../music/types";
 import ManifestField from "../shared/ManifestField.vue";
 import PopupTransition from "../shared/PopupTransition.vue";
 import { getJson, postJson } from "../shared/api";
-import LegacyCorePanel from "./components/LegacyCorePanel.vue";
+import CorePanelRenderer from "./components/CorePanelRenderer.vue";
 import type { CoreTabSpec, CoresMountOptions, JsonRow } from "./types";
 
 const props = defineProps<{ state: { payload: JsonRow }; options: CoresMountOptions }>();
 const manageTabs = [
   { id: "installed", label: "Installed" },
   { id: "store", label: "Store" },
-  { id: "manage", label: "Maintenance" },
+  { id: "manage", label: "Manage" },
   { id: "repos", label: "Repositories" },
 ];
 const activeTab = ref(String(props.options.initialTab || "manage"));
@@ -24,6 +24,7 @@ const purgeIds = ref<Record<string, boolean>>({});
 const repoName = ref("");
 const repoUrl = ref("");
 const draftRepos = ref<JsonRow[]>([]);
+const repoSection = ref("trusted");
 const settingsCore = ref<JsonRow | null>(null);
 const fieldValues = ref<JsonRow>({});
 const panelStates = reactive<Record<string, { payload: JsonRow }>>({});
@@ -40,6 +41,7 @@ const catalog = computed(() => Array.isArray(shop.value.catalog) ? shop.value.ca
 const available = computed(() => catalog.value.filter((row: JsonRow) => !row.installed).sort(compareRows));
 const updates = computed(() => installed.value.filter((row: JsonRow) => row.update_available));
 const runningCount = computed(() => runtimeItems.value.filter((row: JsonRow) => Boolean(row.running)).length);
+const trustedRepos = computed(() => Array.isArray(shop.value.repos?.trusted) ? shop.value.repos.trusted : []);
 const dynamicTabs = computed<CoreTabSpec[]>(() => (Array.isArray(tabsPayload.value.tabs) ? tabsPayload.value.tabs : [])
   .filter((tab: JsonRow) => text(tab.core_key))
   .map((tab: JsonRow) => ({ ...tab, core_key: text(tab.core_key) })));
@@ -81,6 +83,7 @@ const musicOptions = computed<MusicCoreMountOptions | null>(() => {
     tabEndpoint: `${props.options.endpoints.runtime}/${encoded}/tab`,
     actionEndpoint: `${props.options.endpoints.runtime}/${encoded}/tab-action`,
     eventsEndpoint: `${props.options.endpoints.runtime}/${encoded}/tab-events`,
+    onToast: props.options.onToast,
   };
 });
 
@@ -106,7 +109,27 @@ function notify(message: string, tone = "success") {
   props.options.onToast?.(message, tone);
 }
 function syncDraftRepos() {
-  draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repos.additional.map((row: JsonRow) => ({ ...row })) : [];
+  const trustedUrls = new Set(trustedRepos.value.map((row: JsonRow) => text(row.url).toLowerCase()).filter(Boolean));
+  draftRepos.value = Array.isArray(shop.value.repos?.additional)
+    ? shop.value.repos.additional.filter((row: JsonRow) => !trustedUrls.has(text(row.url).toLowerCase())).map((row: JsonRow) => ({ ...row }))
+    : [];
+}
+function selectedTrustedRepos(): JsonRow[] {
+  return trustedRepos.value.filter((row: JsonRow) => Boolean(row.enabled)).map((row: JsonRow) => ({ name: text(row.name), url: text(row.url) }));
+}
+function combinedRepos(): JsonRow[] { return [...selectedTrustedRepos(), ...draftRepos.value]; }
+async function toggleTrustedRepo(repo: JsonRow) {
+  if (busy.value) return;
+  const wasEnabled = Boolean(repo.enabled);
+  const enabling = !repo.enabled;
+  repo.enabled = enabling;
+  busy.value = `${enabling ? "Adding" : "Removing"} ${text(repo.name || repo.repository)}…`;
+  try {
+    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() });
+    notify(`${text(repo.name || repo.repository)} ${enabling ? "added to" : "removed from"} the Core Store.`);
+    await refresh(true);
+  } catch (requestError) { repo.enabled = wasEnabled; notify(requestError instanceof Error ? requestError.message : "Trusted repository update failed.", "error"); }
+  finally { busy.value = ""; }
 }
 function ensurePanelState(key: string) {
   if (!panelStates[key]) panelStates[key] = { payload: {} };
@@ -249,13 +272,13 @@ async function saveSettings() {
 function addRepo() {
   const url = repoUrl.value.trim();
   if (!url) { notify("Repository URL is required.", "error"); return; }
-  if (draftRepos.value.some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already added.", "error"); return; }
+  if ([...draftRepos.value, ...trustedRepos.value].some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already listed.", "error"); return; }
   draftRepos.value.push({ name: repoName.value.trim(), url });
   repoName.value = ""; repoUrl.value = ""; status.value = "Repository added. Save repositories to apply it."; error.value = "";
 }
 async function saveRepos() {
   busy.value = "Saving Core repositories…";
-  try { await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: draftRepos.value }); notify("Core repositories saved."); await refresh(true); }
+  try { await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() }); notify("Core repositories saved."); await refresh(true); }
   catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Repository save failed.", "error"); }
   finally { busy.value = ""; }
 }
@@ -267,7 +290,7 @@ syncDraftRepos();
 window.addEventListener("keydown", handleEscape);
 onBeforeUnmount(() => { closeEvents(); window.removeEventListener("keydown", handleEscape); });
 nextTick(() => void selectTopTab(activeTab.value));
-defineExpose({ refresh: () => refresh(false), refreshTab: (key: string) => refreshTab(key, true) });
+defineExpose({ refresh: () => refresh(false), refreshTab: (key: string) => refreshTab(key, true), select: selectTopTab });
 </script>
 
 <template>
@@ -285,7 +308,14 @@ defineExpose({ refresh: () => refresh(false), refreshTab: (key: string) => refre
     <section v-if="activeTab !== 'manage'" class="core-top-tab-panel active tcx-core-panel" :data-core-tab-panel="activeTab" :data-core-tab-loaded="panelLoading[activeTab] ? 'loading' : '1'">
       <div v-if="panelLoading[activeTab] && !Object.keys(activePayload).length" class="tv-empty">Loading {{ activeSpec?.label || activeTab }}…</div>
       <MusicCoreApp v-else-if="activeSpec && activePanelState && activeIsMusic && musicOptions" :state="activePanelState as { payload: CoreTabPayload }" :options="musicOptions" />
-      <LegacyCorePanel v-else-if="activeSpec && activePanelState" :payload="activePayload" :tab="activeSpec" :render="options.renderCorePanel" :clear="options.clearCorePanel" />
+      <CorePanelRenderer
+        v-else-if="activeSpec && activePanelState"
+        :payload="activePayload"
+        :tab="activeSpec"
+        :action-endpoint="`${options.endpoints.runtime}/${encode(activeSpec.core_key)}/tab-action`"
+        :refresh="() => refreshTab(activeSpec!.core_key, true)"
+        :notify="notify"
+      />
     </section>
 
     <section v-else class="core-top-tab-panel active tcx-manage" data-core-tab-panel="manage">
@@ -302,12 +332,38 @@ defineExpose({ refresh: () => refresh(false), refreshTab: (key: string) => refre
         <article v-for="row in available" :key="row.id" class="tv-panel tcx-core-card"><header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ row.name || row.id }}</h2></div><span class="tv-state">v{{ row.version || '-' }}</span></header><p>{{ row.description || 'No description provided.' }}</p><footer><span>{{ row.source_label || 'Tater Shop' }}</span><button class="tv-button primary" type="button" @click="shopAction('install', row.id)">Install</button></footer></article><div v-if="!available.length" class="tv-empty">No additional Cores are available from the configured repositories.</div>
       </div>
 
-      <div v-else-if="manageTab === 'manage'" class="tcx-manage-list">
-        <div class="tv-panel tcx-manage-toolbar"><div><span class="tv-eyebrow">Maintenance</span><h2>Manage installed Cores</h2><p>{{ updates.length }} update{{ updates.length === 1 ? '' : 's' }} available. Running Cores restart automatically after an update.</p></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
-        <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tcx-manage-row"><div><strong>{{ row.name || row.id }}</strong><span>{{ row.installed_ver || '0.0.0' }} → {{ row.store_ver || '-' }} · {{ stateLabel(runtimeForShop(row)) }}</span></div><div class="ti-row-actions"><button class="tv-button" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeForShop(row)" class="tv-button" type="button" @click="runtimeAction(runtimeForShop(row)!, runtimeForShop(row)?.running ? 'stop' : 'start')">{{ runtimeForShop(row)?.running ? 'Stop' : 'Start' }}</button><label class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button></div></article><div v-if="!installed.length" class="tv-empty">No installed Cores found.</div>
+      <div v-else-if="manageTab === 'manage'" class="tcx-manage-list tv-manage-workspace">
+        <div class="tv-panel tcx-manage-toolbar tv-manage-hero">
+          <div class="tv-manage-hero-copy"><span class="tv-eyebrow">Manage library</span><h2>Core control center</h2><p>Update system capabilities, control their runtimes, and remove Cores with optional data cleanup. Running Cores restart automatically after an update.</p></div>
+          <div class="tv-manage-overview"><div><span>Installed</span><strong>{{ installed.length }}</strong></div><div :class="{ attention: updates.length }"><span>Updates ready</span><strong>{{ updates.length }}</strong></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
+        </div>
+        <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tcx-manage-row tv-manage-card" :class="{ 'has-update': row.update_available }">
+          <div class="tv-manage-identity"><span class="tv-manage-monogram">{{ text(row.name || row.id).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">{{ row.id }}</span><h3>{{ row.name || row.id }}</h3><small>{{ row.source_label || 'Local Core' }}</small></div></div>
+          <div class="tv-manage-version"><div><span>Installed</span><strong>{{ row.installed_ver || '0.0.0' }}</strong></div><i>→</i><div><span>Latest</span><strong>{{ row.store_ver || '-' }}</strong></div><span class="tv-state" :class="row.update_available ? 'pending' : 'good'">{{ row.update_available ? 'Update ready' : 'Current' }}</span></div>
+          <div class="tv-manage-actions"><span class="tv-manage-runtime" :class="{ online: runtimeForShop(row)?.running }"><i />{{ stateLabel(runtimeForShop(row)) }}</span><button class="tv-button" :class="{ primary: row.update_available }" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeForShop(row)" class="tv-button" type="button" @click="runtimeAction(runtimeForShop(row)!, runtimeForShop(row)?.running ? 'stop' : 'start')">{{ runtimeForShop(row)?.running ? 'Stop' : 'Start' }}</button><label class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button></div>
+        </article>
+        <div v-if="!installed.length" class="tv-empty">No installed Cores found.</div>
       </div>
 
-      <div v-else class="tv-panel tcx-repos"><header><div><span class="tv-eyebrow">Trusted sources</span><h2>Core repositories</h2><p>The built-in Core repository stays available. Add other trusted manifests below.</p></div></header><article class="ti-repo-row builtin"><div><strong>{{ shop.repos?.default?.name || 'Default' }}</strong><code>{{ shop.repos?.default?.url || '(not set)' }}</code></div><span>Built-in</span></article><article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Additional repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article><div v-if="!draftRepos.length" class="tv-empty compact">No additional repositories configured.</div><div class="tcx-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Core Repo" /></label><label><span>Repository URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/cores.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save repositories</button></div></div>
+      <div v-else class="tv-panel tcx-repos tv-repository-manager">
+        <header class="tv-repository-heading"><div><span class="tv-eyebrow">Repository library</span><h2>Core repositories</h2><p>Choose a Tater-trusted source or add your own manifest.</p></div></header>
+        <nav class="tv-repository-tabs" aria-label="Core repository sources"><button type="button" :class="{ active: repoSection === 'trusted' }" @click="repoSection = 'trusted'">Trusted repositories</button><button type="button" :class="{ active: repoSection === 'custom' }" @click="repoSection = 'custom'">Custom repositories</button></nav>
+        <div v-if="repoSection === 'trusted'" class="tv-trusted-repositories">
+          <p class="tv-repository-intro">Curated sources are reviewed by Tater. Select a card to add or remove its Cores from your Store automatically.</p>
+          <div v-if="shop.repos?.trusted_error" class="tv-repository-warning">The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.</div>
+          <div class="tv-trusted-repo-grid">
+            <article class="tv-trusted-repo-card builtin selected" aria-label="Built-in Tater Core Shop repository"><span class="tv-repo-check">✓</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">T</span><div><span class="tv-eyebrow">Always available</span><h3>{{ shop.repos?.default?.name || 'Tater Core Shop' }}</h3><p>by <strong>Tater Assistant</strong></p></div></div><p>The official built-in Core catalog.</p><footer><span class="tv-repo-enabled">Built in</span></footer></article>
+            <article v-for="repo in trustedRepos" :key="repo.id || repo.url" class="tv-trusted-repo-card" :class="{ selected: repo.enabled }" role="button" tabindex="0" :aria-pressed="Boolean(repo.enabled)" @click="toggleTrustedRepo(repo)" @keydown.enter.prevent="toggleTrustedRepo(repo)" @keydown.space.prevent="toggleTrustedRepo(repo)"><span class="tv-repo-check">{{ repo.enabled ? '✓' : '+' }}</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">{{ text(repo.repository || repo.name).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">Trusted Core source</span><h3>{{ repo.repository || repo.name }}</h3><p>by <a v-if="repo.author_url" :href="repo.author_url" target="_blank" rel="noreferrer" @click.stop>{{ repo.author || 'Community author' }}</a><strong v-else>{{ repo.author || 'Community author' }}</strong></p></div></div><p>{{ repo.description || 'Additional Cores for the Tater Store.' }}</p><div v-if="repo.tags?.length" class="ti-tags"><span v-for="tag in repo.tags" :key="tag">{{ tag }}</span></div><footer><a v-if="repo.homepage" :href="repo.homepage" target="_blank" rel="noreferrer" @click.stop>View repository ↗</a><span :class="repo.enabled ? 'tv-repo-enabled' : 'tv-repo-available'">{{ repo.enabled ? 'Added to Store' : 'Select to add' }}</span></footer></article>
+          </div>
+          <div v-if="!trustedRepos.length" class="tv-empty compact">No additional trusted Core repositories are listed yet.</div>
+        </div>
+        <div v-else class="tv-custom-repositories">
+          <p class="tv-repository-intro">Custom manifests are managed by you and are not reviewed by Tater.</p>
+          <article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Custom repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article>
+          <div v-if="!draftRepos.length" class="tv-empty compact">No custom repositories configured.</div>
+          <div class="tcx-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Core Repo" /></label><label><span>Manifest URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/cores.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save custom repositories</button></div>
+        </div>
+      </div>
     </section>
   </div>
 

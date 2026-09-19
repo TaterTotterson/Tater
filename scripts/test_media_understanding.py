@@ -126,37 +126,34 @@ class MediaUnderstandingTests(unittest.TestCase):
         self.assertEqual(error, "")
 
     def test_models_ui_groups_image_and_video_under_vision_tab(self):
-        source = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        self.assertIn('data-models-tab="audio-understanding"', source)
-        self.assertIn('data-models-tab="vision">Vision</button>', source)
-        self.assertNotIn('data-models-tab="video-understanding"', source)
-        self.assertEqual(source.count('data-models-panel="vision"'), 2)
-        self.assertIn('<div class="hydra-model-panel-title">Image Understanding</div>', source)
-        self.assertIn('<div class="hydra-model-panel-title">Video Understanding</div>', source)
-        self.assertIn('{ value: "base", label: "Same as Base" }', source)
+        settings = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
+        card = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "MediaModelCard.vue").read_text(encoding="utf-8")
+        self.assertIn('{ id: "vision", label: "Vision"', settings)
+        self.assertIn('{ id: "audio-understanding", label: "Audio & Video"', settings)
+        self.assertNotIn('id: "video-understanding"', settings)
+        self.assertIn('kind="vision"', settings)
+        self.assertIn('kind="audio"', settings)
+        self.assertIn('kind="video"', settings)
+        self.assertIn('{ value: "base", label: "Same as Base"', card)
+        self.assertIn("function chooseMode", card)
 
     def test_models_tabs_follow_the_user_workflow_order(self):
-        source = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        tab_bar_start = source.index('<div class="settings-subtabs" style="grid-column: 1 / -1;">')
-        tab_bar_end = source.index("</div>", tab_bar_start)
-        tab_bar = source[tab_bar_start:tab_bar_end]
+        source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
         expected_tabs = (
-            'data-models-tab="huggingface">Hugging Face</button>',
-            'data-models-tab="routing">LLM</button>',
-            'data-models-tab="speech">Speech</button>',
-            'data-models-tab="wake">Wake Word</button>',
-            'data-models-tab="vision">Vision</button>',
-            'data-models-tab="audio-understanding">Audio Understanding</button>',
-            'data-models-tab="speakerid">Speaker ID</button>',
-            'data-models-tab="emotionid">Emotion ID</button>',
-            'data-models-tab="faceid">Face ID</button>',
+            '{ id: "huggingface", label: "Hugging Face"',
+            '{ id: "routing", label: "LLM"',
+            '{ id: "speech", label: "Speech"',
+            '{ id: "wake", label: "Wake Word"',
+            '{ id: "vision", label: "Vision"',
+            '{ id: "audio-understanding", label: "Audio & Video"',
+            '{ id: "speakerid", label: "Speaker ID"',
+            '{ id: "emotionid", label: "Emotion ID"',
+            '{ id: "faceid", label: "Face ID"',
         )
-        positions = [tab_bar.index(tab) for tab in expected_tabs]
+        positions = [source.index(tab) for tab in expected_tabs]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn('class="settings-subpanel active" data-models-panel="huggingface"', source)
-        self.assertIn('class="settings-subpanel" data-models-panel="routing"', source)
-        self.assertNotIn('data-llm-vision-tab="huggingface"', source)
-        self.assertIn('root.querySelector(\'[data-models-tab="huggingface"]\')?.addEventListener', source)
+        self.assertIn('v-for="tab in tabs"', source)
+        self.assertIn('@click="select(tab.id)"', source)
 
     def test_runtime_source_routes_modalities_and_reuses_cache(self):
         source = (ROOT / "helpers.py").read_text(encoding="utf-8")
@@ -177,11 +174,10 @@ class MediaUnderstandingTests(unittest.TestCase):
         self.assertIn('if str(settings.get("mode") or "").strip().lower() != "dedicated"', source)
 
     def test_save_and_load_targets_keep_roles_and_media_capabilities(self):
-        source = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        self.assertIn('role: "Image", mediaKind: "vision"', source)
-        self.assertIn('role: kind === "audio" ? "Audio" : "Video"', source)
-        self.assertIn('target.media_kinds = [mediaToken]', source)
-        self.assertIn('for (const field of ["roles", "media_kinds"])', source)
+        source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
+        self.assertIn('roles: [kind === "vision" ? "Image" : kind === "audio" ? "Audio" : "Video"]', source)
+        self.assertIn("media_kinds: [kind]", source)
+        self.assertIn('["roles", "media_kinds"].forEach', source)
 
     def test_runtime_stats_include_selected_model_roles(self):
         source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")

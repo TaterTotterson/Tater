@@ -9,17 +9,19 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueCoresTests(unittest.TestCase):
-    def test_cores_use_shared_vue_bundle_with_legacy_fallback(self) -> None:
+    def test_cores_are_loaded_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn("async function mountVueCores", app_js)
-        self.assertIn("module.mountCores", app_js)
+        self.assertIn('import CoresApp from "../cores/CoresApp.vue"', shell)
+        self.assertIn("cores: CoresApp", shell)
+        self.assertIn('if (view === "cores")', app_js)
+        self.assertIn("createCoresVueDescriptor", app_js)
         self.assertIn('withBasePath("/api/cores")', app_js)
         self.assertIn('withBasePath("/api/shop/cores")', app_js)
         self.assertIn('withBasePath("/api/cores/tabs")', app_js)
-        self.assertIn("The Vue Cores surface could not load; using the legacy renderer.", app_js)
-        self.assertIn("export function mountCores", entry)
+        self.assertNotIn("mountVueCores", app_js)
+        self.assertNotIn("legacy renderer", app_js)
 
     def test_cores_preserve_runtime_shop_settings_and_repositories(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
@@ -38,21 +40,36 @@ class VueCoresTests(unittest.TestCase):
             "shopAction('remove'",
             "Delete data",
             "Running Cores restart automatically",
+            '{ id: "manage", label: "Manage" }',
+            "Core control center",
+            "tv-manage-card",
+            "Updates ready",
         ):
             self.assertIn(feature, source)
 
-    def test_dynamic_panels_keep_live_music_and_specialized_core_contracts(self) -> None:
+        self.assertNotIn('{ id: "manage", label: "Maintenance" }', source)
+
+    def test_dynamic_panels_use_native_vue_renderers_and_live_core_contracts(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
-        bridge = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "LegacyCorePanel.vue").read_text(encoding="utf-8")
+        renderer = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CorePanelRenderer.vue").read_text(encoding="utf-8")
+        item = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerItem.vue").read_text(encoding="utf-8")
+        field = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerField.vue").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
         self.assertIn("MusicCoreApp", source)
+        self.assertIn("CorePanelRenderer", source)
         self.assertIn('addEventListener("core-tab"', source)
         self.assertIn("/tab-events", source)
-        self.assertIn("props.render", bridge)
-        self.assertIn("host.innerHTML = renderCoreTabPayload", app_js)
-        self.assertIn('state.surfaceVueView === "cores"', app_js)
-        self.assertIn("state.surfaceVueController.refreshTab", app_js)
+        self.assertIn('data-core-renderer="vue"', renderer)
+        self.assertIn("CoreManagerItems", renderer)
+        self.assertIn("CoreManagerField", item)
+        self.assertIn("type === 'image_checklist'", field)
+        self.assertNotIn("renderCorePanel:", app_js)
+        self.assertFalse((REPO_ROOT / "frontend" / "src" / "cores" / "components" / "LegacyCorePanel.vue").exists())
+        self.assertIn("selectViewTab", shell)
+        self.assertIn("refreshTab", shell)
+        self.assertNotIn("renderCoreTabPayload", app_js)
 
     def test_cores_share_manifest_settings_and_responsive_styles(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
@@ -62,9 +79,14 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".tcx-card-grid { display: grid;", styles)
         self.assertIn(".tcx-manage-list { display: grid;", styles)
         self.assertIn(".tcx-repo-form { display: grid;", styles)
-        self.assertIn(".tcx-legacy-host", styles)
+        self.assertIn(".tcx-native-panel", styles)
+        self.assertIn(
+            ".tcx-native-manager .core-manager-tabs, .tcx-native-manager .core-manager-subtabs { flex-wrap: nowrap; overflow-x: auto; }",
+            styles,
+        )
+        self.assertIn(".tcx-native-popup .tcx-native-fields { grid-template-columns: 1fr; }", styles)
 
-    def test_vue_input_styles_do_not_stretch_legacy_core_toggles(self) -> None:
+    def test_vue_input_styles_do_not_stretch_native_core_toggles(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn(".tater-vue-surface input:not(.toggle-input)", styles)
@@ -82,11 +104,11 @@ class VueCoresTests(unittest.TestCase):
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn(
-            ".core-settings-manager-awareness label.core-stats-control-toggle { display: inline-flex;",
+            ".core-settings-manager-awareness .tcx-native-stats-controls { gap: 7px !important;",
             styles,
         )
         self.assertIn(
-            ".core-settings-manager-awareness .core-stats-control-toggle .toggle-input { grid-column: auto;",
+            ".tcx-native-toggle .toggle-input { width: 34px;",
             styles,
         )
         self.assertIn(
@@ -101,26 +123,16 @@ class VueCoresTests(unittest.TestCase):
     def test_automation_enabled_toggle_uses_compact_scoped_layout(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
-        self.assertIn(
-            '.core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"] { grid-column: auto;',
-            styles,
-        )
-        self.assertIn(
-            '.core-settings-manager-automation input.toggle-input[data-core-field-key="enabled"]:checked::before { transform: translateX(13px);',
-            styles,
-        )
+        self.assertIn(".tcx-native-toggle .toggle-input:checked::before { transform: translateX(15px);", styles)
 
     def test_runtime_edit_popups_refresh_dependent_core_fields(self) -> None:
-        source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerField.vue").read_text(encoding="utf-8")
 
-        self.assertIn("function bindRuntimeSettingDependentSelects(fieldsEl)", source)
-        self.assertIn('data-runtime-filter-source-key="', source)
-        self.assertIn("targetSelect.dataset.runtimeDependentBound", source)
-        self.assertIn("bindRuntimeSettingDependentSelects(fieldsEl);", source)
-        self.assertIn(
-            "_coreRenderSelectOptions(targetSelect, nextRows, preferredValue, preferredValues)",
-            source,
-        )
+        self.assertIn("const options = computed(() =>", source)
+        self.assertIn("props.field.dependent_options", source)
+        self.assertIn("dependent.source_key", source)
+        self.assertIn("dependent.options_by_source[sourceValue]", source)
+        self.assertIn("props.allValues[sourceKey]", source)
 
     def test_core_media_route_supports_browser_metadata_and_range_requests(self) -> None:
         source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
@@ -131,20 +143,15 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn('"Content-Range": f"bytes {start}-{end}/{size}"', source)
 
     def test_core_video_can_return_to_its_poster_after_playback(self) -> None:
-        source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerField.vue").read_text(encoding="utf-8")
 
-        self.assertIn('data-core-video-reset-to-poster="1"', source)
-        self.assertIn("data-core-video-poster-button", source)
-        self.assertIn("function bindCoreVideoPosterReset(root = document)", source)
-        self.assertIn('video.addEventListener("pause"', source)
-        self.assertIn('video.addEventListener("ended", showPoster)', source)
-        self.assertIn("video.hidden = true", source)
-        self.assertIn('video.style.display = "none"', source)
-        self.assertIn('video.style.display = "block"', source)
-        self.assertIn("posterButton.hidden = false", source)
-        self.assertIn('posterButton.style.display = "block"', source)
-        self.assertIn('posterButton.addEventListener("click", async () => {', source)
-        self.assertIn("bindCoreVideoPosterReset();", source)
+        self.assertIn("function showVideoPoster()", source)
+        self.assertIn("function handleVideoPause", source)
+        self.assertIn("async function playVideoFromPoster", source)
+        self.assertIn('@pause="handleVideoPause"', source)
+        self.assertIn('@ended="showVideoPoster"', source)
+        self.assertIn('v-show="videoPosterVisible"', source)
+        self.assertIn('class="tcx-native-video-poster"', source)
 
     def test_music_player_selectors_group_targets_and_use_friendly_names(self) -> None:
         display = (REPO_ROOT / "frontend" / "src" / "music" / "playerDisplay.ts").read_text(

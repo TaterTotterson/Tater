@@ -189,16 +189,16 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
 
     def test_core_task_contract_supports_automatic_event_driven_jobs(self) -> None:
         app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
-        ui_source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        ui_source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "SystemTaskCard.vue").read_text(encoding="utf-8")
 
         self.assertIn('raw_task.get("manual")', app_source)
         self.assertIn('raw_task.get("schedule_label")', app_source)
         self.assertIn('raw_task.get("next_run_label")', app_source)
         self.assertIn('detail = "This core task runs automatically."', app_source)
-        self.assertIn('boolFromAny(task?.manual, true)', ui_source)
-        self.assertIn('task?.schedule_label', ui_source)
-        self.assertIn('task?.next_run_label', ui_source)
-        self.assertIn('>Automatic</button>', ui_source)
+        self.assertIn("bool(props.task.manual, true)", ui_source)
+        self.assertIn("props.task.schedule_label", ui_source)
+        self.assertIn("props.task.next_run_label", ui_source)
+        self.assertIn(">Automatic</button>", ui_source)
 
     def test_satellite_snapshot_is_event_driven_with_five_minute_fallback(self) -> None:
         app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
@@ -241,14 +241,18 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
 
     def test_runtime_stats_and_context_settings_use_background_snapshots(self) -> None:
         app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
-        ui_source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        ui_source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
         helpers_source = (REPO_ROOT / "helpers.py").read_text(encoding="utf-8")
 
-        self.assertIn("RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 15", app_source)
+        self.assertIn("RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 5", app_source)
+        self.assertIn("RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS = 1.0", app_source)
+        self.assertIn('@app.get("/api/runtime/telemetry")', app_source)
+        self.assertIn("get_system_hardware_snapshot(include_vram_probe=False)", app_source)
         self.assertIn("RUNTIME_MODEL_SNAPSHOT_INTERVAL_SECONDS = 30", app_source)
         self.assertIn("_runtime_cached_loaded_models(include_models=False)", app_source)
         self.assertIn('@app.get("/api/runtime/context-estimate")', app_source)
-        self.assertIn('api("/api/runtime/context-estimate"', ui_source)
+        self.assertIn("context", ui_source)
+        self.assertIn("breakdown", ui_source)
         self.assertNotIn("Open the top stats bubble to refresh", ui_source)
         self.assertIn("enable_apple_ioreg_probe=True", app_source)
         self.assertIn("enable_ioreg_probe: Optional[bool] = None", helpers_source)

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from . import runtime as esphome_runtime
+from . import airplay_input
 from . import firmware as esphome_firmware
 from . import native_live_settings
 from . import native_satellite
@@ -76,6 +77,7 @@ async def startup() -> None:
     esphome_settings.cleanup_removed_user_settings()
     native_satellite.bind_runtime_loop()
     await esphome_runtime.startup()
+    airplay_input.startup()
 
 
 async def shutdown() -> None:
@@ -84,7 +86,7 @@ async def shutdown() -> None:
 
 def _runtime_panel_token(panel: Any = "") -> str:
     token = esphome_runtime.lower(panel)
-    return token if token in {"satellites", "firmware", "stereo", "platform", "speakerid", "emotionid", "stats"} else ""
+    return token if token in {"satellites", "firmware", "stereo", "airplay", "platform", "speakerid", "emotionid", "stats"} else ""
 
 
 def _native_satellite_status_snapshot() -> Dict[str, Any]:
@@ -1062,6 +1064,7 @@ def get_runtime_payload(
     include_satellites = panel_token in {"", "satellites"}
     include_firmware = panel_token in {"", "firmware"}
     include_stereo_pairs = panel_token in {"", "stereo"}
+    include_airplay = panel_token in {"", "airplay"}
     include_speaker_id = panel_token in {"", "speakerid"}
     include_emotion_id = panel_token in {"", "emotionid"}
     include_stats = panel_token in {"", "stats"}
@@ -1144,6 +1147,9 @@ def get_runtime_payload(
 
     if include_firmware:
         payload["firmware"] = esphome_firmware.firmware_panel_payload(status)
+
+    if include_airplay:
+        payload["airplay_input"] = airplay_input.panel_payload()
 
     if include_speaker_id:
         payload["speaker_id"] = esphome_speaker_id.panel_payload(status)
@@ -1403,6 +1409,26 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
     if isinstance(emotion_id_result, dict):
         return emotion_id_result
 
+    if action_name == "voice_airplay_input_save":
+        result = airplay_input.save_settings(esphome_runtime.payload_values(body))
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": "AirPlay Input settings saved.",
+            **result,
+            "airplay_input": airplay_input.panel_payload(),
+        }
+
+    if action_name == "voice_airplay_input_stop":
+        status = airplay_input.stop_input()
+        return {
+            "ok": True,
+            "action": action_name,
+            "message": "AirPlay input stopped.",
+            "status": status,
+            "airplay_input": airplay_input.panel_payload(),
+        }
+
     if action_name == "voice_wake_trainer_link_pairing_start":
         result = wake_trainer_link.start_pairing()
         return {
@@ -1605,18 +1631,14 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         if not selector:
             raise ValueError("selector is required")
         result = native_satellite.run_on_runtime_loop(
-            native_satellite.send_command(
-                selector,
-                "setup.reset",
-                {"reason": "user_requested_setup_mode"},
-            ),
+            native_satellite.enter_setup_mode_and_forget(selector),
             timeout=5.0,
         )
         return {
             "ok": True,
             "action": action_name,
             "selector": selector,
-            "message": "Setup mode requested. The satellite will reboot and start its setup Wi-Fi network.",
+            "message": "Satellite unpaired. It will reboot into setup mode and must be paired again before Tater can use it.",
             **(result if isinstance(result, dict) else {}),
             "status": esphome_runtime.status(),
         }

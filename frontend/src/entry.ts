@@ -24,13 +24,56 @@ import type { PortalPayload, PortalsController, PortalsMountOptions } from "./po
 import SpudexApp from "./spudex/SpudexApp.vue";
 import type { SpudexController, SpudexMountOptions, SpudexPayload } from "./spudex/types";
 import SettingsApp from "./settings/SettingsApp.vue";
-import type { SettingsController, SettingsMountOptions, SettingsSummary } from "./settings/types";
+import type {
+  AdvancedSettings,
+  GeneralSettings,
+  HydraSettings,
+  MiscSettings,
+  ModelsSettingsPayload,
+  PeopleSettingsPayload,
+  SpudLinkSettings,
+  SettingsController,
+  SettingsMountOptions,
+  SettingsSummary,
+} from "./settings/types";
 import RuntimeStatus from "./runtime/RuntimeStatus.vue";
 import type { RuntimeStatusController, RuntimeStatusMountOptions, RuntimeStatusState } from "./runtime/types";
+import AppShell from "./shell/AppShell.vue";
+import type { AppShellController, AppShellMountOptions } from "./shell/types";
 import VerbasApp from "./verbas/VerbasApp.vue";
 import type { VerbaPayload, VerbasController, VerbasMountOptions } from "./verbas/types";
+import "./base.css";
 import "./music/music-core.css";
 import "./tater-ui.css";
+
+export function mountAppShell(
+  container: HTMLElement,
+  options: AppShellMountOptions,
+): AppShellController {
+  const app = createApp(AppShell, { options });
+  const instance = app.mount(container) as unknown as Omit<AppShellController, "unmount">;
+  return {
+    navigate: (view, navigateOptions) => instance.navigate(view, navigateOptions),
+    refresh: () => instance.refresh(),
+    refreshTab: (key) => instance.refreshTab(key),
+    selectViewTab: (view, tab, childTab) => instance.selectViewTab(view, tab, childTab),
+    selectSettings: (tab) => instance.selectSettings(tab),
+    select: (tab) => instance.select(tab),
+    updateView: (view, payload) => instance.updateView(view, payload),
+    update: (payload) => instance.update(payload),
+    setHealth: (health, tone) => instance.setHealth(health, tone),
+    setStatus: (text, tone) => instance.setStatus(text, tone),
+    openRuntime: () => instance.openRuntime(),
+    toast: (message, tone, timeoutMs) => instance.toast(message, tone, timeoutMs),
+    updateBranding: (branding) => instance.updateBranding(branding),
+    setSidebarCollapsed: (collapsed) => instance.setSidebarCollapsed(collapsed),
+    updateAuth: (state) => instance.updateAuth(state),
+    requireAuth: (state, message) => instance.requireAuth(state, message),
+    unmount() {
+      app.unmount();
+    },
+  };
+}
 
 export function mountChat(
   container: HTMLElement,
@@ -177,7 +220,25 @@ export function mountSettings(
   container: HTMLElement,
   options: SettingsMountOptions,
 ): SettingsController {
-  const state = reactive<{ summary: SettingsSummary }>({ summary: options.initialSummary || {} });
+  const state = reactive<{
+    summary: SettingsSummary;
+    general: GeneralSettings;
+    hydra: HydraSettings;
+    misc: MiscSettings;
+    people: PeopleSettingsPayload;
+    spudLink: SpudLinkSettings;
+    models: ModelsSettingsPayload;
+    advanced: AdvancedSettings;
+  }>({
+    summary: options.initialSummary || {},
+    general: options.initialGeneral || {},
+    hydra: options.initialHydra || {},
+    misc: options.initialMisc || {},
+    people: options.initialPeople || {},
+    spudLink: options.initialSpudLink || {},
+    models: options.initialModels || {},
+    advanced: options.initialAdvanced || {},
+  });
   const app = createApp(SettingsApp, { state, options });
   const instance = app.mount(container) as unknown as { select?: (tab: string) => void };
   return {
@@ -243,6 +304,8 @@ export function mountMusicCore(
 }
 
 export type {
+  AppShellController,
+  AppShellMountOptions,
   ChatController,
   ChatMessage,
   ChatMountOptions,

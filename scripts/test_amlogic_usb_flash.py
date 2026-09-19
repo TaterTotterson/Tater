@@ -85,7 +85,7 @@ class AmlogicUsbFlashTests(unittest.TestCase):
 
     def test_tater_backend_never_routes_s420_through_esptool(self) -> None:
         firmware_source = (REPO_ROOT / "tater_voice" / "firmware.py").read_text(encoding="utf-8")
-        app_source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        firmware_ui = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "voice" / "VoiceFirmware.vue").read_text(encoding="utf-8")
         self.assertIn('"voice_firmware_amlogic_flash_start"', firmware_source)
         self.assertIn('operation": "amlogic_usb_factory_flash"', firmware_source)
         self.assertIn('"--soc=axg"', (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"))
@@ -117,7 +117,8 @@ class AmlogicUsbFlashTests(unittest.TestCase):
             '"save"',
             (REPO_ROOT / "tater_voice" / "amlogic_s420_flash.py").read_text(encoding="utf-8"),
         )
-        self.assertIn('runCoreManagerAction(card, coreKey, "voice_firmware_amlogic_flash_start"', app_source)
+        self.assertIn('startSession("voice_firmware_amlogic_flash_start"', firmware_ui)
+        self.assertIn('flashTransport.value === "amlogic_usb_burn"', firmware_ui)
         self.assertIn('flash_transport != "esp_serial"', firmware_source)
 
     def test_s420_progress_ignores_amlogic_chunk_percentages(self) -> None:

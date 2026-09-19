@@ -9,24 +9,29 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueRuntimeStatusTests(unittest.TestCase):
-    def test_runtime_status_uses_shared_vue_bundle_with_legacy_fallback(self) -> None:
+    def test_runtime_status_is_owned_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn("async function mountVueRuntimeStatus", app_js)
-        self.assertIn("module.mountRuntimeStatus", app_js)
-        self.assertIn("state.runtimeVueController.setHealth", app_js)
-        self.assertIn("state.runtimeVueController.setStatus", app_js)
-        self.assertIn("Falling back to the legacy runtime status UI", app_js)
-        self.assertIn("bindRuntimeSummary();", app_js)
-        self.assertIn("export function mountRuntimeStatus", entry)
+        self.assertIn('import RuntimeStatus from "../runtime/RuntimeStatus.vue"', shell)
+        self.assertIn("<RuntimeStatus", shell)
+        self.assertIn(':assistant-name="branding.firstName"', shell)
+        self.assertIn("function setHealth", shell)
+        self.assertIn("function setStatus", shell)
+        self.assertIn("function createRuntimeVueOptions()", app_js)
+        self.assertNotIn("mountVueRuntimeStatus", app_js)
+        self.assertNotIn("legacy runtime status", app_js.lower())
 
-    def test_runtime_popup_keeps_live_polling_and_model_controls(self) -> None:
+    def test_runtime_monitor_uses_streaming_telemetry_with_detail_polling_fallback(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 
         for contract in (
+            "props.options.endpoints.telemetry",
             "props.options.endpoints.breakdown",
             "props.options.endpoints.unloadModel",
+            "new EventSource",
+            'addEventListener("telemetry"',
+            'document.addEventListener("visibilitychange"',
             "window.setInterval",
             "5000",
             "unloadModel(model)",
@@ -37,6 +42,9 @@ class VueRuntimeStatusTests(unittest.TestCase):
         ):
             self.assertIn(contract, source)
         self.assertNotIn("innerHTML", source)
+        self.assertNotIn(">Refresh</button>", source)
+        self.assertIn("assistantRuntimeLabel", source)
+        self.assertNotIn("<strong>Tater runtime</strong>", source)
 
     def test_runtime_popup_includes_every_existing_statistics_area(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
@@ -52,34 +60,42 @@ class VueRuntimeStatusTests(unittest.TestCase):
         ):
             self.assertIn(heading, source)
 
+        self.assertIn('class="tr-tab-mark"', source)
+        self.assertNotIn('class="tr-modal-badge"', source)
+        self.assertNotIn('class="tr-overview-mark"', source)
+        self.assertNotIn('class="tr-pill-orb"', source)
+        for view in ("tr-activity-view", "tr-models-view", "tr-context-view", "tr-view-hero"):
+            self.assertIn(view, source)
+
     def test_llm_calls_show_queued_and_running_states(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
-        fallback = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
 
         for contract in ("llm.running_total", "llm.queued_total", "call.state_label", "call.state_age_seconds"):
             self.assertIn(contract, source)
-        for contract in ("llmCalls.running_total", "llmCalls.queued_total", "row?.state_age_seconds"):
-            self.assertIn(contract, fallback)
 
     def test_remote_models_show_hub_status_without_fake_memory_estimates(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 
         self.assertIn("model.remote", source)
         self.assertIn("model.remote ? 'Spud Hub'", source)
-        self.assertIn('model.remote\n    ? ""', source)
+        self.assertIn('const estimate = model.remote ? ""', source)
 
-    def test_runtime_breakdown_still_updates_shared_cache_consumers(self) -> None:
+    def test_runtime_breakdown_is_reactive_and_uses_shell_endpoints(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 
-        self.assertIn("state.runtimeBreakdownPayload = payload || {};", app_js)
-        self.assertIn('new CustomEvent("tater:runtime-breakdown-updated"', app_js)
+        self.assertIn("const breakdown = ref<JsonRow>({})", source)
+        self.assertIn("breakdown.value = payload || {}", source)
+        self.assertIn("props.options.onBreakdownChange?.(payload || {})", source)
         self.assertIn('breakdown: withBasePath("/api/runtime/breakdown")', app_js)
+        self.assertIn('telemetry: withBasePath("/api/runtime/telemetry")', app_js)
         self.assertIn('unloadModel: withBasePath("/api/runtime/local-llm/unload")', app_js)
+        self.assertNotIn("runtimeBreakdownPayload", app_js)
 
     def test_unified_memory_hardware_avoids_a_duplicate_vram_meter(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 
-        self.assertIn('resource(unified ? "Unified" : "RAM"', source)
+        self.assertIn('resource(unified ? "MEM" : "RAM"', source)
         self.assertIn('if (!unified) resources.push(resource("VRAM"', source)
         self.assertIn('metric(unified ? "Unified Memory" : "System RAM"', source)
         self.assertIn('if (!unified) values.push(metric("System VRAM"', source)
@@ -92,6 +108,9 @@ class VueRuntimeStatusTests(unittest.TestCase):
             ".tr-pill {",
             ".tr-resource {",
             ".tr-modal {",
+            ".tr-live-state {",
+            ".tr-tabs {",
+            ".tr-overview-hero {",
             ".tr-grid {",
             ".tr-meter-grid {",
             ".tr-turns {",
@@ -99,6 +118,21 @@ class VueRuntimeStatusTests(unittest.TestCase):
             self.assertIn(selector, styles)
         self.assertIn("@media (max-width: 860px)", styles)
         self.assertIn("@media (max-width: 620px)", styles)
+
+    def test_runtime_telemetry_backend_streams_fast_cpu_ram_and_cached_gpu(self) -> None:
+        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+
+        for contract in (
+            "RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 5",
+            "RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS = 15",
+            "RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS = 1.0",
+            "get_system_hardware_snapshot(include_vram_probe=False)",
+            "async def _stream_runtime_telemetry(request: Request)",
+            '@app.get("/api/runtime/telemetry")',
+            'media_type="text/event-stream"',
+            "_stream_runtime_telemetry(request)",
+        ):
+            self.assertIn(contract, source)
 
 
 if __name__ == "__main__":

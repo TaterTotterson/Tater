@@ -31,6 +31,10 @@ DELETED_IDENTITY = "__deleted__"
 OBSERVATION_LIMIT = 500
 REFERENCE_LIMIT = 24
 MODEL_SWITCH_STATE_KEY = "tater:face_id:model_switch:v1"
+FACENET_KNOWN_MATCH_THRESHOLD = 0.45
+KNOWN_MATCH_MIN_MARGIN = 0.10
+KNOWN_MATCH_MIN_REFERENCES = 2
+SINGLE_KNOWN_MATCH_MIN_REFERENCES = 3
 
 _identity_lock = threading.RLock()
 _model_switch_lock = threading.RLock()
@@ -443,22 +447,69 @@ def match_identity(
     model_signature: str = "",
 ) -> Tuple[str, float]:
     maximum = _float(threshold, _float(getattr(face_id_runtime, "MATCH_THRESHOLD", 0.30), 0.30))
-    best_id = ""
-    best_distance = float("inf")
+    candidates: List[Dict[str, Any]] = []
     for identity_id, identity in identities.items():
-        distance = min(
-            (
-                cosine_distance(embedding, reference)
-                for reference in reference_embeddings(identity, model_signature=model_signature)
-            ),
-            default=float("inf"),
+        references = reference_embeddings(identity, model_signature=model_signature)
+        distances = sorted(cosine_distance(embedding, reference) for reference in references)
+        if not distances:
+            continue
+        candidates.append(
+            {
+                "id": identity_id,
+                "identity": identity,
+                "distance": distances[0],
+                "distances": distances,
+                "known": bool(
+                    _text(identity.get("person_id"))
+                    or _text(identity.get("person_name"))
+                    or _text(identity.get("name"))
+                ),
+            }
         )
-        if distance < best_distance:
-            best_id = identity_id
-            best_distance = distance
-    if not best_id or best_distance > maximum:
-        return "", best_distance
-    return best_id, best_distance
+
+    if not candidates:
+        return "", float("inf")
+
+    candidates.sort(key=lambda row: (float(row["distance"]), _text(row["id"])))
+    known = [row for row in candidates if bool(row["known"])]
+    unknown = [row for row in candidates if not bool(row["known"])]
+
+    # Once a profile is linked to a Person, a nearby anonymous cluster should
+    # not steal future observations from it. Prefer a valid named match first;
+    # anonymous clusters are still used when no named profile is convincing.
+    if known and float(known[0]["distance"]) <= maximum:
+        return _text(known[0]["id"]), float(known[0]["distance"])
+
+    # FaceNet's general cutoff is deliberately strict. For an enrolled person,
+    # accept a wider pose/lighting variation only when several saved views agree
+    # and the next enrolled person is clearly farther away. This recovers strong
+    # household matches without globally loosening anonymous clustering.
+    signature = _text(model_signature).lower()
+    known_maximum = FACENET_KNOWN_MATCH_THRESHOLD if "facenet512" in signature else maximum
+    if known and known_maximum > maximum:
+        best_known = known[0]
+        second_distance = float(known[1]["distance"]) if len(known) > 1 else float("inf")
+        required_references = (
+            KNOWN_MATCH_MIN_REFERENCES
+            if len(known) > 1
+            else SINGLE_KNOWN_MATCH_MIN_REFERENCES
+        )
+        support = sum(
+            1
+            for distance in best_known["distances"]
+            if float(distance) <= known_maximum
+        )
+        if (
+            float(best_known["distance"]) <= known_maximum
+            and support >= required_references
+            and second_distance - float(best_known["distance"]) >= KNOWN_MATCH_MIN_MARGIN
+        ):
+            return _text(best_known["id"]), float(best_known["distance"])
+
+    if unknown and float(unknown[0]["distance"]) <= maximum:
+        return _text(unknown[0]["id"]), float(unknown[0]["distance"])
+
+    return "", float(candidates[0]["distance"])
 
 
 def _detection_observation(

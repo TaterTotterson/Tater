@@ -17,6 +17,7 @@ const tabs = [
   { id: "repos", label: "Repositories" },
 ];
 const activeTab = ref(tabs.some((tab) => tab.id === props.options.initialTab) ? String(props.options.initialTab) : "installed");
+const selectTab = (tab: string) => { if (tabs.some((row) => row.id === tab)) activeTab.value = tab; };
 const busy = ref("");
 const status = ref("");
 const error = ref("");
@@ -24,6 +25,7 @@ const purgeIds = ref<Record<string, boolean>>({});
 const repoName = ref("");
 const repoUrl = ref("");
 const draftRepos = ref<JsonRow[]>([]);
+const repoSection = ref("trusted");
 const settingsVerba = ref<JsonRow | null>(null);
 const fieldValues = ref<JsonRow>({});
 
@@ -35,6 +37,7 @@ const catalog = computed(() => Array.isArray(shop.value.catalog) ? shop.value.ca
 const available = computed(() => catalog.value.filter((row: JsonRow) => !row.installed).sort(compareRows));
 const updates = computed(() => installed.value.filter((row: JsonRow) => row.update_available));
 const enabledCount = computed(() => runtimeItems.value.filter((row: JsonRow) => Boolean(row.enabled)).length);
+const trustedRepos = computed(() => Array.isArray(shop.value.repos?.trusted) ? shop.value.repos.trusted : []);
 const runtimeById = computed(() => new Map(runtimeItems.value.map((row: JsonRow) => [canonicalId(row.id), row])));
 const installedRows = computed(() => {
   const seen = new Set<string>();
@@ -66,7 +69,30 @@ function notify(message: string, tone = "success") {
   props.options.onToast?.(message, tone);
 }
 function syncDraftRepos() {
-  draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repos.additional.map((row: JsonRow) => ({ ...row })) : [];
+  const trustedUrls = new Set(trustedRepos.value.map((row: JsonRow) => text(row.url).toLowerCase()).filter(Boolean));
+  draftRepos.value = Array.isArray(shop.value.repos?.additional)
+    ? shop.value.repos.additional.filter((row: JsonRow) => !trustedUrls.has(text(row.url).toLowerCase())).map((row: JsonRow) => ({ ...row }))
+    : [];
+}
+
+function selectedTrustedRepos(): JsonRow[] {
+  return trustedRepos.value.filter((row: JsonRow) => Boolean(row.enabled)).map((row: JsonRow) => ({ name: text(row.name), url: text(row.url) }));
+}
+function combinedRepos(): JsonRow[] { return [...selectedTrustedRepos(), ...draftRepos.value]; }
+async function toggleTrustedRepo(repo: JsonRow) {
+  if (busy.value) return;
+  const wasEnabled = Boolean(repo.enabled);
+  const enabling = !repo.enabled;
+  repo.enabled = enabling;
+  busy.value = `${enabling ? "Adding" : "Removing"} ${text(repo.name || repo.repository)}…`;
+  try {
+    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() });
+    notify(`${text(repo.name || repo.repository)} ${enabling ? "added to" : "removed from"} the Verba Store.`);
+    await refresh(true);
+  } catch (requestError) {
+    repo.enabled = wasEnabled;
+    notify(requestError instanceof Error ? requestError.message : "Trusted repository update failed.", "error");
+  } finally { busy.value = ""; }
 }
 
 async function refresh(quiet = false) {
@@ -169,7 +195,7 @@ async function saveSettings() {
 function addRepo() {
   const url = repoUrl.value.trim();
   if (!url) { notify("Repo URL is required.", "error"); return; }
-  if (draftRepos.value.some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already added.", "error"); return; }
+  if ([...draftRepos.value, ...trustedRepos.value].some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already listed.", "error"); return; }
   draftRepos.value.push({ name: repoName.value.trim(), url });
   repoName.value = "";
   repoUrl.value = "";
@@ -179,7 +205,7 @@ function addRepo() {
 async function saveRepos() {
   busy.value = "Saving Verba repositories…";
   try {
-    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: draftRepos.value });
+    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() });
     notify("Verba repositories saved.");
     await refresh(true);
   } catch (requestError) {
@@ -192,6 +218,7 @@ watch(() => props.state.payload, syncDraftRepos, { deep: false });
 syncDraftRepos();
 window.addEventListener("keydown", handleEscape);
 onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
+defineExpose({ select: selectTab });
 </script>
 
 <template>
@@ -211,7 +238,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
     <div v-if="shop.errors?.length" class="tv-notice error">{{ shop.errors.join(' • ') }}</div>
 
     <nav class="tv-tabs tvb-tabs" aria-label="Verba sections">
-      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
+      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="selectTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
     </nav>
 
     <section v-if="activeTab === 'installed'" class="tvb-card-grid">
@@ -235,18 +262,37 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
       <div v-if="!available.length" class="tv-empty">No additional Verba are available from the configured repositories.</div>
     </section>
 
-    <section v-else-if="activeTab === 'manage'" class="tvb-manage-list">
-      <div class="tv-panel tvb-manage-toolbar"><div><span class="tv-eyebrow">Maintenance</span><h2>Manage installed Verba</h2><p>{{ updates.length }} update{{ updates.length === 1 ? '' : 's' }} available.</p></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
-      <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tvb-manage-row"><div><strong>{{ row.name || row.id }}</strong><span>{{ row.installed_ver || '0.0.0' }} → {{ row.store_ver || '-' }}</span></div><div class="ti-row-actions"><button class="tv-button" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeById.has(canonicalId(row.id))" class="tv-button" type="button" @click="toggleVerba(row.id, !runtimeById.get(canonicalId(row.id))?.enabled)">{{ runtimeById.get(canonicalId(row.id))?.enabled ? 'Disable' : 'Enable' }}</button><label v-if="!row.required" class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button v-if="!row.required" class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button><span v-else class="tv-state good">Required</span></div></article>
+    <section v-else-if="activeTab === 'manage'" class="tvb-manage-list tv-manage-workspace">
+      <div class="tv-panel tvb-manage-toolbar tv-manage-hero">
+        <div class="tv-manage-hero-copy"><span class="tv-eyebrow">Manage library</span><h2>Verba control center</h2><p>Keep Tater’s tools current, choose what is enabled, and remove tools you no longer use.</p></div>
+        <div class="tv-manage-overview"><div><span>Installed</span><strong>{{ installed.length }}</strong></div><div :class="{ attention: updates.length }"><span>Updates ready</span><strong>{{ updates.length }}</strong></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
+      </div>
+      <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tvb-manage-row tv-manage-card" :class="{ 'has-update': row.update_available }">
+        <div class="tv-manage-identity"><span class="tv-manage-monogram">{{ text(row.name || row.id).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">{{ row.id }}</span><h3>{{ row.name || row.id }}</h3><small>{{ row.source_label || 'Local Verba' }}</small></div></div>
+        <div class="tv-manage-version"><div><span>Installed</span><strong>{{ row.installed_ver || '0.0.0' }}</strong></div><i>→</i><div><span>Latest</span><strong>{{ row.store_ver || '-' }}</strong></div><span class="tv-state" :class="row.update_available ? 'pending' : 'good'">{{ row.update_available ? 'Update ready' : 'Current' }}</span></div>
+        <div class="tv-manage-actions"><span v-if="runtimeById.has(canonicalId(row.id))" class="tv-manage-runtime" :class="{ online: runtimeById.get(canonicalId(row.id))?.enabled }"><i />{{ runtimeById.get(canonicalId(row.id))?.enabled ? 'Enabled' : 'Disabled' }}</span><button class="tv-button" :class="{ primary: row.update_available }" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeById.has(canonicalId(row.id))" class="tv-button" type="button" @click="toggleVerba(row.id, !runtimeById.get(canonicalId(row.id))?.enabled)">{{ runtimeById.get(canonicalId(row.id))?.enabled ? 'Disable' : 'Enable' }}</button><label v-if="!row.required" class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button v-if="!row.required" class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button><span v-else class="tv-state good">Required</span></div>
+      </article>
       <div v-if="!installed.length" class="tv-empty">No installed Verba found.</div>
     </section>
 
-    <section v-else class="tv-panel tvb-repos">
-      <header><div><span class="tv-eyebrow">Trusted sources</span><h2>Verba repositories</h2><p>The built-in repository stays available. Add other trusted manifests below.</p></div></header>
-      <article class="ti-repo-row builtin"><div><strong>{{ shop.repos?.default?.name || 'Default' }}</strong><code>{{ shop.repos?.default?.url || '(not set)' }}</code></div><span>Built-in</span></article>
-      <article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Additional repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article>
-      <div v-if="!draftRepos.length" class="tv-empty compact">No additional repositories configured.</div>
-      <div class="tvb-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Verba Repo" /></label><label><span>Repository URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/verbas.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save repositories</button></div>
+    <section v-else class="tv-panel tvb-repos tv-repository-manager">
+      <header class="tv-repository-heading"><div><span class="tv-eyebrow">Repository library</span><h2>Verba repositories</h2><p>Choose a Tater-trusted source or add your own manifest.</p></div></header>
+      <nav class="tv-repository-tabs" aria-label="Verba repository sources"><button type="button" :class="{ active: repoSection === 'trusted' }" @click="repoSection = 'trusted'">Trusted repositories</button><button type="button" :class="{ active: repoSection === 'custom' }" @click="repoSection = 'custom'">Custom repositories</button></nav>
+      <div v-if="repoSection === 'trusted'" class="tv-trusted-repositories">
+        <p class="tv-repository-intro">Curated sources are reviewed by Tater. Select a card to add or remove its Verba from your Store automatically.</p>
+        <div v-if="shop.repos?.trusted_error" class="tv-repository-warning">The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.</div>
+        <div class="tv-trusted-repo-grid">
+          <article class="tv-trusted-repo-card builtin selected" aria-label="Built-in Tater Shop repository"><span class="tv-repo-check">✓</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">T</span><div><span class="tv-eyebrow">Always available</span><h3>{{ shop.repos?.default?.name || 'Tater Shop' }}</h3><p>by <strong>Tater Assistant</strong></p></div></div><p>The official built-in Verba catalog.</p><footer><span class="tv-repo-enabled">Built in</span></footer></article>
+          <article v-for="repo in trustedRepos" :key="repo.id || repo.url" class="tv-trusted-repo-card" :class="{ selected: repo.enabled }" role="button" tabindex="0" :aria-pressed="Boolean(repo.enabled)" @click="toggleTrustedRepo(repo)" @keydown.enter.prevent="toggleTrustedRepo(repo)" @keydown.space.prevent="toggleTrustedRepo(repo)"><span class="tv-repo-check">{{ repo.enabled ? '✓' : '+' }}</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">{{ text(repo.repository || repo.name).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">Trusted Verba source</span><h3>{{ repo.repository || repo.name }}</h3><p>by <a v-if="repo.author_url" :href="repo.author_url" target="_blank" rel="noreferrer" @click.stop>{{ repo.author || 'Community author' }}</a><strong v-else>{{ repo.author || 'Community author' }}</strong></p></div></div><p>{{ repo.description || 'Additional Verba for the Tater Store.' }}</p><div v-if="repo.tags?.length" class="ti-tags"><span v-for="tag in repo.tags" :key="tag">{{ tag }}</span></div><footer><a v-if="repo.homepage" :href="repo.homepage" target="_blank" rel="noreferrer" @click.stop>View repository ↗</a><span :class="repo.enabled ? 'tv-repo-enabled' : 'tv-repo-available'">{{ repo.enabled ? 'Added to Store' : 'Select to add' }}</span></footer></article>
+        </div>
+        <div v-if="!trustedRepos.length" class="tv-empty compact">No additional trusted Verba repositories are listed yet.</div>
+      </div>
+      <div v-else class="tv-custom-repositories">
+        <p class="tv-repository-intro">Custom manifests are managed by you and are not reviewed by Tater.</p>
+        <article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Custom repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article>
+        <div v-if="!draftRepos.length" class="tv-empty compact">No custom repositories configured.</div>
+        <div class="tvb-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Verba Repo" /></label><label><span>Manifest URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/verbas.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save custom repositories</button></div>
+      </div>
     </section>
 
     <PopupTransition :open="Boolean(settingsVerba)" @close="settingsVerba = null">

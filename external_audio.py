@@ -1,9 +1,10 @@
 """Reusable live external-audio input for synchronized Tater satellites.
 
 Shairport Sync receives classic AirPlay/RAOP audio on Linux or macOS and sends
-decoded 44.1 kHz stereo S16LE PCM to this module through standard output.  The
-module keeps one shared PCM timeline and exposes it as an open-ended WAV stream
-so every selected player starts from the same byte cursor.
+decoded 44.1 kHz stereo S16LE PCM to this module through standard output. The
+module keeps one shared PCM timeline and transcodes each listener to a live MP3
+stream so every selected player starts from the same byte cursor without the
+fragile pause/resume behavior of an open-ended WAV response.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ DEFAULT_PREBUFFER_SECONDS = 3.0
 DEFAULT_INPUT_IDLE_SECONDS = 8.0
 EXTERNAL_NATIVE_START_LEAD_MS = 2500
 PCM_IO_CHUNK_BYTES = 16 * 1024
+MP3_STREAM_BITRATE_KBPS = 192
 DEFAULT_ROUTE_MAX_ATTEMPTS = 5
 DEFAULT_RECEIVER_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_RECEIVER_RESTART_DELAYS = (5.0, 15.0)
@@ -370,6 +372,68 @@ def _find_shairport_sync(configured: Any = "") -> str:
         ):
             return str(Path(candidate).resolve())
     return ""
+
+
+def _find_stream_encoder(configured: Any = "") -> str:
+    """Return the ffmpeg executable bundled by the pinned imageio dependency."""
+    bundled = ""
+    try:
+        import imageio_ffmpeg
+
+        bundled = _text(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        bundled = ""
+    candidates = [
+        _text(configured),
+        _text(os.getenv("TATER_FFMPEG_PATH")),
+        bundled,
+        _text(shutil.which("ffmpeg")),
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return str(Path(candidate).resolve())
+    return ""
+
+
+def _mp3_stream_command(binary: str) -> list[str]:
+    """Build the low-latency PCM-to-MP3 command used by each live listener."""
+    return [
+        _text(binary),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        str(CHANNELS),
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-map_metadata",
+        "-1",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        f"{MP3_STREAM_BITRATE_KBPS}k",
+        "-write_xing",
+        "0",
+        "-flush_packets",
+        "1",
+        "-f",
+        "mp3",
+        "pipe:1",
+    ]
 
 
 class _ExternalAudioRuntime:
@@ -1043,7 +1107,7 @@ class _ExternalAudioRuntime:
             query = urlencode({"cursor": cursor, "token": token})
             url = (
                 f"{_service_base_url_for_peer().rstrip('/')}"
-                f"/api/external-audio/v1/streams/{quote(session_id)}/live.wav?{query}"
+                f"/api/external-audio/v1/streams/{quote(session_id)}/live.mp3?{query}"
             )
             metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
             sender_volume = _metadata_volume_percent(
@@ -1054,9 +1118,9 @@ class _ExternalAudioRuntime:
             result = play_media_url_targets(
                 targets=targets,
                 source_url=url,
-                media_type="audio/wav",
+                media_type="audio/mpeg",
                 media_content_type="music",
-                filename="external-audio-live.wav",
+                filename="external-audio-live.mp3",
                 title=_text(metadata.get("title")) or "AirPlay",
                 artist=_text(metadata.get("artist")),
                 album=_text(metadata.get("album")),
@@ -1247,6 +1311,113 @@ class _ExternalAudioRuntime:
 
         return body()
 
+    def stream_mp3(self, session_id: Any, token: Any, cursor: Any) -> Iterator[bytes]:
+        """Encode one independent live listener from the shared PCM cursor.
+
+        Each satellite gets its own encoder so stereo members consume exactly
+        the same PCM timeline while MPV receives a stream-native format. This
+        avoids the embedded player's tendency to stop reading an open-ended
+        WAV after a synchronized paused start.
+        """
+        with self._lock:
+            session = dict(self._active_session)
+            if not session or _text(session.get("id")) != _text(session_id):
+                raise ExternalAudioStreamError("The external audio stream was not found.")
+            if not secrets.compare_digest(_text(session.get("token")), _text(token)):
+                raise ExternalAudioStreamError("The external audio stream token is invalid.")
+            try:
+                clean_cursor = max(0, int(cursor))
+            except Exception as exc:
+                raise ExternalAudioStreamError("The external audio cursor is invalid.") from exc
+            if clean_cursor % FRAME_BYTES:
+                raise ExternalAudioStreamError("The external audio cursor is not frame-aligned.")
+            generation = int(session.get("generation") or 0)
+
+        encoder = _find_stream_encoder()
+        if not encoder:
+            raise RuntimeError(
+                "The bundled ffmpeg encoder is unavailable for live satellite audio."
+            )
+        try:
+            process = subprocess.Popen(
+                _mp3_stream_command(encoder),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=False,
+                bufsize=0,
+                close_fds=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Could not start the live satellite audio encoder: {exc}") from exc
+        if process.stdin is None or process.stdout is None:
+            with contextlib.suppress(Exception):
+                process.terminate()
+            raise RuntimeError("The live satellite audio encoder did not expose its pipes.")
+
+        stop_feeder = threading.Event()
+
+        def feed_pcm() -> None:
+            next_cursor = clean_cursor
+            try:
+                while not stop_feeder.is_set() and process.poll() is None:
+                    try:
+                        chunk, next_cursor = self._timeline.read(
+                            next_cursor,
+                            generation,
+                            maximum=PCM_IO_CHUNK_BYTES,
+                            timeout=1.0,
+                        )
+                    except ExternalAudioStreamError:
+                        return
+                    if chunk:
+                        pending = memoryview(chunk)
+                        while pending and not stop_feeder.is_set():
+                            written = process.stdin.write(pending)
+                            if not written:
+                                return
+                            pending = pending[written:]
+                        continue
+                    with self._lock:
+                        if _text(self._active_session.get("id")) != _text(session_id):
+                            return
+            except (BrokenPipeError, OSError, ValueError):
+                return
+            finally:
+                with contextlib.suppress(Exception):
+                    process.stdin.close()
+
+        feeder = threading.Thread(
+            target=feed_pcm,
+            name=f"tater-external-audio-mp3-{_text(session_id)[:8]}",
+            daemon=True,
+        )
+        feeder.start()
+
+        def body() -> Iterator[bytes]:
+            try:
+                while True:
+                    chunk = os.read(process.stdout.fileno(), PCM_IO_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    yield bytes(chunk)
+            finally:
+                stop_feeder.set()
+                with contextlib.suppress(Exception):
+                    process.stdin.close()
+                with contextlib.suppress(Exception):
+                    process.stdout.close()
+                if process.poll() is None:
+                    with contextlib.suppress(Exception):
+                        process.terminate()
+                        process.wait(timeout=1.0)
+                if process.poll() is None:
+                    with contextlib.suppress(Exception):
+                        process.kill()
+                feeder.join(timeout=1.0)
+
+        return body()
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
             process_running = self._receiver is not None and self._receiver.poll() is None
@@ -1316,6 +1487,10 @@ def stream_external_audio_wav(session_id: Any, token: Any, cursor: Any) -> Itera
     return _runtime.stream(session_id, token, cursor)
 
 
+def stream_external_audio_mp3(session_id: Any, token: Any, cursor: Any) -> Iterator[bytes]:
+    return _runtime.stream_mp3(session_id, token, cursor)
+
+
 def stop_external_audio_input() -> Dict[str, Any]:
     return _runtime.stop_input()
 
@@ -1355,5 +1530,6 @@ __all__ = [
     "release_external_audio_sessions",
     "shutdown_external_audio_runtime",
     "stop_external_audio_input",
+    "stream_external_audio_mp3",
     "stream_external_audio_wav",
 ]

@@ -3529,6 +3529,8 @@ async def _run_thanatos_state_update(
     tool_call: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
     max_tokens: Optional[int] = None,
+    structured_plan_step: Optional[Dict[str, Any]] = None,
+    mode_out: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     return await thanatos_state.run_thanatos_state_update(
         llm_client=llm_client,
@@ -3538,6 +3540,8 @@ async def _run_thanatos_state_update(
         tool_call=tool_call,
         tool_result=tool_result,
         max_tokens=max_tokens,
+        structured_plan_step=structured_plan_step,
+        mode_out=mode_out,
         normalize_agent_state_fn=lambda s, fallback_goal: _normalize_agent_state(s, fallback_goal=fallback_goal),
         configured_thanatos_max_tokens_fn=(lambda: None),
         coerce_text_fn=_coerce_text,
@@ -4862,6 +4866,8 @@ def _write_hydra_ledger(
     thanatos_ms: int = 0,
     progress_ms: int = 0,
     state_update_ms: int = 0,
+    state_update_deterministic_count: int = 0,
+    state_update_llm_count: int = 0,
     tool_ms: int = 0,
     checker_ms: int = 0,
     hermes_chat_ms: int = 0,
@@ -4902,6 +4908,8 @@ def _write_hydra_ledger(
         thanatos_ms=thanatos_ms,
         progress_ms=progress_ms,
         state_update_ms=state_update_ms,
+        state_update_deterministic_count=state_update_deterministic_count,
+        state_update_llm_count=state_update_llm_count,
         tool_ms=tool_ms,
         checker_ms=checker_ms,
         hermes_chat_ms=hermes_chat_ms,
@@ -5026,6 +5034,8 @@ async def _run_hydra_turn_impl(
     thanatos_ms_total = 0.0
     progress_ms_total = 0.0
     state_update_ms_total = 0.0
+    state_update_deterministic_count = 0
+    state_update_llm_count = 0
     tool_ms_total = 0.0
     checker_ms_total = 0.0
     hermes_chat_ms_total = 0.0
@@ -5437,6 +5447,8 @@ async def _run_hydra_turn_impl(
             thanatos_ms=int(max(0.0, thanatos_ms_total)),
             progress_ms=int(max(0.0, progress_ms_total)),
             state_update_ms=int(max(0.0, state_update_ms_total)),
+            state_update_deterministic_count=state_update_deterministic_count,
+            state_update_llm_count=state_update_llm_count,
             tool_ms=int(max(0.0, tool_ms_total)),
             checker_ms=int(max(0.0, checker_ms_total)),
             hermes_chat_ms=int(max(0.0, hermes_chat_ms_total)),
@@ -5974,6 +5986,7 @@ async def _run_hydra_turn_impl(
 
         try:
             state_update_started = time.perf_counter()
+            state_update_mode: Dict[str, str] = {}
             agent_state = await _run_thanatos_state_update(
                 llm_client=llm_client_thanatos,
                 platform=platform,
@@ -5982,10 +5995,16 @@ async def _run_hydra_turn_impl(
                 tool_call=planned_tool,
                 tool_result=tool_result_for_checker,
                 max_tokens=None,
+                structured_plan_step=current_plan_step,
+                mode_out=state_update_mode,
             )
             state_update_ms_total += (
                 time.perf_counter() - state_update_started
             ) * 1000.0
+            if state_update_mode.get("mode") == "deterministic":
+                state_update_deterministic_count += 1
+            else:
+                state_update_llm_count += 1
             if structured_plan_queue:
                 agent_state = _sync_agent_state_with_plan_queue(
                     agent_state=agent_state,

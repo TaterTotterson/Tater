@@ -53,37 +53,15 @@ class SpudLinkVadOptionTests(unittest.TestCase):
         self.assertIn('"Voice Activity Detection"', model_groups)
         self.assertIn('"VOICE_VAD_BACKEND"', model_groups)
 
-        app_source = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        speech_panel = app_source[
-            app_source.index('data-models-panel="speech"') : app_source.index(
-                'data-models-panel="routing"',
-                app_source.index('data-models-panel="speech"'),
-            )
-        ]
+        speech_panel = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
+        route_ui = (ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue").read_text(encoding="utf-8")
         for tab in ("listening", "replies", "announcements", "playback"):
-            self.assertIn(f'data-speech-settings-tab="{tab}"', speech_panel)
-            self.assertIn(f'data-speech-settings-panel="{tab}"', speech_panel)
-        self.assertIn('data-spud-link-partial-lock="speech"', speech_panel)
-        self.assertIn('renderSpudLinkRouteNotice("vad", "stt", "tts")', speech_panel)
-        self.assertIn("${voiceVadSettingsHtml}", speech_panel)
-        self.assertLess(speech_panel.index("${voiceVadSettingsHtml}"), speech_panel.index("Speech to Text"))
-        self.assertLess(speech_panel.index("Announcement TTS"), speech_panel.index("Announcement Backend"))
-        self.assertLess(speech_panel.index("Announcement Backend"), speech_panel.index("Announcement Model"))
-        self.assertNotIn("data-spud-link-route-locked", speech_panel[: speech_panel.index("${voiceVadSettingsHtml}")])
-        self.assertIn('data-spud-link-route-locked="${spudLinkRouteUsesHub("stt") ? "true" : "false"}"', speech_panel)
-        self.assertGreaterEqual(
-            speech_panel.count('data-spud-link-route-locked="${spudLinkRouteUsesHub("tts") ? "true" : "false"}"'),
-            2,
-        )
-
-        route_ui = app_source[
-            app_source.index("const spudLinkModelRouteSpecs = [") : app_source.index(
-                "const spudLinkModeLabel",
-                app_source.index("const spudLinkModelRouteSpecs = ["),
-            )
-        ]
+            self.assertIn(f"area === '{tab}'", speech_panel)
+        self.assertIn('<ModelFields :sections="visibleVoiceSections"', speech_panel)
+        self.assertLess(speech_panel.index("Speech recognition"), speech_panel.index("<ModelFields"))
         self.assertIn('{ id: "vad", label: "Speech-End Detection (VAD)"', route_ui)
-        self.assertIn('label === "Voice Activity Detection" && spudLinkRouteUsesHub("vad")', app_source)
+        self.assertIn("function routeUsesHub", route_ui)
+        self.assertIn("The Hub detects when speech ends; this Tater keeps a local fallback", route_ui)
 
     def test_vad_spud_link_route_controls_effective_backend(self) -> None:
         model_source = (ROOT / "spud_link_models.py").read_text(encoding="utf-8")

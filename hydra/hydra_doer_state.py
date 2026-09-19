@@ -80,6 +80,48 @@ def compact_tool_result_for_thanatos(
     return out
 
 
+def can_update_structured_state_deterministically(
+    *,
+    prior_state: Optional[Dict[str, Any]],
+    structured_plan_step: Optional[Dict[str, Any]],
+    tool_call: Optional[Dict[str, Any]],
+    tool_result: Optional[Dict[str, Any]],
+    short_text_fn: Callable[..., str],
+    is_low_information_text_fn: Callable[[Any], bool],
+) -> bool:
+    """Return whether a successful structured step has enough evidence for a direct state update."""
+    if not isinstance(structured_plan_step, dict):
+        return False
+    if not isinstance(tool_call, dict) or not str(tool_call.get("function") or "").strip():
+        return False
+    if not isinstance(tool_result, dict) or not bool(tool_result.get("ok")):
+        return False
+
+    step_id = short_text_fn(structured_plan_step.get("id"), limit=24)
+    if not step_id:
+        return False
+    prior_steps = (prior_state or {}).get("plan_steps") if isinstance(prior_state, dict) else None
+    if not isinstance(prior_steps, list) or not prior_steps or not isinstance(prior_steps[0], dict):
+        return False
+    current_state_step_id = short_text_fn(prior_steps[0].get("id"), limit=24)
+    if current_state_step_id != step_id:
+        return False
+
+    tool_hint = str(structured_plan_step.get("tool_hint") or "").strip()
+    tool_name = str(tool_call.get("function") or "").strip()
+    if tool_hint and tool_hint != tool_name:
+        return False
+
+    summary = short_text_fn(tool_result.get("summary_for_user"), limit=260)
+    if summary and not is_low_information_text_fn(summary):
+        return True
+    data = tool_result.get("data")
+    if isinstance(data, (dict, list, tuple)) and bool(data):
+        return True
+    artifacts = tool_result.get("artifacts")
+    return isinstance(artifacts, list) and bool(artifacts)
+
+
 async def run_thanatos_state_update(
     *,
     llm_client: Any,
@@ -89,6 +131,8 @@ async def run_thanatos_state_update(
     tool_call: Optional[Dict[str, Any]],
     tool_result: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
+    structured_plan_step: Optional[Dict[str, Any]],
+    mode_out: Optional[Dict[str, str]],
     normalize_agent_state_fn: Callable[[Optional[Dict[str, Any]], str], Dict[str, Any]],
     configured_thanatos_max_tokens_fn: Callable[[], Optional[int]],
     coerce_text_fn: Callable[[Any], str],
@@ -107,85 +151,99 @@ async def run_thanatos_state_update(
             merged_lines = state_add_line_fn(merged_lines, line, max_items)
         return merged_lines
 
-    payload = {
-        "platform": platform,
-        "user_request": str(user_request or ""),
-        "prior_state": previous,
-        "tool_call": {
-            "function": str((tool_call or {}).get("function") or "").strip(),
-            "arguments": (tool_call or {}).get("arguments")
-            if isinstance((tool_call or {}).get("arguments"), dict)
-            else {},
-        },
-        "tool_result": compact_tool_result_for_thanatos(tool_result, short_text_fn=short_text_fn),
-    }
-    prompt = (
-        "You are Thanatos, the Reaper head in the Astraeus/Thanatos/Hermes loop.\n"
-        "Update only the agent state.\n"
-        "Return exactly one compact JSON object with keys:\n"
-        "goal, plan, facts, open_questions, next_step, tool_history\n"
-        "Rules:\n"
-        "- Use short plain text snippets.\n"
-        "- Do not invent facts; use only explicit evidence from payload.tool_result or prior_state.\n"
-        "- Preserve prior successful facts and tool_history; do not drop earlier completed steps.\n"
-        "- Keep plan as the remaining checklist of explicit user-requested actions.\n"
-        "- For compound requests, plan must contain one item per explicit requested action.\n"
-        "- If multiple actions were requested, keep unfinished items in plan and set next_step to the next unfinished action.\n"
-        "- Remove plan items that are already completed.\n"
-        "- A plan item is completed only when payload.tool_result provides direct evidence for that specific item.\n"
-        "- Generic summaries (for example: 'Completed', 'Done', 'Completed N of N actions') are not enough to close information-seeking items.\n"
-        "- For information requests, keep the item unfinished unless the concrete requested value is present in summary_for_user or data_preview.\n"
-        "- Keep facts stable and deterministic.\n"
-        "- When tool_result.ok is true, include one short fact describing what this specific step accomplished. Use payload.user_request when needed.\n"
-        "- Record completion facts only when tool_result.ok is true; for failures, keep blocker details in open_questions.\n"
-        "- Keep open_questions only for real blockers.\n"
-        "- next_step is a short tool sketch or empty.\n"
-        "- No markdown."
-    )
     merged: Dict[str, Any] = dict(previous)
-    try:
-        token_limit = int(max_tokens) if max_tokens is not None else configured_thanatos_max_tokens_fn()
-        chat_kwargs: Dict[str, Any] = {
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.1,
-            "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
-            "activity": "execution",
-            "cache_namespace": "hydra:thanatos:state",
+    deterministic = can_update_structured_state_deterministically(
+        prior_state=previous,
+        structured_plan_step=structured_plan_step,
+        tool_call=tool_call,
+        tool_result=tool_result,
+        short_text_fn=short_text_fn,
+        is_low_information_text_fn=is_low_information_text_fn,
+    )
+    if isinstance(mode_out, dict):
+        mode_out["mode"] = "deterministic" if deterministic else "llm"
+
+    if not deterministic:
+        payload = {
+            "platform": platform,
+            "user_request": str(user_request or ""),
+            "prior_state": previous,
+            "tool_call": {
+                "function": str((tool_call or {}).get("function") or "").strip(),
+                "arguments": (tool_call or {}).get("arguments")
+                if isinstance((tool_call or {}).get("arguments"), dict)
+                else {},
+            },
+            "tool_result": compact_tool_result_for_thanatos(tool_result, short_text_fn=short_text_fn),
         }
-        response = await llm_client.chat(**chat_kwargs)
-        text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
-        patch_state = first_json_object_fn(text)
-        if isinstance(patch_state, dict):
-            patch = normalize_agent_state_fn(
-                patch_state,
-                fallback_goal=previous.get("goal") or user_request,
-            )
+        prompt = (
+            "You are Thanatos, the Reaper head in the Astraeus/Thanatos/Hermes loop.\n"
+            "Update only the agent state.\n"
+            "Return exactly one compact JSON object with keys:\n"
+            "goal, plan, facts, open_questions, next_step, tool_history\n"
+            "Rules:\n"
+            "- Use short plain text snippets.\n"
+            "- Do not invent facts; use only explicit evidence from payload.tool_result or prior_state.\n"
+            "- Preserve prior successful facts and tool_history; do not drop earlier completed steps.\n"
+            "- Keep plan as the remaining checklist of explicit user-requested actions.\n"
+            "- For compound requests, plan must contain one item per explicit requested action.\n"
+            "- If multiple actions were requested, keep unfinished items in plan and set next_step to the next unfinished action.\n"
+            "- Remove plan items that are already completed.\n"
+            "- A plan item is completed only when payload.tool_result provides direct evidence for that specific item.\n"
+            "- Generic summaries (for example: 'Completed', 'Done', 'Completed N of N actions') are not enough to close information-seeking items.\n"
+            "- For information requests, keep the item unfinished unless the concrete requested value is present in summary_for_user or data_preview.\n"
+            "- Keep facts stable and deterministic.\n"
+            "- When tool_result.ok is true, include one short fact describing what this specific step accomplished. Use payload.user_request when needed.\n"
+            "- Record completion facts only when tool_result.ok is true; for failures, keep blocker details in open_questions.\n"
+            "- Keep open_questions only for real blockers.\n"
+            "- next_step is a short tool sketch or empty.\n"
+            "- No markdown."
+        )
+        try:
+            token_limit = int(max_tokens) if max_tokens is not None else configured_thanatos_max_tokens_fn()
+            chat_kwargs: Dict[str, Any] = {
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                "temperature": 0.1,
+                "max_tokens": (max(1, int(token_limit)) if token_limit is not None else None),
+                "activity": "execution",
+                "cache_namespace": "hydra:thanatos:state",
+            }
+            response = await llm_client.chat(**chat_kwargs)
+            text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
+            patch_state = first_json_object_fn(text)
+            if isinstance(patch_state, dict):
+                patch = normalize_agent_state_fn(
+                    patch_state,
+                    fallback_goal=previous.get("goal") or user_request,
+                )
+                merged = dict(previous)
+                merged["goal"] = patch.get("goal") or previous.get("goal") or str(user_request or "")
+                merged["plan"] = list(patch.get("plan") or previous.get("plan") or [])
+                merged["next_step"] = patch.get("next_step") or previous.get("next_step") or ""
+                merged["open_questions"] = list(patch.get("open_questions") or previous.get("open_questions") or [])
+                merged["facts"] = _merge_lines(
+                    list(previous.get("facts") or []),
+                    patch.get("facts"),
+                    max_items=8,
+                    item_limit=140,
+                )
+                merged["tool_history"] = _merge_lines(
+                    list(previous.get("tool_history") or []),
+                    patch.get("tool_history"),
+                    max_items=8,
+                    item_limit=150,
+                )
+                if isinstance(previous.get("plan_steps"), list):
+                    merged["plan_steps"] = list(previous.get("plan_steps") or [])
+                if isinstance(previous.get("result_memory"), list):
+                    merged["result_memory"] = [
+                        dict(item) for item in previous.get("result_memory") if isinstance(item, dict)
+                    ]
+        except Exception:
             merged = dict(previous)
-            merged["goal"] = patch.get("goal") or previous.get("goal") or str(user_request or "")
-            merged["plan"] = list(patch.get("plan") or previous.get("plan") or [])
-            merged["next_step"] = patch.get("next_step") or previous.get("next_step") or ""
-            merged["open_questions"] = list(patch.get("open_questions") or previous.get("open_questions") or [])
-            merged["facts"] = _merge_lines(
-                list(previous.get("facts") or []),
-                patch.get("facts"),
-                max_items=8,
-                item_limit=140,
-            )
-            merged["tool_history"] = _merge_lines(
-                list(previous.get("tool_history") or []),
-                patch.get("tool_history"),
-                max_items=8,
-                item_limit=150,
-            )
-            if isinstance(previous.get("plan_steps"), list):
-                merged["plan_steps"] = list(previous.get("plan_steps") or [])
-            if isinstance(previous.get("result_memory"), list):
-                merged["result_memory"] = [dict(item) for item in previous.get("result_memory") if isinstance(item, dict)]
-    except Exception:
-        merged = dict(previous)
 
     merged["tool_history"] = state_add_line_fn(
         list(merged.get("tool_history") or []),

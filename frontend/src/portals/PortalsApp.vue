@@ -17,6 +17,7 @@ const tabs = [
   { id: "repos", label: "Repositories" },
 ];
 const activeTab = ref(tabs.some((tab) => tab.id === props.options.initialTab) ? String(props.options.initialTab) : "installed");
+const selectTab = (tab: string) => { if (tabs.some((row) => row.id === tab)) activeTab.value = tab; };
 const busy = ref("");
 const status = ref("");
 const error = ref("");
@@ -24,8 +25,12 @@ const purgeIds = ref<Record<string, boolean>>({});
 const repoName = ref("");
 const repoUrl = ref("");
 const draftRepos = ref<JsonRow[]>([]);
+const repoSection = ref("trusted");
 const settingsPortal = ref<JsonRow | null>(null);
 const fieldValues = ref<JsonRow>({});
+const settingsLoading = ref(false);
+const settingsError = ref("");
+let settingsLoadSequence = 0;
 
 const runtime = computed(() => props.state.payload?.runtime || {});
 const shop = computed(() => props.state.payload?.shop || {});
@@ -35,6 +40,7 @@ const catalog = computed(() => Array.isArray(shop.value.catalog) ? shop.value.ca
 const available = computed(() => catalog.value.filter((row: JsonRow) => !row.installed).sort(compareRows));
 const updates = computed(() => installed.value.filter((row: JsonRow) => row.update_available));
 const runningCount = computed(() => runtimeItems.value.filter((row: JsonRow) => Boolean(row.running)).length);
+const trustedRepos = computed(() => Array.isArray(shop.value.repos?.trusted) ? shop.value.repos.trusted : []);
 const runtimeByKey = computed(() => new Map(runtimeItems.value.map((row: JsonRow) => [canonical(row.key), row])));
 const installedByRuntimeKey = computed(() => {
   const result = new Map<string, JsonRow>();
@@ -81,7 +87,30 @@ function notify(message: string, tone = "success") {
   props.options.onToast?.(message, tone);
 }
 function syncDraftRepos() {
-  draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repos.additional.map((row: JsonRow) => ({ ...row })) : [];
+  const trustedUrls = new Set(trustedRepos.value.map((row: JsonRow) => text(row.url).toLowerCase()).filter(Boolean));
+  draftRepos.value = Array.isArray(shop.value.repos?.additional)
+    ? shop.value.repos.additional.filter((row: JsonRow) => !trustedUrls.has(text(row.url).toLowerCase())).map((row: JsonRow) => ({ ...row }))
+    : [];
+}
+
+function selectedTrustedRepos(): JsonRow[] {
+  return trustedRepos.value.filter((row: JsonRow) => Boolean(row.enabled)).map((row: JsonRow) => ({ name: text(row.name), url: text(row.url) }));
+}
+function combinedRepos(): JsonRow[] { return [...selectedTrustedRepos(), ...draftRepos.value]; }
+async function toggleTrustedRepo(repo: JsonRow) {
+  if (busy.value) return;
+  const wasEnabled = Boolean(repo.enabled);
+  const enabling = !repo.enabled;
+  repo.enabled = enabling;
+  busy.value = `${enabling ? "Adding" : "Removing"} ${text(repo.name || repo.repository)}…`;
+  try {
+    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() });
+    notify(`${text(repo.name || repo.repository)} ${enabling ? "added to" : "removed from"} the Portal Store.`);
+    await refresh(true);
+  } catch (requestError) {
+    repo.enabled = wasEnabled;
+    notify(requestError instanceof Error ? requestError.message : "Trusted repository update failed.", "error");
+  } finally { busy.value = ""; }
 }
 
 async function refresh(quiet = false) {
@@ -161,9 +190,35 @@ function fieldVisible(field: JsonRow): boolean {
     return allowed.includes(current);
   });
 }
-function openSettings(row: JsonRow) {
-  settingsPortal.value = row;
+function applySettingsFields(row: JsonRow) {
   fieldValues.value = Object.fromEntries((Array.isArray(row.settings) ? row.settings : []).filter((field: JsonRow) => text(field.key)).map((field: JsonRow) => [text(field.key), normalizeValue(field)]));
+}
+function closeSettings() {
+  settingsLoadSequence += 1;
+  settingsLoading.value = false;
+  settingsError.value = "";
+  settingsPortal.value = null;
+}
+async function openSettings(row: JsonRow) {
+  const key = text(row.key);
+  if (!key) return;
+  const requestId = ++settingsLoadSequence;
+  settingsPortal.value = { ...row };
+  applySettingsFields(row);
+  settingsLoading.value = true;
+  settingsError.value = "";
+  try {
+    const result = await getJson<JsonRow>(`${props.options.endpoints.runtime}/${encode(key)}/settings`);
+    if (requestId !== settingsLoadSequence || text(settingsPortal.value?.key) !== key) return;
+    const loaded = { ...row, ...result, settings: Array.isArray(result.settings) ? result.settings : row.settings };
+    settingsPortal.value = loaded;
+    applySettingsFields(loaded);
+  } catch (requestError) {
+    if (requestId !== settingsLoadSequence || text(settingsPortal.value?.key) !== key) return;
+    settingsError.value = requestError instanceof Error ? requestError.message : "Live Portal settings could not be loaded.";
+  } finally {
+    if (requestId === settingsLoadSequence) settingsLoading.value = false;
+  }
 }
 async function saveSettings() {
   const portal = settingsPortal.value;
@@ -177,7 +232,7 @@ async function saveSettings() {
     }).map((field: JsonRow) => [text(field.key), fieldValues.value[text(field.key)]]));
     await postJson<JsonRow>(`${props.options.endpoints.runtime}/${encode(key)}/settings`, { values });
     notify(`Saved settings for ${text(portal.label || key)}.`);
-    settingsPortal.value = null;
+    closeSettings();
     await refresh(true);
   } catch (requestError) {
     notify(requestError instanceof Error ? requestError.message : "Portal settings save failed.", "error");
@@ -187,7 +242,7 @@ async function saveSettings() {
 function addRepo() {
   const url = repoUrl.value.trim();
   if (!url) { notify("Repository URL is required.", "error"); return; }
-  if (draftRepos.value.some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already added.", "error"); return; }
+  if ([...draftRepos.value, ...trustedRepos.value].some((row) => text(row.url).toLowerCase() === url.toLowerCase())) { notify("That repository is already listed.", "error"); return; }
   draftRepos.value.push({ name: repoName.value.trim(), url });
   repoName.value = "";
   repoUrl.value = "";
@@ -197,19 +252,23 @@ function addRepo() {
 async function saveRepos() {
   busy.value = "Saving Portal repositories…";
   try {
-    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: draftRepos.value });
+    await postJson<JsonRow>(`${props.options.endpoints.shop}/repos`, { repos: combinedRepos() });
     notify("Portal repositories saved.");
     await refresh(true);
   } catch (requestError) {
     notify(requestError instanceof Error ? requestError.message : "Repository save failed.", "error");
   } finally { busy.value = ""; }
 }
-function handleEscape(event: KeyboardEvent) { if (event.key === "Escape") settingsPortal.value = null; }
+function handleEscape(event: KeyboardEvent) { if (event.key === "Escape") closeSettings(); }
 
 watch(() => props.state.payload, syncDraftRepos, { deep: false });
 syncDraftRepos();
 window.addEventListener("keydown", handleEscape);
-onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
+onBeforeUnmount(() => {
+  settingsLoadSequence += 1;
+  window.removeEventListener("keydown", handleEscape);
+});
+defineExpose({ select: selectTab });
 </script>
 
 <template>
@@ -229,7 +288,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
     <div v-if="shop.errors?.length" class="tv-notice error">{{ shop.errors.join(' • ') }}</div>
 
     <nav class="tv-tabs tp-tabs" aria-label="Portal sections">
-      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
+      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="selectTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
     </nav>
 
     <section v-if="activeTab === 'installed'" class="tp-card-grid">
@@ -247,20 +306,39 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
       <div v-if="!available.length" class="tv-empty">No additional Portals are available from the configured repositories.</div>
     </section>
 
-    <section v-else-if="activeTab === 'manage'" class="tp-manage-list">
-      <div class="tv-panel tp-manage-toolbar"><div><span class="tv-eyebrow">Maintenance</span><h2>Manage installed Portals</h2><p>{{ updates.length }} update{{ updates.length === 1 ? '' : 's' }} available. Running Portals restart automatically after an update.</p></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
-      <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tp-manage-row"><div><strong>{{ row.name || row.id }}</strong><span>{{ row.installed_ver || '0.0.0' }} → {{ row.store_ver || '-' }} · {{ stateLabel(runtimeForShop(row)) }}</span></div><div class="ti-row-actions"><button class="tv-button" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeForShop(row)" class="tv-button" type="button" @click="runtimeAction(runtimeForShop(row)!, runtimeForShop(row)?.running ? 'stop' : 'start')">{{ runtimeForShop(row)?.running ? 'Stop' : 'Start' }}</button><label class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button></div></article>
+    <section v-else-if="activeTab === 'manage'" class="tp-manage-list tv-manage-workspace">
+      <div class="tv-panel tp-manage-toolbar tv-manage-hero">
+        <div class="tv-manage-hero-copy"><span class="tv-eyebrow">Manage library</span><h2>Portal control center</h2><p>Update conversation surfaces, control their runtimes, and cleanly remove saved data. Running Portals restart automatically after an update.</p></div>
+        <div class="tv-manage-overview"><div><span>Installed</span><strong>{{ installed.length }}</strong></div><div :class="{ attention: updates.length }"><span>Updates ready</span><strong>{{ updates.length }}</strong></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
+      </div>
+      <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tp-manage-row tv-manage-card" :class="{ 'has-update': row.update_available }">
+        <div class="tv-manage-identity"><span class="tv-manage-monogram">{{ text(row.name || row.id).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">{{ row.id }}</span><h3>{{ row.name || row.id }}</h3><small>{{ row.source_label || 'Local Portal' }}</small></div></div>
+        <div class="tv-manage-version"><div><span>Installed</span><strong>{{ row.installed_ver || '0.0.0' }}</strong></div><i>→</i><div><span>Latest</span><strong>{{ row.store_ver || '-' }}</strong></div><span class="tv-state" :class="row.update_available ? 'pending' : 'good'">{{ row.update_available ? 'Update ready' : 'Current' }}</span></div>
+        <div class="tv-manage-actions"><span class="tv-manage-runtime" :class="{ online: runtimeForShop(row)?.running }"><i />{{ stateLabel(runtimeForShop(row)) }}</span><button class="tv-button" :class="{ primary: row.update_available }" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeForShop(row)" class="tv-button" type="button" @click="runtimeAction(runtimeForShop(row)!, runtimeForShop(row)?.running ? 'stop' : 'start')">{{ runtimeForShop(row)?.running ? 'Stop' : 'Start' }}</button><label class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button></div>
+      </article>
       <div v-if="!installed.length" class="tv-empty">No installed Portals found.</div>
     </section>
 
-    <section v-else class="tv-panel tp-repos">
-      <header><div><span class="tv-eyebrow">Trusted sources</span><h2>Portal repositories</h2><p>The built-in Portal repository stays available. Add other trusted manifests below.</p></div></header>
-      <article class="ti-repo-row builtin"><div><strong>{{ shop.repos?.default?.name || 'Default' }}</strong><code>{{ shop.repos?.default?.url || '(not set)' }}</code></div><span>Built-in</span></article>
-      <article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Additional repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article>
-      <div v-if="!draftRepos.length" class="tv-empty compact">No additional repositories configured.</div>
-      <div class="tp-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Portal Repo" /></label><label><span>Repository URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/portals.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save repositories</button></div>
+    <section v-else class="tv-panel tp-repos tv-repository-manager">
+      <header class="tv-repository-heading"><div><span class="tv-eyebrow">Repository library</span><h2>Portal repositories</h2><p>Choose a Tater-trusted source or add your own manifest.</p></div></header>
+      <nav class="tv-repository-tabs" aria-label="Portal repository sources"><button type="button" :class="{ active: repoSection === 'trusted' }" @click="repoSection = 'trusted'">Trusted repositories</button><button type="button" :class="{ active: repoSection === 'custom' }" @click="repoSection = 'custom'">Custom repositories</button></nav>
+      <div v-if="repoSection === 'trusted'" class="tv-trusted-repositories">
+        <p class="tv-repository-intro">Curated sources are reviewed by Tater. Select a card to add or remove its Portals from your Store automatically.</p>
+        <div v-if="shop.repos?.trusted_error" class="tv-repository-warning">The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.</div>
+        <div class="tv-trusted-repo-grid">
+          <article class="tv-trusted-repo-card builtin selected" aria-label="Built-in Tater Portal Shop repository"><span class="tv-repo-check">✓</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">T</span><div><span class="tv-eyebrow">Always available</span><h3>{{ shop.repos?.default?.name || 'Tater Portal Shop' }}</h3><p>by <strong>Tater Assistant</strong></p></div></div><p>The official built-in Portal catalog.</p><footer><span class="tv-repo-enabled">Built in</span></footer></article>
+          <article v-for="repo in trustedRepos" :key="repo.id || repo.url" class="tv-trusted-repo-card" :class="{ selected: repo.enabled }" role="button" tabindex="0" :aria-pressed="Boolean(repo.enabled)" @click="toggleTrustedRepo(repo)" @keydown.enter.prevent="toggleTrustedRepo(repo)" @keydown.space.prevent="toggleTrustedRepo(repo)"><span class="tv-repo-check">{{ repo.enabled ? '✓' : '+' }}</span><div class="tv-repo-card-top"><span class="tv-repo-monogram">{{ text(repo.repository || repo.name).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">Trusted Portal source</span><h3>{{ repo.repository || repo.name }}</h3><p>by <a v-if="repo.author_url" :href="repo.author_url" target="_blank" rel="noreferrer" @click.stop>{{ repo.author || 'Community author' }}</a><strong v-else>{{ repo.author || 'Community author' }}</strong></p></div></div><p>{{ repo.description || 'Additional Portals for the Tater Store.' }}</p><div v-if="repo.tags?.length" class="ti-tags"><span v-for="tag in repo.tags" :key="tag">{{ tag }}</span></div><footer><a v-if="repo.homepage" :href="repo.homepage" target="_blank" rel="noreferrer" @click.stop>View repository ↗</a><span :class="repo.enabled ? 'tv-repo-enabled' : 'tv-repo-available'">{{ repo.enabled ? 'Added to Store' : 'Select to add' }}</span></footer></article>
+        </div>
+        <div v-if="!trustedRepos.length" class="tv-empty compact">No additional trusted Portal repositories are listed yet.</div>
+      </div>
+      <div v-else class="tv-custom-repositories">
+        <p class="tv-repository-intro">Custom manifests are managed by you and are not reviewed by Tater.</p>
+        <article v-for="(repo, index) in draftRepos" :key="`${repo.url}-${index}`" class="ti-repo-row"><div><strong>{{ repo.name || 'Custom repository' }}</strong><code>{{ repo.url }}</code></div><button class="tv-button" type="button" @click="draftRepos.splice(index, 1)">Remove</button></article>
+        <div v-if="!draftRepos.length" class="tv-empty compact">No custom repositories configured.</div>
+        <div class="tp-repo-form"><label><span>Name (optional)</span><input v-model="repoName" type="text" placeholder="My Portal Repo" /></label><label><span>Manifest URL</span><input v-model="repoUrl" type="url" placeholder="https://example.com/portals.json" @keyup.enter="addRepo" /></label><button class="tv-button" type="button" @click="addRepo">Add</button><button class="tv-button primary" type="button" @click="saveRepos">Save custom repositories</button></div>
+      </div>
     </section>
 
-    <PopupTransition :open="Boolean(settingsPortal)" @close="settingsPortal = null"><form class="tv-modal tp-settings-modal" @submit.prevent="saveSettings"><header><div><span class="tv-eyebrow">{{ settingsPortal?.key }}</span><h2>{{ settingsPortal?.label || settingsPortal?.key }} settings</h2></div><button class="tv-button" type="button" @click="settingsPortal = null">Close</button></header><div class="tvb-field-grid"><ManifestField v-for="(field, index) in settingsPortal?.settings || []" :key="field.key || index" v-model="fieldValues[field.key]" :field="field" :all-values="fieldValues" @error="notify($event, 'error')" @notify="notify" /></div><footer><span>{{ busy || status }}</span><button class="tv-button primary" type="submit">Save settings</button></footer></form></PopupTransition>
+    <PopupTransition :open="Boolean(settingsPortal)" @close="closeSettings"><form class="tv-modal tp-settings-modal" @submit.prevent="saveSettings"><header><div><span class="tv-eyebrow">{{ settingsPortal?.key }}</span><h2>{{ settingsPortal?.label || settingsPortal?.key }} settings</h2></div><button class="tv-button" type="button" @click="closeSettings">Close</button></header><div v-if="settingsError" class="tv-notice error">{{ settingsError }}</div><div v-if="settingsLoading" class="tv-empty compact">Loading live Portal settings…</div><div v-else class="tvb-field-grid"><ManifestField v-for="(field, index) in settingsPortal?.settings || []" :key="field.key || index" v-model="fieldValues[field.key]" :field="field" :all-values="fieldValues" @error="notify($event, 'error')" @notify="notify" /></div><footer><span>{{ settingsLoading ? 'Loading live options…' : busy || status }}</span><button class="tv-button primary" type="submit" :disabled="settingsLoading">Save settings</button></footer></form></PopupTransition>
   </div>
 </template>

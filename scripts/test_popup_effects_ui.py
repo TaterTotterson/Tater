@@ -54,13 +54,13 @@ class PopupEffectsUiTests(unittest.TestCase):
         self.assertIn("@media (prefers-reduced-motion: reduce)", source)
 
     def test_misc_settings_has_live_preview(self) -> None:
-        source = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "MiscSettings.vue").read_text(encoding="utf-8")
 
-        self.assertIn('id="settings-popup-effect-preview"', source)
-        self.assertIn("function openPopupEffectPreview", source)
-        self.assertIn("function closePopupEffectPreview", source)
-        self.assertIn("tater-popup-effect-backdrop tater-popup-enter-active", source)
-        self.assertIn(".tater-popup-effect-backdrop", source)
+        self.assertIn("const previewOpen = ref(false)", source)
+        self.assertIn("function preview()", source)
+        self.assertIn("function closePreview()", source)
+        self.assertIn('<PopupTransition :open="previewOpen"', source)
+        self.assertIn("popup-effect-preview-dialog", source)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ _DEVICE_INFO: Dict[str, Any] = {}
 
 FACENET_MODEL_ID = "facenet512"
 ADAFACE_MODEL_ID = "adaface_ir50_webface4m"
+MIN_FACE_SIDE = 32
+MIN_FACE_AREA = 1600
 
 
 def _text(value: Any) -> str:
@@ -169,6 +171,14 @@ def _integer(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(int(minimum), min(int(maximum), parsed))
 
 
+def _usable_face_area(area: Any) -> bool:
+    if not isinstance(area, dict):
+        return False
+    width = max(0, int(area.get("w") or area.get("width") or 0))
+    height = max(0, int(area.get("h") or area.get("height") or 0))
+    return min(width, height) >= MIN_FACE_SIDE and width * height >= MIN_FACE_AREA
+
+
 def _face_crop(image: Any, area: Dict[str, Any]) -> str:
     import cv2
 
@@ -234,6 +244,7 @@ def _adaface_represent(
         if isinstance(row, dict)
         and isinstance(row.get("face"), np.ndarray)
         and _number(row.get("confidence"), 1.0, 0.0, 1.0) >= minimum_confidence
+        and _usable_face_area(row.get("facial_area"))
     ]
     if not accepted:
         return []
@@ -326,6 +337,8 @@ def represent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         if confidence < minimum_confidence:
             continue
         area = row.get("facial_area") if isinstance(row.get("facial_area"), dict) else {}
+        if not _usable_face_area(area):
+            continue
         out.append(
             {
                 "embedding": [float(item) for item in row["embedding"]],

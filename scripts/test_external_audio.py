@@ -252,6 +252,17 @@ class ExternalAudioTests(unittest.TestCase):
             0.1,
         )
 
+    def test_live_satellite_stream_uses_low_latency_mp3(self) -> None:
+        command = external_audio._mp3_stream_command("/opt/tater/bin/ffmpeg")
+
+        self.assertEqual(command[0], "/opt/tater/bin/ffmpeg")
+        self.assertIn("s16le", command)
+        self.assertIn("libmp3lame", command)
+        self.assertIn(f"{external_audio.MP3_STREAM_BITRATE_KBPS}k", command)
+        self.assertIn("-analyzeduration", command)
+        self.assertEqual(command[command.index("-analyzeduration") + 1], "0")
+        self.assertEqual(command[-2:], ["mp3", "pipe:1"])
+
     def test_raw_little_endian_pcm_is_written_frame_aligned(self) -> None:
         runtime = external_audio._ExternalAudioRuntime()
         runtime._config = runtime._normalized_config(
@@ -375,7 +386,8 @@ class ExternalAudioTests(unittest.TestCase):
                 {"sonos:RINCON_DEN": "airplay"},
             )
             self.assertEqual(call["volume_percent"], 100)
-            self.assertEqual(call["media_type"], "audio/wav")
+            self.assertEqual(call["media_type"], "audio/mpeg")
+            self.assertEqual(call["filename"], "external-audio-live.mp3")
             self.assertEqual(call["media_content_type"], "music")
             self.assertEqual(call["source_owner"], "external_audio")
             self.assertEqual(
@@ -383,6 +395,7 @@ class ExternalAudioTests(unittest.TestCase):
                 external_audio.EXTERNAL_NATIVE_START_LEAD_MS,
             )
             self.assertIn("/api/external-audio/v1/streams/", call["source_url"])
+            self.assertIn("/live.mp3?", call["source_url"])
             self.assertIn("cursor=0", call["source_url"])
             self.assertIn("token=", call["source_url"])
             self.assertEqual(runtime.status()["status"], "playing")

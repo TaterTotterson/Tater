@@ -968,6 +968,9 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
     faces = face_identity.ui_rows(client)
     linked_count = len([row for row in identities if _text(row.get("person_id"))])
     admin_count = len([person for person in people if _as_bool(person.get("is_admin"), False)])
+    face_linked_count = len(
+        [person for person in people if _as_bool((person.get("face_id") or {}).get("linked"), False)]
+    )
     return {
         "settings": dict(store.get("settings") or {}),
         "summary_metrics": [
@@ -975,7 +978,7 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
             {"label": "Admins", "value": admin_count},
             {"label": "Linked Identities", "value": linked_count},
             {"label": "Discovered Identities", "value": len(identities)},
-            {"label": "Known Faces", "value": len([row for row in faces if row.get("name")])},
+            {"label": "Face ID Linked", "value": face_linked_count},
         ],
         "people": people,
         "identities": identities,

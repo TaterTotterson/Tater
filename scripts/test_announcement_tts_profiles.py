@@ -126,15 +126,17 @@ class AnnouncementTtsProfileTests(unittest.TestCase):
         self.assertEqual(fake.values["announcement_qwen_tts_instruct"], "A bright announcement voice.")
 
     def test_ui_exposes_reuse_and_independent_managed_voice_cards(self) -> None:
-        app_source = (ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        models_source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
+        speech_source = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
+        profile_source = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "TtsProfile.vue").read_text(encoding="utf-8")
         settings_source = (ROOT / "speech_settings.py").read_text(encoding="utf-8")
 
         self.assertIn('"label": "Same as Direct Reply TTS"', settings_source)
-        self.assertIn('id="speech-announcement-qwen-tts-profile-wrap"', app_source)
-        self.assertIn('id="speech-announcement-omnivoice-tts-profile-wrap"', app_source)
-        self.assertIn("scope=${encodeURIComponent(scope)}", app_source)
-        self.assertIn("speech_announcement_qwen_tts_clone_text", app_source)
-        self.assertIn("speech_announcement_omnivoice_tts_clone_text", app_source)
+        self.assertIn('scope="announcement"', speech_source)
+        self.assertIn('scope="direct"', speech_source)
+        self.assertIn('const keyPrefix = computed(() => announcement.value ? "speech_announcement_" : "speech_")', profile_source)
+        self.assertIn("speech_announcement_qwen_tts_clone_text", models_source)
+        self.assertIn("speech_announcement_omnivoice_tts_clone_text", models_source)
 
 
 class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):

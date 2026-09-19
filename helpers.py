@@ -1822,20 +1822,22 @@ def _llama_cpp_cache_namespace_slot(
 ) -> int:
     """Keep stable Hydra roles on stable llama-server slots.
 
-    Calls without a namespace retain the configured slot behavior exactly. This
-    makes the optimization private to callers that explicitly opt into cache
-    affinity and avoids changing generic llama.cpp or vision traffic.
+    A valid configured slot is an explicit pin and always wins. Auto slots use
+    the cache namespace to keep each Hydra role on a stable llama-server slot.
+    Calls without a namespace retain the configured slot behavior exactly.
     """
     if vision:
         return _llama_cpp_slot_id("vision", configured_slot)
 
     base_slot = _llama_cpp_slot_id("base", configured_slot)
+    if base_slot >= 0:
+        return base_slot
+
     namespace = str(cache_namespace or "").strip().lower()
     slot_count = _llama_cpp_slot_count()
     if not namespace or slot_count <= 1:
         return base_slot
 
-    start_slot = base_slot if base_slot >= 0 else 0
     role_offsets = (
         (("hermes", "chat", "final"), 1),
         (("thanatos", "state", "execution"), 2),
@@ -1844,10 +1846,10 @@ def _llama_cpp_cache_namespace_slot(
     )
     for role_tokens, offset in role_offsets:
         if any(token in namespace for token in role_tokens):
-            return int((start_slot + offset) % slot_count)
+            return int(offset % slot_count)
 
     digest = hashlib.sha256(namespace.encode("utf-8", "ignore")).digest()
-    return int((start_slot + int.from_bytes(digest[:4], "big")) % slot_count)
+    return int(int.from_bytes(digest[:4], "big") % slot_count)
 
 
 def _llama_cpp_n_threads() -> int:

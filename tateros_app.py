@@ -23,6 +23,7 @@ import urllib.request
 import uuid
 import wave
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -298,6 +299,7 @@ from media_understanding_settings import get_media_understanding_settings, save_
 from tateros import core_store as core_store_module
 from tateros import verba_store as verba_store_module
 from tateros import portal_store as portal_store_module
+from tateros import trusted_repositories as trusted_repositories_module
 
 
 logger = logging.getLogger("tateros")
@@ -424,6 +426,9 @@ SPUD_LINK_ACTIVE_RUN_TTL_SECONDS = 24 * 60 * 60
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
 DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
+WEBUI_THEME_KEY = "tater:webui:theme"
+DEFAULT_WEBUI_THEME = "tater"
+WEBUI_THEME_CHOICES = {"tater", "tater-light", "blueberry", "mint", "grape", "strawberry"}
 WEBUI_AUTH_PASSWORD_HASH_KEY = "tater:webui_auth:password_hash"
 WEBUI_AUTH_SESSIONS_KEY = "tater:webui_auth:sessions"
 WEBUI_AUTH_COOKIE_NAME = "tater_webui_session"
@@ -434,8 +439,9 @@ WEBUI_AUTH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 5
 RUNTIME_CONTEXT_ESTIMATE_TTL_SECONDS = 20
 RUNTIME_HARDWARE_TELEMETRY_KEY = "tater:runtime:hardware-telemetry:v1"
 RUNTIME_HARDWARE_TELEMETRY_SCHEMA_VERSION = 1
-RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 15
-RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS = 45
+RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 5
+RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS = 15
+RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS = 1.0
 RUNTIME_MODEL_SNAPSHOT_KEY = "tater:runtime:model-snapshot:v1"
 RUNTIME_MODEL_SNAPSHOT_SCHEMA_VERSION = 1
 RUNTIME_MODEL_SNAPSHOT_INTERVAL_SECONDS = 30
@@ -938,6 +944,62 @@ def _portal_settings_module(portal_key: str) -> Optional[ModuleType]:
         return None
 
 
+PORTAL_SETTINGS_HOOK_TIMEOUT_SECONDS = 2.0
+PORTAL_SETTINGS_FIELD_CACHE_TTL_SECONDS = 60.0
+PORTAL_SETTINGS_FIELD_RETRY_SECONDS = 10.0
+_portal_settings_field_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tater-portal-settings")
+_portal_settings_field_cache_lock = threading.RLock()
+_portal_settings_field_cache: Dict[str, Dict[str, Any]] = {}
+_portal_settings_field_inflight: Dict[str, Any] = {}
+
+
+def _copy_setting_fields(fields: Any) -> List[Dict[str, Any]]:
+    return [dict(field) if isinstance(field, dict) else field for field in (fields or [])]
+
+
+def _portal_setting_fields_cache_key(
+    portal_key: str,
+    fields: List[Dict[str, Any]],
+    current: Dict[str, str],
+) -> str:
+    payload = json.dumps(
+        {"portal": str(portal_key or ""), "fields": fields, "current": current},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _finish_portal_setting_fields(
+    cache_key: str,
+    portal_key: str,
+    future: Any,
+) -> None:
+    try:
+        updated = future.result()
+    except Exception:
+        logger.exception("[portals] settings field hook failed for %s", portal_key)
+        updated = None
+
+    with _portal_settings_field_cache_lock:
+        if _portal_settings_field_inflight.get(cache_key) is future:
+            _portal_settings_field_inflight.pop(cache_key, None)
+        if isinstance(updated, list):
+            _portal_settings_field_cache[cache_key] = {
+                "fields": _copy_setting_fields(updated),
+                "fetched_at": time.monotonic(),
+                "retry_after": 0.0,
+            }
+            if len(_portal_settings_field_cache) > 64:
+                oldest_key = min(
+                    _portal_settings_field_cache,
+                    key=lambda key: float(_portal_settings_field_cache[key].get("fetched_at") or 0.0),
+                )
+                if oldest_key != cache_key:
+                    _portal_settings_field_cache.pop(oldest_key, None)
+
+
 def _portal_setting_fields(portal_key: str, required: Dict[str, Any], current: Dict[str, str]) -> List[Dict[str, Any]]:
     fields = _setting_fields(required, current)
     module = _portal_settings_module(portal_key)
@@ -946,17 +1008,49 @@ def _portal_setting_fields(portal_key: str, required: Dict[str, Any], current: D
     hook = getattr(module, "webui_settings_fields", None)
     if not callable(hook):
         return fields
+
+    cache_key = _portal_setting_fields_cache_key(portal_key, fields, current)
+    now = time.monotonic()
+    with _portal_settings_field_cache_lock:
+        cached = dict(_portal_settings_field_cache.get(cache_key) or {})
+        cached_fields = cached.get("fields") if isinstance(cached.get("fields"), list) else None
+        fetched_at = float(cached.get("fetched_at") or 0.0)
+        if cached_fields is not None and fetched_at and now - fetched_at < PORTAL_SETTINGS_FIELD_CACHE_TTL_SECONDS:
+            return _copy_setting_fields(cached_fields)
+
+        future = _portal_settings_field_inflight.get(cache_key)
+        retry_after = float(cached.get("retry_after") or 0.0)
+        if future is not None and retry_after > now:
+            return _copy_setting_fields(cached_fields if cached_fields is not None else fields)
+        if future is None:
+            future = _portal_settings_field_executor.submit(
+                hook,
+                fields=_copy_setting_fields(fields),
+                current_settings=dict(current or {}),
+                redis_client=redis_client,
+                notifier_destination_catalog=notifier_destination_catalog,
+            )
+            _portal_settings_field_inflight[cache_key] = future
+            future.add_done_callback(
+                lambda completed, key=cache_key, portal=portal_key: _finish_portal_setting_fields(key, portal, completed)
+            )
+
     try:
-        updated = hook(
-            fields=[dict(field) if isinstance(field, dict) else field for field in fields],
-            current_settings=dict(current or {}),
-            redis_client=redis_client,
-            notifier_destination_catalog=notifier_destination_catalog,
+        updated = future.result(timeout=PORTAL_SETTINGS_HOOK_TIMEOUT_SECONDS)
+    except FutureTimeoutError:
+        with _portal_settings_field_cache_lock:
+            entry = dict(_portal_settings_field_cache.get(cache_key) or {})
+            entry["retry_after"] = time.monotonic() + PORTAL_SETTINGS_FIELD_RETRY_SECONDS
+            _portal_settings_field_cache[cache_key] = entry
+        logger.warning(
+            "[portals] settings field hook timed out after %.1fs for %s; using cached or local fields",
+            PORTAL_SETTINGS_HOOK_TIMEOUT_SECONDS,
+            portal_key,
         )
+        return _copy_setting_fields(cached_fields if cached_fields is not None else fields)
     except Exception:
-        logger.exception("[portals] settings field hook failed for %s", portal_key)
-        return fields
-    return updated if isinstance(updated, list) else fields
+        return _copy_setting_fields(cached_fields if cached_fields is not None else fields)
+    return _copy_setting_fields(updated) if isinstance(updated, list) else fields
 
 
 def _esphome_settings_fields() -> List[Dict[str, Any]]:
@@ -1046,6 +1140,14 @@ def _normalize_popup_effect_style(value: Any, default: str = DEFAULT_WEBUI_POPUP
         return token
     fallback = str(default or DEFAULT_WEBUI_POPUP_EFFECT_STYLE).strip().lower()
     return fallback if fallback in WEBUI_POPUP_EFFECT_STYLE_CHOICES else DEFAULT_WEBUI_POPUP_EFFECT_STYLE
+
+
+def _normalize_webui_theme(value: Any, default: str = DEFAULT_WEBUI_THEME) -> str:
+    token = str(value or "").strip().lower()
+    if token in WEBUI_THEME_CHOICES:
+        return token
+    fallback = str(default or DEFAULT_WEBUI_THEME).strip().lower()
+    return fallback if fallback in WEBUI_THEME_CHOICES else DEFAULT_WEBUI_THEME
 
 
 def _speech_model_warmup_snapshot() -> Dict[str, Any]:
@@ -1687,6 +1789,7 @@ def _run_hf_llm_warmup(
     )
     item_states: List[Dict[str, Any]] = []
     errors: List[str] = []
+    unload_result: Dict[str, Any] = {}
     if load_models and unload_targets:
         with hf_llm_warmup_lock:
             hf_llm_warmup_state["active_key"] = "__unload_previous__"
@@ -1864,7 +1967,12 @@ def _run_hf_llm_warmup(
     runtime_restart: Dict[str, Any] = {}
     settings_triggered = str(reason or "").strip().lower().startswith("settings-save")
     loaded_count = sum(1 for item in item_states if str(item.get("status") or "").strip().lower() == "loaded")
-    if load_models and settings_triggered and loaded_count > 0:
+    unloaded_count = int(unload_result.get("unloaded_count") or 0)
+    if load_models and settings_triggered and (loaded_count > 0 or unloaded_count > 0):
+        active_before = {
+            "cores": _running_surface_keys(core_runtime),
+            "portals": _running_surface_keys(portal_runtime),
+        }
         with hf_llm_warmup_lock:
             hf_llm_warmup_state["active_key"] = "__runtime_restart__"
             hf_llm_warmup_state["progress"] = 99.0
@@ -1872,7 +1980,7 @@ def _run_hf_llm_warmup(
                 "running": True,
                 "reason": reason,
                 "started_ts": time.time(),
-                "active_before": {},
+                "active_before": active_before,
                 "stopped": {},
                 "resumed": {},
             }
@@ -1928,7 +2036,7 @@ def _start_hf_llm_warmup(
 ) -> Dict[str, Any]:
     clean_items = _dedupe_hf_llm_warmup_targets(models or [])
     clean_unload_items = _dedupe_hf_llm_warmup_targets(unload_before or [])
-    if not clean_items:
+    if not clean_items and not clean_unload_items:
         snapshot = _hf_llm_warmup_snapshot()
         snapshot["started"] = False
         snapshot["already_running"] = False
@@ -3057,6 +3165,31 @@ def _hf_browser_effective_model_id(provider: str, repo_id: str, filename: str = 
     return repo
 
 
+def _hf_browser_download_provider(
+    provider: Any,
+    *,
+    repo_id: Any = "",
+    model_id: Any = "",
+    filename: Any = "",
+) -> str:
+    """Resolve browser labels and file hints to a canonical local provider."""
+    provider_token = _normalize_hydra_llm_provider(provider)
+    if _is_local_hydra_llm_provider(provider_token):
+        return provider_token
+
+    hint = " ".join(
+        str(value or "").strip().lower()
+        for value in (provider, repo_id, model_id, filename)
+    )
+    if any(marker in hint for marker in ("llama.cpp", "llama_cpp", "llama-cpp", "gguf", ".gguf")):
+        return HYDRA_LLM_PROVIDER_LLAMA_CPP
+    if any(marker in hint for marker in ("mlx lm", "mlx_lm", "mlx-lm", "mlx-vlm", "mlx_vlm")):
+        return HYDRA_LLM_PROVIDER_MLX_LM
+    if any(marker in hint for marker in ("transformers", "hugging face", "huggingface", "safetensors")):
+        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+    return provider_token
+
+
 def _local_llm_model_registry_path() -> Path:
     raw = str(os.getenv("TATER_LOCAL_LLM_MODEL_REGISTRY") or "").strip()
     if raw:
@@ -3408,6 +3541,84 @@ def _write_local_llm_model_registry(rows: List[Dict[str, Any]]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _normalize_local_llm_speculative_method(value: Any) -> str:
+    token = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    aliases = {
+        "mtp": "draft-mtp",
+        "draft-mtp": "draft-mtp",
+        "multi-token-prediction": "draft-mtp",
+        "multitoken-prediction": "draft-mtp",
+        "dflash": "draft-dflash",
+        "d-flash": "draft-dflash",
+        "draft-dflash": "draft-dflash",
+        "draft-d-flash": "draft-dflash",
+        "dspark": "draft-dspark",
+        "d-spark": "draft-dspark",
+        "draft-dspark": "draft-dspark",
+        "draft-d-spark": "draft-dspark",
+    }
+    return aliases.get(token, "")
+
+
+def _local_llm_speculative_profile(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify speculative sidecars without assuming one publisher naming scheme.
+
+    Explicit inventory/GGUF metadata wins when it is available. Most publishers do
+    not expose a standard draft-role field yet, so the local filename is the safe
+    fallback; the repository name is intentionally not used by itself because one
+    repository commonly contains both the base model and several sidecars.
+    """
+    explicit_method = ""
+    for key in (
+        "speculative_method",
+        "speculative_draft_method",
+        "draft_method",
+        "llama_cpp_speculative_method",
+    ):
+        explicit_method = _normalize_local_llm_speculative_method(row.get(key))
+        if explicit_method:
+            break
+
+    explicit_role = " ".join(
+        str(row.get(key) or "")
+        for key in ("model_role", "role", "purpose", "general_type", "general_tags")
+    ).lower()
+    explicit_draft = row.get("is_speculative_draft") is True or any(
+        marker in explicit_role for marker in ("speculative", "draft", "sidecar", "speculator")
+    )
+    if explicit_method:
+        return {
+            "is_speculative_draft": True,
+            "speculative_method": explicit_method,
+            "speculative_detection_source": "metadata",
+        }
+
+    filename = str(row.get("filename") or "").strip()
+    model = str(row.get("model") or row.get("model_id") or "").strip()
+    model_path = str(row.get("model_path") or "").strip()
+    if not filename and "::" in model:
+        filename = model.split("::", 1)[1].strip()
+    if not filename and model_path:
+        filename = Path(model_path).name
+    identity = filename or model
+    normalized_identity = re.sub(r"[^a-z0-9]+", "-", identity.lower()).strip("-")
+    method = ""
+    if re.search(r"(?:^|-)d-?flash(?:-|$)", normalized_identity):
+        method = "draft-dflash"
+    elif re.search(r"(?:^|-)d-?spark(?:-|$)", normalized_identity):
+        method = "draft-dspark"
+    elif re.search(r"(?:^|-)(?:mtp|multi-token-prediction)(?:-|$)", normalized_identity):
+        method = "draft-mtp"
+    name_marks_draft = bool(method) or bool(
+        re.search(r"(?:^|-)(?:draft|sidecar|speculator|speculative)(?:-|$)", normalized_identity)
+    )
+    return {
+        "is_speculative_draft": bool(explicit_draft or name_marks_draft),
+        "speculative_method": method,
+        "speculative_detection_source": "metadata" if explicit_draft else ("filename" if name_marks_draft else ""),
+    }
+
+
 def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     provider = _normalize_hydra_llm_provider(row.get("provider"))
     model = str(row.get("model") or row.get("model_id") or "").strip()
@@ -3485,7 +3696,7 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
             for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
         )
         supports_video = supports_vision and not audio_only
-    return {
+    normalized = {
         "provider": provider,
         "provider_label": _hydra_llm_provider_label(provider),
         "model": model,
@@ -3505,6 +3716,9 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "mmproj_filename": mmproj_filename,
         "mmproj_path": mmproj_path,
     }
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        normalized.update(_local_llm_speculative_profile({**row, **normalized}))
+    return normalized
 
 
 def _local_llm_model_dedupe_key(row: Dict[str, Any]) -> Tuple[str, str]:
@@ -3547,6 +3761,12 @@ def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_HF_TRANSFORMERS))
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_LLAMA_CPP))
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_MLX_LM))
+    for row in rows:
+        if (
+            _normalize_hydra_llm_provider(row.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            and "is_speculative_draft" not in row
+        ):
+            row.update(_local_llm_speculative_profile(row))
     explicit_llama_repos = {
         str(row.get("repo_id") or "").strip()
         for row in rows
@@ -5658,6 +5878,7 @@ def _webui_auth_profile_payload(
         "mode": mode,
         "username": str(chat_settings.get("username") or "User"),
         "user_avatar": _read_user_avatar_data_url(chat_settings),
+        "webui_theme": _normalize_webui_theme(redis_client.get(WEBUI_THEME_KEY)),
         "app_version": app_version,
         "app_version_label": f"v{app_version}" if app_version else "",
     }
@@ -8192,9 +8413,39 @@ def _plugin_platforms(item: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _trusted_repo_payload(kind: str, additional_repos: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[str]]:
+    rows, errors = trusted_repositories_module.load_trusted_repositories(kind)
+    enabled_urls = {
+        str(repo.get("url") or "").strip().casefold()
+        for repo in additional_repos
+        if isinstance(repo, dict) and str(repo.get("url") or "").strip()
+    }
+    return [
+        {**row, "enabled": str(row.get("url") or "").strip().casefold() in enabled_urls}
+        for row in rows
+    ], errors
+
+
+def _shop_repo_config_payload(
+    kind: str,
+    configured_repos: List[Dict[str, Any]],
+    additional_repos: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    trusted_repos, trusted_errors = _trusted_repo_payload(kind, additional_repos)
+    return {
+        "configured": configured_repos,
+        "additional": additional_repos,
+        "trusted": trusted_repos,
+        "trusted_error": " ".join(trusted_errors),
+        "directory_url": trusted_repositories_module.directory_url(kind),
+        "default": configured_repos[0] if configured_repos else {"name": "", "url": ""},
+    }
+
+
 def _verba_shop_raw() -> Dict[str, Any]:
     verba_registry_module.ensure_verbas_loaded()
     manifest_repos = verba_store_module.get_configured_shop_manifest_repos()
+    additional_repos = verba_store_module.get_additional_shop_manifest_repos()
     catalog_items, catalog_errors = verba_store_module.load_shop_catalog(manifest_repos)
 
     build_entries = getattr(verba_store_module, "_build_installed_entries", None)
@@ -8251,11 +8502,7 @@ def _verba_shop_raw() -> Dict[str, Any]:
     catalog_payload.sort(key=_shop_payload_sort_key)
 
     return {
-        "repos": {
-            "configured": manifest_repos,
-            "additional": verba_store_module.get_additional_shop_manifest_repos(),
-            "default": manifest_repos[0] if manifest_repos else {"name": "", "url": ""},
-        },
+        "repos": _shop_repo_config_payload("verba", manifest_repos, additional_repos),
         "errors": list(catalog_errors or []),
         "installed": installed_payload,
         "catalog": catalog_payload,
@@ -8267,6 +8514,7 @@ def _verba_shop_raw() -> Dict[str, Any]:
 
 def _core_shop_raw() -> Dict[str, Any]:
     manifest_repos = core_store_module.get_configured_core_shop_manifest_repos()
+    additional_repos = core_store_module.get_additional_core_shop_manifest_repos()
     catalog_items, catalog_errors = core_store_module.load_core_shop_catalog(manifest_repos)
 
     build_entries = getattr(core_store_module, "_build_installed_core_entries", None)
@@ -8320,11 +8568,7 @@ def _core_shop_raw() -> Dict[str, Any]:
     catalog_payload.sort(key=_shop_payload_sort_key)
 
     return {
-        "repos": {
-            "configured": manifest_repos,
-            "additional": core_store_module.get_additional_core_shop_manifest_repos(),
-            "default": manifest_repos[0] if manifest_repos else {"name": "", "url": ""},
-        },
+        "repos": _shop_repo_config_payload("core", manifest_repos, additional_repos),
         "errors": list(catalog_errors or []),
         "installed": installed_payload,
         "catalog": catalog_payload,
@@ -8336,6 +8580,7 @@ def _core_shop_raw() -> Dict[str, Any]:
 
 def _portal_shop_raw() -> Dict[str, Any]:
     manifest_repos = portal_store_module.get_configured_portal_shop_manifest_repos()
+    additional_repos = portal_store_module.get_additional_portal_shop_manifest_repos()
     catalog_items, catalog_errors = portal_store_module.load_portal_shop_catalog(manifest_repos)
 
     build_entries = getattr(portal_store_module, "_build_installed_portal_entries", None)
@@ -8389,11 +8634,7 @@ def _portal_shop_raw() -> Dict[str, Any]:
     catalog_payload.sort(key=_shop_payload_sort_key)
 
     return {
-        "repos": {
-            "configured": manifest_repos,
-            "additional": portal_store_module.get_additional_portal_shop_manifest_repos(),
-            "default": manifest_repos[0] if manifest_repos else {"name": "", "url": ""},
-        },
+        "repos": _shop_repo_config_payload("portal", manifest_repos, additional_repos),
         "errors": list(catalog_errors or []),
         "installed": installed_payload,
         "catalog": catalog_payload,
@@ -9453,12 +9694,16 @@ class PeopleActionRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
-class HfModelDownloadRequest(BaseModel):
+class HfModelDownloadItemRequest(BaseModel):
     provider: Optional[str] = None
     repo_id: Optional[str] = None
     model_id: Optional[str] = None
     filename: Optional[str] = None
     task: Optional[str] = None
+
+
+class HfModelDownloadRequest(HfModelDownloadItemRequest):
+    items: List[HfModelDownloadItemRequest] = Field(default_factory=list)
 
 
 class LocalLlmModelDeleteRequest(BaseModel):
@@ -9504,6 +9749,7 @@ class AppSettingsRequest(BaseModel):
     tater_first_name: Optional[str] = None
     tater_last_name: Optional[str] = None
     tater_personality: Optional[str] = None
+    webui_theme: Optional[str] = None
     max_store: Optional[int] = None
     max_llm: Optional[int] = None
     homeassistant_base_url: Optional[str] = None
@@ -9699,6 +9945,78 @@ class AppSettingsRequest(BaseModel):
     webui_password: Optional[str] = None
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
+
+
+class GeneralSettingsRequest(BaseModel):
+    username: Optional[str] = None
+    user_avatar: Optional[str] = None
+    tater_avatar: Optional[str] = None
+    clear_user_avatar: Optional[bool] = None
+    clear_tater_avatar: Optional[bool] = None
+    show_speed_stats: Optional[bool] = None
+    tater_first_name: Optional[str] = None
+    tater_last_name: Optional[str] = None
+    tater_personality: Optional[str] = None
+    webui_theme: Optional[str] = None
+    webui_password: Optional[str] = None
+    webui_password_confirm: Optional[str] = None
+    clear_webui_password: Optional[bool] = None
+
+
+class MiscSettingsRequest(BaseModel):
+    popup_effect_style: Optional[str] = None
+    emoji_enable_on_reaction_add: Optional[bool] = None
+    emoji_enable_auto_reaction_on_reply: Optional[bool] = None
+    emoji_reaction_chain_chance_percent: Optional[int] = None
+    emoji_reply_reaction_chance_percent: Optional[int] = None
+    emoji_reaction_chain_cooldown_seconds: Optional[int] = None
+    emoji_reply_reaction_cooldown_seconds: Optional[int] = None
+    emoji_min_message_length: Optional[int] = None
+
+
+class AdvancedSettingsRequest(BaseModel):
+    admin_only_plugins: Optional[List[str]] = None
+    tater_api_enabled: Optional[bool] = None
+    tater_api_key: Optional[str] = None
+    clear_tater_api_key: Optional[bool] = None
+    tater_api_mode: Optional[str] = None
+    tater_api_hydra_tools_enabled: Optional[bool] = None
+
+
+class HydraSettingsRequest(BaseModel):
+    max_display: Optional[int] = None
+    max_store: Optional[int] = None
+    max_llm: Optional[int] = None
+    hydra_max_ledger_items: Optional[int] = None
+    hydra_astraeus_plan_review_enabled: Optional[bool] = None
+    hydra_auto_continue_incomplete_final_enabled: Optional[bool] = None
+
+
+class SpudLinkSettingsRequest(BaseModel):
+    spud_link_mode: Optional[str] = None
+    spud_link_node_name: Optional[str] = None
+    spud_link_home_url: Optional[str] = None
+    spud_link_public_url: Optional[str] = None
+    spud_link_pairing_enabled: Optional[bool] = None
+    spud_link_allow_spudlets: Optional[bool] = None
+    spud_link_allow_little_spuds: Optional[bool] = None
+    spud_link_little_spud_tools_enabled: Optional[bool] = None
+    spud_link_telemetry_enabled: Optional[bool] = None
+    spud_link_request_previews_enabled: Optional[bool] = None
+    spud_link_model_routing_enabled: Optional[bool] = None
+    spud_link_model_route_llm: Optional[str] = None
+    spud_link_model_route_vad: Optional[str] = None
+    spud_link_model_route_stt: Optional[str] = None
+    spud_link_model_route_tts: Optional[str] = None
+    spud_link_model_route_vision: Optional[str] = None
+    spud_link_model_route_audio: Optional[str] = None
+    spud_link_model_route_video: Optional[str] = None
+    spud_link_model_route_speaker_id: Optional[str] = None
+    spud_link_model_route_emotion_id: Optional[str] = None
+    spud_link_model_route_face_id: Optional[str] = None
+    spud_link_hub_url: Optional[str] = None
+    spud_link_node_token: Optional[str] = None
+    clear_spud_link_node_token: Optional[bool] = None
 
 
 class HueLinkRequest(BaseModel):
@@ -9900,6 +10218,34 @@ def external_audio_live_stream(
     )
 
 
+@app.get("/api/external-audio/v1/streams/{session_id}/live.mp3")
+def external_audio_live_mp3_stream(
+    session_id: str,
+    token: str = "",
+    cursor: int = 0,
+) -> StreamingResponse:
+    """Serve one live MP3 encoder from a tokenized shared PCM cursor."""
+    try:
+        from external_audio import stream_external_audio_mp3
+
+        body = stream_external_audio_mp3(session_id, token, cursor)
+    except Exception as exc:
+        from external_audio import ExternalAudioStreamError
+
+        if isinstance(exc, ExternalAudioStreamError):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=f"External audio is unavailable: {exc}") from exc
+    return StreamingResponse(
+        body,
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.on_event("startup")
 async def _startup_event() -> None:
     set_main_loop(asyncio.get_running_loop())
@@ -10080,7 +10426,6 @@ async def _redis_error_handler(_request: Request, exc: RedisError):
 def _webui_asset_version() -> str:
     candidates = (
         STATIC_DIR / "app.js",
-        STATIC_DIR / "styles.css",
         STATIC_DIR / "ui" / "tater-ui.js",
         STATIC_DIR / "ui" / "tater-ui.css",
     )
@@ -10098,8 +10443,8 @@ def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     version = _webui_asset_version()
     html = html.replace(
-        'href="./static/styles.css"',
-        f'href="./static/styles.css?v={version}"',
+        'href="./static/ui/tater-ui.css"',
+        f'href="./static/ui/tater-ui.css?v={version}"',
     ).replace(
         'src="./static/app.js"',
         f'src="./static/app.js?v={version}"',
@@ -11317,6 +11662,51 @@ def _runtime_cached_context_estimate() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not estimate:
         estimate = _estimate_webui_chat_context_window()
     return estimate, runtime_meta
+
+
+def _runtime_live_telemetry_payload() -> Dict[str, Any]:
+    """Build the cheap, high-frequency runtime sample used by the WebUI stream.
+
+    CPU and RAM are sampled directly. GPU data comes from the shared hardware
+    cache so the more expensive platform probe keeps its own slower cadence.
+    """
+    sampled_at = time.time()
+    live_system = get_system_hardware_snapshot(include_vram_probe=False)
+    cached_system, cache_meta = _runtime_hardware_snapshot_load()
+    if isinstance(cached_system, dict) and cached_system:
+        cached_vram = cached_system.get("vram")
+        if isinstance(cached_vram, dict):
+            live_system["vram"] = dict(cached_vram)
+        if "unified_memory" in cached_system:
+            live_system["unified_memory"] = bool(cached_system.get("unified_memory"))
+    return {
+        "ok": True,
+        "type": "telemetry",
+        "sampled_at": sampled_at,
+        "interval_seconds": RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS,
+        "system": live_system,
+        "gpu_cache": {
+            "sampled_at": float(cache_meta.get("cached_at") or 0.0),
+            "age_seconds": float(cache_meta.get("age_seconds") or 0.0),
+            "source": str(cache_meta.get("source") or "missing"),
+        },
+    }
+
+
+async def _stream_runtime_telemetry(request: Request):
+    sequence = 0
+    while not await request.is_disconnected():
+        payload = await asyncio.to_thread(_runtime_live_telemetry_payload)
+        gpu_cache = payload.get("gpu_cache") if isinstance(payload.get("gpu_cache"), dict) else {}
+        if (
+            str(gpu_cache.get("source") or "") in {"missing", "invalid"}
+            or float(gpu_cache.get("age_seconds") or 0.0) >= float(RUNTIME_HARDWARE_TELEMETRY_STALE_SECONDS)
+        ):
+            system_task_manager.request_run("hardware_telemetry", reason="runtime-telemetry-stream")
+        sequence += 1
+        payload["sequence"] = sequence
+        yield _sse("telemetry", payload)
+        await asyncio.sleep(RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS)
 
 
 def _runtime_breakdown_payload() -> Dict[str, Any]:
@@ -14626,6 +15016,19 @@ def runtime_breakdown(refresh: bool = False) -> Dict[str, Any]:
     return {"ok": True, **payload}
 
 
+@app.get("/api/runtime/telemetry")
+async def runtime_telemetry(request: Request) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_runtime_telemetry(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/runtime/context-estimate")
 def runtime_context_estimate() -> Dict[str, Any]:
     estimate, cache_meta = _runtime_cached_context_estimate()
@@ -17331,6 +17734,7 @@ def chat_profile() -> Dict[str, Any]:
         "attach_max_mb_each": int(WEBUI_ATTACH_MAX_MB_EACH),
         "attach_max_mb_total": int(WEBUI_ATTACH_MAX_MB_TOTAL),
         "show_speed_stats": _show_speed_stats_enabled(default=False),
+        "webui_theme": _normalize_webui_theme(redis_client.get(WEBUI_THEME_KEY)),
         "popup_effect_style": _normalize_popup_effect_style(
             redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
             default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
@@ -18171,12 +18575,31 @@ def list_portals() -> Dict[str, Any]:
                 "label": portal.get("label", key),
                 "desired_running": desired_running,
                 "running": actual_running,
-                "settings": _portal_setting_fields(key, portal.get("required", {}), current_settings),
+                # Keep the overview local-only. Some Portals enrich their
+                # settings from a remote service, which must not hold up the
+                # entire Portals tab when that service is offline.
+                "settings": _setting_fields(portal.get("required", {}), current_settings),
             }
         )
 
     rows.sort(key=lambda row: str(row.get("label") or "").lower())
     return {"items": rows}
+
+
+@app.get("/api/portals/{portal_key}/settings")
+def get_portal_settings(portal_key: str) -> Dict[str, Any]:
+    key = str(portal_key or "").strip()
+    entries = portal_registry_module.refresh_portal_registry()
+    portal = next((entry for entry in entries if str(entry.get("key") or "").strip() == key), None)
+    if portal is None:
+        raise HTTPException(status_code=404, detail=f"Unknown portal: {portal_key}")
+
+    current_settings = redis_client.hgetall(f"{key}_settings") or {}
+    return {
+        "key": key,
+        "label": portal.get("label", key),
+        "settings": _portal_setting_fields(key, portal.get("required", {}), current_settings),
+    }
 
 
 @app.post("/api/portals/{portal_key}/start")
@@ -18457,8 +18880,9 @@ def get_verba_shop() -> Dict[str, Any]:
 def save_verba_repos(payload: ShopReposRequest) -> Dict[str, Any]:
     rows = _normalize_repo_rows(payload.repos)
     verba_store_module.save_additional_shop_manifest_repos(rows)
-    snapshot = _verba_shop_raw()
-    return {"ok": True, "repos": snapshot["repos"]}
+    additional = verba_store_module.get_additional_shop_manifest_repos()
+    configured = verba_store_module.get_configured_shop_manifest_repos()
+    return {"ok": True, "repos": _shop_repo_config_payload("verba", configured, additional)}
 
 
 @app.post("/api/shop/verbas/install")
@@ -18591,8 +19015,9 @@ def get_core_shop() -> Dict[str, Any]:
 def save_core_repos(payload: ShopReposRequest) -> Dict[str, Any]:
     rows = _normalize_repo_rows(payload.repos)
     core_store_module.save_additional_core_shop_manifest_repos(rows)
-    snapshot = _core_shop_raw()
-    return {"ok": True, "repos": snapshot["repos"]}
+    additional = core_store_module.get_additional_core_shop_manifest_repos()
+    configured = core_store_module.get_configured_core_shop_manifest_repos()
+    return {"ok": True, "repos": _shop_repo_config_payload("core", configured, additional)}
 
 
 @app.post("/api/shop/cores/install")
@@ -18762,8 +19187,9 @@ def get_portal_shop() -> Dict[str, Any]:
 def save_portal_repos(payload: ShopReposRequest) -> Dict[str, Any]:
     rows = _normalize_repo_rows(payload.repos)
     portal_store_module.save_additional_portal_shop_manifest_repos(rows)
-    snapshot = _portal_shop_raw()
-    return {"ok": True, "repos": snapshot["repos"]}
+    additional = portal_store_module.get_additional_portal_shop_manifest_repos()
+    configured = portal_store_module.get_configured_portal_shop_manifest_repos()
+    return {"ok": True, "repos": _shop_repo_config_payload("portal", configured, additional)}
 
 
 @app.post("/api/shop/portals/install")
@@ -19382,9 +19808,110 @@ def run_people_settings_action(payload: PeopleActionRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc) or "People action failed.") from exc
 
 
+def _general_settings_payload() -> Dict[str, Any]:
+    chat_settings = redis_client.hgetall("chat_settings") or {}
+    return {
+        "username": chat_settings.get("username", "User"),
+        "user_avatar": _read_user_avatar_data_url(chat_settings),
+        "tater_avatar": _read_tater_avatar_data_url(),
+        "show_speed_stats": _show_speed_stats_enabled(default=False),
+        "webui_theme": _normalize_webui_theme(redis_client.get(WEBUI_THEME_KEY)),
+        "tater_first_name": redis_client.get("tater:first_name") or "Tater",
+        "tater_last_name": redis_client.get("tater:last_name") or "Totterson",
+        "tater_personality": redis_client.get("tater:personality") or "",
+        "webui_password_set": _webui_password_is_set(),
+    }
+
+
+def _misc_settings_payload() -> Dict[str, Any]:
+    emoji_settings = get_core_emoji_settings() or {}
+    return {
+        "popup_effect_style": _normalize_popup_effect_style(
+            redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
+            default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
+        ),
+        "emoji_enable_on_reaction_add": bool(emoji_settings.get("enable_on_reaction_add", True)),
+        "emoji_enable_auto_reaction_on_reply": bool(emoji_settings.get("enable_auto_reaction_on_reply", True)),
+        "emoji_reaction_chain_chance_percent": int(emoji_settings.get("reaction_chain_chance_percent", 100)),
+        "emoji_reply_reaction_chance_percent": int(emoji_settings.get("reply_reaction_chance_percent", 12)),
+        "emoji_reaction_chain_cooldown_seconds": int(emoji_settings.get("reaction_chain_cooldown_seconds", 30)),
+        "emoji_reply_reaction_cooldown_seconds": int(emoji_settings.get("reply_reaction_cooldown_seconds", 120)),
+        "emoji_min_message_length": int(emoji_settings.get("min_message_length", 4)),
+    }
+
+
+def _advanced_settings_payload() -> Dict[str, Any]:
+    verba_registry_module.ensure_verbas_loaded()
+    registry_snapshot = verba_registry_module.get_verba_registry_snapshot()
+    admin_plugin_options = sorted(
+        str(plugin_id or "").strip()
+        for plugin_id in registry_snapshot.keys()
+        if str(plugin_id or "").strip()
+    )
+    tater_api_settings = _load_tater_api_settings(include_secret=False)
+    return {
+        "admin_plugin_options": admin_plugin_options,
+        "admin_only_plugins": sorted(get_admin_only_plugins(redis_client)),
+        "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
+        "tater_api_enabled": bool(tater_api_settings.get("enabled")),
+        "tater_api_key_set": bool(tater_api_settings.get("api_key_set")),
+        "tater_api_mode": _normalize_tater_api_mode(tater_api_settings.get("mode")),
+        "tater_api_hydra_tools_enabled": bool(tater_api_settings.get("hydra_tools_enabled")),
+    }
+
+
+def _hydra_settings_payload() -> Dict[str, Any]:
+    return {
+        "max_display": _read_positive_int("tater:max_display", DEFAULT_MAX_DISPLAY),
+        "max_store": _read_non_negative_int("tater:max_store", DEFAULT_MAX_STORE),
+        "max_llm": _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM),
+        "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
+        "hydra_astraeus_plan_review_enabled": _as_bool_flag(
+            redis_client.get(HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY),
+            default=DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
+        ),
+        "hydra_auto_continue_incomplete_final_enabled": _as_bool_flag(
+            redis_client.get(HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY),
+            default=DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
+        ),
+        "defaults": {
+            "max_display": int(DEFAULT_MAX_DISPLAY),
+            "max_store": int(DEFAULT_MAX_STORE),
+            "max_llm": int(DEFAULT_MAX_LLM),
+            "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
+            "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
+            "hydra_auto_continue_incomplete_final_enabled": bool(DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED),
+        },
+    }
+
+
+@app.get("/api/settings/general")
+def get_general_settings() -> Dict[str, Any]:
+    return _general_settings_payload()
+
+
+@app.get("/api/settings/misc")
+def get_misc_settings() -> Dict[str, Any]:
+    return _misc_settings_payload()
+
+
+@app.get("/api/settings/advanced")
+def get_advanced_settings() -> Dict[str, Any]:
+    return _advanced_settings_payload()
+
+
+@app.get("/api/settings/hydra")
+def get_hydra_settings() -> Dict[str, Any]:
+    return _hydra_settings_payload()
+
+
+@app.get("/api/settings/spud-link")
+def get_spud_link_settings() -> Dict[str, Any]:
+    return _spud_link_public_settings_payload()
+
+
 @app.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
-    chat_settings = redis_client.hgetall("chat_settings") or {}
     homeassistant_module = _integration_module("homeassistant", auto_restore=False)
     hue_module = _integration_module("hue", auto_restore=False)
     aladdin_module = _integration_module("aladdin", auto_restore=False)
@@ -19472,13 +19999,6 @@ def get_settings() -> Dict[str, Any]:
         voice=speech_settings.get("announcement_tts_voice"),
         default_backend=str(speech_settings.get("tts_backend") or "wyoming"),
     )
-    emoji_settings = get_core_emoji_settings() or {}
-
-    verba_registry_module.ensure_verbas_loaded()
-    registry_snapshot = verba_registry_module.get_verba_registry_snapshot()
-    admin_plugin_options = sorted(str(plugin_id or "").strip() for plugin_id in registry_snapshot.keys() if str(plugin_id or "").strip())
-    admin_only_plugins = sorted(get_admin_only_plugins(redis_client))
-
     hydra_base_servers_raw = resolve_hydra_base_servers(
         redis_conn=redis_client,
         include_legacy=True,
@@ -19539,6 +20059,9 @@ def get_settings() -> Dict[str, Any]:
         hydra_role_model_values[f"hydra_llm_{role}_llama_cpp_slot"] = role_llama_cpp_slot
 
     hydra_defaults = {
+        "max_display": int(DEFAULT_MAX_DISPLAY),
+        "max_store": int(DEFAULT_MAX_STORE),
+        "max_llm": int(DEFAULT_MAX_LLM),
         "hydra_llm_provider": HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
         "hydra_llm_host": "",
         "hydra_llm_port": "",
@@ -19583,24 +20106,15 @@ def get_settings() -> Dict[str, Any]:
         "catalog": integration_shop_snapshot.get("catalog") or [],
         "updates_available": integration_shop_snapshot.get("updates_available") or 0,
     }
-    tater_api_settings = _load_tater_api_settings(include_secret=False)
     spud_link_settings = _spud_link_public_settings_payload()
 
     return {
-        "username": chat_settings.get("username", "User"),
-        "user_avatar": _read_user_avatar_data_url(chat_settings),
-        "tater_avatar": _read_tater_avatar_data_url(),
+        **_general_settings_payload(),
+        **_misc_settings_payload(),
+        **_advanced_settings_payload(),
         "max_display": _read_positive_int("tater:max_display", DEFAULT_MAX_DISPLAY),
-        "show_speed_stats": _show_speed_stats_enabled(default=False),
-        "tater_first_name": redis_client.get("tater:first_name") or "Tater",
-        "tater_last_name": redis_client.get("tater:last_name") or "Totterson",
-        "tater_personality": redis_client.get("tater:personality") or "",
         "max_store": _read_non_negative_int("tater:max_store", DEFAULT_MAX_STORE),
         "max_llm": _read_positive_int("tater:max_llm", DEFAULT_MAX_LLM),
-        "popup_effect_style": _normalize_popup_effect_style(
-            redis_client.get(WEBUI_POPUP_EFFECT_STYLE_KEY),
-            default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE,
-        ),
         "homeassistant_base_url": homeassistant_settings.get("base") or HOMEASSISTANT_DEFAULT_BASE_URL,
         "homeassistant_token": homeassistant_settings.get("token", ""),
         "hue_bridge_host": hue_settings.get("HUE_BRIDGE_HOST", HUE_DEFAULT_BRIDGE_HOST),
@@ -19757,13 +20271,6 @@ def get_settings() -> Dict[str, Any]:
         "announcement_speech_ui": announcement_speech_ui,
         "esphome_ui": esphome_ui,
         "voice_model_ui": voice_model_ui,
-        "emoji_enable_on_reaction_add": bool(emoji_settings.get("enable_on_reaction_add", True)),
-        "emoji_enable_auto_reaction_on_reply": bool(emoji_settings.get("enable_auto_reaction_on_reply", True)),
-        "emoji_reaction_chain_chance_percent": int(emoji_settings.get("reaction_chain_chance_percent", 100)),
-        "emoji_reply_reaction_chance_percent": int(emoji_settings.get("reply_reaction_chance_percent", 12)),
-        "emoji_reaction_chain_cooldown_seconds": int(emoji_settings.get("reaction_chain_cooldown_seconds", 30)),
-        "emoji_reply_reaction_cooldown_seconds": int(emoji_settings.get("reply_reaction_cooldown_seconds", 120)),
-        "emoji_min_message_length": int(emoji_settings.get("min_message_length", 4)),
         "hydra_llm_provider": hydra_llm_provider,
         "hydra_llm_host": hydra_llm_host,
         "hydra_llm_port": hydra_llm_port,
@@ -19938,13 +20445,6 @@ def get_settings() -> Dict[str, Any]:
         ),
         **hydra_role_model_values,
         "hydra_defaults": hydra_defaults,
-        "admin_plugin_options": admin_plugin_options,
-        "admin_only_plugins": admin_only_plugins,
-        "admin_only_plugins_defaults": sorted(DEFAULT_ADMIN_ONLY_PLUGINS),
-        "tater_api_enabled": bool(tater_api_settings.get("enabled")),
-        "tater_api_key_set": bool(tater_api_settings.get("api_key_set")),
-        "tater_api_mode": _normalize_tater_api_mode(tater_api_settings.get("mode")),
-        "tater_api_hydra_tools_enabled": bool(tater_api_settings.get("hydra_tools_enabled")),
         "spud_link": spud_link_settings,
         "spud_link_mode": _normalize_spud_link_mode(spud_link_settings.get("mode")),
         "spud_link_node_name": str(spud_link_settings.get("node_name") or ""),
@@ -19966,7 +20466,6 @@ def get_settings() -> Dict[str, Any]:
         },
         "spud_link_hub_url": str(spud_link_settings.get("hub_url") or ""),
         "spud_link_node_token_set": bool(spud_link_settings.get("node_token_set")),
-        "webui_password_set": _webui_password_is_set(),
     }
 
 
@@ -20694,25 +21193,58 @@ def get_huggingface_model_detail(
 
 @app.post("/api/settings/huggingface/download")
 def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[str, Any]:
-    provider_token = _normalize_hydra_llm_provider(request.provider)
-    if not _is_local_hydra_llm_provider(provider_token):
-        raise HTTPException(status_code=400, detail="Choose a local provider before downloading.")
-    repo = str(request.repo_id or "").strip()
-    model_id = str(request.model_id or "").strip()
-    filename = str(request.filename or "").strip()
-    task_token = _normalize_hf_browser_task(request.task)
-    effective_model_id = model_id or _hf_browser_effective_model_id(provider_token, repo, filename)
-    if not effective_model_id:
-        raise HTTPException(status_code=400, detail="Model id is required.")
+    requested_items: List[HfModelDownloadItemRequest] = list(request.items or []) or [request]
+    if len(requested_items) > 32:
+        raise HTTPException(status_code=400, detail="Choose no more than 32 models per download batch.")
+
+    targets: List[Dict[str, Any]] = []
+    requested: List[Dict[str, Any]] = []
+    for item in requested_items:
+        provider_token = _hf_browser_download_provider(
+            item.provider,
+            repo_id=item.repo_id,
+            model_id=item.model_id,
+            filename=item.filename,
+        )
+        if not _is_local_hydra_llm_provider(provider_token):
+            raise HTTPException(status_code=400, detail="Choose a local provider before downloading.")
+        repo = str(item.repo_id or "").strip()
+        model_id = str(item.model_id or "").strip()
+        filename = str(item.filename or "").strip()
+        task_token = _normalize_hf_browser_task(item.task)
+        effective_model_id = model_id or _hf_browser_effective_model_id(provider_token, repo, filename)
+        if not effective_model_id:
+            raise HTTPException(status_code=400, detail="Every queued download needs a model id.")
+        media_kind = {
+            "image-text-to-text": "vision",
+            "audio-text-to-text": "audio",
+            "video-text-to-text": "video",
+        }.get(task_token, "")
+        target: Dict[str, Any] = {"provider": provider_token, "model": effective_model_id}
+        if media_kind:
+            target["media_kind"] = media_kind
+        targets.append(target)
+        requested.append(
+            {
+                "provider": provider_token,
+                "provider_label": _hydra_llm_provider_label(provider_token),
+                "repo_id": repo,
+                "model_id": effective_model_id,
+                "filename": filename,
+                "task": task_token,
+            }
+        )
+
+    targets = _dedupe_hf_llm_warmup_targets(targets)
     result = _start_hf_llm_warmup(
-        [{"provider": provider_token, "model": effective_model_id}],
+        targets,
         reason="huggingface-browser",
         load_models=False,
     )
-    result["provider"] = provider_token
-    result["provider_label"] = _hydra_llm_provider_label(provider_token)
-    result["model_id"] = effective_model_id
-    result["task"] = task_token
+    result["queued_count"] = len(targets)
+    result["requested"] = requested
+    if len(requested) == 1:
+        result.update(requested[0])
     return result
 
 
@@ -21700,6 +22232,13 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     if "show_speed_stats" in updates:
         redis_client.set("tater:show_speed_stats", "true" if updates["show_speed_stats"] else "false")
 
+    if "webui_theme" in updates:
+        raw_theme = str(updates.get("webui_theme") or "").strip().lower()
+        if raw_theme and raw_theme not in WEBUI_THEME_CHOICES:
+            allowed = ", ".join(sorted(WEBUI_THEME_CHOICES))
+            raise HTTPException(status_code=400, detail=f"webui_theme must be one of: {allowed}")
+        redis_client.set(WEBUI_THEME_KEY, _normalize_webui_theme(raw_theme))
+
     if "tater_first_name" in updates:
         redis_client.set("tater:first_name", str(updates["tater_first_name"]).strip() or "Tater")
 
@@ -22516,19 +23055,31 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             unload_before=local_model_unload_targets,
         )
     elif explicit_local_model_load_targets and local_model_unload_targets:
-        unloaded: List[Dict[str, Any]] = []
-        for target in local_model_unload_targets:
-            unloaded.append(
-                unload_local_llm_models(
-                    provider=str(target.get("provider") or ""),
-                    model=str(target.get("model") or ""),
-                )
-            )
+        hf_llm_warmup_result = _start_hf_llm_warmup(
+            [],
+            reason="settings-save-unload",
+            load_models=True,
+            unload_before=local_model_unload_targets,
+        )
+    elif explicit_local_model_load_targets:
+        now = time.time()
         hf_llm_warmup_result = {
             "ok": True,
             "started": False,
             "running": False,
-            "unloaded": unloaded,
+            "started_ts": now,
+            "finished_ts": now,
+            "reason": "settings-save-no-local-model-change",
+            "items": [],
+            "errors": [],
+            "unload_before": [],
+            "unload_result": {},
+            "runtime_restart": {},
+            "progress": 100.0,
+            "active_key": "",
+            "cancel_requested": False,
+            "cancelled": False,
+            "load_models": True,
         }
 
     hydra_mappings = {
@@ -22598,3 +23149,38 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hf_llm_warmup": hf_llm_warmup_result or _hf_llm_warmup_snapshot(),
         "face_id": face_id_result or face_identity.service_status(redis_client),
     }
+
+
+@app.post("/api/settings/general")
+def update_general_settings(payload: GeneralSettingsRequest, response: Response) -> Dict[str, Any]:
+    updates = payload.model_dump(exclude_none=True)
+    update_settings(AppSettingsRequest(**updates), response)
+    return _general_settings_payload()
+
+
+@app.post("/api/settings/misc")
+def update_misc_settings(payload: MiscSettingsRequest, response: Response) -> Dict[str, Any]:
+    updates = payload.model_dump(exclude_none=True)
+    update_settings(AppSettingsRequest(**updates), response)
+    return _misc_settings_payload()
+
+
+@app.post("/api/settings/advanced")
+def update_advanced_settings(payload: AdvancedSettingsRequest, response: Response) -> Dict[str, Any]:
+    updates = payload.model_dump(exclude_none=True)
+    update_settings(AppSettingsRequest(**updates), response)
+    return _advanced_settings_payload()
+
+
+@app.post("/api/settings/hydra")
+def update_hydra_settings(payload: HydraSettingsRequest, response: Response) -> Dict[str, Any]:
+    updates = payload.model_dump(exclude_none=True)
+    update_settings(AppSettingsRequest(**updates), response)
+    return _hydra_settings_payload()
+
+
+@app.post("/api/settings/spud-link")
+def update_spud_link_settings(payload: SpudLinkSettingsRequest, response: Response) -> Dict[str, Any]:
+    updates = payload.model_dump(exclude_none=True)
+    update_settings(AppSettingsRequest(**updates), response)
+    return _spud_link_public_settings_payload()

@@ -16,6 +16,7 @@ const props = defineProps<{
 const selectedTab = ref("");
 const busyKeys = ref(new Set<string>());
 const errorMessage = ref("");
+const successMessage = ref("");
 const eventStatus = ref<"connecting" | "live" | "offline">("connecting");
 let eventSource: EventSource | null = null;
 let reconnectTimer = 0;
@@ -81,10 +82,19 @@ async function run(
 ): Promise<boolean> {
   if (!action || isBusy(busyKey)) return false;
   errorMessage.value = "";
+  successMessage.value = "";
   setBusy(busyKey, true);
   try {
-    await runMusicAction(props.options.actionEndpoint, action, actionPayload);
+    const result = await runMusicAction(props.options.actionEndpoint, action, actionPayload);
+    if (result.ok === false) {
+      throw new Error(String(result.message || result.detail || "Music action failed."));
+    }
     await refreshState();
+    const message = typeof result.message === "string" ? result.message.trim() : "";
+    if (message) {
+      if (props.options.onToast) props.options.onToast(message, "success");
+      else successMessage.value = message;
+    }
     return true;
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error || "Music action failed.");
@@ -199,7 +209,17 @@ onBeforeUnmount(() => {
         :run="run"
       />
       <section v-else class="tm-settings-grid" :class="`group-${activeManagerTab?.item_group || 'all'}`">
-        <SettingsCard v-for="item in activeItems" :key="item.id" :item="item" :busy="isBusy" :run="run" />
+        <SettingsCard
+          v-for="item in activeItems"
+          :key="item.id"
+          :item="item"
+          :busy="isBusy"
+          :run="run"
+          :fields-popup="Boolean(ui.item_fields_popup) && item.fields_popup !== false"
+          :fields-dropdown="Boolean(item.fields_dropdown ?? ui.item_fields_dropdown)"
+          :dropdown-label="item.fields_dropdown_label || ui.item_fields_dropdown_label || 'Connection settings'"
+          :popup-label="item.settings_label || ui.item_fields_popup_label || 'Settings'"
+        />
         <div v-if="!activeItems.length" class="tm-empty">
           {{ activeManagerTab?.empty_message || payload.empty_message || 'Nothing is available here yet.' }}
         </div>
@@ -208,6 +228,10 @@ onBeforeUnmount(() => {
       <div v-if="errorMessage" class="tm-error-toast" role="alert">
         <span>{{ errorMessage }}</span>
         <button type="button" aria-label="Dismiss" @click="errorMessage = ''">×</button>
+      </div>
+      <div v-if="successMessage" class="tm-success-toast" role="status">
+        <span>{{ successMessage }}</span>
+        <button type="button" aria-label="Dismiss" @click="successMessage = ''">×</button>
       </div>
     </template>
   </main>

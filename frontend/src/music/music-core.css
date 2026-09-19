@@ -1352,7 +1352,8 @@
   background: rgb(241 107 107 / 7%);
 }
 
-.tm-error-toast {
+.tm-error-toast,
+.tm-success-toast {
   position: fixed;
   right: 22px;
   bottom: 22px;
@@ -1369,7 +1370,14 @@
   box-shadow: 0 16px 36px rgb(0 0 0 / 36%);
 }
 
+.tm-success-toast {
+  border-color: color-mix(in srgb, var(--tm-accent) 48%, transparent);
+  color: var(--tm-text);
+  background: color-mix(in srgb, var(--tm-surface-strong) 94%, black);
+}
+
 .tm-error-toast button,
+.tm-success-toast button,
 .tm-close {
   border: 0;
   color: inherit;
@@ -1421,6 +1429,7 @@
 .tm-modal > header { border-bottom: 1px solid var(--tm-border); }
 .tm-modal > footer { justify-content: flex-end; border-top: 1px solid var(--tm-border); }
 .tm-modal-body { max-height: 520px; overflow: auto; padding: 18px; }
+.tm-modal-form-grid { margin-top: 0; }
 
 .tm-player-rows {
   display: grid;

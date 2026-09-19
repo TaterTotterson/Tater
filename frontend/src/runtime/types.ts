@@ -10,6 +10,7 @@ export interface RuntimeStatusMountOptions {
   initialState?: Partial<RuntimeStatusState>;
   endpoints: {
     breakdown: string;
+    telemetry: string;
     unloadModel: string;
   };
   onBreakdownChange?: (payload: JsonRow) => void;

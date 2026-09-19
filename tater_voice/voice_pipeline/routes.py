@@ -400,6 +400,75 @@ async def native_satellite_status(x_tater_token: Optional[str] = Header(None)) -
     return await native_satellite.status()
 
 
+@router.get("/api/tater/satellite/v1/presence")
+@router.get("/api/tater/satellite/v1/ble", include_in_schema=False)
+async def native_satellite_ble(
+    selector: str = "",
+    address: str = "",
+    limit: int = 200,
+    max_age_s: float = 300.0,
+    include_observations: bool = True,
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_ble
+
+    return native_ble.snapshot(
+        selector=selector,
+        address=address,
+        limit=limit,
+        max_age_s=max_age_s,
+        include_observations=include_observations,
+    )
+
+
+@router.get("/api/tater/satellite/v1/presence/events")
+@router.get("/api/tater/satellite/v1/ble/events", include_in_schema=False)
+async def native_satellite_presence_events(
+    request: Request,
+    selector: str = "",
+    address: str = "",
+    limit: int = 500,
+    max_age_s: float = 60.0,
+    x_tater_token: Optional[str] = Header(None),
+) -> StreamingResponse:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_ble
+
+    async def stream():
+        last_revision = -1
+        last_emit = 0.0
+        yield "retry: 1500\n\n"
+        while not await request.is_disconnected():
+            now = asyncio.get_running_loop().time()
+            payload = native_ble.snapshot(
+                selector=selector,
+                address=address,
+                limit=limit,
+                max_age_s=max_age_s,
+                include_observations=False,
+            )
+            revision = int(payload.get("revision") or 0)
+            if revision != last_revision or now - last_emit >= 5.0:
+                data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                yield f"event: presence.snapshot\ndata: {data}\n\n"
+                last_revision = revision
+                last_emit = now
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/api/tater/satellite/v1/firmware/{artifact_id}/{relative_path:path}")
 async def native_satellite_firmware_artifact(artifact_id: str, relative_path: str) -> FileResponse:
     from .. import firmware as firmware_module

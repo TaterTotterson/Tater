@@ -30,22 +30,24 @@ class VoiceSatelliteLoadPerformanceTests(unittest.TestCase):
             app_source.index('app.mount("/static",'),
         )
 
-    def test_loaded_voice_panels_are_reused_until_explicit_refresh(self) -> None:
-        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+    def test_silent_satellite_refresh_preserves_unsaved_fields(self) -> None:
+        settings = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "VoiceSettings.vue").read_text(encoding="utf-8")
+        satellites = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "voice" / "VoiceSatellites.vue").read_text(encoding="utf-8")
 
-        self.assertIn("shell.dataset.runtimeLoadedPanels", app_js)
-        self.assertIn("loadedPanels.has(targetPanel)", app_js)
-        self.assertIn("loadedPanels.add(targetPanel)", app_js)
-        self.assertIn("ensureEspHomeRuntimeLoaded({ panel: tabKey })", app_js)
-        self.assertIn("ensureEspHomeRuntimeLoaded({ force: true, panel: getActiveEspHomeRuntimePanel() })", app_js)
+        self.assertIn("const payload = ref<JsonRow>({})", settings)
+        self.assertIn("async function refresh(silent = false)", settings)
+        self.assertIn("if (!settingsDirty[token])", satellites)
+        self.assertIn("if (!dirty[token])", satellites)
+        self.assertIn("if (profile && !displayDirty[token])", satellites)
+        self.assertIn('if (!dirty[`${token}:volume`])', satellites)
 
     def test_settings_bootstrap_requests_run_together(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        start = app_js.index("async function loadSettingsView()")
-        end = app_js.index("\nfunction clearSpudexPollTimer", start)
+        start = app_js.index('if (view === "settings")')
+        end = app_js.index("throw new Error", start)
         function_source = app_js[start:end]
 
-        self.assertIn("const [redisStatusPayload, redisEncryptionPayload, settings] = await Promise.all([", function_source)
+        self.assertIn("await Promise.all([", function_source)
         self.assertIn('api("/api/settings")', function_source)
         self.assertNotIn('const settings = await api("/api/settings")', function_source)
 

@@ -124,28 +124,26 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertTrue(model_keys.isdisjoint(runtime_keys))
 
     def test_wake_verification_card_is_below_shared_wake_settings(self) -> None:
-        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        shared_wake_host = 'id="settings-models-wake-satellite-settings"'
-        wake_verifier_host = 'id="settings-models-wake-verifier"'
+        source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "WakeWordModels.vue").read_text(encoding="utf-8")
+        wake_group = '=== "global_satellite_model_settings"'
+        verifier_group = '=== "wake_verifier"'
+        wake_fields = 'class="tm-form-card tm-wake-engine-card"'
+        verifier_fields = 'class="tm-form-card tm-wake-verifier-card"'
 
-        self.assertIn('getElementById("settings-models-wake-verifier")', app_js)
-        self.assertIn(shared_wake_host, app_js)
-        self.assertIn(wake_verifier_host, app_js)
-        self.assertLess(app_js.index(shared_wake_host), app_js.index(wake_verifier_host))
-        self.assertNotIn('id="settings-esphome-runtime-wake-verifier"', app_js)
+        self.assertIn(wake_group, source)
+        self.assertIn(verifier_group, source)
+        self.assertLess(source.index(wake_fields), source.index(verifier_fields))
+        self.assertEqual(source.count("Apply To All Satellites"), 0)
 
     def test_faster_whisper_card_visibility_follows_selected_stt_backend(self) -> None:
-        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        speech = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
+        fields = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "ModelFields.vue").read_text(encoding="utf-8")
 
-        self.assertIn('id="speech-faster-whisper-settings-wrap"', app_js)
-        self.assertIn(
-            'getElementById("speech-faster-whisper-settings-wrap")',
-            app_js,
-        )
-        self.assertIn(
-            'setElementVisible(speechFasterWhisperSettingsWrapEl, sttBackend === "faster_whisper")',
-            app_js,
-        )
+        self.assertIn("function setStt", speech)
+        self.assertIn("visibleVoiceSections", speech)
+        self.assertIn('<ModelFields :sections="visibleVoiceSections"', speech)
+        self.assertIn("show_when", fields)
+        self.assertIn("function visible", fields)
 
     def test_led_brightness_is_a_percentage(self) -> None:
         normalized = native_live_settings.normalize_settings({"led_brightness": 255})

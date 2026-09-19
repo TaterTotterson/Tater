@@ -102,22 +102,20 @@ class TaterBuildVersionTests(unittest.TestCase):
 
     def test_auth_bootstrap_and_sidebar_display_are_wired(self) -> None:
         backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
-        index = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        styles = (REPO_ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "base.css").read_text(encoding="utf-8")
 
         self.assertIn('"app_version": app_version', backend)
-        self.assertIn('id="tater-build-version"', index)
+        self.assertIn('id="tater-build-version"', shell)
         self.assertIn("_renderTaterBuildVersion(appVersion, appVersionLabel)", app_js)
         self.assertIn(".sidebar-build-version {\n  margin-top: auto;", styles)
 
-    def test_sidebar_uses_the_dedicated_tater_app_icon(self) -> None:
-        index = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
-        icon = REPO_ROOT / "tateros_static" / "assets" / "tater-app-sidebar-icon.png"
+    def test_sidebar_branding_is_text_only(self) -> None:
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn("./static/assets/tater-app-sidebar-icon.png", index)
-        self.assertTrue(icon.is_file())
-        self.assertGreater(icon.stat().st_size, 0)
+        self.assertIn('class="brand-wrap"', shell)
+        self.assertNotIn("/static/assets/tater-app-sidebar-icon.png", shell)
 
     def test_app_javascript_parses(self) -> None:
         node = shutil.which("node")

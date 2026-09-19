@@ -9,15 +9,17 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueSpudexTests(unittest.TestCase):
-    def test_spudex_uses_shared_vue_bundle_with_legacy_fallback(self) -> None:
+    def test_spudex_is_loaded_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn("async function mountVueSpudex", app_js)
-        self.assertIn("module.mountSpudex", app_js)
+        self.assertIn('import SpudexApp from "../spudex/SpudexApp.vue"', shell)
+        self.assertIn("spudex: SpudexApp", shell)
+        self.assertIn('if (view === "spudex")', app_js)
+        self.assertIn("createSpudexVueDescriptor", app_js)
         self.assertIn('withBasePath("/api/spudex")', app_js)
-        self.assertIn("The Vue Spudex surface could not load; using the legacy renderer.", app_js)
-        self.assertIn("export function mountSpudex", entry)
+        self.assertNotIn("mountVueSpudex", app_js)
+        self.assertNotIn("legacy renderer", app_js)
 
     def test_spudex_preserves_all_workspaces_and_actions(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")

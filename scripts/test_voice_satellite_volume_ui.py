@@ -73,12 +73,12 @@ class VoiceSatelliteVolumeUiTests(unittest.TestCase):
         self.assertIn("logging_level", {field["key"] for field in items[0]["popup_fields"]})
 
     def test_card_slider_posts_only_the_device_volume(self) -> None:
-        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        component = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "voice" / "VoiceSatellites.vue").read_text(encoding="utf-8")
 
-        self.assertIn("renderNativeSatelliteVolumeControl(item?.volume_control, title)", app_js)
-        self.assertIn('data-native-satellite-volume-action="${escapeHtml(action)}"', app_js)
-        self.assertIn("values: { volume_percent: volumePercent }", app_js)
-        self.assertIn("bindNativeSatelliteVolumeControls();", app_js)
+        self.assertIn("item.volume_control", component)
+        self.assertIn("async function saveVolume", component)
+        self.assertIn("values: { volume_percent: value }", component)
+        self.assertIn('@change="saveVolume(item)"', component)
 
 
 if __name__ == "__main__":

@@ -21,8 +21,6 @@ export interface CoresMountOptions {
     shop: string;
     tabs: string;
   };
-  renderCorePanel?: (host: HTMLElement, payload: JsonRow, tab: CoreTabSpec) => void;
-  clearCorePanel?: (host: HTMLElement) => void;
   onTabChange?: (tab: string) => void;
   onToast?: (message: string, tone?: string) => void;
   onHealthRefresh?: () => void;

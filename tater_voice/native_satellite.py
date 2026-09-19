@@ -1430,6 +1430,7 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
             "rejections": int(row.get("wake_verifier_rejections") or 0),
             "last": row.get("wake_verifier_last") if isinstance(row.get("wake_verifier_last"), dict) else {},
         },
+        "ble": dict(row.get("ble")) if isinstance(row.get("ble"), dict) else {},
         "voice": voice,
     }
 
@@ -1520,6 +1521,29 @@ async def forget(selector: str) -> Dict[str, Any]:
         "registry_removed": removed_registry,
         "credentials_removed": removed_credentials,
         "aliases_removed": removed_aliases,
+    }
+
+
+async def enter_setup_mode_and_forget(selector: str) -> Dict[str, Any]:
+    """Reset a connected satellite to setup mode and remove its Tater pairing."""
+    token = _canonical_selector(selector)
+    if not token:
+        raise ValueError("selector is required")
+    reset = await send_command(
+        token,
+        "setup.reset",
+        {"reason": "user_requested_setup_mode"},
+    )
+    # The command sender owns the queue after this call. Yield once so it can
+    # flush setup.reset before forget() removes the live registry entry.
+    await asyncio.sleep(0)
+    cleanup = await forget(token)
+    return {
+        "ok": True,
+        "selector": token,
+        "reset": reset,
+        "forgotten": cleanup,
+        "removed": bool(cleanup.get("removed")),
     }
 
 
@@ -4142,6 +4166,25 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
                 "finished_ts": _now(),
             }
             _record_stereo_overlay_finished(selector, payload)
+        elif msg_type == "ble.advertisements":
+            from . import native_ble
+
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            hello_payload = _message_payload(hello)
+            row["ble"] = native_ble.ingest_advertisements(
+                selector,
+                payload,
+                metadata={
+                    "device_id": _text(hello_payload.get("device_id")),
+                    "device_name": _device_name_from_hello(hello_payload, selector),
+                    "board": _text(hello_payload.get("board")),
+                    "room": _text(
+                        hello_payload.get("room")
+                        or hello_payload.get("area_name")
+                        or hello_payload.get("room_name")
+                    ),
+                },
+            )
         elif msg_type in {"log", "ota.status"}:
             logs_deque = row.get("logs")
             if isinstance(logs_deque, deque):

@@ -303,6 +303,37 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
         native_satellite._clients.clear()
         native_satellite._clients_lock = asyncio.Lock()
 
+    async def test_setup_mode_queues_reset_before_forgetting_pairing(self) -> None:
+        selector = "native:voicepe-2e88e8"
+        calls: list[str] = []
+
+        async def send_command(target, message_type, payload):
+            calls.append("reset")
+            self.assertEqual(target, selector)
+            self.assertEqual(message_type, "setup.reset")
+            self.assertEqual(payload["reason"], "user_requested_setup_mode")
+            return {"ok": True, "selector": target}
+
+        async def forget(target):
+            calls.append("forget")
+            self.assertEqual(target, selector)
+            return {"ok": True, "removed": True, "credentials_removed": 1}
+
+        with mock.patch.object(native_satellite, "_canonical_selector", return_value=selector), mock.patch.object(
+            native_satellite,
+            "send_command",
+            side_effect=send_command,
+        ), mock.patch.object(
+            native_satellite,
+            "forget",
+            side_effect=forget,
+        ):
+            result = await native_satellite.enter_setup_mode_and_forget(selector)
+
+        self.assertEqual(calls, ["reset", "forget"])
+        self.assertTrue(result["removed"])
+        self.assertEqual(result["forgotten"]["credentials_removed"], 1)
+
     async def test_forget_purges_disconnected_runtime_credential_registry_and_aliases(self) -> None:
         selector = "native:voicepe-2e88e8"
         redis = _FakeRedis()

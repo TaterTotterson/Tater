@@ -686,7 +686,7 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 ),
                 "run_label": "Setup Mode" if native_device and connected else ("" if native_device else ("Disconnect" if connected else "Connect")),
                 "run_confirm": (
-                    f"Put {name} into setup mode? It will clear saved provisioning, reboot, and disconnect from Tater until setup is completed again."
+                    f"Unpair {name} and put it into setup mode? This removes it from Tater, clears its saved pairing, and reboots it. You will need to pair it again before Tater can use it."
                     if native_device and connected
                     else ("" if native_device else ("Disconnect and deselect this satellite?" if connected else ""))
                 ),

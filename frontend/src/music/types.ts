@@ -43,6 +43,7 @@ export interface MusicAction {
   tooltip?: string;
   tone?: string;
   confirm?: string;
+  success_text?: string;
 }
 
 export interface MusicBadge {
@@ -122,7 +123,9 @@ export interface MusicItem {
   run_action?: string;
   run_label?: string;
   actions?: MusicAction[];
+  fields_popup?: boolean;
   fields_dropdown?: boolean;
+  fields_dropdown_label?: string;
   recommendation_items?: MusicRecommendationEntry[];
   generated_at?: number;
   history_event_count?: number;
@@ -155,6 +158,10 @@ export interface MusicUi {
   default_tab?: string;
   manager_tabs?: ManagerTab[];
   item_forms?: MusicItem[];
+  item_fields_popup?: boolean;
+  item_fields_popup_label?: string;
+  item_fields_dropdown?: boolean;
+  item_fields_dropdown_label?: string;
   live_updates?: boolean;
 }
 
@@ -173,6 +180,7 @@ export interface MusicCoreMountOptions {
   tabEndpoint: string;
   actionEndpoint: string;
   eventsEndpoint: string;
+  onToast?: (message: string, tone?: string) => void;
 }
 
 export interface MusicCoreController {

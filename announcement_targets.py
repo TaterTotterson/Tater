@@ -684,6 +684,15 @@ def fetch_sonos_speaker_target_options(*, current_values: Any = None) -> List[Di
 def fetch_airplay_target_options(*, current_values: Any = None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     seen = set()
+    local_receiver_name = ""
+    try:
+        import external_audio
+
+        local_status = external_audio.get_external_audio_status()
+        if isinstance(local_status, dict):
+            local_receiver_name = _text(local_status.get("receiver_name")).casefold()
+    except Exception:
+        local_receiver_name = ""
     try:
         from airplay_bridge import discover_airplay_devices, resolve_airplay_target
 
@@ -699,6 +708,10 @@ def fetch_airplay_target_options(*, current_values: Any = None) -> List[Dict[str
             return
         seen.add(value)
         name = _text(item.get("name")) or device_id
+        # Never offer this Tater server's own input receiver as an outbound
+        # destination. Routing back into it would create an audio loop.
+        if local_receiver_name and name.casefold() == local_receiver_name:
+            return
         details = []
         manufacturer = _text(item.get("manufacturer"))
         model = _text(item.get("model"))

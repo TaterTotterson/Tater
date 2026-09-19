@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import PopupTransition from "../../shared/PopupTransition.vue";
 import DynamicField from "./DynamicField.vue";
 import type { MusicAction, MusicField, MusicItem } from "../types";
 
@@ -7,14 +8,35 @@ const props = defineProps<{
   item: MusicItem;
   busy: (key: string) => boolean;
   run: (action: string, payload: Record<string, unknown>, busyKey?: string) => Promise<boolean>;
+  fieldsPopup?: boolean;
+  fieldsDropdown?: boolean;
+  dropdownLabel?: string;
+  popupLabel?: string;
 }>();
 
 const values = reactive<Record<string, unknown>>({});
 const dirty = new Set<string>();
 const fieldGrid = ref<HTMLElement | null>(null);
+const popupOpen = ref(false);
 let fieldLayoutFrame = 0;
 let fieldResizeObserver: ResizeObserver | null = null;
 let fieldLayoutSignature = "";
+
+const editableFields = computed<MusicField[]>(() => {
+  const result: MusicField[] = [];
+  const seen = new Set<string>();
+  for (const field of [...(props.item.popup_fields || []), ...(props.item.fields || [])]) {
+    const key = String(field.key || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(field);
+  }
+  return result;
+});
+const popupFields = computed<MusicField[]>(() => props.fieldsPopup
+  ? editableFields.value
+  : props.item.popup_fields || []);
+const showPopupButton = computed(() => popupFields.value.length > 0);
 
 function layoutFields(): void {
   fieldLayoutFrame = 0;
@@ -74,13 +96,17 @@ function layoutSignature(fields: MusicField[]): string {
   );
 }
 
+function syncValues(fields: MusicField[]): void {
+  for (const field of fields) {
+    if (!dirty.has(field.key)) values[field.key] = copyFieldValue(field.value);
+  }
+}
+
 watch(
-  () => props.item.fields,
+  editableFields,
   (fields) => {
-    for (const field of fields || []) {
-      if (!dirty.has(field.key)) values[field.key] = copyFieldValue(field.value);
-    }
-    const nextLayoutSignature = layoutSignature(fields || []);
+    syncValues(fields);
+    const nextLayoutSignature = layoutSignature(fields);
     if (nextLayoutSignature !== fieldLayoutSignature) {
       fieldLayoutSignature = nextLayoutSignature;
       void nextTick().then(observeFields);
@@ -88,6 +114,10 @@ watch(
   },
   { immediate: true },
 );
+
+watch(popupOpen, (open) => {
+  if (open) void nextTick().then(observeFields);
+});
 
 onMounted(() => void nextTick().then(observeFields));
 onBeforeUnmount(() => {
@@ -100,16 +130,19 @@ function setValue(field: MusicField, value: unknown): void {
   dirty.add(field.key);
 }
 
-async function save(): Promise<void> {
+async function save(closePopup = false): Promise<void> {
   if (!props.item.save_action) return;
   const saved = await props.run(props.item.save_action, { id: props.item.id, values: { ...values } }, `item:${props.item.id}:save`);
-  if (saved) dirty.clear();
+  if (saved) {
+    dirty.clear();
+    syncValues(editableFields.value);
+    if (closePopup) popupOpen.value = false;
+  }
 }
 
 async function runAction(entry: MusicAction): Promise<void> {
   if (entry.confirm && !window.confirm(entry.confirm)) return;
-  const saved = await props.run(entry.action, { id: props.item.id, values: { ...values } }, `item:${props.item.id}:${entry.action}`);
-  if (saved) dirty.clear();
+  await props.run(entry.action, { id: props.item.id, values: { ...values } }, `item:${props.item.id}:${entry.action}`);
 }
 </script>
 
@@ -137,8 +170,8 @@ async function runAction(entry: MusicAction): Promise<void> {
       </div>
     </dl>
 
-    <details v-if="item.fields_dropdown && item.fields?.length" class="tm-settings-fields" @toggle="scheduleFieldLayout">
-      <summary>Connection settings</summary>
+    <details v-if="!fieldsPopup && fieldsDropdown && item.fields?.length" class="tm-settings-fields" @toggle="scheduleFieldLayout">
+      <summary>{{ dropdownLabel || 'Connection settings' }}</summary>
       <div ref="fieldGrid" class="tm-form-grid">
         <DynamicField
           v-for="field in item.fields"
@@ -150,7 +183,7 @@ async function runAction(entry: MusicAction): Promise<void> {
         />
       </div>
     </details>
-    <div v-else-if="item.fields?.length" ref="fieldGrid" class="tm-form-grid">
+    <div v-else-if="!fieldsPopup && item.fields?.length" ref="fieldGrid" class="tm-form-grid">
       <DynamicField
         v-for="field in item.fields"
         :key="field.key"
@@ -161,7 +194,7 @@ async function runAction(entry: MusicAction): Promise<void> {
       />
     </div>
 
-    <footer v-if="item.actions?.length || item.save_action">
+    <footer v-if="item.actions?.length || item.save_action || showPopupButton">
       <button
         v-for="entry in item.actions || []"
         :key="entry.action"
@@ -174,14 +207,58 @@ async function runAction(entry: MusicAction): Promise<void> {
         {{ entry.label || 'Run' }}
       </button>
       <button
-        v-if="item.save_action"
+        v-if="item.save_action && !fieldsPopup"
         type="button"
         class="tm-button primary"
         :disabled="busy(`item:${item.id}:save`)"
-        @click="save"
+        @click="save(false)"
       >
         {{ item.save_label || 'Save' }}
       </button>
+      <button
+        v-if="showPopupButton"
+        type="button"
+        class="tm-button primary"
+        :aria-label="item.settings_aria_label || popupLabel"
+        @click="popupOpen = true"
+      >
+        {{ popupLabel || 'Settings' }}
+      </button>
     </footer>
   </article>
+
+  <PopupTransition :open="popupOpen" backdrop-class="tm-modal-backdrop" @close="popupOpen = false">
+    <form class="tm-modal tm-settings-modal" @submit.prevent="save(true)">
+      <header>
+        <div>
+          <span class="tm-eyebrow">{{ item.group || 'Music settings' }}</span>
+          <h3>{{ item.settings_title || `${item.title || item.id} Settings` }}</h3>
+        </div>
+        <button class="tm-button secondary" type="button" @click="popupOpen = false">Close</button>
+      </header>
+      <div class="tm-modal-body">
+        <div ref="fieldGrid" class="tm-form-grid tm-modal-form-grid">
+          <DynamicField
+            v-for="field in popupFields"
+            :key="field.key"
+            :field="field"
+            :model-value="values[field.key]"
+            :compact="Boolean(field.compact)"
+            @update:model-value="setValue(field, $event)"
+          />
+        </div>
+      </div>
+      <footer>
+        <button class="tm-button secondary" type="button" @click="popupOpen = false">Cancel</button>
+        <button
+          v-if="item.save_action"
+          class="tm-button primary"
+          type="submit"
+          :disabled="busy(`item:${item.id}:save`)"
+        >
+          {{ item.save_label || 'Save' }}
+        </button>
+      </footer>
+    </form>
+  </PopupTransition>
 </template>

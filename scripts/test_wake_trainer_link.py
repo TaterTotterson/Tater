@@ -172,16 +172,18 @@ class WakeTrainerLinkTests(unittest.TestCase):
         self.assertEqual(status["state"], "waiting")
 
     def test_voice_settings_embeds_link_in_trainer_feedback_card(self) -> None:
-        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        styles = (REPO_ROOT / "tateros_static" / "styles.css").read_text(encoding="utf-8")
+        component = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "WakeWordModels.vue").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
-        self.assertIn("wakeTrainerLink: wakeTrainerLinkItem", app_js)
-        self.assertIn('id="settings-models-wake-satellite-settings"', app_js)
-        self.assertIn('=== "global_satellite_model_settings"', app_js)
-        self.assertIn("trainer-feedback-section", app_js)
-        self.assertNotIn('id="settings-esphome-runtime-wake-trainer-link"', app_js)
-        self.assertIn(".wake-trainer-link-panel", styles)
-        self.assertIn(".wake-trainer-link-summary", styles)
+        self.assertIn('=== "wake_trainer_link"', component)
+        self.assertIn('=== "global_satellite_model_settings"', component)
+        self.assertIn("tm-wake-training-card", component)
+        self.assertIn("tm-wake-trainer-link", component)
+        self.assertIn("tm-wake-trainer-linked", component)
+        self.assertIn("voice_wake_trainer_link_pairing_start", component)
+        self.assertIn("voice_wake_trainer_link_pairing_status", component)
+        self.assertIn("voice_wake_trainer_link_unlink", component)
+        self.assertIn(".tm-pairing-box", styles)
 
 
 if __name__ == "__main__":

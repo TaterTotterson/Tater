@@ -12,7 +12,7 @@ const emit = defineEmits<{ close: [] }>();
 
 function syncBodyLock() {
   window.requestAnimationFrame(() => {
-    const visible = Boolean(document.querySelector(".cerb-modal.active, .cerb-modal.closing, .tater-popup-effect-backdrop"));
+    const visible = Boolean(document.querySelector(".tater-popup-effect-backdrop"));
     document.body.classList.toggle("modal-open", visible);
   });
 }

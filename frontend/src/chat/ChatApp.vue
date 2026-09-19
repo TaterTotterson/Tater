@@ -23,6 +23,11 @@ const activeJobs = ref<Record<string, ChatJobState>>({ ...(props.options.initial
 const stickToBottom = ref(true);
 const sources: Record<string, EventSource> = {};
 const pollTimers: Record<string, number> = {};
+const streamTargets: Record<string, string> = {};
+const streamRevealTimers: Record<string, number> = {};
+const streamLastRevealAt: Record<string, number> = {};
+
+const STREAM_REVEAL_FRAME_MS = 32;
 
 const profile = computed(() => props.state.profile || {});
 const messages = computed(() => Array.isArray(props.state.messages) ? props.state.messages : []);
@@ -101,6 +106,59 @@ function clearPoll(jobId: string) {
   delete pollTimers[jobId];
 }
 
+function clearStreamReveal(jobId: string) {
+  if (streamRevealTimers[jobId]) window.clearTimeout(streamRevealTimers[jobId]);
+  delete streamRevealTimers[jobId];
+  delete streamLastRevealAt[jobId];
+  delete streamTargets[jobId];
+}
+
+function streamRevealEnd(target: string, visibleLength: number): number {
+  const remaining = Math.max(0, target.length - visibleLength);
+  if (!remaining) return visibleLength;
+  const budget = remaining > 240 ? 48 : remaining > 120 ? 28 : remaining > 48 ? 18 : 10;
+  let end = Math.min(target.length, visibleLength + budget);
+  if (end >= target.length || /\s/.test(target.charAt(end - 1))) return end;
+  const boundary = target.slice(end, Math.min(target.length, end + 14)).search(/\s/);
+  if (boundary >= 0) end += boundary + 1;
+  return Math.min(target.length, end);
+}
+
+function revealStream(jobId: string) {
+  delete streamRevealTimers[jobId];
+  const target = String(streamTargets[jobId] || "");
+  const visible = String(streams.value[jobId] || "");
+  if (!target || target === visible) return;
+
+  const next = target.startsWith(visible)
+    ? target.slice(0, streamRevealEnd(target, visible.length))
+    : target;
+  streams.value = { ...streams.value, [jobId]: next };
+  streamLastRevealAt[jobId] = performance.now();
+  if (next.length < target.length) scheduleStreamReveal(jobId);
+}
+
+function scheduleStreamReveal(jobId: string) {
+  if (streamRevealTimers[jobId]) return;
+  const elapsed = performance.now() - Number(streamLastRevealAt[jobId] || 0);
+  const delay = Math.max(0, STREAM_REVEAL_FRAME_MS - elapsed);
+  streamRevealTimers[jobId] = window.setTimeout(() => revealStream(jobId), delay);
+}
+
+function appendStreamChunk(jobId: string, chunk: string) {
+  streamTargets[jobId] = String(streamTargets[jobId] || streams.value[jobId] || "") + chunk;
+  scheduleStreamReveal(jobId);
+}
+
+function flushStreamReveal(jobId: string) {
+  if (streamRevealTimers[jobId]) window.clearTimeout(streamRevealTimers[jobId]);
+  delete streamRevealTimers[jobId];
+  const target = String(streamTargets[jobId] || "");
+  if (target && streams.value[jobId] !== target) {
+    streams.value = { ...streams.value, [jobId]: target };
+  }
+}
+
 function updateJob(jobId: string, patch: ChatJobState) {
   const previous = activeJobs.value[jobId] || {};
   activeJobs.value = {
@@ -158,10 +216,7 @@ async function finalizeJob(jobId: string, message: string, responses: unknown[] 
   if (!activeJobs.value[jobId]) return;
   closeSource(jobId);
   clearPoll(jobId);
-  removeJob(jobId);
-  const nextStreams = { ...streams.value };
-  delete nextStreams[jobId];
-  streams.value = nextStreams;
+  flushStreamReveal(jobId);
   try {
     await refreshHistory();
   } catch (error) {
@@ -174,6 +229,11 @@ async function finalizeJob(jobId: string, message: string, responses: unknown[] 
       reportError(error, "Chat history refresh failed.");
     }
   }
+  removeJob(jobId);
+  clearStreamReveal(jobId);
+  const nextStreams = { ...streams.value };
+  delete nextStreams[jobId];
+  streams.value = nextStreams;
   await refreshStats();
   props.options.onHealthRefresh?.();
   statusMessage.value = message;
@@ -243,8 +303,7 @@ function attachJob(jobId: string, initial: ChatJobState = {}) {
   source.addEventListener("response_chunk", (event) => {
     const chunk = String(parseEvent(event).chunk || "");
     if (!chunk) return;
-    streams.value = { ...streams.value, [jobId]: String(streams.value[jobId] || "") + chunk };
-    scrollIfFollowing();
+    appendStreamChunk(jobId, chunk);
   });
   source.addEventListener("done", (event) => {
     const payload = parseEvent(event);
@@ -378,6 +437,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   Object.keys(sources).forEach(closeSource);
   Object.keys(pollTimers).forEach(clearPoll);
+  [...new Set([...Object.keys(streamTargets), ...Object.keys(streamRevealTimers)])]
+    .forEach((jobId) => clearStreamReveal(jobId));
 });
 </script>
 
@@ -408,7 +469,7 @@ onBeforeUnmount(() => {
         <div v-for="([jobId, content]) in streamRows" :key="jobId" :data-chat-stream-job="jobId" aria-live="polite" aria-busy="true">
           <ChatMessageView :message="{ role: 'assistant', content }" :profile="profile" :files-endpoint="options.endpoints.files" />
         </div>
-        <ChatMessageView v-if="activeCount" :message="typingMessage" :profile="profile" :files-endpoint="options.endpoints.files" />
+        <ChatMessageView v-if="activeCount && !streamRows.length" :message="typingMessage" :profile="profile" :files-endpoint="options.endpoints.files" />
       </div>
 
       <div v-if="pendingFiles.length" class="tc-attachment-tray">

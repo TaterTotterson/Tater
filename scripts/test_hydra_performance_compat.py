@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from unittest import mock
 import helpers
 from hydra import hydra_prompts
 from hydra import hydra_ledger
+from hydra import hydra_doer_state
 
 
 def _local_result(text: str = "ok"):
@@ -616,7 +618,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(metadata["n_batch"], 512)
         self.assertEqual(metadata["cache_reuse_tokens"], 256)
 
-    def test_cache_namespaces_get_stable_role_slots(self):
+    def test_cache_namespaces_auto_assign_roles_and_preserve_explicit_slots(self):
         def slot_id(scope="base", value=None):
             if value is not None:
                 try:
@@ -626,26 +628,38 @@ class LlamaCppPerformanceTests(unittest.TestCase):
             return 1 if scope == "vision" else 0
 
         with (
-            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
             mock.patch.object(helpers, "_llama_cpp_slot_id", side_effect=slot_id),
         ):
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
-                    "hydra:astraeus", configured_slot=0
+                    "hydra:astraeus", configured_slot=-1
                 ),
                 0,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
-                    "hydra:hermes:final", configured_slot=0
+                    "hydra:hermes:final", configured_slot=-1
                 ),
                 1,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
-                    "hydra:thanatos:state", configured_slot=0
+                    "hydra:thanatos:state", configured_slot=-1
                 ),
-                0,
+                2,
+            )
+            self.assertEqual(
+                helpers._llama_cpp_cache_namespace_slot(
+                    "hydra:hermes:final", configured_slot=1
+                ),
+                1,
+            )
+            self.assertEqual(
+                helpers._llama_cpp_cache_namespace_slot(
+                    "hydra:thanatos:state", configured_slot=2
+                ),
+                2,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
@@ -972,7 +986,10 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["max_tokens"], 32640)
 
     async def test_local_llama_streams_without_forwarding_cache_metadata(self):
-        client = helpers.LlamaCppLLMClientWrapper(model="test-model")
+        client = helpers.LlamaCppLLMClientWrapper(
+            model="test-model",
+            llama_cpp_slot=-1,
+        )
         captured = {}
 
         def fake_engine(
@@ -1003,7 +1020,6 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 helpers, "_llama_cpp_engine_chat_completion", side_effect=fake_engine
             ),
             mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
-            mock.patch.object(helpers, "_llama_cpp_slot_id", return_value=0),
         ):
             result = await client.chat(
                 [{"role": "user", "content": "hello"}],
@@ -1016,6 +1032,39 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, ["o", "k"])
         self.assertEqual(captured["slot_id"], 1)
         self.assertNotIn("cache_namespace", captured["chat_kwargs"])
+
+    async def test_local_llama_explicit_slot_is_not_remapped_by_role(self):
+        client = helpers.LlamaCppLLMClientWrapper(
+            model="test-model",
+            llama_cpp_slot=0,
+        )
+        captured = {}
+
+        def fake_engine(
+            model,
+            messages,
+            chat_kwargs,
+            *,
+            timeout=None,
+            vision=False,
+            slot_id=None,
+            stream_callback=None,
+        ):
+            captured["slot_id"] = slot_id
+            return _local_result()
+
+        with (
+            mock.patch.object(
+                helpers, "_llama_cpp_engine_chat_completion", side_effect=fake_engine
+            ),
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+        ):
+            await client.chat(
+                [{"role": "user", "content": "hello"}],
+                cache_namespace="hydra:hermes:final",
+            )
+
+        self.assertEqual(captured["slot_id"], 0)
 
     async def test_remote_llama_accepts_stream_hook_without_leaking_metadata(self):
         client = helpers.LlamaCppRemoteLLMClientWrapper(
@@ -1042,6 +1091,40 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, ["ok"])
         self.assertEqual(captured["_cache_namespace"], "hydra:hermes:final")
         self.assertNotIn("cache_namespace", captured)
+
+    def test_remote_llama_explicit_slot_is_sent_without_role_remapping(self):
+        client = helpers.LlamaCppRemoteLLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+            llama_cpp_slot=0,
+        )
+        captured = {}
+
+        def fake_post(_host, path, payload, **_kwargs):
+            if path == "/apply-template":
+                return {"prompt": "prompt"}
+            captured.update(payload)
+            return {
+                "content": "ok",
+                "tokens_evaluated": 1,
+                "timings": {"predicted_n": 1},
+            }
+
+        with (
+            mock.patch.object(client, "_ensure_remote_mode", return_value="single"),
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=2),
+            mock.patch.object(
+                helpers, "_llama_cpp_native_json_post", side_effect=fake_post
+            ),
+        ):
+            result = client._chat_sync(
+                [{"role": "user", "content": "hello"}],
+                _cache_namespace="hydra:hermes:final",
+            )
+
+        self.assertEqual(result["message"]["content"], "ok")
+        self.assertTrue(captured["cache_prompt"])
+        self.assertEqual(captured["id_slot"], 0)
 
     async def test_transformers_consumes_cache_metadata_and_stream_falls_back(self):
         client = helpers.TransformersLLMClientWrapper(model="test-model")
@@ -1443,6 +1526,162 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertGreater(prompt.index(marker), prompt.index("Execution role"))
 
 
+class DeterministicStateUpdateTests(unittest.IsolatedAsyncioTestCase):
+    class Client:
+        def __init__(self, response_state=None):
+            self.calls = 0
+            self.response_state = response_state or {}
+
+        async def chat(self, **_kwargs):
+            self.calls += 1
+            return {
+                "message": {
+                    "content": json.dumps(self.response_state),
+                }
+            }
+
+    @staticmethod
+    def _short(value, *, limit=0):
+        text = " ".join(str(value or "").split())
+        return text[:limit] if limit else text
+
+    @classmethod
+    def _normalize(cls, state, fallback_goal):
+        source = dict(state) if isinstance(state, dict) else {}
+        source.setdefault("goal", fallback_goal)
+        source.setdefault("plan", [])
+        source.setdefault("plan_steps", [])
+        source.setdefault("facts", [])
+        source.setdefault("open_questions", [])
+        source.setdefault("next_step", "")
+        source.setdefault("tool_history", [])
+        source.setdefault("result_memory", [])
+        return source
+
+    @classmethod
+    async def _update(cls, *, client, prior_state, step, tool_result, mode_out):
+        return await hydra_doer_state.run_thanatos_state_update(
+            llm_client=client,
+            platform="webui",
+            user_request=str(step.get("nl") or "Complete the step"),
+            prior_state=prior_state,
+            tool_call={"function": "homeassistant_control", "arguments": {"entity": "light.kitchen"}},
+            tool_result=tool_result,
+            max_tokens=None,
+            structured_plan_step=step,
+            mode_out=mode_out,
+            normalize_agent_state_fn=lambda state, fallback_goal: cls._normalize(state, fallback_goal),
+            configured_thanatos_max_tokens_fn=lambda: 128,
+            coerce_text_fn=lambda value: str(value or ""),
+            first_json_object_fn=lambda text: json.loads(text) if text else None,
+            state_add_line_fn=lambda items, line, max_items: hydra_doer_state.state_add_line(
+                items,
+                line,
+                max_items=max_items,
+                short_text_fn=cls._short,
+            ),
+            tool_history_line_fn=lambda call, result: hydra_doer_state.tool_history_line(
+                tool_call=call,
+                tool_result=result,
+                short_text_fn=cls._short,
+            ),
+            short_text_fn=cls._short,
+            is_low_information_text_fn=lambda value: str(value or "").strip().lower()
+            in {"", "done", "completed", "ok", "success"},
+            state_list_fn=lambda values, max_items, item_limit: [
+                cls._short(item, limit=item_limit) for item in (values or [])
+            ][:max_items],
+        )
+
+    async def test_successful_matching_step_skips_state_llm(self):
+        step = {
+            "id": "s1",
+            "intent": "Turn on the kitchen light",
+            "nl": "Turn on the kitchen light",
+            "tool_hint": "homeassistant_control",
+        }
+        prior_state = self._normalize(
+            {
+                "goal": "Prepare the kitchen",
+                "plan_steps": [step, {"id": "s2", "intent": "Set temperature", "nl": "Set temperature"}],
+                "open_questions": ["old blocker"],
+            },
+            "Prepare the kitchen",
+        )
+        client = self.Client()
+        mode = {}
+
+        updated = await self._update(
+            client=client,
+            prior_state=prior_state,
+            step=step,
+            tool_result={"ok": True, "summary_for_user": "The kitchen light is now on."},
+            mode_out=mode,
+        )
+
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(mode, {"mode": "deterministic"})
+        self.assertIn("The kitchen light is now on.", updated["facts"])
+        self.assertEqual(updated["open_questions"], [])
+        self.assertTrue(any("homeassistant_control:ok" in row for row in updated["tool_history"]))
+        self.assertEqual(updated["plan_steps"], prior_state["plan_steps"])
+
+    async def test_low_information_success_uses_state_llm(self):
+        step = {
+            "id": "s1",
+            "intent": "Look up the requested value",
+            "nl": "Look up the requested value",
+            "tool_hint": "homeassistant_control",
+        }
+        prior_state = self._normalize({"goal": "Look something up", "plan_steps": [step]}, "Look something up")
+        client = self.Client(
+            {
+                "goal": "Look something up",
+                "plan": [],
+                "facts": ["The model reviewed the ambiguous result."],
+                "open_questions": [],
+                "next_step": "",
+                "tool_history": [],
+            }
+        )
+        mode = {}
+
+        updated = await self._update(
+            client=client,
+            prior_state=prior_state,
+            step=step,
+            tool_result={"ok": True, "summary_for_user": "Done"},
+            mode_out=mode,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(mode, {"mode": "llm"})
+        self.assertIn("The model reviewed the ambiguous result.", updated["facts"])
+
+    async def test_failed_step_uses_state_llm(self):
+        step = {
+            "id": "s1",
+            "intent": "Turn on the kitchen light",
+            "nl": "Turn on the kitchen light",
+            "tool_hint": "homeassistant_control",
+        }
+        prior_state = self._normalize({"goal": "Prepare the kitchen", "plan_steps": [step]}, "Prepare the kitchen")
+        client = self.Client()
+        mode = {}
+
+        updated = await self._update(
+            client=client,
+            prior_state=prior_state,
+            step=step,
+            tool_result={"ok": False, "summary_for_user": "The device is offline.", "errors": ["offline"]},
+            mode_out=mode,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(mode, {"mode": "llm"})
+        self.assertIn("offline", updated["open_questions"])
+
+
 class TelemetryTests(unittest.TestCase):
     def test_ledger_keeps_parallel_stage_timings_separate(self):
         class Redis:
@@ -1474,6 +1713,8 @@ class TelemetryTests(unittest.TestCase):
             thanatos_ms=200,
             progress_ms=30,
             state_update_ms=40,
+            state_update_deterministic_count=3,
+            state_update_llm_count=1,
             tool_ms=300,
             compact_tool_ref_fn=lambda _value: None,
             validation_status_for_ledger_fn=lambda **_kwargs: {},
@@ -1490,6 +1731,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(row["thanatos_ms"], 200)
         self.assertEqual(row["progress_ms"], 30)
         self.assertEqual(row["state_update_ms"], 40)
+        self.assertEqual(row["state_update_deterministic_count"], 3)
+        self.assertEqual(row["state_update_llm_count"], 1)
 
 
 class SpudLinkStreamingTests(unittest.IsolatedAsyncioTestCase):
