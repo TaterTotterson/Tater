@@ -168,7 +168,165 @@ class NativeBleTests(unittest.TestCase):
 
         device = native_ble.snapshot(now_ts=612.0)["devices"][0]
         self.assertEqual("Office", device["strongest_room"])
-        self.assertEqual("medium", device["confidence"])
+        self.assertEqual("low", device["confidence"])
+
+    def test_small_or_brief_signal_changes_do_not_move_a_stationary_device(self) -> None:
+        address = "de:ad:be:ef:00:04"
+        for selector, room, rssi in (
+            ("native:kitchen", "Kitchen", -55),
+            ("native:office", "Office", -80),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=700.0,
+            )
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=700.0)["devices"][0]["strongest_room"])
+
+        # A few much stronger office readings are enough to nominate Office,
+        # but not enough to record a room movement.
+        for timestamp in (701.0, 702.0, 703.0, 704.0):
+            native_ble.ingest_advertisements(
+                "native:kitchen",
+                {"adverts": [{"address": address, "rssi": -65, "data": "020106"}]},
+                metadata={"room": "Kitchen"},
+                received_ts=timestamp,
+            )
+            native_ble.ingest_advertisements(
+                "native:office",
+                {"adverts": [{"address": address, "rssi": -40, "data": "020106"}]},
+                metadata={"room": "Office"},
+                received_ts=timestamp,
+            )
+            device = native_ble.snapshot(now_ts=timestamp)["devices"][0]
+
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("Office", device["raw_strongest_room"])
+        self.assertEqual("Office", device["candidate_room"])
+
+        # Returning to the original signal pattern clears the pending move.
+        native_ble.ingest_advertisements(
+            "native:kitchen",
+            {"adverts": [{"address": address, "rssi": -35, "data": "020106"}]},
+            metadata={"room": "Kitchen"},
+            received_ts=705.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": -80, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=705.0,
+        )
+        device = native_ble.snapshot(now_ts=705.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertNotIn("candidate_room", device)
+
+    def test_sustained_stronger_signal_moves_the_device_after_dwell(self) -> None:
+        address = "de:ad:be:ef:00:05"
+        for selector, room, rssi in (
+            ("native:kitchen", "Kitchen", -55),
+            ("native:office", "Office", -80),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=800.0,
+            )
+        native_ble.snapshot(now_ts=800.0)
+
+        device = {}
+        for timestamp in range(801, 814):
+            for selector, room, rssi in (
+                ("native:kitchen", "Kitchen", -65),
+                ("native:office", "Office", -40),
+            ):
+                native_ble.ingest_advertisements(
+                    selector,
+                    {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                    metadata={"room": room},
+                    received_ts=float(timestamp),
+                )
+            device = native_ble.snapshot(now_ts=float(timestamp))["devices"][0]
+            if timestamp < 812:
+                self.assertEqual("Kitchen", device["strongest_room"])
+
+        self.assertEqual("Office", device["strongest_room"])
+        self.assertEqual("Office", device["raw_strongest_room"])
+        self.assertNotIn("candidate_room", device)
+
+    def test_recent_packets_get_a_freshness_grace_period(self) -> None:
+        address = "de:ad:be:ef:00:06"
+        native_ble.ingest_advertisements(
+            "native:kitchen",
+            {"adverts": [{"address": address, "rssi": -60, "data": "020106"}]},
+            metadata={"room": "Kitchen"},
+            received_ts=900.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -61, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=900.0,
+        )
+        native_ble.snapshot(now_ts=900.0)
+
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -61, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=903.0,
+        )
+        device = native_ble.snapshot(now_ts=903.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("Kitchen", device["raw_strongest_room"])
+
+    def test_filtered_snapshot_does_not_change_the_canonical_room(self) -> None:
+        address = "de:ad:be:ef:00:07"
+        for selector, room, rssi in (
+            ("native:kitchen", "Kitchen", -50),
+            ("native:office", "Office", -65),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=1000.0,
+            )
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1000.0)["devices"][0]["strongest_room"])
+
+        filtered = native_ble.snapshot(selector="native:office", now_ts=1001.0)["devices"][0]
+        self.assertEqual("Office", filtered["strongest_room"])
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1001.0)["devices"][0]["strongest_room"])
+
+    def test_periodic_snapshots_do_not_move_between_two_stale_sources(self) -> None:
+        address = "de:ad:be:ef:00:08"
+        native_ble.ingest_advertisements(
+            "native:kitchen",
+            {"adverts": [{"address": address, "rssi": -50, "data": "020106"}]},
+            metadata={"room": "Kitchen"},
+            received_ts=1100.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": -60, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1100.0,
+        )
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1100.0)["devices"][0]["strongest_room"])
+
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": -48, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1101.0,
+        )
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1101.0)["devices"][0]["strongest_room"])
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1115.0)["devices"][0]["strongest_room"])
+        device = native_ble.snapshot(now_ts=1120.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertNotIn("candidate_room", device)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,17 @@
-# Tater v1.2.0
+# Tater v1.2.1
 
-Tater v1.2.0 brings a faster, cleaner, fully Vue-powered interface with major
-improvements to models, satellites, extensions, and live system status.
+Tater v1.2.1 brings a faster, cleaner, fully Vue-powered interface with major
+improvements to models, satellites, extensions, and live system status, plus a
+presence-room stability fix.
 
 ## What's Changed
+
+### Stable Presence Rooms
+
+- Smooths normal Bluetooth signal noise and scanner timing differences.
+- Requires a meaningfully stronger signal to remain stronger before recording
+  a room movement.
+- Keeps a short failover for scanners that actually stop reporting.
 
 ### A More Live Tater
 
@@ -42,11 +50,11 @@ improvements to models, satellites, extensions, and live system status.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.2.0 through
+- macOS users already running v1.0.1 or later can install v1.2.1 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.2.0` or `latest` for the CPU image and
-  `v1.2.0-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.2.1` or `latest` for the CPU image and
+  `v1.2.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

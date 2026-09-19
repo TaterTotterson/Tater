@@ -1,7 +1,10 @@
 # Native Satellite Presence API
 
 Tater combines passive BLE observations from every compatible native satellite
-and assigns each detected address to the room with the strongest fresh signal.
+and assigns each detected address to the room with the strongest sustained
+signal. Signal smoothing, a freshness grace period, and room-change hysteresis
+prevent stationary devices from bouncing between rooms as ordinary radio noise
+and staggered scanner reports arrive.
 The same data used by the Satellites → Presence UI is available to cores,
 verbas, integrations, and automations.
 
@@ -19,9 +22,12 @@ Optional query parameters:
 - `limit`: cap retained observation rows from 1–500.
 - `include_observations=false`: omit raw packets for a smaller response.
 
-The `devices` array contains the current `strongest_room`, `strongest_rssi`,
+The `devices` array contains the stable `strongest_room`, `strongest_rssi`,
 signal label, confidence, advertised name, service UUIDs, last-seen time, and a
 ranked `sources` list showing every satellite that recently heard the device.
+When another room is currently stronger but has not held the lead long enough,
+`raw_strongest_room`, `candidate_room`, and `candidate_age_s` expose that pending
+decision without reporting a false movement.
 `rooms` contains device counts by selected room, while `sources` reports scanner
 health and totals.
 

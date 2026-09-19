@@ -12,12 +12,22 @@ MAX_OBSERVATIONS = 1024
 DEFAULT_MAX_AGE_S = 300.0
 OBSERVATION_TTL_S = 900.0
 MAX_DATA_BYTES = 31
+RSSI_SMOOTHING_ALPHA = 0.25
+LOCATION_FRESHNESS_GRACE_S = 4.0
+LOCATION_FRESHNESS_PENALTY_DB_PER_S = 2.0
+ROOM_SWITCH_MARGIN_DB = 8.0
+ROOM_SWITCH_DWELL_S = 8.0
+ROOM_CURRENT_STALE_S = 12.0
+ROOM_CHALLENGER_MAX_AGE_S = 6.0
+ROOM_STALE_SWITCH_DWELL_S = 3.0
 
 _ADDRESS_RE = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 _lock = threading.RLock()
 _observations: "OrderedDict[Tuple[str, str, int], Dict[str, Any]]" = OrderedDict()
 _source_stats: Dict[str, Dict[str, Any]] = {}
+_signal_state: Dict[Tuple[str, str], Dict[str, float]] = {}
+_room_assignments: Dict[str, Dict[str, Any]] = {}
 _revision = 0
 
 
@@ -122,6 +132,16 @@ def _prune_locked(now_ts: float) -> None:
     stale = [key for key, row in _observations.items() if float(row.get("received_ts") or 0.0) < cutoff]
     for key in stale:
         _observations.pop(key, None)
+    stale_signals = [key for key, row in _signal_state.items() if float(row.get("last_seen_ts") or 0.0) < cutoff]
+    for key in stale_signals:
+        _signal_state.pop(key, None)
+    stale_assignments = [
+        key
+        for key, row in _room_assignments.items()
+        if float(row.get("last_seen_ts") or 0.0) < cutoff
+    ]
+    for key in stale_assignments:
+        _room_assignments.pop(key, None)
     while len(_observations) > MAX_OBSERVATIONS:
         _observations.popitem(last=False)
 
@@ -165,6 +185,21 @@ def ingest_advertisements(
             key = (token, advert["address"], int(advert["event_type"]))
             _observations[key] = advert
             _observations.move_to_end(key)
+            signal_key = (advert["address"], token)
+            measured_rssi = float(advert.get("rssi") or -127)
+            previous_signal = _signal_state.get(signal_key)
+            if previous_signal is None or now_ts - float(previous_signal.get("last_seen_ts") or 0.0) > 30.0:
+                smoothed_rssi = measured_rssi
+            else:
+                previous_rssi = float(previous_signal.get("smoothed_rssi") or measured_rssi)
+                smoothed_rssi = (
+                    previous_rssi * (1.0 - RSSI_SMOOTHING_ALPHA)
+                    + measured_rssi * RSSI_SMOOTHING_ALPHA
+                )
+            _signal_state[signal_key] = {
+                "smoothed_rssi": smoothed_rssi,
+                "last_seen_ts": now_ts,
+            }
         _prune_locked(now_ts)
         stats = _source_stats.setdefault(
             token,
@@ -208,7 +243,12 @@ def _signal_label(rssi: int) -> str:
     return "weak"
 
 
-def _presence_rows(observations: Iterable[Dict[str, Any]], *, now_ts: float) -> List[Dict[str, Any]]:
+def _presence_rows(
+    observations: Iterable[Dict[str, Any]],
+    *,
+    now_ts: float,
+    signal_state: Dict[Tuple[str, str], Dict[str, float]],
+) -> List[Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in observations:
         grouped.setdefault(_text(row.get("address")), []).append(row)
@@ -231,8 +271,16 @@ def _presence_rows(observations: Iterable[Dict[str, Any]], *, now_ts: float) -> 
             source_row = dict(item)
             age_s = max(0.0, now_ts - float(source_row.get("received_ts") or 0.0))
             rssi = int(source_row.get("rssi") or -127)
+            signal_key = (_text(source_row.get("address")), _text(source_row.get("selector")))
+            smoothed_rssi = float((signal_state.get(signal_key) or {}).get("smoothed_rssi") or rssi)
+            freshness_penalty = min(
+                48.0,
+                max(0.0, age_s - LOCATION_FRESHNESS_GRACE_S)
+                * LOCATION_FRESHNESS_PENALTY_DB_PER_S,
+            )
             source_row["age_s"] = round(age_s, 3)
-            source_row["location_score"] = round(rssi - min(48.0, age_s * 2.0), 2)
+            source_row["smoothed_rssi"] = round(smoothed_rssi, 2)
+            source_row["location_score"] = round(smoothed_rssi - freshness_penalty, 2)
             source_row["signal"] = _signal_label(rssi)
             sources.append(source_row)
         sources.sort(key=lambda item: float(item.get("location_score") or -999.0), reverse=True)
@@ -278,6 +326,7 @@ def _presence_rows(observations: Iterable[Dict[str, Any]], *, now_ts: float) -> 
                         "device_name": _text(item.get("device_name")),
                         "room": _text(item.get("room")),
                         "rssi": int(item.get("rssi") or -127),
+                        "smoothed_rssi": float(item.get("smoothed_rssi") or item.get("rssi") or -127),
                         "signal": _text(item.get("signal")),
                         "age_s": float(item.get("age_s") or 0.0),
                         "location_score": float(item.get("location_score") or -999.0),
@@ -289,6 +338,148 @@ def _presence_rows(observations: Iterable[Dict[str, Any]], *, now_ts: float) -> 
         )
     devices.sort(key=lambda item: float(item.get("last_seen_ts") or 0.0), reverse=True)
     return devices
+
+
+def _room_source_map(device: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    room_sources: Dict[str, Dict[str, Any]] = {}
+    for source in device.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        room = _text(source.get("room")) or "Unknown"
+        previous = room_sources.get(room)
+        if previous is None or float(source.get("location_score") or -999.0) > float(
+            previous.get("location_score") or -999.0
+        ):
+            room_sources[room] = source
+    return room_sources
+
+
+def _set_stable_room_fields(
+    device: Dict[str, Any],
+    *,
+    assignment: Dict[str, Any],
+    room_sources: Dict[str, Dict[str, Any]],
+    raw_room: str,
+    raw_selector: str,
+    now_ts: float,
+) -> None:
+    stable_room = _text(assignment.get("room")) or raw_room
+    selected = room_sources.get(stable_room) or room_sources.get(raw_room)
+    if selected is None:
+        return
+    selected_score = float(selected.get("location_score") or -999.0)
+    competing_scores = [
+        float(source.get("location_score") or -999.0)
+        for room, source in room_sources.items()
+        if room != stable_room
+    ]
+    score_gap = selected_score - max(competing_scores) if competing_scores else 99.0
+    device["raw_strongest_room"] = raw_room
+    device["raw_strongest_selector"] = raw_selector
+    device["strongest_room"] = stable_room
+    device["strongest_selector"] = _text(selected.get("selector"))
+    device["strongest_rssi"] = int(selected.get("rssi") or -127)
+    device["signal"] = _signal_label(int(selected.get("rssi") or -127))
+    device["confidence"] = "high" if score_gap >= 10.0 else "medium" if score_gap >= 4.0 else "low"
+    device["room_changed_ts"] = float(assignment.get("changed_ts") or now_ts)
+    candidate_room = _text(assignment.get("candidate_room"))
+    if candidate_room:
+        device["candidate_room"] = candidate_room
+        device["candidate_age_s"] = round(
+            max(0.0, now_ts - float(assignment.get("candidate_since_ts") or now_ts)),
+            3,
+        )
+
+
+def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float) -> None:
+    with _lock:
+        for device in devices:
+            address = _text(device.get("address"))
+            raw_room = _text(device.get("strongest_room")) or "Unknown"
+            raw_selector = _text(device.get("strongest_selector"))
+            room_sources = _room_source_map(device)
+            if not address or not room_sources:
+                continue
+
+            assignment = _room_assignments.get(address)
+            if assignment is None:
+                assignment = {
+                    "room": raw_room,
+                    "changed_ts": now_ts,
+                    "candidate_room": "",
+                    "candidate_since_ts": 0.0,
+                    "last_seen_ts": now_ts,
+                }
+                _room_assignments[address] = assignment
+
+            current_room = _text(assignment.get("room")) or raw_room
+            assignment["last_seen_ts"] = now_ts
+            if current_room not in room_sources:
+                assignment.update(
+                    {
+                        "room": raw_room,
+                        "changed_ts": now_ts,
+                        "candidate_room": "",
+                        "candidate_since_ts": 0.0,
+                    }
+                )
+            elif raw_room == current_room:
+                assignment["candidate_room"] = ""
+                assignment["candidate_since_ts"] = 0.0
+            else:
+                current_source = room_sources[current_room]
+                challenger = room_sources[raw_room]
+                score_gap = float(challenger.get("location_score") or -999.0) - float(
+                    current_source.get("location_score") or -999.0
+                )
+                current_stale = float(current_source.get("age_s") or 0.0) >= ROOM_CURRENT_STALE_S
+                challenger_fresh = float(challenger.get("age_s") or 0.0) <= ROOM_CHALLENGER_MAX_AGE_S
+                qualified = challenger_fresh and (score_gap >= ROOM_SWITCH_MARGIN_DB or current_stale)
+                dwell_s = ROOM_STALE_SWITCH_DWELL_S if current_stale else ROOM_SWITCH_DWELL_S
+                if not qualified:
+                    assignment["candidate_room"] = ""
+                    assignment["candidate_since_ts"] = 0.0
+                elif _text(assignment.get("candidate_room")) != raw_room:
+                    assignment["candidate_room"] = raw_room
+                    assignment["candidate_since_ts"] = now_ts
+                elif now_ts - float(assignment.get("candidate_since_ts") or now_ts) >= dwell_s:
+                    assignment.update(
+                        {
+                            "room": raw_room,
+                            "changed_ts": now_ts,
+                            "candidate_room": "",
+                            "candidate_since_ts": 0.0,
+                        }
+                    )
+
+            _set_stable_room_fields(
+                device,
+                assignment=assignment,
+                room_sources=room_sources,
+                raw_room=raw_room,
+                raw_selector=raw_selector,
+                now_ts=now_ts,
+            )
+
+
+def _apply_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float) -> None:
+    """Apply canonical assignments without letting API filters change them."""
+    with _lock:
+        for device in devices:
+            address = _text(device.get("address"))
+            assignment = _room_assignments.get(address)
+            room_sources = _room_source_map(device)
+            stable_room = _text((assignment or {}).get("room"))
+            if not assignment or not stable_room or stable_room not in room_sources:
+                continue
+            _set_stable_room_fields(
+                device,
+                assignment=assignment,
+                room_sources=room_sources,
+                raw_room=_text(device.get("strongest_room")) or "Unknown",
+                raw_selector=_text(device.get("strongest_selector")),
+                now_ts=now_ts,
+            )
 
 
 def snapshot(
@@ -312,6 +503,11 @@ def snapshot(
     with _lock:
         _prune_locked(now)
         revision = _revision
+        canonical_rows = [
+            dict(row)
+            for row in reversed(_observations.values())
+            if now - float(row.get("received_ts") or 0.0) <= 60.0
+        ]
         rows = [
             dict(row)
             for row in reversed(_observations.values())
@@ -324,8 +520,13 @@ def snapshot(
             for key, row in sorted(_source_stats.items())
             if not token or key == token
         ]
+        signal_state = {key: dict(row) for key, row in _signal_state.items()}
 
-    devices = _presence_rows(rows, now_ts=now)
+    canonical_devices = _presence_rows(canonical_rows, now_ts=now, signal_state=signal_state)
+    _stabilize_room_assignments(canonical_devices, now_ts=now)
+    devices = _presence_rows(rows, now_ts=now, signal_state=signal_state)
+    if not token:
+        _apply_room_assignments(devices, now_ts=now)
     rooms = dict(Counter(_text(row.get("strongest_room")) or "Unknown" for row in devices))
 
     return {
@@ -348,4 +549,6 @@ def reset_for_tests() -> None:
     with _lock:
         _observations.clear()
         _source_stats.clear()
+        _signal_state.clear()
+        _room_assignments.clear()
         _revision = 0
