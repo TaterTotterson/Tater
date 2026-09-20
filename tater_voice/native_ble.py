@@ -13,12 +13,13 @@ DEFAULT_MAX_AGE_S = 300.0
 OBSERVATION_TTL_S = 900.0
 MAX_DATA_BYTES = 31
 RSSI_SMOOTHING_ALPHA = 0.25
-LOCATION_FRESHNESS_GRACE_S = 4.0
-LOCATION_FRESHNESS_PENALTY_DB_PER_S = 2.0
+LOCATION_FRESHNESS_GRACE_S = 30.0
+LOCATION_FRESHNESS_PENALTY_DB_PER_S = 1.0
 ROOM_SWITCH_MARGIN_DB = 8.0
 ROOM_SWITCH_DWELL_S = 8.0
-ROOM_CURRENT_STALE_S = 12.0
-ROOM_CHALLENGER_MAX_AGE_S = 6.0
+ROOM_CURRENT_STALE_S = 45.0
+ROOM_CHALLENGER_MAX_AGE_S = 15.0
+ROOM_MIN_CHALLENGER_OBSERVATIONS = 2
 ROOM_STALE_SWITCH_DWELL_S = 3.0
 
 _ADDRESS_RE = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
@@ -408,6 +409,8 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                     "changed_ts": now_ts,
                     "candidate_room": "",
                     "candidate_since_ts": 0.0,
+                    "candidate_last_seen_ts": 0.0,
+                    "candidate_observations": 0,
                     "last_seen_ts": now_ts,
                 }
                 _room_assignments[address] = assignment
@@ -421,11 +424,15 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                         "changed_ts": now_ts,
                         "candidate_room": "",
                         "candidate_since_ts": 0.0,
+                        "candidate_last_seen_ts": 0.0,
+                        "candidate_observations": 0,
                     }
                 )
             elif raw_room == current_room:
                 assignment["candidate_room"] = ""
                 assignment["candidate_since_ts"] = 0.0
+                assignment["candidate_last_seen_ts"] = 0.0
+                assignment["candidate_observations"] = 0
             else:
                 current_source = room_sources[current_room]
                 challenger = room_sources[raw_room]
@@ -439,16 +446,32 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                 if not qualified:
                     assignment["candidate_room"] = ""
                     assignment["candidate_since_ts"] = 0.0
+                    assignment["candidate_last_seen_ts"] = 0.0
+                    assignment["candidate_observations"] = 0
                 elif _text(assignment.get("candidate_room")) != raw_room:
                     assignment["candidate_room"] = raw_room
                     assignment["candidate_since_ts"] = now_ts
-                elif now_ts - float(assignment.get("candidate_since_ts") or now_ts) >= dwell_s:
+                    assignment["candidate_last_seen_ts"] = float(challenger.get("received_ts") or now_ts)
+                    assignment["candidate_observations"] = 1
+                else:
+                    challenger_seen_ts = float(challenger.get("received_ts") or 0.0)
+                    if challenger_seen_ts > float(assignment.get("candidate_last_seen_ts") or 0.0):
+                        assignment["candidate_last_seen_ts"] = challenger_seen_ts
+                        assignment["candidate_observations"] = int(assignment.get("candidate_observations") or 0) + 1
+                if (
+                    qualified
+                    and _text(assignment.get("candidate_room")) == raw_room
+                    and int(assignment.get("candidate_observations") or 0) >= ROOM_MIN_CHALLENGER_OBSERVATIONS
+                    and now_ts - float(assignment.get("candidate_since_ts") or now_ts) >= dwell_s
+                ):
                     assignment.update(
                         {
                             "room": raw_room,
                             "changed_ts": now_ts,
                             "candidate_room": "",
                             "candidate_since_ts": 0.0,
+                            "candidate_last_seen_ts": 0.0,
+                            "candidate_observations": 0,
                         }
                     )
 

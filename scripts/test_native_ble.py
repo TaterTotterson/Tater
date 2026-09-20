@@ -151,7 +151,7 @@ class NativeBleTests(unittest.TestCase):
         self.assertEqual([], compact["observations"])
         self.assertEqual(1, compact["count"])
 
-    def test_fresher_room_wins_when_an_old_signal_was_stronger(self) -> None:
+    def test_recent_stronger_signal_is_not_displaced_by_packet_timing(self) -> None:
         address = "de:ad:be:ef:00:03"
         native_ble.ingest_advertisements(
             "native:kitchen",
@@ -167,8 +167,8 @@ class NativeBleTests(unittest.TestCase):
         )
 
         device = native_ble.snapshot(now_ts=612.0)["devices"][0]
-        self.assertEqual("Office", device["strongest_room"])
-        self.assertEqual("low", device["confidence"])
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("high", device["confidence"])
 
     def test_small_or_brief_signal_changes_do_not_move_a_stationary_device(self) -> None:
         address = "de:ad:be:ef:00:04"
@@ -327,6 +327,106 @@ class NativeBleTests(unittest.TestCase):
         device = native_ble.snapshot(now_ts=1120.0)["devices"][0]
         self.assertEqual("Kitchen", device["strongest_room"])
         self.assertNotIn("candidate_room", device)
+
+    def test_sparse_stationary_adverts_do_not_make_the_latest_packet_win(self) -> None:
+        address = "de:ad:be:ef:00:09"
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -51, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=1200.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:master",
+            {"adverts": [{"address": address, "rssi": -63, "data": "020106"}]},
+            metadata={"room": "Master Bedroom"},
+            received_ts=1200.0,
+        )
+        self.assertEqual("Living Room", native_ble.snapshot(now_ts=1200.0)["devices"][0]["strongest_room"])
+
+        # Master Bedroom hears a newer advert eighteen seconds later. Living
+        # Room remains the better signal and must not be treated as stale.
+        native_ble.ingest_advertisements(
+            "native:master",
+            {"adverts": [{"address": address, "rssi": -62, "data": "020106"}]},
+            metadata={"room": "Master Bedroom"},
+            received_ts=1218.0,
+        )
+        device = native_ble.snapshot(now_ts=1218.0)["devices"][0]
+        self.assertEqual("Living Room", device["strongest_room"])
+        self.assertEqual("Living Room", device["raw_strongest_room"])
+
+    def test_candidate_room_requires_two_distinct_observations(self) -> None:
+        address = "de:ad:be:ef:00:0a"
+        for selector, room, rssi in (
+            ("native:kitchen", "Kitchen", -55),
+            ("native:office", "Office", -60),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=1300.0,
+            )
+        native_ble.snapshot(now_ts=1300.0)
+
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": 20, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1301.0,
+        )
+        device = native_ble.snapshot(now_ts=1301.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("Office", device["candidate_room"])
+
+        device = native_ble.snapshot(now_ts=1310.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("Office", device["candidate_room"])
+
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": 20, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1311.0,
+        )
+        device = native_ble.snapshot(now_ts=1311.0)["devices"][0]
+        self.assertEqual("Office", device["strongest_room"])
+
+    def test_stale_current_room_moves_after_two_fresh_observations(self) -> None:
+        address = "de:ad:be:ef:00:0b"
+        for selector, room, rssi in (
+            ("native:kitchen", "Kitchen", -50),
+            ("native:office", "Office", -70),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=1400.0,
+            )
+        self.assertEqual("Kitchen", native_ble.snapshot(now_ts=1400.0)["devices"][0]["strongest_room"])
+
+        # The old room has gone quiet, while the new room hears two separate
+        # advertisements across the shorter stale-room dwell window.
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": -20, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1446.0,
+        )
+        device = native_ble.snapshot(now_ts=1446.0)["devices"][0]
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual("Office", device["candidate_room"])
+
+        native_ble.ingest_advertisements(
+            "native:office",
+            {"adverts": [{"address": address, "rssi": -20, "data": "020106"}]},
+            metadata={"room": "Office"},
+            received_ts=1449.0,
+        )
+        device = native_ble.snapshot(now_ts=1449.0)["devices"][0]
+        self.assertEqual("Office", device["strongest_room"])
 
 
 if __name__ == "__main__":
