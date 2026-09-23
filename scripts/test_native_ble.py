@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from tater_voice import native_ble
@@ -427,6 +433,191 @@ class NativeBleTests(unittest.TestCase):
         )
         device = native_ble.snapshot(now_ts=1449.0)["devices"][0]
         self.assertEqual("Office", device["strongest_room"])
+
+    def test_ibeacon_identity_survives_rotating_addresses(self) -> None:
+        beacon_uuid = "00112233445566778899aabbccddeeff"
+        advertisement = f"0201061aff4c000215{beacon_uuid}00010002c5"
+        for selector, room, address, rssi in (
+            ("native:kitchen", "Kitchen", "40:11:22:33:44:55", -44),
+            ("native:office", "Office", "41:aa:bb:cc:dd:ee", -61),
+        ):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "address_type": 1, "rssi": rssi, "data": advertisement}]},
+                metadata={"room": room},
+                received_ts=1500.0,
+            )
+
+        snapshot = native_ble.snapshot(now_ts=1500.0)
+        self.assertEqual(1, snapshot["device_count"])
+        device = snapshot["devices"][0]
+        self.assertEqual("ibeacon", device["identity_type"])
+        self.assertEqual("00112233-4455-6677-8899-aabbccddeeff:1:2", device["ibeacon"]["id"])
+        self.assertEqual(2, len(device["addresses"]))
+        self.assertEqual("Kitchen", device["strongest_room"])
+        self.assertEqual(-59, device["reference_power"])
+
+    def test_calibration_offsets_change_distance_and_room_scoring(self) -> None:
+        address = "de:ad:be:ef:10:01"
+        native_ble.configure("save_settings", {"reference_power": -60, "attenuation": 2.0})
+        native_ble.configure("save_scanner", {"selector": "native:office", "rssi_offset_db": 12})
+        for selector, room in (("native:kitchen", "Kitchen"), ("native:office", "Office")):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": -66, "data": "020106"}]},
+                metadata={"room": room},
+                received_ts=1600.0,
+            )
+
+        device = native_ble.snapshot(now_ts=1600.0)["devices"][0]
+        self.assertEqual("Office", device["strongest_room"])
+        self.assertLess(device["distance_m"], 1.0)
+        office = next(row for row in device["sources"] if row["room"] == "Office")
+        kitchen = next(row for row in device["sources"] if row["room"] == "Kitchen")
+        self.assertEqual(12.0, office["rssi_offset_db"])
+        self.assertLess(office["distance_m"], kitchen["distance_m"])
+
+    def test_named_tracker_records_home_away_and_redacts_irk(self) -> None:
+        address = "de:ad:be:ef:10:02"
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -52, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=1700.0,
+        )
+        device_id = native_ble.snapshot(now_ts=1700.0)["devices"][0]["presence_id"]
+        native_ble.configure(
+            "upsert_device",
+            {
+                "id": device_id,
+                "name": "Alice's phone",
+                "owner": "Alice",
+                "category": "phone",
+                "track": True,
+                "home_timeout_s": 30,
+                "identities": [
+                    {"type": "address", "value": address},
+                    {"type": "irk", "value": "00112233445566778899aabbccddeeff"},
+                ],
+            },
+            now_ts=1700.0,
+        )
+
+        home = native_ble.snapshot(now_ts=1701.0)["devices"][0]
+        self.assertEqual("Alice's phone", home["display_name"])
+        self.assertEqual("home", home["home_state"])
+        public_irk = next(row for row in home["identities"] if row["type"] == "irk")
+        self.assertNotIn("value", public_irk)
+        self.assertTrue(public_irk["configured"])
+
+        away = native_ble.snapshot(now_ts=1740.0)["devices"][0]
+        self.assertEqual("away", away["home_state"])
+        event_types = [row["type"] for row in native_ble.history_snapshot()["events"]]
+        self.assertIn("arrived_home", event_types)
+        self.assertIn("left_home", event_types)
+
+    def test_private_address_can_resolve_to_registered_irk(self) -> None:
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        except Exception:
+            self.skipTest("cryptography is not installed in this test interpreter")
+        irk = bytes.fromhex("00112233445566778899aabbccddeeff")
+        prand = bytes.fromhex("401234")
+        encryptor = Cipher(algorithms.AES(irk), modes.ECB()).encryptor()
+        address_bytes = prand + (encryptor.update((b"\x00" * 13) + prand) + encryptor.finalize())[-3:]
+        address = ":".join(f"{byte:02x}" for byte in address_bytes)
+        native_ble.configure(
+            "upsert_device",
+            {
+                "id": "alice-watch",
+                "name": "Alice Watch",
+                "identities": [{"type": "irk", "value": irk.hex()}],
+            },
+            now_ts=1800.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:bedroom",
+            {"adverts": [{"address": address, "address_type": 1, "rssi": -48, "data": "020106"}]},
+            metadata={"room": "Bedroom"},
+            received_ts=1800.0,
+        )
+        device = native_ble.snapshot(now_ts=1800.0)["devices"][0]
+        self.assertEqual("alice-watch", device["presence_id"])
+        self.assertEqual("irk", device["identity_type"])
+
+    def test_ingest_keeps_tracker_history_current_without_open_ui(self) -> None:
+        address = "de:ad:be:ef:10:03"
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -48, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=1900.0,
+        )
+        device_id = native_ble.snapshot(now_ts=1900.0)["devices"][0]["presence_id"]
+        native_ble.configure(
+            "upsert_device",
+            {
+                "id": device_id,
+                "name": "House keys",
+                "home_timeout_s": 30,
+                "identities": [{"type": "address", "value": address}],
+            },
+            now_ts=1900.0,
+        )
+
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": address, "rssi": -48, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=1901.0,
+        )
+        native_ble.ingest_advertisements(
+            "native:living",
+            {"adverts": [{"address": "de:ad:be:ef:10:04", "rssi": -55, "data": "020106"}]},
+            metadata={"room": "Living Room"},
+            received_ts=1935.0,
+        )
+
+        events = native_ble.history_snapshot(device_id=device_id)["events"]
+        self.assertEqual(["left_home", "arrived_home"], [row["type"] for row in events])
+
+    def test_configuration_persists_and_never_returns_irk(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = Path(temp_dir) / "presence.json"
+            environment = {
+                **os.environ,
+                "PYTHONPATH": str(repo_root),
+                "TATER_NATIVE_PRESENCE_PATH": str(storage_path),
+            }
+            writer = """
+from tater_voice import native_ble
+native_ble.configure('upsert_device', {
+    'id': 'persisted-phone',
+    'name': 'Persisted phone',
+    'identities': [{'type': 'irk', 'value': '00112233445566778899aabbccddeeff'}],
+})
+"""
+            subprocess.run([sys.executable, "-c", writer], cwd=repo_root, env=environment, check=True)
+            self.assertEqual(0o600, storage_path.stat().st_mode & 0o777)
+            reader = """
+import json
+from tater_voice import native_ble
+print(json.dumps(native_ble.configuration_snapshot()))
+"""
+            completed = subprocess.run(
+                [sys.executable, "-c", reader],
+                cwd=repo_root,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            configuration = json.loads(completed.stdout)
+            identity = configuration["devices"][0]["identities"][0]
+            self.assertEqual("irk", identity["type"])
+            self.assertNotIn("value", identity)
+            self.assertEqual(12, len(identity["fingerprint"]))
 
 
 if __name__ == "__main__":

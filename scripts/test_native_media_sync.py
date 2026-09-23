@@ -364,12 +364,19 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
                     "buffered_frames": 96000,
                     "rebuffering": True,
                     "underrun_events": 1,
+                    "overlay_underrun_events": 1,
+                    "background_underrun_events": 1,
+                    "foreground_underrun_events": 0,
                 },
             )
 
         self.assertTrue(
             native_satellite._stereo_sessions["group-1"]["playheads"]["native:sat1-left"]["rebuffering"]
         )
+        health = native_satellite._stereo_sessions["group-1"]["playhead_health"]["native:sat1-left"]
+        self.assertEqual(health["overlay_underrun_events"], 1)
+        self.assertEqual(health["background_underrun_events"], 1)
+        self.assertEqual(health["foreground_underrun_events"], 0)
         voice_pipeline.logger.warning.assert_called_once()
 
     async def test_member_disconnect_aborts_group_and_stops_remaining_satellite(self) -> None:

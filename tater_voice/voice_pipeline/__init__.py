@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -390,7 +391,11 @@ DEFAULT_VOICE_SAMPLE_WIDTH = 2
 DEFAULT_VOICE_CHANNELS = 1
 DEFAULT_MAX_AUDIO_BYTES = 4 * 1024 * 1024
 
-DEFAULT_CONTINUED_CHAT_ENABLED = False
+# Native satellites advertise continued-chat support and expose it enabled in
+# their shared defaults. Keep the server-side gate aligned so a fresh install
+# can actually request a microphone reopen without requiring a second,
+# unrelated settings save first.
+DEFAULT_CONTINUED_CHAT_ENABLED = True
 DEFAULT_CONTINUED_CHAT_REUSE_SECONDS = 30.0
 DEFAULT_CONTINUED_CHAT_CLASSIFY_TIMEOUT_S = 4.0
 DEFAULT_CONTINUED_CHAT_REPLY_TO_CUE_PAUSE_S = 0.60
@@ -424,6 +429,10 @@ DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
+NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS = 96
+NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS = 192
+NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ = 48000
+NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S = 60.0
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "webrtc" if remote_only_enabled() else "silero"
@@ -4813,10 +4822,201 @@ def _selector_host(selector: str) -> str:
     return ""
 
 
+def _native_media_ffmpeg_binary() -> str:
+    bundled = ""
+    with contextlib.suppress(Exception):
+        import imageio_ffmpeg
+
+        bundled = _text(imageio_ffmpeg.get_ffmpeg_exe())
+    candidates = (
+        _text(os.getenv("TATER_FFMPEG_PATH") or os.getenv("FFMPEG_PATH")),
+        bundled,
+        _text(shutil.which("ffmpeg")),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    )
+    for candidate in candidates:
+        path = Path(candidate).expanduser() if candidate else None
+        if path and path.is_file() and os.access(path, os.X_OK):
+            return str(path.resolve())
+    return ""
+
+
+def _native_media_is_mp3(media_bytes: bytes, media_type: str, filename: str) -> bool:
+    data = bytes(media_bytes or b"")
+    mime = _text(media_type).split(";", 1)[0].strip().lower()
+    suffix = Path(_text(filename)).suffix.lower()
+    if mime in {"audio/mpeg", "audio/mp3"} or suffix == ".mp3":
+        return True
+    if data.startswith(b"ID3"):
+        return True
+    return len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+
+
+def _native_media_mp3_filename(filename: str) -> str:
+    name = Path(_text(filename) or "satellite-audio").name
+    stem = Path(name).stem or "satellite-audio"
+    return f"{stem}.mp3"
+
+
+def _prepare_native_media_asset_sync(
+    media_bytes: bytes,
+    *,
+    media_type: str,
+    filename: str,
+    playback_kind: str = "",
+) -> Dict[str, Any]:
+    """Prepare one compact asset shared by every native playback destination."""
+    data = bytes(media_bytes or b"")
+    mime = _text(media_type).split(";", 1)[0].strip().lower() or "application/octet-stream"
+    safe_filename = Path(_text(filename) or "satellite-audio.bin").name
+    if not data:
+        return {
+            "bytes": b"",
+            "media_type": mime,
+            "filename": safe_filename,
+            "transcoded": False,
+        }
+    if _native_media_is_mp3(data, mime, safe_filename):
+        return {
+            "bytes": data,
+            "media_type": "audio/mpeg",
+            "filename": _native_media_mp3_filename(safe_filename),
+            "transcoded": False,
+        }
+
+    ffmpeg = _native_media_ffmpeg_binary()
+    if not ffmpeg:
+        logger.warning(
+            "[native-media] satellite MP3 preparation skipped because ffmpeg is unavailable "
+            "media_type=%s filename=%s bytes=%d",
+            mime,
+            safe_filename,
+            len(data),
+        )
+        return {
+            "bytes": data,
+            "media_type": mime,
+            "filename": safe_filename,
+            "transcoded": False,
+            "warning": "ffmpeg is unavailable",
+        }
+
+    kind = _lower(playback_kind)
+    bitrate_kbps = (
+        NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS
+        if kind in {"music", "background", "media"}
+        else NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS
+    )
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-map_metadata",
+        "-1",
+        "-ar",
+        str(NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ),
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        f"{bitrate_kbps}k",
+        "-write_xing",
+        "0",
+        "-f",
+        "mp3",
+        "pipe:1",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S,
+        )
+        encoded = bytes(completed.stdout or b"")
+        if int(completed.returncode or 0) != 0 or not encoded:
+            detail = bytes(completed.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or f"ffmpeg exited with status {completed.returncode}")
+    except Exception as exc:
+        logger.warning(
+            "[native-media] satellite MP3 preparation failed; using original asset "
+            "media_type=%s filename=%s bytes=%d error=%s",
+            mime,
+            safe_filename,
+            len(data),
+            _text(exc) or exc.__class__.__name__,
+        )
+        return {
+            "bytes": data,
+            "media_type": mime,
+            "filename": safe_filename,
+            "transcoded": False,
+            "warning": _text(exc) or exc.__class__.__name__,
+        }
+
+    prepared_filename = _native_media_mp3_filename(safe_filename)
+    logger.info(
+        "[native-media] prepared satellite MP3 kind=%s source_type=%s source_bytes=%d "
+        "prepared_bytes=%d bitrate_kbps=%d filename=%s",
+        kind or "audio",
+        mime,
+        len(data),
+        len(encoded),
+        bitrate_kbps,
+        prepared_filename,
+    )
+    return {
+        "bytes": encoded,
+        "media_type": "audio/mpeg",
+        "filename": prepared_filename,
+        "transcoded": True,
+        "source_media_type": mime,
+        "source_bytes": len(data),
+        "bitrate_kbps": bitrate_kbps,
+    }
+
+
+async def _prepare_native_media_asset(
+    media_bytes: bytes,
+    *,
+    media_type: str,
+    filename: str,
+    playback_kind: str = "",
+) -> Dict[str, Any]:
+    return await run_background(
+        _prepare_native_media_asset_sync,
+        media_bytes,
+        media_type=media_type,
+        filename=filename,
+        playback_kind=playback_kind,
+    )
+
+
 def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_format: Dict[str, Any]) -> str:
     wav_bytes, normalized_format = _pcm_to_wav(audio_bytes, audio_format)
     if not wav_bytes:
         return ""
+
+    prepared = _prepare_native_media_asset_sync(
+        wav_bytes,
+        media_type="audio/wav",
+        filename="tts.wav",
+        playback_kind="tts",
+    )
+    body_bytes = bytes(prepared.get("bytes") or b"")
+    if not body_bytes:
+        return ""
+    media_type = _text(prepared.get("media_type")) or "audio/wav"
+    filename = Path(_text(prepared.get("filename")) or "tts.wav").name
 
     stream_id = uuid.uuid4().hex
     expires_ts = _now() + _tts_url_ttl_s()
@@ -4829,13 +5029,18 @@ def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_for
             "created_ts": _now(),
             "expires_ts": expires_ts,
             "audio_format": normalized_format,
-            "wav_bytes": wav_bytes,
+            "body_bytes": body_bytes,
+            "media_type": media_type,
+            "filename": filename,
+            "transcoded": bool(prepared.get("transcoded")),
         }
 
     base_url = _service_base_url_for_peer(_selector_host(selector))
-    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    extension = "mp3" if media_type in {"audio/mpeg", "audio/mp3"} else "wav"
+    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.{extension}"
     _native_debug(
-        f"native tts url prepared selector={_text(selector)} session_id={_text(session_id)} bytes={len(wav_bytes)} url={url}"
+        f"native tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
+        f"bytes={len(body_bytes)} media_type={media_type} url={url}"
     )
     return url
 

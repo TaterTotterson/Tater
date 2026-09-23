@@ -499,6 +499,73 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
                 )
                 notify.assert_called_once_with("settings", selector)
 
+    async def test_settings_apply_failure_is_retained_and_exposed_in_diagnostics(self) -> None:
+        selector = "native:echo-test"
+        native_satellite._clients[selector] = {
+            "selector": selector,
+            "connected": True,
+            "hello": {
+                "type": "hello",
+                "payload": {
+                    "device_id": "echo-test",
+                    "device_name": "Kitchen Echo",
+                    "board": "biscuit",
+                    "capabilities": {"speaker": True},
+                },
+            },
+            "last_status": {
+                "state": "idle",
+                "wake_engine": {
+                    "ready": True,
+                    "active_wake_word": "hey_tater",
+                    "active_model_source": "embedded",
+                },
+            },
+            "last_settings_result": {},
+            "pending_requests": {},
+        }
+
+        with mock.patch.object(native_satellite, "_notify_state_change") as notify:
+            await native_satellite._handle_text_message(
+                selector,
+                {
+                    "type": "settings.changed",
+                    "payload": {
+                        "ok": False,
+                        "error": "wake model HTTPS certificate is not yet valid",
+                        "settings": {"wake_word": "custom_url", "volume_percent": 75},
+                    },
+                },
+            )
+
+        notify.assert_any_call("settings_result", selector)
+        snapshot = native_satellite._client_snapshot(selector, native_satellite._clients[selector])
+        self.assertFalse(snapshot["settings_result"]["ok"])
+        self.assertIn("certificate", snapshot["settings_result"]["error"])
+
+        runtime = home._native_client_to_runtime_row(selector, snapshot)
+        diagnostics = next(
+            section["rows"]
+            for section in runtime["native_detail_sections"]
+            if section["title"] == "Diagnostics"
+        )
+        values = {row["label"]: row["value"] for row in diagnostics}
+        self.assertEqual("Failed", values["Settings Apply"])
+        self.assertIn("certificate", values["Settings Error"])
+
+        # A physical volume delta is not a full apply and must not hide the
+        # model error. A later full settings acknowledgement clears it.
+        await native_satellite._handle_text_message(
+            selector,
+            {"type": "settings.changed", "payload": {"ok": True, "settings": {"volume_percent": 60}}},
+        )
+        self.assertFalse(native_satellite._clients[selector]["last_settings_result"]["ok"])
+        await native_satellite._handle_text_message(
+            selector,
+            {"type": "settings.changed", "payload": {"ok": True, "settings": {"wake_word": "custom_url"}}},
+        )
+        self.assertTrue(native_satellite._clients[selector]["last_settings_result"]["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

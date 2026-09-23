@@ -73,6 +73,8 @@ STEREO_STARTUP_ADJUST_MAX_FRAMES = 240
 STEREO_STARTUP_ADJUST_SETTLE_MS = 2000
 STEREO_STARTUP_REALIGN_THRESHOLD_US = 40_000
 STEREO_STARTUP_REALIGN_MAX_US = 2_000_000
+STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES = 480
+STEREO_REJOIN_REALIGN_MAX_FRAMES = 480_000
 STEREO_PHASE_EMA_ALPHA = 0.25
 STEREO_PHASE_STABLE_SAMPLES = 2
 MEDIA_RENDER_START_GUARD_MS = 250
@@ -352,6 +354,7 @@ def _default_name_for_board(board: Any) -> str:
         "satellite1-beta-rev41": "Tater Sat1 Beta.1",
         "respeaker-xvf3800": "Tater ReSpeaker XVF3800",
         "s3-box": "Tater S3 Box",
+        "biscuit": "Tater Echo Dot 2",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")
 
 
@@ -613,6 +616,7 @@ def _credential_row(selector: str, payload: Dict[str, Any], token_hash: str) -> 
         "hardware_id": _hardware_id(payload.get("hardware_id")),
         "device_name": _device_name_from_hello(payload, selector),
         "board": _text(payload.get("board")),
+        "firmware_target": _text(payload.get("firmware_target")),
         "firmware_version": _text(payload.get("firmware_version")),
         "room": _text(payload.get("room") or payload.get("area_name") or payload.get("room_name")),
         "token_hash": token_hash,
@@ -731,6 +735,7 @@ def _valid_device_credential(token: str, selector: str, payload: Dict[str, Any])
                     "hardware_id": hardware_id or _hardware_id(row.get("hardware_id")),
                     "device_name": _device_name_from_hello(payload, row.get("device_name")),
                     "board": _text(payload.get("board")) or _text(row.get("board")),
+                    "firmware_target": _text(payload.get("firmware_target")) or _text(row.get("firmware_target")),
                     "firmware_version": _text(payload.get("firmware_version")) or _text(row.get("firmware_version")),
                     "last_seen_ts": _now(),
                 }
@@ -877,7 +882,26 @@ def _live_settings_payload(selector: str = "", *, board: str = "") -> Dict[str, 
 def _firmware_settings_payload(selector: str = "", *, board: str = "") -> Dict[str, Any]:
     from . import native_live_settings
 
-    return native_live_settings.firmware_settings_snapshot(selector, board=board)
+    settings = native_live_settings.firmware_settings_snapshot(selector, board=board)
+    if _lower(board) != "biscuit" or _lower(settings.get("wake_word")) != "custom_url":
+        return settings
+    source_url = _text(settings.get("wake_word_url"))
+    if not source_url:
+        return settings
+    row = _clients.get(_canonical_selector(selector))
+    peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
+    try:
+        from . import wake_package_proxy
+
+        service_url = _vp()._service_base_url_for_peer(peer_host)
+        settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, source_url)
+    except (ValueError, RuntimeError) as exc:
+        _vp().logger.warning(
+            "[native-satellite] could not prepare local wake package selector=%s: %s",
+            selector or "-",
+            exc,
+        )
+    return settings
 
 
 async def _handle_wake_verifier_packet(
@@ -1331,6 +1355,7 @@ def _registry_metadata_from_hello(payload: Dict[str, Any], *, connected: bool) -
         "native_transport": "websocket",
         "native_last_seen_ts": _now(),
         "firmware_version": _text(payload.get("firmware_version")),
+        "firmware_target": _text(payload.get("firmware_target")),
         "board": board,
         "device_id": _text(payload.get("device_id") or payload.get("id")),
         "hardware_id": _hardware_id(payload.get("hardware_id")),
@@ -1397,6 +1422,7 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "hardware_id": _hardware_id(payload.get("hardware_id")),
         "device_name": _device_name_from_hello(payload, row.get("name") or selector),
         "board": _text(payload.get("board")),
+        "firmware_target": _text(payload.get("firmware_target")),
         "firmware_version": _text(payload.get("firmware_version")),
         "room": _text(payload.get("room") or payload.get("area_name") or payload.get("room_name")),
         "capabilities": _capabilities(payload),
@@ -1406,6 +1432,11 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "last_error": _text(row.get("last_error")),
         "last_message_type": _text(row.get("last_message_type")),
         "last_status": row.get("last_status") if isinstance(row.get("last_status"), dict) else {},
+        "settings_result": (
+            dict(row.get("last_settings_result"))
+            if isinstance(row.get("last_settings_result"), dict)
+            else {}
+        ),
         "media_session": (
             dict(row.get("media_session"))
             if isinstance(row.get("media_session"), dict)
@@ -2681,6 +2712,7 @@ async def start_stereo_overlay(
     ducking: Optional[Dict[str, Any]] = None,
     start_server_us: int = 0,
     stop_media_when_finished: bool = False,
+    background_fade_out_ms: int = 0,
     wait_for_completion: bool = False,
     completion_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
@@ -2787,6 +2819,10 @@ async def start_stereo_overlay(
                     "volume_percent": _as_int(settings.get("volume_percent"), base_volume),
                 },
                 "ducking": dict(duck),
+                "finish": {
+                    "stop_media": bool(stop_media_when_finished),
+                    "fade_ms": max(0, min(10000, _as_int(background_fade_out_ms, 0))),
+                },
                 "start_at_us": start_at_us,
                 "group_id": _text(session.get("group_id")),
             },
@@ -2852,6 +2888,7 @@ async def start_single_overlay(
     ducking: Optional[Dict[str, Any]] = None,
     start_server_us: int = 0,
     stop_media_when_finished: bool = False,
+    background_fade_out_ms: int = 0,
     wait_for_completion: bool = False,
     completion_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
@@ -2928,6 +2965,10 @@ async def start_single_overlay(
                     ),
                 },
                 "ducking": dict(duck),
+                "finish": {
+                    "stop_media": bool(stop_media_when_finished),
+                    "fade_ms": max(0, min(10000, _as_int(background_fade_out_ms, 0))),
+                },
                 "start_at_us": start_at_us,
                 "group_id": group_token,
             },
@@ -3222,8 +3263,13 @@ async def _adjust_audible_timeline_session(
         else STEREO_ADJUST_SETTLE_MS
     )
     corrections: Dict[str, int] = {}
+    correction_modes: Dict[str, str] = {}
     phase_errors: Dict[str, float] = {}
     raw_phase_errors: Dict[str, float] = {}
+    pending_rejoin = session.setdefault("pending_rejoin_realign", {})
+    if not isinstance(pending_rejoin, dict):
+        pending_rejoin = {}
+        session["pending_rejoin_realign"] = pending_rejoin
     sampled_phase = False
     for selector in selectors:
         row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
@@ -3261,6 +3307,18 @@ async def _adjust_audible_timeline_session(
             + (STEREO_PHASE_EMA_ALPHA * phase_error_frames)
         )
         phase_ema[selector] = smoothed_error_frames
+        if selector in pending_rejoin:
+            if phase_error_frames > STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES:
+                correction = min(
+                    STEREO_REJOIN_REALIGN_MAX_FRAMES,
+                    int(round(phase_error_frames)),
+                )
+                corrections[selector] = correction
+                correction_modes[selector] = "jump"
+                phase_errors[selector] = phase_error_frames
+                raw_phase_errors[selector] = phase_error_frames
+                continue
+            pending_rejoin.pop(selector, None)
         if abs(smoothed_error_frames) < threshold_frames:
             phase_directions[selector] = 0
             phase_stable_samples[selector] = 0
@@ -3278,6 +3336,7 @@ async def _adjust_audible_timeline_session(
             continue
         correction = int(round(smoothed_error_frames))
         corrections[selector] = max(-maximum_frames, min(maximum_frames, correction))
+        correction_modes[selector] = "slew"
         phase_errors[selector] = smoothed_error_frames
         raw_phase_errors[selector] = phase_error_frames
 
@@ -3290,6 +3349,8 @@ async def _adjust_audible_timeline_session(
         row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
         hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
         supports_slew = bool(_capabilities(_message_payload(hello)).get("media_rate_slew"))
+        requested_mode = correction_modes.get(selector) or "slew"
+        mode = "jump" if requested_mode == "jump" else "slew" if supports_slew else "legacy"
         result = await send_request(
             selector,
             "media.session.adjust",
@@ -3297,10 +3358,11 @@ async def _adjust_audible_timeline_session(
                 "session_id": _text(session.get("session_id")),
                 "group_id": group_id,
                 "correction_frames": correction,
-                "mode": "slew" if supports_slew else "legacy",
-                "settle_ms": settle_ms if supports_slew else 0,
+                "mode": mode,
+                "settle_ms": settle_ms if mode == "slew" else 0,
                 "reference_selector": "tater:audible-timeline",
                 "audible_start_server_us": audible_start_server_us,
+                "reason": "rejoin_realign" if mode == "jump" else "timeline_drift",
             },
             timeout_s=2.0,
         )
@@ -3318,6 +3380,24 @@ async def _adjust_audible_timeline_session(
         if _as_bool(result.get("ok"), False)
     }
     if applied:
+        rejoin_applied = {
+            selector: correction
+            for selector, correction in applied.items()
+            if correction_modes.get(selector) == "jump"
+        }
+        for selector, correction in rejoin_applied.items():
+            if raw_phase_errors.get(selector, 0.0) <= (
+                correction + STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES
+            ):
+                pending_rejoin.pop(selector, None)
+        if rejoin_applied:
+            _vp().logger.warning(
+                "[native-media] realigned playback after rejoin group=%s corrections=%s",
+                group_id,
+                ",".join(
+                    f"{selector}:{frames}" for selector, frames in rejoin_applied.items()
+                ),
+            )
         session["last_adjust_server_us"] = now_us
         session["last_correction_frames"] = applied
         session["last_phase_error_frames"] = {
@@ -3598,6 +3678,18 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
     current_health = {
         "rebuffering": _as_bool(payload.get("rebuffering"), False),
         "underrun_events": max(0, _as_int(payload.get("underrun_events"), 0)),
+        "overlay_underrun_events": max(
+            0,
+            _as_int(payload.get("overlay_underrun_events"), 0),
+        ),
+        "background_underrun_events": max(
+            0,
+            _as_int(payload.get("background_underrun_events"), 0),
+        ),
+        "foreground_underrun_events": max(
+            0,
+            _as_int(payload.get("foreground_underrun_events"), 0),
+        ),
         "rejoin_count": max(0, _as_int(payload.get("rejoin_count"), 0)),
         "rejoin_frames": max(0, _as_int(payload.get("rejoin_frames"), 0)),
         "correction_frames": _as_int(payload.get("correction_frames"), 0),
@@ -3613,6 +3705,10 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         ),
     }
     health_rows[selector] = current_health
+    if current_health["rejoin_count"] > _as_int(previous.get("rejoin_count"), 0):
+        pending_rejoin = session.setdefault("pending_rejoin_realign", {})
+        if isinstance(pending_rejoin, dict):
+            pending_rejoin[selector] = current_health["rejoin_count"]
     health_changed = (
         current_health["rebuffering"]
         or current_health["underrun_events"] > _as_int(previous.get("underrun_events"), 0)
@@ -3621,12 +3717,17 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
     if health_changed:
         _vp().logger.warning(
             "[native-media] playback recovery selector=%s group=%s buffered_frames=%d "
-            "rebuffering=%s underruns=%d rejoins=%d rejoin_frames=%d correction_frames=%d",
+            "rebuffering=%s underruns=%d background_underruns=%d "
+            "foreground_underruns=%d overlay_window_underruns=%d rejoins=%d "
+            "rejoin_frames=%d correction_frames=%d",
             selector,
             group_id,
             current_health["buffered_frames"],
             current_health["rebuffering"],
             current_health["underrun_events"],
+            current_health["background_underrun_events"],
+            current_health["foreground_underrun_events"],
+            current_health["overlay_underrun_events"],
             current_health["rejoin_count"],
             current_health["rejoin_frames"],
             current_health["correction_frames"],
@@ -3956,6 +4057,7 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         "last_seen_ts": now_ts,
         "last_message_type": "hello",
         "last_status": {},
+        "last_settings_result": {},
         "media_session": {"active": False},
         "audio_overlay": {"active": False},
         "logs": deque(maxlen=MAX_LOG_ROWS),
@@ -4085,6 +4187,7 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     reported_volume: Any = None
     reported_volume_changed = False
     reported_volume_board = ""
+    settings_result_changed = False
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
@@ -4097,6 +4200,19 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
                 if isinstance(payload.get("settings"), dict)
                 else payload
             )
+            if msg_type == "settings.changed":
+                settings_error = _text(payload.get("error"))
+                settings_ok = _as_bool(payload.get("ok"), not bool(settings_error))
+                # Physical controls also report small settings.changed deltas.
+                # Only a full live-settings acknowledgement (wake_word is
+                # always present) or a failure should replace this diagnostic.
+                if settings_error or "wake_word" in reported_settings:
+                    row["last_settings_result"] = {
+                        "ok": settings_ok,
+                        "error": settings_error,
+                        "ts": _now(),
+                    }
+                    settings_result_changed = True
             if "volume_percent" in reported_settings:
                 reported_volume = reported_settings.get("volume_percent")
                 reported_volume_changed = (
@@ -4232,6 +4348,8 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             board=reported_volume_board,
         ):
             _notify_state_change("settings", selector)
+    if settings_result_changed:
+        _notify_state_change("settings_result", selector)
     if msg_type == "ambient.observation.request":
         from . import reachy_ambient
 

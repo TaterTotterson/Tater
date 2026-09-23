@@ -692,6 +692,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     voice = row.get("voice") if isinstance(row.get("voice"), dict) else {}
     auth = row.get("auth") if isinstance(row.get("auth"), dict) else {}
     live_settings = row.get("live_settings") if isinstance(row.get("live_settings"), dict) else {}
+    settings_result = row.get("settings_result") if isinstance(row.get("settings_result"), dict) else {}
     wake_engine = status.get("wake_engine") if isinstance(status.get("wake_engine"), dict) else {}
     reset = status.get("reset") if isinstance(status.get("reset"), dict) else {}
     transport = status.get("transport") if isinstance(status.get("transport"), dict) else {}
@@ -700,6 +701,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     state = esphome_runtime.text(status.get("state")) or esphome_runtime.text(voice.get("state")) or "idle"
     room = esphome_runtime.text(row.get("room"))
     board = esphome_runtime.text(row.get("board")) or "native satellite"
+    firmware_target = esphome_runtime.text(row.get("firmware_target"))
     firmware_version = esphome_runtime.text(row.get("firmware_version"))
     name = esphome_runtime.text(row.get("device_name")) or esphome_runtime.text(row.get("device_id")) or selector
 
@@ -726,6 +728,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_connection", "Connection", "Connected" if bool(row.get("connected")) else "Offline"),
         _native_detail_row("native_auth", "Auth", esphome_runtime.text(auth.get("mode")) or "open"),
         _native_detail_row("native_board", "Board", board),
+        _native_detail_row("native_firmware_target", "Firmware Target", firmware_target),
         _native_detail_row("native_firmware", "Firmware", firmware_version),
         _native_detail_row("native_last_message", "Last Message", row.get("last_message_type")),
     ]
@@ -738,6 +741,19 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_logs", "Logs", row.get("log_count")),
         _native_detail_row("native_queued_commands", "Queued Commands", row.get("queued_commands")),
     ]
+    if settings_result:
+        settings_error = esphome_runtime.text(settings_result.get("error"))
+        diagnostic_rows.append(
+            _native_detail_row(
+                "native_settings_apply",
+                "Settings Apply",
+                "Applied" if bool(settings_result.get("ok")) and not settings_error else "Failed",
+            )
+        )
+        if settings_error:
+            diagnostic_rows.append(
+                _native_detail_row("native_settings_error", "Settings Error", settings_error)
+            )
     if bool(wake_engine.get("custom_download_running")) or any(int(wake_engine.get(key) or 0) for key in ("custom_cache_hits", "custom_cache_writes", "custom_cache_failures", "custom_download_failures")):
         diagnostic_rows.append(
             _native_detail_row(
@@ -924,6 +940,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
             "native_selected": True,
             "native_connected": bool(row.get("connected")),
             "board": board,
+            "firmware_target": firmware_target,
             "area_name": room,
             "room": room,
             "room_name": room,

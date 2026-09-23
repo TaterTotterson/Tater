@@ -19162,32 +19162,70 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			}, V(s.value === "save" ? "Applying…" : "Save & Apply Satellite Settings"), 9, PR)])])) : Z("", !0)
 		]));
 	}
-}), IR = { class: "tm-stack tvoice-presence" }, LR = { class: "tm-form-card tvoice-presence-hero" }, RR = { class: "tm-metrics tvoice-presence-metrics" }, zR = {
+}), IR = { class: "tm-stack tvoice-presence tpresence-next" }, LR = { class: "tm-form-card tvoice-presence-hero tpresence-hero" }, RR = {
+	class: "tpresence-nav",
+	"aria-label": "Presence views"
+}, zR = ["onClick"], BR = { class: "tm-metrics tvoice-presence-metrics tpresence-metrics" }, VR = { class: "home" }, HR = { class: "away" }, UR = {
 	key: 0,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, BR = {
+}, WR = {
 	key: 1,
 	class: "tv-notice"
-}, VR = {
-	key: 2,
-	class: "tm-form-card tvoice-presence-board"
-}, HR = { class: "tvoice-presence-board-head" }, UR = { class: "tvoice-presence-filters" }, WR = ["value"], GR = {
+}, GR = { class: "tm-form-card tvoice-presence-board tpresence-location-board" }, KR = { class: "tvoice-presence-board-head" }, qR = { class: "tvoice-presence-filters" }, JR = ["value"], YR = {
 	key: 0,
-	class: "tvoice-presence-rooms"
-}, KR = { class: "tvoice-presence-devices" }, qR = ["onClick"], JR = { class: "tvoice-presence-device-mark" }, YR = { class: "tvoice-presence-device-copy" }, XR = ["title"], ZR = ["onClick"], QR = {
+	class: "tvoice-presence-rooms tpresence-house"
+}, XR = { class: "tvoice-presence-devices" }, ZR = ["onClick"], QR = { class: "tpresence-device-icon" }, $R = { class: "tvoice-presence-device-copy" }, ez = ["title"], tz = ["onClick"], nz = {
 	key: 1,
 	class: "tv-empty"
-}, $R = ["aria-labelledby"], ez = { class: "tvoice-presence-room-modal-title" }, tz = ["id"], nz = { class: "tvoice-presence-room-modal-body" }, rz = ["onClick"], iz = { class: "tvoice-presence-device-mark" }, az = { class: "tvoice-presence-device-copy" }, oz = ["title"], sz = {
+}, rz = {
+	key: 0,
+	class: "tm-form-card tvoice-presence-detail tpresence-detail"
+}, iz = { class: "tpresence-detail-actions" }, az = { class: "tvoice-presence-detail-grid" }, oz = { class: "tvoice-presence-source-list" }, sz = {
 	key: 3,
-	class: "tm-form-card tvoice-presence-detail"
-}, cz = { class: "tvoice-presence-detail-grid" }, lz = { class: "tvoice-presence-source-list" }, uz = { class: "tvoice-presence-lower" }, dz = { class: "tm-form-card tvoice-presence-moves" }, fz = { key: 0 }, pz = {
+	class: "tm-form-card tpresence-device-registry"
+}, cz = {
+	key: 0,
+	class: "tpresence-registry-grid"
+}, lz = ["onClick"], uz = { class: "tpresence-device-icon" }, dz = {
 	key: 1,
-	class: "tv-empty compact"
-}, mz = { class: "tm-form-card tvoice-presence-api" }, hz = {
+	class: "tv-empty"
+}, fz = { class: "tpresence-discovered" }, pz = { class: "tpresence-discovered-body" }, mz = { class: "tpresence-registry-search" }, hz = {
+	key: 0,
+	class: "tpresence-registry-grid unassigned"
+}, gz = ["onClick"], _z = { class: "tpresence-device-icon" }, vz = {
+	key: 1,
+	class: "tv-empty"
+}, yz = {
 	key: 4,
-	class: "tm-form-card tvoice-presence-scanners"
-}, gz = 4, _z = 8, vz = /* @__PURE__ */ sr({
+	class: "tm-form-card tpresence-history"
+}, bz = ["disabled"], xz = {
+	key: 0,
+	class: "tpresence-timeline"
+}, Sz = {
+	key: 1,
+	class: "tv-empty"
+}, Cz = {
+	key: 5,
+	class: "tpresence-calibration-grid"
+}, wz = { class: "tm-form-card tpresence-calibration" }, Tz = { class: "tpresence-form-grid" }, Ez = ["disabled"], Dz = { class: "tm-form-card tpresence-scanner-calibration" }, Oz = { key: 0 }, kz = ["onUpdate:modelValue"], Az = ["disabled", "onClick"], jz = {
+	key: 1,
+	class: "tv-empty"
+}, Mz = { class: "tvoice-presence-lower tpresence-lower" }, Nz = { class: "tm-form-card tvoice-presence-api" }, Pz = { class: "tm-form-card tpresence-diagnostics" }, Fz = {
+	key: 0,
+	class: "tv-modal tvoice-presence-room-modal",
+	role: "dialog",
+	"aria-modal": "true"
+}, Iz = { class: "tvoice-presence-room-modal-title" }, Lz = { class: "tvoice-presence-room-modal-body" }, Rz = ["onClick"], zz = { class: "tpresence-device-icon" }, Bz = { class: "tvoice-presence-device-copy" }, Vz = {
+	key: 0,
+	class: "tv-modal tpresence-editor",
+	role: "dialog",
+	"aria-modal": "true",
+	"aria-labelledby": "tpresence-editor-title"
+}, Hz = { id: "tpresence-editor-title" }, Uz = { class: "tpresence-editor-body" }, Wz = { class: "tpresence-form-grid" }, Gz = { class: "tpresence-check" }, Kz = { class: "tpresence-form-grid" }, qz = { class: "wide" }, Jz = {
+	key: 0,
+	class: "tpresence-identity-chips"
+}, Yz = { class: "tpresence-form-grid" }, Xz = ["disabled"], Zz = ["disabled"], Qz = 6, $z = /* @__PURE__ */ sr({
 	__name: "VoicePresence",
 	props: {
 		snapshotEndpoint: {},
@@ -19198,155 +19236,278 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		let n = e, r = t, i = /* @__PURE__ */ U({
 			devices: [],
 			sources: [],
-			rooms: {}
-		}), a = /* @__PURE__ */ U(!0), o = /* @__PURE__ */ U(""), s = /* @__PURE__ */ U("connecting"), c = /* @__PURE__ */ U(""), l = /* @__PURE__ */ U("all"), u = /* @__PURE__ */ U(""), d = /* @__PURE__ */ U(""), f = /* @__PURE__ */ U(Date.now() / 1e3), p = /* @__PURE__ */ U(0), m = /* @__PURE__ */ U({}), h = /* @__PURE__ */ new Map(), g = /* @__PURE__ */ new Map(), _ = /* @__PURE__ */ new Map(), v = null, y = 0, b = 0, x = Q(() => Array.isArray(i.value.devices) ? i.value.devices : []), S = Q(() => Array.isArray(i.value.sources) ? i.value.sources : []), C = Q(() => [...new Set(x.value.map((e) => N(e)).filter(Boolean))].sort((e, t) => e === "Unknown" ? 1 : t === "Unknown" ? -1 : e.localeCompare(t))), w = Q(() => {
-			let e = c.value.trim().toLowerCase();
-			return x.value.filter((t) => {
-				let n = N(t);
-				return l.value !== "all" && n !== l.value ? !1 : !e || [
+			rooms: {},
+			history: [],
+			settings: {},
+			diagnostics: {}
+		}), a = /* @__PURE__ */ U({
+			settings: {},
+			devices: [],
+			scanners: {},
+			capabilities: {}
+		}), o = /* @__PURE__ */ U(!0), s = /* @__PURE__ */ U(!1), c = /* @__PURE__ */ U(""), l = /* @__PURE__ */ U("connecting"), u = /* @__PURE__ */ U("locations"), d = /* @__PURE__ */ U(""), f = /* @__PURE__ */ U(""), p = /* @__PURE__ */ U("all"), m = /* @__PURE__ */ U(""), h = /* @__PURE__ */ U(""), g = /* @__PURE__ */ U(!1), _ = /* @__PURE__ */ U(Date.now() / 1e3), v = /* @__PURE__ */ U(0), y = /* @__PURE__ */ U(ae()), b = /* @__PURE__ */ U({}), x = /* @__PURE__ */ U({}), S = null, C = 0, w = 0, T = Q(() => `${n.snapshotEndpoint.replace(/\/$/, "")}/config`), E = Q(() => Array.isArray(i.value.devices) ? i.value.devices : []), D = Q(() => Array.isArray(i.value.sources) ? i.value.sources : []), O = Q(() => Array.isArray(i.value.history) ? i.value.history : []), k = Q(() => E.value.filter((e) => !!e.tracked)), A = Q(() => E.value.filter((e) => !!e.configured).slice().sort(me)), j = Q(() => {
+			let e = f.value.trim().toLowerCase();
+			return E.value.filter((e) => !e.configured).filter((t) => !e || [
+				ce(t),
+				t.address,
+				t.advertised_name
+			].some((t) => String(t || "").toLowerCase().includes(e))).slice().sort(me);
+		}), M = Q(() => k.value.filter((e) => e.home_state === "home").length), N = Q(() => k.value.filter((e) => e.home_state === "away").length), P = Q(() => D.value.filter((e) => le(e.last_seen_ts) <= 15).length), F = Q(() => E.value.filter((e) => !!e.present).length), I = Q(() => [...new Set(E.value.filter((e) => e.home_state !== "away").map((e) => se(e)).filter((e) => e && e !== "Away"))].sort((e, t) => e === "Unknown" ? 1 : t === "Unknown" ? -1 : e.localeCompare(t))), ee = Q(() => {
+			let e = d.value.trim().toLowerCase();
+			return E.value.filter((t) => {
+				let n = se(t);
+				return p.value !== "all" && n !== p.value ? !1 : !e || [
 					t.display_name,
 					t.advertised_name,
 					t.address,
-					t.manufacturer_id_hex,
+					t.owner,
+					t.category,
 					n
 				].some((t) => String(t || "").toLowerCase().includes(e));
 			});
-		}), T = Q(() => C.value.filter((e) => l.value === "all" || e === l.value).map((e) => ({
+		}), te = Q(() => I.value.filter((e) => p.value === "all" || e === p.value).map((e) => ({
 			room: e,
-			devices: w.value.filter((t) => N(t) === e).sort(z)
-		})).filter((e) => e.devices.length || l.value !== "all")), E = Q(() => T.value.find((e) => e.room === d.value) || null), D = Q(() => x.value.find((e) => String(e.address || "") === u.value) || null), O = Q(() => x.value.filter((e) => F(e.last_seen_ts) <= 15).length), k = Q(() => x.value.filter((e) => String(e.advertised_name || "").trim()).length), A = Q(() => S.value.filter((e) => F(e.last_seen_ts) <= 15).length), j = Q(() => Object.values(m.value).filter((e) => f.value - e.at <= 120).sort((e, t) => t.at - e.at).slice(0, 8)), M = Q(() => ({
+			devices: ee.value.filter((t) => t.home_state !== "away" && se(t) === e).sort(pe)
+		})).filter((e) => e.devices.length || p.value !== "all")), ne = Q(() => te.value.find((e) => e.room === h.value) || null), L = Q(() => E.value.find((e) => oe(e) === m.value) || null), R = Q(() => i.value.diagnostics || {}), z = Q(() => a.value.settings || i.value.settings || {}), re = Q(() => a.value.capabilities || {}), ie = Q(() => ({
 			connecting: "Connecting",
 			live: "Live",
 			reconnecting: "Reconnecting",
 			unsupported: "Polling"
-		})[s.value]);
-		function N(e) {
-			return String(e.strongest_room || "Unknown").trim() || "Unknown";
+		})[l.value]);
+		function ae() {
+			return {
+				id: "",
+				configured: !1,
+				address: "",
+				name: "",
+				owner: "",
+				category: "device",
+				track: !0,
+				referencePower: "",
+				maxRadius: "",
+				homeTimeout: "",
+				ibeaconId: "",
+				irk: "",
+				identities: []
+			};
 		}
-		function P(e) {
+		function oe(e) {
+			return String(e.presence_id || e.id || e.address || "");
+		}
+		function se(e) {
+			return String(e.location_room || e.location || e.strongest_room || "Unknown").trim() || "Unknown";
+		}
+		function ce(e) {
 			return String(e.display_name || e.advertised_name || `BLE ${String(e.address || "").slice(-8).toUpperCase()}`);
 		}
-		function F(e) {
+		function le(e) {
 			let t = Number(e || 0);
-			return t > 0 ? Math.max(0, f.value - t) : Infinity;
+			return t > 0 ? Math.max(0, _.value - t) : Infinity;
 		}
-		function I(e) {
-			let t = F(e);
-			return Number.isFinite(t) ? t < 2 ? "now" : t < 60 ? `${Math.floor(t)}s ago` : t < 3600 ? `${Math.floor(t / 60)}m ago` : `${Math.floor(t / 3600)}h ago` : "never";
+		function ue(e) {
+			let t = le(e);
+			return Number.isFinite(t) ? t < 2 ? "now" : t < 60 ? `${Math.floor(t)}s ago` : t < 3600 ? `${Math.floor(t / 60)}m ago` : t < 86400 ? `${Math.floor(t / 3600)}h ago` : `${Math.floor(t / 86400)}d ago` : "never";
 		}
-		function ee(e) {
+		function de(e) {
+			let t = Number(e);
+			return !Number.isFinite(t) || t <= 0 || t >= 999 ? "Distance unavailable" : t < 1 ? `${Math.round(t * 100)} cm away` : `~${t < 10 ? t.toFixed(1) : Math.round(t)} m away`;
+		}
+		function fe(e) {
 			let t = Number(e ?? -127);
 			return t >= -55 ? 4 : t >= -67 ? 3 : t >= -78 ? 2 : 1;
 		}
-		function te(e) {
-			let t = String(e.address || "");
-			return _.get(t) ?? g.get(t) ?? Number(e.strongest_rssi ?? -127);
+		function pe(e, t) {
+			let n = Number(e.distance_m ?? 999), r = Number(t.distance_m ?? 999);
+			return Math.abs(n - r) >= .35 ? n - r : ce(e).localeCompare(ce(t));
 		}
-		function ne(e) {
-			return Math.round(te(e) / 6) * 6;
+		function me(e, t) {
+			return ce(e).localeCompare(ce(t), void 0, {
+				numeric: !0,
+				sensitivity: "base"
+			}) || oe(e).localeCompare(oe(t), void 0, {
+				numeric: !0,
+				sensitivity: "base"
+			});
 		}
-		function L(e) {
-			let t = te(e);
-			return t >= -55 ? 3 : t >= -67 ? 2 : +(t >= -78);
-		}
-		function R(e) {
-			let t = L(e);
-			return t === 3 ? "Very close" : t === 2 ? "Close" : t === 1 ? "Nearby" : "Farther away";
-		}
-		function z(e, t) {
-			return L(t) - L(e) || ne(t) - ne(e) || P(e).localeCompare(P(t)) || String(e.address || "").localeCompare(String(t.address || ""));
-		}
-		function re(e) {
+		function he(e) {
 			return e === "Unknown" ? "?" : e.split(/\s+/).map((e) => e[0] || "").join("").slice(0, 2).toUpperCase();
 		}
-		function ie(e) {
-			return e.slice(0, gz);
+		function ge(e) {
+			let t = String(e.category || "").toLowerCase();
+			return t.includes("phone") ? "▯" : t.includes("watch") ? "◉" : t.includes("person") ? "●" : t.includes("pet") ? "◆" : e.ibeacon || t.includes("beacon") ? "⌁" : "•";
 		}
-		function ae(e) {
-			let t = m.value[String(e.address || "")];
-			return !!(t && f.value - t.at <= 4);
+		function _e(e) {
+			return e.type === "arrived_home" ? "↘" : e.type === "left_home" ? "↗" : "→";
 		}
-		function oe(e, t = !1) {
-			let n = String(e.address || "");
-			u.value = u.value === n ? "" : n, t && (d.value = "");
+		function ve(e) {
+			return e.type === "arrived_home" ? `Arrived home${e.room ? ` · ${e.room}` : ""}` : e.type === "left_home" ? "Left home" : `${e.from || "Unknown"} → ${e.to || e.room || "Unknown"}`;
 		}
-		function se(e) {
-			let t = Array.isArray(e.devices) ? e.devices : [], n = { ...m.value }, r = /* @__PURE__ */ new Set();
-			t.forEach((e) => {
-				let t = String(e.address || ""), i = N(e), a = h.get(t), o = Number(e.strongest_rssi ?? -127);
-				if (t) {
-					r.add(t);
-					let e = g.get(t), n = e === void 0 ? o : e * .75 + o * .25;
-					g.set(t, n);
-					let s = _.get(t);
-					(s === void 0 || a !== i || Math.abs(n - s) >= _z) && _.set(t, n);
-				}
-				t && a && a !== i && (n[t] = {
-					address: t,
-					name: P(e),
-					from: a,
-					to: i,
-					at: Date.now() / 1e3
-				}), t && h.set(t, i);
-			});
-			for (let e of g.keys()) r.has(e) || (g.delete(e), _.delete(e));
-			m.value = n, i.value = e, p.value = Date.now() / 1e3, a.value = !1, o.value = "";
+		function ye(e) {
+			let t = Array.isArray(e.identities) ? e.identities : [];
+			return t.length ? t.map((e) => String(e.type || "BLE").toUpperCase()).join(" + ") : String(e.address || "Unidentified BLE device");
 		}
-		function ce(e) {
+		function be(e) {
+			i.value = e;
+			let t = { ...x.value };
+			(Array.isArray(e.sources) ? e.sources : []).forEach((e) => {
+				let n = String(e.selector || "");
+				n && t[n] === void 0 && (t[n] = String(e.rssi_offset_db ?? 0));
+			}), x.value = t, v.value = Date.now() / 1e3, o.value = !1, c.value = "", m.value && !E.value.some((e) => oe(e) === m.value) && (m.value = "");
+		}
+		function xe(e) {
 			let t = new URL(e, window.location.href);
-			return t.searchParams.set("limit", "500"), t.searchParams.set("max_age_s", "60"), t.searchParams.set("include_observations", "false"), t.toString();
+			return t.searchParams.set("limit", "500"), t.searchParams.set("max_age_s", "60"), t.searchParams.set("include_observations", "false"), t.searchParams.set("history_limit", "100"), t.toString();
 		}
-		async function le(e = !1) {
-			e || (a.value = !0);
+		async function H(e = !1) {
+			e || (o.value = !0);
 			try {
-				se(await As(ce(n.snapshotEndpoint)));
+				be(await As(xe(n.snapshotEndpoint)));
 			} catch (e) {
-				o.value = e instanceof Error ? e.message : "Presence data could not be loaded.", a.value = !1;
+				c.value = e instanceof Error ? e.message : "Presence data could not be loaded.", o.value = !1;
 			}
 		}
-		function ue() {
-			v?.close(), v = null;
-		}
-		function de() {
-			if (ue(), typeof window.EventSource != "function") {
-				s.value = "unsupported";
-				return;
+		async function Se() {
+			try {
+				let e = await As(T.value);
+				a.value = e, b.value = { ...e.settings || {} };
+				let t = {};
+				Object.entries(e.scanners || {}).forEach(([e, n]) => {
+					t[e] = String(n?.rssi_offset_db ?? 0);
+				}), D.value.forEach((e) => {
+					let n = String(e.selector || "");
+					n && t[n] === void 0 && (t[n] = String(e.rssi_offset_db ?? 0));
+				}), x.value = t;
+			} catch (e) {
+				c.value = e instanceof Error ? e.message : "Presence configuration could not be loaded.";
 			}
-			s.value = "connecting";
-			let e = new EventSource(ce(n.eventsEndpoint));
-			v = e, e.onopen = () => {
-				s.value = "live";
-			}, e.addEventListener("presence.snapshot", (e) => {
-				try {
-					se(JSON.parse(e.data)), s.value = "live";
-				} catch {
-					o.value = "A live presence update could not be read.";
-				}
-			}), e.onerror = () => {
-				s.value = "reconnecting";
-			};
 		}
-		async function fe(e, t) {
+		async function Ce(e, t = {}) {
+			s.value = !0;
+			try {
+				return a.value = await js(T.value, {
+					action: e,
+					payload: t
+				}), b.value = { ...a.value.settings || {} }, await H(!0), r("notify", "Tater Presence updated.", "success"), !0;
+			} catch (e) {
+				return r("notify", e instanceof Error ? e.message : "Presence update failed.", "error"), !1;
+			} finally {
+				s.value = !1;
+			}
+		}
+		function we(e, t = !1) {
+			let n = oe(e);
+			m.value = m.value === n ? "" : n, t && (h.value = "");
+		}
+		function Te(e) {
+			let t = Array.isArray(e.identities) ? e.identities.map((e) => ({ ...e })) : [], n = t.find((e) => e.type === "ibeacon");
+			y.value = {
+				id: oe(e),
+				configured: !!e.configured,
+				address: String(e.address || ""),
+				name: ce(e),
+				owner: String(e.owner || ""),
+				category: String(e.category || "device"),
+				track: !e.configured || !!e.tracked,
+				referencePower: e.configured && e.reference_power_override != null ? String(e.reference_power_override) : "",
+				maxRadius: e.configured && e.max_radius_m_override != null ? String(e.max_radius_m_override) : "",
+				homeTimeout: e.configured && e.home_timeout_s_override != null ? String(e.home_timeout_s_override) : "",
+				ibeaconId: String(n?.value || e.ibeacon?.id || ""),
+				irk: "",
+				identities: t
+			}, g.value = !0;
+		}
+		async function Ee() {
+			let e = y.value, t = e.identities.filter((t) => t.type !== "ibeacon" || !e.ibeaconId.trim()).map((e) => ({
+				type: e.type,
+				value: e.value,
+				fingerprint: e.fingerprint
+			}));
+			e.ibeaconId.trim() && t.push({
+				type: "ibeacon",
+				value: e.ibeaconId.trim()
+			}), e.irk.trim() && t.push({
+				type: "irk",
+				value: e.irk.trim()
+			}), !t.some((e) => e.type === "address") && e.address && t.push({
+				type: "address",
+				value: e.address
+			}), await Ce("upsert_device", {
+				id: e.id,
+				address: e.address,
+				name: e.name,
+				owner: e.owner,
+				category: e.category,
+				track: e.track,
+				reference_power: e.referencePower === "" ? null : Number(e.referencePower),
+				max_radius_m: e.maxRadius === "" ? null : Number(e.maxRadius),
+				home_timeout_s: e.homeTimeout === "" ? null : Number(e.homeTimeout),
+				identities: t
+			}) && (g.value = !1, m.value = e.id);
+		}
+		async function De() {
+			y.value.id && await Ce("remove_device", { id: y.value.id }) && (g.value = !1, m.value = "");
+		}
+		async function Oe() {
+			await Ce("save_settings", {
+				reference_power: Number(b.value.reference_power),
+				attenuation: Number(b.value.attenuation),
+				home_timeout_s: Number(b.value.home_timeout_s),
+				max_home_radius_m: Number(b.value.max_home_radius_m),
+				max_room_radius_m: Number(b.value.max_room_radius_m),
+				history_days: Number(b.value.history_days)
+			});
+		}
+		async function ke(e) {
+			await Ce("save_scanner", {
+				selector: e,
+				rssi_offset_db: Number(x.value[e] || 0)
+			});
+		}
+		async function Ae(e, t) {
 			try {
 				await navigator.clipboard.writeText(new URL(e, window.location.href).toString()), r("notify", `${t} endpoint copied.`, "success");
 			} catch {
 				r("notify", `Could not copy the ${t.toLowerCase()} endpoint.`, "error");
 			}
 		}
-		function pe() {
-			document.visibilityState === "visible" && (le(!0), v || de());
+		function je() {
+			S?.close(), S = null;
+		}
+		function Me() {
+			if (je(), typeof window.EventSource != "function") {
+				l.value = "unsupported";
+				return;
+			}
+			l.value = "connecting";
+			let e = new EventSource(xe(n.eventsEndpoint));
+			S = e, e.onopen = () => {
+				l.value = "live";
+			}, e.addEventListener("presence.snapshot", (e) => {
+				try {
+					be(JSON.parse(e.data)), l.value = "live";
+				} catch {
+					c.value = "A live presence update could not be read.";
+				}
+			}), e.addEventListener("presence.event", () => {
+				H(!0);
+			}), e.onerror = () => {
+				l.value = "reconnecting";
+			};
+		}
+		function Ne() {
+			document.visibilityState === "visible" && (H(!0), S || Me());
 		}
 		return Er(() => {
-			le(), de(), y = window.setInterval(() => {
-				document.visibilityState === "visible" && s.value !== "live" && le(!0);
-			}, 5e3), b = window.setInterval(() => {
-				f.value = Date.now() / 1e3;
-			}, 1e3), document.addEventListener("visibilitychange", pe);
+			Promise.all([H(), Se()]), Me(), C = window.setInterval(() => {
+				document.visibilityState === "visible" && l.value !== "live" && H(!0);
+			}, 5e3), w = window.setInterval(() => {
+				_.value = Date.now() / 1e3;
+			}, 1e3), document.addEventListener("visibilitychange", Ne);
 		}), kr(() => {
-			ue(), window.clearInterval(y), window.clearInterval(b), document.removeEventListener("visibilitychange", pe);
+			je(), window.clearInterval(C), window.clearInterval(w), document.removeEventListener("visibilitychange", Ne);
 		}), (t, n) => (q(), J("section", IR, [
 			Y("section", LR, [
-				n[9] ||= Y("div", {
+				n[31] ||= Y("div", {
 					class: "tvoice-presence-radar",
 					"aria-hidden": "true"
 				}, [
@@ -19354,239 +19515,515 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					Y("i"),
 					Y("span")
 				], -1),
-				n[10] ||= Y("div", { class: "tvoice-presence-copy" }, [
-					Y("span", { class: "tv-eyebrow" }, "Whole-home Bluetooth presence"),
-					Y("h3", null, "See devices move through your rooms"),
-					Y("p", null, "Every native satellite contributes passive BLE observations. Tater compares signal and freshness, then updates the strongest room live.")
+				n[32] ||= Y("div", { class: "tvoice-presence-copy" }, [
+					Y("span", { class: "tv-eyebrow" }, "Tater Presence Intelligence"),
+					Y("h3", null, "Know what is home—and which room it is in"),
+					Y("p", null, "Native satellites resolve stable BLE identities, calibrated distance, room movement, and home or away state locally inside Tater.")
 				], -1),
-				Y("div", { class: B(["tvoice-presence-live", `state-${s.value}`]) }, [n[8] ||= Y("i", null, null, -1), Y("span", null, [Y("strong", null, V(M.value), 1), Y("small", null, V(p.value ? `Updated ${I(p.value)}` : "Waiting for data"), 1)])], 2)
+				Y("div", { class: B(["tvoice-presence-live", `state-${l.value}`]) }, [n[30] ||= Y("i", null, null, -1), Y("span", null, [Y("strong", null, V(ie.value), 1), Y("small", null, V(v.value ? `Updated ${ue(v.value)}` : "Waiting for data"), 1)])], 2)
 			]),
-			Y("div", RR, [
-				Y("article", null, [
-					n[11] ||= Y("span", null, "Present now", -1),
-					Y("strong", null, V(O.value), 1),
-					n[12] ||= Y("small", null, "seen in 15 seconds", -1)
+			Y("nav", RR, [(q(), J(K, null, G([
+				["locations", "Locations"],
+				["devices", "Tracked devices"],
+				["history", "History"],
+				["calibration", "Calibration"]
+			], (e) => Y("button", {
+				key: e[0],
+				type: "button",
+				class: B({ active: u.value === e[0] }),
+				onClick: (t) => u.value = e[0]
+			}, V(e[1]), 11, zR)), 64))]),
+			Y("div", BR, [
+				Y("article", VR, [
+					n[33] ||= Y("span", null, "Home", -1),
+					Y("strong", null, V(M.value), 1),
+					n[34] ||= Y("small", null, "tracked devices", -1)
+				]),
+				Y("article", HR, [
+					n[35] ||= Y("span", null, "Away", -1),
+					Y("strong", null, V(N.value), 1),
+					n[36] ||= Y("small", null, "tracked devices", -1)
 				]),
 				Y("article", null, [
-					n[13] ||= Y("span", null, "Detected", -1),
-					Y("strong", null, V(x.value.length), 1),
-					n[14] ||= Y("small", null, "within one minute", -1)
+					n[37] ||= Y("span", null, "Nearby", -1),
+					Y("strong", null, V(F.value), 1),
+					n[38] ||= Y("small", null, "seen in 15 seconds", -1)
 				]),
 				Y("article", null, [
-					n[15] ||= Y("span", null, "Rooms", -1),
-					Y("strong", null, V(C.value.length), 1),
-					n[16] ||= Y("small", null, "reporting locations", -1)
+					n[39] ||= Y("span", null, "Rooms", -1),
+					Y("strong", null, V(I.value.length), 1),
+					n[40] ||= Y("small", null, "with live coverage", -1)
 				]),
 				Y("article", null, [
-					n[17] ||= Y("span", null, "Scanners", -1),
-					Y("strong", null, V(A.value) + "/" + V(S.value.length), 1),
-					n[18] ||= Y("small", null, "satellites online", -1)
-				]),
-				Y("article", null, [
-					n[19] ||= Y("span", null, "Named", -1),
-					Y("strong", null, V(k.value), 1),
-					n[20] ||= Y("small", null, "advertised names", -1)
+					n[41] ||= Y("span", null, "Scanners", -1),
+					Y("strong", null, V(P.value) + "/" + V(D.value.length), 1),
+					n[42] ||= Y("small", null, "satellites reporting", -1)
 				])
 			]),
-			o.value ? (q(), J("div", zR, V(o.value), 1)) : Z("", !0),
-			a.value ? (q(), J("div", BR, "Listening for nearby Bluetooth devices…")) : (q(), J("section", VR, [Y("header", HR, [n[24] ||= Y("div", null, [
-				Y("span", { class: "tv-eyebrow" }, "Live room map"),
-				Y("h3", null, "Where devices are strongest right now"),
-				Y("p", null, "Devices are ordered closest first using a steadied signal, so stationary devices stay put while movement remains visible.")
-			], -1), Y("div", UR, [Y("label", null, [n[21] ||= Y("span", null, "Search", -1), W(Y("input", {
-				"onUpdate:modelValue": n[0] ||= (e) => c.value = e,
+			c.value ? (q(), J("div", UR, V(c.value), 1)) : Z("", !0),
+			o.value ? (q(), J("div", WR, "Building the live Tater presence map…")) : u.value === "locations" ? (q(), J(K, { key: 2 }, [Y("section", GR, [Y("header", KR, [n[46] ||= Y("div", null, [
+				Y("span", { class: "tv-eyebrow" }, "Live location view"),
+				Y("h3", null, "Room-by-room location"),
+				Y("p", null, "Estimated distance is calibrated per device and satellite. Tater waits for sustained movement before changing rooms.")
+			], -1), Y("div", qR, [Y("label", null, [n[43] ||= Y("span", null, "Search", -1), W(Y("input", {
+				"onUpdate:modelValue": n[0] ||= (e) => d.value = e,
 				type: "search",
-				placeholder: "Name or BLE address"
-			}, null, 512), [[$, c.value]])]), Y("label", null, [n[23] ||= Y("span", null, "Room", -1), W(Y("select", { "onUpdate:modelValue": n[1] ||= (e) => l.value = e }, [n[22] ||= Y("option", { value: "all" }, "All rooms", -1), (q(!0), J(K, null, G(C.value, (e) => (q(), J("option", {
+				placeholder: "Device, owner, or address"
+			}, null, 512), [[$, d.value]])]), Y("label", null, [n[45] ||= Y("span", null, "Room", -1), W(Y("select", { "onUpdate:modelValue": n[1] ||= (e) => p.value = e }, [n[44] ||= Y("option", { value: "all" }, "All rooms", -1), (q(!0), J(K, null, G(I.value, (e) => (q(), J("option", {
 				key: e,
 				value: e
-			}, V(e), 9, WR))), 128))], 512), [[ds, l.value]])])])]), T.value.length ? (q(), J("div", GR, [(q(!0), J(K, null, G(T.value, (e) => (q(), J("article", {
+			}, V(e), 9, JR))), 128))], 512), [[ds, p.value]])])])]), te.value.length ? (q(), J("div", YR, [(q(!0), J(K, null, G(te.value, (e) => (q(), J("article", {
 				key: e.room,
-				class: B(["tvoice-presence-room", { unknown: e.room === "Unknown" }])
+				class: B(["tvoice-presence-room tpresence-room", { unknown: e.room === "Unknown" }])
 			}, [
 				Y("header", null, [
-					Y("span", null, V(re(e.room)), 1),
-					Y("div", null, [Y("strong", null, V(e.room), 1), Y("small", null, V(e.devices.length) + " device" + V(e.devices.length === 1 ? "" : "s") + " · closest first", 1)]),
-					n[25] ||= Y("i", null, null, -1)
+					Y("span", null, V(he(e.room)), 1),
+					Y("div", null, [Y("strong", null, V(e.room), 1), Y("small", null, V(e.devices.length) + " located · nearest first", 1)]),
+					n[47] ||= Y("i", null, null, -1)
 				]),
-				Y("div", KR, [(q(!0), J(K, null, G(ie(e.devices), (e) => (q(), J("button", {
-					key: String(e.address),
+				Y("div", XR, [(q(!0), J(K, null, G(e.devices.slice(0, Qz), (e) => (q(), J("button", {
+					key: oe(e),
 					type: "button",
 					class: B({
-						selected: u.value === e.address,
+						selected: m.value === oe(e),
 						stale: !e.present,
-						moved: ae(e)
+						tracked: e.tracked
 					}),
-					onClick: (t) => oe(e)
+					onClick: (t) => we(e)
 				}, [
-					Y("span", JR, [Y("i", { class: B(`signal-${e.signal || "weak"}`) }, null, 2)]),
-					Y("span", YR, [Y("strong", null, V(P(e)), 1), Y("small", null, V(R(e)) + " · " + V(e.address) + " · " + V(I(e.last_seen_ts)), 1)]),
+					Y("span", QR, V(ge(e)), 1),
+					Y("span", $R, [Y("strong", null, V(ce(e)), 1), Y("small", null, [Y("b", null, V(de(e.distance_m)), 1), X(" · " + V(e.owner || ye(e)), 1)])]),
 					Y("span", {
 						class: "tvoice-presence-signal",
 						title: `${e.strongest_rssi} dBm`
 					}, [(q(), J(K, null, G(4, (t) => Y("i", {
 						key: t,
-						class: B({ active: t <= ee(e.strongest_rssi) })
-					}, null, 2)), 64)), Y("b", null, V(e.strongest_rssi), 1)], 8, XR)
-				], 10, qR))), 128))]),
-				e.devices.length > gz ? (q(), J("button", {
+						class: B({ active: t <= fe(e.strongest_rssi) })
+					}, null, 2)), 64)), Y("b", null, V(e.strongest_rssi), 1)], 8, ez)
+				], 10, ZR))), 128))]),
+				e.devices.length > Qz ? (q(), J("button", {
 					key: 0,
 					class: "tvoice-presence-room-more",
 					type: "button",
-					onClick: (t) => d.value = e.room
+					onClick: (t) => h.value = e.room
 				}, [
-					Y("span", null, "View all " + V(e.devices.length) + " devices", 1),
-					Y("small", null, "+" + V(e.devices.length - gz) + " more", 1),
-					n[26] ||= Y("b", null, "→", -1)
-				], 8, ZR)) : Z("", !0)
-			], 2))), 128))])) : (q(), J("div", QR, "No devices match this view yet. Nearby devices appear automatically as satellites hear them."))])),
+					Y("span", null, "View all " + V(e.devices.length), 1),
+					Y("small", null, "+" + V(e.devices.length - Qz) + " more", 1),
+					n[48] ||= Y("b", null, "→", -1)
+				], 8, tz)) : Z("", !0)
+			], 2))), 128))])) : (q(), J("div", nz, "No devices match this view yet. Nearby devices appear automatically as satellites hear them."))]), L.value ? (q(), J("section", rz, [
+				Y("header", null, [Y("div", null, [
+					n[49] ||= Y("span", { class: "tv-eyebrow" }, "Current location", -1),
+					Y("h3", null, V(ce(L.value)), 1),
+					Y("p", null, V(L.value.owner || ye(L.value)) + " · " + V(L.value.address || "private identity"), 1)
+				]), Y("div", iz, [Y("button", {
+					class: "tv-button",
+					type: "button",
+					onClick: n[2] ||= (e) => Te(L.value)
+				}, V(L.value.configured ? "Edit tracker" : "Name & track"), 1), Y("button", {
+					class: "tv-button",
+					type: "button",
+					onClick: n[3] ||= (e) => m.value = ""
+				}, "Close")])]),
+				Y("div", { class: B(["tpresence-location-callout", String(L.value.home_state || "nearby")]) }, [
+					Y("span", null, V(he(se(L.value))), 1),
+					Y("div", null, [
+						Y("small", null, V(L.value.home_state === "away" ? "Last known location" : "Located in"), 1),
+						Y("strong", null, V(se(L.value)), 1),
+						Y("p", null, V(de(L.value.distance_m)) + " from " + V(L.value.strongest_selector || "the nearest satellite"), 1)
+					]),
+					Y("b", null, V(L.value.home_state === "away" ? "Away" : L.value.confidence || "Live"), 1)
+				], 2),
+				Y("div", az, [
+					Y("div", null, [
+						n[50] ||= Y("span", null, "Home state", -1),
+						Y("strong", null, V(L.value.home_state || "nearby"), 1),
+						Y("small", null, "changed " + V(ue(L.value.state_changed_ts)), 1)
+					]),
+					Y("div", null, [
+						n[51] ||= Y("span", null, "Estimated distance", -1),
+						Y("strong", null, V(de(L.value.distance_m)), 1),
+						Y("small", null, "RSSI " + V(L.value.calibrated_rssi ?? L.value.strongest_rssi) + " dBm calibrated", 1)
+					]),
+					Y("div", null, [
+						n[52] ||= Y("span", null, "Last seen", -1),
+						Y("strong", null, V(ue(L.value.last_seen_ts)), 1),
+						Y("small", null, V(L.value.present ? "present now" : "not currently advertising"), 1)
+					]),
+					Y("div", null, [
+						n[53] ||= Y("span", null, "Identity", -1),
+						Y("strong", null, V(ye(L.value)), 1),
+						Y("small", null, V((L.value.addresses || []).length || 1) + " observed address" + V((L.value.addresses || []).length === 1 ? "" : "es"), 1)
+					])
+				]),
+				Y("div", oz, [(q(!0), J(K, null, G(L.value.sources || [], (e) => (q(), J("article", { key: String(e.selector) }, [
+					Y("span", null, V(he(e.room || "Unknown")), 1),
+					Y("div", null, [Y("strong", null, V(e.room || e.device_name || "Unknown room"), 1), Y("small", null, V(de(e.distance_m)) + " · offset " + V(Number(e.rssi_offset_db || 0) >= 0 ? "+" : "") + V(e.rssi_offset_db || 0) + " dB", 1)]),
+					Y("b", null, V(e.calibrated_rssi ?? e.rssi) + " dBm", 1)
+				]))), 128))])
+			])) : Z("", !0)], 64)) : u.value === "devices" ? (q(), J("section", sz, [
+				Y("header", null, [n[54] ||= Y("div", null, [
+					Y("span", { class: "tv-eyebrow" }, "Stable identity registry"),
+					Y("h3", null, "Tracked devices"),
+					Y("p", null, "This registry stays alphabetized while live room and distance changes remain in Locations.")
+				], -1), Y("span", null, V(k.value.length) + " tracking", 1)]),
+				A.value.length ? (q(), J("div", cz, [(q(!0), J(K, null, G(A.value, (e) => (q(), J("button", {
+					key: oe(e),
+					type: "button",
+					class: B(["configured", { away: e.home_state === "away" }]),
+					onClick: (t) => Te(e)
+				}, [
+					Y("span", uz, V(ge(e)), 1),
+					Y("span", null, [Y("strong", null, V(ce(e)), 1), Y("small", null, V(ye(e)) + " · " + V(e.owner || "No owner"), 1)]),
+					Y("b", null, V(e.tracked ? e.home_state === "away" ? "Away" : se(e) : "Paused"), 1),
+					n[55] ||= Y("i", null, "Edit", -1)
+				], 10, lz))), 128))])) : (q(), J("div", dz, "No devices are tracked yet. Add one from the nearby-device list below.")),
+				Y("details", fz, [Y("summary", null, [n[56] ||= Y("span", null, [Y("strong", null, "Add a nearby device"), Y("small", null, "Unassigned devices stay in a stable identity order—not live distance order.")], -1), Y("b", null, V(j.value.length) + " available", 1)]), Y("div", pz, [Y("label", mz, [n[57] ||= Y("span", null, "Find a device", -1), W(Y("input", {
+					"onUpdate:modelValue": n[4] ||= (e) => f.value = e,
+					type: "search",
+					placeholder: "Name or BLE address"
+				}, null, 512), [[$, f.value]])]), j.value.length ? (q(), J("div", hz, [(q(!0), J(K, null, G(j.value, (e) => (q(), J("button", {
+					key: oe(e),
+					type: "button",
+					onClick: (t) => Te(e)
+				}, [
+					Y("span", _z, V(ge(e)), 1),
+					Y("span", null, [Y("strong", null, V(ce(e)), 1), Y("small", null, V(ye(e)), 1)]),
+					n[58] ||= Y("b", null, "Track", -1)
+				], 8, gz))), 128))])) : (q(), J("div", vz, V(f.value ? "No nearby devices match that search." : "No unassigned BLE devices are nearby."), 1))])])
+			])) : u.value === "history" ? (q(), J("section", yz, [Y("header", null, [Y("div", null, [
+				n[59] ||= Y("span", { class: "tv-eyebrow" }, "Persistent movement history", -1),
+				n[60] ||= Y("h3", null, "Arrivals, departures, and room changes", -1),
+				Y("p", null, "History stays in Tater for " + V(z.value.history_days || 30) + " days and is available to Cores, Verbas, and native automations.", 1)
+			]), O.value.length ? (q(), J("button", {
+				key: 0,
+				class: "tv-button",
+				type: "button",
+				disabled: s.value,
+				onClick: n[5] ||= (e) => Ce("clear_history")
+			}, "Clear history", 8, bz)) : Z("", !0)]), O.value.length ? (q(), J("div", xz, [(q(!0), J(K, null, G(O.value, (e) => (q(), J("article", { key: String(e.id) }, [
+				Y("span", null, V(_e(e)), 1),
+				Y("div", null, [
+					Y("strong", null, V(e.name || e.device_id), 1),
+					Y("p", null, V(ve(e)), 1),
+					Y("small", null, [e.distance_m ? (q(), J(K, { key: 0 }, [X(V(de(e.distance_m)) + " · ", 1)], 64)) : Z("", !0), X(V(e.confidence || "recorded") + " confidence", 1)])
+				]),
+				Y("time", null, V(ue(e.at)), 1)
+			]))), 128))])) : (q(), J("div", Sz, "Track a device to begin recording room movement and home or away changes."))])) : (q(), J("div", Cz, [Y("section", wz, [
+				n[74] ||= Y("header", null, [Y("div", null, [
+					Y("span", { class: "tv-eyebrow" }, "Distance model"),
+					Y("h3", null, "Whole-home calibration"),
+					Y("p", null, "These defaults convert steadied RSSI into an estimated distance. Device-specific values can override them.")
+				]), Y("span", null, "Local only")], -1),
+				Y("div", Tz, [
+					Y("label", null, [
+						n[61] ||= Y("span", null, "RSSI at one metre", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[6] ||= (e) => b.value.reference_power = e,
+							type: "number",
+							min: "-100",
+							max: "-20",
+							step: "1"
+						}, null, 512), [[$, b.value.reference_power]]),
+						n[62] ||= Y("small", null, "Place a reference beacon exactly 1 m from a satellite.", -1)
+					]),
+					Y("label", null, [
+						n[63] ||= Y("span", null, "Environmental attenuation", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[7] ||= (e) => b.value.attenuation = e,
+							type: "number",
+							min: "1",
+							max: "6",
+							step: "0.1"
+						}, null, 512), [[$, b.value.attenuation]]),
+						n[64] ||= Y("small", null, "Typical indoor values are 2.2–3.5.", -1)
+					]),
+					Y("label", null, [
+						n[65] ||= Y("span", null, "Room radius", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[8] ||= (e) => b.value.max_room_radius_m = e,
+							type: "number",
+							min: "1",
+							max: "100",
+							step: "1"
+						}, null, 512), [[$, b.value.max_room_radius_m]]),
+						n[66] ||= Y("small", null, "Signals beyond this show as Unknown.", -1)
+					]),
+					Y("label", null, [
+						n[67] ||= Y("span", null, "Home radius", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[9] ||= (e) => b.value.max_home_radius_m = e,
+							type: "number",
+							min: "1",
+							max: "250",
+							step: "1"
+						}, null, 512), [[$, b.value.max_home_radius_m]]),
+						n[68] ||= Y("small", null, "Maximum distance still considered home.", -1)
+					]),
+					Y("label", null, [
+						n[69] ||= Y("span", null, "Away timeout", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[10] ||= (e) => b.value.home_timeout_s = e,
+							type: "number",
+							min: "15",
+							max: "3600",
+							step: "15"
+						}, null, 512), [[$, b.value.home_timeout_s]]),
+						n[70] ||= Y("small", null, "Seconds without a trustworthy observation.", -1)
+					]),
+					Y("label", null, [
+						n[71] ||= Y("span", null, "History retention", -1),
+						W(Y("input", {
+							"onUpdate:modelValue": n[11] ||= (e) => b.value.history_days = e,
+							type: "number",
+							min: "1",
+							max: "365",
+							step: "1"
+						}, null, 512), [[$, b.value.history_days]]),
+						n[72] ||= Y("small", null, "Days of arrival and movement events.", -1)
+					])
+				]),
+				Y("footer", null, [n[73] ||= Y("span", null, "Distance is an estimate; walls, people, and antenna orientation affect BLE RSSI.", -1), Y("button", {
+					class: "tv-button primary",
+					type: "button",
+					disabled: s.value,
+					onClick: Oe
+				}, V(s.value ? "Saving…" : "Save model"), 9, Ez)])
+			]), Y("section", Dz, [Y("header", null, [n[75] ||= Y("div", null, [
+				Y("span", { class: "tv-eyebrow" }, "Receiver normalization"),
+				Y("h3", null, "Satellite RSSI offsets"),
+				Y("p", null, "Use offsets when one satellite consistently appears stronger or weaker than the others at the same physical distance.")
+			], -1), Y("span", null, V(R.value.calibrated_scanners || 0) + " calibrated", 1)]), D.value.length ? (q(), J("div", Oz, [(q(!0), J(K, null, G(D.value, (e) => (q(), J("article", {
+				key: String(e.selector),
+				class: B({ offline: le(e.last_seen_ts) > 15 })
+			}, [
+				n[77] ||= Y("i", null, null, -1),
+				Y("span", null, [Y("strong", null, V(e.room || e.device_name || e.selector), 1), Y("small", null, V(e.board || e.selector) + " · " + V(ue(e.last_seen_ts)), 1)]),
+				Y("label", null, [W(Y("input", {
+					"onUpdate:modelValue": (t) => x.value[String(e.selector)] = t,
+					type: "number",
+					min: "-40",
+					max: "40",
+					step: "0.5"
+				}, null, 8, kz), [[$, x.value[String(e.selector)]]]), n[76] ||= Y("small", null, "dB", -1)]),
+				Y("button", {
+					class: "tv-button",
+					type: "button",
+					disabled: s.value,
+					onClick: (t) => ke(String(e.selector))
+				}, "Save", 8, Az)
+			], 2))), 128))])) : (q(), J("div", jz, "Satellite calibration appears after a native scanner reports in."))])])),
+			Y("div", Mz, [Y("section", Nz, [
+				n[82] ||= Y("header", null, [Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Tater-native API"), Y("h3", null, "Use location anywhere in Tater")]), Y("span", null, "REST + SSE")], -1),
+				n[83] ||= Y("p", null, "Cores, Verbas, integrations, and automations can read current locations or listen continuously for movement events—without Home Assistant.", -1),
+				Y("button", {
+					type: "button",
+					onClick: n[12] ||= (t) => Ae(e.snapshotEndpoint, "Snapshot API")
+				}, [
+					n[78] ||= Y("span", null, "Locations", -1),
+					Y("code", null, V(e.snapshotEndpoint), 1),
+					n[79] ||= Y("b", null, "Copy", -1)
+				]),
+				Y("button", {
+					type: "button",
+					onClick: n[13] ||= (t) => Ae(e.eventsEndpoint, "Live stream")
+				}, [
+					n[80] ||= Y("span", null, "Live events", -1),
+					Y("code", null, V(e.eventsEndpoint), 1),
+					n[81] ||= Y("b", null, "Copy", -1)
+				])
+			]), Y("section", Pz, [Y("header", null, [n[84] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "System health"), Y("h3", null, "Presence diagnostics")], -1), Y("span", null, V(re.value.irk ? "Full identity" : "BLE identity"), 1)]), Y("div", null, [
+				Y("article", null, [
+					n[85] ||= Y("span", null, "Identity registry", -1),
+					Y("strong", null, V(R.value.identity_registry || 0), 1),
+					n[86] ||= Y("small", null, "named devices", -1)
+				]),
+				Y("article", null, [
+					n[87] ||= Y("span", null, "Private identities", -1),
+					Y("strong", null, V(R.value.irk_identities || 0), 1),
+					n[88] ||= Y("small", null, "IRKs stored privately", -1)
+				]),
+				Y("article", null, [
+					n[89] ||= Y("span", null, "iBeacons visible", -1),
+					Y("strong", null, V(R.value.ibeacons_visible || 0), 1),
+					n[90] ||= Y("small", null, "stable beacon IDs", -1)
+				]),
+				Y("article", null, [
+					n[91] ||= Y("span", null, "Observation buffer", -1),
+					Y("strong", null, V(R.value.bounded_observations || 0) + "/" + V(R.value.observation_capacity || 1024), 1),
+					n[92] ||= Y("small", null, "bounded server memory", -1)
+				]),
+				Y("article", null, [
+					n[93] ||= Y("span", null, "Movement history", -1),
+					Y("strong", null, V(R.value.history_events || 0) + "/" + V(R.value.history_capacity || 2e3), 1),
+					n[94] ||= Y("small", null, "persistent bounded events", -1)
+				]),
+				Y("article", null, [
+					n[95] ||= Y("span", null, "Identity cache", -1),
+					Y("strong", null, V(R.value.identity_cache || 0) + "/" + V(R.value.identity_cache_capacity || 2048), 1),
+					n[96] ||= Y("small", null, "rotating-address lookups", -1)
+				])
+			])])]),
 			ga(kl, {
-				open: !!E.value,
+				open: !!ne.value,
 				"backdrop-class": "tv-modal-backdrop tset-modal",
-				onClose: n[4] ||= (e) => d.value = ""
+				onClose: n[16] ||= (e) => h.value = ""
 			}, {
-				default: Sn(() => [E.value ? (q(), J("section", {
-					key: 0,
-					class: "tv-modal tvoice-presence-room-modal",
-					role: "dialog",
-					"aria-modal": "true",
-					"aria-labelledby": `presence-room-${re(E.value.room)}`
-				}, [
-					Y("header", null, [Y("div", ez, [Y("span", null, V(re(E.value.room)), 1), Y("div", null, [
-						n[27] ||= Y("small", { class: "tv-eyebrow" }, "Live room devices", -1),
-						Y("h2", { id: `presence-room-${re(E.value.room)}` }, V(E.value.room), 9, tz),
-						Y("p", null, V(E.value.devices.length) + " device" + V(E.value.devices.length === 1 ? "" : "s") + " · stable proximity order", 1)
+				default: Sn(() => [ne.value ? (q(), J("section", Fz, [
+					Y("header", null, [Y("div", Iz, [Y("span", null, V(he(ne.value.room)), 1), Y("div", null, [
+						n[97] ||= Y("small", { class: "tv-eyebrow" }, "Live room devices", -1),
+						Y("h2", null, V(ne.value.room), 1),
+						Y("p", null, V(ne.value.devices.length) + " located · nearest first", 1)
 					])]), Y("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: n[2] ||= (e) => d.value = ""
+						onClick: n[14] ||= (e) => h.value = ""
 					}, "Close")]),
-					Y("div", nz, [(q(!0), J(K, null, G(E.value.devices, (e) => (q(), J("button", {
-						key: String(e.address),
+					Y("div", Lz, [(q(!0), J(K, null, G(ne.value.devices, (e) => (q(), J("button", {
+						key: oe(e),
 						type: "button",
-						class: B({
-							stale: !e.present,
-							moved: ae(e)
-						}),
-						onClick: (t) => oe(e, !0)
+						onClick: (t) => we(e, !0)
 					}, [
-						Y("span", iz, [Y("i", { class: B(`signal-${e.signal || "weak"}`) }, null, 2)]),
-						Y("span", az, [Y("strong", null, V(P(e)), 1), Y("small", null, V(R(e)) + " · " + V(e.address) + " · " + V(I(e.last_seen_ts)), 1)]),
-						Y("span", {
-							class: "tvoice-presence-signal",
-							title: `${e.strongest_rssi} dBm`
-						}, [(q(), J(K, null, G(4, (t) => Y("i", {
-							key: t,
-							class: B({ active: t <= ee(e.strongest_rssi) })
-						}, null, 2)), 64)), Y("b", null, V(e.strongest_rssi), 1)], 8, oz)
-					], 10, rz))), 128))]),
-					Y("footer", null, [n[28] ||= Y("span", null, "Select a device to open its detailed satellite readings.", -1), Y("button", {
+						Y("span", zz, V(ge(e)), 1),
+						Y("span", Bz, [Y("strong", null, V(ce(e)), 1), Y("small", null, V(de(e.distance_m)) + " · " + V(ye(e)), 1)]),
+						Y("b", null, V(e.strongest_rssi) + " dBm", 1)
+					], 8, Rz))), 128))]),
+					Y("footer", null, [n[98] ||= Y("span", null, "Select a device to inspect its calibrated location.", -1), Y("button", {
 						class: "tv-button primary",
 						type: "button",
-						onClick: n[3] ||= (e) => d.value = ""
+						onClick: n[15] ||= (e) => h.value = ""
 					}, "Done")])
-				], 8, $R)) : Z("", !0)]),
+				])) : Z("", !0)]),
 				_: 1
 			}, 8, ["open"]),
-			D.value ? (q(), J("section", sz, [
-				Y("header", null, [Y("div", null, [
-					n[29] ||= Y("span", { class: "tv-eyebrow" }, "Device detail", -1),
-					Y("h3", null, V(P(D.value)), 1),
-					Y("p", null, [X(V(D.value.address), 1), D.value.manufacturer_id_hex ? (q(), J(K, { key: 0 }, [X(" · Manufacturer " + V(D.value.manufacturer_id_hex), 1)], 64)) : Z("", !0)])
-				]), Y("button", {
-					class: "tv-button",
-					type: "button",
-					onClick: n[5] ||= (e) => u.value = ""
-				}, "Close")]),
-				Y("div", cz, [
-					Y("div", null, [
-						n[30] ||= Y("span", null, "Current room", -1),
-						Y("strong", null, V(N(D.value)), 1),
-						Y("small", null, V(D.value.confidence || "unknown") + " confidence", 1)
+			ga(kl, {
+				open: g.value,
+				"backdrop-class": "tv-modal-backdrop tset-modal",
+				onClose: n[29] ||= (e) => g.value = !1
+			}, {
+				default: Sn(() => [g.value ? (q(), J("section", Vz, [
+					Y("header", null, [Y("div", null, [
+						n[99] ||= Y("small", { class: "tv-eyebrow" }, "Tater identity registry", -1),
+						Y("h2", Hz, V(y.value.name || "Track BLE device"), 1),
+						n[100] ||= Y("p", null, "Names and private identity keys stay on this Tater.", -1)
+					]), Y("button", {
+						class: "tv-button",
+						type: "button",
+						onClick: n[17] ||= (e) => g.value = !1
+					}, "Close")]),
+					Y("div", Uz, [
+						Y("div", Wz, [
+							Y("label", null, [n[101] ||= Y("span", null, "Display name", -1), W(Y("input", {
+								"onUpdate:modelValue": n[18] ||= (e) => y.value.name = e,
+								placeholder: "Alice's phone"
+							}, null, 512), [[$, y.value.name]])]),
+							Y("label", null, [n[102] ||= Y("span", null, "Owner or person", -1), W(Y("input", {
+								"onUpdate:modelValue": n[19] ||= (e) => y.value.owner = e,
+								placeholder: "Alice"
+							}, null, 512), [[$, y.value.owner]])]),
+							Y("label", null, [n[104] ||= Y("span", null, "Category", -1), W(Y("select", { "onUpdate:modelValue": n[20] ||= (e) => y.value.category = e }, [...n[103] ||= [
+								Y("option", { value: "device" }, "Device", -1),
+								Y("option", { value: "phone" }, "Phone", -1),
+								Y("option", { value: "watch" }, "Watch", -1),
+								Y("option", { value: "person" }, "Person", -1),
+								Y("option", { value: "pet" }, "Pet", -1),
+								Y("option", { value: "keys" }, "Keys", -1),
+								Y("option", { value: "beacon" }, "Beacon", -1)
+							]], 512), [[ds, y.value.category]])]),
+							Y("label", Gz, [W(Y("input", {
+								"onUpdate:modelValue": n[21] ||= (e) => y.value.track = e,
+								type: "checkbox"
+							}, null, 512), [[cs, y.value.track]]), n[105] ||= Y("span", null, [Y("b", null, "Track home and room state"), Y("small", null, "Record arrivals, departures, and room changes.")], -1)])
+						]),
+						Y("section", null, [
+							n[110] ||= Y("header", null, [Y("div", null, [Y("strong", null, "Stable identity"), Y("small", null, "Use the detected address, iBeacon ID, or a private IRK.")])], -1),
+							Y("div", Kz, [
+								Y("label", null, [n[106] ||= Y("span", null, "Detected address", -1), W(Y("input", {
+									"onUpdate:modelValue": n[22] ||= (e) => y.value.address = e,
+									readonly: ""
+								}, null, 512), [[$, y.value.address]])]),
+								Y("label", null, [n[107] ||= Y("span", null, "iBeacon UUID:major:minor", -1), W(Y("input", {
+									"onUpdate:modelValue": n[23] ||= (e) => y.value.ibeaconId = e,
+									placeholder: "uuid:1:2"
+								}, null, 512), [[$, y.value.ibeaconId]])]),
+								Y("label", qz, [
+									n[108] ||= Y("span", null, "Identity Resolving Key", -1),
+									W(Y("input", {
+										"onUpdate:modelValue": n[24] ||= (e) => y.value.irk = e,
+										type: "password",
+										placeholder: "Paste 32 hex characters or Base64"
+									}, null, 512), [[$, y.value.irk]]),
+									n[109] ||= Y("small", null, "Leave blank to keep an existing IRK. It is never returned by the API.", -1)
+								])
+							]),
+							y.value.identities.length ? (q(), J("div", Jz, [(q(!0), J(K, null, G(y.value.identities, (e) => (q(), J("span", { key: String(e.type) + String(e.value || e.fingerprint) }, V(e.display || e.type), 1))), 128))])) : Z("", !0)
+						]),
+						Y("section", null, [n[114] ||= Y("header", null, [Y("div", null, [Y("strong", null, "Optional device calibration"), Y("small", null, "Leave blank to use the whole-home defaults.")])], -1), Y("div", Yz, [
+							Y("label", null, [n[111] ||= Y("span", null, "RSSI at one metre", -1), W(Y("input", {
+								"onUpdate:modelValue": n[25] ||= (e) => y.value.referencePower = e,
+								type: "number",
+								min: "-100",
+								max: "-20",
+								placeholder: "Global default"
+							}, null, 512), [[$, y.value.referencePower]])]),
+							Y("label", null, [n[112] ||= Y("span", null, "Room radius in metres", -1), W(Y("input", {
+								"onUpdate:modelValue": n[26] ||= (e) => y.value.maxRadius = e,
+								type: "number",
+								min: "1",
+								max: "100",
+								placeholder: "Global default"
+							}, null, 512), [[$, y.value.maxRadius]])]),
+							Y("label", null, [n[113] ||= Y("span", null, "Away timeout in seconds", -1), W(Y("input", {
+								"onUpdate:modelValue": n[27] ||= (e) => y.value.homeTimeout = e,
+								type: "number",
+								min: "15",
+								max: "3600",
+								placeholder: "Global default"
+							}, null, 512), [[$, y.value.homeTimeout]])])
+						])])
 					]),
-					Y("div", null, [
-						n[31] ||= Y("span", null, "Strongest signal", -1),
-						Y("strong", null, V(D.value.strongest_rssi) + " dBm", 1),
-						Y("small", null, V(D.value.signal || "unknown"), 1)
-					]),
-					Y("div", null, [
-						n[32] ||= Y("span", null, "Last seen", -1),
-						Y("strong", null, V(I(D.value.last_seen_ts)), 1),
-						Y("small", null, V(D.value.present ? "present now" : "recently seen"), 1)
-					]),
-					Y("div", null, [
-						n[33] ||= Y("span", null, "Service UUIDs", -1),
-						Y("strong", null, V((D.value.service_uuids || []).length || "—"), 1),
-						Y("small", null, V((D.value.service_uuids || []).join(", ") || "none advertised"), 1)
+					Y("footer", null, [
+						y.value.configured ? (q(), J("button", {
+							key: 0,
+							class: "tv-button danger",
+							type: "button",
+							disabled: s.value,
+							onClick: De
+						}, "Stop tracking", 8, Xz)) : Z("", !0),
+						n[115] ||= Y("span", null, null, -1),
+						Y("button", {
+							class: "tv-button",
+							type: "button",
+							onClick: n[28] ||= (e) => g.value = !1
+						}, "Cancel"),
+						Y("button", {
+							class: "tv-button primary",
+							type: "button",
+							disabled: s.value || !y.value.name.trim(),
+							onClick: Ee
+						}, V(s.value ? "Saving…" : "Save tracker"), 9, Zz)
 					])
-				]),
-				Y("div", lz, [(q(!0), J(K, null, G(D.value.sources || [], (e) => (q(), J("article", { key: String(e.selector) }, [
-					Y("span", null, V(re(e.room || "Unknown")), 1),
-					Y("div", null, [Y("strong", null, V(e.room || e.device_name || "Unknown room"), 1), Y("small", null, V(e.device_name || e.selector) + " · " + V(I(e.received_ts)), 1)]),
-					Y("b", null, V(e.rssi) + " dBm", 1)
-				]))), 128))])
-			])) : Z("", !0),
-			Y("div", uz, [Y("section", dz, [Y("header", null, [n[34] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Movement feed"), Y("h3", null, "Recent room changes")], -1), Y("span", null, V(j.value.length) + " live", 1)]), j.value.length ? (q(), J("div", fz, [(q(!0), J(K, null, G(j.value, (e) => (q(), J("article", { key: `${e.address}:${e.at}` }, [
-				n[35] ||= Y("span", null, "↗", -1),
-				Y("div", null, [Y("strong", null, V(e.name), 1), Y("small", null, V(e.from) + " → " + V(e.to), 1)]),
-				Y("time", null, V(I(e.at)), 1)
-			]))), 128))])) : (q(), J("div", pz, "Room changes will appear here as signal leadership moves between satellites."))]), Y("section", mz, [
-				n[40] ||= Y("header", null, [Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Core + Verba API"), Y("h3", null, "Use presence anywhere in Tater")]), Y("span", null, "JSON + SSE")], -1),
-				n[41] ||= Y("p", null, "The snapshot endpoint answers “where is this device?” on demand. The event stream pushes complete room state whenever observations change.", -1),
-				Y("button", {
-					type: "button",
-					onClick: n[6] ||= (t) => fe(e.snapshotEndpoint, "Snapshot API")
-				}, [
-					n[36] ||= Y("span", null, "REST snapshot", -1),
-					Y("code", null, V(e.snapshotEndpoint), 1),
-					n[37] ||= Y("b", null, "Copy", -1)
-				]),
-				Y("button", {
-					type: "button",
-					onClick: n[7] ||= (t) => fe(e.eventsEndpoint, "Live stream")
-				}, [
-					n[38] ||= Y("span", null, "Live stream", -1),
-					Y("code", null, V(e.eventsEndpoint), 1),
-					n[39] ||= Y("b", null, "Copy", -1)
-				]),
-				n[42] ||= Y("small", null, [
-					X("Filter REST calls with "),
-					Y("code", null, "?address=aa:bb:cc:dd:ee:ff"),
-					X(", "),
-					Y("code", null, "?selector=native:…"),
-					X(", or "),
-					Y("code", null, "?max_age_s=30"),
-					X(". In-process cores and verbas can also call "),
-					Y("code", null, "tater_voice.native_ble.snapshot()"),
-					X(".")
-				], -1)
-			])]),
-			S.value.length ? (q(), J("section", hz, [Y("header", null, [n[43] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Scanner network"), Y("h3", null, "Satellite coverage")], -1), Y("span", null, V(A.value) + " reporting now", 1)]), Y("div", null, [(q(!0), J(K, null, G(S.value, (e) => (q(), J("article", {
-				key: String(e.selector),
-				class: B({ offline: F(e.last_seen_ts) > 15 })
-			}, [
-				n[44] ||= Y("i", null, null, -1),
-				Y("span", null, [Y("strong", null, V(e.room || e.device_name || e.selector), 1), Y("small", null, V(e.device_name || e.board || e.selector), 1)]),
-				Y("b", null, V(I(e.last_seen_ts)), 1)
-			], 2))), 128))])])) : Z("", !0)
+				])) : Z("", !0)]),
+				_: 1
+			}, 8, ["open"])
 		]));
 	}
-}), yz = { class: "tm-stack tvoice-satellites" }, bz = {
+}), eB = { class: "tm-stack tvoice-satellites" }, tB = {
 	key: 0,
 	class: "tv-notice error"
-}, xz = { class: "tm-form-card tvoice-pairing-card" }, Sz = ["disabled"], Cz = {
+}, nB = { class: "tm-form-card tvoice-pairing-card" }, rB = ["disabled"], iB = {
 	key: 1,
 	class: "tvoice-section-heading tvoice-device-list-heading"
-}, wz = { class: "tvoice-device-head" }, Tz = { class: "tvoice-device-identity" }, Ez = ["src", "alt"], Dz = {
+}, aB = { class: "tvoice-device-head" }, oB = { class: "tvoice-device-identity" }, sB = ["src", "alt"], cB = {
 	key: 0,
 	class: "tvoice-badges"
-}, Oz = {
+}, lB = {
 	key: 0,
 	class: "tm-detail-list tvoice-summary-list"
-}, kz = ["onClick"], Az = {
+}, uB = ["onClick"], dB = {
 	key: 1,
 	class: "tvoice-volume"
-}, jz = [
+}, fB = [
 	"onUpdate:modelValue",
 	"min",
 	"max",
@@ -19594,47 +20031,47 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 	"disabled",
 	"onInput",
 	"onChange"
-], Mz = {
+], pB = {
 	key: 3,
 	class: "tvoice-sensors"
-}, Nz = { class: "tm-metrics" }, Pz = { class: "tm-inline-actions tvoice-item-actions" }, Fz = ["disabled", "onClick"], Iz = ["disabled", "onClick"], Lz = {
+}, mB = { class: "tm-metrics" }, hB = { class: "tm-inline-actions tvoice-item-actions" }, gB = ["disabled", "onClick"], _B = ["disabled", "onClick"], vB = {
 	key: 0,
 	class: "tvoice-unsaved-dot",
 	"aria-label": "Unsaved changes"
-}, Rz = ["disabled", "onClick"], zz = [
+}, yB = ["disabled", "onClick"], bB = [
 	"disabled",
 	"title",
 	"onClick"
-], Bz = ["disabled", "onClick"], Vz = {
+], xB = ["disabled", "onClick"], SB = {
 	key: 5,
 	class: "tm-unsaved-label"
-}, Hz = {
+}, CB = {
 	key: 2,
 	class: "tv-notice"
-}, Uz = {
+}, wB = {
 	key: 0,
 	class: "tv-modal tvoice-settings-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-settings-title"
-}, Wz = { class: "tvoice-settings-modal-head" }, Gz = { class: "tvoice-settings-device" }, Kz = ["src", "alt"], qz = { id: "tvoice-settings-title" }, Jz = { class: "tvoice-settings-overview" }, Yz = { key: 0 }, Xz = { class: "tvoice-settings-sections" }, Zz = {
+}, TB = { class: "tvoice-settings-modal-head" }, EB = { class: "tvoice-settings-device" }, DB = ["src", "alt"], OB = { id: "tvoice-settings-title" }, kB = { class: "tvoice-settings-overview" }, AB = { key: 0 }, jB = { class: "tvoice-settings-sections" }, MB = {
 	key: 0,
 	class: "tvoice-settings-block"
-}, Qz = { key: 1 }, $z = {
+}, NB = { key: 1 }, PB = {
 	key: 0,
 	class: "tv-notice warning"
-}, eB = { class: "tvoice-settings-footer" }, tB = ["disabled"], nB = {
+}, FB = { class: "tvoice-settings-footer" }, IB = ["disabled"], LB = {
 	class: "tv-modal tvoice-pairing-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-pairing-title"
-}, rB = { key: 0 }, iB = { key: 1 }, aB = { key: 2 }, oB = ["value"], sB = ["href"], cB = ["disabled"], lB = {
+}, RB = { key: 0 }, zB = { key: 1 }, BB = { key: 2 }, VB = ["value"], HB = ["href"], UB = ["disabled"], WB = {
 	key: 0,
 	class: "tv-modal tvoice-info-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-info-title"
-}, uB = { class: "tv-eyebrow" }, dB = { id: "tvoice-info-title" }, fB = { class: "tvoice-info-sections" }, pB = /* @__PURE__ */ sr({
+}, GB = { class: "tv-eyebrow" }, KB = { id: "tvoice-info-title" }, qB = { class: "tvoice-info-sections" }, JB = /* @__PURE__ */ sr({
 	__name: "VoiceSatellites",
 	props: {
 		payload: {},
@@ -19862,9 +20299,9 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		return On(() => n.payload, R, {
 			deep: !0,
 			immediate: !0
-		}), kr(H), (t, n) => (q(), J("section", yz, [
-			f.value ? (q(), J("div", bz, V(f.value), 1)) : Z("", !0),
-			Y("article", xz, [Y("header", null, [n[3] ||= Y("div", null, [
+		}), kr(H), (t, n) => (q(), J("section", eB, [
+			f.value ? (q(), J("div", tB, V(f.value), 1)) : Z("", !0),
+			Y("article", nB, [Y("header", null, [n[3] ||= Y("div", null, [
 				Y("span", { class: "tv-eyebrow" }, "Tater Native"),
 				Y("h3", null, "Add a satellite"),
 				Y("p", null, "Pair official Tater hardware with a secure, short-lived setup code.")
@@ -19873,7 +20310,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				type: "button",
 				disabled: !!d.value,
 				onClick: ye
-			}, V(d.value === "pairing" ? "Creating…" : A.value === "waiting" && j.value > 0 ? "View pairing code" : "Add Satellite"), 9, Sz)]), n[4] ||= Y("div", {
+			}, V(d.value === "pairing" ? "Creating…" : A.value === "waiting" && j.value > 0 ? "View pairing code" : "Add Satellite"), 9, rB)]), n[4] ||= Y("div", {
 				class: "tvoice-pairing-steps",
 				"aria-label": "Satellite pairing steps"
 			}, [
@@ -19881,7 +20318,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				Y("span", null, [Y("b", null, "2"), X("Enter the code on the satellite")]),
 				Y("span", null, [Y("b", null, "3"), X("Tater connects it automatically")])
 			], -1)]),
-			y.value.length ? (q(), J("div", Cz, [Y("div", null, [
+			y.value.length ? (q(), J("div", iB, [Y("div", null, [
 				n[5] ||= Y("span", { class: "tv-eyebrow" }, "Your satellite network", -1),
 				Y("h3", null, V(b.value) + " connected · " + V(y.value.length) + " known", 1),
 				n[6] ||= Y("p", null, "Core controls stay on each card; deeper device and display settings open in a focused popup.", -1)
@@ -19890,19 +20327,19 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				key: P(e),
 				class: "tm-form-card tvoice-satellite-card"
 			}, [
-				Y("header", wz, [Y("div", Tz, [e.hero_image_src ? (q(), J("img", {
+				Y("header", aB, [Y("div", oB, [e.hero_image_src ? (q(), J("img", {
 					key: 0,
 					src: String(e.hero_image_src),
 					alt: String(e.hero_image_alt || e.title)
-				}, null, 8, Ez)) : Z("", !0), Y("div", null, [
+				}, null, 8, sB)) : Z("", !0), Y("div", null, [
 					Y("h3", null, V(e.title || P(e)), 1),
 					Y("p", null, V(e.subtitle), 1),
-					Array.isArray(e.hero_badges) ? (q(), J("div", Dz, [(q(!0), J(K, null, G(e.hero_badges, (e) => (q(), J("span", {
+					Array.isArray(e.hero_badges) ? (q(), J("div", cB, [(q(!0), J(K, null, G(e.hero_badges, (e) => (q(), J("span", {
 						key: String(e.label),
 						class: B(`tone-${e.tone || "muted"}`)
 					}, V(e.label), 3))), 128))])) : Z("", !0)
 				])]), Y("span", { class: B(["tv-live-pill", { warning: !e.connected }]) }, [n[8] ||= Y("i", null, null, -1), X(V(e.connected ? "Connected" : "Offline"), 1)], 2)]),
-				Array.isArray(e.summary_rows) && e.summary_rows.length ? (q(), J("dl", Oz, [(q(!0), J(K, null, G(e.summary_rows, (e) => (q(), J(K, { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
+				Array.isArray(e.summary_rows) && e.summary_rows.length ? (q(), J("dl", lB, [(q(!0), J(K, null, G(e.summary_rows, (e) => (q(), J(K, { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
 				(q(!0), J(K, null, G(e.detail_sections || [], (t) => (q(), J("section", {
 					key: String(t.title),
 					class: "tvoice-device-overview"
@@ -19911,8 +20348,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					class: "tm-link-button",
 					type: "button",
 					onClick: (t) => ce(e)
-				}, "View all device info", 8, kz)) : Z("", !0)]), Y("dl", null, [(q(!0), J(K, null, G(t.rows || [], (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])]))), 128)),
-				e.volume_control && Object.keys(e.volume_control).length ? (q(), J("label", Az, [Y("span", null, [n[9] ||= Y("strong", null, "Volume", -1), Y("output", null, V(s[P(e)] ?? e.volume_control.value) + "%", 1)]), W(Y("input", {
+				}, "View all device info", 8, uB)) : Z("", !0)]), Y("dl", null, [(q(!0), J(K, null, G(t.rows || [], (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])]))), 128)),
+				e.volume_control && Object.keys(e.volume_control).length ? (q(), J("label", dB, [Y("span", null, [n[9] ||= Y("strong", null, "Volume", -1), Y("output", null, V(s[P(e)] ?? e.volume_control.value) + "%", 1)]), W(Y("input", {
 					"onUpdate:modelValue": (t) => s[P(e)] = t,
 					type: "range",
 					min: e.volume_control.min ?? 0,
@@ -19921,7 +20358,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					disabled: !!d.value,
 					onInput: (t) => c[`${P(e)}:volume`] = !0,
 					onChange: (t) => pe(e)
-				}, null, 40, jz), [[
+				}, null, 40, fB), [[
 					$,
 					s[P(e)],
 					void 0,
@@ -19939,29 +20376,29 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					"disabled",
 					"onChange"
 				])) : Z("", !0),
-				Array.isArray(e.sensor_rows) && e.sensor_rows.length ? (q(), J("div", Mz, [Y("h4", null, V(e.sensor_title || "Live entities"), 1), Y("div", Nz, [(q(!0), J(K, null, G(e.sensor_rows, (e) => (q(), J("article", { key: String(e.key) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
-				Y("div", Pz, [
+				Array.isArray(e.sensor_rows) && e.sensor_rows.length ? (q(), J("div", pB, [Y("h4", null, V(e.sensor_title || "Live entities"), 1), Y("div", mB, [(q(!0), J(K, null, G(e.sensor_rows, (e) => (q(), J("article", { key: String(e.key) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
+				Y("div", hB, [
 					e.save_action ? (q(), J("button", {
 						key: 0,
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!d.value,
 						onClick: (t) => ie(e)
-					}, V(d.value === `${P(e)}:save` ? "Saving…" : e.save_label || "Save"), 9, Fz)) : Z("", !0),
+					}, V(d.value === `${P(e)}:save` ? "Saving…" : e.save_label || "Save"), 9, gB)) : Z("", !0),
 					Array.isArray(e.popup_fields) && e.popup_fields.length || ee(e) ? (q(), J("button", {
 						key: 1,
 						class: "tv-button tvoice-settings-trigger",
 						type: "button",
 						disabled: !!d.value,
 						onClick: (t) => oe(e)
-					}, [X(V(e.settings_label || "Satellite Settings"), 1), l[P(e)] || u[P(e)] ? (q(), J("span", Lz)) : Z("", !0)], 8, Iz)) : Z("", !0),
+					}, [X(V(e.settings_label || "Satellite Settings"), 1), l[P(e)] || u[P(e)] ? (q(), J("span", vB)) : Z("", !0)], 8, _B)) : Z("", !0),
 					e.identify_action ? (q(), J("button", {
 						key: 2,
 						class: "tv-button",
 						type: "button",
 						disabled: !!d.value || !e.connected,
 						onClick: (t) => me(e)
-					}, V(e.identify_label || "Identify"), 9, Rz)) : Z("", !0),
+					}, V(e.identify_label || "Identify"), 9, yB)) : Z("", !0),
 					e.run_action ? (q(), J("button", {
 						key: 3,
 						class: B(["tv-button", {
@@ -19972,39 +20409,39 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						disabled: !!d.value,
 						title: I(e) ? "Unpairs this satellite and restarts it in setup mode" : "",
 						onClick: (t) => he(e)
-					}, V(d.value === `${P(e)}:run` ? "Working…" : e.run_label || "Run"), 11, zz)) : Z("", !0),
+					}, V(d.value === `${P(e)}:run` ? "Working…" : e.run_label || "Run"), 11, bB)) : Z("", !0),
 					e.remove_action ? (q(), J("button", {
 						key: 4,
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!d.value,
 						onClick: (t) => ge(e)
-					}, V(e.remove_label || "Forget"), 9, Bz)) : Z("", !0),
-					c[P(e)] ? (q(), J("span", Vz, "Unsaved changes")) : Z("", !0)
+					}, V(e.remove_label || "Forget"), 9, xB)) : Z("", !0),
+					c[P(e)] ? (q(), J("span", SB, "Unsaved changes")) : Z("", !0)
 				])
 			]))), 128)),
-			y.value.length ? Z("", !0) : (q(), J("div", Hz, V(e.payload.empty_message || "No native satellites are connected yet."), 1)),
+			y.value.length ? Z("", !0) : (q(), J("div", CB, V(e.payload.empty_message || "No native satellites are connected yet."), 1)),
 			ga(kl, {
 				open: !!x.value,
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: se
 			}, {
-				default: Sn(() => [x.value ? (q(), J("section", Uz, [
-					Y("header", Wz, [Y("div", Gz, [x.value.hero_image_src ? (q(), J("img", {
+				default: Sn(() => [x.value ? (q(), J("section", wB, [
+					Y("header", TB, [Y("div", EB, [x.value.hero_image_src ? (q(), J("img", {
 						key: 0,
 						src: String(x.value.hero_image_src),
 						alt: String(x.value.hero_image_alt || x.value.title)
-					}, null, 8, Kz)) : Z("", !0), Y("div", null, [
+					}, null, 8, DB)) : Z("", !0), Y("div", null, [
 						n[10] ||= Y("span", { class: "tv-eyebrow" }, "Tater satellite controls", -1),
-						Y("h2", qz, V(x.value.title || x.value.settings_title || "Satellite Settings"), 1),
+						Y("h2", OB, V(x.value.title || x.value.settings_title || "Satellite Settings"), 1),
 						n[11] ||= Y("p", null, "Fine-tune device behavior, lighting, and display sensors in one place.", -1)
 					])]), Y("button", {
 						class: "tv-button tvoice-settings-close",
 						type: "button",
 						onClick: se
 					}, "Close")]),
-					Y("div", Jz, [Y("span", { class: B(["tv-live-pill", { warning: !x.value.connected }]) }, [n[12] ||= Y("i", null, null, -1), X(V(x.value.connected ? "Connected" : "Offline"), 1)], 2), T.value.length ? (q(), J("dl", Yz, [(q(!0), J(K, null, G(T.value, (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])) : Z("", !0)]),
-					Y("div", Xz, [w.value.length ? (q(), J("section", Zz, [n[13] ||= Y("header", null, [Y("span", { class: "tvoice-section-mark" }, "SAT"), Y("div", null, [Y("h3", null, "Satellite behavior"), Y("p", null, "Each group applies only to this device. LED previews update as you choose an animation.")])], -1), ga(Vk, {
+					Y("div", kB, [Y("span", { class: B(["tv-live-pill", { warning: !x.value.connected }]) }, [n[12] ||= Y("i", null, null, -1), X(V(x.value.connected ? "Connected" : "Offline"), 1)], 2), T.value.length ? (q(), J("dl", AB, [(q(!0), J(K, null, G(T.value, (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])) : Z("", !0)]),
+					Y("div", jB, [w.value.length ? (q(), J("section", MB, [n[13] ||= Y("header", null, [Y("span", { class: "tvoice-section-mark" }, "SAT"), Y("div", null, [Y("h3", null, "Satellite behavior"), Y("p", null, "Each group applies only to this device. LED previews update as you choose an animation.")])], -1), ga(Vk, {
 						class: "tvoice-settings-groups",
 						sections: w.value,
 						values: a[P(x.value)] || {},
@@ -20014,7 +20451,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						"sections",
 						"values",
 						"disabled"
-					])])) : Z("", !0), C.value ? (q(), J("section", Qz, [
+					])])) : Z("", !0), C.value ? (q(), J("section", NB, [
 						Y("header", null, [n[15] ||= Y("span", { class: "tvoice-section-mark" }, "DSP", -1), Y("div", null, [n[14] ||= Y("h3", null, "Display sensors", -1), Y("p", null, V(C.value.detail || "Choose which Environment Core readings this display shows."), 1)])]),
 						ga(Vk, {
 							sections: F("Sensor slots", Array.isArray(C.value.fields) ? C.value.fields : []),
@@ -20026,14 +20463,14 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 							"values",
 							"disabled"
 						]),
-						k.value ? Z("", !0) : (q(), J("div", $z, V(e.payload.display_sensors?.message || "Environment Core readings are not available yet."), 1))
+						k.value ? Z("", !0) : (q(), J("div", PB, V(e.payload.display_sensors?.message || "Environment Core readings are not available yet."), 1))
 					])) : Z("", !0)]),
-					Y("footer", eB, [Y("span", { class: B(["tvoice-settings-sync", { dirty: l[P(x.value)] || u[P(x.value)] }]) }, [n[16] ||= Y("i", null, null, -1), X(V(l[P(x.value)] || u[P(x.value)] ? "Unsaved changes" : "Satellite settings are synchronized"), 1)], 2), Y("button", {
+					Y("footer", FB, [Y("span", { class: B(["tvoice-settings-sync", { dirty: l[P(x.value)] || u[P(x.value)] }]) }, [n[16] ||= Y("i", null, null, -1), X(V(l[P(x.value)] || u[P(x.value)] ? "Unsaved changes" : "Satellite settings are synchronized"), 1)], 2), Y("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!d.value,
 						onClick: n[0] ||= (e) => fe(x.value)
-					}, V(d.value ? "Saving…" : "Save Satellite Settings"), 9, tB)])
+					}, V(d.value ? "Saving…" : "Save Satellite Settings"), 9, IB)])
 				])) : Z("", !0)]),
 				_: 1
 			}, 8, ["open"]),
@@ -20042,7 +20479,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: n[2] ||= (e) => m.value = !1
 			}, {
-				default: Sn(() => [Y("section", nB, [
+				default: Sn(() => [Y("section", LB, [
 					Y("header", null, [n[17] ||= Y("div", null, [
 						Y("span", { class: "tv-eyebrow" }, "Secure satellite pairing"),
 						Y("h2", { id: "tvoice-pairing-title" }, "Connect a Tater satellite"),
@@ -20055,12 +20492,12 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					Y("div", { class: B(["tvoice-pairing-code", `state-${A.value}`]) }, [
 						Y("span", null, V(N.value), 1),
 						Y("strong", null, V(p.value?.pairing_code || p.value?.display_code || p.value?.code || "—"), 1),
-						A.value === "waiting" ? (q(), J("small", rB, "Expires in " + V(L(j.value)), 1)) : A.value === "paired" ? (q(), J("small", iB, "The satellite is paired and ready to appear in this list.")) : (q(), J("small", aB, "Create a fresh code to continue.")),
+						A.value === "waiting" ? (q(), J("small", RB, "Expires in " + V(L(j.value)), 1)) : A.value === "paired" ? (q(), J("small", zB, "The satellite is paired and ready to appear in this list.")) : (q(), J("small", BB, "Create a fresh code to continue.")),
 						A.value === "waiting" ? (q(), J("progress", {
 							key: 3,
 							value: M.value,
 							max: "100"
-						}, null, 8, oB)) : Z("", !0)
+						}, null, 8, VB)) : Z("", !0)
 					], 2),
 					n[18] ||= Y("ol", { class: "tvoice-pairing-guide" }, [
 						Y("li", null, [Y("b", null, "Open setup on the satellite."), Y("span", null, "Connect the satellite to power and continue until it asks for a Tater pairing code.")]),
@@ -20073,13 +20510,13 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						href: String(p.value.pairing_url || p.value.url),
 						target: "_blank",
 						rel: "noreferrer"
-					}, "Open setup page ↗", 8, sB)) : Z("", !0),
+					}, "Open setup page ↗", 8, HB)) : Z("", !0),
 					Y("footer", null, [Y("span", null, V(A.value === "waiting" ? "Checking for your satellite…" : N.value), 1), Y("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!d.value,
 						onClick: ve
-					}, V(d.value === "pairing" ? "Creating…" : "Create new code"), 9, cB)])
+					}, V(d.value === "pairing" ? "Creating…" : "Create new code"), 9, UB)])
 				])]),
 				_: 1
 			}, 8, ["open"]),
@@ -20088,29 +20525,29 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: le
 			}, {
-				default: Sn(() => [S.value ? (q(), J("section", lB, [Y("header", null, [Y("div", null, [
-					Y("span", uB, V(S.value.title || "Satellite"), 1),
-					Y("h2", dB, V(S.value.info_title || "Device information"), 1),
+				default: Sn(() => [S.value ? (q(), J("section", WB, [Y("header", null, [Y("div", null, [
+					Y("span", GB, V(S.value.title || "Satellite"), 1),
+					Y("h2", KB, V(S.value.info_title || "Device information"), 1),
 					n[19] ||= Y("p", null, "Live identity, connection, diagnostics, and firmware details.", -1)
 				]), Y("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: le
-				}, "Close")]), Y("div", fB, [(q(!0), J(K, null, G(ne(S.value), (e) => (q(), J("section", { key: String(e.title) }, [Y("h3", null, V(e.title), 1), Y("dl", null, [(q(!0), J(K, null, G(e.rows || [], (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])]))), 128))])])) : Z("", !0)]),
+				}, "Close")]), Y("div", qB, [(q(!0), J(K, null, G(ne(S.value), (e) => (q(), J("section", { key: String(e.title) }, [Y("h3", null, V(e.title), 1), Y("dl", null, [(q(!0), J(K, null, G(e.rows || [], (e) => (q(), J("div", { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)]))), 128))])]))), 128))])])) : Z("", !0)]),
 				_: 1
 			}, 8, ["open"])
 		]));
 	}
-}), mB = { class: "tm-stack tvoice-stats" }, hB = {
+}), YB = { class: "tm-stack tvoice-stats" }, XB = {
 	key: 0,
 	class: "tv-notice error"
-}, gB = { class: "tm-form-card tvoice-subhero tvoice-stats-hero" }, _B = { class: "tvoice-subhero-metrics" }, vB = { class: "tm-card-grid tvoice-stat-sections" }, yB = { class: "tvoice-card-identity" }, bB = { class: "tvoice-card-mark" }, xB = { class: "tm-metrics tvoice-metric-grid" }, SB = { class: "tm-table-wrap" }, CB = { key: 0 }, wB = ["colspan"], TB = {
+}, ZB = { class: "tm-form-card tvoice-subhero tvoice-stats-hero" }, QB = { class: "tvoice-subhero-metrics" }, $B = { class: "tm-card-grid tvoice-stat-sections" }, eV = { class: "tvoice-card-identity" }, tV = { class: "tvoice-card-mark" }, nV = { class: "tm-metrics tvoice-metric-grid" }, rV = { class: "tm-table-wrap" }, iV = { key: 0 }, aV = ["colspan"], oV = {
 	key: 1,
 	class: "tv-notice"
-}, EB = {
+}, sV = {
 	key: 2,
 	class: "tset-save-bar tvoice-save-bar"
-}, DB = ["disabled"], OB = /* @__PURE__ */ sr({
+}, cV = ["disabled"], lV = /* @__PURE__ */ sr({
 	__name: "VoiceStats",
 	props: {
 		payload: {},
@@ -20132,43 +20569,43 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				}
 			}
 		}
-		return (e, t) => (q(), J("section", mB, [
-			a.value ? (q(), J("div", hB, V(a.value), 1)) : Z("", !0),
-			Y("section", gB, [t[2] ||= Y("div", null, [
+		return (e, t) => (q(), J("section", YB, [
+			a.value ? (q(), J("div", XB, V(a.value), 1)) : Z("", !0),
+			Y("section", ZB, [t[2] ||= Y("div", null, [
 				Y("span", { class: "tv-eyebrow" }, "Live voice health"),
 				Y("h3", null, "See how every conversation performs"),
 				Y("p", null, "Quality, latency, backend fallbacks, and device outcomes update automatically while this tab is open.")
-			], -1), Y("div", _B, [Y("span", null, [Y("b", null, V(l.value), 1), t[0] ||= X("Live signals", -1)]), Y("span", null, [Y("b", null, V(u.value), 1), t[1] ||= X("Device rows", -1)])])]),
-			Y("div", vB, [(q(!0), J(K, null, G(o.value, (e, n) => (q(), J("article", {
+			], -1), Y("div", QB, [Y("span", null, [Y("b", null, V(l.value), 1), t[0] ||= X("Live signals", -1)]), Y("span", null, [Y("b", null, V(u.value), 1), t[1] ||= X("Device rows", -1)])])]),
+			Y("div", $B, [(q(!0), J(K, null, G(o.value, (e, n) => (q(), J("article", {
 				key: String(e.title),
 				class: "tm-form-card tvoice-stat-card"
-			}, [Y("header", null, [Y("div", yB, [Y("span", bB, V(n + 1), 1), Y("div", null, [t[3] ||= Y("span", { class: "tv-eyebrow" }, "Live measurements", -1), Y("h3", null, V(e.title), 1)])]), Y("span", null, V((e.metrics || []).length) + " signals", 1)]), Y("div", xB, [(q(!0), J(K, null, G(e.metrics || [], (e) => (q(), J("article", { key: String(e.label) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value), 1)]))), 128))])]))), 128))]),
+			}, [Y("header", null, [Y("div", eV, [Y("span", tV, V(n + 1), 1), Y("div", null, [t[3] ||= Y("span", { class: "tv-eyebrow" }, "Live measurements", -1), Y("h3", null, V(e.title), 1)])]), Y("span", null, V((e.metrics || []).length) + " signals", 1)]), Y("div", nV, [(q(!0), J(K, null, G(e.metrics || [], (e) => (q(), J("article", { key: String(e.label) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value), 1)]))), 128))])]))), 128))]),
 			(q(!0), J(K, null, G(s.value, (e) => (q(), J("article", {
 				key: String(e.title),
 				class: "tm-form-card tvoice-stats-table"
-			}, [Y("header", null, [Y("div", null, [t[4] ||= Y("span", { class: "tv-eyebrow" }, "Per-satellite detail", -1), Y("h3", null, V(e.title), 1)]), Y("span", null, V((e.rows || []).length) + " rows", 1)]), Y("div", SB, [Y("table", null, [Y("thead", null, [Y("tr", null, [(q(!0), J(K, null, G(e.columns || [], (e) => (q(), J("th", { key: String(e.key) }, V(e.label || e.key), 1))), 128))])]), Y("tbody", null, [(q(!0), J(K, null, G(e.rows || [], (t, n) => (q(), J("tr", { key: n }, [(q(!0), J(K, null, G(e.columns || [], (e) => (q(), J("td", { key: String(e.key) }, V(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), (e.rows || []).length ? Z("", !0) : (q(), J("tr", CB, [Y("td", { colspan: Math.max(1, (e.columns || []).length) }, V(e.empty_message || "No measurements yet."), 9, wB)]))])])])]))), 128)),
-			!o.value.length && !s.value.length ? (q(), J("div", TB, "No voice statistics are available yet.")) : Z("", !0),
-			c.value.reset_action ? (q(), J("footer", EB, [Y("div", null, [t[5] ||= Y("strong", null, "Statistics update automatically", -1), Y("span", null, V(c.value.description), 1)]), Y("button", {
+			}, [Y("header", null, [Y("div", null, [t[4] ||= Y("span", { class: "tv-eyebrow" }, "Per-satellite detail", -1), Y("h3", null, V(e.title), 1)]), Y("span", null, V((e.rows || []).length) + " rows", 1)]), Y("div", rV, [Y("table", null, [Y("thead", null, [Y("tr", null, [(q(!0), J(K, null, G(e.columns || [], (e) => (q(), J("th", { key: String(e.key) }, V(e.label || e.key), 1))), 128))])]), Y("tbody", null, [(q(!0), J(K, null, G(e.rows || [], (t, n) => (q(), J("tr", { key: n }, [(q(!0), J(K, null, G(e.columns || [], (e) => (q(), J("td", { key: String(e.key) }, V(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), (e.rows || []).length ? Z("", !0) : (q(), J("tr", iV, [Y("td", { colspan: Math.max(1, (e.columns || []).length) }, V(e.empty_message || "No measurements yet."), 9, aV)]))])])])]))), 128)),
+			!o.value.length && !s.value.length ? (q(), J("div", oV, "No voice statistics are available yet.")) : Z("", !0),
+			c.value.reset_action ? (q(), J("footer", sV, [Y("div", null, [t[5] ||= Y("strong", null, "Statistics update automatically", -1), Y("span", null, V(c.value.description), 1)]), Y("button", {
 				class: "tv-button danger",
 				type: "button",
 				disabled: i.value,
 				onClick: d
-			}, V(i.value ? "Resetting…" : c.value.reset_label || "Reset Voice Statistics"), 9, DB)])) : Z("", !0)
+			}, V(i.value ? "Resetting…" : c.value.reset_label || "Reset Voice Statistics"), 9, cV)])) : Z("", !0)
 		]));
 	}
-}), kB = { class: "tm-stack tvoice-stereo" }, AB = {
+}), uV = { class: "tm-stack tvoice-stereo" }, dV = {
 	key: 0,
 	class: "tv-notice error"
-}, jB = { class: "tm-form-card tvoice-subhero tvoice-stereo-hero" }, MB = { class: "tvoice-subhero-metrics" }, NB = { class: "tvoice-pair-head" }, PB = { class: "tvoice-card-identity" }, FB = { class: "tvoice-card-mark" }, IB = { class: "tv-eyebrow" }, LB = {
+}, fV = { class: "tm-form-card tvoice-subhero tvoice-stereo-hero" }, pV = { class: "tvoice-subhero-metrics" }, mV = { class: "tvoice-pair-head" }, hV = { class: "tvoice-card-identity" }, gV = { class: "tvoice-card-mark" }, _V = { class: "tv-eyebrow" }, vV = {
 	key: 0,
 	class: "tm-detail-list tvoice-pair-summary"
-}, RB = { class: "tm-inline-actions tvoice-item-actions" }, zB = ["disabled", "onClick"], BB = ["disabled", "onClick"], VB = {
+}, yV = { class: "tm-inline-actions tvoice-item-actions" }, bV = ["disabled", "onClick"], xV = ["disabled", "onClick"], SV = {
 	key: 1,
 	class: "tm-unsaved-label"
-}, HB = {
+}, CV = {
 	key: 1,
 	class: "tv-notice"
-}, UB = /* @__PURE__ */ sr({
+}, wV = /* @__PURE__ */ sr({
 	__name: "VoiceStereo",
 	props: {
 		payload: {},
@@ -20236,23 +20673,23 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		return On(() => n.payload, p, {
 			deep: !0,
 			immediate: !0
-		}), (e, t) => (q(), J("section", kB, [
-			s.value ? (q(), J("div", AB, V(s.value), 1)) : Z("", !0),
-			Y("section", jB, [t[2] ||= Y("div", null, [
+		}), (e, t) => (q(), J("section", uV, [
+			s.value ? (q(), J("div", dV, V(s.value), 1)) : Z("", !0),
+			Y("section", fV, [t[2] ||= Y("div", null, [
 				Y("span", { class: "tv-eyebrow" }, "Room-filling playback"),
 				Y("h3", null, "Build synchronized stereo rooms"),
 				Y("p", null, "Pair two compatible satellites as left and right speakers while keeping each device available for normal voice turns.")
-			], -1), Y("div", MB, [Y("span", null, [Y("b", null, V(l.value.length), 1), t[0] ||= X("Saved pairs", -1)]), Y("span", null, [Y("b", null, V(u.value), 1), t[1] ||= X("Ready now", -1)])])]),
+			], -1), Y("div", pV, [Y("span", null, [Y("b", null, V(l.value.length), 1), t[0] ||= X("Saved pairs", -1)]), Y("span", null, [Y("b", null, V(u.value), 1), t[1] ||= X("Ready now", -1)])])]),
 			(q(!0), J(K, null, G(c.value, (e) => (q(), J("article", {
 				key: d(e),
 				class: B(["tm-form-card tvoice-pair-card", { "is-new": e.group === "stereo_pair_create" }])
 			}, [
-				Y("header", NB, [Y("div", PB, [Y("span", FB, V(e.group === "stereo_pair_create" ? "+" : "2X"), 1), Y("div", null, [
-					Y("span", IB, V(e.group === "stereo_pair_create" ? "Create a room" : "Stereo destination"), 1),
+				Y("header", mV, [Y("div", hV, [Y("span", gV, V(e.group === "stereo_pair_create" ? "+" : "2X"), 1), Y("div", null, [
+					Y("span", _V, V(e.group === "stereo_pair_create" ? "Create a room" : "Stereo destination"), 1),
 					Y("h3", null, V(e.title || "Stereo Pair"), 1),
 					Y("p", null, [X(V(e.subtitle), 1), e.detail ? (q(), J(K, { key: 0 }, [X(" · " + V(e.detail), 1)], 64)) : Z("", !0)])
 				])]), Y("span", { class: B(["tv-live-pill", { warning: e.group !== "stereo_pair_create" && !e.connected }]) }, [t[3] ||= Y("i", null, null, -1), X(V(e.group === "stereo_pair_create" ? "New pair" : e.connected ? "Ready" : "Unavailable"), 1)], 2)]),
-				Array.isArray(e.summary_rows) && e.summary_rows.length ? (q(), J("dl", LB, [(q(!0), J(K, null, G(e.summary_rows, (e) => (q(), J(K, { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
+				Array.isArray(e.summary_rows) && e.summary_rows.length ? (q(), J("dl", vV, [(q(!0), J(K, null, G(e.summary_rows, (e) => (q(), J(K, { key: String(e.label) }, [Y("dt", null, V(e.label), 1), Y("dd", null, V(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
 				ga(Vk, {
 					sections: f(e),
 					values: i[d(e)] || {},
@@ -20264,40 +20701,40 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					"disabled",
 					"onChange"
 				]),
-				Y("div", RB, [
+				Y("div", yV, [
 					Y("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!o.value,
 						onClick: (t) => h(e)
-					}, V(o.value === d(e) ? "Saving…" : e.save_label || "Save Pair"), 9, zB),
+					}, V(o.value === d(e) ? "Saving…" : e.save_label || "Save Pair"), 9, bV),
 					e.remove_action ? (q(), J("button", {
 						key: 0,
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!o.value,
 						onClick: (t) => g(e)
-					}, V(e.remove_label || "Delete Pair"), 9, BB)) : Z("", !0),
-					a[d(e)] ? (q(), J("span", VB, "Unsaved changes")) : Z("", !0)
+					}, V(e.remove_label || "Delete Pair"), 9, xV)) : Z("", !0),
+					a[d(e)] ? (q(), J("span", SV, "Unsaved changes")) : Z("", !0)
 				])
 			], 2))), 128)),
-			c.value.length ? Z("", !0) : (q(), J("div", HB, "No stereo-pair configuration is available."))
+			c.value.length ? Z("", !0) : (q(), J("div", CV, "No stereo-pair configuration is available."))
 		]));
 	}
-}), WB = { class: "tset-resource tvoice-resource" }, GB = { class: "tv-panel tvoice-hero" }, KB = {
+}), TV = { class: "tset-resource tvoice-resource" }, EV = { class: "tv-panel tvoice-hero" }, DV = {
 	class: "tv-tabs tvoice-tabs",
 	"aria-label": "Satellite settings sections"
-}, qB = ["onClick"], JB = { class: "tvoice-tab-mark" }, YB = { class: "tset-context" }, XB = {
+}, OV = ["onClick"], kV = { class: "tvoice-tab-mark" }, AV = { class: "tset-context" }, jV = {
 	key: 0,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, ZB = {
+}, MV = {
 	key: 1,
 	class: "tv-notice"
-}, QB = {
+}, NV = {
 	key: 2,
 	class: "tm-metrics tvoice-metrics"
-}, $B = /* @__PURE__ */ sr({
+}, PV = /* @__PURE__ */ sr({
 	__name: "VoiceSettings",
 	props: {
 		runtimeEndpoint: {},
@@ -20392,8 +20829,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			}, 1e4);
 		}), kr(() => {
 			p !== null && window.clearInterval(p), m += 1;
-		}), (t, n) => (q(), J("section", WB, [
-			Y("section", GB, [n[7] ||= Y("div", { class: "tvoice-hero-copy" }, [
+		}), (t, n) => (q(), J("section", TV, [
+			Y("section", EV, [n[7] ||= Y("div", { class: "tvoice-hero-copy" }, [
 				Y("span", { class: "tv-eyebrow" }, "Tater satellite control center"),
 				Y("h2", null, "Your voice hardware, in one friendly workspace"),
 				Y("p", null, "Pair satellites, keep firmware current, build stereo rooms, and tune Tater’s live voice pipeline without leaving Settings.")
@@ -20402,23 +20839,23 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				Y("i"),
 				Y("i")
 			], -1), Y("div", null, [Y("strong", null, V(d.value ? "Refreshing devices" : `${h.value.label} ready`), 1), Y("small", null, V(f.value ? "Runtime needs attention" : "Live satellite state"), 1)])], 2)]),
-			Y("nav", KB, [(q(), J(K, null, G(a, (e) => Y("button", {
+			Y("nav", DV, [(q(), J(K, null, G(a, (e) => Y("button", {
 				key: e.id,
 				type: "button",
 				class: B({ active: c.value === e.id }),
 				onClick: (t) => y(e.id)
-			}, [Y("span", JB, V(e.icon), 1), Y("span", null, [Y("b", null, V(e.label), 1), Y("small", null, V(e.short), 1)])], 10, qB)), 64))]),
-			Y("div", YB, [Y("span", null, V(h.value.label), 1), Y("p", null, V(h.value.description), 1)]),
-			f.value ? (q(), J("div", XB, V(f.value), 1)) : Z("", !0),
-			u.value ? (q(), J("div", ZB, "Loading " + V(h.value.label) + "…", 1)) : Z("", !0),
-			g.value.length && c.value !== "stats" ? (q(), J("div", QB, [(q(!0), J(K, null, G(g.value, (e) => (q(), J("article", { key: String(e.label) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value), 1)]))), 128))])) : Z("", !0),
-			c.value === "satellites" && !u.value ? (q(), da(pB, {
+			}, [Y("span", kV, V(e.icon), 1), Y("span", null, [Y("b", null, V(e.label), 1), Y("small", null, V(e.short), 1)])], 10, OV)), 64))]),
+			Y("div", AV, [Y("span", null, V(h.value.label), 1), Y("p", null, V(h.value.description), 1)]),
+			f.value ? (q(), J("div", jV, V(f.value), 1)) : Z("", !0),
+			u.value ? (q(), J("div", MV, "Loading " + V(h.value.label) + "…", 1)) : Z("", !0),
+			g.value.length && c.value !== "stats" ? (q(), J("div", NV, [(q(!0), J(K, null, G(g.value, (e) => (q(), J("article", { key: String(e.label) }, [Y("span", null, V(e.label), 1), Y("strong", null, V(e.value), 1)]))), 128))])) : Z("", !0),
+			c.value === "satellites" && !u.value ? (q(), da(JB, {
 				key: 3,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[0] ||= (e) => v(!0),
 				onNotify: b
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "presence" && !u.value ? (q(), da(vz, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "presence" && !u.value ? (q(), da($z, {
 				key: 4,
 				"snapshot-endpoint": e.presenceEndpoint,
 				"events-endpoint": e.presenceEventsEndpoint,
@@ -20429,7 +20866,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[1] ||= (e) => v(!0),
 				onNotify: b
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stereo" && !u.value ? (q(), da(UB, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stereo" && !u.value ? (q(), da(wV, {
 				key: 6,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
@@ -20441,7 +20878,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[3] ||= (e) => v(!0),
 				onNotify: b
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stats" && !u.value ? (q(), da(OB, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stats" && !u.value ? (q(), da(lV, {
 				key: 8,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
@@ -20456,13 +20893,13 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			}, null, 8, ["payload", "action-endpoint"])) : Z("", !0)
 		]));
 	}
-}), eV = { class: "tater-vue-surface tset-settings" }, tV = { class: "tv-page-heading" }, nV = { class: "tv-heading-actions" }, rV = { class: "tv-metrics tset-metrics" }, iV = {
+}), FV = { class: "tater-vue-surface tset-settings" }, IV = { class: "tv-page-heading" }, LV = { class: "tv-heading-actions" }, RV = { class: "tv-metrics tset-metrics" }, zV = {
 	class: "tv-tabs tset-tabs",
 	"aria-label": "Settings sections"
-}, aV = ["data-settings-vue-tab", "onClick"], oV = {
+}, BV = ["data-settings-vue-tab", "onClick"], VV = {
 	class: "tset-context",
 	"aria-live": "polite"
-}, sV = /* @__PURE__ */ sr({
+}, HV = /* @__PURE__ */ sr({
 	__name: "SettingsApp",
 	props: {
 		state: {},
@@ -20566,25 +21003,25 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		function y(e, t = "success") {
 			n.options.onToast?.(e, t);
 		}
-		return t({ select: (e, t = "") => u(e, !1, t) }), (t, n) => (q(), J("div", eV, [
-			Y("header", tV, [n[5] ||= Y("div", null, [
+		return t({ select: (e, t = "") => u(e, !1, t) }), (t, n) => (q(), J("div", FV, [
+			Y("header", IV, [n[5] ||= Y("div", null, [
 				Y("span", { class: "tv-eyebrow" }, "Tater configuration"),
 				Y("h1", null, "Settings"),
 				Y("p", null, "Configure identity, intelligence, voice, storage, security, and diagnostics from one workspace.")
-			], -1), Y("div", nV, [Y("span", { class: B(["tv-live-pill", { warning: !l.value.redisConnected }]) }, [n[4] ||= Y("i", null, null, -1), X(V(l.value.redisConnected ? "Services connected" : "Redis needs attention"), 1)], 2)])]),
-			Y("div", rV, [
+			], -1), Y("div", LV, [Y("span", { class: B(["tv-live-pill", { warning: !l.value.redisConnected }]) }, [n[4] ||= Y("i", null, null, -1), X(V(l.value.redisConnected ? "Services connected" : "Redis needs attention"), 1)], 2)])]),
+			Y("div", RV, [
 				Y("div", null, [n[6] ||= Y("span", null, "Redis", -1), Y("strong", null, V(l.value.redisConnected ? "Connected" : "Setup needed"), 1)]),
 				Y("div", null, [n[7] ||= Y("span", null, "Admin gated", -1), Y("strong", null, V(Number(l.value.adminGateCount || 0)), 1)]),
 				Y("div", null, [n[8] ||= Y("span", null, "Integrations", -1), Y("strong", null, V(Number(l.value.integrationCount || 0)), 1)])
 			]),
-			Y("nav", iV, [(q(), J(K, null, G(r, (e) => Y("button", {
+			Y("nav", zV, [(q(), J(K, null, G(r, (e) => Y("button", {
 				key: e.id,
 				type: "button",
 				class: B({ active: o.value === e.id }),
 				"data-settings-vue-tab": e.id,
 				onClick: (t) => u(e.id, !0)
-			}, V(e.label), 11, aV)), 64))]),
-			Y("div", oV, [Y("span", null, V(c.value.label), 1), Y("p", null, V(c.value.description), 1)]),
+			}, V(e.label), 11, BV)), 64))]),
+			Y("div", VV, [Y("span", null, V(c.value.label), 1), Y("p", null, V(c.value.description), 1)]),
 			o.value === "general" ? (q(), da(Qx, {
 				key: 0,
 				settings: e.state.general,
@@ -20667,7 +21104,7 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				"models-api-url",
 				"pair-api-url",
 				"initial-tab"
-			])) : o.value === "esphome" ? (q(), da($B, {
+			])) : o.value === "esphome" ? (q(), da(PV, {
 				key: 5,
 				ref_key: "voicePanel",
 				ref: s,
@@ -20741,75 +21178,75 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			}, null, 8, ["endpoint", "initial-auto-scroll"])) : Z("", !0)
 		]));
 	}
-}), cV = ["title"], lV = { class: "tr-pill-brand" }, uV = { class: "tr-pill-copy" }, dV = {
+}), UV = ["title"], WV = { class: "tr-pill-brand" }, GV = { class: "tr-pill-copy" }, KV = {
 	key: 0,
 	class: "tr-pill-resources"
-}, fV = { class: "tr-resource-track" }, pV = { class: "tr-pill-end" }, mV = {
+}, qV = { class: "tr-resource-track" }, JV = { class: "tr-pill-end" }, YV = {
 	class: "tv-modal tr-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-label": "Runtime monitor"
-}, hV = { class: "tr-modal-head" }, gV = { class: "tv-eyebrow" }, _V = { class: "tr-modal-actions" }, vV = {
+}, XV = { class: "tr-modal-head" }, ZV = { class: "tv-eyebrow" }, QV = { class: "tr-modal-actions" }, $V = {
 	class: "tr-tabs",
 	"aria-label": "Runtime monitor sections"
-}, yV = ["onClick"], bV = { class: "tr-tab-mark" }, xV = {
+}, eH = ["onClick"], tH = { class: "tr-tab-mark" }, nH = {
 	key: 1,
 	class: "tv-empty"
-}, SV = {
+}, rH = {
 	key: 2,
 	class: "tr-tab-panel tr-overview"
-}, CV = { class: "tr-overview-hero" }, wV = { class: "tr-overview-copy" }, TV = { class: "tr-overview-facts" }, EV = { class: "tr-meter-grid tr-live-meter-grid" }, DV = { class: "tr-meter-track" }, OV = { key: 0 }, kV = { class: "tr-overview-cards" }, AV = {
+}, iH = { class: "tr-overview-hero" }, aH = { class: "tr-overview-copy" }, oH = { class: "tr-overview-facts" }, sH = { class: "tr-meter-grid tr-live-meter-grid" }, cH = { class: "tr-meter-track" }, lH = { key: 0 }, uH = { class: "tr-overview-cards" }, dH = {
 	key: 3,
 	class: "tr-tab-panel tr-activity-view"
-}, jV = { class: "tr-view-hero" }, MV = { class: "tr-view-metrics" }, NV = { class: "tr-activity-grid" }, PV = { class: "tr-runtime-section tr-activity-card hydra" }, FV = { class: "tr-inline-stats" }, IV = { class: "tr-block" }, LV = {
+}, fH = { class: "tr-view-hero" }, pH = { class: "tr-view-metrics" }, mH = { class: "tr-activity-grid" }, hH = { class: "tr-runtime-section tr-activity-card hydra" }, gH = { class: "tr-inline-stats" }, _H = { class: "tr-block" }, vH = {
 	key: 0,
 	class: "tr-turns"
-}, RV = { class: "tv-state good" }, zV = { key: 0 }, BV = { key: 1 }, VV = { key: 0 }, HV = { key: 1 }, UV = {
+}, yH = { class: "tv-state good" }, bH = { key: 0 }, xH = { key: 1 }, SH = { key: 0 }, CH = { key: 1 }, wH = {
 	key: 1,
 	class: "tv-empty compact"
-}, WV = { class: "tr-runtime-section tr-activity-card calls" }, GV = { class: "tr-inline-stats" }, KV = { class: "tr-block" }, qV = {
+}, TH = { class: "tr-runtime-section tr-activity-card calls" }, EH = { class: "tr-inline-stats" }, DH = { class: "tr-block" }, OH = {
 	key: 0,
 	class: "tr-list"
-}, JV = {
+}, kH = {
 	key: 1,
 	class: "tv-empty compact"
-}, YV = { class: "tr-runtime-section tr-activity-card vision" }, XV = { class: "tr-inline-stats" }, ZV = { class: "tr-block" }, QV = {
+}, AH = { class: "tr-runtime-section tr-activity-card vision" }, jH = { class: "tr-inline-stats" }, MH = { class: "tr-block" }, NH = {
 	key: 0,
 	class: "tr-list"
-}, $V = { class: "tv-state good" }, eH = {
+}, PH = { class: "tv-state good" }, FH = {
 	key: 1,
 	class: "tv-empty compact"
-}, tH = {
+}, IH = {
 	key: 4,
 	class: "tr-tab-panel tr-models-view"
-}, nH = { class: "tr-view-hero" }, rH = { class: "tr-view-copy" }, iH = { class: "tr-view-metrics" }, aH = {
+}, LH = { class: "tr-view-hero" }, RH = { class: "tr-view-copy" }, zH = { class: "tr-view-metrics" }, BH = {
 	key: 0,
 	class: "tr-runtime-section tr-device-section"
-}, oH = { class: "tr-device-grid" }, sH = { class: "tr-device-head" }, cH = { class: "tr-meter-track" }, lH = { class: "tr-runtime-section tr-model-section" }, uH = { class: "tv-state good" }, dH = {
+}, VH = { class: "tr-device-grid" }, HH = { class: "tr-device-head" }, UH = { class: "tr-meter-track" }, WH = { class: "tr-runtime-section tr-model-section" }, GH = { class: "tv-state good" }, KH = {
 	key: 0,
 	class: "tr-model-list"
-}, fH = { class: "tr-entry-mark" }, pH = { class: "tr-model-copy" }, mH = { key: 0 }, hH = {
+}, qH = { class: "tr-entry-mark" }, JH = { class: "tr-model-copy" }, YH = { key: 0 }, XH = {
 	key: 1,
 	class: "danger"
-}, gH = { class: "tr-model-action" }, _H = ["disabled", "onClick"], vH = {
+}, ZH = { class: "tr-model-action" }, QH = ["disabled", "onClick"], $H = {
 	key: 1,
 	class: "tv-state good"
-}, yH = {
+}, eU = {
 	key: 1,
 	class: "tv-empty compact"
-}, bH = {
+}, tU = {
 	key: 5,
 	class: "tr-tab-panel tr-context-view"
-}, xH = { class: "tr-view-hero" }, SH = { class: "tr-view-copy" }, CH = { key: 0 }, wH = { key: 1 }, TH = { key: 2 }, EH = {
+}, nU = { class: "tr-view-hero" }, rU = { class: "tr-view-copy" }, iU = { key: 0 }, aU = { key: 1 }, oU = { key: 2 }, sU = {
 	key: 0,
 	class: "tr-view-metrics"
-}, DH = {
+}, cU = {
 	key: 0,
 	class: "tr-runtime-section tr-context-section"
-}, OH = { class: "tr-context-rows" }, kH = { class: "tr-meter-track" }, AH = { class: "tr-context-stack" }, jH = {
+}, lU = { class: "tr-context-rows" }, uU = { class: "tr-meter-track" }, dU = { class: "tr-context-stack" }, fU = {
 	key: 0,
 	class: "tr-context-notes"
-}, MH = /* @__PURE__ */ sr({
+}, pU = /* @__PURE__ */ sr({
 	__name: "RuntimeStatus",
 	props: {
 		state: {},
@@ -21131,23 +21568,23 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			title: `${E.value}. Open the live runtime monitor.`,
 			onClick: We
 		}, [
-			Y("span", lV, [Y("span", uV, [Y("strong", null, V(_.value), 1), Y("small", null, V(O.value), 1)])]),
-			e.state.health ? (q(), J("span", dV, [(q(!0), J(K, null, G(j.value, (e) => (q(), J("span", {
+			Y("span", WV, [Y("span", GV, [Y("strong", null, V(_.value), 1), Y("small", null, V(O.value), 1)])]),
+			e.state.health ? (q(), J("span", KV, [(q(!0), J(K, null, G(j.value, (e) => (q(), J("span", {
 				key: e.label,
 				class: B(["tr-resource", { unavailable: e.unavailable }])
-			}, [Y("span", null, [Y("b", null, V(e.label), 1), Y("em", null, V(e.value), 1)]), Y("span", fV, [Y("i", { style: R({ width: `${e.percent}%` }) }, null, 4)])], 2))), 128))])) : Z("", !0),
-			Y("span", pV, [Y("span", null, [Y("b", null, V(T.value), 1), n[4] ||= Y("small", null, "models", -1)]), n[5] ||= Y("i", null, "›", -1)])
-		], 10, cV), ga(kl, {
+			}, [Y("span", null, [Y("b", null, V(e.label), 1), Y("em", null, V(e.value), 1)]), Y("span", qV, [Y("i", { style: R({ width: `${e.percent}%` }) }, null, 4)])], 2))), 128))])) : Z("", !0),
+			Y("span", JV, [Y("span", null, [Y("b", null, V(T.value), 1), n[4] ||= Y("small", null, "models", -1)]), n[5] ||= Y("i", null, "›", -1)])
+		], 10, UV), ga(kl, {
 			open: r.value,
 			"backdrop-class": "tv-modal-backdrop tr-backdrop",
 			onClose: Ge
 		}, {
-			default: Sn(() => [Y("section", mV, [
-				Y("header", hV, [Y("div", null, [
-					Y("span", gV, V(_.value), 1),
+			default: Sn(() => [Y("section", YV, [
+				Y("header", XV, [Y("div", null, [
+					Y("span", ZV, V(_.value), 1),
 					n[6] ||= Y("h2", null, "Live system monitor", -1),
 					n[7] ||= Y("p", null, "Fast compute telemetry with focused views for current work, loaded models, and context.", -1)
-				]), Y("div", _V, [
+				]), Y("div", QV, [
 					Y("span", { class: B(["tr-live-state", `stream-${d.value}`]) }, [n[8] ||= Y("i", null, null, -1), X(V(A.value), 1)], 2),
 					Y("small", null, V(c.value ? `Telemetry ${c.value}` : s.value ? `Updated ${s.value}` : "Starting live telemetry…"), 1),
 					Y("button", {
@@ -21158,26 +21595,26 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						onClick: Ge
 					}, "Close", 512)
 				])]),
-				Y("nav", vV, [(q(!0), J(K, null, G(fe.value, (e) => (q(), J("button", {
+				Y("nav", $V, [(q(!0), J(K, null, G(fe.value, (e) => (q(), J("button", {
 					key: e.id,
 					type: "button",
 					class: B({ active: f.value === e.id }),
 					onClick: (t) => f.value = e.id
 				}, [
-					Y("i", bV, V(e.mark), 1),
+					Y("i", tH, V(e.mark), 1),
 					Y("strong", null, V(e.label), 1),
 					Y("small", null, V(e.meta), 1)
-				], 10, yV))), 128))]),
+				], 10, eH))), 128))]),
 				a.value || o.value ? (q(), J("div", {
 					key: 0,
 					class: B(["tv-notice", { error: !!a.value }])
 				}, V(a.value || o.value), 3)) : Z("", !0),
-				!Object.keys(l.value).length && i.value ? (q(), J("div", xV, "Loading runtime state…")) : f.value === "overview" ? (q(), J("section", SV, [
-					Y("article", CV, [Y("div", wV, [
+				!Object.keys(l.value).length && i.value ? (q(), J("div", nH, "Loading runtime state…")) : f.value === "overview" ? (q(), J("section", rH, [
+					Y("article", iH, [Y("div", aH, [
 						n[9] ||= Y("span", { class: "tv-eyebrow" }, "Overall runtime", -1),
 						Y("h3", null, V(ue.value), 1),
 						Y("p", null, V(de.value), 1)
-					]), Y("div", TV, [Y("div", null, [
+					]), Y("div", oH, [Y("div", null, [
 						n[10] ||= Y("span", null, "Models", -1),
 						Y("strong", null, V(T.value), 1),
 						n[11] ||= Y("small", null, "loaded", -1)
@@ -21186,15 +21623,15 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						Y("strong", null, V(le.value), 1),
 						n[13] ||= Y("small", null, "operations", -1)
 					])])]),
-					Y("div", EV, [(q(!0), J(K, null, G(Ie.value, (e) => (q(), J("div", {
+					Y("div", sH, [(q(!0), J(K, null, G(Ie.value, (e) => (q(), J("div", {
 						key: e.label,
 						class: B(["tr-meter", { unavailable: e.unavailable }])
 					}, [
 						Y("div", null, [Y("strong", null, V(e.label), 1), Y("span", null, V(e.value), 1)]),
-						Y("span", DV, [Y("i", { style: R({ width: `${e.percent}%` }) }, null, 4)]),
-						e.detail ? (q(), J("small", OV, V(e.detail), 1)) : Z("", !0)
+						Y("span", cH, [Y("i", { style: R({ width: `${e.percent}%` }) }, null, 4)]),
+						e.detail ? (q(), J("small", lH, V(e.detail), 1)) : Z("", !0)
 					], 2))), 128))]),
-					Y("div", kV, [
+					Y("div", uH, [
 						Y("button", {
 							type: "button",
 							onClick: n[0] ||= (e) => f.value = "activity"
@@ -21228,11 +21665,11 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 							n[25] ||= Y("i", null, "›", -1)
 						])
 					])
-				])) : f.value === "activity" ? (q(), J("section", AV, [Y("article", jV, [n[31] ||= Y("div", { class: "tr-view-copy" }, [
+				])) : f.value === "activity" ? (q(), J("section", dH, [Y("article", fH, [n[31] ||= Y("div", { class: "tr-view-copy" }, [
 					Y("span", { class: "tv-eyebrow" }, "Live workload"),
 					Y("h2", null, "Runtime activity"),
 					Y("p", null, "See what Hydra and the model runtimes are doing now without mixing active work with lifetime totals.")
-				], -1), Y("div", MV, [
+				], -1), Y("div", pH, [
 					Y("div", null, [
 						n[26] ||= Y("span", null, "Hydra", -1),
 						Y("strong", null, V(ie.value.length), 1),
@@ -21248,61 +21685,61 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						Y("strong", null, V(H(P.value.active_total)), 1),
 						n[30] ||= Y("small", null, "active calls", -1)
 					])
-				])]), Y("div", NV, [
-					Y("article", PV, [
+				])]), Y("div", mH, [
+					Y("article", hH, [
 						Y("header", null, [
 							n[32] ||= Y("span", { class: "tr-section-mark" }, "HY", -1),
 							n[33] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Orchestration"), Y("h2", null, "Hydra Jobs")], -1),
 							Y("span", { class: B(["tv-state", { good: ie.value.length > 0 }]) }, V(ie.value.length ? `${ie.value.length} active` : "Ready"), 3)
 						]),
-						Y("div", FV, [
+						Y("div", gH, [
 							Y("span", null, [Y("b", null, V(H(M.value.total)), 1), n[34] ||= X(" total", -1)]),
 							Y("span", null, [Y("b", null, V(H(M.value.webui_jobs)), 1), n[35] ||= X(" WebUI queue", -1)]),
 							Y("span", null, [Y("b", null, V(H(M.value.surface_running_turns)), 1), n[36] ||= X(" surface turns", -1)])
 						]),
-						Y("section", IV, [n[37] ||= Y("h3", null, "Active Turns", -1), ie.value.length ? (q(), J("div", LV, [(q(!0), J(K, null, G(ie.value, (e) => (q(), J("article", { key: e.id }, [
-							Y("header", null, [Y("strong", null, V(e.task_name || "Hydra task"), 1), Y("span", RV, "Running " + V(De(e.age_seconds)), 1)]),
+						Y("section", _H, [n[37] ||= Y("h3", null, "Active Turns", -1), ie.value.length ? (q(), J("div", vH, [(q(!0), J(K, null, G(ie.value, (e) => (q(), J("article", { key: e.id }, [
+							Y("header", null, [Y("strong", null, V(e.task_name || "Hydra task"), 1), Y("span", yH, "Running " + V(De(e.age_seconds)), 1)]),
 							Y("div", null, [
 								Y("span", null, V(e.platform_label || e.platform || "Unknown"), 1),
-								e.source ? (q(), J("span", zV, V(e.source), 1)) : Z("", !0),
-								e.id ? (q(), J("span", BV, "Drop " + V(xe(e.id).slice(0, 8)), 1)) : Z("", !0)
+								e.source ? (q(), J("span", bH, V(e.source), 1)) : Z("", !0),
+								e.id ? (q(), J("span", xH, "Drop " + V(xe(e.id).slice(0, 8)), 1)) : Z("", !0)
 							]),
-							e.current_tool ? (q(), J("small", VV, "Current verba/tool: " + V(e.current_tool), 1)) : Z("", !0),
-							e.scope ? (q(), J("small", HV, "Scope: " + V(e.scope), 1)) : Z("", !0)
-						]))), 128))])) : (q(), J("div", UV, "Hydra is ready. No active turns right now."))])
+							e.current_tool ? (q(), J("small", SH, "Current verba/tool: " + V(e.current_tool), 1)) : Z("", !0),
+							e.scope ? (q(), J("small", CH, "Scope: " + V(e.scope), 1)) : Z("", !0)
+						]))), 128))])) : (q(), J("div", wH, "Hydra is ready. No active turns right now."))])
 					]),
-					Y("article", WV, [
+					Y("article", TH, [
 						Y("header", null, [
 							n[38] ||= Y("span", { class: "tr-section-mark" }, "LL", -1),
 							n[39] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Language models"), Y("h2", null, "LLM Calls")], -1),
 							Y("span", { class: B(["tv-state", { good: H(N.value.running_total ?? N.value.active_total) > 0 }]) }, V(H(N.value.running_total ?? N.value.active_total) ? "Working" : "Ready"), 3)
 						]),
-						Y("div", GV, [
+						Y("div", EH, [
 							Y("span", null, [Y("b", null, V(H(N.value.running_total ?? N.value.active_total)), 1), n[40] ||= X(" running", -1)]),
 							Y("span", null, [Y("b", null, V(H(N.value.queued_total)), 1), n[41] ||= X(" queued", -1)]),
 							Y("span", null, [Y("b", null, V(H(N.value.totals?.completed)), 1), n[42] ||= X(" completed", -1)])
 						]),
-						Y("section", KV, [n[43] ||= Y("h3", null, "Current Calls", -1), ae.value.length ? (q(), J("div", qV, [(q(!0), J(K, null, G(ae.value, (e, t) => (q(), J("article", { key: e.id || t }, [Y("div", null, [Y("strong", null, V(e.source_label || e.label || "Unknown source"), 1), Y("small", null, V(Pe(e, "llm")), 1)]), Y("span", { class: B(["tv-state", { good: xe(e.state) !== "queued" }]) }, V(e.state_label || (xe(e.state) === "queued" ? "Queued" : "Running")) + " " + V(De(e.state_age_seconds ?? e.age_seconds)), 3)]))), 128))])) : (q(), J("div", JV, "The LLM runtime is ready. No active calls."))])
+						Y("section", DH, [n[43] ||= Y("h3", null, "Current Calls", -1), ae.value.length ? (q(), J("div", OH, [(q(!0), J(K, null, G(ae.value, (e, t) => (q(), J("article", { key: e.id || t }, [Y("div", null, [Y("strong", null, V(e.source_label || e.label || "Unknown source"), 1), Y("small", null, V(Pe(e, "llm")), 1)]), Y("span", { class: B(["tv-state", { good: xe(e.state) !== "queued" }]) }, V(e.state_label || (xe(e.state) === "queued" ? "Queued" : "Running")) + " " + V(De(e.state_age_seconds ?? e.age_seconds)), 3)]))), 128))])) : (q(), J("div", kH, "The LLM runtime is ready. No active calls."))])
 					]),
-					Y("article", YV, [
+					Y("article", AH, [
 						Y("header", null, [
 							n[44] ||= Y("span", { class: "tr-section-mark" }, "VI", -1),
 							n[45] ||= Y("div", null, [Y("span", { class: "tv-eyebrow" }, "Visual understanding"), Y("h2", null, "Vision Calls")], -1),
 							Y("span", { class: B(["tv-state", { good: H(P.value.active_total) > 0 }]) }, V(H(P.value.active_total) ? "Working" : "Ready"), 3)
 						]),
-						Y("div", XV, [
+						Y("div", jH, [
 							Y("span", null, [Y("b", null, V(H(P.value.active_total)), 1), n[46] ||= X(" active", -1)]),
 							Y("span", null, [Y("b", null, V(H(P.value.totals?.completed)), 1), n[47] ||= X(" completed", -1)]),
 							Y("span", null, [Y("b", null, V(H(P.value.totals?.failed)), 1), n[48] ||= X(" failed", -1)])
 						]),
-						Y("section", ZV, [n[49] ||= Y("h3", null, "Active Calls", -1), oe.value.length ? (q(), J("div", QV, [(q(!0), J(K, null, G(oe.value, (e, t) => (q(), J("article", { key: e.id || t }, [Y("div", null, [Y("strong", null, V(e.source_label || e.label || "Unknown source"), 1), Y("small", null, V(Pe(e, "vision")), 1)]), Y("span", $V, V(De(e.age_seconds)), 1)]))), 128))])) : (q(), J("div", eH, "Vision is ready. No active calls right now."))])
+						Y("section", MH, [n[49] ||= Y("h3", null, "Active Calls", -1), oe.value.length ? (q(), J("div", NH, [(q(!0), J(K, null, G(oe.value, (e, t) => (q(), J("article", { key: e.id || t }, [Y("div", null, [Y("strong", null, V(e.source_label || e.label || "Unknown source"), 1), Y("small", null, V(Pe(e, "vision")), 1)]), Y("span", PH, V(De(e.age_seconds)), 1)]))), 128))])) : (q(), J("div", FH, "Vision is ready. No active calls right now."))])
 					])
-				])])) : f.value === "models" ? (q(), J("section", tH, [
-					Y("article", nH, [Y("div", rH, [
+				])])) : f.value === "models" ? (q(), J("section", IH, [
+					Y("article", LH, [Y("div", RH, [
 						n[50] ||= Y("span", { class: "tv-eyebrow" }, "Compute and memory", -1),
 						n[51] ||= Y("h2", null, "Loaded Runtime Models", -1),
 						Y("p", null, V(pe.value), 1)
-					]), Y("div", iH, [
+					]), Y("div", zH, [
 						Y("div", null, [
 							n[52] ||= Y("span", null, "Loaded", -1),
 							Y("strong", null, V(H(I.value.loaded_count ?? z.value.length)), 1),
@@ -21324,43 +21761,43 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 							n[59] ||= Y("small", null, "memory", -1)
 						])
 					])]),
-					re.value.length ? (q(), J("section", aH, [n[61] ||= Y("header", null, [Y("div", null, [
+					re.value.length ? (q(), J("section", BH, [n[61] ||= Y("header", null, [Y("div", null, [
 						Y("span", { class: "tv-eyebrow" }, "Accelerators"),
 						Y("h2", null, "GPU Devices"),
 						Y("p", null, "Live utilization and memory reported by the active compute backend.")
-					])], -1), Y("div", oH, [(q(!0), J(K, null, G(re.value, (e, t) => (q(), J("article", { key: e.index ?? t }, [Y("div", sH, [
+					])], -1), Y("div", VH, [(q(!0), J(K, null, G(re.value, (e, t) => (q(), J("article", { key: e.index ?? t }, [Y("div", HH, [
 						n[60] ||= Y("span", { class: "tr-section-mark" }, "GPU", -1),
 						Y("div", null, [Y("strong", null, V(e.name || `GPU ${e.index ?? ""}`), 1), Y("small", null, V(Ne(e)), 1)]),
 						Y("b", null, V(we(e.utilization_percent)), 1)
-					]), Y("span", cH, [Y("i", { style: R({ width: `${Ce(e.utilization_percent) ?? 0}%` }) }, null, 4)])]))), 128))])])) : Z("", !0),
-					Y("section", lH, [Y("header", null, [n[62] ||= Y("div", null, [
+					]), Y("span", UH, [Y("i", { style: R({ width: `${Ce(e.utilization_percent) ?? 0}%` }) }, null, 4)])]))), 128))])])) : Z("", !0),
+					Y("section", WH, [Y("header", null, [n[62] ||= Y("div", null, [
 						Y("span", { class: "tv-eyebrow" }, "Inventory"),
 						Y("h2", null, "Loaded Model Entries"),
 						Y("p", null, "Everything currently held by Tater, including managed speech and identity models.")
-					], -1), Y("span", uH, V(z.value.length) + " loaded", 1)]), z.value.length ? (q(), J("div", dH, [(q(!0), J(K, null, G(z.value, (e) => (q(), J("article", {
+					], -1), Y("span", GH, V(z.value.length) + " loaded", 1)]), z.value.length ? (q(), J("div", KH, [(q(!0), J(K, null, G(z.value, (e) => (q(), J("article", {
 						key: e.cache_key || `${e.provider}:${e.model}`,
 						class: "tr-model-entry"
 					}, [
-						Y("span", fH, V(je(e)), 1),
-						Y("div", pH, [
+						Y("span", qH, V(je(e)), 1),
+						Y("div", JH, [
 							Y("strong", null, V(e.model || "model"), 1),
 							Y("small", null, V(ke(e)), 1),
-							Ae(e).length ? (q(), J("small", mH, V(Ae(e).join(" • ")), 1)) : Z("", !0),
-							e.warning ? (q(), J("small", hH, V(e.warning), 1)) : Z("", !0)
+							Ae(e).length ? (q(), J("small", YH, V(Ae(e).join(" • ")), 1)) : Z("", !0),
+							e.warning ? (q(), J("small", XH, V(e.warning), 1)) : Z("", !0)
 						]),
-						Y("div", gH, [e.unloadable && !e.managed ? (q(), J("button", {
+						Y("div", ZH, [e.unloadable && !e.managed ? (q(), J("button", {
 							key: 0,
 							class: "tv-button danger",
 							type: "button",
 							disabled: !!m.value,
 							onClick: (t) => Ke(e)
-						}, V(m.value === xe(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, _H)) : (q(), J("span", vH, V(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))])
-					]))), 128))])) : (q(), J("div", yH, "No runtime models are loaded right now."))])
-				])) : (q(), J("section", bH, [Y("article", xH, [Y("div", SH, [
+						}, V(m.value === xe(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, QH)) : (q(), J("span", $H, V(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))])
+					]))), 128))])) : (q(), J("div", eU, "No runtime models are loaded right now."))])
+				])) : (q(), J("section", tU, [Y("article", nU, [Y("div", rU, [
 					n[63] ||= Y("span", { class: "tv-eyebrow" }, "Prompt budget", -1),
 					n[64] ||= Y("h2", null, "Estimated Chat Context Window", -1),
-					F.value.error ? (q(), J("p", CH, V(F.value.error), 1)) : H(F.value.prompt_tokens) || H(F.value.minimum_context_window) ? (q(), J("p", wH, "A clear estimate of what occupies the active Hydra prompt and how much room the selected model should provide.")) : (q(), J("p", TH, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))
-				]), F.value.error ? Z("", !0) : (q(), J("div", EH, [
+					F.value.error ? (q(), J("p", iU, V(F.value.error), 1)) : H(F.value.prompt_tokens) || H(F.value.minimum_context_window) ? (q(), J("p", aU, "A clear estimate of what occupies the active Hydra prompt and how much room the selected model should provide.")) : (q(), J("p", oU, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))
+				]), F.value.error ? Z("", !0) : (q(), J("div", sU, [
 					Y("div", null, [
 						n[65] ||= Y("span", null, "Prompt", -1),
 						Y("strong", null, V(Se(F.value.prompt_tokens)), 1),
@@ -21381,38 +21818,38 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						Y("strong", null, V(Se(F.value.recommended_context_window)), 1),
 						n[72] ||= Y("small", null, "window", -1)
 					])
-				]))]), me.value.length && !F.value.error ? (q(), J("section", DH, [
+				]))]), me.value.length && !F.value.error ? (q(), J("section", cU, [
 					Y("header", null, [Y("div", null, [
 						n[73] ||= Y("span", { class: "tv-eyebrow" }, "Token map", -1),
 						n[74] ||= Y("h2", null, "Prompt Composition", -1),
 						Y("p", null, V(he.value), 1)
 					])]),
-					Y("div", OH, [(q(!0), J(K, null, G(me.value, (e) => (q(), J("article", { key: e.label }, [Y("div", null, [Y("strong", null, V(e.label), 1), Y("span", null, V(Se(e.tokens)) + " tokens", 1)]), Y("span", kH, [Y("i", { style: R({ width: `${Me(e.tokens)}%` }) }, null, 4)])]))), 128))]),
-					Y("div", AH, [
+					Y("div", lU, [(q(!0), J(K, null, G(me.value, (e) => (q(), J("article", { key: e.label }, [Y("div", null, [Y("strong", null, V(e.label), 1), Y("span", null, V(Se(e.tokens)) + " tokens", 1)]), Y("span", uU, [Y("i", { style: R({ width: `${Me(e.tokens)}%` }) }, null, 4)])]))), 128))]),
+					Y("div", dU, [
 						Y("span", null, [Y("b", null, V(H(F.value.enabled_verbas)), 1), n[75] ||= X(" Verbas", -1)]),
 						Y("span", null, [Y("b", null, V(H(F.value.connected_portals)), 1), n[76] ||= X(" Portals", -1)]),
 						Y("span", null, [Y("b", null, V(H(F.value.running_cores)), 1), n[77] ||= X(" Cores", -1)])
 					]),
-					ge.value.length ? (q(), J("div", jH, [(q(!0), J(K, null, G(ge.value, (e, t) => (q(), J("article", { key: e }, [Y("span", null, V(t + 1), 1), Y("p", null, V(e), 1)]))), 128))])) : Z("", !0)
+					ge.value.length ? (q(), J("div", fU, [(q(!0), J(K, null, G(ge.value, (e, t) => (q(), J("article", { key: e }, [Y("span", null, V(t + 1), 1), Y("p", null, V(e), 1)]))), 128))])) : Z("", !0)
 				])) : Z("", !0)]))
 			])]),
 			_: 1
 		}, 8, ["open"])], 64));
 	}
-}), NH = {
+}), mU = {
 	key: 0,
 	id: "webui-auth-modal",
 	class: "webui-auth-overlay active",
 	"aria-hidden": "false"
-}, PH = {
+}, hU = {
 	class: "card webui-auth-card",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-label": "WebUI Login"
-}, FH = { class: "webui-auth-avatar-wrap" }, IH = ["src"], LH = {
+}, gU = { class: "webui-auth-avatar-wrap" }, _U = ["src"], vU = {
 	key: 1,
 	class: "webui-auth-avatar-fallback"
-}, RH = { class: "card-title" }, zH = { class: "small" }, BH = ["autocomplete", "disabled"], VH = { key: 0 }, HH = ["disabled"], UH = ["disabled"], WH = /* @__PURE__ */ sr({
+}, yU = { class: "card-title" }, bU = { class: "small" }, xU = ["autocomplete", "disabled"], SU = { key: 0 }, CU = ["disabled"], wU = ["disabled"], TU = /* @__PURE__ */ sr({
 	__name: "AuthGate",
 	props: {
 		state: {},
@@ -21458,15 +21895,15 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			name: "tater-popup",
 			appear: ""
 		}, {
-			default: Sn(() => [e.state.required ? (q(), J("div", NH, [Y("div", PH, [
-				Y("div", FH, [e.state.userAvatar ? (q(), J("img", {
+			default: Sn(() => [e.state.required ? (q(), J("div", mU, [Y("div", hU, [
+				Y("div", gU, [e.state.userAvatar ? (q(), J("img", {
 					key: 0,
 					class: "webui-auth-avatar-img",
 					src: e.state.userAvatar,
 					alt: "User avatar"
-				}, null, 8, IH)) : (q(), J("div", LH, V(u.value), 1))]),
-				Y("h3", RH, V(c.value ? "Create WebUI Password" : "WebUI Login"), 1),
-				Y("div", zH, V(c.value ? `${l.value}, set a password to protect this WebUI.` : `${l.value}, enter your password to unlock TaterOS.`), 1),
+				}, null, 8, _U)) : (q(), J("div", vU, V(u.value), 1))]),
+				Y("h3", yU, V(c.value ? "Create WebUI Password" : "WebUI Login"), 1),
+				Y("div", bU, V(c.value ? `${l.value}, set a password to protect this WebUI.` : `${l.value}, enter your password to unlock TaterOS.`), 1),
 				Y("form", {
 					class: "form-grid webui-auth-form",
 					onSubmit: bs(d, ["prevent"])
@@ -21477,92 +21914,92 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						autocomplete: c.value ? "new-password" : "current-password",
 						disabled: o.value,
 						autofocus: ""
-					}, null, 8, BH), [[$, i.value]])]),
-					c.value ? (q(), J("label", VH, [n[3] ||= X("Repeat Password", -1), W(Y("input", {
+					}, null, 8, xU), [[$, i.value]])]),
+					c.value ? (q(), J("label", SU, [n[3] ||= X("Repeat Password", -1), W(Y("input", {
 						"onUpdate:modelValue": n[1] ||= (e) => a.value = e,
 						type: "password",
 						autocomplete: "new-password",
 						disabled: o.value
-					}, null, 8, HH), [[$, a.value]])])) : Z("", !0),
+					}, null, 8, CU), [[$, a.value]])])) : Z("", !0),
 					Y("button", {
 						type: "submit",
 						class: "action-btn",
 						disabled: o.value
-					}, V(o.value ? "Checking…" : c.value ? "Save Password" : "Login"), 9, UH)
+					}, V(o.value ? "Checking…" : c.value ? "Save Password" : "Login"), 9, wU)
 				], 32),
 				Y("div", { class: B(["small", { error: !!s.value }]) }, V(s.value || e.state.message || (c.value ? "Create a password and repeat it to save." : "Enter your password to continue.")), 3)
 			])])) : Z("", !0)]),
 			_: 1
 		})]));
 	}
-}), GH = { class: "tater-vue-surface tvb-verbas" }, KH = { class: "tv-page-heading" }, qH = { class: "tv-heading-actions" }, JH = { class: "tv-metrics" }, YH = {
+}), EU = { class: "tater-vue-surface tvb-verbas" }, DU = { class: "tv-page-heading" }, OU = { class: "tv-heading-actions" }, kU = { class: "tv-metrics" }, AU = {
 	key: 1,
 	class: "tv-notice error"
-}, XH = {
+}, jU = {
 	class: "tv-tabs tvb-tabs",
 	"aria-label": "Verba sections"
-}, ZH = ["onClick"], QH = { key: 0 }, $H = {
+}, MU = ["onClick"], NU = { key: 0 }, PU = {
 	key: 2,
 	class: "tvb-card-grid"
-}, eU = { class: "tv-eyebrow" }, tU = { class: "tvb-version" }, nU = {
+}, FU = { class: "tv-eyebrow" }, IU = { class: "tvb-version" }, LU = {
 	key: 0,
 	class: "ti-tags"
-}, rU = ["onClick"], iU = { key: 1 }, aU = ["onClick"], oU = {
+}, RU = ["onClick"], zU = { key: 1 }, BU = ["onClick"], VU = {
 	key: 0,
 	class: "tv-empty"
-}, sU = {
+}, HU = {
 	key: 3,
 	class: "tvb-card-grid"
-}, cU = { class: "tv-eyebrow" }, lU = { class: "tv-state" }, uU = {
+}, UU = { class: "tv-eyebrow" }, WU = { class: "tv-state" }, GU = {
 	key: 0,
 	class: "ti-tags"
-}, dU = ["onClick"], fU = {
+}, KU = ["onClick"], qU = {
 	key: 0,
 	class: "tv-empty"
-}, pU = {
+}, JU = {
 	key: 4,
 	class: "tvb-manage-list tv-manage-workspace"
-}, mU = { class: "tv-panel tvb-manage-toolbar tv-manage-hero" }, hU = { class: "tv-manage-overview" }, gU = ["disabled"], _U = { class: "tv-manage-identity" }, vU = { class: "tv-manage-monogram" }, yU = { class: "tv-eyebrow" }, bU = { class: "tv-manage-version" }, xU = { class: "tv-manage-actions" }, SU = ["disabled", "onClick"], CU = ["onClick"], wU = {
+}, YU = { class: "tv-panel tvb-manage-toolbar tv-manage-hero" }, XU = { class: "tv-manage-overview" }, ZU = ["disabled"], QU = { class: "tv-manage-identity" }, $U = { class: "tv-manage-monogram" }, eW = { class: "tv-eyebrow" }, tW = { class: "tv-manage-version" }, nW = { class: "tv-manage-actions" }, rW = ["disabled", "onClick"], iW = ["onClick"], aW = {
 	key: 2,
 	class: "ti-purge"
-}, TU = ["onUpdate:modelValue"], EU = ["onClick"], DU = {
+}, oW = ["onUpdate:modelValue"], sW = ["onClick"], cW = {
 	key: 4,
 	class: "tv-state good"
-}, OU = {
+}, lW = {
 	key: 0,
 	class: "tv-empty"
-}, kU = {
+}, uW = {
 	key: 5,
 	class: "tv-panel tvb-repos tv-repository-manager"
-}, AU = {
+}, dW = {
 	class: "tv-repository-tabs",
 	"aria-label": "Verba repository sources"
-}, jU = {
+}, fW = {
 	key: 0,
 	class: "tv-trusted-repositories"
-}, MU = {
+}, pW = {
 	key: 0,
 	class: "tv-repository-warning"
-}, NU = { class: "tv-trusted-repo-grid" }, PU = {
+}, mW = { class: "tv-trusted-repo-grid" }, hW = {
 	class: "tv-trusted-repo-card builtin selected",
 	"aria-label": "Built-in Tater Shop repository"
-}, FU = { class: "tv-repo-card-top" }, IU = [
+}, gW = { class: "tv-repo-card-top" }, _W = [
 	"aria-pressed",
 	"onClick",
 	"onKeydown"
-], LU = { class: "tv-repo-check" }, RU = { class: "tv-repo-card-top" }, zU = { class: "tv-repo-monogram" }, BU = ["href"], VU = { key: 1 }, HU = {
+], vW = { class: "tv-repo-check" }, yW = { class: "tv-repo-card-top" }, bW = { class: "tv-repo-monogram" }, xW = ["href"], SW = { key: 1 }, CW = {
 	key: 0,
 	class: "ti-tags"
-}, UU = ["href"], WU = {
+}, wW = ["href"], TW = {
 	key: 1,
 	class: "tv-empty compact"
-}, GU = {
+}, EW = {
 	key: 1,
 	class: "tv-custom-repositories"
-}, KU = ["onClick"], qU = {
+}, DW = ["onClick"], OW = {
 	key: 0,
 	class: "tv-empty compact"
-}, JU = { class: "tvb-repo-form" }, YU = { class: "tv-eyebrow" }, XU = { class: "tvb-field-grid" }, ZU = /* @__PURE__ */ sr({
+}, kW = { class: "tvb-repo-form" }, AW = { class: "tv-eyebrow" }, jW = { class: "tvb-field-grid" }, MW = /* @__PURE__ */ sr({
 	__name: "VerbasApp",
 	props: {
 		state: {},
@@ -21791,17 +22228,17 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		function ce(e) {
 			e.key === "Escape" && (m.value = null);
 		}
-		return On(() => n.state.payload, F, { deep: !1 }), F(), window.addEventListener("keydown", ce), kr(() => window.removeEventListener("keydown", ce)), t({ select: a }), (e, t) => (q(), J("div", GH, [
-			Y("header", KH, [t[12] ||= Y("div", null, [
+		return On(() => n.state.payload, F, { deep: !1 }), F(), window.addEventListener("keydown", ce), kr(() => window.removeEventListener("keydown", ce)), t({ select: a }), (e, t) => (q(), J("div", EU, [
+			Y("header", DU, [t[12] ||= Y("div", null, [
 				Y("span", { class: "tv-eyebrow" }, "Tater tools"),
 				Y("h1", null, "Verba"),
 				Y("p", null, "Enable Tater’s tools, manage their settings, and keep every Verba current.")
-			], -1), Y("div", qH, [Y("span", { class: B(["tv-live-pill", { busy: !!o.value }]) }, [t[11] ||= Y("i", null, null, -1), X(V(o.value || "Ready"), 1)], 2), Y("button", {
+			], -1), Y("div", OU, [Y("span", { class: B(["tv-live-pill", { busy: !!o.value }]) }, [t[11] ||= Y("i", null, null, -1), X(V(o.value || "Ready"), 1)], 2), Y("button", {
 				class: "tv-button",
 				type: "button",
 				onClick: t[0] ||= (e) => ne()
 			}, "Refresh")])]),
-			Y("div", JH, [
+			Y("div", kU, [
 				Y("div", null, [t[13] ||= Y("span", null, "Installed", -1), Y("strong", null, V(y.value.length || v.value.length), 1)]),
 				Y("div", null, [t[14] ||= Y("span", null, "Enabled", -1), Y("strong", null, V(C.value), 1)]),
 				Y("div", null, [t[15] ||= Y("span", null, "Store", -1), Y("strong", null, V(b.value.length), 1)]),
@@ -21811,54 +22248,54 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				key: 0,
 				class: B(["tv-notice", { error: !!c.value }])
 			}, V(c.value || s.value), 3)) : Z("", !0),
-			_.value.errors?.length ? (q(), J("div", YH, V(_.value.errors.join(" • ")), 1)) : Z("", !0),
-			Y("nav", XH, [(q(), J(K, null, G(r, (e) => Y("button", {
+			_.value.errors?.length ? (q(), J("div", AU, V(_.value.errors.join(" • ")), 1)) : Z("", !0),
+			Y("nav", jU, [(q(), J(K, null, G(r, (e) => Y("button", {
 				key: e.id,
 				type: "button",
 				class: B({ active: i.value === e.id }),
 				onClick: (t) => a(e.id)
-			}, [X(V(e.label), 1), e.id === "manage" && S.value.length ? (q(), J("span", QH, V(S.value.length), 1)) : Z("", !0)], 10, ZH)), 64))]),
-			i.value === "installed" ? (q(), J("section", $H, [(q(!0), J(K, null, G(E.value, (e) => (q(), J("article", {
+			}, [X(V(e.label), 1), e.id === "manage" && S.value.length ? (q(), J("span", NU, V(S.value.length), 1)) : Z("", !0)], 10, MU)), 64))]),
+			i.value === "installed" ? (q(), J("section", PU, [(q(!0), J(K, null, G(E.value, (e) => (q(), J("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				Y("header", null, [Y("div", null, [Y("span", eU, V(e.id), 1), Y("h2", null, V(j(e)), 1)]), Y("span", { class: B(["tv-state", { good: e.runtime?.enabled }]) }, V(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
+				Y("header", null, [Y("div", null, [Y("span", FU, V(e.id), 1), Y("h2", null, V(j(e)), 1)]), Y("span", { class: B(["tv-state", { good: e.runtime?.enabled }]) }, V(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
 				Y("p", null, V(M(e)), 1),
-				Y("div", tU, [
+				Y("div", IU, [
 					Y("span", null, "Installed " + V(e.shop?.installed_ver || "0.0.0"), 1),
 					Y("span", null, "Store " + V(e.shop?.store_ver || "-"), 1),
 					Y("span", null, V(e.shop?.source_label || "local"), 1)
 				]),
-				N(e).length ? (q(), J("div", nU, [(q(!0), J(K, null, G(N(e).slice(0, 12), (e) => (q(), J("span", { key: e }, V(e), 1))), 128))])) : Z("", !0),
+				N(e).length ? (q(), J("div", LU, [(q(!0), J(K, null, G(N(e).slice(0, 12), (e) => (q(), J("span", { key: e }, V(e), 1))), 128))])) : Z("", !0),
 				Y("footer", null, [e.runtime?.settings?.length ? (q(), J("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					onClick: (t) => ie(e.runtime)
-				}, "Settings", 8, rU)) : (q(), J("span", iU, V(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (q(), J("button", {
+				}, "Settings", 8, RU)) : (q(), J("span", zU, V(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (q(), J("button", {
 					key: 2,
 					class: B(["tv-button", { primary: !e.runtime.enabled }]),
 					type: "button",
 					onClick: (t) => L(e.id, !e.runtime.enabled)
-				}, V(e.runtime.enabled ? "Disable" : "Enable"), 11, aU)) : Z("", !0)])
-			]))), 128)), E.value.length ? Z("", !0) : (q(), J("div", oU, "No installed Verba found."))])) : i.value === "store" ? (q(), J("section", sU, [(q(!0), J(K, null, G(x.value, (e) => (q(), J("article", {
+				}, V(e.runtime.enabled ? "Disable" : "Enable"), 11, BU)) : Z("", !0)])
+			]))), 128)), E.value.length ? Z("", !0) : (q(), J("div", VU, "No installed Verba found."))])) : i.value === "store" ? (q(), J("section", HU, [(q(!0), J(K, null, G(x.value, (e) => (q(), J("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				Y("header", null, [Y("div", null, [Y("span", cU, V(e.id), 1), Y("h2", null, V(e.name || e.id), 1)]), Y("span", lU, "v" + V(e.version || "-"), 1)]),
+				Y("header", null, [Y("div", null, [Y("span", UU, V(e.id), 1), Y("h2", null, V(e.name || e.id), 1)]), Y("span", WU, "v" + V(e.version || "-"), 1)]),
 				Y("p", null, V(e.description || "No description provided."), 1),
-				e.platforms?.length ? (q(), J("div", uU, [(q(!0), J(K, null, G(e.platforms.slice(0, 12), (e) => (q(), J("span", { key: e }, V(D(e).replaceAll("_", " ")), 1))), 128))])) : Z("", !0),
+				e.platforms?.length ? (q(), J("div", GU, [(q(!0), J(K, null, G(e.platforms.slice(0, 12), (e) => (q(), J("span", { key: e }, V(D(e).replaceAll("_", " ")), 1))), 128))])) : Z("", !0),
 				Y("footer", null, [Y("span", null, V(e.source_label || "Tater Shop"), 1), Y("button", {
 					class: "tv-button primary",
 					type: "button",
 					onClick: (t) => R("install", e.id)
-				}, "Install", 8, dU)])
-			]))), 128)), x.value.length ? Z("", !0) : (q(), J("div", fU, "No additional Verba are available from the configured repositories."))])) : i.value === "manage" ? (q(), J("section", pU, [
-				Y("div", mU, [t[19] ||= Y("div", { class: "tv-manage-hero-copy" }, [
+				}, "Install", 8, KU)])
+			]))), 128)), x.value.length ? Z("", !0) : (q(), J("div", qU, "No additional Verba are available from the configured repositories."))])) : i.value === "manage" ? (q(), J("section", JU, [
+				Y("div", YU, [t[19] ||= Y("div", { class: "tv-manage-hero-copy" }, [
 					Y("span", { class: "tv-eyebrow" }, "Manage library"),
 					Y("h2", null, "Verba control center"),
 					Y("p", null, "Keep Tater’s tools current, choose what is enabled, and remove tools you no longer use.")
-				], -1), Y("div", hU, [
+				], -1), Y("div", XU, [
 					Y("div", null, [t[17] ||= Y("span", null, "Installed", -1), Y("strong", null, V(y.value.length), 1)]),
 					Y("div", { class: B({ attention: S.value.length }) }, [t[18] ||= Y("span", null, "Updates ready", -1), Y("strong", null, V(S.value.length), 1)], 2),
 					Y("button", {
@@ -21866,24 +22303,24 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						type: "button",
 						disabled: !S.value.length,
 						onClick: t[1] ||= (e) => R("update-all")
-					}, "Update all", 8, gU)
+					}, "Update all", 8, ZU)
 				])]),
 				(q(!0), J(K, null, G(y.value.slice().sort(A), (e) => (q(), J("article", {
 					key: e.id,
 					class: B(["tv-panel tvb-manage-row tv-manage-card", { "has-update": e.update_available }])
 				}, [
-					Y("div", _U, [Y("span", vU, V(D(e.name || e.id).charAt(0).toUpperCase()), 1), Y("div", null, [
-						Y("span", yU, V(e.id), 1),
+					Y("div", QU, [Y("span", $U, V(D(e.name || e.id).charAt(0).toUpperCase()), 1), Y("div", null, [
+						Y("span", eW, V(e.id), 1),
 						Y("h3", null, V(e.name || e.id), 1),
 						Y("small", null, V(e.source_label || "Local Verba"), 1)
 					])]),
-					Y("div", bU, [
+					Y("div", tW, [
 						Y("div", null, [t[20] ||= Y("span", null, "Installed", -1), Y("strong", null, V(e.installed_ver || "0.0.0"), 1)]),
 						t[22] ||= Y("i", null, "→", -1),
 						Y("div", null, [t[21] ||= Y("span", null, "Latest", -1), Y("strong", null, V(e.store_ver || "-"), 1)]),
 						Y("span", { class: B(["tv-state", e.update_available ? "pending" : "good"]) }, V(e.update_available ? "Update ready" : "Current"), 3)
 					]),
-					Y("div", xU, [
+					Y("div", nW, [
 						T.value.has(k(e.id)) ? (q(), J("span", {
 							key: 0,
 							class: B(["tv-manage-runtime", { online: T.value.get(k(e.id))?.enabled }])
@@ -21893,33 +22330,33 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 							type: "button",
 							disabled: !e.update_available,
 							onClick: (t) => R("update", e.id)
-						}, V(e.update_available ? "Update" : "Current"), 11, SU),
+						}, V(e.update_available ? "Update" : "Current"), 11, rW),
 						T.value.has(k(e.id)) ? (q(), J("button", {
 							key: 1,
 							class: "tv-button",
 							type: "button",
 							onClick: (t) => L(e.id, !T.value.get(k(e.id))?.enabled)
-						}, V(T.value.get(k(e.id))?.enabled ? "Disable" : "Enable"), 9, CU)) : Z("", !0),
-						e.required ? Z("", !0) : (q(), J("label", wU, [W(Y("input", {
+						}, V(T.value.get(k(e.id))?.enabled ? "Disable" : "Enable"), 9, iW)) : Z("", !0),
+						e.required ? Z("", !0) : (q(), J("label", aW, [W(Y("input", {
 							"onUpdate:modelValue": (t) => l.value[e.id] = t,
 							type: "checkbox"
-						}, null, 8, TU), [[cs, l.value[e.id]]]), t[24] ||= X(" Delete data", -1)])),
-						e.required ? (q(), J("span", DU, "Required")) : (q(), J("button", {
+						}, null, 8, oW), [[cs, l.value[e.id]]]), t[24] ||= X(" Delete data", -1)])),
+						e.required ? (q(), J("span", cW, "Required")) : (q(), J("button", {
 							key: 3,
 							class: "tv-button danger",
 							type: "button",
 							onClick: (t) => R("remove", e.id)
-						}, "Remove", 8, EU))
+						}, "Remove", 8, sW))
 					])
 				], 2))), 128)),
-				y.value.length ? Z("", !0) : (q(), J("div", OU, "No installed Verba found."))
-			])) : (q(), J("section", kU, [
+				y.value.length ? Z("", !0) : (q(), J("div", lW, "No installed Verba found."))
+			])) : (q(), J("section", uW, [
 				t[37] ||= Y("header", { class: "tv-repository-heading" }, [Y("div", null, [
 					Y("span", { class: "tv-eyebrow" }, "Repository library"),
 					Y("h2", null, "Verba repositories"),
 					Y("p", null, "Choose a Tater-trusted source or add your own manifest.")
 				])], -1),
-				Y("nav", AU, [Y("button", {
+				Y("nav", dW, [Y("button", {
 					type: "button",
 					class: B({ active: p.value === "trusted" }),
 					onClick: t[2] ||= (e) => p.value = "trusted"
@@ -21928,12 +22365,12 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					class: B({ active: p.value === "custom" }),
 					onClick: t[3] ||= (e) => p.value = "custom"
 				}, "Custom repositories", 2)]),
-				p.value === "trusted" ? (q(), J("div", jU, [
+				p.value === "trusted" ? (q(), J("div", fW, [
 					t[33] ||= Y("p", { class: "tv-repository-intro" }, "Curated sources are reviewed by Tater. Select a card to add or remove its Verba from your Store automatically.", -1),
-					_.value.repos?.trusted_error ? (q(), J("div", MU, "The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.")) : Z("", !0),
-					Y("div", NU, [Y("article", PU, [
+					_.value.repos?.trusted_error ? (q(), J("div", pW, "The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.")) : Z("", !0),
+					Y("div", mW, [Y("article", hW, [
 						t[28] ||= Y("span", { class: "tv-repo-check" }, "✓", -1),
-						Y("div", FU, [t[27] ||= Y("span", { class: "tv-repo-monogram" }, "T", -1), Y("div", null, [
+						Y("div", gW, [t[27] ||= Y("span", { class: "tv-repo-monogram" }, "T", -1), Y("div", null, [
 							t[25] ||= Y("span", { class: "tv-eyebrow" }, "Always available", -1),
 							Y("h3", null, V(_.value.repos?.default?.name || "Tater Shop"), 1),
 							t[26] ||= Y("p", null, [X("by "), Y("strong", null, "Tater Assistant")], -1)
@@ -21949,8 +22386,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						onClick: (t) => te(e),
 						onKeydown: [Ss(bs((t) => te(e), ["prevent"]), ["enter"]), Ss(bs((t) => te(e), ["prevent"]), ["space"])]
 					}, [
-						Y("span", LU, V(e.enabled ? "✓" : "+"), 1),
-						Y("div", RU, [Y("span", zU, V(D(e.repository || e.name).charAt(0).toUpperCase()), 1), Y("div", null, [
+						Y("span", vW, V(e.enabled ? "✓" : "+"), 1),
+						Y("div", yW, [Y("span", bW, V(D(e.repository || e.name).charAt(0).toUpperCase()), 1), Y("div", null, [
 							t[32] ||= Y("span", { class: "tv-eyebrow" }, "Trusted Verba source", -1),
 							Y("h3", null, V(e.repository || e.name), 1),
 							Y("p", null, [t[31] ||= X("by ", -1), e.author_url ? (q(), J("a", {
@@ -21959,20 +22396,20 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 								target: "_blank",
 								rel: "noreferrer",
 								onClick: t[4] ||= bs(() => {}, ["stop"])
-							}, V(e.author || "Community author"), 9, BU)) : (q(), J("strong", VU, V(e.author || "Community author"), 1))])
+							}, V(e.author || "Community author"), 9, xW)) : (q(), J("strong", SW, V(e.author || "Community author"), 1))])
 						])]),
 						Y("p", null, V(e.description || "Additional Verba for the Tater Store."), 1),
-						e.tags?.length ? (q(), J("div", HU, [(q(!0), J(K, null, G(e.tags, (e) => (q(), J("span", { key: e }, V(e), 1))), 128))])) : Z("", !0),
+						e.tags?.length ? (q(), J("div", CW, [(q(!0), J(K, null, G(e.tags, (e) => (q(), J("span", { key: e }, V(e), 1))), 128))])) : Z("", !0),
 						Y("footer", null, [e.homepage ? (q(), J("a", {
 							key: 0,
 							href: e.homepage,
 							target: "_blank",
 							rel: "noreferrer",
 							onClick: t[5] ||= bs(() => {}, ["stop"])
-						}, "View repository ↗", 8, UU)) : Z("", !0), Y("span", { class: B(e.enabled ? "tv-repo-enabled" : "tv-repo-available") }, V(e.enabled ? "Added to Store" : "Select to add"), 3)])
-					], 42, IU))), 128))]),
-					w.value.length ? Z("", !0) : (q(), J("div", WU, "No additional trusted Verba repositories are listed yet."))
-				])) : (q(), J("div", GU, [
+						}, "View repository ↗", 8, wW)) : Z("", !0), Y("span", { class: B(e.enabled ? "tv-repo-enabled" : "tv-repo-available") }, V(e.enabled ? "Added to Store" : "Select to add"), 3)])
+					], 42, _W))), 128))]),
+					w.value.length ? Z("", !0) : (q(), J("div", TW, "No additional trusted Verba repositories are listed yet."))
+				])) : (q(), J("div", EW, [
 					t[36] ||= Y("p", { class: "tv-repository-intro" }, "Custom manifests are managed by you and are not reviewed by Tater.", -1),
 					(q(!0), J(K, null, G(f.value, (e, t) => (q(), J("article", {
 						key: `${e.url}-${t}`,
@@ -21981,9 +22418,9 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 						class: "tv-button",
 						type: "button",
 						onClick: (e) => f.value.splice(t, 1)
-					}, "Remove", 8, KU)]))), 128)),
-					f.value.length ? Z("", !0) : (q(), J("div", qU, "No custom repositories configured.")),
-					Y("div", JU, [
+					}, "Remove", 8, DW)]))), 128)),
+					f.value.length ? Z("", !0) : (q(), J("div", OW, "No custom repositories configured.")),
+					Y("div", kW, [
 						Y("label", null, [t[34] ||= Y("span", null, "Name (optional)", -1), W(Y("input", {
 							"onUpdate:modelValue": t[6] ||= (e) => u.value = e,
 							type: "text",
@@ -22016,12 +22453,12 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					class: "tv-modal tvb-settings-modal",
 					onSubmit: bs(ae, ["prevent"])
 				}, [
-					Y("header", null, [Y("div", null, [Y("span", YU, V(m.value?.id), 1), Y("h2", null, V(m.value?.name || m.value?.id) + " settings", 1)]), Y("button", {
+					Y("header", null, [Y("div", null, [Y("span", AW, V(m.value?.id), 1), Y("h2", null, V(m.value?.name || m.value?.id) + " settings", 1)]), Y("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: t[8] ||= (e) => m.value = null
 					}, "Close")]),
-					Y("div", XU, [(q(!0), J(K, null, G(m.value?.settings || [], (e, n) => (q(), da(zd, {
+					Y("div", jW, [(q(!0), J(K, null, G(m.value?.settings || [], (e, n) => (q(), da(zd, {
 						key: e.key || n,
 						modelValue: h.value[e.key],
 						"onUpdate:modelValue": (t) => h.value[e.key] = t,
@@ -22044,31 +22481,31 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			}, 8, ["open"])
 		]));
 	}
-}), QU = {
+}), NW = {
 	id: "app-sidebar",
 	class: "sidebar"
-}, $U = { class: "sidebar-controls" }, eW = ["disabled", "aria-label"], tW = { class: "brand-wrap" }, nW = { id: "brand-name" }, rW = { id: "brand-subtitle" }, iW = {
+}, PW = { class: "sidebar-controls" }, FW = ["disabled", "aria-label"], IW = { class: "brand-wrap" }, LW = { id: "brand-name" }, RW = { id: "brand-subtitle" }, zW = {
 	class: "nav-stack",
 	"aria-label": "Primary"
-}, aW = ["data-view", "onClick"], oW = ["aria-label"], sW = { class: "main-pane" }, cW = { class: "topbar" }, lW = { id: "view-title" }, uW = { id: "view-subtitle" }, dW = {
+}, BW = ["data-view", "onClick"], VW = ["aria-label"], HW = { class: "main-pane" }, UW = { class: "topbar" }, WW = { id: "view-title" }, GW = { id: "view-subtitle" }, KW = {
 	id: "runtime-summary",
 	class: "runtime-summary runtime-summary-vue-host"
-}, fW = ["data-view"], pW = {
+}, qW = ["data-view"], JW = {
 	key: 0,
 	class: "tv-notice error"
-}, mW = {
+}, YW = {
 	key: 1,
 	class: "tv-empty"
-}, hW = {
+}, XW = {
 	key: 2,
 	class: "tater-shell-refresh-indicator",
 	role: "status"
-}, gW = ["disabled"], _W = {
+}, ZW = ["disabled"], QW = {
 	id: "toast-root",
 	class: "toast-root",
 	"aria-live": "polite",
 	"aria-atomic": "true"
-}, vW = ["onClick"], yW = /* @__PURE__ */ sr({
+}, $W = ["onClick"], eG = /* @__PURE__ */ sr({
 	__name: "AppShell",
 	props: { options: {} },
 	setup(e, { expose: t }) {
@@ -22116,12 +22553,12 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 		], i = new Set(r.map((e) => e.id)), a = Ft({
 			dashboard: Kg,
 			chat: Dc,
-			verbas: ZU,
+			verbas: MW,
 			portals: Dy,
 			cores: _g,
 			integrations: bv,
 			spudex: lx,
-			settings: sV
+			settings: HV
 		}), o = n.options.initialBranding || {}, s = /* @__PURE__ */ U(j(n.options.initialView)), c = /* @__PURE__ */ Dt({}), l = /* @__PURE__ */ U(""), u = /* @__PURE__ */ U(""), d = /* @__PURE__ */ U(null), f = /* @__PURE__ */ U(null), p = /* @__PURE__ */ Et({
 			firstName: String(o.firstName || "Tater"),
 			fullName: String(o.fullName || "Tater Totterson"),
@@ -22331,31 +22768,31 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 			Y("div", {
 				id: "app-shell",
 				class: B(["app-shell tater-vue-shell", O.value])
-			}, [Y("aside", QU, [
-				Y("div", $U, [Y("button", {
+			}, [Y("aside", NW, [
+				Y("div", PW, [Y("button", {
 					id: "sidebar-collapse-btn",
 					class: "inline-btn sidebar-toggle-btn",
 					type: "button",
 					disabled: !!_.value,
 					"aria-label": g.value ? "Show menu" : "Hide menu",
 					onClick: n[0] ||= (e) => pe(!g.value)
-				}, V(_.value ? "⋯" : g.value ? "☰" : "✕"), 9, eW)]),
-				Y("div", tW, [Y("div", null, [Y("h1", nW, V(p.firstName), 1), Y("p", rW, V(p.firstName) + "OS Control Surface", 1)])]),
-				Y("nav", iW, [(q(), J(K, null, G(r, (e) => Y("button", {
+				}, V(_.value ? "⋯" : g.value ? "☰" : "✕"), 9, FW)]),
+				Y("div", IW, [Y("div", null, [Y("h1", LW, V(p.firstName), 1), Y("p", RW, V(p.firstName) + "OS Control Surface", 1)])]),
+				Y("nav", zW, [(q(), J(K, null, G(r, (e) => Y("button", {
 					key: e.id,
 					class: B(["nav-btn", { active: s.value === e.id }]),
 					"data-view": e.id,
 					type: "button",
 					onClick: (t) => I(e.id)
-				}, V(e.label), 11, aW)), 64))]),
+				}, V(e.label), 11, BW)), 64))]),
 				k.value ? (q(), J("div", {
 					key: 0,
 					id: "tater-build-version",
 					class: "sidebar-build-version",
 					"aria-label": `Current ${p.firstName || "Tater"} version`,
 					"aria-live": "polite"
-				}, V(k.value), 9, oW)) : Z("", !0)
-			]), Y("main", sW, [Y("header", cW, [Y("div", null, [Y("h2", lW, V(C.value.label), 1), Y("p", uW, V(A.value), 1)]), Y("div", dW, [ga(MH, {
+				}, V(k.value), 9, VW)) : Z("", !0)
+			]), Y("main", HW, [Y("header", UW, [Y("div", null, [Y("h2", WW, V(C.value.label), 1), Y("p", GW, V(A.value), 1)]), Y("div", KW, [ga(pU, {
 				ref_key: "runtimeComponent",
 				ref: f,
 				state: m,
@@ -22370,11 +22807,11 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				class: "view-root tater-shell-view-root",
 				"data-view": s.value
 			}, [
-				u.value && !w.value ? (q(), J("div", pW, [X("Failed to load " + V(C.value.label) + ": " + V(u.value) + " ", 1), Y("button", {
+				u.value && !w.value ? (q(), J("div", JW, [X("Failed to load " + V(C.value.label) + ": " + V(u.value) + " ", 1), Y("button", {
 					class: "inline-btn",
 					type: "button",
 					onClick: n[1] ||= (e) => F(s.value, !0)
-				}, "Try again")])) : w.value ? Z("", !0) : (q(), J("div", mW, "Loading " + V(C.value.label) + "…", 1)),
+				}, "Try again")])) : w.value ? Z("", !0) : (q(), J("div", YW, "Loading " + V(C.value.label) + "…", 1)),
 				(q(), da(hr, { max: r.length }, [w.value ? (q(), da(Rr(T.value), {
 					ref_key: "activeComponent",
 					ref: d,
@@ -22382,8 +22819,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					state: E.value,
 					options: D.value
 				}, null, 8, ["state", "options"])) : Z("", !0)], 1032, ["max"])),
-				l.value && w.value ? (q(), J("div", hW, "Refreshing " + V(C.value.label) + "…", 1)) : Z("", !0)
-			], 8, fW)])], 2),
+				l.value && w.value ? (q(), J("div", XW, "Refreshing " + V(C.value.label) + "…", 1)) : Z("", !0)
+			], 8, qW)])], 2),
 			Y("button", {
 				id: "sidebar-expand-btn",
 				class: "sidebar-expand-fab",
@@ -22392,8 +22829,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 				title: "Show menu",
 				disabled: !!_.value,
 				onClick: n[2] ||= (e) => pe(!1)
-			}, V(_.value ? "⋯" : "☰"), 9, gW),
-			Y("div", _W, [(q(!0), J(K, null, G(S.value, (e) => (q(), J("button", {
+			}, V(_.value ? "⋯" : "☰"), 9, ZW),
+			Y("div", QW, [(q(!0), J(K, null, G(S.value, (e) => (q(), J("button", {
 				key: e.id,
 				type: "button",
 				class: B(["toast-item", [e.tone, {
@@ -22401,8 +22838,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 					"flame-out": e.closing
 				}]]),
 				onClick: (t) => ue(e.id)
-			}, V(e.message), 11, vW))), 128))]),
-			ga(WH, {
+			}, V(e.message), 11, $W))), 128))]),
+			ga(TU, {
 				state: h,
 				authenticate: e.options.authenticate,
 				onAuthenticated: oe
@@ -22412,8 +22849,8 @@ var nL = { class: "tm-stack tvoice-firmware" }, rL = {
 });
 //#endregion
 //#region src/entry.ts
-function bW(e, t) {
-	let n = Es(yW, { options: t }), r = n.mount(e);
+function tG(e, t) {
+	let n = Es(eG, { options: t }), r = n.mount(e);
 	return {
 		navigate: (e, t) => r.navigate(e, t),
 		refresh: () => r.refresh(),
@@ -22436,7 +22873,7 @@ function bW(e, t) {
 		}
 	};
 }
-function xW(e, t) {
+function nG(e, t) {
 	let n = /* @__PURE__ */ Et({
 		profile: t.initialProfile || {},
 		messages: t.initialMessages || [],
@@ -22457,7 +22894,7 @@ function xW(e, t) {
 		}
 	};
 }
-function SW(e, t) {
+function rG(e, t) {
 	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(Kg, {
 		state: n,
 		options: t
@@ -22471,7 +22908,7 @@ function SW(e, t) {
 		}
 	};
 }
-function CW(e, t) {
+function iG(e, t) {
 	let n = /* @__PURE__ */ Et({ settings: t.initialSettings }), r = Es(bv, {
 		state: n,
 		options: t
@@ -22485,8 +22922,8 @@ function CW(e, t) {
 		}
 	};
 }
-function wW(e, t) {
-	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(ZU, {
+function aG(e, t) {
+	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(MW, {
 		state: n,
 		options: t
 	});
@@ -22499,7 +22936,7 @@ function wW(e, t) {
 		}
 	};
 }
-function TW(e, t) {
+function oG(e, t) {
 	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(Dy, {
 		state: n,
 		options: t
@@ -22513,7 +22950,7 @@ function TW(e, t) {
 		}
 	};
 }
-function EW(e, t) {
+function sG(e, t) {
 	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(_g, {
 		state: n,
 		options: t
@@ -22533,7 +22970,7 @@ function EW(e, t) {
 		}
 	};
 }
-function DW(e, t) {
+function cG(e, t) {
 	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(lx, {
 		state: n,
 		options: t
@@ -22550,7 +22987,7 @@ function DW(e, t) {
 		}
 	};
 }
-function OW(e, t) {
+function lG(e, t) {
 	let n = /* @__PURE__ */ Et({
 		summary: t.initialSummary || {},
 		general: t.initialGeneral || {},
@@ -22560,7 +22997,7 @@ function OW(e, t) {
 		spudLink: t.initialSpudLink || {},
 		models: t.initialModels || {},
 		advanced: t.initialAdvanced || {}
-	}), r = Es(sV, {
+	}), r = Es(HV, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -22576,12 +23013,12 @@ function OW(e, t) {
 		}
 	};
 }
-function kW(e, t) {
+function uG(e, t) {
 	let n = /* @__PURE__ */ Et({
 		health: t.initialState?.health || null,
 		text: t.initialState?.text || "Checking system…",
 		tone: t.initialState?.tone || "normal"
-	}), r = Es(MH, {
+	}), r = Es(pU, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -22600,7 +23037,7 @@ function kW(e, t) {
 		}
 	};
 }
-function AW(e, t) {
+function dG(e, t) {
 	let n = /* @__PURE__ */ Et({ payload: t.initialPayload }), r = Es(dd, {
 		state: n,
 		options: t
@@ -22615,4 +23052,4 @@ function AW(e, t) {
 	};
 }
 //#endregion
-export { bW as mountAppShell, xW as mountChat, EW as mountCores, SW as mountDashboard, CW as mountIntegrations, AW as mountMusicCore, TW as mountPortals, kW as mountRuntimeStatus, OW as mountSettings, DW as mountSpudex, wW as mountVerbas };
+export { tG as mountAppShell, nG as mountChat, sG as mountCores, rG as mountDashboard, iG as mountIntegrations, dG as mountMusicCore, oG as mountPortals, uG as mountRuntimeStatus, lG as mountSettings, cG as mountSpudex, aG as mountVerbas };

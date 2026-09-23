@@ -122,6 +122,14 @@ def _exact_satellite_image_src(value: Any) -> str:
     if not token:
         return ""
     compact = token.replace("-", "")
+    if token in {"biscuit", "echo-dot-2", "echo-dot-gen-2", "tater-echo"} or compact in {
+        "biscuit",
+        "echodot2",
+        "echodotgen2",
+        "amazonechodot2",
+        "taterecho",
+    }:
+        return _named_satellite_image_src("echo-dot-2.png")
     if token in {"reachy-mini", "tater-reachy", "tater-voice-sat"} or compact in {"reachymini", "taterreachy", "tatervoicesat"}:
         return _named_satellite_image_src("reachy-mini.png")
     if token in {"respeaker-lite", "seeed-respeaker-lite"} or compact in {"respeakerlite", "seeedrespeakerlite"}:
@@ -176,6 +184,18 @@ def device_image_src(*name_candidates: Any) -> str:
         token = esphome_runtime.lower(raw_name)
         if not token:
             continue
+        if any(
+            part in token
+            for part in (
+                "biscuit",
+                "echo dot 2",
+                "echo-dot-2",
+                "echo dot gen 2",
+                "echo dot 2nd generation",
+                "tater echo",
+            )
+        ):
+            return _named_satellite_image_src("echo-dot-2.png")
         if any(
             part in token
             for part in (
@@ -413,6 +433,10 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         project_name = esphome_runtime.text(device_info.get("project_name"))
         project_version = esphome_runtime.text(device_info.get("project_version"))
         firmware_version = esphome_runtime.text(client_row.get("firmware_version")) or project_version
+        firmware_target = (
+            esphome_runtime.text(client_row.get("firmware_target"))
+            or esphome_runtime.text(meta.get("firmware_target"))
+        )
         board = (model or esphome_runtime.text(meta.get("board"))) if native_device else (esphome_runtime.text(meta.get("board")) or model)
         esphome_version = esphome_runtime.text(device_info.get("esphome_version"))
         compilation_time = esphome_runtime.text(device_info.get("compilation_time"))
@@ -538,14 +562,19 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
             summary_rows.append({"label": "MAC", "value": mac_address})
         if bluetooth_mac_address and not native_device:
             summary_rows.append({"label": "BT MAC", "value": bluetooth_mac_address})
-        hero_image_src = _exact_satellite_image_src(board) or _satellite_image_src(
-            firmware_version,
-            model,
-            project_name,
-            selector,
-            name,
-            device_name,
-            friendly_name,
+        hero_image_src = (
+            _exact_satellite_image_src(firmware_target)
+            or _exact_satellite_image_src(board)
+            or _satellite_image_src(
+                firmware_target,
+                firmware_version,
+                model,
+                project_name,
+                selector,
+                name,
+                device_name,
+                friendly_name,
+            )
         )
         sensor_rows = [
             {

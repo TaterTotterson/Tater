@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tater_voice import voice_pipeline as vp  # noqa: E402
+from tater_voice.voice_pipeline import routes as voice_routes  # noqa: E402
 
 
 class NativePublicBaseUrlTests(unittest.TestCase):
@@ -80,6 +81,16 @@ class NativePublicBaseUrlTests(unittest.TestCase):
             ),
             mock.patch.object(
                 vp,
+                "_prepare_native_media_asset_sync",
+                return_value={
+                    "bytes": b"mp3",
+                    "media_type": "audio/mpeg",
+                    "filename": "tts.mp3",
+                    "transcoded": True,
+                },
+            ),
+            mock.patch.object(
+                vp,
                 "_chatterbox_tts_request",
                 return_value=("http://chatterbox/tts", {"text": "hello"}),
             ),
@@ -107,7 +118,7 @@ class NativePublicBaseUrlTests(unittest.TestCase):
 
         self.assertRegex(
             tts_url,
-            r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.wav$",
+            r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.mp3$",
         )
         self.assertRegex(
             chatterbox_url,
@@ -117,6 +128,93 @@ class NativePublicBaseUrlTests(unittest.TestCase):
             media_url,
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/media/[0-9a-f]+$",
         )
+
+    def test_native_media_preparation_keeps_existing_mp3_without_reencoding(self) -> None:
+        payload = b"ID3already-compressed"
+        with mock.patch.object(
+            vp.subprocess,
+            "run",
+            side_effect=AssertionError("existing MP3 must not be re-encoded"),
+        ):
+            prepared = vp._prepare_native_media_asset_sync(
+                payload,
+                media_type="audio/mpeg",
+                filename="music.mp3",
+                playback_kind="background",
+            )
+
+        self.assertEqual(prepared["bytes"], payload)
+        self.assertEqual(prepared["media_type"], "audio/mpeg")
+        self.assertFalse(prepared["transcoded"])
+
+    def test_native_tts_mp3_url_serves_the_prepared_asset_type(self) -> None:
+        with (
+            mock.patch.object(vp, "_service_base_url_for_peer", return_value="http://tater"),
+            mock.patch.object(
+                vp,
+                "_pcm_to_wav",
+                return_value=(b"wav", {"rate": 16000, "width": 2, "channels": 1}),
+            ),
+            mock.patch.object(
+                vp,
+                "_prepare_native_media_asset_sync",
+                return_value={
+                    "bytes": b"ID3prepared",
+                    "media_type": "audio/mpeg",
+                    "filename": "tts.mp3",
+                    "transcoded": True,
+                },
+            ),
+        ):
+            url = vp._store_tts_url(
+                "native:test",
+                "session",
+                b"pcm",
+                {"rate": 16000, "width": 2, "channels": 1},
+            )
+
+        stream_id = url.rsplit("/", 1)[-1].removesuffix(".mp3")
+        response = asyncio.run(voice_routes.native_tts_stream(stream_id))
+        self.assertEqual(response.media_type, "audio/mpeg")
+        self.assertEqual(bytes(response.body), b"ID3prepared")
+
+    def test_native_media_preparation_converts_wav_to_shared_mp3_asset(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=b"ID3prepared", stderr=b"")
+        with (
+            mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
+            mock.patch.object(vp.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            prepared = vp._prepare_native_media_asset_sync(
+                b"RIFF-wave-audio",
+                media_type="audio/wav",
+                filename="reply.wav",
+                playback_kind="tts",
+            )
+
+        self.assertEqual(prepared["bytes"], b"ID3prepared")
+        self.assertEqual(prepared["media_type"], "audio/mpeg")
+        self.assertEqual(prepared["filename"], "reply.mp3")
+        self.assertEqual(prepared["bitrate_kbps"], 96)
+        command = run_mock.call_args.args[0]
+        self.assertIn("96k", command)
+
+    def test_native_background_preparation_uses_music_bitrate_and_preserves_channels(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=b"ID3music", stderr=b"")
+        with (
+            mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
+            mock.patch.object(vp.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            prepared = vp._prepare_native_media_asset_sync(
+                b"fLaCmusic",
+                media_type="audio/flac",
+                filename="background.flac",
+                playback_kind="background",
+            )
+
+        self.assertEqual(prepared["bitrate_kbps"], 192)
+        command = run_mock.call_args.args[0]
+        self.assertIn("192k", command)
+        self.assertNotIn("-ac", command)
 
     def test_remote_music_url_is_eligible_for_persistent_passthrough(self) -> None:
         url = "http://10.4.20.204:4229/api/tater/local/stream?profile=audio_sync"

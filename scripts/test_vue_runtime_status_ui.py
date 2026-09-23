@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import pathlib
+import types
+import typing
 import unittest
 
 
@@ -133,6 +136,65 @@ class VueRuntimeStatusTests(unittest.TestCase):
             "_stream_runtime_telemetry(request)",
         ):
             self.assertIn(contract, source)
+
+    def test_local_face_id_is_included_in_runtime_model_inventory(self) -> None:
+        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+
+        for contract in (
+            "def _runtime_face_id_model_rows()",
+            'category="face_id"',
+            'kind_label="Face ID"',
+            'provider_label="Face ID • Tater"',
+            'row["managed_by"] = "Settings › Models › Face ID"',
+            "*_runtime_face_id_model_rows()",
+        ):
+            self.assertIn(contract, source)
+
+        wanted = {
+            "_runtime_model_memory_kind_from_device",
+            "_runtime_managed_model_row",
+            "_runtime_face_id_model_rows",
+        }
+        tree = ast.parse(source)
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        ]
+        namespace = {
+            "Any": typing.Any,
+            "Dict": typing.Dict,
+            "List": typing.List,
+            "Optional": typing.Optional,
+            "redis_client": object(),
+        }
+        status = {
+            "enabled": True,
+            "loaded": True,
+            "local_only": True,
+            "model": "AdaFace IR-50 · WebFace4M",
+            "model_id": "adaface_ir50_webface4m",
+            "device_name": "METAL",
+            "accelerator": "metal",
+            "detector_backend": "retinaface",
+            "distance_metric": "cosine",
+            "model_pack_version": "6",
+            "model_pack_path": "/runtime/models/face-id",
+            "loaded_at": 123.0,
+        }
+        namespace["face_identity"] = types.SimpleNamespace(runtime_status=lambda _client: status)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "tateros_app.py", "exec"), namespace)
+
+        rows = namespace["_runtime_face_id_model_rows"]()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["category"], "face_id")
+        self.assertEqual(rows[0]["model"], "AdaFace IR-50 · WebFace4M")
+        self.assertEqual(rows[0]["device"], "METAL")
+        self.assertEqual(rows[0]["memory_kind"], "unified")
+        self.assertTrue(rows[0]["loaded"])
+
+        status.update({"local_only": False, "routed_via": "spud_link"})
+        self.assertEqual(namespace["_runtime_face_id_model_rows"](), [])
 
 
 if __name__ == "__main__":

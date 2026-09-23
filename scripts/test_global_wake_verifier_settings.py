@@ -14,6 +14,15 @@ from tater_voice import home, native_live_settings, settings  # noqa: E402
 
 
 class GlobalWakeVerifierSettingsTests(unittest.TestCase):
+    def test_continued_chat_defaults_match_voice_pipeline(self) -> None:
+        from tater_voice import voice_pipeline
+
+        self.assertTrue(native_live_settings.DEFAULTS["continued_chat"])
+        self.assertEqual(
+            voice_pipeline.DEFAULT_CONTINUED_CHAT_ENABLED,
+            native_live_settings.DEFAULTS["continued_chat"],
+        )
+
     def test_existing_device_values_migrate_to_global_satellite_settings(self) -> None:
         device_prefix = native_live_settings.DEVICE_SETTINGS_HASH_PREFIX
         rows = {

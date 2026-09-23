@@ -405,9 +405,11 @@ async def native_satellite_status(x_tater_token: Optional[str] = Header(None)) -
 async def native_satellite_ble(
     selector: str = "",
     address: str = "",
+    device_id: str = "",
     limit: int = 200,
     max_age_s: float = 300.0,
     include_observations: bool = True,
+    history_limit: int = 80,
     x_tater_token: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     vp = _vp()
@@ -417,10 +419,50 @@ async def native_satellite_ble(
     return native_ble.snapshot(
         selector=selector,
         address=address,
+        device_id=device_id,
         limit=limit,
         max_age_s=max_age_s,
         include_observations=include_observations,
+        history_limit=history_limit,
     )
+
+
+@router.get("/api/tater/satellite/v1/presence/config")
+async def native_satellite_presence_config(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_ble
+
+    return native_ble.configuration_snapshot()
+
+
+@router.post("/api/tater/satellite/v1/presence/config")
+async def native_satellite_presence_config_save(
+    payload: Dict[str, Any],
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_ble
+
+    try:
+        return native_ble.configure(payload.get("action"), payload.get("payload"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/tater/satellite/v1/presence/history")
+async def native_satellite_presence_history(
+    device_id: str = "",
+    limit: int = 80,
+    since_ts: float = 0.0,
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import native_ble
+
+    return native_ble.history_snapshot(device_id=device_id, limit=limit, since_ts=since_ts)
 
 
 @router.get("/api/tater/satellite/v1/presence/events")
@@ -429,6 +471,7 @@ async def native_satellite_presence_events(
     request: Request,
     selector: str = "",
     address: str = "",
+    device_id: str = "",
     limit: int = 500,
     max_age_s: float = 60.0,
     x_tater_token: Optional[str] = Header(None),
@@ -440,20 +483,35 @@ async def native_satellite_presence_events(
     async def stream():
         last_revision = -1
         last_emit = 0.0
+        last_event_id = ""
         yield "retry: 1500\n\n"
         while not await request.is_disconnected():
             now = asyncio.get_running_loop().time()
             payload = native_ble.snapshot(
                 selector=selector,
                 address=address,
+                device_id=device_id,
                 limit=limit,
                 max_age_s=max_age_s,
                 include_observations=False,
+                history_limit=80,
             )
             revision = int(payload.get("revision") or 0)
             if revision != last_revision or now - last_emit >= 5.0:
+                history = payload.get("history") if isinstance(payload.get("history"), list) else []
+                newest_event_id = str((history[0] if history else {}).get("id") or "")
+                if last_event_id and newest_event_id and newest_event_id != last_event_id:
+                    fresh_events = []
+                    for event in history:
+                        if str(event.get("id") or "") == last_event_id:
+                            break
+                        fresh_events.append(event)
+                    for event in reversed(fresh_events):
+                        event_data = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
+                        yield f"event: presence.event\ndata: {event_data}\n\n"
                 data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
                 yield f"event: presence.snapshot\ndata: {data}\n\n"
+                last_event_id = newest_event_id or last_event_id
                 last_revision = revision
                 last_emit = now
             await asyncio.sleep(1.0)
@@ -480,6 +538,42 @@ async def native_satellite_firmware_artifact(artifact_id: str, relative_path: st
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FileResponse(path, media_type="application/octet-stream")
+
+
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/manifest.json")
+async def native_satellite_wake_package_manifest(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.manifest_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/model.tflite")
+async def native_satellite_wake_package_model(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.model_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(
+        content=body,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/api/tater/satellite/v1/settings")
@@ -1087,6 +1181,16 @@ async def native_satellite_play_group(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
     media_type = requested_media_type or fetched_media_type or "application/octet-stream"
+    if not passthrough_url:
+        prepared_asset = await vp._prepare_native_media_asset(
+            media_bytes,
+            media_type=media_type,
+            filename=filename,
+            playback_kind=media_content_type,
+        )
+        media_bytes = bytes(prepared_asset.get("bytes") or b"")
+        media_type = vp._text(prepared_asset.get("media_type")) or media_type
+        filename = vp._text(prepared_asset.get("filename")) or filename
     playback_id = uuid.uuid4().hex
     playback_url = passthrough_url or vp._store_media_url(
         playback_members[0]["selector"],
@@ -1285,6 +1389,17 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
             **result,
         }
 
+    if not passthrough_url:
+        prepared_asset = await vp._prepare_native_media_asset(
+            media_bytes,
+            media_type=media_type,
+            filename=filename,
+            playback_kind=media_content_type or "tts",
+        )
+        media_bytes = bytes(prepared_asset.get("bytes") or b"")
+        media_type = vp._text(prepared_asset.get("media_type")) or media_type
+        filename = vp._text(prepared_asset.get("filename")) or filename
+
     playback_id = uuid.uuid4().hex
     playback_url = passthrough_url or vp._store_media_url(
         selector,
@@ -1315,12 +1430,18 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                 background_bytes, background_media_type = await vp._download_media_source(
                     background_source_url
                 )
-                background_url = vp._store_media_url(
-                    selector,
-                    f"{playback_id}-background",
+                background_asset = await vp._prepare_native_media_asset(
                     background_bytes,
                     media_type=background_media_type or "application/octet-stream",
                     filename="background-audio",
+                    playback_kind="background",
+                )
+                background_url = vp._store_media_url(
+                    selector,
+                    f"{playback_id}-background",
+                    bytes(background_asset.get("bytes") or b""),
+                    media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
+                    filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
                 )
                 if not background_url:
                     raise RuntimeError("Failed to store stereo background audio for playback")
@@ -1338,6 +1459,11 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     if isinstance(audio_scene.get("foreground"), dict)
                     else {}
                 )
+                finish = (
+                    audio_scene.get("finish")
+                    if isinstance(audio_scene.get("finish"), dict)
+                    else {}
+                )
                 overlay_result = await native_satellite.start_stereo_overlay(
                     stereo_pair,
                     overlay_id=playback_id,
@@ -1347,6 +1473,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     ducking=dict(audio_scene.get("ducking") or {}),
                     start_server_us=int(background_result.get("start_server_us") or 0),
                     stop_media_when_finished=True,
+                    background_fade_out_ms=int(finish.get("fade_ms", 350)),
                     wait_for_completion=wait_for_completion,
                     completion_timeout_s=timeout_s,
                 )
@@ -1427,13 +1554,19 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     background = audio_scene.get("background") if isinstance(audio_scene.get("background"), dict) else {}
                     background_source_url = vp._text(background.get("url"))
                     background_bytes, background_media_type = await vp._download_media_source(background_source_url)
+                    background_asset = await vp._prepare_native_media_asset(
+                        background_bytes,
+                        media_type=background_media_type or "application/octet-stream",
+                        filename="background-audio",
+                        playback_kind="background",
+                    )
                     background_session_id = f"{playback_id}-background"
                     background_url = vp._store_media_url(
                         selector,
                         background_session_id,
-                        background_bytes,
-                        media_type=background_media_type or "application/octet-stream",
-                        filename="background-audio",
+                        bytes(background_asset.get("bytes") or b""),
+                        media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
+                        filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
                     )
                     if not background_url:
                         raise RuntimeError("Failed to store background audio for playback")
@@ -1461,6 +1594,11 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                         if isinstance(audio_scene.get("foreground"), dict)
                         else {}
                     )
+                    finish = (
+                        audio_scene.get("finish")
+                        if isinstance(audio_scene.get("finish"), dict)
+                        else {}
+                    )
                     overlay_result = await native_satellite.start_single_overlay(
                         selector,
                         group_id=vp._text(background_result.get("group_id")) or group_id,
@@ -1471,6 +1609,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                         ducking=dict(audio_scene.get("ducking") or {}),
                         start_server_us=int(background_result.get("start_server_us") or 0),
                         stop_media_when_finished=True,
+                        background_fade_out_ms=int(finish.get("fade_ms", 350)),
                         wait_for_completion=wait_for_completion,
                         completion_timeout_s=timeout_s,
                     )
@@ -1504,12 +1643,18 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     background = audio_scene.get("background") if isinstance(audio_scene.get("background"), dict) else {}
                     background_source_url = vp._text(background.get("url"))
                     background_bytes, background_media_type = await vp._download_media_source(background_source_url)
-                    background_url = vp._store_media_url(
-                        selector,
-                        playback_id,
+                    background_asset = await vp._prepare_native_media_asset(
                         background_bytes,
                         media_type=background_media_type or "application/octet-stream",
                         filename="background-audio",
+                        playback_kind="background",
+                    )
+                    background_url = vp._store_media_url(
+                        selector,
+                        playback_id,
+                        bytes(background_asset.get("bytes") or b""),
+                        media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
+                        filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
                     )
                     if not background_url:
                         raise RuntimeError("Failed to store background audio for playback")
@@ -1695,6 +1840,7 @@ async def intercom_cancel(payload: Dict[str, Any], x_tater_token: Optional[str] 
     return await intercom.cancel_for_selector(selector)
 
 
+@router.get("/api/tater/satellite/v1/tts/{stream_id}.mp3")
 @router.get("/api/tater/satellite/v1/tts/{stream_id}.wav")
 async def native_tts_stream(stream_id: str) -> Response:
     vp = _vp()
@@ -1721,15 +1867,18 @@ async def native_tts_stream(stream_id: str) -> Response:
             headers=headers,
         )
 
-    wav_bytes = row.get("wav_bytes") if isinstance(row.get("wav_bytes"), (bytes, bytearray)) else b""
-    if not wav_bytes:
+    body_bytes = row.get("body_bytes") if isinstance(row.get("body_bytes"), (bytes, bytearray)) else b""
+    if not body_bytes:
+        body_bytes = row.get("wav_bytes") if isinstance(row.get("wav_bytes"), (bytes, bytearray)) else b""
+    if not body_bytes:
         raise HTTPException(status_code=404, detail="TTS stream has no audio data")
+    media_type = vp._text(row.get("media_type")).split(";", 1)[0].strip().lower() or "audio/wav"
 
     vp._native_debug(
         f"native tts url fetch stream_id={vp._text(stream_id)} session_id={vp._text(row.get('session_id'))} "
-        f"selector={vp._text(row.get('selector'))} bytes={len(wav_bytes)}"
+        f"selector={vp._text(row.get('selector'))} bytes={len(body_bytes)} media_type={media_type}"
     )
-    return Response(content=bytes(wav_bytes), media_type="audio/wav", headers=headers)
+    return Response(content=bytes(body_bytes), media_type=media_type, headers=headers)
 
 
 @router.get("/api/tater/satellite/v1/media/{stream_id}")

@@ -713,6 +713,72 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             all(row[2]["reference_selector"] == "tater:audible-timeline" for row in sent)
         )
 
+    async def test_rejoined_member_jumps_back_to_the_shared_audible_timeline(self) -> None:
+        now_us = native_satellite._monotonic_us()
+        selectors = ["native:left", "native:right"]
+        native_satellite._stereo_sessions["rejoin-pair"] = {
+            "group_id": "rejoin-pair",
+            "session_id": "announcement-1",
+            "selectors": selectors,
+            "clock_offsets_us": {selector: 0 for selector in selectors},
+            "clock_sync_server_us": now_us,
+            "last_adjust_server_us": 0,
+            "last_phase_sample_server_us": 0,
+            "use_rendered_clock": True,
+            "audible_start_server_us": now_us - 3_000_000,
+            "member_delays_ms": {selector: 0 for selector in selectors},
+            "start_position_frames": {selector: 0 for selector in selectors},
+            "pending_rejoin_realign": {"native:right": 1},
+            "playheads": {
+                "native:left": {
+                    "session_id": "announcement-1",
+                    "sample_rate_hz": 48000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 144000,
+                    "rebuffering": False,
+                },
+                "native:right": {
+                    "session_id": "announcement-1",
+                    "sample_rate_hz": 48000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 96000,
+                    "rebuffering": False,
+                },
+            },
+        }
+        native_satellite._clients.update(
+            {
+                selector: {
+                    "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
+                }
+                for selector in selectors
+            }
+        )
+        sent = []
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            sent.append((selector, message_type, dict(payload)))
+            return {"ok": True}
+
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with (
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+            mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline),
+        ):
+            await native_satellite._adjust_stereo_session("rejoin-pair")
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "native:right")
+        self.assertEqual(sent[0][1], "media.session.adjust")
+        self.assertEqual(sent[0][2]["mode"], "jump")
+        self.assertEqual(sent[0][2]["reason"], "rejoin_realign")
+        self.assertEqual(sent[0][2]["correction_frames"], 48000)
+        self.assertNotIn(
+            "native:right",
+            native_satellite._stereo_sessions["rejoin-pair"]["pending_rejoin_realign"],
+        )
+        voice_pipeline.logger.warning.assert_called_once()
+
     async def test_scheduled_overlay_uses_pair_calibration_and_stops_scene_media(self) -> None:
         now_us = native_satellite._monotonic_us()
         native_satellite._stereo_sessions["pair1"] = {
@@ -755,6 +821,7 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 foreground_volume_percent=90,
                 start_server_us=now_us + 500_000,
                 stop_media_when_finished=True,
+                background_fade_out_ms=625,
             )
             self.assertTrue(result["stop_media_when_finished"])
             self.assertEqual(len(sent), 2)
@@ -763,6 +830,13 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 4000,
             )
             self.assertEqual(sent[1][2]["foreground"]["volume_percent"], 72)
+            self.assertEqual(
+                [row[2]["finish"] for row in sent],
+                [
+                    {"stop_media": True, "fade_ms": 625},
+                    {"stop_media": True, "fade_ms": 625},
+                ],
+            )
 
             native_satellite._record_stereo_overlay_finished(
                 "native:left",
@@ -808,6 +882,7 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ducking={"target_percent": 35},
                 start_server_us=now_us + 500_000,
                 stop_media_when_finished=True,
+                background_fade_out_ms=725,
             )
 
             self.assertTrue(result["single_overlay_started"])
@@ -817,6 +892,10 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sent[0][2]["group_id"], "single-1")
             self.assertEqual(sent[0][2]["foreground"]["volume_percent"], 90)
             self.assertEqual(sent[0][2]["ducking"]["target_percent"], 35)
+            self.assertEqual(
+                sent[0][2]["finish"],
+                {"stop_media": True, "fade_ms": 725},
+            )
             self.assertEqual(sent[0][2]["start_at_us"], now_us + 501_250)
 
             native_satellite._record_stereo_overlay_finished(

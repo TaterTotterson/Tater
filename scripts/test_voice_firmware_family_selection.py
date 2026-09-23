@@ -81,9 +81,16 @@ class VoiceFirmwareFamilySelectionTests(unittest.TestCase):
         self.assertIn('"Tater-SAT1-RPi"', self.backend)
         self.assertNotIn('"Tater-SAT1-Standalone"', self.backend)
         self.assertIn(
-            'for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):',
+            'for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone", "biscuit"):',
             self.backend,
         )
+
+    def test_echo_dot_uses_its_release_manifest_and_native_ota_only(self) -> None:
+        self.assertIn('"key": "biscuit"', self.backend)
+        self.assertIn("TATER_ECHO_FIRMWARE_MANIFEST_URL", self.backend)
+        self.assertIn('"format": "echo_targets"', self.backend)
+        self.assertIn('"usb_recovery": False', self.backend)
+        self.assertIn('"flash_transport": "tater_native_ota" if kind == "ota"', self.backend)
 
     def test_sat1_rpi_hardware_identities_do_not_alias_the_esp_sat1(self) -> None:
         self.assertIn('return "satellite1_rpi_standalone"', self.backend)

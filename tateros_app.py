@@ -11280,6 +11280,49 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
     return rows
 
 
+def _runtime_face_id_model_rows() -> List[Dict[str, Any]]:
+    try:
+        runtime = dict(face_identity.runtime_status(redis_client) or {})
+    except Exception:
+        return []
+    if (
+        not bool(runtime.get("enabled"))
+        or not bool(runtime.get("loaded"))
+        or not bool(runtime.get("local_only", True))
+        or str(runtime.get("routed_via") or "").strip().lower() == "spud_link"
+    ):
+        return []
+
+    detector = str(runtime.get("detector_backend") or "").strip()
+    detector_label = "RetinaFace" if detector.lower() == "retinaface" else detector.replace("_", " ").title()
+    metric = str(runtime.get("distance_metric") or "").strip()
+    model_pack = str(runtime.get("model_pack_version") or "").strip()
+    details = [
+        f"Detector {detector_label}" if detector_label else "",
+        f"Metric {metric.title()}" if metric else "",
+        f"Model pack v{model_pack}" if model_pack else "",
+        "Private Face ID worker",
+    ]
+    row = _runtime_managed_model_row(
+        category="face_id",
+        kind_label="Face ID",
+        provider=f"face_id_{str(runtime.get('model_id') or 'tater').strip()}",
+        provider_label="Face ID • Tater",
+        model=str(runtime.get("model") or runtime.get("model_id") or "Face ID"),
+        device=str(runtime.get("device_name") or runtime.get("accelerator") or ""),
+        model_root=str(runtime.get("model_pack_path") or ""),
+        memory_kind=_runtime_model_memory_kind_from_device(
+            runtime.get("device_name") or runtime.get("accelerator")
+        ),
+        warning=str(runtime.get("accelerator_warning") or runtime.get("error") or ""),
+        details=details,
+        loaded_ts=float(runtime.get("loaded_at") or 0.0),
+    )
+    row["loaded"] = True
+    row["managed_by"] = "Settings › Models › Face ID"
+    return [row]
+
+
 def _runtime_spud_link_model_rows() -> List[Dict[str, Any]]:
     routing = load_model_routing_settings(redis_conn=redis_client)
     routed_kinds = [kind for kind in SPUD_LINK_MODEL_KINDS if spud_link_should_use_hub(kind, redis_conn=redis_client)]
@@ -11534,7 +11577,7 @@ def _runtime_loaded_models_snapshot(
         row.setdefault("unloadable", True)
         row.setdefault("managed_by", "")
 
-    managed_rows = _runtime_managed_voice_model_rows()
+    managed_rows = [*_runtime_managed_voice_model_rows(), *_runtime_face_id_model_rows()]
     spud_link_rows = _runtime_spud_link_model_rows()
     rows = [*llm_rows, *managed_rows, *spud_link_rows]
     rows.sort(key=lambda row: (str(row.get("kind_label") or ""), str(row.get("provider_label") or ""), str(row.get("model") or "")))

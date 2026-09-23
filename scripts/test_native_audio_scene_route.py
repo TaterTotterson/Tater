@@ -38,6 +38,7 @@ class FakeVoicePipeline:
         self.logger = FakeLogger()
         self.stored = []
         self.downloaded = []
+        self.prepared = []
 
     @staticmethod
     def _require_api_auth(_token):
@@ -76,6 +77,28 @@ class FakeVoicePipeline:
         self.downloaded.append(source_url)
         return b"background", "audio/mpeg"
 
+    async def _prepare_native_media_asset(
+        self,
+        media_bytes,
+        *,
+        media_type,
+        filename,
+        playback_kind="",
+    ):
+        data = bytes(media_bytes or b"")
+        mime = str(media_type or "application/octet-stream")
+        name = str(filename or "satellite-audio.bin")
+        is_mp3 = mime in {"audio/mpeg", "audio/mp3"} or name.endswith(".mp3")
+        prepared = {
+            "bytes": data if is_mp3 else b"mp3:" + data,
+            "media_type": "audio/mpeg",
+            "filename": name if name.endswith(".mp3") else f"{Path(name).stem}.mp3",
+            "transcoded": not is_mp3,
+            "playback_kind": playback_kind,
+        }
+        self.prepared.append(dict(prepared))
+        return prepared
+
     @staticmethod
     def _native_persistent_media_source_url(
         source_url,
@@ -100,7 +123,7 @@ class FakeVoicePipeline:
         )
         return (
             "http://voice-core/media/background"
-            if filename == "background-audio"
+            if filename.startswith("background-audio")
             else "http://voice-core/media/foreground"
         )
 
@@ -349,7 +372,12 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(overlay["foreground_url"], "http://voice-core/media/foreground")
         self.assertEqual(overlay["ducking"]["target_percent"], 35)
         self.assertTrue(overlay["stop_media_when_finished"])
+        self.assertEqual(overlay["background_fade_out_ms"], 500)
         self.assertEqual(self.vp.background_source_url, "https://example.test/morning.mp3")
+        self.assertEqual([row["playback_kind"] for row in self.vp.prepared], ["tts", "background"])
+        self.assertTrue(self.vp.prepared[0]["transcoded"])
+        self.assertFalse(self.vp.prepared[1]["transcoded"])
+        self.assertTrue(all(row["media_type"] == "audio/mpeg" for row in self.vp.stored))
 
     def test_older_scene_satellite_keeps_compatibility_mixer(self) -> None:
         self.capabilities["synchronized_media_sessions"] = False
@@ -651,6 +679,11 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(media["channel_mode"], "mono")
         self.assertTrue(media["wait_for_completion"])
         self.assertEqual(media["completion_timeout_s"], 42)
+        self.assertEqual(len(self.vp.prepared), 1)
+        self.assertEqual(self.vp.prepared[0]["playback_kind"], "tts")
+        self.assertTrue(self.vp.prepared[0]["transcoded"])
+        self.assertEqual(self.vp.stored[0]["media_type"], "audio/mpeg")
+        self.assertEqual(self.vp.stored[0]["filename"], "tts.mp3")
 
     def test_stereo_pair_audio_scene_synchronizes_background_and_tts(self) -> None:
         self.stereo_pair = {
@@ -677,6 +710,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(overlay["ducking"]["target_percent"], 35)
         self.assertEqual(overlay["start_server_us"], 123456789)
         self.assertTrue(overlay["stop_media_when_finished"])
+        self.assertEqual(overlay["background_fade_out_ms"], 500)
 
 
 if __name__ == "__main__":

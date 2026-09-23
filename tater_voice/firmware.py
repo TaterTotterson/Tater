@@ -113,6 +113,22 @@ _SAT1_RPI_FIRMWARE_LATEST_URL = str(
     )
     or ""
 ).strip()
+_ECHO_FIRMWARE_GITHUB_OWNER = "TaterTotterson"
+_ECHO_FIRMWARE_GITHUB_REPO = "Tater-Echo-Firmware"
+_ECHO_FIRMWARE_RELEASE_BASE_URL = str(
+    os.getenv(
+        "TATER_ECHO_FIRMWARE_RELEASE_BASE_URL",
+        f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}/releases/latest/download",
+    )
+    or ""
+).strip().rstrip("/")
+_ECHO_FIRMWARE_MANIFEST_URL = str(
+    os.getenv(
+        "TATER_ECHO_FIRMWARE_MANIFEST_URL",
+        f"{_ECHO_FIRMWARE_RELEASE_BASE_URL}/firmware-manifest.json",
+    )
+    or ""
+).strip()
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NATIVE_FIRMWARE_LOCAL_ROOTS = tuple(
     root
@@ -180,6 +196,28 @@ _SAT1_RPI_FIRMWARE_LOCAL_LATEST = next(
     if _SAT1_RPI_FIRMWARE_LOCAL_ROOTS
     else _SOURCE_ROOT / "release_assets" / "latest.json",
 )
+_ECHO_FIRMWARE_LOCAL_ROOTS = tuple(
+    root
+    for root in (
+        Path(os.getenv("TATER_ECHO_FIRMWARE_LOCAL_ROOT", "")).expanduser()
+        if os.getenv("TATER_ECHO_FIRMWARE_LOCAL_ROOT")
+        else None,
+        _SOURCE_ROOT.parent / "Tater-Echo-Firmware",
+        Path.home() / "Scripts" / "Tater-Echo-Firmware",
+        Path.home() / "Tater-Echo-Firmware",
+    )
+    if isinstance(root, Path)
+)
+_ECHO_FIRMWARE_LOCAL_MANIFEST = next(
+    (
+        root / "release" / "firmware-manifest.json"
+        for root in _ECHO_FIRMWARE_LOCAL_ROOTS
+        if (root / "release" / "firmware-manifest.json").is_file()
+    ),
+    (_ECHO_FIRMWARE_LOCAL_ROOTS[0] / "release" / "firmware-manifest.json")
+    if _ECHO_FIRMWARE_LOCAL_ROOTS
+    else _SOURCE_ROOT / "release" / "firmware-manifest.json",
+)
 _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY = {
     "s3box_display": "s3_box",
 }
@@ -188,6 +226,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
     for template_key, manifest_key in _NATIVE_FIRMWARE_TEMPLATE_TO_MANIFEST_KEY.items()
 }
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
+    "biscuit",
     "satellite1_rpi_satellite",
     "satellite1_rpi_standalone",
     "thirdreality_s420",
@@ -254,6 +293,19 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
 }
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
+    {
+        "key": "biscuit",
+        "label": "Tater Echo Dot 2",
+        "usb_recovery": False,
+        "match_tokens": {
+            "biscuit",
+            "echo dot 2",
+            "echo dot 2nd generation",
+            "echo dot gen 2",
+            "amazon echo dot 2",
+            "tater echo",
+        },
+    },
     {
         "key": "satellite1_rpi_standalone",
         "label": "Tater SAT1 Raspberry Pi — Standalone",
@@ -983,6 +1035,16 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
+    if key == "biscuit":
+        return {
+            "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
+            "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
+            "release_base_url": _ECHO_FIRMWARE_RELEASE_BASE_URL,
+            "raw_base_url": _ECHO_FIRMWARE_RELEASE_BASE_URL,
+            "local_manifest": _ECHO_FIRMWARE_LOCAL_MANIFEST,
+            "local_roots": _ECHO_FIRMWARE_LOCAL_ROOTS,
+            "format": "echo_targets",
+        }
     if key in {"satellite1_rpi_standalone", "satellite1_rpi_satellite"}:
         return {
             "latest_url": _SAT1_RPI_FIRMWARE_LATEST_URL,
@@ -1059,9 +1121,113 @@ def _native_template_key_for_manifest(manifest_key: Any) -> str:
     return _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY.get(token, token)
 
 
+def _load_echo_firmware_manifest(
+    source: Dict[str, Any],
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    manifest_url = _text(source.get("manifest_url"))
+    local_manifest = source.get("local_manifest")
+    try:
+        manifest_payload = _remote_json(manifest_url, force_refresh=force_refresh)
+        manifest_source = "remote"
+    except Exception:
+        manifest_payload = _local_json(local_manifest)
+        manifest_source = "local"
+        manifest_url = str(local_manifest)
+
+    if not isinstance(manifest_payload, dict):
+        raise RuntimeError("Tater Echo firmware manifest did not parse into an object.")
+    targets = manifest_payload.get("targets")
+    if not isinstance(targets, dict):
+        raise RuntimeError("Tater Echo firmware manifest is missing its targets object.")
+    version = _text(manifest_payload.get("version"))
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version):
+        raise RuntimeError("Tater Echo firmware manifest has an invalid version.")
+
+    release_base_url = _text(source.get("release_base_url")).rstrip("/")
+    devices: List[Dict[str, Any]] = []
+    for raw_target, raw_device in targets.items():
+        target = _lower(raw_target)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", target) or not isinstance(raw_device, dict):
+            continue
+        raw_artifacts = raw_device.get("artifacts") if isinstance(raw_device.get("artifacts"), dict) else {}
+        artifacts: Dict[str, Dict[str, Any]] = {}
+        for kind in ("factory", "ota"):
+            raw_artifact = raw_artifacts.get(kind) if isinstance(raw_artifacts.get(kind), dict) else None
+            if not isinstance(raw_artifact, dict):
+                continue
+            raw_name = _text(raw_artifact.get("name"))
+            name = Path(raw_name).name
+            sha256 = _lower(raw_artifact.get("sha256"))
+            size_bytes = _as_int(raw_artifact.get("size"), 0, minimum=0)
+            if not name or name != raw_name or not re.fullmatch(r"[0-9a-f]{64}", sha256) or size_bytes < 1:
+                raise RuntimeError(f"Tater Echo {target} {kind} artifact metadata is invalid.")
+            artifact_path = (
+                f"{release_base_url}/{urllib_parse.quote(name, safe='')}"
+                if manifest_source == "remote"
+                else name
+            )
+            artifacts[kind] = {
+                "kind": kind,
+                "path": artifact_path,
+                "name": name,
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "flash_transport": "tater_native_ota" if kind == "ota" else "external_factory_installer",
+                "browser_flash_supported": False,
+                "instructions_url": (
+                    f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}#install-on-an-echo-dot-2"
+                    if kind == "factory"
+                    else ""
+                ),
+            }
+        if not artifacts:
+            continue
+        display_version = version[1:] if version.startswith("v") else version
+        devices.append(
+            {
+                "key": target,
+                "label": _text(raw_device.get("display_name")) or f"Tater Echo {target}",
+                "board": _text(raw_device.get("amazon_codename")) or target,
+                "firmware_target": target,
+                "firmware_version": version,
+                "display_version": display_version,
+                "project": "tater.echo",
+                "flash_transport": "tater_native_ota",
+                "artifacts": artifacts,
+                "support": {
+                    key: copy.deepcopy(value)
+                    for key, value in raw_device.items()
+                    if key != "artifacts"
+                },
+            }
+        )
+
+    if not devices:
+        raise RuntimeError("Tater Echo firmware manifest has no usable targets.")
+    payload = copy.deepcopy(manifest_payload)
+    payload.update(
+        {
+            "kind": "tater_echo_firmware",
+            "project": "tater.echo",
+            "version": version,
+            "display_version": version[1:] if version.startswith("v") else version,
+            "latest_url": _text(source.get("latest_url")) or manifest_url,
+            "manifest_url": manifest_url,
+            "manifest_path": "firmware-manifest.json",
+            "devices": devices,
+            "devices_by_key": {_lower(row.get("key")): dict(row) for row in devices},
+        }
+    )
+    return payload
+
+
 def _load_native_firmware_manifest(*, force_refresh: bool = False, template_key: Any = "") -> Dict[str, Any]:
     latest_payload: Any
     source = _firmware_manifest_source(template_key)
+    if _lower(source.get("format")) == "echo_targets":
+        return _load_echo_firmware_manifest(source, force_refresh=force_refresh)
     latest_url = _text(source.get("latest_url"))
     local_latest = source.get("local_latest")
     local_roots = source.get("local_roots") if isinstance(source.get("local_roots"), tuple) else ()
@@ -1165,7 +1331,7 @@ def _native_firmware_info(template_key: Any, *, force_refresh: bool = False) -> 
 
 def _native_firmware_device_keys(*, force_refresh: bool = False) -> set[str]:
     keys: set[str] = set()
-    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):
+    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone", "biscuit"):
         try:
             manifest = _load_native_firmware_manifest(force_refresh=force_refresh, template_key=source_key)
         except Exception:
@@ -1371,7 +1537,7 @@ def _prebuilt_artifact_ui_summary(prebuilt: Dict[str, Any]) -> Dict[str, Any]:
 def _prebuilt_firmware_panel_summary(*, force_refresh: bool = False) -> Dict[str, Any]:
     manifests: List[Dict[str, Any]] = []
     errors: List[str] = []
-    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone"):
+    for source_key in ("", "thirdreality_s420", "satellite1_rpi_standalone", "biscuit"):
         try:
             manifests.append(
                 _load_native_firmware_manifest(
@@ -2012,6 +2178,14 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _template_key_from_hardware_identity(value: Any) -> str:
     token = _lower(value).replace("_", "-")
     compact = re.sub(r"[^a-z0-9]+", "", token)
+    if token in {"biscuit", "echo-dot-2", "echo-dot-gen-2"} or compact in {
+        "biscuit",
+        "echodot2",
+        "echodotgen2",
+        "amazonechodot2",
+        "taterecho",
+    }:
+        return "biscuit"
     if token in {"satellite1-rpi-standalone", "sat1-rpi-standalone"} or compact in {
         "satellite1rpistandalone",
         "sat1rpistandalone",
@@ -2068,7 +2242,9 @@ def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
     metadata = client_row.get("metadata") if isinstance(client_row.get("metadata"), dict) else {}
     for value in (
+        client_row.get("firmware_target"),
         client_row.get("board"),
+        metadata.get("firmware_target"),
         metadata.get("board"),
         device_info.get("model"),
         device_info.get("project_version"),
@@ -2088,7 +2264,9 @@ def _match_template_spec(selector: str, client_row: Dict[str, Any]) -> Optional[
             client_row.get("host"),
             client_row.get("source"),
             client_row.get("board"),
+            client_row.get("firmware_target"),
             metadata.get("board"),
+            metadata.get("firmware_target"),
             client_row.get("device_id"),
             client_row.get("device_name"),
             client_row.get("firmware_version"),
@@ -2324,7 +2502,9 @@ def _firmware_device_option(selector: str, client_row: Dict[str, Any]) -> Option
         "hero_image_src": esphome_ui_helpers.device_image_src(
             matched_template.get("key") if isinstance(matched_template, dict) else "",
             matched_template.get("label") if isinstance(matched_template, dict) else "",
+            client_row.get("firmware_target"),
             client_row.get("board"),
+            (client_row.get("metadata") or {}).get("firmware_target") if isinstance(client_row.get("metadata"), dict) else "",
             (client_row.get("metadata") or {}).get("board") if isinstance(client_row.get("metadata"), dict) else "",
             device_info.get("model"),
             title,
@@ -2451,6 +2631,8 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     usb_recovery_option = _firmware_device_option(_FIRMWARE_USB_RECOVERY_SELECTOR, {"firmware_usb_recovery": True})
     if isinstance(usb_recovery_option, dict):
         for spec in native_template_specs:
+            if not _as_bool(spec.get("usb_recovery"), True):
+                continue
             template_key = _text(spec.get("key"))
             if not template_key:
                 continue
