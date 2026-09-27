@@ -83,10 +83,16 @@ def resolve_reply_playback_target(row: Any, *, client_row: Any = None) -> str:
 
 
 def _current_external_values(current_value: Any) -> List[str]:
-    target = normalize_reply_playback_target(current_value)
-    if is_external_reply_playback_target(target):
-        return [target]
-    return []
+    values = current_value if isinstance(current_value, (list, tuple, set)) else [current_value]
+    targets: List[str] = []
+    seen = set()
+    for value in values:
+        target = normalize_reply_playback_target(value)
+        if not is_external_reply_playback_target(target) or target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+    return targets
 
 
 def build_reply_playback_options(current_value: Any = None) -> List[Dict[str, str]]:

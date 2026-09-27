@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import importlib
 import io
 import json
@@ -203,6 +204,13 @@ _runtime_tts_assets: Dict[str, Dict[str, Any]] = {}
 _runtime_tts_assets_lock = threading.Lock()
 logger = logging.getLogger("speech_tts")
 RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
+ANNOUNCEMENT_TTS_CACHE_SCHEMA = 1
+ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS = 256
+ANNOUNCEMENT_TTS_CACHE_MAX_BYTES = 256 * 1024 * 1024
+ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+ANNOUNCEMENT_TTS_CACHE_ROOT = agent_lab_path("cache", "announcement_tts")
+_announcement_tts_cache_lock = threading.RLock()
+_announcement_tts_clone_digest_cache: Dict[Tuple[str, int, int], str] = {}
 
 
 def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
@@ -536,6 +544,148 @@ def _as_float(value: Any, default: float, *, minimum: Optional[float] = None) ->
     if minimum is not None:
         out = max(float(minimum), out)
     return out
+
+
+def _announcement_tts_clone_audio_identity(value: Any) -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    path = Path(token).expanduser()
+    if path.is_file():
+        try:
+            stat = path.stat()
+            cache_identity = (str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+            with _announcement_tts_cache_lock:
+                cached_digest = _announcement_tts_clone_digest_cache.get(cache_identity)
+            if cached_digest:
+                return cached_digest
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest_value = digest.hexdigest()
+            with _announcement_tts_cache_lock:
+                _announcement_tts_clone_digest_cache[cache_identity] = digest_value
+                while len(_announcement_tts_clone_digest_cache) > 16:
+                    _announcement_tts_clone_digest_cache.pop(next(iter(_announcement_tts_clone_digest_cache)), None)
+            return digest_value
+        except Exception:
+            pass
+    return hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _announcement_tts_cache_key(*, text: Any, **voice_settings: Any) -> str:
+    profile = dict(voice_settings)
+    api_key = _text(profile.pop("openai_api_key", ""))
+    clone_audio = profile.pop("clone_audio", None)
+    profile["openai_api_key_sha256"] = (
+        hashlib.sha256(api_key.encode("utf-8", errors="replace")).hexdigest() if api_key else ""
+    )
+    profile["clone_audio_sha256"] = _announcement_tts_clone_audio_identity(clone_audio)
+    payload = {
+        "schema": ANNOUNCEMENT_TTS_CACHE_SCHEMA,
+        "text": _text(text),
+        "voice": {
+            str(key): value
+            if value is None or isinstance(value, (str, int, float, bool))
+            else _text(value)
+            for key, value in sorted(profile.items())
+        },
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _announcement_tts_cache_path(cache_key: Any) -> Path:
+    token = re.sub(r"[^a-f0-9]", "", _text(cache_key).lower())[:64]
+    return Path(ANNOUNCEMENT_TTS_CACHE_ROOT) / f"{token}.wav"
+
+
+def _is_wav_bytes(payload: Any) -> bool:
+    data = bytes(payload or b"")
+    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+
+
+def _announcement_tts_cache_read(cache_key: Any) -> Optional[bytes]:
+    path = _announcement_tts_cache_path(cache_key)
+    if not path.is_file():
+        return None
+    with _announcement_tts_cache_lock:
+        try:
+            if time.time() - path.stat().st_mtime > ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+                return None
+            payload = path.read_bytes()
+            if not _is_wav_bytes(payload):
+                path.unlink(missing_ok=True)
+                return None
+            os.utime(path, None)
+            return payload
+        except Exception:
+            return None
+
+
+def _cleanup_announcement_tts_cache_locked() -> Dict[str, int]:
+    root = Path(ANNOUNCEMENT_TTS_CACHE_ROOT)
+    if not root.is_dir():
+        return {"removed": 0, "items": 0, "bytes": 0}
+
+    now = time.time()
+    rows: list[Tuple[Path, float, int]] = []
+    removed = 0
+    for path in root.glob("*.wav"):
+        try:
+            stat = path.stat()
+            if now - stat.st_mtime > ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+                removed += 1
+                continue
+            rows.append((path, float(stat.st_mtime), int(stat.st_size)))
+        except Exception:
+            continue
+
+    rows.sort(key=lambda row: row[1], reverse=True)
+    keep = rows[:ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS]
+    for row in rows[ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS:]:
+        try:
+            row[0].unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            keep.append(row)
+
+    total_bytes = sum(row[2] for row in keep)
+    while keep and total_bytes > ANNOUNCEMENT_TTS_CACHE_MAX_BYTES:
+        row = keep.pop()
+        try:
+            row[0].unlink(missing_ok=True)
+            total_bytes -= row[2]
+            removed += 1
+        except Exception:
+            keep.append(row)
+            break
+    return {"removed": removed, "items": len(keep), "bytes": max(0, total_bytes)}
+
+
+def _announcement_tts_cache_write(cache_key: Any, wav_bytes: bytes) -> bool:
+    payload = bytes(wav_bytes or b"")
+    if not _is_wav_bytes(payload):
+        return False
+    path = _announcement_tts_cache_path(cache_key)
+    with _announcement_tts_cache_lock:
+        temp_path: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp"
+            temp_path.write_bytes(payload)
+            os.replace(temp_path, path)
+            _cleanup_announcement_tts_cache_locked()
+            return True
+        except Exception as exc:
+            logger.debug("[speech_tts] announcement cache write skipped: %s", exc)
+            if temp_path is not None:
+                with contextlib.suppress(Exception):
+                    temp_path.unlink(missing_ok=True)
+            return False
 
 
 def _tts_output_gain(env_name: str, settings_key: str, default: float, override: Any = None) -> float:
@@ -2877,37 +3027,44 @@ async def speak_announcement_targets(
         "integration_target_count": len(integration_devices),
     }
 
-    wav_bytes = await synthesize_tts_wav(
-        text=prompt,
-        backend=selected_backend,
-        model=model,
-        voice=voice,
-        wyoming_host=wyoming_host,
-        wyoming_port=wyoming_port,
-        wyoming_voice=wyoming_voice,
-        openai_base_url=openai_base_url,
-        openai_api_key=openai_api_key,
-        chatterbox_base_url=chatterbox_base_url,
-        chatterbox_voice_mode=chatterbox_voice_mode,
-        chatterbox_chunk_size=chatterbox_chunk_size,
-        chatterbox_temperature=chatterbox_temperature,
-        chatterbox_exaggeration=chatterbox_exaggeration,
-        chatterbox_cfg_weight=chatterbox_cfg_weight,
-        chatterbox_seed=chatterbox_seed,
-        chatterbox_speed_factor=chatterbox_speed_factor,
-        chatterbox_language=chatterbox_language,
-        acceleration=acceleration,
-        kokoro_output_gain=kokoro_output_gain,
-        pocket_tts_output_gain=pocket_tts_output_gain,
-        clone_audio=clone_audio,
-        clone_text=clone_text,
-        managed_language=managed_language,
-        managed_instruct=managed_instruct,
-    )
+    synthesis_kwargs = {
+        "backend": selected_backend,
+        "model": model,
+        "voice": voice,
+        "wyoming_host": wyoming_host,
+        "wyoming_port": wyoming_port,
+        "wyoming_voice": wyoming_voice,
+        "openai_base_url": openai_base_url,
+        "openai_api_key": openai_api_key,
+        "chatterbox_base_url": chatterbox_base_url,
+        "chatterbox_voice_mode": chatterbox_voice_mode,
+        "chatterbox_chunk_size": chatterbox_chunk_size,
+        "chatterbox_temperature": chatterbox_temperature,
+        "chatterbox_exaggeration": chatterbox_exaggeration,
+        "chatterbox_cfg_weight": chatterbox_cfg_weight,
+        "chatterbox_seed": chatterbox_seed,
+        "chatterbox_speed_factor": chatterbox_speed_factor,
+        "chatterbox_language": chatterbox_language,
+        "acceleration": acceleration,
+        "kokoro_output_gain": kokoro_output_gain,
+        "pocket_tts_output_gain": pocket_tts_output_gain,
+        "clone_audio": clone_audio,
+        "clone_text": clone_text,
+        "managed_language": managed_language,
+        "managed_instruct": managed_instruct,
+    }
+    cache_key = _announcement_tts_cache_key(text=prompt, **synthesis_kwargs)
+    wav_bytes = _announcement_tts_cache_read(cache_key)
+    cache_hit = wav_bytes is not None
+    if wav_bytes is None:
+        wav_bytes = await synthesize_tts_wav(text=prompt, **synthesis_kwargs)
+        _announcement_tts_cache_write(cache_key, wav_bytes)
+    result["audio_cache"] = "hit" if cache_hit else "miss"
     result["bytes"] = len(wav_bytes or b"")
     logger.info(
-        "[speech_tts] announcement synthesized backend=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
+        "[speech_tts] announcement audio ready backend=%s cache=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
         selected_backend,
+        result["audio_cache"],
         len(wav_bytes or b""),
         homeassistant_players,
         voice_core_selectors,

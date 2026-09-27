@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 import time
 import unittest
 from pathlib import Path
@@ -79,6 +80,137 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(model["match_threshold"], 0.40)
         self.assertEqual(metadata["embedding_dimensions"], 512)
         self.assertEqual(metadata["model_revision"], face_identity.face_id_runtime.ADAFACE_REVISION)
+
+    @staticmethod
+    def burst_detection(embedding, *, x=100, y=100, threshold=0.40):
+        return {
+            "embedding": embedding,
+            "facial_area": {"x": x, "y": y, "w": 48, "h": 56},
+            "confidence": 0.98,
+            "crop_b64": "ZmFjZQ==",
+            "crop_content_type": "image/jpeg",
+            "embedding_model": {
+                "model_id": "adaface_ir50_webface4m",
+                "model_name": "AdaFace IR-50 WebFace4M",
+                "distance_metric": "cosine",
+                "embedding_dimensions": 2,
+                "match_threshold": threshold,
+                "model_revision": "test-revision",
+            },
+            "embedding_model_signature": "adaface ir-50 webface4m|cosine|2|test-revisio",
+        }
+
+    @staticmethod
+    def burst_identity(identity_id, references, person_name):
+        signature = "adaface ir-50 webface4m|cosine|2|test-revisio"
+        return {
+            "id": identity_id,
+            "name": person_name,
+            "person_id": f"person_{identity_id}",
+            "person_name": person_name,
+            "embedding_model_signature": signature,
+            "reference_centroids": references,
+            "observations": [
+                {
+                    "id": f"observation_{identity_id}",
+                    "embedding": references[0],
+                    "embedding_model_signature": signature,
+                    "face_b64": "ZmFjZQ==",
+                    "quality": 1.0,
+                }
+            ],
+        }
+
+    def test_adaface_burst_consensus_recovers_a_clear_known_winner(self):
+        fred = self.burst_identity(
+            "face_fred",
+            [[1.0, 0.0], [0.995, 0.099875]],
+            "Fred",
+        )
+        wilma = self.burst_identity(
+            "face_wilma",
+            [[-1.0, 0.0], [-0.995, 0.099875]],
+            "Wilma",
+        )
+        self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY] = {
+            "face_fred": json.dumps(fred),
+            "face_wilma": json.dumps(wilma),
+        }
+        angles = [61, 58, 64, 62, 69]
+        frames = [
+            [
+                self.burst_detection(
+                    [math.cos(math.radians(angle)), math.sin(math.radians(angle))],
+                    x=100 + index * 4,
+                    y=100 + index * 2,
+                )
+            ]
+            for index, angle in enumerate(angles)
+        ]
+
+        saved = face_identity.record_detection_burst(
+            frames,
+            event_id="front-door-burst",
+            seen_at="2026-09-21T07:34:01Z",
+            redis_client=self.redis,
+        )
+
+        self.assertEqual([row["id"] for row in saved], ["face_fred"])
+        identities = face_identity.identity_rows(self.redis)
+        self.assertEqual(set(identities), {"face_fred", "face_wilma"})
+        self.assertGreater(len(face_identity.observations(identities["face_fred"])), 1)
+        self.assertEqual(
+            face_identity.identity_ids_for_event("front-door-burst", redis_client=self.redis),
+            ["face_fred"],
+        )
+
+    def test_burst_consensus_rejects_ambiguous_people_and_keeps_one_unknown_track(self):
+        fred = self.burst_identity("face_fred", [[1.0, 0.0], [0.995, 0.099875]], "Fred")
+        wilma = self.burst_identity("face_wilma", [[0.0, 1.0], [0.099875, 0.995]], "Wilma")
+        self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY] = {
+            "face_fred": json.dumps(fred),
+            "face_wilma": json.dumps(wilma),
+        }
+        frames = [
+            [
+                self.burst_detection(
+                    [math.cos(math.radians(angle)), math.sin(math.radians(angle))],
+                    x=120 + index * 3,
+                    threshold=0.05,
+                )
+            ]
+            for index, angle in enumerate([28, 36, 44, 52, 60])
+        ]
+
+        saved = face_identity.record_detection_burst(
+            frames,
+            event_id="ambiguous-burst",
+            redis_client=self.redis,
+        )
+
+        self.assertEqual(len(saved), 1)
+        self.assertFalse(saved[0].get("person_id"))
+        self.assertEqual(saved[0]["observation_count"], 5)
+        identities = face_identity.identity_rows(self.redis)
+        self.assertEqual(len(identities), 3)
+        self.assertEqual(
+            face_identity.identity_ids_for_event("ambiguous-burst", redis_client=self.redis),
+            [saved[0]["id"]],
+        )
+
+    def test_burst_tracking_keeps_two_same_frame_faces_separate(self):
+        frames = [
+            [
+                self.burst_detection([1.0, 0.0], x=20 + frame_index * 4),
+                self.burst_detection([0.0, 1.0], x=320 - frame_index * 4),
+            ]
+            for frame_index in range(3)
+        ]
+
+        tracks = face_identity._burst_detection_tracks(frames, redis_client=self.redis)
+
+        self.assertEqual(sorted(len(track) for track in tracks), [3, 3])
+        self.assertTrue(all(len({round(row["facial_area"]["x"] / 100) for row in track}) == 1 for track in tracks))
 
     def test_recording_matches_faces_and_deduplicates_the_same_event(self):
         first = face_identity.record_detection(

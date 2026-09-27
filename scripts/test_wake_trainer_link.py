@@ -183,7 +183,12 @@ class WakeTrainerLinkTests(unittest.TestCase):
         self.assertIn("voice_wake_trainer_link_pairing_start", component)
         self.assertIn("voice_wake_trainer_link_pairing_status", component)
         self.assertIn("voice_wake_trainer_link_unlink", component)
+        self.assertIn("pairing.value?.display_code", component)
+        self.assertIn("const previousPairing = pairing.value || {};", component)
+        self.assertIn("...previousPairing,", component)
+        self.assertIn('state === "expired"', component)
         self.assertIn(".tm-pairing-box", styles)
+        self.assertIn(".tm-pairing-box.expired", styles)
 
 
 if __name__ == "__main__":

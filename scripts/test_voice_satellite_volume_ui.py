@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 fake_native_live_settings = types.ModuleType("tater_voice.native_live_settings")
 fake_native_live_settings.settings_fields = lambda *_args, **_kwargs: []
 fake_reply_playback = types.ModuleType("tater_voice.reply_playback")
+fake_reply_playback.REPLY_PLAYBACK_DEVICE = "device"
 fake_reply_playback.resolve_reply_playback_target = lambda *_args, **_kwargs: "device"
 fake_reply_playback.build_reply_playback_options = lambda *_args, **_kwargs: [
     {"value": "device", "label": "This device speaker"}
@@ -40,6 +41,58 @@ from tater_voice import ui_helpers  # noqa: E402
 
 
 class VoiceSatelliteVolumeUiTests(unittest.TestCase):
+    def test_reply_playback_destinations_are_discovered_once_per_snapshot(self) -> None:
+        status = {
+            "clients": {
+                "native:left": {
+                    "selector": "native:left",
+                    "source": "tater_native",
+                    "name": "Left",
+                    "connected": True,
+                    "metadata": {"reply_playback_target": "voice_core:stereo:office"},
+                },
+                "native:right": {
+                    "selector": "native:right",
+                    "source": "tater_native",
+                    "name": "Right",
+                    "connected": True,
+                    "metadata": {"reply_playback_target": "sonos:kitchen"},
+                },
+            }
+        }
+        targets = {
+            "native:left": "voice_core:stereo:office",
+            "native:right": "sonos:kitchen",
+        }
+        options = [
+            {"value": "device", "label": "This device speaker"},
+            {"value": "voice_core:stereo:office", "label": "Office Stereo"},
+            {"value": "sonos:kitchen", "label": "Kitchen Sonos"},
+        ]
+
+        with (
+            mock.patch.object(ui_helpers.esphome_runtime, "load_satellite_registry", return_value=[]),
+            mock.patch.object(
+                ui_helpers.reply_playback,
+                "resolve_reply_playback_target",
+                side_effect=lambda row, **_kwargs: targets[row["selector"]],
+            ),
+            mock.patch.object(
+                ui_helpers.reply_playback,
+                "build_reply_playback_options",
+                return_value=options,
+            ) as discover,
+        ):
+            items = ui_helpers.satellite_item_forms(status)
+
+        discover.assert_called_once()
+        self.assertCountEqual(
+            discover.call_args.args[0],
+            ["voice_core:stereo:office", "sonos:kitchen"],
+        )
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all(item["fields"][1]["options"] == options for item in items))
+
     def test_native_volume_is_on_the_card_instead_of_the_settings_popup(self) -> None:
         status = {
             "clients": {

@@ -26,6 +26,14 @@ permissions. They are never returned by the API, included in events, or sent
 back to satellites. Public API responses contain only an IRK fingerprint and a
 masked display value.
 
+## Manual IRK entry
+
+Tater does not ask satellites to pair with a phone or watch. To track a device
+whose BLE address rotates, open Satellites → Presence → Tracked devices, choose
+**Add IRK manually**, and paste the device's 32-character hexadecimal or Base64
+Identity Resolving Key. Tater stores the key only in its private local registry;
+satellites continue operating solely as passive BLE observers.
+
 Presence state remains active when the WebUI is closed: incoming satellite
 advertisement batches advance tracked home/away and room state and record new
 events. Observation, identity-cache, and history collections are all bounded.
@@ -55,6 +63,10 @@ calibrated RSSI, configured offset, and estimated distance.
 When another room is currently stronger but has not held the lead long enough,
 `raw_strongest_room`, `candidate_room`, and `candidate_age_s` expose that pending
 decision without reporting a false movement.
+When multiple satellites cover the same room, Tater also keeps the selected
+scanner stable through brief RSSI crossovers. A different same-room scanner
+must remain clearly stronger across several fresh observations before it can
+replace the displayed distance source; stale scanners fail over more quickly.
 `rooms` contains device counts by selected location, `trackers` summarizes
 home/away state, `history` contains native presence events, and `sources`
 reports scanner health and totals. `diagnostics` reports registry, iBeacon,

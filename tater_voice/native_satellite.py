@@ -7,6 +7,7 @@ import hmac
 import inspect
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -31,6 +32,7 @@ NATIVE_WEBSOCKET_TASK_CANCEL_TIMEOUT_S = 1.0
 NATIVE_WEBSOCKET_BRIDGE_CLOSE_TIMEOUT_S = 3.0
 NATIVE_WEBSOCKET_DISCONNECT_TIMEOUT_S = 1.0
 NATIVE_MEDIA_DISCONNECT_GRACE_S = 6.0
+NATIVE_SCREEN_WEATHER_REFRESH_S = 60.0
 
 VOICE_EVENT_STATE = {
     "RUN_START": "listening",
@@ -81,6 +83,7 @@ MEDIA_RENDER_START_GUARD_MS = 250
 MEDIA_RENDER_LATENCY_EMA_ALPHA = 0.25
 MEDIA_RENDER_LATENCY_MAX_FRAMES = 24_000
 MEDIA_RENDER_LATENCY_LEARN_SAMPLES = 3
+STEREO_REPLY_DIRECTION_DEGREES = 0.0
 
 
 def _vp():
@@ -461,6 +464,110 @@ def _parse_json_text(text: Any) -> Dict[str, Any]:
 def _message_payload(message: Dict[str, Any]) -> Dict[str, Any]:
     payload = message.get("payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def _screen_weather_supported(payload: Dict[str, Any]) -> bool:
+    capabilities = payload.get("capabilities")
+    return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_weather"), False)
+
+
+def _screen_notifications_supported(payload: Dict[str, Any]) -> bool:
+    capabilities = payload.get("capabilities")
+    return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_notifications"), False)
+
+
+def _screen_weather_payload(selector: str = "") -> Dict[str, Any]:
+    from . import display_feed
+
+    try:
+        return display_feed.build_weather_summary(selector=selector)
+    except Exception:
+        _vp().logger.warning("[native-satellite] screen weather refresh failed", exc_info=True)
+        return {"available": False}
+
+
+def _native_display_targets(selector: str, hello_payload: Dict[str, Any]) -> set[str]:
+    values = {
+        "all",
+        _lower(selector),
+        _lower(hello_payload.get("device_id")),
+        _lower(hello_payload.get("device_name")),
+        _lower(hello_payload.get("room")),
+    }
+    normalized = {
+        re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+        for value in values
+        if value
+    }
+    return {value for value in values.union(normalized) if value}
+
+
+def _native_display_event_matches(event: Dict[str, Any], targets: set[str]) -> bool:
+    event_targets = {_lower(event.get("target") or "all")}
+    for value in event.get("targets") or []:
+        token = _lower(value)
+        if token:
+            event_targets.add(token)
+    normalized = {
+        re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+        for value in event_targets
+        if value
+    }
+    return bool(event_targets.union(normalized).intersection(targets))
+
+
+def _native_display_snapshot_image(image_url: Any) -> Dict[str, str]:
+    match = re.fullmatch(
+        r"/tater-ha/v1/display/snapshots/([A-Fa-f0-9]{16,64})",
+        _text(image_url),
+    )
+    if match is None:
+        return {}
+    try:
+        raw = _vp().redis_client.get(f"awareness:event_snapshot:{match.group(1)}")
+        parsed = json.loads(_text(raw))
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    data = _text(parsed.get("data_b64") or parsed.get("data"))
+    if not data or len(data) > 3 * 1024 * 1024:
+        return {}
+    content_type = _text(parsed.get("content_type") or "image/jpeg").split(";", 1)[0].lower()
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return {"image_data_b64": data, "image_content_type": content_type}
+
+
+def _native_display_notification_payload(event: Dict[str, Any]) -> Dict[str, Any]:
+    meta = event.get("meta") if isinstance(event.get("meta"), dict) else {}
+    title = _text(event.get("title"))
+    try:
+        created_at = float(event.get("created_at") or 0.0)
+    except Exception:
+        created_at = 0.0
+    try:
+        expires_at = float(event.get("expires_at") or 0.0)
+    except Exception:
+        expires_at = 0.0
+    payload: Dict[str, Any] = {
+        "id": _text(event.get("id")),
+        "seq": _as_int(event.get("seq"), 0),
+        "kind": _text(event.get("kind") or "notification"),
+        "priority": _text(event.get("priority") or "normal"),
+        "title": title,
+        "camera_name": _text(meta.get("camera_name") or meta.get("camera") or title),
+        "description": _text(event.get("description") or event.get("message")),
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "ttl_seconds": _as_int(event.get("ttl_seconds"), 90),
+        "source": _text(event.get("source")),
+    }
+    image_url = _text(event.get("image_url"))
+    if image_url:
+        payload["image_url"] = image_url
+        payload.update(_native_display_snapshot_image(image_url))
+    return payload
 
 
 def _message_type(message: Dict[str, Any]) -> str:
@@ -2279,6 +2386,7 @@ async def prepare_stereo_media_session(
         compatibility_checked=True,
         wait_for_completion=wait_for_completion,
         completion_timeout_s=completion_timeout_s,
+        direction_degrees=STEREO_REPLY_DIRECTION_DEGREES,
     )
     result["stereo_session_started"] = True
     return result
@@ -2302,6 +2410,7 @@ async def prepare_group_media_session(
     compatibility_checked: bool = False,
     wait_for_completion: bool = False,
     completion_timeout_s: float = 180.0,
+    direction_degrees: Optional[float] = None,
 ) -> Dict[str, Any]:
     member_rows: list[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -2394,6 +2503,8 @@ async def prepare_group_media_session(
         if transient_tts:
             prepare_payload["visual_mode"] = "speaking"
             prepare_payload["state_after"] = "idle"
+            if direction_degrees is not None:
+                prepare_payload["direction_degrees"] = float(direction_degrees) % 360.0
         seek_prepare_timeout_s = min(
             60.0,
             max(15.0, 8.0 + (max(0, _as_int(start_position_ms, 0)) / 15000.0)),
@@ -2808,24 +2919,29 @@ async def start_stereo_overlay(
             + int(clock.get("offset_us") or 0)
             + (_as_int(settings.get("delay_ms"), 0) * 1000)
         )
+        command_payload = {
+            "overlay_id": _text(overlay_id),
+            "foreground": {
+                "url": _text(foreground_url),
+                "kind": _text(foreground_kind) or "tts",
+                "volume_percent": _as_int(settings.get("volume_percent"), base_volume),
+            },
+            "ducking": dict(duck),
+            "finish": {
+                "stop_media": bool(stop_media_when_finished),
+                "fade_ms": max(0, min(10000, _as_int(background_fade_out_ms, 0))),
+            },
+            "start_at_us": start_at_us,
+            "group_id": _text(session.get("group_id")),
+        }
+        # A bearing measured on one chassis is not meaningful on its partner:
+        # the pair can be placed at different rotations. Point synchronized
+        # reply animations at the physical front of each speaker instead.
+        command_payload["direction_degrees"] = STEREO_REPLY_DIRECTION_DEGREES
         result = await send_command(
             selector,
             "audio.overlay.start",
-            {
-                "overlay_id": _text(overlay_id),
-                "foreground": {
-                    "url": _text(foreground_url),
-                    "kind": _text(foreground_kind) or "tts",
-                    "volume_percent": _as_int(settings.get("volume_percent"), base_volume),
-                },
-                "ducking": dict(duck),
-                "finish": {
-                    "stop_media": bool(stop_media_when_finished),
-                    "fade_ms": max(0, min(10000, _as_int(background_fade_out_ms, 0))),
-                },
-                "start_at_us": start_at_us,
-                "group_id": _text(session.get("group_id")),
-            },
+            command_payload,
         )
         return {**result, "start_at_us": start_at_us}
 
@@ -4426,6 +4542,8 @@ async def handle_websocket(websocket: WebSocket) -> None:
 
     selector = ""
     command_sender: Optional[asyncio.Task] = None
+    screen_weather_sender: Optional[asyncio.Task] = None
+    screen_notification_sender: Optional[asyncio.Task] = None
     wake_verifier_tasks: set[asyncio.Task] = set()
     client_row: Optional[Dict[str, Any]] = None
     client_host = getattr(websocket.client, "host", "unknown") if websocket.client is not None else "unknown"
@@ -4514,6 +4632,50 @@ async def handle_websocket(websocket: WebSocket) -> None:
 
         await send_json(_envelope("state", {"state": "idle"}))
         await send_json(_envelope("settings", _firmware_settings_payload(selector, board=_text(payload.get("board")))))
+
+        if _screen_weather_supported(payload):
+            first_weather = await asyncio.to_thread(_screen_weather_payload, selector)
+            await send_json(_envelope("display.weather", first_weather))
+
+            async def send_screen_weather() -> None:
+                previous = json.dumps(first_weather, sort_keys=True, separators=(",", ":"))
+                while True:
+                    await asyncio.sleep(NATIVE_SCREEN_WEATHER_REFRESH_S)
+                    weather = await asyncio.to_thread(_screen_weather_payload, selector)
+                    encoded = json.dumps(weather, sort_keys=True, separators=(",", ":"))
+                    if encoded == previous:
+                        continue
+                    await send_json(_envelope("display.weather", weather))
+                    previous = encoded
+
+            screen_weather_sender = asyncio.create_task(send_screen_weather())
+
+        if _screen_notifications_supported(payload):
+            from . import display_bus
+
+            display_targets = _native_display_targets(selector, payload)
+
+            async def send_screen_notifications() -> None:
+                after_seq = 0
+                while True:
+                    result = await asyncio.to_thread(
+                        display_bus.list_display_events,
+                        after_seq=after_seq,
+                        target="",
+                        limit=50,
+                    )
+                    events = result.get("events") if isinstance(result.get("events"), list) else []
+                    for event in events:
+                        if not isinstance(event, dict):
+                            continue
+                        after_seq = max(after_seq, _as_int(event.get("seq"), 0))
+                        if not _native_display_event_matches(event, display_targets):
+                            continue
+                        notification = await asyncio.to_thread(_native_display_notification_payload, event)
+                        await send_json(_envelope("display.notification", notification))
+                    await asyncio.sleep(0.75)
+
+            screen_notification_sender = asyncio.create_task(send_screen_notifications())
 
         async def send_commands() -> None:
             while True:
@@ -4611,6 +4773,18 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 (command_sender,),
                 selector=selector,
                 label="command sender",
+            )
+        if screen_weather_sender is not None:
+            await _cancel_websocket_tasks(
+                (screen_weather_sender,),
+                selector=selector,
+                label="screen weather sender",
+            )
+        if screen_notification_sender is not None:
+            await _cancel_websocket_tasks(
+                (screen_notification_sender,),
+                selector=selector,
+                label="screen notification sender",
             )
         if selector:
             bridge = None

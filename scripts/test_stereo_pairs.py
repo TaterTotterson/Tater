@@ -498,6 +498,10 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prepare_calls[0][2]["media"]["content_type"], "tts")
             self.assertEqual(prepare_calls[0][2]["visual_mode"], "speaking")
             self.assertEqual(prepare_calls[0][2]["state_after"], "idle")
+            self.assertEqual(
+                [row[2]["direction_degrees"] for row in prepare_calls],
+                [0.0, 0.0],
+            )
 
             native_satellite._record_stereo_finished(
                 "native:left",
@@ -836,6 +840,10 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     {"stop_media": True, "fade_ms": 625},
                     {"stop_media": True, "fade_ms": 625},
                 ],
+            )
+            self.assertEqual(
+                [row[2]["direction_degrees"] for row in sent],
+                [0.0, 0.0],
             )
 
             native_satellite._record_stereo_overlay_finished(

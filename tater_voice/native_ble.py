@@ -31,6 +31,12 @@ ROOM_CURRENT_STALE_S = 45.0
 ROOM_CHALLENGER_MAX_AGE_S = 15.0
 ROOM_MIN_CHALLENGER_OBSERVATIONS = 2
 ROOM_STALE_SWITCH_DWELL_S = 3.0
+SCANNER_SWITCH_MARGIN_DB = 5.0
+SCANNER_SWITCH_DWELL_S = 5.0
+SCANNER_CURRENT_STALE_S = 30.0
+SCANNER_CHALLENGER_MAX_AGE_S = 10.0
+SCANNER_MIN_CHALLENGER_OBSERVATIONS = 3
+SCANNER_STALE_SWITCH_DWELL_S = 2.0
 MAX_HISTORY_EVENTS = 2000
 MAX_TRACKED_DEVICES = 512
 MAX_IDENTITIES_PER_DEVICE = 16
@@ -834,6 +840,84 @@ def _room_source_map(device: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return room_sources
 
 
+def _room_scanner_source_map(device: Dict[str, Any], room: str) -> Dict[str, Dict[str, Any]]:
+    scanner_sources: Dict[str, Dict[str, Any]] = {}
+    for source in device.get("sources") or []:
+        if not isinstance(source, dict) or (_text(source.get("room")) or "Unknown") != room:
+            continue
+        selector = _text(source.get("selector"))
+        if selector:
+            scanner_sources[selector] = source
+    return scanner_sources
+
+
+def _clear_scanner_candidate(assignment: Dict[str, Any]) -> None:
+    assignment["scanner_candidate_selector"] = ""
+    assignment["scanner_candidate_since_ts"] = 0.0
+    assignment["scanner_candidate_last_seen_ts"] = 0.0
+    assignment["scanner_candidate_observations"] = 0
+
+
+def _select_scanner(assignment: Dict[str, Any], selector: str, now_ts: float) -> None:
+    assignment["scanner_selector"] = selector
+    assignment["scanner_changed_ts"] = now_ts
+    _clear_scanner_candidate(assignment)
+
+
+def _stabilize_room_scanner(
+    device: Dict[str, Any],
+    *,
+    assignment: Dict[str, Any],
+    room: str,
+    now_ts: float,
+) -> None:
+    scanner_sources = _room_scanner_source_map(device, room)
+    if not scanner_sources:
+        return
+    challenger = max(
+        scanner_sources.values(),
+        key=lambda source: float(source.get("location_score") or -999.0),
+    )
+    challenger_selector = _text(challenger.get("selector"))
+    current_selector = _text(assignment.get("scanner_selector"))
+    current = scanner_sources.get(current_selector)
+    if current is None:
+        _select_scanner(assignment, challenger_selector, now_ts)
+        return
+    if challenger_selector == current_selector:
+        _clear_scanner_candidate(assignment)
+        return
+
+    score_gap = float(challenger.get("location_score") or -999.0) - float(
+        current.get("location_score") or -999.0
+    )
+    current_stale = float(current.get("age_s") or 0.0) >= SCANNER_CURRENT_STALE_S
+    challenger_fresh = float(challenger.get("age_s") or 0.0) <= SCANNER_CHALLENGER_MAX_AGE_S
+    qualified = challenger_fresh and (score_gap >= SCANNER_SWITCH_MARGIN_DB or current_stale)
+    dwell_s = SCANNER_STALE_SWITCH_DWELL_S if current_stale else SCANNER_SWITCH_DWELL_S
+    if not qualified:
+        _clear_scanner_candidate(assignment)
+        return
+    if _text(assignment.get("scanner_candidate_selector")) != challenger_selector:
+        assignment["scanner_candidate_selector"] = challenger_selector
+        assignment["scanner_candidate_since_ts"] = now_ts
+        assignment["scanner_candidate_last_seen_ts"] = float(challenger.get("received_ts") or now_ts)
+        assignment["scanner_candidate_observations"] = 1
+        return
+
+    challenger_seen_ts = float(challenger.get("received_ts") or 0.0)
+    if challenger_seen_ts > float(assignment.get("scanner_candidate_last_seen_ts") or 0.0):
+        assignment["scanner_candidate_last_seen_ts"] = challenger_seen_ts
+        assignment["scanner_candidate_observations"] = int(
+            assignment.get("scanner_candidate_observations") or 0
+        ) + 1
+    if (
+        int(assignment.get("scanner_candidate_observations") or 0) >= SCANNER_MIN_CHALLENGER_OBSERVATIONS
+        and now_ts - float(assignment.get("scanner_candidate_since_ts") or now_ts) >= dwell_s
+    ):
+        _select_scanner(assignment, challenger_selector, now_ts)
+
+
 def _set_stable_room_fields(
     device: Dict[str, Any],
     *,
@@ -844,10 +928,12 @@ def _set_stable_room_fields(
     now_ts: float,
 ) -> None:
     stable_room = _text(assignment.get("room")) or raw_room
-    selected = room_sources.get(stable_room) or room_sources.get(raw_room)
-    if selected is None:
+    room_best = room_sources.get(stable_room) or room_sources.get(raw_room)
+    if room_best is None:
         return
-    selected_score = float(selected.get("location_score") or -999.0)
+    preferred_selector = _text(assignment.get("scanner_selector"))
+    selected = _room_scanner_source_map(device, stable_room).get(preferred_selector) or room_best
+    selected_score = float(room_best.get("location_score") or -999.0)
     competing_scores = [
         float(source.get("location_score") or -999.0)
         for room, source in room_sources.items()
@@ -892,6 +978,8 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                 assignment = {
                     "room": raw_room,
                     "changed_ts": now_ts,
+                    "scanner_selector": raw_selector,
+                    "scanner_changed_ts": now_ts,
                     "candidate_room": "",
                     "candidate_since_ts": 0.0,
                     "candidate_last_seen_ts": 0.0,
@@ -907,6 +995,8 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                     {
                         "room": raw_room,
                         "changed_ts": now_ts,
+                        "scanner_selector": raw_selector,
+                        "scanner_changed_ts": now_ts,
                         "candidate_room": "",
                         "candidate_since_ts": 0.0,
                         "candidate_last_seen_ts": 0.0,
@@ -953,12 +1043,22 @@ def _stabilize_room_assignments(devices: List[Dict[str, Any]], *, now_ts: float)
                         {
                             "room": raw_room,
                             "changed_ts": now_ts,
+                            "scanner_selector": raw_selector,
+                            "scanner_changed_ts": now_ts,
                             "candidate_room": "",
                             "candidate_since_ts": 0.0,
                             "candidate_last_seen_ts": 0.0,
                             "candidate_observations": 0,
                         }
                     )
+
+            stable_room = _text(assignment.get("room")) or raw_room
+            _stabilize_room_scanner(
+                device,
+                assignment=assignment,
+                room=stable_room,
+                now_ts=now_ts,
+            )
 
             _set_stable_room_fields(
                 device,

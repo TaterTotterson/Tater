@@ -1401,7 +1401,12 @@ def get_integration_devices(client: Any = None, *, refresh: bool = False, use_ca
     return _load_integration_devices_live()
 
 
-def _build_integration_device_registry(snapshot: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
+def _build_integration_device_registry(
+    snapshot: Dict[str, Any],
+    client: Any = None,
+    *,
+    overlay_runtime_state: bool = True,
+) -> Dict[str, Any]:
     groups = snapshot.get("groups") if isinstance(snapshot.get("groups"), list) else []
     room_store = _load_room_store(client)
     devices: List[Dict[str, Any]] = []
@@ -1433,7 +1438,8 @@ def _build_integration_device_registry(snapshot: Dict[str, Any], client: Any = N
             devices.append(device)
             integration_counts[integration_id] = integration_counts.get(integration_id, 0) + 1
 
-    _apply_runtime_state_overlay_to_devices(devices, client)
+    if overlay_runtime_state:
+        _apply_runtime_state_overlay_to_devices(devices, client)
     devices.sort(key=_device_sort_key)
 
     categories: List[Dict[str, Any]] = []
@@ -1631,7 +1637,11 @@ def _cache_metadata(
     }
 
 
-def get_cached_integration_device_registry(client: Any = None) -> Dict[str, Any]:
+def get_cached_integration_device_registry(
+    client: Any = None,
+    *,
+    overlay_runtime_state: bool = True,
+) -> Dict[str, Any]:
     redis_obj = _cache_client(client)
     if not redis_obj:
         return {}
@@ -1666,7 +1676,9 @@ def get_cached_integration_device_registry(client: Any = None) -> Dict[str, Any]
         "enabled_integrations": current_enabled,
         "age_seconds": max(0.0, time.time() - generated_at) if generated_at else 0.0,
     }
-    return _apply_runtime_state_overlay_to_registry(registry, redis_obj)
+    if overlay_runtime_state:
+        return _apply_runtime_state_overlay_to_registry(registry, redis_obj)
+    return registry
 
 
 def _device_registry_cache_comparable(value: Any) -> Any:
@@ -1841,15 +1853,28 @@ def refresh_integration_device_group_cache(
     return save_integration_device_registry_cache(registry, client)
 
 
-def get_integration_device_registry(client: Any = None, *, refresh: bool = False, use_cache: bool = True) -> Dict[str, Any]:
+def get_integration_device_registry(
+    client: Any = None,
+    *,
+    refresh: bool = False,
+    use_cache: bool = True,
+    overlay_runtime_state: bool = True,
+) -> Dict[str, Any]:
     if use_cache and not refresh:
-        cached = get_cached_integration_device_registry(client)
+        cached = get_cached_integration_device_registry(
+            client,
+            overlay_runtime_state=overlay_runtime_state,
+        )
         if cached:
             return cached
     if refresh:
         return refresh_integration_device_registry_cache(client, source="manual")
     snapshot = _load_integration_devices_live()
-    registry = _build_integration_device_registry(snapshot, client)
+    registry = _build_integration_device_registry(
+        snapshot,
+        client,
+        overlay_runtime_state=overlay_runtime_state,
+    )
     registry["cache"] = _cache_metadata(generated_at=time.time(), source="live")
     registry["cache"]["cached"] = False
     return registry

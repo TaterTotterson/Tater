@@ -41,6 +41,9 @@ const verifierStt = computed(() => String(Object.values(verifierFields.value).fi
 const connected = computed(() => stat("Connected") || "0");
 const activeWakeLabel = computed(() => optionLabel(optionsFor(wakeFields.value.wake_engine).find((option) => optionValue(option) === wakeEngine.value)) || "microWakeWord");
 const activeWakeSourceLabel = computed(() => optionLabel(optionsFor(wakeFields.value.wake_word).find((option) => optionValue(option) === wakeSource.value)) || "Built-in Hey Tater");
+const pairingCode = computed(() => String(pairing.value?.display_code || pairing.value?.pairing_code || pairing.value?.code || "").trim());
+const pairingState = computed(() => String(pairing.value?.state || pairing.value?.status || "waiting").trim().toLowerCase());
+const pairingRemaining = computed(() => Math.max(0, Math.floor(Number(pairing.value?.expires_in_s || 0))));
 
 const wakeEngineDetails: Record<string, { mark: string; short: string }> = {
   micro_wake_word: { mark: "MW", short: "Private, fast wake detection directly on each satellite." },
@@ -79,6 +82,11 @@ function optionValue(option: unknown): string {
 
 function optionLabel(option: unknown): string {
   return option && typeof option === "object" ? String((option as JsonRow).label ?? (option as JsonRow).name ?? optionValue(option)) : String(option ?? "");
+}
+
+function formatPairingTime(value: number): string {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
 function stat(label: string): string {
@@ -179,8 +187,14 @@ async function resetStats() {
 async function startPairing() {
   if (!trainer.value) return;
   busy.value = "pair";
+  error.value = "";
+  stopPairingPoll();
   try {
-    pairing.value = await action(String(trainer.value.start_action || "voice_wake_trainer_link_pairing_start"));
+    const result = await action(String(trainer.value.start_action || "voice_wake_trainer_link_pairing_start"));
+    const pairingId = String(result.pairing_id || "").trim();
+    const displayCode = String(result.display_code || result.pairing_code || result.code || "").trim();
+    if (!pairingId || !displayCode) throw new Error("Tater did not create a pairing code.");
+    pairing.value = { ...result, display_code: displayCode };
     schedulePairingPoll();
   } catch (actionError) {
     error.value = actionError instanceof Error ? actionError.message : "Trainer pairing could not start.";
@@ -194,12 +208,20 @@ async function checkPairing() {
   if (!pairingId || !trainer.value) return;
   try {
     const result = await action(String(trainer.value.status_action || "voice_wake_trainer_link_pairing_status"), { values: { pairing_id: pairingId } });
-    pairing.value = result;
+    const previousPairing = pairing.value || {};
+    pairing.value = {
+      ...previousPairing,
+      ...result,
+      display_code: String(result.display_code || previousPairing.display_code || previousPairing.pairing_code || previousPairing.code || "").trim(),
+    };
     if (result.wake_trainer_link && typeof result.wake_trainer_link === "object") trainer.value = result.wake_trainer_link as JsonRow;
-    if (Boolean((result.wake_trainer_link as JsonRow | undefined)?.linked) || String(result.status || "") === "linked") {
+    const state = String(result.state || result.status || "").trim().toLowerCase();
+    if (Boolean(result.linked) || Boolean((result.wake_trainer_link as JsonRow | undefined)?.linked) || state === "linked") {
       stopPairingPoll();
       emit("notify", "Wake Word Trainer linked.", "success");
       await refresh(true);
+    } else if (state === "expired" || Boolean(result.expired)) {
+      stopPairingPoll();
     } else {
       schedulePairingPoll();
     }
@@ -284,8 +306,8 @@ defineExpose({ apply, refresh });
       <label class="tm-field tm-field-wide"><span class="tm-field-label">Trainer App URL</span><input v-model="wakeValues.trainer_app_url" type="url" :placeholder="String(wakeFields.trainer_app_url?.placeholder || 'http://trainer.local:8789')" :disabled="Boolean(busy)" @input="update(wakeValues, 'trainer_app_url', wakeValues.trainer_app_url)" /><small>The destination used by satellites when wake-clip sharing is enabled.</small></label>
 
       <div v-if="trainer?.linked" class="tm-wake-trainer-linked"><div><i>✓</i><span><strong>{{ trainer.trainer_name }}</strong><small>Last model: {{ trainer.last_wake_word || "No model published yet" }} · {{ trainer.last_publish_at || "Waiting for first publish" }}</small></span></div><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="unlinkTrainer">Unlink</button></div>
-      <div v-else class="tm-wake-trainer-link"><div><i>↗</i><span><strong>Link the trainer securely</strong><small>A short pairing code ensures only your trainer can publish wake models.</small></span></div><div class="tm-inline-actions"><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="startPairing">{{ pairing ? "Restart pairing" : "Link trainer" }}</button><button v-if="pairing" class="tv-button" type="button" :disabled="Boolean(busy)" @click="checkPairing">Check link</button></div></div>
-      <div v-if="pairing && !trainer?.linked" class="tm-pairing-box"><span>Pairing code</span><strong>{{ pairing.pairing_code || pairing.code || "Waiting…" }}</strong><a v-if="pairing.pairing_url || pairing.url" :href="String(pairing.pairing_url || pairing.url)" target="_blank" rel="noreferrer">Open trainer pairing</a></div>
+      <div v-else class="tm-wake-trainer-link"><div><i>↗</i><span><strong>Link the trainer securely</strong><small>A short pairing code ensures only your trainer can publish wake models.</small></span></div><div class="tm-inline-actions"><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="startPairing">{{ pairing ? "Restart pairing" : "Link trainer" }}</button><button v-if="pairing && pairingState === 'waiting'" class="tv-button" type="button" :disabled="Boolean(busy)" @click="checkPairing">Check link</button></div></div>
+      <div v-if="pairing && !trainer?.linked" class="tm-pairing-box" :class="{ expired: pairingState === 'expired' }"><span>Pairing code</span><strong>{{ pairingState === "expired" ? "Expired" : pairingCode || "Creating…" }}</strong><small v-if="pairingState === 'waiting'">Expires in {{ formatPairingTime(pairingRemaining) }}</small><small v-else-if="pairingState === 'expired'">Restart pairing to create a new code.</small><a v-if="pairing.pairing_url || pairing.url" :href="String(pairing.pairing_url || pairing.url)" target="_blank" rel="noreferrer">Open trainer pairing</a></div>
     </article>
 
     <article v-if="verifierForm" class="tm-form-card tm-wake-verifier-card">

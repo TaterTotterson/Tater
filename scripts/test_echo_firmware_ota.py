@@ -40,7 +40,28 @@ def _echo_manifest() -> dict[str, object]:
                         "size": 2048,
                     },
                 },
-            }
+            },
+            "checkers": {
+                "display_name": "Amazon Echo Show 5 1st Generation (2019)",
+                "amazon_codename": "checkers",
+                "cpu": "armv7a",
+                "unlock": "amonet-checkers-v2.0.1+",
+                "factory_install": True,
+                "ota": True,
+                "status": "native-hardware-test",
+                "artifacts": {
+                    "factory": {
+                        "name": "tater-echo-checkers-v0.4.0-factory.tar.gz",
+                        "sha256": "c" * 64,
+                        "size": 8192,
+                    },
+                    "ota": {
+                        "name": "tater-echo-checkers-v0.4.0-ota.zip",
+                        "sha256": "d" * 64,
+                        "size": 6144,
+                    },
+                },
+            },
         },
     }
 
@@ -100,6 +121,74 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         metadata = native_satellite._registry_metadata_from_hello(payload, connected=True)
         self.assertEqual("biscuit", credential["firmware_target"])
         self.assertEqual("biscuit", metadata["firmware_target"])
+
+    def test_checkers_identity_selects_coordinated_echo_ota(self) -> None:
+        row = {
+            "connected": True,
+            "firmware_target": "checkers",
+            "board": "checkers",
+            "firmware_version": "v0.3.0",
+            "capabilities": {"ota": True, "screen": True},
+        }
+        spec = firmware._match_template_spec("native:show-test", row)
+        self.assertEqual("checkers", spec["key"])
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+            ui_helpers.device_image_src("checkers", "Tater Echo Show 5"),
+        )
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            info = firmware._native_firmware_info("checkers")
+        self.assertTrue(info["available"])
+        self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
+        self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-checkers-v0.4.0-ota.zip"))
+
+    def test_checkers_update_is_reported_in_firmware_panel(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "checkers",
+            "board": "checkers",
+            "device_info": {
+                "name": "show-test",
+                "friendly_name": "Kitchen Show",
+                "manufacturer": "Tater",
+                "model": "checkers",
+                "project_name": "tater.native_satellite",
+                "project_version": "v0.3.0",
+            },
+            "metadata": {
+                "firmware_target": "checkers",
+                "board": "checkers",
+            },
+            "capabilities": {"ota": True, "screen": True},
+        }
+        checkers_spec = firmware._template_spec_by_key("checkers")
+        self.assertIsNotNone(checkers_spec)
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[checkers_spec]),
+            mock.patch.object(
+                firmware,
+                "_prebuilt_firmware_panel_summary",
+                return_value={"available": True, "device_count": 2, "version": "v0.4.0"},
+            ),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:show-test": row}})
+
+        self.assertEqual(1, panel["firmware_update_count"])
+        update = panel["firmware_updates"][0]
+        self.assertEqual("native:show-test", update["selector"])
+        self.assertEqual("checkers", update["template_key"])
+        self.assertEqual("v0.3.0", update["installed"])
+        self.assertEqual("v0.4.0", update["latest"])
+        self.assertTrue(update["prebuilt_firmware_ota_available"])
+        self.assertTrue(
+            update["prebuilt_firmware"]["artifacts"]["ota"]["path"].endswith(
+                "tater-echo-checkers-v0.4.0-ota.zip"
+            )
+        )
 
 
 if __name__ == "__main__":

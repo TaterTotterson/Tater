@@ -28,7 +28,7 @@ class S420LedSettingsTests(unittest.TestCase):
         fake.hget.return_value = "off"
         return fake
 
-    def test_s420_shows_single_status_light_controls_without_ring_preview(self) -> None:
+    def test_s420_shows_single_status_light_controls_and_preview(self) -> None:
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
             fields = native_live_settings.settings_fields(
                 "native:kitchen-s420",
@@ -38,14 +38,20 @@ class S420LedSettingsTests(unittest.TestCase):
         by_key = {str(field.get("key") or ""): field for field in fields}
         self.assertEqual(by_key["led_section"]["label"], "Tater S420 Status Light")
         self.assertEqual(by_key["led_color"]["label"], "Tater Status Color")
-        self.assertNotIn("led_preview", by_key)
+        self.assertTrue(by_key["led_preview"]["single_light"])
+        self.assertEqual(
+            [state["label"] for state in by_key["led_preview"]["states"]],
+            ["Listening", "Thinking", "Replying"],
+        )
         self.assertNotIn("led_tool_call_animation", by_key)
-        expected = {"pulse", "breathe", "heartbeat", "solid"}
         for key in (
             "led_listening_animation",
             "led_thinking_animation",
             "led_replying_animation",
         ):
+            expected = {"pulse", "breathe", "heartbeat", "solid"}
+            if key == "led_replying_animation":
+                expected.add("audio_glow")
             self.assertEqual(
                 {str(option["value"]) for option in by_key[key]["options"]},
                 expected,
@@ -84,7 +90,31 @@ class S420LedSettingsTests(unittest.TestCase):
         self.assertEqual(payload["led_color"], "#ff5a1f")
         self.assertEqual(payload["led_listening_animation"], "pulse")
         self.assertEqual(payload["led_thinking_animation"], "breathe")
-        self.assertEqual(payload["led_replying_animation"], "pulse")
+        self.assertEqual(payload["led_replying_animation"], "audio_glow")
+
+    def test_existing_reply_animation_is_not_replaced_by_the_new_default(self) -> None:
+        fake = mock.Mock()
+        fake.hgetall.return_value = {
+            native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+            "led_replying_animation": "voice_ring",
+        }
+
+        with mock.patch.object(native_live_settings, "redis_client", fake):
+            existing = native_live_settings._global_settings_with_migration()
+
+        self.assertEqual(existing["led_replying_animation"], "voice_ring")
+        fake.hset.assert_not_called()
+
+    def test_s3_box_does_not_receive_ring_animation_settings(self) -> None:
+        with mock.patch.object(native_live_settings, "redis_client", self._redis()):
+            payload = native_live_settings.firmware_settings_snapshot(
+                "native:office-s3",
+                board="s3-box-3",
+            )
+
+        self.assertNotIn("led_replying_animation", payload)
+        self.assertNotIn("led_listening_animation", payload)
+        self.assertEqual(payload["screen_brightness"], 80)
 
 
 if __name__ == "__main__":

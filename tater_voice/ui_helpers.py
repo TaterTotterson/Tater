@@ -122,6 +122,21 @@ def _exact_satellite_image_src(value: Any) -> str:
     if not token:
         return ""
     compact = token.replace("-", "")
+    if token in {
+        "checkers",
+        "echo-show-5",
+        "echo-show-5-1st-gen",
+        "echo-show-5-1st-generation",
+        "tater-echo-show",
+    } or compact in {
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "echoshow51stgeneration",
+        "amazonechoshow5",
+        "taterechoshow",
+    }:
+        return _named_satellite_image_src("echo-show-5.png")
     if token in {"biscuit", "echo-dot-2", "echo-dot-gen-2", "tater-echo"} or compact in {
         "biscuit",
         "echodot2",
@@ -184,6 +199,18 @@ def device_image_src(*name_candidates: Any) -> str:
         token = esphome_runtime.lower(raw_name)
         if not token:
             continue
+        if any(
+            part in token
+            for part in (
+                "checkers",
+                "echo show 5",
+                "echo-show-5",
+                "echo_show_5",
+                "echo show 5 1st generation",
+                "tater echo show",
+            )
+        ):
+            return _named_satellite_image_src("echo-show-5.png")
         if any(
             part in token
             for part in (
@@ -396,14 +423,27 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         sortable_rows.append((selected, connected, esphome_runtime.lower(name or host), selector, row, client_row))
 
     sortable_rows.sort(key=lambda item: (0 if item[0] else 1, 0 if item[1] else 1, item[2], item[3]))
+    reply_playback_targets = {
+        selector: reply_playback.resolve_reply_playback_target(row, client_row=client_row)
+        for _selected, _connected, _sort_name, selector, row, client_row in sortable_rows
+    }
+    # Target discovery can include network-backed integrations. Do it once for
+    # the complete snapshot instead of once per satellite; reconnect bursts can
+    # otherwise keep this background refresh busy long enough to stall the UI.
+    shared_reply_playback_options = (
+        reply_playback.build_reply_playback_options(list(reply_playback_targets.values()))
+        if sortable_rows
+        else []
+    )
     for selected, connected, _sort_name, selector, row, client_row in sortable_rows:
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         source = esphome_runtime.text(row.get("source")) or "unknown"
         native_device = source in {"tater_native", "native_satellite"} or selector.startswith("native:")
         host = esphome_runtime.lower(row.get("host")) or ("" if native_device else esphome_runtime.satellite_host_from_selector(selector))
         name = esphome_runtime.text(row.get("name")) or host or selector
         area_name = _satellite_area_name(row)
-        reply_playback_target = reply_playback.resolve_reply_playback_target(row, client_row=client_row)
-        reply_playback_options = reply_playback.build_reply_playback_options(reply_playback_target)
+        reply_playback_target = reply_playback_targets.get(selector) or reply_playback.REPLY_PLAYBACK_DEVICE
+        reply_playback_options = list(shared_reply_playback_options)
         reply_playback_label = next(
             (
                 esphome_runtime.text(option.get("label"))
@@ -708,17 +748,9 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "remove_action": "" if native_device and connected else "voice_satellite_remove",
                 "remove_label": "Forget",
                 "remove_confirm": f"Forget satellite {name}?",
-                "run_action": (
-                    "voice_native_satellite_setup_mode"
-                    if native_device and connected
-                    else ("" if native_device else ("voice_disconnect" if connected else "voice_connect"))
-                ),
-                "run_label": "Setup Mode" if native_device and connected else ("" if native_device else ("Disconnect" if connected else "Connect")),
-                "run_confirm": (
-                    f"Unpair {name} and put it into setup mode? This removes it from Tater, clears its saved pairing, and reboots it. You will need to pair it again before Tater can use it."
-                    if native_device and connected
-                    else ("" if native_device else ("Disconnect and deselect this satellite?" if connected else ""))
-                ),
+                "run_action": "" if native_device else ("voice_disconnect" if connected else "voice_connect"),
+                "run_label": "" if native_device else ("Disconnect" if connected else "Connect"),
+                "run_confirm": "" if native_device else ("Disconnect and deselect this satellite?" if connected else ""),
                 "settings_title": settings_title,
                 "settings_label": settings_label,
             }

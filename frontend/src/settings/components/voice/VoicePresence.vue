@@ -295,6 +295,11 @@ function openEditor(device: JsonRow) {
   editorOpen.value = true;
 }
 
+function openManualIrkEditor() {
+  editor.value = emptyEditor();
+  editorOpen.value = true;
+}
+
 async function saveDevice() {
   const draft = editor.value;
   const identities: JsonRow[] = draft.identities
@@ -475,7 +480,7 @@ onBeforeUnmount(() => {
 
     <template v-else-if="activeView === 'devices'">
       <section class="tm-form-card tpresence-device-registry">
-        <header><div><span class="tv-eyebrow">Stable identity registry</span><h3>Tracked devices</h3><p>This registry stays alphabetized while live room and distance changes remain in Locations.</p></div><span>{{ trackedDevices.length }} tracking</span></header>
+        <header><div><span class="tv-eyebrow">Stable identity registry</span><h3>Tracked devices</h3><p>This registry stays alphabetized while live room and distance changes remain in Locations.</p></div><div class="tpresence-detail-actions"><span>{{ trackedDevices.length }} tracking</span><button class="tv-button primary" type="button" @click="openManualIrkEditor">Add IRK manually</button></div></header>
         <div v-if="registeredDevices.length" class="tpresence-registry-grid">
           <button v-for="device in registeredDevices" :key="deviceKey(device)" type="button" class="configured" :class="{ away: device.home_state === 'away' }" @click="openEditor(device)">
             <span class="tpresence-device-icon">{{ categoryIcon(device) }}</span>

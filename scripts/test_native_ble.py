@@ -125,6 +125,111 @@ class NativeBleTests(unittest.TestCase):
         device = native_ble.snapshot(now_ts=400.0)["devices"][0]
         self.assertEqual(1, len(device["sources"]))
 
+    def test_same_room_scanners_do_not_flip_on_a_brief_rssi_crossover(self) -> None:
+        address = "de:ad:be:ef:70:01"
+        for selector, rssi in (("native:left", -42), ("native:right", -62)):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=2000.0,
+            )
+        device = native_ble.snapshot(now_ts=2000.0)["devices"][0]
+        self.assertEqual("native:left", device["strongest_selector"])
+
+        for timestamp in range(2001, 2005):
+            for selector, rssi in (("native:left", -70), ("native:right", -25)):
+                native_ble.ingest_advertisements(
+                    selector,
+                    {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                    metadata={"room": "Game Room"},
+                    received_ts=float(timestamp),
+                )
+            device = native_ble.snapshot(now_ts=float(timestamp))["devices"][0]
+            self.assertEqual("Game Room", device["strongest_room"])
+            self.assertEqual("native:left", device["strongest_selector"])
+
+        self.assertEqual("native:right", device["raw_strongest_selector"])
+        left_source = next(source for source in device["sources"] if source["selector"] == "native:left")
+        self.assertEqual(left_source["distance_m"], device["distance_m"])
+
+        for timestamp in (2005.0, 2006.0):
+            native_ble.ingest_advertisements(
+                "native:left",
+                {"adverts": [{"address": address, "rssi": -25, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=timestamp,
+            )
+            native_ble.ingest_advertisements(
+                "native:right",
+                {"adverts": [{"address": address, "rssi": -80, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=timestamp,
+            )
+            device = native_ble.snapshot(now_ts=timestamp)["devices"][0]
+        self.assertEqual("native:left", device["strongest_selector"])
+
+    def test_same_room_scanner_switches_after_a_sustained_clear_lead(self) -> None:
+        address = "de:ad:be:ef:70:02"
+        for selector, rssi in (("native:left", -42), ("native:right", -75)):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=2100.0,
+            )
+        native_ble.snapshot(now_ts=2100.0)
+
+        switched_at = None
+        for timestamp in range(2101, 2121):
+            for selector, rssi in (("native:left", -90), ("native:right", -20)):
+                native_ble.ingest_advertisements(
+                    selector,
+                    {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                    metadata={"room": "Game Room"},
+                    received_ts=float(timestamp),
+                )
+            device = native_ble.snapshot(now_ts=float(timestamp))["devices"][0]
+            self.assertEqual("Game Room", device["strongest_room"])
+            if device["strongest_selector"] == "native:right":
+                switched_at = float(timestamp)
+                break
+
+        self.assertIsNotNone(switched_at)
+        self.assertGreaterEqual(switched_at, 2107.0)
+        self.assertEqual("native:right", device["strongest_selector"])
+
+    def test_same_room_scanner_fails_over_quickly_when_current_goes_stale(self) -> None:
+        address = "de:ad:be:ef:70:03"
+        for selector, rssi in (("native:left", -45), ("native:right", -70)):
+            native_ble.ingest_advertisements(
+                selector,
+                {"adverts": [{"address": address, "rssi": rssi, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=2200.0,
+            )
+        self.assertEqual(
+            "native:left",
+            native_ble.snapshot(now_ts=2200.0)["devices"][0]["strongest_selector"],
+        )
+
+        switched_at = None
+        for timestamp in range(2231, 2237):
+            native_ble.ingest_advertisements(
+                "native:right",
+                {"adverts": [{"address": address, "rssi": 20, "data": "020106"}]},
+                metadata={"room": "Game Room"},
+                received_ts=float(timestamp),
+            )
+            device = native_ble.snapshot(now_ts=float(timestamp))["devices"][0]
+            self.assertEqual("Game Room", device["strongest_room"])
+            if device["strongest_selector"] == "native:right":
+                switched_at = float(timestamp)
+                break
+
+        self.assertIsNotNone(switched_at)
+        self.assertLessEqual(switched_at, 2235.0)
+
     def test_snapshot_decodes_identity_and_exposes_presence_metadata(self) -> None:
         native_ble.ingest_advertisements(
             "native:family-room",

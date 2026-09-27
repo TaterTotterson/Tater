@@ -28,6 +28,8 @@ _DEFAULT_RECONNECT_SECONDS = 5
 _DEFAULT_ECOBEE_HOMEKIT_POLL_SECONDS = 30
 _DEFAULT_UNIFI_NETWORK_POLL_SECONDS = 30
 _DEFAULT_DEVICE_REGISTRY_REFRESH_SECONDS = 60
+_DEFAULT_RUNTIME_STATE_RETENTION_SECONDS = 24 * 60 * 60
+_DEFAULT_RUNTIME_STATE_PRUNE_INTERVAL_SECONDS = 60 * 60
 HUE_DEFAULT_TIMEOUT_SECONDS = 10
 _TASKS: List[asyncio.Task] = []
 _STOP_EVENT: Optional[asyncio.Event] = None
@@ -44,6 +46,9 @@ _EVENT_HISTORY_CACHE: Dict[str, Any] = {
 _GENERIC_RUNTIME_CURSOR: Dict[str, Any] = {}
 _GENERIC_RUNTIME_NEXT_POLL: Dict[str, float] = {}
 _RUNTIME_FILTER_ERROR_LOGGED_AT: Dict[str, float] = {}
+_RUNTIME_STATE_LAST_PRUNE: Dict[str, float] = {}
+_UNIFI_SENSOR_EVENT_ID_CACHE: Dict[str, str] = {}
+_UNIFI_SENSOR_EVENT_ID_CACHE_LOCK = threading.RLock()
 _RUNTIME_PROVIDER_OWNER = {
     "ecobee_homekit": "homekit",
 }
@@ -508,6 +513,57 @@ def _delete_runtime_state(client: Any, provider: str, state_id: Any) -> None:
         pass
 
 
+def _prune_runtime_provider_states(
+    client: Any,
+    provider: str,
+    active_state_ids: Any,
+    *,
+    retention_seconds: int = _DEFAULT_RUNTIME_STATE_RETENTION_SECONDS,
+    now: Optional[float] = None,
+) -> int:
+    """Remove inactive provider states after a grace period.
+
+    The live inventory remains the discovery source. Runtime states are only a
+    current-state overlay, so they should not grow into an unbounded history.
+    """
+    redis_obj = _runtime_client(client)
+    provider_token = _text(provider).lower()
+    active = {_text(item).lower() for item in (active_state_ids or []) if _text(item)}
+    if not redis_obj or not provider_token:
+        return 0
+    try:
+        raw_states = redis_obj.hgetall(INTEGRATION_RUNTIME_STATES_KEY) or {}
+    except Exception:
+        return 0
+    if not isinstance(raw_states, dict):
+        return 0
+
+    cutoff = float(now if now is not None else time.time()) - max(300, int(retention_seconds or 0))
+    removed = 0
+    for key, value in raw_states.items():
+        key_text = _text(key)
+        record = _json_loads(value)
+        record_provider = _text(
+            record.get("provider") if record else key_text.split(":", 1)[0]
+        ).lower()
+        if record_provider != provider_token:
+            continue
+        state_id = _text(record.get("id") if record else "").lower()
+        if not state_id and ":" in key_text:
+            state_id = key_text.split(":", 1)[1].lower()
+        if state_id in active:
+            continue
+        updated_at = _as_float(record.get("updated_at") if record else None, 0.0)
+        if updated_at <= 0 or updated_at > cutoff:
+            continue
+        try:
+            redis_obj.hdel(INTEGRATION_RUNTIME_STATES_KEY, key)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 async def _publish_generic_runtime_result(client: Any, integration_id: str, result: Any) -> None:
     if result is None:
         return
@@ -870,6 +926,114 @@ def _unifi_event_state_id(item: Dict[str, Any]) -> str:
     return _text(item.get("id") or item.get("__ws_event_id")).lower()
 
 
+def _unifi_sensor_event_state(item: Dict[str, Any]) -> Optional[bool]:
+    event_type = _text(item.get("type") or item.get("eventType") or item.get("event_type"))
+    token = "".join(character for character in event_type.lower() if character.isalnum())
+    if "sensoropened" in token:
+        return True
+    if "sensorclosed" in token:
+        return False
+    return None
+
+
+def _unifi_timestamp_ms(value: Any) -> float:
+    timestamp = _as_float(value, 0.0)
+    if 0 < timestamp < 100_000_000_000:
+        timestamp *= 1000.0
+    return timestamp
+
+
+def _unifi_sensor_opened(row: Dict[str, Any]) -> Optional[bool]:
+    for key in ("isOpened", "is_opened", "isOpen", "is_open", "open", "opened"):
+        if key in row:
+            return _as_bool(row.get(key), False)
+    return None
+
+
+def _unifi_sensor_event_match(item: Dict[str, Any], sensors: Any) -> Optional[Dict[str, Any]]:
+    expected_open = _unifi_sensor_event_state(item)
+    event_ts = _unifi_timestamp_ms(item.get("start") or item.get("end"))
+    if expected_open is None or event_ts <= 0 or not isinstance(sensors, list):
+        return None
+
+    candidates: List[tuple[float, Dict[str, Any]]] = []
+    for row in sensors:
+        if not isinstance(row, dict) or _unifi_sensor_opened(row) is not expected_open:
+            continue
+        changed_at = 0.0
+        for key in ("openStatusChangedAt", "open_status_changed_at", "openedAt", "opened_at"):
+            changed_at = _unifi_timestamp_ms(row.get(key))
+            if changed_at > 0:
+                break
+        sensor_id = _text(row.get("id") or row.get("_id") or row.get("uuid")).lower()
+        if changed_at <= 0 or not sensor_id:
+            continue
+        delta_ms = abs(changed_at - event_ts)
+        if delta_ms <= 2000.0:
+            candidates.append((delta_ms, row))
+
+    candidates.sort(key=lambda candidate: candidate[0])
+    if not candidates:
+        return None
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < 250.0:
+        return None
+    return dict(candidates[0][1])
+
+
+def _unifi_sensor_event_cache_get(event_id: Any) -> str:
+    token = _text(event_id).lower()
+    if not token:
+        return ""
+    with _UNIFI_SENSOR_EVENT_ID_CACHE_LOCK:
+        return _text(_UNIFI_SENSOR_EVENT_ID_CACHE.get(token)).lower()
+
+
+def _unifi_sensor_event_cache_set(event_id: Any, sensor_id: Any) -> None:
+    event_token = _text(event_id).lower()
+    sensor_token = _text(sensor_id).lower()
+    if not event_token or not sensor_token:
+        return
+    with _UNIFI_SENSOR_EVENT_ID_CACHE_LOCK:
+        _UNIFI_SENSOR_EVENT_ID_CACHE[event_token] = sensor_token
+        while len(_UNIFI_SENSOR_EVENT_ID_CACHE) > 256:
+            _UNIFI_SENSOR_EVENT_ID_CACHE.pop(next(iter(_UNIFI_SENSOR_EVENT_ID_CACHE)), None)
+
+
+async def _unifi_resolve_sensor_event_item(item: Dict[str, Any], protect_module: Any) -> Dict[str, Any]:
+    if _unifi_sensor_event_state(item) is None:
+        return item
+    if _text(item.get("sensor") or item.get("sensorId") or item.get("sensor_id")):
+        return item
+
+    event_id = _text(item.get("id") or item.get("__ws_event_id"))
+    cached_sensor_id = _unifi_sensor_event_cache_get(event_id)
+    if cached_sensor_id:
+        return {**item, "sensor": cached_sensor_id}
+
+    list_sensors = getattr(protect_module, "list_unifi_sensors", None)
+    if not callable(list_sensors):
+        return item
+    for attempt in range(2):
+        try:
+            sensors = await asyncio.wait_for(run_background(list_sensors), timeout=2.0)
+        except Exception as exc:
+            logger.debug("[integrations] UniFi sensor event lookup skipped: %s", exc)
+            return item
+        match = _unifi_sensor_event_match(item, sensors)
+        if match is not None:
+            sensor_id = _text(match.get("id") or match.get("_id") or match.get("uuid")).lower()
+            if sensor_id:
+                _unifi_sensor_event_cache_set(event_id, sensor_id)
+                resolved = {**item, "sensor": sensor_id}
+                sensor_name = _text(match.get("name") or match.get("displayName") or match.get("friendlyName"))
+                if sensor_name:
+                    resolved.setdefault("sensorName", sensor_name)
+                return resolved
+        if attempt == 0:
+            await asyncio.sleep(0.1)
+    return item
+
+
 async def _unifi_protect_loop(stop_event: asyncio.Event, client: Any) -> None:
     redis_obj = _runtime_client(client)
     while not stop_event.is_set():
@@ -927,6 +1091,7 @@ async def _unifi_protect_loop(stop_event: asyncio.Event, client: Any) -> None:
                             item = _unifi_ws_event_item(parsed)
                             if item is None:
                                 continue
+                            item = await _unifi_resolve_sensor_event_item(item, protect_module)
                             state_id = _unifi_event_state_id(item)
                             if state_id:
                                 _state_set(
@@ -1263,6 +1428,29 @@ async def _unifi_network_poll_loop(stop_event: asyncio.Event, client: Any) -> No
             )
             snapshot = await run_background(_unifi_network_snapshot_from_settings, settings)
             current = _unifi_network_publish_changes(redis_obj, snapshot, previous, first_snapshot=first_snapshot)
+            retention_seconds = _as_int(
+                os.getenv("TATER_INTEGRATION_RUNTIME_STATE_RETENTION_SECONDS"),
+                _DEFAULT_RUNTIME_STATE_RETENTION_SECONDS,
+                minimum=300,
+                maximum=30 * 24 * 60 * 60,
+            )
+            prune_interval_seconds = _as_int(
+                os.getenv("TATER_INTEGRATION_RUNTIME_STATE_PRUNE_INTERVAL_SECONDS"),
+                _DEFAULT_RUNTIME_STATE_PRUNE_INTERVAL_SECONDS,
+                minimum=300,
+                maximum=24 * 60 * 60,
+            )
+            pruned_states = 0
+            prune_now = time.monotonic()
+            if prune_now - float(_RUNTIME_STATE_LAST_PRUNE.get("unifi_network") or 0.0) >= prune_interval_seconds:
+                pruned_states = await run_background(
+                    _prune_runtime_provider_states,
+                    redis_obj,
+                    "unifi_network",
+                    current.keys(),
+                    retention_seconds=retention_seconds,
+                )
+                _RUNTIME_STATE_LAST_PRUNE["unifi_network"] = prune_now
             device_count = len(snapshot.get("devices") or [])
             client_count = len(snapshot.get("clients") or [])
             _status_set(
@@ -1275,6 +1463,10 @@ async def _unifi_network_poll_loop(stop_event: asyncio.Event, client: Any) -> No
                 unifi_network_site_name=_text(snapshot.get("site_name")),
                 unifi_network_device_count=device_count,
                 unifi_network_client_count=client_count,
+                unifi_network_runtime_state_count=len(current),
+                unifi_network_runtime_states_pruned=pruned_states,
+                unifi_network_runtime_state_retention_seconds=retention_seconds,
+                unifi_network_runtime_state_prune_interval_seconds=prune_interval_seconds,
                 unifi_network_last_poll_ts=time.time(),
                 unifi_network_last_error="",
             )

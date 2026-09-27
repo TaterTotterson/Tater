@@ -16,6 +16,7 @@ from tater_voice import firmware, home, ui_helpers  # noqa: E402
 class FirmwareOfflineImageTests(unittest.TestCase):
     BOARD_CASES = {
         "biscuit": ("biscuit", "echo-dot-2.png"),
+        "checkers": ("checkers", "echo-show-5.png"),
         "thirdreality-s420": ("thirdreality_s420", "thirdreality-s420.png"),
         "voice-pe": ("voicepe", "voicepe.png"),
         "satellite1": ("satellite1", "sat1.png"),
@@ -69,6 +70,7 @@ class FirmwareOfflineImageTests(unittest.TestCase):
                     device_option["hero_image_src"],
                     ui_helpers._named_satellite_image_src(expected_image),
                 )
+                self.assertTrue((REPO_ROOT / "images" / expected_image).is_file())
 
     def test_saved_board_replaces_generic_disconnected_live_snapshot(self) -> None:
         status = self._offline_status(
@@ -90,6 +92,97 @@ class FirmwareOfflineImageTests(unittest.TestCase):
         self.assertEqual(
             firmware._match_template_spec("native:test-sat", client)["key"],
             "satellite1",
+        )
+
+    def test_satellite_cards_keep_images_for_each_device_in_a_mixed_fleet(self) -> None:
+        saved_rows = [
+            {
+                "selector": "native:voicepe-test",
+                "host": "",
+                "name": "VoicePE Test",
+                "source": "tater_native",
+                "metadata": {
+                    "native_selected": True,
+                    "board": "voice-pe",
+                    "firmware_target": "",
+                    "firmware_version": "native-voicepe-0.4.1",
+                },
+                "last_seen_ts": 123.0,
+            },
+            {
+                "selector": "native:echo-test",
+                "host": "",
+                "name": "Echo Test",
+                "source": "tater_native",
+                "metadata": {
+                    "native_selected": True,
+                    "board": "biscuit",
+                    "firmware_target": "biscuit",
+                    "firmware_version": "v0.1.1",
+                },
+                "last_seen_ts": 124.0,
+            },
+            {
+                "selector": "native:show-test",
+                "host": "",
+                "name": "Echo Show Test",
+                "source": "tater_native",
+                "metadata": {
+                    "native_selected": True,
+                    "board": "checkers",
+                    "firmware_target": "checkers",
+                    "firmware_version": "v0.1.5",
+                },
+                "last_seen_ts": 125.0,
+            },
+        ]
+        native_status = {
+            "clients": {
+                "native:voicepe-test": {
+                    "connected": True,
+                    "device_id": "voicepe-test",
+                    "device_name": "VoicePE Test",
+                    "board": "voice-pe",
+                    "firmware_target": "",
+                    "firmware_version": "native-voicepe-0.4.1",
+                },
+                "native:echo-test": {
+                    "connected": True,
+                    "device_id": "echo-test",
+                    "device_name": "Echo Test",
+                    "board": "biscuit",
+                    "firmware_target": "biscuit",
+                    "firmware_version": "v0.1.1",
+                },
+                "native:show-test": {
+                    "connected": True,
+                    "device_id": "show-test",
+                    "device_name": "Echo Show Test",
+                    "board": "checkers",
+                    "firmware_target": "checkers",
+                    "firmware_version": "v0.1.5",
+                },
+            }
+        }
+
+        with (
+            mock.patch.object(home.esphome_runtime, "status", return_value={"clients": {}, "voice_metrics": {}}),
+            mock.patch.object(home.esphome_runtime, "load_satellite_registry", return_value=saved_rows),
+        ):
+            status = home._runtime_status_with_native(native_status)
+            cards = {row["id"]: row for row in ui_helpers.satellite_item_forms(status)}
+
+        self.assertEqual(
+            cards["native:voicepe-test"]["hero_image_src"],
+            ui_helpers._named_satellite_image_src("voicepe.png"),
+        )
+        self.assertEqual(
+            cards["native:echo-test"]["hero_image_src"],
+            ui_helpers._named_satellite_image_src("echo-dot-2.png"),
+        )
+        self.assertEqual(
+            cards["native:show-test"]["hero_image_src"],
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
         )
 
 

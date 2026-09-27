@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -39,6 +40,9 @@ def _load_speak_announcement_targets():
         "normalize_announcement_tts_backend": speech_settings.normalize_announcement_tts_backend,
         "normalize_tts_backend": speech_settings._normalize_tts_backend,
         "_text": lambda value: str(value or "").strip(),
+        "_announcement_tts_cache_key": lambda **_kwargs: "test-cache-key",
+        "_announcement_tts_cache_read": lambda _key: None,
+        "_announcement_tts_cache_write": lambda _key, _payload: True,
         "logger": mock.Mock(),
     }
     module = ast.Module(body=[future, function], type_ignores=[])
@@ -212,6 +216,78 @@ class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["clone_text"], "Announcement transcript")
         self.assertEqual(kwargs["managed_language"], "Spanish")
         self.assertEqual(kwargs["managed_instruct"], "Announcement voice")
+
+    async def test_repeated_and_custom_messages_use_the_persistent_audio_cache(self) -> None:
+        settings = {
+            "tts_backend": "omnivoice",
+            "tts_model": "voice-model",
+            "tts_voice": "",
+            "omnivoice_tts_clone_audio": "/profiles/direct.wav",
+            "omnivoice_tts_clone_text": "Reference transcript",
+            "acceleration": "cpu",
+        }
+        cache = {}
+        async_synthesize = mock.AsyncMock(return_value=b"RIFF\x04\x00\x00\x00WAVEaudio")
+        async_playback = mock.AsyncMock(return_value={"ok": True, "sent_count": 1})
+        grouped = {
+            "homeassistant_media_players": [],
+            "voice_core_selectors": ["kitchen"],
+            "unifi_protect_cameras": [],
+            "sonos_speakers": [],
+            "integration_devices": [],
+        }
+
+        def cache_key(**kwargs):
+            return json.dumps(kwargs, sort_keys=True, default=str)
+
+        with mock.patch.dict(
+            SPEECH_TTS_NAMESPACE,
+            {
+                "get_speech_settings": lambda: settings,
+                "split_announcement_targets": lambda _targets: grouped,
+                "synthesize_tts_wav": async_synthesize,
+                "run_background": async_playback,
+                "_voice_core_play_media_sync": object(),
+                "_announcement_tts_cache_key": cache_key,
+                "_announcement_tts_cache_read": lambda key: cache.get(key),
+                "_announcement_tts_cache_write": lambda key, payload: cache.setdefault(key, payload) is payload,
+            },
+        ):
+            first = await SPEAK_ANNOUNCEMENT_TARGETS(
+                text="The back door is open.",
+                backend="same_as_direct",
+                ha_base="",
+                token="",
+                targets=["kitchen"],
+            )
+            repeated = await SPEAK_ANNOUNCEMENT_TARGETS(
+                text="The back door is open.",
+                backend="same_as_direct",
+                ha_base="",
+                token="",
+                targets=["kitchen"],
+            )
+            custom = await SPEAK_ANNOUNCEMENT_TARGETS(
+                text="Spud's custom reminder.",
+                backend="same_as_direct",
+                ha_base="",
+                token="",
+                targets=["kitchen"],
+            )
+            settings["tts_model"] = "new-voice-model"
+            changed_voice = await SPEAK_ANNOUNCEMENT_TARGETS(
+                text="The back door is open.",
+                backend="same_as_direct",
+                ha_base="",
+                token="",
+                targets=["kitchen"],
+            )
+
+        self.assertEqual(first["audio_cache"], "miss")
+        self.assertEqual(repeated["audio_cache"], "hit")
+        self.assertEqual(custom["audio_cache"], "miss")
+        self.assertEqual(changed_voice["audio_cache"], "miss")
+        self.assertEqual(async_synthesize.await_count, 3)
 
 
 if __name__ == "__main__":

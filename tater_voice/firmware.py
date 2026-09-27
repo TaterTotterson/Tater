@@ -227,6 +227,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
 }
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
+    "checkers",
     "satellite1_rpi_satellite",
     "satellite1_rpi_standalone",
     "thirdreality_s420",
@@ -287,9 +288,12 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
     "lightning",
     "pressure",
     "rain",
+    "rain_rate",
     "solar",
     "temperature",
     "wind",
+    "wind_direction",
+    "wind_speed",
 }
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
@@ -304,6 +308,18 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "echo dot gen 2",
             "amazon echo dot 2",
             "tater echo",
+        },
+    },
+    {
+        "key": "checkers",
+        "label": "Tater Echo Show 5",
+        "usb_recovery": False,
+        "match_tokens": {
+            "checkers",
+            "echo show 5",
+            "echo show 5 1st generation",
+            "amazon echo show 5",
+            "tater echo show",
         },
     },
     {
@@ -791,7 +807,7 @@ def _tater_sensor_select_state(current_value: Any) -> Dict[str, Any]:
     current = _text(current_value)
     sensor_options = _tater_sensor_options()
     known_values = {_text(row.get("value")) for row in sensor_options if isinstance(row, dict)}
-    options: List[Dict[str, Any]] = [{"value": "", "label": "None"}]
+    options: List[Dict[str, Any]] = [{"value": "", "label": "Do not show"}]
     if current and current not in known_values:
         options.append({"value": current, "label": f"{current} (current)"})
     if sensor_options:
@@ -1035,7 +1051,7 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
-    if key == "biscuit":
+    if key in {"biscuit", "checkers"}:
         return {
             "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
             "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
@@ -1725,7 +1741,7 @@ def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
     payload = {
         "target": target,
         "target_label": target_label,
-        "template": "s3box_display",
+        "template": _text(values.get("display_profile_kind")) or "s3box_display",
         "selector": _text(selector),
         "updated_at": time.time(),
         "slots": slots,
@@ -1753,7 +1769,7 @@ def _display_profile_rows_from_store() -> Dict[str, Dict[str, Any]]:
         if not isinstance(parsed, dict):
             continue
         template = _lower(parsed.get("template"))
-        if template and template != "s3box_display":
+        if template and template not in {"s3box_display", "native_screen"}:
             continue
         raw_target = _text(parsed.get("target")) or fallback_target
         target = _display_target_key(raw_target)
@@ -1871,7 +1887,21 @@ def _cleanup_stale_display_profiles(target: str, selector: str) -> None:
 def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, Any]) -> List[Dict[str, Any]]:
     ready = bool(sensor_select.get("ready"))
     message = _text(sensor_select.get("message"))
-    options = sensor_select.get("options") if isinstance(sensor_select.get("options"), list) else []
+    options = copy.deepcopy(sensor_select.get("options")) if isinstance(sensor_select.get("options"), list) else []
+    blank_option = next(
+        (
+            row
+            for row in options
+            if isinstance(row, dict)
+            and _text(row.get("value")) == ""
+            and not row.get("options")
+        ),
+        None,
+    )
+    if blank_option is None:
+        options.insert(0, {"value": "", "label": "Do not show"})
+    else:
+        blank_option["label"] = "Do not show"
     fields: List[Dict[str, Any]] = []
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         fields.append(
@@ -1883,7 +1913,7 @@ def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, A
                 "options": copy.deepcopy(options),
                 "disabled": not ready,
                 "description": (
-                    "Choose the Tater sensor shown in this display slot."
+                    "Choose the Tater sensor shown in this display slot, or select Do not show."
                     if ready
                     else message or "Install Environment Core to choose display sensors."
                 ),
@@ -1905,7 +1935,8 @@ def _display_sensor_profile_from_context(
     sensor_select: Dict[str, Any],
     saved_profiles: Dict[str, Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    if _lower(context.get("template_key")) != "s3box_display":
+    profile_kind = _lower(context.get("template_key"))
+    if profile_kind not in {"s3box_display", "native_screen"}:
         return None
     raw_target = _text(context.get("display_target_label")) or _text(context.get("display_target")) or _text(selector)
     target = _display_target_key(context.get("display_target")) or _display_target_key(raw_target)
@@ -1928,6 +1959,7 @@ def _display_sensor_profile_from_context(
         "connected": bool(item.get("connected")),
         "updated_at": saved_profile.get("updated_at"),
         "display_url": _text(context.get("display_base_url")),
+        "profile_kind": profile_kind,
         "_saved_target": saved_profile_target,
         "fields": _display_sensor_field_rows(slots, sensor_select),
     }
@@ -1959,10 +1991,11 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             "target_label": target_label,
             "selector": _text(saved_profile.get("selector")),
             "title": target_label or target,
-            "detail": f"Display target: {target}" if target_label and target_label != target else "Saved S3Box display profile",
+            "detail": f"Display target: {target}" if target_label and target_label != target else "Saved display sensor profile",
             "connected": False,
             "updated_at": saved_profile.get("updated_at"),
             "display_url": _tater_display_base_url_for_selector(saved_profile.get("selector") or target),
+            "profile_kind": _text(saved_profile.get("template")) or "s3box_display",
             "fields": _display_sensor_field_rows(
                 {alias: _text(slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS},
                 sensor_select,
@@ -2130,6 +2163,10 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     elif raw_target and raw_target != target:
         values["display_target_label"] = raw_target
     values["selector"] = selector
+    profile_kind = _lower(body.get("profile_kind"))
+    if profile_kind not in {"s3box_display", "native_screen"}:
+        profile_kind = "native_screen" if selector.startswith("native:") else "s3box_display"
+    values["display_profile_kind"] = profile_kind
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
             values[profile_key] = _text(slot_source.get(alias))
@@ -2144,11 +2181,24 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     _display_profile_save(selector, values)
 
     display_url = _normalize_http_base_url(body.get("display_url")) or _tater_display_base_url_for_selector(selector)
-    display_url_result = _apply_s3box_display_url(selector, display_url) if display_url else {"applied": False, "reason": "missing_url"}
-    display_target_result = _apply_s3box_display_target(selector, target)
+    if profile_kind == "s3box_display":
+        display_url_result = _apply_s3box_display_url(selector, display_url) if display_url else {"applied": False, "reason": "missing_url"}
+        display_target_result = _apply_s3box_display_target(selector, target)
+    else:
+        display_url_result = {"applied": False, "reason": "native_screen"}
+        display_target_result = {"applied": False, "reason": "native_screen"}
 
     with contextlib.suppress(Exception):
         display_bus.request_display_refresh(target, reason="sensor_profile")
+    if profile_kind == "native_screen":
+        with contextlib.suppress(Exception):
+            from . import display_feed, native_satellite
+
+            weather = display_feed.build_weather_summary(selector=selector)
+            native_satellite.run_on_runtime_loop(
+                native_satellite.send_command(selector, "display.weather", weather),
+                timeout=3.0,
+            )
 
     display_name = target_label or (raw_target if raw_target and raw_target != target else target)
     message = f"Updated display sensors for {display_name}."
@@ -2170,6 +2220,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         "target_label": target_label or (raw_target if raw_target and raw_target != target else ""),
         "selector": selector,
         "display_url": display_url,
+        "profile_kind": profile_kind,
         "display_url_result": display_url_result,
         "display_target_result": display_target_result,
         "message": message,
@@ -2186,6 +2237,14 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         "taterecho",
     }:
         return "biscuit"
+    if token in {"checkers", "echo-show-5", "echo-show-5-1st-gen"} or compact in {
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "amazonechoshow5",
+        "taterechoshow",
+    }:
+        return "checkers"
     if token in {"satellite1-rpi-standalone", "sat1-rpi-standalone"} or compact in {
         "satellite1rpistandalone",
         "sat1rpistandalone",
@@ -2517,18 +2576,62 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     clients = status.get("clients") if isinstance(status.get("clients"), dict) else {}
     spec = _template_spec_by_key("s3box_display")
     display_contexts: List[Dict[str, Any]] = []
-    if not isinstance(spec, dict):
-        return _display_sensor_profiles_payload(display_contexts)
 
     for selector, client_row in sorted(clients.items(), key=lambda item: _lower(item[0])):
         selector_token = _text(selector)
         row = client_row if isinstance(client_row, dict) else {}
-        if not selector_token or _matched_template_key(selector_token, row) != "s3box_display":
+        if not selector_token:
             continue
-        try:
-            context = _build_device_context(selector_token, row, dict(spec))
-        except Exception:
-            continue
+        template_key = _matched_template_key(selector_token, row)
+        context: Optional[Dict[str, Any]] = None
+        if template_key == "s3box_display" and isinstance(spec, dict):
+            try:
+                context = _build_device_context(selector_token, row, dict(spec))
+            except Exception:
+                continue
+        else:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+            if not capabilities and isinstance(metadata.get("capabilities"), dict):
+                capabilities = metadata.get("capabilities")
+            device_info = row.get("device_info") if isinstance(row.get("device_info"), dict) else {}
+            hardware_tokens = " ".join(
+                _lower(value)
+                for value in (
+                    row.get("board"),
+                    row.get("firmware_target"),
+                    metadata.get("board"),
+                    metadata.get("firmware_target"),
+                    device_info.get("model"),
+                )
+                if _text(value)
+            )
+            native_screen = _as_bool(capabilities.get("screen_weather"), False) or "checkers" in hardware_tokens
+            if not native_screen:
+                continue
+            title = (
+                _text(device_info.get("friendly_name"))
+                or _text(row.get("name"))
+                or _text(device_info.get("name"))
+                or selector_token
+            )
+            host = _text(row.get("host"))
+            model = _text(device_info.get("model")) or _text(metadata.get("board")) or "Tater screen"
+            context = {
+                "template_key": "native_screen",
+                "display_target": selector_token,
+                "display_target_label": title,
+                "display_base_url": "",
+                "host": host,
+                "item": {
+                    "title": title,
+                    "subtitle": " • ".join(part for part in (host, model) if part),
+                    "detail": " • ".join(part for part in (host, model) if part),
+                    "connected": bool(row.get("connected")),
+                    "selector": selector_token,
+                    "host": host,
+                },
+            }
         if isinstance(context, dict):
             display_contexts.append({"selector": selector_token, "context": context})
     return _display_sensor_profiles_payload(display_contexts)

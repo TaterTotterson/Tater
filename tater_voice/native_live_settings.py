@@ -70,7 +70,7 @@ DEFAULTS: Dict[str, Any] = {
     "led_listening_animation": "directional",
     "led_thinking_animation": "sparkle",
     "led_tool_call_animation": "ping_pong",
-    "led_replying_animation": "voice_ring",
+    "led_replying_animation": "audio_glow",
     "logging_level": "info",
 }
 FIRMWARE_SETTING_KEYS = (
@@ -294,6 +294,7 @@ LED_ANIMATION_ROWS = [
     ("directional", "Directional Listening"),
     ("sparkle", "Sparkle"),
     ("ping_pong", "Ping Pong"),
+    ("audio_glow", "Audio Glow"),
     ("voice_ring", "Voice Ring"),
     ("spinner", "Spinner"),
     ("orbit", "Orbit"),
@@ -328,10 +329,19 @@ def _animation_rows(*preferred: str) -> List[tuple[str, str]]:
     return rows
 
 
-LED_LISTENING_ANIMATIONS = _animation_rows("directional", "pulse", "spinner", "breathe")
-LED_THINKING_ANIMATIONS = _animation_rows("sparkle", "shimmer", "twinkle", "breathe")
-LED_TOOL_CALL_ANIMATIONS = _animation_rows("ping_pong", "scanner", "orbit", "comet")
-LED_REPLYING_ANIMATIONS = _animation_rows("voice_ring", "wave", "ripple", "equalizer")
+LED_LISTENING_ANIMATIONS = [
+    row for row in _animation_rows("directional", "pulse", "spinner", "breathe")
+    if row[0] != "audio_glow"
+]
+LED_THINKING_ANIMATIONS = [
+    row for row in _animation_rows("sparkle", "shimmer", "twinkle", "breathe")
+    if row[0] != "audio_glow"
+]
+LED_TOOL_CALL_ANIMATIONS = [
+    row for row in _animation_rows("ping_pong", "scanner", "orbit", "comet")
+    if row[0] != "audio_glow"
+]
+LED_REPLYING_ANIMATIONS = _animation_rows("audio_glow", "voice_ring", "wave", "ripple", "equalizer")
 LED_ANIMATION_VALUES = {
     value
     for rows in (
@@ -346,9 +356,10 @@ S420_LED_DEFAULTS = {
     "led_listening_animation": "pulse",
     "led_thinking_animation": "breathe",
     "led_tool_call_animation": "heartbeat",
-    "led_replying_animation": "pulse",
+    "led_replying_animation": "audio_glow",
 }
 S420_LED_ANIMATIONS = [
+    ("audio_glow", "Audio Glow"),
     ("pulse", "Tater Pulse"),
     ("breathe", "Tater Breathe"),
     ("heartbeat", "Tater Heartbeat"),
@@ -1065,6 +1076,14 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
 def firmware_settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     current = settings_snapshot(selector, board=board)
     output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
+    if not _board_supports_led_settings(board):
+        for key in (
+            "led_listening_animation",
+            "led_thinking_animation",
+            "led_tool_call_animation",
+            "led_replying_animation",
+        ):
+            output.pop(key, None)
     if _board_supports_screen_settings(board):
         now = datetime.now().astimezone()
         output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
@@ -1529,7 +1548,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         fields = [
             field
             for field in fields
-            if _text(field.get("key")) not in {"led_tool_call_animation", "led_preview"}
+            if _text(field.get("key")) != "led_tool_call_animation"
         ]
         for field in fields:
             key = _text(field.get("key"))
@@ -1555,11 +1574,21 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
                     }
                 )
             elif key in S420_LED_DEFAULTS:
+                animations = S420_LED_ANIMATIONS
+                if key != "led_replying_animation":
+                    animations = [row for row in animations if row[0] != "audio_glow"]
                 field["options"] = [
                     {"value": value, "label": label}
-                    for value, label in S420_LED_ANIMATIONS
+                    for value, label in animations
                 ]
                 field["default"] = S420_LED_DEFAULTS[key]
+            elif key == "led_preview":
+                field["single_light"] = True
+                field["states"] = [
+                    {"label": "Listening", "animation_key": "led_listening_animation"},
+                    {"label": "Thinking", "animation_key": "led_thinking_animation"},
+                    {"label": "Replying", "animation_key": "led_replying_animation"},
+                ]
     if not (_selector_token(selector) and _board_supports_screen_settings(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     return fields

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from helpers import redis_client
@@ -56,6 +58,7 @@ _ENVIRONMENT_PROVIDER_LATEST_KEYS: Dict[str, str] = {
 }
 _ENVIRONMENT_SETTINGS_KEY = "environment_core_settings"
 _DEFAULT_TEMPERATURE_UNIT = "F"
+_DEFAULT_ENVIRONMENT_STALE_AFTER_MINUTES = 20
 
 
 def _text(value: Any) -> str:
@@ -355,7 +358,7 @@ def _iter_saved_display_profiles(client: Any) -> Iterable[Tuple[str, Dict[str, A
         if not isinstance(parsed, dict):
             continue
         template = _lower(parsed.get("template"))
-        if template and template != "s3box_display":
+        if template and template not in {"s3box_display", "native_screen"}:
             continue
         rows.append((key, parsed))
     return rows
@@ -550,6 +553,485 @@ def _environment_runtime_states(client: Any) -> Dict[str, Dict[str, Any]]:
                 "environment": enriched,
             }
     return out
+
+
+def _environment_core_installed() -> bool:
+    """Return whether Environment Core is actually installed, not merely cached."""
+    try:
+        import core_registry
+
+        core_dir = getattr(core_registry, "CORE_DIR", None)
+        if core_dir is not None and (Path(core_dir) / "environment_core.py").exists():
+            return True
+    except Exception:
+        pass
+    try:
+        return importlib.util.find_spec("cores.environment_core") is not None
+    except Exception:
+        return False
+
+
+def _environment_setting(client: Any, key: str, default: str = "") -> str:
+    try:
+        value = client.hget(_ENVIRONMENT_SETTINGS_KEY, key)
+    except Exception:
+        value = ""
+    return _text(value) or default
+
+
+def _environment_source_provider(value: Any) -> str:
+    token = _lower(value)
+    if token.startswith("provider:"):
+        return token.split(":", 1)[1]
+    return token if token in _ENVIRONMENT_PROVIDER_LATEST_KEYS else ""
+
+
+def _environment_reading(snapshot: Dict[str, Any], *keys: str) -> Optional[Dict[str, Any]]:
+    wanted = {_lower(key) for key in keys if _text(key)}
+    for row in snapshot.get("readings") or []:
+        if isinstance(row, dict) and _lower(row.get("key")) in wanted:
+            return row
+    return None
+
+
+def _environment_category_reading(
+    snapshot: Dict[str, Any],
+    category: str,
+    *,
+    prefer_outdoor: bool = False,
+) -> Optional[Dict[str, Any]]:
+    rows = [
+        row
+        for row in (snapshot.get("readings") or [])
+        if isinstance(row, dict) and _lower(row.get("category")) == _lower(category)
+    ]
+    if prefer_outdoor:
+        for row in rows:
+            area = _lower(row.get("area"))
+            if area in {"outside", "outdoor", "forecast"}:
+                return row
+    return rows[0] if rows else None
+
+
+def _environment_temperature_reading(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return _environment_reading(
+        snapshot,
+        "tempf",
+        "tempc",
+        "weather_api_temperature",
+        "outdoor_temperature",
+        "temperature",
+    ) or _environment_category_reading(snapshot, "temperature", prefer_outdoor=True)
+
+
+def _environment_indoor_temperature_reading(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    row = _environment_reading(
+        snapshot,
+        "temp_in",
+        "tempinf",
+        "tempinc",
+        "indoor_temperature",
+        "temperature_indoor",
+    )
+    if row:
+        return row
+    rows = [
+        candidate
+        for candidate in (snapshot.get("readings") or [])
+        if isinstance(candidate, dict) and _lower(candidate.get("category")) == "temperature"
+    ]
+    for candidate in rows:
+        area = _lower(candidate.get("area"))
+        if area and area not in {"outside", "outdoor", "forecast"}:
+            return candidate
+    return None
+
+
+def _environment_indoor_humidity_reading(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    row = _environment_reading(
+        snapshot,
+        "humidity_in",
+        "indoor_humidity",
+        "humidity_indoor",
+    )
+    if row:
+        return row
+    rows = [
+        candidate
+        for candidate in (snapshot.get("readings") or [])
+        if isinstance(candidate, dict) and _lower(candidate.get("category")) == "humidity"
+    ]
+    for candidate in rows:
+        area = _lower(candidate.get("area"))
+        if area and area not in {"outside", "outdoor", "forecast"}:
+            return candidate
+    return None
+
+
+def _environment_condition_reading(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    row = _environment_reading(snapshot, "weather_api_condition", "current_condition", "condition")
+    if row:
+        return row
+    for candidate in snapshot.get("readings") or []:
+        if not isinstance(candidate, dict) or _lower(candidate.get("category")) != "condition":
+            continue
+        if _lower(candidate.get("key")) in {"cloud", "weather_api_cloud"}:
+            continue
+        value = _text(candidate.get("display") or candidate.get("value"))
+        if value and _as_float(value) is None:
+            return candidate
+    return None
+
+
+def _environment_reading_text(row: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return _text(row.get("display") or row.get("value"))
+
+
+def _environment_wind_direction_text(row: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    degrees = _as_float(row.get("value"))
+    if degrees is None:
+        return _environment_reading_text(row)
+    compass = (
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+    )
+    return compass[int((degrees % 360.0 + 11.25) // 22.5) % len(compass)]
+
+
+def _environment_weather_kind(condition: Any) -> str:
+    token = _lower(condition)
+    if "partly" in token:
+        return "partly"
+    if any(word in token for word in ("thunder", "storm", "lightning")):
+        return "storm"
+    if any(word in token for word in ("rain", "drizzle", "shower", "sleet")):
+        return "rain"
+    if any(word in token for word in ("snow", "ice", "blizzard", "flurr")):
+        return "snow"
+    if any(word in token for word in ("fog", "mist", "haze", "smoke")):
+        return "fog"
+    if any(word in token for word in ("cloud", "overcast")):
+        return "cloud"
+    if any(word in token for word in ("wind", "breez")):
+        return "wind"
+    if any(word in token for word in ("sun", "clear")):
+        return "sun"
+    return "partly"
+
+
+def _environment_number_text(value: Any, *, digits: int = 0) -> str:
+    number = _as_float(value)
+    if number is None:
+        return ""
+    if digits <= 0:
+        return str(int(round(number)))
+    return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _environment_weather_source(snapshot: Dict[str, Any], row: Optional[Dict[str, Any]]) -> str:
+    if isinstance(row, dict):
+        source = _text(row.get("source_name"))
+        if source:
+            return source
+    provider = _lower(snapshot.get("provider"))
+    return (
+        _text(snapshot.get("model") or snapshot.get("stationtype"))
+        or _integration_source_label(provider)
+        or "Environment Core"
+    )
+
+
+def _environment_received_at(*snapshots: Dict[str, Any]) -> float:
+    values: List[float] = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        value = _as_float(snapshot.get("received_at") or snapshot.get("sample_time"))
+        if value is not None:
+            values.append(value)
+    return max(values) if values else 0.0
+
+
+def _tater_display_clock() -> Dict[str, Any]:
+    now = datetime.now().astimezone()
+    offset = now.utcoffset()
+    return {
+        "clock_unix_ms": int(time.time() * 1000),
+        "utc_offset_seconds": int(offset.total_seconds()) if offset is not None else 0,
+        "timezone": _text(now.tzname()) or "Tater",
+    }
+
+
+def build_weather_summary(
+    *,
+    client: Any = None,
+    core_installed: Optional[bool] = None,
+    selector: str = "",
+) -> Dict[str, Any]:
+    """Build the small, secret-free weather payload sent to screen satellites."""
+    result = _tater_display_clock()
+    if core_installed is None:
+        core_installed = _environment_core_installed()
+    if not core_installed:
+        return {**result, "available": False}
+
+    redis_obj = client or redis_client
+    snapshots = _environment_provider_snapshots(redis_obj)
+    if not snapshots:
+        return {**result, "available": False}
+
+    live_provider = _environment_source_provider(
+        _environment_setting(
+            redis_obj,
+            "ENVIRONMENT_CURRENT_CONDITION_LIVE_SOURCE",
+            "provider:ecowitt",
+        )
+    )
+    condition_provider = _environment_source_provider(
+        _environment_setting(
+            redis_obj,
+            "ENVIRONMENT_CURRENT_CONDITION_CONDITION_SOURCE",
+            "provider:weather_api",
+        )
+    )
+    live_snapshot = (
+        snapshots.get(live_provider)
+        or snapshots.get("ecowitt")
+        or snapshots.get("weather_api")
+        or next(iter(snapshots.values()))
+    )
+    condition_snapshot = (
+        snapshots.get(condition_provider)
+        or snapshots.get("weather_api")
+        or live_snapshot
+    )
+
+    preferred_unit = _environment_temperature_unit(redis_obj)
+    selected_slots: Dict[str, Dict[str, Any]] = {}
+    slot_specs: Dict[str, str] = {}
+    profile_found = False
+    if _text(selector):
+        slot_specs, profile_found = _slot_map_from_saved_display_profile(
+            {"selector": _text(selector), "target": _text(selector)},
+            redis_obj,
+        )
+        runtime_states = _runtime_integration_states(redis_obj) if slot_specs else {}
+        for alias, spec in slot_specs.items():
+            provider, state_id = _split_slot_spec(spec)
+            selected_slots[alias] = _normalize_integration_slot(
+                alias,
+                spec,
+                runtime_record=runtime_states.get(spec) or runtime_states.get(f"{provider}:{state_id}"),
+            )
+
+    def selected_number(alias: str) -> Optional[float]:
+        slot = selected_slots.get(alias)
+        if not isinstance(slot, dict) or not bool(slot.get("available")):
+            return None
+        return _as_float(slot.get("numeric_value", slot.get("value")))
+
+    def selected_temperature(alias: str) -> str:
+        slot = selected_slots.get(alias)
+        if not isinstance(slot, dict) or not bool(slot.get("available")):
+            return ""
+        converted = _temperature_value(
+            slot.get("numeric_value", slot.get("value")),
+            slot.get("unit"),
+            preferred_unit,
+        )
+        return _environment_number_text(converted)
+
+    def selected_text(alias: str) -> str:
+        slot = selected_slots.get(alias)
+        if not isinstance(slot, dict) or not bool(slot.get("available")):
+            return ""
+        return _text(slot.get("display") or slot.get("state") or slot.get("value"))
+
+    def slot_is_visible(alias: str) -> bool:
+        return not profile_found or alias in slot_specs
+
+    temperature_row = _environment_temperature_reading(live_snapshot)
+    if temperature_row is None:
+        temperature_row = _environment_temperature_reading(condition_snapshot)
+    temperature_row = (
+        _normalize_environment_temperature_row(temperature_row, preferred_unit)
+        if isinstance(temperature_row, dict)
+        else None
+    )
+    condition_row = _environment_condition_reading(condition_snapshot)
+    if condition_row is None:
+        condition_row = _environment_condition_reading(live_snapshot)
+    condition = _environment_reading_text(condition_row)
+
+    temperature = selected_temperature("temp_out") if slot_is_visible("temp_out") else ""
+    if not temperature and not profile_found:
+        temperature = _environment_number_text(
+            temperature_row.get("value") if isinstance(temperature_row, dict) else None
+        )
+
+    feels_row = _environment_reading(
+        condition_snapshot,
+        "weather_api_feelslike",
+        "feelslike",
+        "feels_like",
+        "apparent_temperature",
+    ) or _environment_reading(
+        live_snapshot,
+        "weather_api_feelslike",
+        "feelslike",
+        "feels_like",
+        "apparent_temperature",
+    )
+    if isinstance(feels_row, dict):
+        feels_row = _normalize_environment_temperature_row(feels_row, preferred_unit)
+    humidity_row = _environment_reading(
+        live_snapshot,
+        "humidity",
+        "humidity_out",
+        "outdoor_humidity",
+        "weather_api_humidity",
+    ) or _environment_category_reading(live_snapshot, "humidity", prefer_outdoor=True)
+    if humidity_row is None:
+        humidity_row = _environment_reading(condition_snapshot, "weather_api_humidity", "humidity")
+    wind_row = _environment_reading(
+        live_snapshot,
+        "windspeedmph",
+        "weather_api_wind_speed",
+        "wind_speed",
+        "windspeed",
+    ) or _environment_category_reading(live_snapshot, "wind_speed")
+    if wind_row is None:
+        wind_row = _environment_reading(condition_snapshot, "windspeedmph", "weather_api_wind_speed", "wind_speed")
+    wind_direction_row = _environment_reading(
+        live_snapshot,
+        "weather_api_wind_dir",
+        "wind_direction",
+        "winddir",
+    ) or _environment_reading(
+        condition_snapshot,
+        "weather_api_wind_dir",
+        "wind_direction",
+        "winddir",
+    )
+    lightning_row = _environment_reading(
+        live_snapshot,
+        "lightning_num",
+        "lightning_strikes",
+        "lightning",
+    ) or _environment_category_reading(live_snapshot, "lightning")
+    rain_row = _environment_reading(
+        live_snapshot,
+        "rain_rate",
+        "rainratein",
+        "rainfall_rate",
+        "precipitation_rate",
+    ) or _environment_category_reading(live_snapshot, "rain_rate") \
+        or _environment_category_reading(live_snapshot, "rain")
+
+    indoor_temperature = selected_temperature("temp_in") if slot_is_visible("temp_in") else ""
+    if not indoor_temperature and not profile_found:
+        indoor_row = _environment_indoor_temperature_reading(live_snapshot)
+        if indoor_row is None:
+            for candidate_snapshot in snapshots.values():
+                indoor_row = _environment_indoor_temperature_reading(candidate_snapshot)
+                if indoor_row is not None:
+                    break
+        if isinstance(indoor_row, dict):
+            indoor_row = _normalize_environment_temperature_row(indoor_row, preferred_unit)
+            indoor_temperature = _environment_number_text(indoor_row.get("value"))
+
+    indoor_humidity = selected_text("humidity_in") if slot_is_visible("humidity_in") else ""
+    if not indoor_humidity and not profile_found:
+        indoor_humidity_row = _environment_indoor_humidity_reading(live_snapshot)
+        if indoor_humidity_row is None:
+            for candidate_snapshot in snapshots.values():
+                indoor_humidity_row = _environment_indoor_humidity_reading(candidate_snapshot)
+                if indoor_humidity_row is not None:
+                    break
+        indoor_humidity = _environment_reading_text(indoor_humidity_row)
+
+    feels = _environment_number_text(
+        feels_row.get("value") if temperature and isinstance(feels_row, dict) else None
+    )
+    feels_like_relation = ""
+    shown_temperature = _as_float(temperature)
+    shown_feels = _as_float(feels)
+    if shown_temperature is not None and shown_feels is not None:
+        if shown_feels < shown_temperature:
+            feels_like_relation = "cooler"
+        elif shown_feels > shown_temperature:
+            feels_like_relation = "warmer"
+        else:
+            feels_like_relation = "same"
+    humidity = selected_text("humidity_out") if slot_is_visible("humidity_out") else ""
+    if not humidity and not profile_found:
+        humidity_number = _environment_number_text(
+            humidity_row.get("value") if isinstance(humidity_row, dict) else None
+        )
+        humidity = f"{humidity_number}%" if humidity_number else ""
+    selected_wind = selected_number("wind_speed")
+    wind_speed = _environment_number_text(
+        selected_wind if selected_wind is not None else (
+            wind_row.get("value") if isinstance(wind_row, dict) else None
+        )
+    )
+    selected_wind_slot = selected_slots.get("wind_speed")
+    wind_unit = (
+        _text(selected_wind_slot.get("unit"))
+        if selected_wind is not None and isinstance(selected_wind_slot, dict)
+        else (_text(wind_row.get("unit")) if isinstance(wind_row, dict) else "")
+    )
+    wind_direction = _environment_wind_direction_text(wind_direction_row)
+    if profile_found:
+        wind_text = selected_text("wind_speed") if slot_is_visible("wind_speed") else ""
+    else:
+        wind_text = " ".join(part for part in (wind_direction, wind_speed, wind_unit) if part)
+    lightning_text = selected_text("lightning_strikes") if slot_is_visible("lightning_strikes") else ""
+    if not lightning_text and not profile_found:
+        lightning_text = _environment_reading_text(lightning_row)
+    rain_text = selected_text("rain_rate") if slot_is_visible("rain_rate") else ""
+    if not rain_text and not profile_found:
+        rain_text = _environment_reading_text(rain_row)
+
+    received_at = _environment_received_at(live_snapshot, condition_snapshot)
+    try:
+        stale_minutes = int(float(_environment_setting(
+            redis_obj,
+            "ENVIRONMENT_STALE_AFTER_MINUTES",
+            str(_DEFAULT_ENVIRONMENT_STALE_AFTER_MINUTES),
+        )))
+    except Exception:
+        stale_minutes = _DEFAULT_ENVIRONMENT_STALE_AFTER_MINUTES
+    stale_minutes = max(1, min(10080, stale_minutes))
+    stale = bool(received_at and time.time() - received_at > stale_minutes * 60)
+
+    source = _environment_weather_source(condition_snapshot, condition_row)
+    if not condition:
+        condition = "Current conditions"
+        source = _environment_weather_source(live_snapshot, temperature_row)
+    return {
+        **result,
+        "available": True,
+        "temperature_text": f"{temperature}°" if temperature else "",
+        "temperature_unit": preferred_unit,
+        "indoor_temperature_text": f"{indoor_temperature}°" if indoor_temperature else "",
+        "indoor_humidity_text": indoor_humidity,
+        "condition": condition,
+        "condition_kind": _environment_weather_kind(condition),
+        "feels_like_text": f"Feels like {feels}°" if feels else "",
+        "feels_like_relation": feels_like_relation,
+        "humidity_text": humidity,
+        "wind_text": wind_text,
+        "rain_text": rain_text,
+        "lightning_text": lightning_text,
+        "source": source,
+        "stale": stale,
+        "updated_at": received_at,
+    }
 
 
 def _display_text(state: str, unit: str) -> str:

@@ -48,7 +48,10 @@ const pairingStatusLabel = computed(() => pairingState.value === "paired" ? "Sat
 
 function id(item: JsonRow) { return String(item.id || ""); }
 function section(label: string, fields: JsonRow[]): JsonRow[] { return [{ label, fields }]; }
-function isSetupMode(item: JsonRow): boolean { return String(item.run_action || "") === "voice_native_satellite_setup_mode"; }
+function hasSafeRunAction(item: JsonRow): boolean {
+  const action = String(item.run_action || "");
+  return Boolean(action) && action !== "voice_native_satellite_setup_mode";
+}
 function profileFor(item: JsonRow): JsonRow | null {
   const tokens = [item.id, item.selector, item.title, item.display_target].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
   return displayProfiles.value.find((profile) => [profile.selector, profile.target, profile.title].map((value) => String(value || "").trim().toLowerCase()).some((value) => tokens.includes(value))) || null;
@@ -205,6 +208,7 @@ async function saveDisplay(item: JsonRow, profile: JsonRow): Promise<boolean> {
     target_label: profile.target_label,
     selector: profile.selector || token,
     display_url: profile.display_url,
+    profile_kind: profile.profile_kind,
     slots: { ...(displayDrafts[token] || {}) },
   }, `${token}:display`, "Display settings saved.");
   if (result) displayDirty[token] = false;
@@ -287,7 +291,7 @@ onBeforeUnmount(stopPairing);
         <button v-if="item.save_action" class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="saveSatellite(item)">{{ busy === `${id(item)}:save` ? "Saving…" : item.save_label || "Save" }}</button>
         <button v-if="(Array.isArray(item.popup_fields) && item.popup_fields.length) || profileFor(item)" class="tv-button tvoice-settings-trigger" type="button" :disabled="Boolean(busy)" @click="openSettings(item)">{{ item.settings_label || "Satellite Settings" }}<span v-if="settingsDirty[id(item)] || displayDirty[id(item)]" class="tvoice-unsaved-dot" aria-label="Unsaved changes" /></button>
         <button v-if="item.identify_action" class="tv-button" type="button" :disabled="Boolean(busy) || !item.connected" @click="identify(item)">{{ item.identify_label || "Identify" }}</button>
-        <button v-if="item.run_action" class="tv-button" :class="{ danger: isSetupMode(item), 'tvoice-setup-mode': isSetupMode(item) }" type="button" :disabled="Boolean(busy)" :title="isSetupMode(item) ? 'Unpairs this satellite and restarts it in setup mode' : ''" @click="run(item)">{{ busy === `${id(item)}:run` ? "Working…" : item.run_label || "Run" }}</button>
+        <button v-if="hasSafeRunAction(item)" class="tv-button" type="button" :disabled="Boolean(busy)" @click="run(item)">{{ busy === `${id(item)}:run` ? "Working…" : item.run_label || "Run" }}</button>
         <button v-if="item.remove_action" class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="remove(item)">{{ item.remove_label || "Forget" }}</button>
         <span v-if="dirty[id(item)]" class="tm-unsaved-label">Unsaved changes</span>
       </div>

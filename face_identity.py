@@ -35,6 +35,17 @@ FACENET_KNOWN_MATCH_THRESHOLD = 0.45
 KNOWN_MATCH_MIN_MARGIN = 0.10
 KNOWN_MATCH_MIN_REFERENCES = 2
 SINGLE_KNOWN_MATCH_MIN_REFERENCES = 3
+BURST_MIN_DETECTIONS = 3
+BURST_MATCH_FRAME_LIMIT = 4
+BURST_SUPPORT_RATIO = 0.60
+BURST_WIN_RATIO = 0.75
+BURST_DISTANCE_EXTENSION = 0.20
+BURST_CENTROID_EXTENSION = 0.15
+BURST_MIN_MARGIN = 0.15
+BURST_TRACK_STRICT_EXTENSION = 0.08
+BURST_TRACK_DISTANCE_EXTENSION = 0.35
+BURST_TRACK_MAX_SPATIAL_DISTANCE = 1.75
+BURST_TRACK_MAX_AREA_RATIO = 3.0
 
 _identity_lock = threading.RLock()
 _model_switch_lock = threading.RLock()
@@ -512,6 +523,203 @@ def match_identity(
     return "", float(candidates[0]["distance"])
 
 
+def _detection_quality(detection: Dict[str, Any]) -> float:
+    area = detection.get("facial_area") if isinstance(detection.get("facial_area"), dict) else {}
+    area_pixels = max(1, _int(area.get("w"), 1, minimum=1) * _int(area.get("h"), 1, minimum=1))
+    return max(0.0, _float(detection.get("confidence"))) + min(2.0, area_pixels / 100_000.0)
+
+
+def _selected_burst_detections(detections: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        [row for row in detections if isinstance(row, dict) and valid_embedding(row.get("embedding"))],
+        key=_detection_quality,
+        reverse=True,
+    )[:BURST_MATCH_FRAME_LIMIT]
+
+
+def _normalized_detection(detection: Dict[str, Any], client: Any) -> Dict[str, Any]:
+    embedding = valid_embedding(detection.get("embedding"))
+    if not embedding:
+        return {}
+    metadata = _embedding_model_metadata(
+        detection.get("embedding_model"),
+        dimensions=len(embedding),
+        redis_client=client,
+    )
+    payload = _annotate_detection(detection, metadata)
+    explicit_signature = _text(detection.get("embedding_model_signature"))
+    if explicit_signature:
+        payload["embedding_model_signature"] = explicit_signature
+    return payload
+
+
+def _detection_area(detection: Dict[str, Any]) -> Tuple[float, float, float]:
+    area = detection.get("facial_area") if isinstance(detection.get("facial_area"), dict) else {}
+    width = max(0.0, _float(area.get("w")))
+    height = max(0.0, _float(area.get("h")))
+    center_x = _float(area.get("x")) + (width / 2.0)
+    center_y = _float(area.get("y")) + (height / 2.0)
+    return center_x, center_y, max(width, height)
+
+
+def _burst_detection_tracks(
+    frame_detections: Iterable[Iterable[Dict[str, Any]]],
+    *,
+    redis_client: Any = None,
+) -> List[List[Dict[str, Any]]]:
+    """Associate faces across adjacent burst frames without merging same-frame faces."""
+    client = _client(redis_client)
+    tracks: List[Dict[str, Any]] = []
+    for frame_index, raw_detections in enumerate(frame_detections):
+        detections = [
+            normalized
+            for raw in raw_detections or []
+            if isinstance(raw, dict)
+            and (normalized := _normalized_detection(raw, client))
+        ]
+        candidates: List[Tuple[float, int, int]] = []
+        for track_index, track in enumerate(tracks):
+            frame_gap = frame_index - _int(track.get("last_frame"), frame_index)
+            if frame_gap < 1 or frame_gap > 2:
+                continue
+            previous = track["detections"][-1]
+            previous_signature = _text(previous.get("embedding_model_signature"))
+            for detection_index, detection in enumerate(detections):
+                if _text(detection.get("embedding_model_signature")) != previous_signature:
+                    continue
+                embedding = valid_embedding(detection.get("embedding"))
+                previous_embedding = valid_embedding(previous.get("embedding"), len(embedding))
+                distance = cosine_distance(embedding, previous_embedding)
+                model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
+                threshold = _float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD)
+                direct_limit = threshold + BURST_TRACK_STRICT_EXTENSION
+                spatial_limit = min(0.95, threshold + BURST_TRACK_DISTANCE_EXTENSION)
+
+                current_x, current_y, current_size = _detection_area(detection)
+                previous_x, previous_y, previous_size = _detection_area(previous)
+                scale = max(1.0, current_size, previous_size)
+                spatial_distance = math.hypot(current_x - previous_x, current_y - previous_y) / scale
+                smaller = max(1.0, min(current_size, previous_size))
+                size_ratio = max(current_size, previous_size) / smaller
+                spatial_match = (
+                    current_size > 0
+                    and previous_size > 0
+                    and spatial_distance <= BURST_TRACK_MAX_SPATIAL_DISTANCE
+                    and size_ratio <= BURST_TRACK_MAX_AREA_RATIO
+                    and distance <= spatial_limit
+                )
+                if distance > direct_limit and not spatial_match:
+                    continue
+                score = distance + (0.12 * spatial_distance) + (0.04 * max(0.0, size_ratio - 1.0))
+                candidates.append((score, track_index, detection_index))
+
+        used_tracks: set[int] = set()
+        used_detections: set[int] = set()
+        for _score, track_index, detection_index in sorted(candidates):
+            if track_index in used_tracks or detection_index in used_detections:
+                continue
+            tracks[track_index]["detections"].append(detections[detection_index])
+            tracks[track_index]["last_frame"] = frame_index
+            used_tracks.add(track_index)
+            used_detections.add(detection_index)
+        for detection_index, detection in enumerate(detections):
+            if detection_index in used_detections:
+                continue
+            tracks.append({"last_frame": frame_index, "detections": [detection]})
+    return [list(track["detections"]) for track in tracks if track.get("detections")]
+
+
+def match_identity_burst(
+    identities: Dict[str, Dict[str, Any]],
+    detections: Iterable[Dict[str, Any]],
+    *,
+    threshold: Optional[float] = None,
+    model_signature: str = "",
+) -> Tuple[str, float]:
+    """Conservatively recover a known identity from several weak burst frames."""
+    rows = [row for row in detections if isinstance(row, dict) and valid_embedding(row.get("embedding"))]
+    if len(rows) < BURST_MIN_DETECTIONS:
+        return "", float("inf")
+    wanted_signature = _text(model_signature) or _text(rows[0].get("embedding_model_signature"))
+    compatible = [row for row in rows if _text(row.get("embedding_model_signature")) == wanted_signature]
+    if len(compatible) < BURST_MIN_DETECTIONS:
+        return "", float("inf")
+    selected = _selected_burst_detections(compatible)
+    embeddings = [valid_embedding(row.get("embedding")) for row in selected]
+    dimensions = len(embeddings[0]) if embeddings else 0
+    if not dimensions or any(len(embedding) != dimensions for embedding in embeddings):
+        return "", float("inf")
+
+    model = selected[0].get("embedding_model") if isinstance(selected[0].get("embedding_model"), dict) else {}
+    maximum = _float(threshold, _float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD))
+    extended_maximum = min(0.75, maximum + BURST_DISTANCE_EXTENSION)
+    centroid_maximum = min(0.70, maximum + BURST_CENTROID_EXTENSION)
+    centroid = [sum(values) / len(embeddings) for values in zip(*embeddings)]
+    centroid_norm = math.sqrt(sum(value * value for value in centroid))
+    if centroid_norm <= 0.0:
+        return "", float("inf")
+    centroid = [value / centroid_norm for value in centroid]
+
+    candidates: List[Dict[str, Any]] = []
+    for identity_id, identity in identities.items():
+        if not (
+            _text(identity.get("person_id"))
+            or _text(identity.get("person_name"))
+            or _text(identity.get("name"))
+        ):
+            continue
+        references = reference_embeddings(identity, model_signature=wanted_signature)
+        if not references:
+            continue
+        frame_distances = [
+            min(cosine_distance(embedding, reference) for reference in references)
+            for embedding in embeddings
+        ]
+        centroid_distances = sorted(cosine_distance(centroid, reference) for reference in references)
+        ordered_frames = sorted(frame_distances)
+        midpoint = len(ordered_frames) // 2
+        median = (
+            ordered_frames[midpoint]
+            if len(ordered_frames) % 2
+            else (ordered_frames[midpoint - 1] + ordered_frames[midpoint]) / 2.0
+        )
+        candidates.append(
+            {
+                "id": identity_id,
+                "frame_distances": frame_distances,
+                "centroid_distance": centroid_distances[0],
+                "median_distance": median,
+                "reference_support": sum(1 for distance in centroid_distances if distance <= extended_maximum),
+                "reference_count": len(references),
+            }
+        )
+    if not candidates:
+        return "", float("inf")
+
+    for frame_index in range(len(embeddings)):
+        frame_order = sorted(candidates, key=lambda row: (row["frame_distances"][frame_index], _text(row["id"])))
+        frame_order[0]["wins"] = _int(frame_order[0].get("wins"), 0) + 1
+    candidates.sort(key=lambda row: (row["centroid_distance"], row["median_distance"], _text(row["id"])))
+    best = candidates[0]
+    runner_distance = float(candidates[1]["centroid_distance"]) if len(candidates) > 1 else float("inf")
+    required_support = max(BURST_MIN_DETECTIONS, math.ceil(len(embeddings) * BURST_SUPPORT_RATIO))
+    required_wins = max(BURST_MIN_DETECTIONS, math.ceil(len(embeddings) * BURST_WIN_RATIO))
+    support = sum(1 for distance in best["frame_distances"] if distance <= extended_maximum)
+    references_are_supported = (
+        _int(best.get("reference_support"), 0) >= min(2, _int(best.get("reference_count"), 0))
+    )
+    if (
+        support >= required_support
+        and _int(best.get("wins"), 0) >= required_wins
+        and float(best["centroid_distance"]) <= centroid_maximum
+        and float(best["median_distance"]) <= extended_maximum
+        and references_are_supported
+        and runner_distance - float(best["centroid_distance"]) >= BURST_MIN_MARGIN
+    ):
+        return _text(best["id"]), float(best["centroid_distance"])
+    return "", float(best["centroid_distance"])
+
+
 def _detection_observation(
     detection: Dict[str, Any],
     *,
@@ -691,6 +899,7 @@ def record_detection(
     event_id: str,
     seen_at: str = "",
     source: Optional[Dict[str, Any]] = None,
+    matched_identity_id: str = "",
     redis_client: Any = None,
 ) -> Dict[str, Any]:
     client = _client(redis_client)
@@ -700,10 +909,7 @@ def record_detection(
     if not _text(detection.get("crop_b64")):
         raise ValueError("Face result did not include a saved face image.")
     timestamp = _text(seen_at) or _now_iso()
-    area = detection.get("facial_area") if isinstance(detection.get("facial_area"), dict) else {}
-    confidence = _float(detection.get("confidence"))
-    area_pixels = max(1, _int(area.get("w"), 1, minimum=1) * _int(area.get("h"), 1, minimum=1))
-    quality = max(0.0, confidence) + min(2.0, area_pixels / 100_000.0)
+    quality = _detection_quality(detection)
     embedding_model = _embedding_model_metadata(
         detection.get("embedding_model"),
         dimensions=len(embedding),
@@ -713,15 +919,28 @@ def record_detection(
         embedding_model,
         dimensions=len(embedding),
     )
+    detection = dict(detection)
+    detection["embedding_model"] = embedding_model
+    detection["embedding_model_signature"] = model_signature
 
     with _identity_lock:
         identities = identity_rows(client)
-        identity_id, distance = match_identity(
-            identities,
-            embedding,
-            threshold=_float(embedding_model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
-            model_signature=model_signature,
-        )
+        identity_id = resolve_identity_id(matched_identity_id, client)
+        if identity_id and identity_id not in identities:
+            identity_id = ""
+        if identity_id:
+            references = reference_embeddings(identities[identity_id], model_signature=model_signature)
+            distance = min(
+                (cosine_distance(embedding, reference) for reference in references),
+                default=0.0,
+            )
+        else:
+            identity_id, distance = match_identity(
+                identities,
+                embedding,
+                threshold=_float(embedding_model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+                model_signature=model_signature,
+            )
         identity = dict(identities.get(identity_id) or {})
         if not identity_id:
             identity_id = f"face_{uuid.uuid4().hex[:16]}"
@@ -786,6 +1005,53 @@ def record_detection(
         saved = save_identity(identity, client)
         _save_event_identity_ids(client, event_token, [*_event_identity_ids(client, event_token), identity_id])
         return saved
+
+
+def record_detection_burst(
+    frame_detections: Iterable[Iterable[Dict[str, Any]]],
+    *,
+    event_id: str,
+    seen_at: str = "",
+    source: Optional[Dict[str, Any]] = None,
+    redis_client: Any = None,
+) -> List[Dict[str, Any]]:
+    """Record a burst after tracking faces and applying conservative known-person consensus."""
+    client = _client(redis_client)
+    identities_before = identity_rows(client)
+    saved_ids: List[str] = []
+    for detections in _burst_detection_tracks(frame_detections, redis_client=client):
+        if not detections:
+            continue
+        first = detections[0]
+        model = first.get("embedding_model") if isinstance(first.get("embedding_model"), dict) else {}
+        signature = _text(first.get("embedding_model_signature"))
+        consensus_id, _consensus_distance = match_identity_burst(
+            identities_before,
+            detections,
+            threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+            model_signature=signature,
+        )
+        track_identity_id = consensus_id
+        recorded_detections = _selected_burst_detections(detections) if consensus_id else detections
+        for detection in recorded_detections:
+            try:
+                identity = record_detection(
+                    detection,
+                    event_id=event_id,
+                    seen_at=seen_at,
+                    source=source,
+                    matched_identity_id=track_identity_id,
+                    redis_client=client,
+                )
+            except ValueError:
+                continue
+            identity_id = _text(identity.get("id"))
+            if not track_identity_id:
+                track_identity_id = identity_id
+            if identity_id and identity_id not in saved_ids:
+                saved_ids.append(identity_id)
+    current = identity_rows(client)
+    return [current[identity_id] for identity_id in saved_ids if identity_id in current]
 
 
 def runtime_status(redis_client: Any = None) -> Dict[str, Any]:
@@ -1168,6 +1434,86 @@ def _analyze_face_image(
         }
 
 
+def recognize_images(
+    image_frames: Iterable[bytes],
+    *,
+    event_id: str = "",
+    seen_at: str = "",
+    source: Optional[Dict[str, Any]] = None,
+    record: bool = True,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    client = _client(redis_client)
+    frames = [bytes(frame or b"") for frame in image_frames if bytes(frame or b"")]
+    frame_detections: List[List[Dict[str, Any]]] = []
+    routing: Dict[str, Any] = {}
+    failures: List[Dict[str, Any]] = []
+    for image_bytes in frames:
+        detections, frame_routing, failure = _analyze_face_image(image_bytes, redis_client=client)
+        frame_detections.append([row for row in detections if isinstance(row, dict)])
+        if frame_routing:
+            routing.update(frame_routing)
+        if failure is not None:
+            failures.append(dict(failure))
+    identities_before = identity_rows(client)
+    identity_ids: List[str] = []
+    if record:
+        identities = record_detection_burst(
+            frame_detections,
+            event_id=_text(event_id) or f"face_event_{uuid.uuid4().hex[:16]}",
+            seen_at=seen_at,
+            source=source,
+            redis_client=client,
+        )
+        identity_ids = list(
+            dict.fromkeys(_text(identity.get("id")) for identity in identities if _text(identity.get("id")))
+        )
+    else:
+        for detections in _burst_detection_tracks(frame_detections, redis_client=client):
+            if not detections:
+                continue
+            model = detections[0].get("embedding_model") if isinstance(detections[0].get("embedding_model"), dict) else {}
+            signature = _text(detections[0].get("embedding_model_signature"))
+            identity_id, _distance = match_identity_burst(
+                identities_before,
+                detections,
+                threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+                model_signature=signature,
+            )
+            if identity_id:
+                identity_ids.append(identity_id)
+                continue
+            for detection in detections:
+                embedding = valid_embedding(detection.get("embedding"))
+                identity_id, _distance = match_identity(
+                    identities_before,
+                    embedding,
+                    threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+                    model_signature=signature,
+                )
+                if identity_id:
+                    identity_ids.append(identity_id)
+        identity_ids = list(dict.fromkeys(identity_ids))
+
+    recognized = recognized_people(identity_ids, client)
+    names = [row["person_name"] for row in recognized]
+    faces_detected = sum(len(detections) for detections in frame_detections)
+    warning = "; ".join(
+        dict.fromkeys(_text(failure.get("warning")) for failure in failures if _text(failure.get("warning")))
+    )
+    failed_status = _text(failures[0].get("status")) if failures and len(failures) == len(frames) else ""
+    return {
+        "status": "recognized" if names else ("unrecognized" if faces_detected else (failed_status or "no_faces")),
+        "warning": warning,
+        "people": names,
+        "person_ids": [row["person_id"] for row in recognized],
+        "identity_ids": identity_ids,
+        "faces_detected": faces_detected,
+        "frames_checked": len(frames),
+        **routing,
+    }
+
+
 def recognize_image(
     image_bytes: bytes,
     *,
@@ -1177,54 +1523,14 @@ def recognize_image(
     record: bool = True,
     redis_client: Any = None,
 ) -> Dict[str, Any]:
-    client = _client(redis_client)
-    detections, routing, failure = _analyze_face_image(image_bytes, redis_client=client)
-    if failure is not None:
-        return failure
-
-    identities_before = identity_rows(client)
-    identity_ids: List[str] = []
-    if record:
-        for detection in detections:
-            if not isinstance(detection, dict):
-                continue
-            with contextlib.suppress(ValueError):
-                identity = record_detection(
-                    detection,
-                    event_id=_text(event_id) or f"face_event_{uuid.uuid4().hex[:16]}",
-                    seen_at=seen_at,
-                    source=source,
-                    redis_client=client,
-                )
-                identity_id = _text(identity.get("id"))
-                if identity_id and identity_id not in identity_ids:
-                    identity_ids.append(identity_id)
-    else:
-        for detection in detections:
-            if not isinstance(detection, dict):
-                continue
-            embedding = valid_embedding(detection.get("embedding"))
-            model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
-            identity_id, _distance = match_identity(
-                identities_before,
-                embedding,
-                threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
-                model_signature=_text(detection.get("embedding_model_signature")),
-            )
-            if identity_id and identity_id not in identity_ids:
-                identity_ids.append(identity_id)
-
-    recognized = recognized_people(identity_ids, client)
-    names = [row["person_name"] for row in recognized]
-    return {
-        "status": "recognized" if names else ("unrecognized" if detections else "no_faces"),
-        "warning": "",
-        "people": names,
-        "person_ids": [row["person_id"] for row in recognized],
-        "identity_ids": identity_ids,
-        "faces_detected": len([row for row in detections if isinstance(row, dict)]),
-        **routing,
-    }
+    return recognize_images(
+        [image_bytes],
+        event_id=event_id,
+        seen_at=seen_at,
+        source=source,
+        record=record,
+        redis_client=redis_client,
+    )
 
 
 def enroll_person_image(

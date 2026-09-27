@@ -514,6 +514,7 @@ voice_satellite_snapshot_state: Dict[str, Any] = {
     "cached_at": 0.0,
     "payload": None,
     "generation": 0,
+    "stale": False,
 }
 system_tasks_registered = False
 system_task_intervals_lock = threading.RLock()
@@ -12659,7 +12660,9 @@ def _voice_satellite_snapshot_save(
                 "saved": False,
                 "generation": generation,
             }
-        voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": body})
+        voice_satellite_snapshot_state.update(
+            {"cached_at": cached_at, "payload": body, "stale": False}
+        )
         try:
             redis_client.set(
                 VOICE_SATELLITE_SNAPSHOT_KEY,
@@ -12681,17 +12684,11 @@ def _voice_satellite_snapshot_save(
 def _voice_satellite_snapshot_invalidate() -> int:
     with voice_satellite_snapshot_lock:
         generation = int(voice_satellite_snapshot_state.get("generation") or 0) + 1
-        voice_satellite_snapshot_state.update(
-            {
-                "cached_at": 0.0,
-                "payload": None,
-                "generation": generation,
-            }
-        )
-        try:
-            redis_client.delete(VOICE_SATELLITE_SNAPSHOT_KEY)
-        except Exception:
-            logger.debug("[system-tasks] failed invalidating the satellite UI snapshot", exc_info=True)
+        # Keep serving the last complete payload until its replacement is
+        # ready. Deleting it here makes the action-triggered UI refresh perform
+        # a full synchronous rebuild, leaving the whole Satellites section on
+        # its loading state while network-backed playback targets are scanned.
+        voice_satellite_snapshot_state.update({"generation": generation, "stale": True})
     return generation
 
 
@@ -12700,11 +12697,13 @@ def _voice_satellite_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str
         generation = int(voice_satellite_snapshot_state.get("generation") or 0)
         memory_payload = voice_satellite_snapshot_state.get("payload")
         memory_cached_at = float(voice_satellite_snapshot_state.get("cached_at") or 0.0)
+        memory_stale = bool(voice_satellite_snapshot_state.get("stale"))
     if isinstance(memory_payload, dict) and memory_cached_at > 0:
         return memory_payload, {
             "cached_at": memory_cached_at,
             "age_seconds": max(0.0, time.time() - memory_cached_at),
-            "source": "memory",
+            "source": "memory-stale" if memory_stale else "memory",
+            "stale": memory_stale,
         }
 
     try:
@@ -12723,11 +12722,14 @@ def _voice_satellite_snapshot_load() -> Tuple[Optional[Dict[str, Any]], Dict[str
     with voice_satellite_snapshot_lock:
         if int(voice_satellite_snapshot_state.get("generation") or 0) != generation:
             return None, {"cached_at": 0.0, "age_seconds": 0.0, "source": "invalidated"}
-        voice_satellite_snapshot_state.update({"cached_at": cached_at, "payload": payload})
+        voice_satellite_snapshot_state.update(
+            {"cached_at": cached_at, "payload": payload, "stale": memory_stale}
+        )
     return payload, {
         "cached_at": cached_at,
         "age_seconds": max(0.0, time.time() - cached_at),
-        "source": "redis",
+        "source": "redis-stale" if memory_stale else "redis",
+        "stale": memory_stale,
     }
 
 
@@ -12739,6 +12741,26 @@ def _voice_satellite_snapshot_build() -> Dict[str, Any]:
         core_tab=tab,
         panel="satellites",
     )
+
+
+def _voice_satellite_snapshot_pending_payload() -> Dict[str, Any]:
+    """Return a usable shell while the first background snapshot is built."""
+    return {
+        "summary": "Refreshing live satellite status…",
+        "panel": "satellites",
+        "header_stats": [],
+        "items": [],
+        "empty_message": "Refreshing satellite status…",
+        "ui": {
+            "kind": "tater_native_satellite",
+            "title": "Tater Satellites",
+            "item_forms": [],
+            "native_pairing": {
+                "start_action": "voice_native_satellite_pairing_start",
+                "status_action": "voice_native_satellite_pairing_status",
+            },
+        },
+    }
 
 
 async def _system_task_satellite_snapshot(_reason: str = "schedule") -> None:
@@ -18487,11 +18509,16 @@ def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
         cached_payload, cache_meta = _voice_satellite_snapshot_load()
         if isinstance(cached_payload, dict):
             runtime_payload = cached_payload
-            if float(cache_meta.get("age_seconds") or 0.0) >= VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS:
+            if bool(cache_meta.get("stale")) or float(
+                cache_meta.get("age_seconds") or 0.0
+            ) >= VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS:
                 system_task_manager.request_run("satellite_ui_snapshot", reason="satellites-stale")
         else:
-            runtime_payload = _voice_satellite_snapshot_build()
-            _voice_satellite_snapshot_save(runtime_payload)
+            # Never make the UI request perform integration discovery. The
+            # scheduler fills the cache in the background and the visible tab
+            # retries every ten seconds.
+            runtime_payload = _voice_satellite_snapshot_pending_payload()
+            system_task_manager.request_run("satellite_ui_snapshot", reason="satellites-cache-miss")
     else:
         runtime_payload = esphome_home_module.get_runtime_payload(
             redis_client=redis_client,
@@ -18527,6 +18554,8 @@ def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
             "voice_native_satellite_setup_mode",
             "voice_satellite_remove",
             "voice_satellite_save",
+            "voice_stereo_pair_remove",
+            "voice_stereo_pair_save",
             "voice_settings_reset_defaults",
             "voice_settings_save",
             "voice_statistics_reset",
@@ -18535,9 +18564,9 @@ def run_voice_runtime_action(payload: CoreTabActionRequest) -> Dict[str, Any]:
             "voice_wake_verifier_save",
             "voice_refresh",
         }:
-            # The Satellites panel is served from a cached UI snapshot. Clear it
-            # before returning so the save-triggered redraw cannot restore the
-            # previous form values while the debounced rebuild is still pending.
+            # Mark the cached Satellites panel stale before returning. The
+            # save-triggered redraw can keep showing that complete snapshot
+            # while its replacement is built in the background.
             _voice_satellite_snapshot_invalidate()
             system_task_manager.request_run_debounced(
                 "satellite_ui_snapshot",

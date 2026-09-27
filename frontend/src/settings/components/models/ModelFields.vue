@@ -140,7 +140,7 @@ function ledPreviewStyle(): Record<string, string> {
             <span class="tm-field-label">{{ field.label || "LED Preview" }} <small>Live examples</small></span>
             <div class="tm-led-preview-grid">
               <article v-for="state in field.states || []" :key="String(state.label)" class="tm-led-preview-card" :style="ledPreviewStyle()">
-                <div class="tm-led-stage" :class="`animation-${ledAnimation(state)}`" aria-hidden="true">
+                <div class="tm-led-stage" :class="[`animation-${ledAnimation(state)}`, { 'tm-led-stage-single': field.single_light }]" aria-hidden="true">
                   <span class="tm-led-halo" />
                   <i v-for="dotIndex in 12" :key="dotIndex" class="tm-led-dot" :style="`--tm-led-i:${dotIndex - 1}`" />
                   <span class="tm-led-core" />

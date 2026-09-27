@@ -878,7 +878,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
                     esphome_runtime.text(live_settings.get("led_listening_animation")) or "directional",
                     esphome_runtime.text(live_settings.get("led_thinking_animation")) or "sparkle",
                     esphome_runtime.text(live_settings.get("led_tool_call_animation")) or "ping_pong",
-                    esphome_runtime.text(live_settings.get("led_replying_animation")) or "voice_ring",
+                    esphome_runtime.text(live_settings.get("led_replying_animation")) or "audio_glow",
                 ]
             ),
         ),
@@ -941,10 +941,12 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
             "native_connected": bool(row.get("connected")),
             "board": board,
             "firmware_target": firmware_target,
+            "capabilities": dict(capabilities),
             "area_name": room,
             "room": room,
             "room_name": room,
         },
+        "capabilities": dict(capabilities),
         "device_info": {
             "name": esphome_runtime.text(row.get("device_id")) or selector,
             "friendly_name": name,

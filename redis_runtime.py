@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import socket
@@ -39,6 +40,7 @@ _INTERNAL_REDIS_PROCESS: Optional[subprocess.Popen] = None
 _INTERNAL_REDIS_INFO: Dict[str, Any] = {}
 _INTERNAL_REDIS_ATEXIT_REGISTERED = False
 _INTERNAL_REDIS_AOF_MAINTENANCE_PIDS: set[int] = set()
+_INTERNAL_REDIS_TEMP_RE = re.compile(r"^temp-(\d+)\.rdb$")
 _REDIS_ENCRYPTION_KEY_PATH = (_RUNTIME_DIR / "redis_encryption.key").resolve()
 _REDIS_LIVE_ENCRYPTION_STATE_PATH = (_RUNTIME_DIR / "redis_live_encryption.json").resolve()
 _REDIS_ENCRYPTED_SNAPSHOT_PATH = (_RUNTIME_DIR / "redis_snapshot.enc").resolve()  # legacy artifact path
@@ -924,6 +926,214 @@ def _internal_existing_redis_pid(
     return 0
 
 
+def _discover_internal_redis_instances(paths: Dict[str, Path], *, db: int) -> List[Dict[str, Any]]:
+    """Find Redis processes using this exact Tater data file.
+
+    The normal redis.pid/redis.port pair is sufficient during a clean lifecycle.
+    This fallback handles a parent process being killed after it spawned Redis:
+    a later launch may otherwise overwrite the small control files and leave the
+    old Redis writing to an unlinked AOF forever.
+    """
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    target_data_path = paths["data_path"].resolve()
+    found: Dict[int, Dict[str, Any]] = {}
+    try:
+        processes = psutil.process_iter(["pid", "name", "exe", "cmdline", "create_time"])
+    except Exception:
+        return []
+
+    for proc in processes:
+        try:
+            info = proc.info or {}
+            pid = _to_int(info.get("pid"), default=0, min_value=0)
+            if pid <= 0:
+                continue
+            name = str(info.get("name") or "").lower()
+            executable = str(info.get("exe") or "")
+            cmdline_parts = [str(part) for part in (info.get("cmdline") or [])]
+            command = " ".join(cmdline_parts)
+            if "redis-server" not in name and "redis-server" not in executable and "redis-server" not in command:
+                continue
+
+            ports: set[int] = set()
+            for token in cmdline_parts:
+                match = re.search(r"(?:^|:)(\d{2,5})$", token.strip())
+                if match:
+                    port = _to_int(match.group(1), default=0, min_value=0, max_value=65535)
+                    if port > 0:
+                        ports.add(port)
+            try:
+                connections = proc.net_connections(kind="inet")
+            except Exception:
+                connections = []
+            for connection in connections:
+                status = str(getattr(connection, "status", "") or "").upper()
+                local = getattr(connection, "laddr", None)
+                if status != "LISTEN" or not local:
+                    continue
+                try:
+                    host = str(getattr(local, "ip", local[0]) or "")
+                    port = int(getattr(local, "port", local[1]) or 0)
+                except Exception:
+                    continue
+                if host in {"127.0.0.1", "::1", "localhost"} and port > 0:
+                    ports.add(port)
+
+            for port in sorted(ports):
+                client: Optional[redis.Redis] = None
+                try:
+                    client = redis.Redis(
+                        host="127.0.0.1",
+                        port=port,
+                        db=int(db),
+                        decode_responses=True,
+                        socket_timeout=0.35,
+                        socket_connect_timeout=0.35,
+                    )
+                    server = client.info("server") or {}
+                    if _to_int(server.get("process_id"), default=0, min_value=0) != pid:
+                        continue
+                    directory = str((client.config_get("dir") or {}).get("dir") or "").strip()
+                    filename = str((client.config_get("dbfilename") or {}).get("dbfilename") or "").strip()
+                    if not directory or not filename:
+                        continue
+                    candidate_data_path = (Path(directory).expanduser() / filename).resolve()
+                    if candidate_data_path != target_data_path:
+                        continue
+                    persistence = client.info("persistence") or {}
+                    found[pid] = {
+                        "pid": pid,
+                        "port": int(port),
+                        "host": "127.0.0.1",
+                        "started_at": float(info.get("create_time") or 0.0),
+                        "server_path": executable,
+                        "rdb_bgsave_in_progress": bool(int(persistence.get("rdb_bgsave_in_progress") or 0)),
+                    }
+                    break
+                except Exception:
+                    continue
+                finally:
+                    _close_client(client)
+        except Exception:
+            continue
+    return sorted(found.values(), key=lambda item: (float(item.get("started_at") or 0.0), int(item.get("pid") or 0)))
+
+
+def _select_internal_redis_instance(
+    instances: List[Dict[str, Any]],
+    *,
+    preferred_port: int = 0,
+    preferred_pid: int = 0,
+) -> Optional[Dict[str, Any]]:
+    if not instances:
+        return None
+    for instance in instances:
+        if preferred_pid > 0 and preferred_port > 0 and int(instance.get("pid") or 0) == preferred_pid and int(instance.get("port") or 0) == preferred_port:
+            return dict(instance)
+    for instance in instances:
+        if preferred_port > 0 and int(instance.get("port") or 0) == preferred_port:
+            return dict(instance)
+    for instance in instances:
+        if preferred_pid > 0 and int(instance.get("pid") or 0) == preferred_pid:
+            return dict(instance)
+    return dict(max(instances, key=lambda item: (float(item.get("started_at") or 0.0), int(item.get("pid") or 0))))
+
+
+def _stop_discovered_internal_redis(instance: Dict[str, Any], *, timeout_seconds: float = 5.0) -> bool:
+    pid = _to_int(instance.get("pid"), default=0, min_value=0)
+    port = _to_int(instance.get("port"), default=0, min_value=0, max_value=65535)
+    if pid <= 0 or port <= 0:
+        return False
+    client: Optional[redis.Redis] = None
+    try:
+        client = redis.Redis(
+            host="127.0.0.1",
+            port=port,
+            decode_responses=True,
+            socket_timeout=1.0,
+            socket_connect_timeout=1.0,
+        )
+        try:
+            # AOF is fsynced independently. A full RDB snapshot here can take
+            # minutes and is what left Tater's multi-gigabyte temp-*.rdb files.
+            client.execute_command("SHUTDOWN", "NOSAVE")
+        except redis.exceptions.ConnectionError:
+            pass
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    finally:
+        _close_client(client)
+
+    deadline = time.time() + max(0.5, float(timeout_seconds))
+    while _pid_is_running(pid) and time.time() < deadline:
+        time.sleep(0.05)
+    if _pid_is_running(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+        deadline = time.time() + 2.0
+        while _pid_is_running(pid) and time.time() < deadline:
+            time.sleep(0.05)
+    return not _pid_is_running(pid)
+
+
+def _cleanup_stale_internal_redis_temp_files(
+    paths: Dict[str, Path],
+    *,
+    active_instance: Optional[Dict[str, Any]] = None,
+    minimum_age_seconds: float = 300.0,
+) -> Dict[str, int]:
+    if bool((active_instance or {}).get("rdb_bgsave_in_progress")):
+        return {"removed": 0, "bytes": 0}
+    protected_pids = {
+        _to_int((active_instance or {}).get("pid"), default=0, min_value=0),
+    }
+    removed = 0
+    removed_bytes = 0
+    now = time.time()
+    try:
+        candidates = list(paths["data_dir"].glob("temp-*.rdb"))
+    except Exception:
+        candidates = []
+    for candidate in candidates:
+        match = _INTERNAL_REDIS_TEMP_RE.fullmatch(candidate.name)
+        if not match:
+            continue
+        pid = _to_int(match.group(1), default=0, min_value=0)
+        if pid in protected_pids:
+            continue
+        # When a verified active Redis reports no BGSAVE, no temp RDB child is
+        # live. Do not let an unrelated process that later reused the numeric
+        # PID pin an abandoned multi-gigabyte file forever.
+        if active_instance is None and _pid_is_running(pid):
+            continue
+        try:
+            stat_result = candidate.stat()
+            if now - float(stat_result.st_mtime) < max(0.0, float(minimum_age_seconds)):
+                continue
+            size = int(stat_result.st_size)
+            candidate.unlink()
+            removed += 1
+            removed_bytes += max(0, size)
+        except Exception:
+            continue
+    if removed:
+        logger.warning(
+            "[redis] removed %d abandoned RDB temp file(s), reclaiming %d bytes",
+            removed,
+            removed_bytes,
+        )
+    return {"removed": removed, "bytes": removed_bytes}
+
+
 def _internal_redis_state_key(config: Dict[str, Any]) -> str:
     paths = _internal_redis_paths(config)
     return json.dumps(
@@ -965,9 +1175,10 @@ def _internal_redis_config_text(paths: Dict[str, Path], *, port: int, use_unix_s
             "aof-use-rdb-preamble yes",
             "auto-aof-rewrite-percentage 100",
             "auto-aof-rewrite-min-size 512mb",
-            "save 900 1",
-            "save 300 10",
-            "save 60 10000",
+            # The AOF (including its compact RDB preamble) is Tater's durable
+            # store. Periodic full dump.rdb saves duplicated hundreds of MB to
+            # several GB every five minutes without improving recovery.
+            'save ""',
             "",
         ]
     )
@@ -1108,7 +1319,10 @@ def _stop_internal_redis_locked() -> None:
                 )
         if client is not None:
             try:
-                client.execute_command("SHUTDOWN", "SAVE")
+                # AOF is already fsynced every second. Asking Redis for a final
+                # RDB snapshot made shutdown proportional to the entire live DB;
+                # the old timeout then killed that save and stranded temp-*.rdb.
+                client.execute_command("SHUTDOWN", "NOSAVE")
                 shutdown_requested = True
             except redis.exceptions.ConnectionError:
                 shutdown_requested = True
@@ -1164,17 +1378,33 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
 
     if _INTERNAL_REDIS_INFO.get("state_key") == state_key:
         proc = _INTERNAL_REDIS_PROCESS
-        process_running = proc is None or proc.poll() is None
-        if bool(_INTERNAL_REDIS_INFO.get("use_unix_socket")):
-            ping_ok, _ping_error = _internal_redis_existing_ping(socket_path=paths["socket_path"], db=db)
-        else:
-            ping_ok, _ping_error = _internal_redis_existing_ping(
-                host=str(_INTERNAL_REDIS_INFO.get("host") or host),
-                port=int(_INTERNAL_REDIS_INFO.get("port") or 0),
-                db=db,
-            )
+        tracked_pid = _to_int(_INTERNAL_REDIS_INFO.get("pid"), default=0, min_value=0)
+        process_running = (proc is not None and proc.poll() is None) or (proc is None and _pid_is_running(tracked_pid))
+        ping_ok = False
+        ping_error = ""
+        for attempt in range(3):
+            if bool(_INTERNAL_REDIS_INFO.get("use_unix_socket")):
+                ping_ok, ping_error = _internal_redis_existing_ping(socket_path=paths["socket_path"], db=db)
+            else:
+                ping_ok, ping_error = _internal_redis_existing_ping(
+                    host=str(_INTERNAL_REDIS_INFO.get("host") or host),
+                    port=int(_INTERNAL_REDIS_INFO.get("port") or 0),
+                    db=db,
+                )
+            if ping_ok:
+                break
+            if attempt < 2:
+                time.sleep(0.1 * (attempt + 1))
         if process_running and ping_ok:
             return dict(_INTERNAL_REDIS_INFO)
+        if process_running:
+            # A stale redis-py connection or a short fork/fsync pause must not
+            # turn a read-only health request into a destructive restart.
+            raise RedisNotConfiguredError(
+                f"Internal Redis process {tracked_pid or '?'} is running but did not answer fresh probes: {ping_error or 'ping failed'}"
+            )
+        _INTERNAL_REDIS_PROCESS = None
+        _INTERNAL_REDIS_INFO = {}
 
     if _INTERNAL_REDIS_PROCESS is not None:
         _stop_internal_redis_locked()
@@ -1185,6 +1415,7 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
         ping_ok, _ping_error = _internal_redis_existing_ping(socket_path=paths["socket_path"], db=db)
     else:
         ping_ok, _ping_error = _internal_redis_existing_ping(host=host, port=existing_port, db=db)
+    existing_pid = 0
     if ping_ok:
         existing_pid = _internal_existing_redis_pid(
             paths,
@@ -1193,7 +1424,9 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
             port=existing_port,
             db=db,
         )
-        if existing_pid > 0:
+
+    if use_unix_socket:
+        if ping_ok and existing_pid > 0:
             info = {
                 "mode": _REDIS_MODE_INTERNAL,
                 "managed": True,
@@ -1203,8 +1436,8 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
                 "data_path": str(paths["data_path"]),
                 "data_dir": str(paths["data_dir"]),
                 "host": host,
-                "port": int(existing_port),
-                "use_unix_socket": bool(use_unix_socket),
+                "port": 0,
+                "use_unix_socket": True,
                 "socket_path": str(paths["socket_path"]),
                 "config_path": str(paths["config_path"]),
                 "log_path": str(paths["log_path"]),
@@ -1212,12 +1445,71 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
                 "server_source": "existing",
             }
             _INTERNAL_REDIS_INFO = dict(info)
+            _cleanup_stale_internal_redis_temp_files(paths, active_instance=info)
             _schedule_internal_aof_maintenance(info)
             return dict(info)
-        if use_unix_socket:
+        if ping_ok:
             raise RedisNotConfiguredError(
                 f"Internal Redis socket is already in use but does not match Tater's pidfile: {paths['socket_path']}"
             )
+    else:
+        instances = _discover_internal_redis_instances(paths, db=db)
+        if ping_ok and existing_pid > 0 and not any(int(row.get("pid") or 0) == existing_pid for row in instances):
+            instances.append(
+                {
+                    "pid": int(existing_pid),
+                    "port": int(existing_port),
+                    "host": host,
+                    "started_at": 0.0,
+                    "server_path": "",
+                    "rdb_bgsave_in_progress": False,
+                }
+            )
+        selected = _select_internal_redis_instance(
+            instances,
+            preferred_port=int(existing_port),
+            preferred_pid=int(_read_internal_redis_pid(paths["pid_path"])),
+        )
+        if selected is not None:
+            selected_pid = int(selected.get("pid") or 0)
+            duplicates = [row for row in instances if int(row.get("pid") or 0) != selected_pid]
+            for duplicate in duplicates:
+                logger.warning(
+                    "[redis] stopping orphan Redis pid=%s port=%s that shares %s",
+                    duplicate.get("pid"),
+                    duplicate.get("port"),
+                    paths["data_path"],
+                )
+                if not _stop_discovered_internal_redis(duplicate):
+                    raise RedisNotConfiguredError(
+                        f"Could not stop duplicate internal Redis process {duplicate.get('pid')} safely."
+                    )
+            selected_port = int(selected.get("port") or 0)
+            paths["pid_path"].write_text(f"{selected_pid}\n", encoding="utf-8")
+            _safe_chmod(paths["pid_path"], 0o600)
+            _write_internal_redis_port(paths["port_path"], selected_port)
+            info = {
+                "mode": _REDIS_MODE_INTERNAL,
+                "managed": True,
+                "adopted": True,
+                "pid": selected_pid,
+                "state_key": state_key,
+                "data_path": str(paths["data_path"]),
+                "data_dir": str(paths["data_dir"]),
+                "host": host,
+                "port": selected_port,
+                "use_unix_socket": False,
+                "socket_path": str(paths["socket_path"]),
+                "config_path": str(paths["config_path"]),
+                "log_path": str(paths["log_path"]),
+                "server_path": str(selected.get("server_path") or ""),
+                "server_source": "discovered" if duplicates or selected_port != existing_port else "existing",
+                "rdb_bgsave_in_progress": bool(selected.get("rdb_bgsave_in_progress")),
+            }
+            _INTERNAL_REDIS_INFO = dict(info)
+            _cleanup_stale_internal_redis_temp_files(paths, active_instance=info)
+            _schedule_internal_aof_maintenance(info)
+            return dict(info)
 
     for cleanup_path in (paths["socket_path"], paths["pid_path"], paths["port_path"]):
         try:
@@ -1299,6 +1591,7 @@ def _ensure_internal_redis_server_locked(config: Dict[str, Any]) -> Dict[str, An
             }
             _INTERNAL_REDIS_PROCESS = proc
             _INTERNAL_REDIS_INFO = dict(info)
+            _cleanup_stale_internal_redis_temp_files(paths, active_instance=info)
             _schedule_internal_aof_maintenance(info)
             return dict(info)
         last_error = ping_error
@@ -1656,22 +1949,47 @@ def get_redis_connection_status() -> Dict[str, Any]:
                     error = str(fallback_exc)
             else:
                 first_error = str(exc)
-                try:
+                retry_error = first_error
+                for attempt in range(3):
                     with _LOCK:
                         _reset_clients_locked()
-                        _stop_internal_redis_locked()
-                    get_redis_client(decode_responses=True).ping()
+                    try:
+                        get_redis_client(decode_responses=True).ping()
+                        connected = True
+                        retry_error = ""
+                        break
+                    except Exception as fresh_exc:
+                        retry_error = str(fresh_exc) or retry_error
+                        if attempt < 2:
+                            time.sleep(0.15 * (attempt + 1))
+
+                if not connected:
+                    logger.warning(
+                        "[redis] restarting internal Redis only after cached ping and fresh probes failed: cached=%s fresh=%s",
+                        first_error,
+                        retry_error,
+                    )
+                    try:
+                        with _LOCK:
+                            _reset_clients_locked()
+                            _stop_internal_redis_locked()
+                        get_redis_client(decode_responses=True).ping()
+                        connected = True
+                        retry_error = ""
+                    except Exception as restart_exc:
+                        retry_error = str(restart_exc) or retry_error
+
+                if connected:
                     with _LOCK:
                         config = _load_config_locked()
                         source = str(_CONFIG_SOURCE or source)
                         fallback_reason = str(_CONFIG_FALLBACK_REASON or fallback_reason)
                     mode = _normalize_redis_mode(config.get("mode"), default=_REDIS_MODE_INTERNAL)
                     configured = True
-                    connected = True
                     error = ""
-                except Exception as retry_exc:
+                else:
                     connected = False
-                    error = str(retry_exc) or first_error
+                    error = retry_error or first_error
     else:
         try:
             with _LOCK:

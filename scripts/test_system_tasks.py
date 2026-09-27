@@ -219,7 +219,28 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
 
         self.assertIn("_voice_satellite_snapshot_load()", endpoint_source)
         self.assertIn('request_run("satellite_ui_snapshot", reason="satellites-stale")', endpoint_source)
-        self.assertIn("_voice_satellite_snapshot_save(runtime_payload)", endpoint_source)
+        self.assertIn("_voice_satellite_snapshot_pending_payload()", endpoint_source)
+        self.assertIn('request_run("satellite_ui_snapshot", reason="satellites-cache-miss")', endpoint_source)
+        self.assertNotIn("_voice_satellite_snapshot_build()", endpoint_source)
+
+    def test_satellite_snapshot_invalidation_keeps_stale_payload_until_rebuilt(self) -> None:
+        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        start = source.index("def _voice_satellite_snapshot_invalidate")
+        end = source.index("\n\ndef _voice_satellite_snapshot_load", start)
+        invalidate_source = source[start:end]
+
+        self.assertIn('"stale": True', invalidate_source)
+        self.assertNotIn("redis_client.delete", invalidate_source)
+
+    def test_stereo_pair_changes_refresh_satellite_playback_options(self) -> None:
+        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        start = source.index("def run_voice_runtime_action")
+        end = source.index("\n\n@app.get(\"/api/settings/voice/firmware-web", start)
+        action_source = source[start:end]
+
+        self.assertIn('"voice_stereo_pair_save"', action_source)
+        self.assertIn('"voice_stereo_pair_remove"', action_source)
+        self.assertIn("_voice_satellite_snapshot_invalidate()", action_source)
 
     def test_integration_registry_uses_events_and_five_minute_fallback(self) -> None:
         app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
