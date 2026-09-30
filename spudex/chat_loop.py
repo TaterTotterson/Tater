@@ -74,7 +74,7 @@ async def _repair_spudex_decision(
     timeout: int,
 ) -> Dict[str, Any]:
     repair_prompt = (
-        "Repair one malformed Spudex controller response. Return exactly one strict JSON object and nothing else.\n"
+        "Repair one malformed Terminal controller response. Return exactly one strict JSON object and nothing else.\n"
         "Allowed shapes:\n"
         '{"type":"reply","outcome":"answer|completed|blocked|failed","message":"..."}\n'
         '{"type":"write_file","path":"relative/path","content":"...","reason":"..."}\n'
@@ -202,17 +202,17 @@ async def _ai_should_continue_reply(
 ) -> Dict[str, Any]:
     has_observations = bool(ran_commands or ran_searches or wrote_files)
     judge_prompt = (
-        "You are a strict continuation judge for Tater's Spudex Chat loop.\n"
-        "Continuation means Spudex should take another action immediately in this same user turn. "
+        "You are a strict continuation judge for Tater's Terminal Chat loop.\n"
+        "Continuation means Terminal should take another action immediately in this same user turn. "
         "It does not mean staying alive, waiting for the user, or asking the user for a future task.\n"
         "Return exactly one JSON object with this shape: "
         "{\"continue\":true|false,\"reason\":\"...\",\"next_action\":\"none|command|write_file|search|verify\",\"instruction\":\"...\"}.\n"
         "Say continue=true when the assistant reply is only a promise, plan, or next-step narration and the user's task still needs action.\n"
-        "Say continue=true when the user asked Spudex to take an action, but no command/file/search/verify action has happened yet.\n"
+        "Say continue=true when the user asked Terminal to take an action, but no command/file/search/verify action has happened yet.\n"
         "Say continue=true when the assistant asks the user for missing input, but the user's task can still start from a reasonable generic action such as search, inspection, or a local command.\n"
         "Say continue=false for greetings, small talk, capability questions, or normal conversational replies, even when the assistant is waiting for the user's next message.\n"
         "Say continue=false when the reply directly answers a question, asks for a future user task, reports completed work based on observations, no command is needed, or a genuinely specific private link/file/path/secret/detail is required before any useful action can happen.\n"
-        "When continue=true, reason through what useful action is available now, then set next_action to command, write_file, search, or verify and give an instruction for the next Spudex model call without hard-coded provider-specific assumptions.\n"
+        "When continue=true, reason through what useful action is available now, then set next_action to command, write_file, search, or verify and give an instruction for the next Terminal model call without hard-coded provider-specific assumptions.\n"
         "The reason should briefly explain the semantic decision; the instruction should be a direct next-step instruction, not a transcript of hidden reasoning.\n"
         "Be conservative about stopping: if a useful next action can be taken now, continue.\n"
     )
@@ -284,7 +284,7 @@ async def _ai_review_attempt(
     loop_notes: List[str],
 ) -> str:
     review_prompt = (
-        "You are Tater's Spudex attempt reviewer.\n"
+        "You are Tater's Terminal attempt reviewer.\n"
         "Review the latest failed or weak action and produce one short model-facing note for the next planning step.\n"
         "Return exactly one JSON object: {\"note\":\"...\"}.\n"
         "The note should explain what was tried, why it did not answer the user's request, and what kind of meaningfully different next move should be considered.\n"
@@ -343,11 +343,11 @@ async def run_spudex_chat_turn(
     full_access = bool(settings.get("full_access"))
     user_message = str(message or "").strip()
     if not user_message:
-        return action_failure(code="spudex_chat_empty", message="Spudex chat message is required.")
+        return action_failure(code="spudex_chat_empty", message="Terminal chat message is required.")
     if llm_client is None or not hasattr(llm_client, "chat"):
         return action_failure(
             code="spudex_chat_model_unavailable",
-            message="Spudex chat needs an available language model client.",
+            message="Terminal chat needs an available language model client.",
         )
 
     cwd_path = resolve_spudex_cwd(settings.get("default_cwd"))
@@ -371,7 +371,7 @@ async def run_spudex_chat_turn(
         "- Respect the execution_settings allow flags and choose a permitted alternative when an action is blocked.\n"
     )
     system_prompt = (
-        "You are the model inside Tater's shared Spudex execution loop.\n"
+        "You are the model inside Tater's shared Terminal execution loop.\n"
         "You can answer when appropriate, run one terminal command at a time, or ask Tater's websearch helper for command guidance.\n"
         "Return exactly one strict JSON object.\n"
         "Allowed shapes:\n"
@@ -383,7 +383,7 @@ async def run_spudex_chat_turn(
         "{\"type\":\"search\",\"query\":\"how to check free memory on macOS command line\",\"reason\":\"...\"}\n"
         "Rules:\n"
         "- Include a compact plan array when the task has multiple steps: [{\"step\":\"Inspect\",\"status\":\"in_progress\"}]. Keep it updated as you work.\n"
-        "- task_mode=true means Hydra selected Spudex for an executable request. Do not exit with a promise or unsupported success claim.\n"
+        "- task_mode=true means Hydra selected Terminal for an executable request. Do not exit with a promise or unsupported success claim.\n"
         "- A reply must include outcome. Use completed only when the requested task is complete, answer for a direct factual/conversational answer, blocked when specific user input or approval is required, and failed when attempts did not complete the task.\n"
         "- This is a conversation. Use prior session_context, including user corrections like 'no, do it like this'.\n"
         "- Use system_info to choose commands that fit the host OS and path style.\n"
@@ -450,7 +450,7 @@ async def run_spudex_chat_turn(
     for step in range(max_steps):
         await _emit_progress(
             progress_callback,
-            text=f"Spudex is planning step {step + 1} of {max_steps}.",
+            text=f"Terminal is planning step {step + 1} of {max_steps}.",
             phase="spudex_planning",
             session_id=session_id,
             step=step + 1,
@@ -483,13 +483,13 @@ async def run_spudex_chat_turn(
                 timeout=max(15, int(settings.get("command_timeout_sec") or 45)),
             )
         except asyncio.TimeoutError:
-            final_text = "Spudex chat planning timed out while waiting for the model. Try again or use a smaller/faster Spudex model."
+            final_text = "Terminal chat planning timed out while waiting for the model. Try again or use a smaller/faster Terminal model."
             append_session_log(session_id, stream="system", text=final_text, level="error")
             finish_spudex_plan(session_id, success=False)
             update_spudex_session(session_id, status="failed", finished_ts=time.time())
             return action_failure(code="spudex_chat_llm_timeout", message=final_text)
         except Exception as exc:
-            final_text = f"Spudex chat planning failed: {exc}"
+            final_text = f"Terminal chat planning failed: {exc}"
             append_session_log(session_id, stream="system", text=final_text, level="error")
             finish_spudex_plan(session_id, success=False)
             update_spudex_session(session_id, status="failed", finished_ts=time.time())
@@ -502,12 +502,12 @@ async def run_spudex_chat_turn(
             append_session_log(
                 session_id,
                 stream="system",
-                text="Spudex received malformed controller JSON and is attempting one repair.",
+                text="Terminal received malformed controller JSON and is attempting one repair.",
                 level="warning",
             )
             await _emit_progress(
                 progress_callback,
-                text="Spudex is repairing an invalid planning response.",
+                text="Terminal is repairing an invalid planning response.",
                 phase="spudex_repair",
                 session_id=session_id,
                 step=step + 1,
@@ -522,7 +522,7 @@ async def run_spudex_chat_turn(
             )
             repair_used = True
             if not decision:
-                final_text = "Spudex could not parse the model's planning response after one repair attempt."
+                final_text = "Terminal could not parse the model's planning response after one repair attempt."
                 append_session_log(session_id, stream="system", text=final_text, level="error")
                 finish_spudex_plan(session_id, success=False)
                 update_spudex_session(session_id, status="failed", finished_ts=time.time())
@@ -546,7 +546,7 @@ async def run_spudex_chat_turn(
             append_session_log(
                 session_id,
                 stream="system",
-                text="Spudex received a controller object with no valid action and is attempting one repair.",
+                text="Terminal received a controller object with no valid action and is attempting one repair.",
                 level="warning",
             )
             decision = await _repair_spudex_decision(
@@ -624,7 +624,7 @@ async def run_spudex_chat_turn(
                         update_spudex_session(session_id, status="succeeded", finished_ts=time.time())
                         await _emit_progress(
                             progress_callback,
-                            text="Spudex completed the task.",
+                            text="Terminal completed the task.",
                             phase="spudex_completed",
                             session_id=session_id,
                             step=step + 1,
@@ -645,7 +645,7 @@ async def run_spudex_chat_turn(
                         f" {instruction_note}".rstrip()
                     )
                     loop_notes.append(note)
-                    append_session_log(session_id, stream="system", text=f"Continuing Spudex loop: {continuation.get('reason')}", level="warning")
+                    append_session_log(session_id, stream="system", text=f"Continuing Terminal loop: {continuation.get('reason')}", level="warning")
                     continue
             set_spudex_memory_summary(session_id, decision.get("memory_summary") or final_text)
             append_session_log(session_id, stream="assistant", text=final_text, level="info")
@@ -653,7 +653,7 @@ async def run_spudex_chat_turn(
             update_spudex_session(session_id, status="succeeded", finished_ts=time.time())
             await _emit_progress(
                 progress_callback,
-                text="Spudex completed the task.",
+                text="Terminal completed the task.",
                 phase="spudex_completed",
                 session_id=session_id,
                 step=step + 1,
@@ -669,14 +669,14 @@ async def run_spudex_chat_turn(
         if kind == "search":
             query = str(decision.get("query") or decision.get("question") or "").strip()
             if not query:
-                final_text = "I wanted to search, but no search query was provided. Please rephrase the spudex request."
+                final_text = "I wanted to search, but no search query was provided. Please rephrase the Terminal request."
                 append_session_log(session_id, stream="assistant", text=final_text, level="warning")
                 finish_spudex_plan(session_id, success=False)
                 update_spudex_session(session_id, status="failed", finished_ts=time.time())
                 return action_failure(code="spudex_chat_bad_search", message=final_text)
             await _emit_progress(
                 progress_callback,
-                text="Spudex is researching command guidance.",
+                text="Terminal is researching command guidance.",
                 phase="spudex_action",
                 session_id=session_id,
                 step=step + 1,
@@ -688,7 +688,7 @@ async def run_spudex_chat_turn(
             ran_searches.append(search_row)
             await _emit_progress(
                 progress_callback,
-                text="Spudex research completed." if search_row.get("ok") else "Spudex research did not return a usable result.",
+                text="Terminal research completed." if search_row.get("ok") else "Terminal research did not return a usable result.",
                 phase="spudex_step_result",
                 session_id=session_id,
                 step=step + 1,
@@ -717,7 +717,7 @@ async def run_spudex_chat_turn(
             path = str(decision.get("path") or decision.get("filename") or "").strip()
             content = decision.get("content")
             if not path:
-                final_text = "I wanted to write a file, but no file path was provided. Please rephrase the spudex request."
+                final_text = "I wanted to write a file, but no file path was provided. Please rephrase the Terminal request."
                 append_session_log(session_id, stream="assistant", text=final_text, level="warning")
                 finish_spudex_plan(session_id, success=False)
                 update_spudex_session(session_id, status="failed", finished_ts=time.time())
@@ -727,14 +727,14 @@ async def run_spudex_chat_turn(
                 append_session_log(
                     session_id,
                     stream="system",
-                    text=str((approval.get("error") or {}).get("message") or "Spudex approval required."),
+                    text=str((approval.get("error") or {}).get("message") or "Terminal approval required."),
                     level="warning",
                 )
                 finish_spudex_plan(session_id, success=False)
                 update_spudex_session(session_id, status="blocked", finished_ts=time.time())
                 await _emit_progress(
                     progress_callback,
-                    text=str((approval.get("error") or {}).get("message") or "Spudex approval required."),
+                    text=str((approval.get("error") or {}).get("message") or "Terminal approval required."),
                     phase="spudex_blocked",
                     session_id=session_id,
                     step=step + 1,
@@ -748,7 +748,7 @@ async def run_spudex_chat_turn(
                 append_session_log(session_id, stream="assistant", text=reason, level="info")
             await _emit_progress(
                 progress_callback,
-                text=f"Spudex is preparing {path}.",
+                text=f"Terminal is preparing {path}.",
                 phase="spudex_action",
                 session_id=session_id,
                 step=step + 1,
@@ -777,7 +777,7 @@ async def run_spudex_chat_turn(
             if bool(write_result.get("pending")):
                 final_text = str(
                     (write_result.get("error") or {}).get("message")
-                    or "The file change is waiting for approval in the Spudex UI."
+                    or "The file change is waiting for approval in the Terminal UI."
                 )
                 finish_spudex_plan(session_id, success=False)
                 update_spudex_session(session_id, status="blocked", finished_ts=time.time())
@@ -802,7 +802,7 @@ async def run_spudex_chat_turn(
                 return failure
             await _emit_progress(
                 progress_callback,
-                text=f"Spudex {'updated' if write_result.get('ok') else 'could not update'} {path}.",
+                text=f"Terminal {'updated' if write_result.get('ok') else 'could not update'} {path}.",
                 phase="spudex_step_result",
                 session_id=session_id,
                 step=step + 1,
@@ -857,7 +857,7 @@ async def run_spudex_chat_turn(
                 append_session_log(
                     session_id,
                     stream="system",
-                    text=str((approval.get("error") or {}).get("message") or "Spudex approval required."),
+                    text=str((approval.get("error") or {}).get("message") or "Terminal approval required."),
                     level="warning",
                 )
                 finish_spudex_plan(session_id, success=False)
@@ -868,7 +868,7 @@ async def run_spudex_chat_turn(
                 append_session_log(session_id, stream="assistant", text=reason, level="info")
             await _emit_progress(
                 progress_callback,
-                text="Spudex is verifying the result.",
+                text="Terminal is verifying the result.",
                 phase="spudex_action",
                 session_id=session_id,
                 step=step + 1,
@@ -909,7 +909,7 @@ async def run_spudex_chat_turn(
             )
             await _emit_progress(
                 progress_callback,
-                text="Spudex verification passed." if result.get("ok") else "Spudex verification failed.",
+                text="Terminal verification passed." if result.get("ok") else "Terminal verification failed.",
                 phase="spudex_step_result",
                 session_id=session_id,
                 step=step + 1,
@@ -935,7 +935,7 @@ async def run_spudex_chat_turn(
             continue
 
         if kind != "command":
-            final_text = "I could not decide whether to answer or run a command. Please rephrase the spudex request."
+            final_text = "I could not decide whether to answer or run a command. Please rephrase the Terminal request."
             append_session_log(session_id, stream="assistant", text=final_text, level="warning")
             finish_spudex_plan(session_id, success=False)
             update_spudex_session(session_id, status="failed", finished_ts=time.time())
@@ -971,7 +971,7 @@ async def run_spudex_chat_turn(
             append_session_log(
                 session_id,
                 stream="system",
-                text=str((approval.get("error") or {}).get("message") or "Spudex approval required."),
+                text=str((approval.get("error") or {}).get("message") or "Terminal approval required."),
                 level="warning",
             )
             finish_spudex_plan(session_id, success=False)
@@ -983,7 +983,7 @@ async def run_spudex_chat_turn(
         command_label = command_text or " ".join(argv[:3]).strip() or "command"
         await _emit_progress(
             progress_callback,
-            text=f"Spudex is running: {command_label}",
+            text=f"Terminal is running: {command_label}",
             phase="spudex_action",
             session_id=session_id,
             step=step + 1,
@@ -1019,9 +1019,9 @@ async def run_spudex_chat_turn(
         await _emit_progress(
             progress_callback,
             text=(
-                "Spudex command completed."
+                "Terminal command completed."
                 if result.get("ok")
-                else f"Spudex command {str(result.get('status') or 'failed')}."
+                else f"Terminal command {str(result.get('status') or 'failed')}."
             ),
             phase="spudex_step_result",
             session_id=session_id,
@@ -1048,7 +1048,7 @@ async def run_spudex_chat_turn(
         if not bool(result.get("ok")) and result.get("error"):
             continue
 
-    final_text = "Spudex reached its configured step limit before completing the task."
+    final_text = "Terminal reached its configured step limit before completing the task."
     append_session_log(session_id, stream="assistant", text=final_text, level="warning")
     finish_spudex_plan(session_id, success=False)
     update_spudex_session(session_id, status="incomplete", finished_ts=time.time())

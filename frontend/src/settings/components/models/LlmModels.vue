@@ -28,6 +28,7 @@ const providerOptions = [
   { value: "mlx_lm", label: "MLX LM", short: "Optimized for Apple Silicon", mark: "MX", local: true },
   { value: "spud_link", label: "Paired Spud Hub", short: "Route through your hub", mark: "SP", local: false },
 ] as const;
+const taterOpenWebuiProviderOptions = providerOptions.filter((option) => option.value !== "spud_link");
 const roles = [
   { id: "astraeus", label: "Astraeus", description: "Planning and orchestration." },
   { id: "thanatos", label: "Thanatos", description: "Critique, safety, and verification." },
@@ -61,6 +62,7 @@ const servers = computed<JsonRow[]>(() => {
 const selectedRuntimeProviders = computed(() => {
   const selected = new Set<string>();
   servers.value.forEach((row) => { if (local(row.provider)) selected.add(provider(row)); });
+  if (local(props.draft.tater_open_webui_llm_provider)) selected.add(String(props.draft.tater_open_webui_llm_provider));
   if (local(props.draft.spudex_llm_provider)) selected.add(String(props.draft.spudex_llm_provider));
   if (props.draft.hydra_beast_mode_enabled) roles.forEach((role) => {
     const value = String(props.draft[roleKey(role.id, "provider")] || "");
@@ -73,6 +75,7 @@ const activeContextConfig = computed(() => contextConfigs[runtimeProvider.value]
 const selectedRuntimeModel = computed(() => {
   const route = servers.value.find((row) => provider(row) === runtimeProvider.value && String(row.model || "").trim());
   if (route) return String(route.model || "").trim();
+  if (String(props.draft.tater_open_webui_llm_provider || "") === runtimeProvider.value) return String(props.draft.tater_open_webui_llm_model || "").trim();
   if (String(props.draft.spudex_llm_provider || "") === runtimeProvider.value) return String(props.draft.spudex_llm_model || "").trim();
   for (const role of roles) {
     if (String(props.draft[roleKey(role.id, "provider")] || "") === runtimeProvider.value) return String(props.draft[roleKey(role.id, "model")] || "").trim();
@@ -226,6 +229,21 @@ function setSpudexMode(mode: string) {
   props.draft.spudex_llm_provider = mode === "base" ? "" : String(props.draft.spudex_llm_provider || "openai_compatible");
   changed();
 }
+function setTaterOpenWebuiMode(mode: string) {
+  if (mode === "base") {
+    props.draft.tater_open_webui_llm_provider = "";
+  } else if (!props.draft.tater_open_webui_llm_provider) {
+    const primary = servers.value[0] || {};
+    const primaryProvider = provider(primary) === "spud_link" ? "openai_compatible" : provider(primary);
+    props.draft.tater_open_webui_llm_provider = primaryProvider;
+    props.draft.tater_open_webui_llm_host = primaryProvider === "openai_compatible" || primaryProvider === "llama_cpp_remote" ? String(primary.host || "") : "";
+    props.draft.tater_open_webui_llm_port = primaryProvider === "openai_compatible" || primaryProvider === "llama_cpp_remote" ? String(primary.port || "") : "";
+    props.draft.tater_open_webui_llm_model = primaryProvider === "openai_compatible" || primaryProvider === "llama_cpp_remote" || local(primaryProvider) ? String(primary.model || "") : "";
+    props.draft.tater_open_webui_llm_api_key = primaryProvider === "openai_compatible" || primaryProvider === "llama_cpp_remote" ? String(primary.api_key || "") : "";
+    props.draft.tater_open_webui_llm_llama_cpp_slot = "";
+  }
+  changed();
+}
 function setContextTokens(event: Event) {
   const input = event.target as HTMLInputElement;
   const raw = Number(input.value || activeContextConfig.value.fallback);
@@ -280,7 +298,8 @@ onMounted(() => { void refreshContextEstimate(); });
   <section class="tm-stack tm-llm-workspace">
     <nav class="tv-tabs tm-inner-tabs tm-llm-tabs" aria-label="LLM model areas">
       <button type="button" :class="{ active: area === 'base' }" @click="area = 'base'">Base model pool</button>
-      <button type="button" :class="{ active: area === 'spudex' }" @click="area = 'spudex'">Spudex</button>
+      <button type="button" :class="{ active: area === 'tater-open-webui' }" @click="area = 'tater-open-webui'">Tater Open WebUI</button>
+      <button type="button" :class="{ active: area === 'spudex' }" @click="area = 'spudex'">Terminal</button>
       <button type="button" :class="{ active: area === 'beast' }" @click="area = 'beast'">Beast mode</button>
     </nav>
     <div v-if="remoteError" class="tv-notice error">{{ remoteError }}</div>
@@ -378,9 +397,21 @@ onMounted(() => { void refreshContextEstimate(); });
       <article v-else class="tm-form-card tm-llm-no-runtime"><i>✓</i><div><h3>No local runtime to tune</h3><p>The selected routes run on an API, remote server, or paired Spud Hub. Their connection settings are already shown above.</p></div></article>
     </template>
 
+    <template v-else-if="area === 'tater-open-webui'">
+      <article class="tm-form-card tm-llm-special-card"><header><div><span class="tv-eyebrow">Tater Open WebUI model</span><h3>Choose the model for coding chat</h3><p>Keep using Tater's Base model pool, or give linked Tater Open WebUI clients a dedicated coding model. This route applies only to <code>tater/base</code>; Hydra calls keep their existing model routing.</p></div></header><div class="tm-llm-mode-picker"><button type="button" :class="{ active: !draft.tater_open_webui_llm_provider }" @click="setTaterOpenWebuiMode('base')"><i>1</i><span><strong>Use Base model</strong><small>Same behavior as today</small></span></button><button type="button" :class="{ active: Boolean(draft.tater_open_webui_llm_provider) }" @click="setTaterOpenWebuiMode('dedicated')"><i>2</i><span><strong>Dedicated coding model</strong><small>Only for Tater Open WebUI Base calls</small></span></button></div></article>
+      <article v-if="draft.tater_open_webui_llm_provider" class="tm-form-card tm-llm-special-card"><header><div><h3>Dedicated Tater Open WebUI route</h3><p>Only linked Tater Open WebUI <code>tater/base</code> requests use this route.</p></div></header><div class="tm-llm-provider-picker compact" role="group" aria-label="Tater Open WebUI provider"><button v-for="option in taterOpenWebuiProviderOptions" :key="option.value" type="button" :class="{ active: draft.tater_open_webui_llm_provider === option.value }" @click="setDraftProvider('tater_open_webui_llm_provider', option.value)"><i>{{ option.mark }}</i><span><strong>{{ option.label }}</strong><small>{{ option.short }}</small></span><b aria-hidden="true">✓</b></button></div><div class="tm-field-grid">
+        <label v-if="apiProvider(draft.tater_open_webui_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Host or base URL</span><input v-model="draft.tater_open_webui_llm_host" type="text" placeholder="http://127.0.0.1" @input="changed" /></label>
+        <label v-if="apiProvider(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">Port</span><input v-model="draft.tater_open_webui_llm_port" type="number" min="1" max="65535" placeholder="1234" @input="changed" /></label>
+        <label v-if="apiProvider(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">API key</span><input v-model="draft.tater_open_webui_llm_api_key" type="password" autocomplete="off" placeholder="Optional" @input="changed" /></label>
+        <label v-if="local(draft.tater_open_webui_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="draft.tater_open_webui_llm_model" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft.tater_open_webui_llm_model && !modelInstalled(draft.tater_open_webui_llm_provider, draft.tater_open_webui_llm_model)" :value="draft.tater_open_webui_llm_model">Current: {{ draft.tater_open_webui_llm_model }}</option><option v-for="model in modelsFor(draft.tater_open_webui_llm_provider)" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></label>
+        <label v-else class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft.tater_open_webui_llm_model" type="text" placeholder="Coding model id or server alias" @input="changed" /></label>
+        <label v-if="llama(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">Prompt cache slot</span><input v-model="draft.tater_open_webui_llm_llama_cpp_slot" type="number" min="0" :max="Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)" placeholder="Auto" @input="changed" /><small>Blank lets Tater assign the slot automatically.</small></label>
+      </div></article>
+    </template>
+
     <template v-else-if="area === 'spudex'">
-      <article class="tm-form-card tm-llm-special-card"><header><div><span class="tv-eyebrow">Spudex model</span><h3>Choose how Spudex thinks</h3><p>Share Tater's Base route for a simple setup, or give coding work a dedicated model.</p></div></header><div class="tm-llm-mode-picker"><button type="button" :class="{ active: !draft.spudex_llm_provider }" @click="setSpudexMode('base')"><i>1</i><span><strong>Use Base model</strong><small>Recommended for most setups</small></span></button><button type="button" :class="{ active: Boolean(draft.spudex_llm_provider) }" @click="setSpudexMode('dedicated')"><i>2</i><span><strong>Dedicated model</strong><small>Separate model just for Spudex</small></span></button></div></article>
-      <article v-if="draft.spudex_llm_provider" class="tm-form-card tm-llm-special-card"><header><div><h3>Dedicated Spudex route</h3><p>Only settings for the selected provider are shown.</p></div></header><div class="tm-llm-provider-picker compact" role="group" aria-label="Spudex provider"><button v-for="option in providerOptions" :key="option.value" type="button" :class="{ active: draft.spudex_llm_provider === option.value }" @click="setDraftProvider('spudex_llm_provider', option.value)"><i>{{ option.mark }}</i><span><strong>{{ option.label }}</strong><small>{{ option.short }}</small></span><b aria-hidden="true">✓</b></button></div><div class="tm-field-grid">
+      <article class="tm-form-card tm-llm-special-card"><header><div><span class="tv-eyebrow">Terminal model</span><h3>Choose how Terminal thinks</h3><p>Share Tater's Base route for a simple setup, or give terminal and coding work a dedicated model.</p></div></header><div class="tm-llm-mode-picker"><button type="button" :class="{ active: !draft.spudex_llm_provider }" @click="setSpudexMode('base')"><i>1</i><span><strong>Use Base model</strong><small>Recommended for most setups</small></span></button><button type="button" :class="{ active: Boolean(draft.spudex_llm_provider) }" @click="setSpudexMode('dedicated')"><i>2</i><span><strong>Dedicated model</strong><small>Separate model just for Terminal</small></span></button></div></article>
+      <article v-if="draft.spudex_llm_provider" class="tm-form-card tm-llm-special-card"><header><div><h3>Dedicated Terminal route</h3><p>Only settings for the selected provider are shown.</p></div></header><div class="tm-llm-provider-picker compact" role="group" aria-label="Terminal provider"><button v-for="option in providerOptions" :key="option.value" type="button" :class="{ active: draft.spudex_llm_provider === option.value }" @click="setDraftProvider('spudex_llm_provider', option.value)"><i>{{ option.mark }}</i><span><strong>{{ option.label }}</strong><small>{{ option.short }}</small></span><b aria-hidden="true">✓</b></button></div><div class="tm-field-grid">
         <label v-if="apiProvider(draft.spudex_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Host or base URL</span><input v-model="draft.spudex_llm_host" type="text" placeholder="http://127.0.0.1:1234" @input="changed" /></label>
         <label v-if="local(draft.spudex_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="draft.spudex_llm_model" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft.spudex_llm_model && !modelInstalled(draft.spudex_llm_provider, draft.spudex_llm_model)" :value="draft.spudex_llm_model">Current: {{ draft.spudex_llm_model }}</option><option v-for="model in modelsFor(draft.spudex_llm_provider)" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></label>
         <label v-else-if="draft.spudex_llm_provider !== 'spud_link'" class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft.spudex_llm_model" type="text" @input="changed" /></label>

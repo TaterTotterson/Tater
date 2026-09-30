@@ -257,7 +257,8 @@ class VueSettingsTests(unittest.TestCase):
 
         self.assertIn("SpudLinkSettingsPanel", settings_app)
         self.assertIn("activeTab === 'spudhub'", settings_app)
-        self.assertIn("postJson<SpudLinkSettings>(props.endpoint, settingsPayload(overrides))", spud_link)
+        self.assertIn("postJson<SpudLinkSettings>(", spud_link)
+        self.assertIn("settingsPayload(overrides)", spud_link)
         self.assertIn("getJson<JsonRow>(props.statusEndpoint)", spud_link)
         self.assertIn("postJson<JsonRow>(props.pairingCodeEndpoint", spud_link)
         self.assertIn("postJson<JsonRow>(props.connectEndpoint", spud_link)

@@ -416,7 +416,7 @@ def _terminal_listing(argv: List[str], *, cwd: Path) -> Dict[str, Any]:
             "ok": False,
             "error": {
                 "code": "terminal_builtin_usage",
-                "message": f"{command} accepts one directory at a time in Spudex Terminal.",
+                "message": f"{command} accepts one directory at a time in Terminal.",
             },
         }
     try:
@@ -500,7 +500,7 @@ def _run_terminal_builtin_in_session(
                 "ok": False,
                 "error": {
                     "code": "terminal_builtin_usage",
-                    "message": "pwd does not accept arguments in Spudex Terminal.",
+                    "message": "pwd does not accept arguments in Terminal.",
                 },
             }
         else:
@@ -863,7 +863,7 @@ def create_spudex_session(
     now = _now()
     meta = {
         "id": session_id,
-        "label": str(label or "Spudex"),
+        "label": str(label or "Terminal"),
         "argv": list(argv or []),
         "command": " ".join(str(item) for item in (argv or [])),
         "cwd": str(cwd or ""),
@@ -921,7 +921,7 @@ def list_spudex_processes(*, model_only: bool = False) -> list[Dict[str, Any]]:
             {
                 "session_id": session_id,
                 "pid": getattr(process, "pid", None),
-                "label": str(meta.get("label") or meta.get("command") or "Spudex process"),
+                "label": str(meta.get("label") or meta.get("command") or "Terminal process"),
                 "command": str(meta.get("command") or ""),
                 "cwd": str(meta.get("cwd_display") or meta.get("cwd") or ""),
                 "source": source or "unknown",
@@ -941,7 +941,7 @@ def list_spudex_processes(*, model_only: bool = False) -> list[Dict[str, Any]]:
             {
                 "session_id": session_id,
                 "pid": None,
-                "label": str(meta.get("label") or meta.get("command") or "Spudex task"),
+                "label": str(meta.get("label") or meta.get("command") or "Terminal task"),
                 "command": str(meta.get("command") or meta.get("goal") or ""),
                 "cwd": str(meta.get("cwd_display") or meta.get("cwd") or ""),
                 "source": source or "unknown",
@@ -966,7 +966,7 @@ def write_spudex_file_in_session(
     try:
         resolved = resolve_spudex_file_path(path, cwd=cwd)
     except Exception as exc:
-        message = str(exc) or "Spudex file path was rejected."
+        message = str(exc) or "Terminal file path was rejected."
         append_session_log(session_id, stream="policy", text=message, level="error")
         return {"ok": False, "session_id": session_id, "error": {"code": "path_rejected", "message": message}}
 
@@ -992,7 +992,7 @@ def write_spudex_file_in_session(
                 "session_id": session_id,
                 "pending": True,
                 "change": change,
-                "error": {"code": "file_approval_required", "message": "File write is waiting for approval in the Spudex UI."},
+                "error": {"code": "file_approval_required", "message": "File write is waiting for approval in the Terminal UI."},
             }
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if append:
@@ -1024,7 +1024,7 @@ def write_spudex_file_in_session(
             "append": bool(append),
         }
     except Exception as exc:
-        message = str(exc) or "Failed to write spudex file."
+        message = str(exc) or "Failed to write Terminal file."
         append_session_log(session_id, stream="system", text=message, level="error")
         return {"ok": False, "session_id": session_id, "error": {"code": "write_failed", "message": message}}
 
@@ -1130,7 +1130,7 @@ async def run_argv_in_session(
     max_output_bytes = max(16384, int(settings.get("max_output_bytes") or 262144))
     max_processes = max(1, int(settings.get("max_concurrent_processes") or 4))
     if session_id not in _ACTIVE_PROCESSES and len(_ACTIVE_PROCESSES) >= max_processes:
-        message = f"Spudex is already running the configured limit of {max_processes} processes."
+        message = f"Terminal is already running the configured limit of {max_processes} processes."
         append_session_log(session_id, stream="system", text=message, level="error")
         update_spudex_session(session_id, status="blocked", finished_ts=_now(), returncode=None)
         return {
@@ -1182,7 +1182,7 @@ async def run_argv_in_session(
         session_id,
         stream="policy",
         text=(
-            "Full access is on: running directly on the host without Spudex command restrictions or execution isolation."
+            "Full access is on: running directly on the host without Terminal command restrictions or execution isolation."
             if full_access
             else f"Execution isolation: {isolation_backend}."
         ),
@@ -1193,7 +1193,7 @@ async def run_argv_in_session(
     try:
         async with _SESSION_LOCK:
             if session_id not in _ACTIVE_PROCESSES and len(_ACTIVE_PROCESSES) >= max_processes:
-                raise RuntimeError(f"Spudex process limit reached ({max_processes}).")
+                raise RuntimeError(f"Terminal process limit reached ({max_processes}).")
             process, process_launcher = await _spawn_command_process(
                 exec_argv,
                 cwd=cwd,
@@ -1374,7 +1374,7 @@ async def run_spudex_command_once(
     source: str = "hydra",
     platform: str = "webui",
     redis_client: Any = None,
-    label: str = "Spudex command",
+    label: str = "Terminal command",
     background: bool = False,
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
@@ -1408,7 +1408,7 @@ async def start_spudex_command(
     source: str = "ui",
     platform: str = "webui",
     redis_client: Any = None,
-    label: str = "Spudex command",
+    label: str = "Terminal command",
     background: bool = False,
 ) -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
@@ -1501,7 +1501,7 @@ async def stop_spudex_session(session_id: str) -> Dict[str, Any]:
     if process is None:
         meta = _load_meta(session_id)
         if not meta:
-            return {"ok": False, "error": {"code": "session_not_found", "message": "Spudex session was not found."}}
+            return {"ok": False, "error": {"code": "session_not_found", "message": "Terminal session was not found."}}
         if task is not None and not task.done():
             task.cancel()
             append_session_log(session_id, stream="system", text="Stop requested from UI.", level="warning")
@@ -1512,7 +1512,7 @@ async def stop_spudex_session(session_id: str) -> Dict[str, Any]:
             _ACTIVE_TASKS.pop(clean_id, None)
             return {"ok": True, "session": meta, "stopped": True}
         if str(meta.get("status") or "").strip().lower() in {"queued", "running"}:
-            append_session_log(session_id, stream="system", text="No active Spudex process was found; marking stale session stopped.", level="warning")
+            append_session_log(session_id, stream="system", text="No active Terminal process was found; marking stale session stopped.", level="warning")
             finish_spudex_plan(session_id, success=False)
             meta = _load_meta(session_id)
             meta.update({"status": "stopped", "finished_ts": _now(), "updated_ts": _now(), "returncode": None})
@@ -1570,7 +1570,7 @@ async def shutdown_spudex_runtime() -> Dict[str, Any]:
             append_session_log(
                 session_id,
                 stream="system",
-                text="Spudex stopped because Tater is shutting down.",
+                text="Terminal stopped because Tater is shutting down.",
                 level="warning",
             )
         update_spudex_session(
@@ -1594,14 +1594,14 @@ async def shutdown_spudex_runtime() -> Dict[str, Any]:
 async def close_spudex_session(session_id: str) -> Dict[str, Any]:
     clean_id = "".join(ch for ch in str(session_id or "") if ch.isalnum() or ch in {"_", "-"})
     if not clean_id:
-        return {"ok": False, "error": {"code": "session_not_found", "message": "Spudex session was not found."}}
+        return {"ok": False, "error": {"code": "session_not_found", "message": "Terminal session was not found."}}
 
     meta_path, log_path = _paths(clean_id)
     meta = _load_meta(clean_id)
     task = _ACTIVE_TASKS.get(clean_id)
     has_session_files = meta_path.exists() or log_path.exists()
     if not meta and not has_session_files and clean_id not in _ACTIVE_PROCESSES and task is None:
-        return {"ok": False, "error": {"code": "session_not_found", "message": "Spudex session was not found."}}
+        return {"ok": False, "error": {"code": "session_not_found", "message": "Terminal session was not found."}}
 
     status = str(meta.get("status") or "").strip().lower()
     if clean_id in _ACTIVE_PROCESSES or (task is not None and not task.done()) or status in {"queued", "running"}:

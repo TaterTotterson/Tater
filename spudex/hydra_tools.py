@@ -58,12 +58,12 @@ def _little_spud_admin_failure(access: Dict[str, Any]) -> Dict[str, Any]:
     person_name = str(access.get("person_name") or "").strip()
     if bool(access.get("matched")) and person_name:
         message = (
-            "Spudex terminal access from Little Spud is restricted to People marked as admin. "
+            "Terminal access from Little Spud is restricted to People marked as admin. "
             f"{person_name} is not marked admin."
         )
     else:
         message = (
-            "Spudex terminal access from Little Spud requires this Little Spud identity "
+            "Terminal access from Little Spud requires this Little Spud identity "
             "to be linked to a Person marked as admin in Settings > People."
         )
     return action_failure(
@@ -141,12 +141,12 @@ def _approval_required(
     label = str(actor or "Hydra").strip() or "Hydra"
     return action_failure(
         code="spudex_approval_required",
-        message=f"Spudex approval is enabled, so {label} did not run: {' '.join(argv)}",
+        message=f"Terminal approval is enabled, so {label} did not run: {' '.join(argv)}",
         diagnosis={"argv": json.dumps(argv)},
         needs=[
-            "Turn off Spudex approval in the Spudex tab, or run the command manually from the Spudex tab."
+            "Turn off Terminal approval in the Terminal tab, or run the command manually from the Terminal tab."
         ],
-        say_hint="Explain that the spudex command needs approval in the Tater UI.",
+        say_hint="Explain that the Terminal command needs approval in the Tater UI.",
     )
 
 
@@ -228,7 +228,7 @@ async def run_spudex_loop_task(
     llm_client: Any,
     redis_client: Any,
     source: str = "spudex_chat",
-    approval_actor: str = "Spudex chat",
+    approval_actor: str = "Terminal chat",
     session_id: str = "",
     progress_callback: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
@@ -260,8 +260,8 @@ async def run_spudex_hydra_tool(
     if not spudex_enabled_for_platform(platform, redis_client):
         return action_failure(
             code="spudex_disabled",
-            message="Tater Spudex is disabled for this platform.",
-            say_hint="Explain that the Spudex feature must be enabled in the Spudex tab first.",
+            message="Tater Terminal is disabled for this platform.",
+            say_hint="Explain that Terminal must be enabled in the Terminal tab first.",
         )
     access = _little_spud_admin_access(
         platform=platform,

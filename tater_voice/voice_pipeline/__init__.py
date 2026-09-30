@@ -431,6 +431,7 @@ DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
 NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS = 96
 NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS = 192
+NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS = 128
 NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ = 48000
 NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S = 60.0
 
@@ -4871,6 +4872,7 @@ def _prepare_native_media_asset_sync(
     data = bytes(media_bytes or b"")
     mime = _text(media_type).split(";", 1)[0].strip().lower() or "application/octet-stream"
     safe_filename = Path(_text(filename) or "satellite-audio.bin").name
+    kind = _lower(playback_kind)
     if not data:
         return {
             "bytes": b"",
@@ -4878,7 +4880,11 @@ def _prepare_native_media_asset_sync(
             "filename": safe_filename,
             "transcoded": False,
         }
-    if _native_media_is_mp3(data, mime, safe_filename):
+    # Music playback may intentionally preserve the source asset, but a
+    # background scene runs beside a second decoder for the spoken overlay.
+    # Normalize background MP3s too so a high-bitrate upload (and any embedded
+    # artwork/metadata streams) cannot starve one member of a stereo pair.
+    if _native_media_is_mp3(data, mime, safe_filename) and kind != "background":
         return {
             "bytes": data,
             "media_type": "audio/mpeg",
@@ -4903,11 +4909,14 @@ def _prepare_native_media_asset_sync(
             "warning": "ffmpeg is unavailable",
         }
 
-    kind = _lower(playback_kind)
     bitrate_kbps = (
-        NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS
-        if kind in {"music", "background", "media"}
-        else NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS
+        NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS
+        if kind == "background"
+        else (
+            NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS
+            if kind in {"music", "media"}
+            else NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS
+        )
     )
     command = [
         ffmpeg,

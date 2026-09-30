@@ -2313,13 +2313,13 @@ async def _generate_recovery_text(
     )
 
 
-async def _normalize_tool_result_for_minos(
+async def _normalize_tool_result_for_checker(
     *,
     result_payload: Any,
     llm_client: Any,
     platform: str,
 ) -> Dict[str, Any]:
-    return await execution.normalize_tool_result_for_minos(
+    return await execution.normalize_tool_result_for_checker(
         result_payload=result_payload,
         llm_client=llm_client,
         platform=platform,
@@ -2365,7 +2365,7 @@ async def _execute_tool_call(
         canonical_tool_name_fn=_canonical_tool_name,
         attach_origin_fn=_attach_origin,
         normalize_plugin_result_fn=normalize_verba_result,
-        normalize_tool_result_for_minos_fn=_normalize_tool_result_for_minos,
+        normalize_tool_result_for_checker_fn=_normalize_tool_result_for_checker,
         action_failure_fn=action_failure,
         plugin_display_name_fn=verba_display_name,
         expand_plugin_platforms_fn=expand_verba_platforms,
@@ -4017,6 +4017,7 @@ async def _tool_start_progress(
     current_plan_step: Optional[Dict[str, str]],
     completed_steps_count: int,
     total_plan_steps: int,
+    target_context: Optional[Dict[str, Any]] = None,
     platform_preamble: str = "",
     max_tokens: Optional[int] = 56,
 ) -> tuple[str, Dict[str, Any]]:
@@ -4031,6 +4032,35 @@ async def _tool_start_progress(
     if instruction.lower().startswith("to "):
         instruction = instruction[3:].lstrip()
     instruction = instruction.rstrip(".!?")
+
+    argument_preview: Dict[str, Any] = {}
+    raw_arguments = (tool_call or {}).get("arguments")
+    if isinstance(raw_arguments, dict):
+        for raw_key, raw_value in raw_arguments.items():
+            key = str(raw_key or "").strip()
+            lowered_key = key.lower()
+            if not key or lowered_key == "origin" or any(
+                secret_part in lowered_key
+                for secret_part in ("password", "secret", "token", "api_key", "apikey", "credential", "cookie", "authorization")
+            ):
+                continue
+            if isinstance(raw_value, (str, int, float, bool)):
+                preview_value = _short_text(raw_value, limit=120)
+            elif isinstance(raw_value, list) and raw_value:
+                preview_value = _short_text(", ".join(str(item) for item in raw_value[:3]), limit=120)
+            else:
+                preview_value = ""
+            if preview_value:
+                argument_preview[key] = preview_value
+            if len(argument_preview) >= 6:
+                break
+
+    compact_target_context: Dict[str, str] = {}
+    if isinstance(target_context, dict):
+        for key in ("device", "room", "area"):
+            value = _short_text(target_context.get(key), limit=80)
+            if value:
+                compact_target_context[key] = value
 
     step_total = max(0, int(total_plan_steps or 0))
     step_index = 0
@@ -4049,6 +4079,8 @@ async def _tool_start_progress(
     progress_prompt_payload: Dict[str, Any] = {
         "tool": tool_name,
         "instruction": instruction or round_request_text or "",
+        "arguments": argument_preview or None,
+        "target_context": compact_target_context or None,
         "step_index": step_index if step_index > 0 else None,
         "step_total": step_total if step_total > 0 else None,
         "stage": stage or None,
@@ -5037,7 +5069,6 @@ async def _run_hydra_turn_impl(
     state_update_deterministic_count = 0
     state_update_llm_count = 0
     tool_ms_total = 0.0
-    checker_ms_total = 0.0
     hermes_chat_ms_total = 0.0
     hermes_final_ms_total = 0.0
     astraeus_debug: Dict[str, Any] = {}
@@ -5064,7 +5095,6 @@ async def _run_hydra_turn_impl(
         "attempts": 0,
     }
     planned_tool: Optional[Dict[str, Any]] = None
-    checker_action = "FINAL_ANSWER"
     checker_reason = "complete"
     tool_result_for_checker: Optional[Dict[str, Any]] = None
     raw_tool_payload_out: Optional[Dict[str, Any]] = None
@@ -5247,6 +5277,43 @@ async def _run_hydra_turn_impl(
         rounds_left = effective_max_rounds == 0 or rounds_used < effective_max_rounds
         tools_left = effective_max_tool_calls == 0 or tool_calls_used < effective_max_tool_calls
         return rounds_left and tools_left
+
+    async def _run_tool_progress(
+        *,
+        progress_args: Dict[str, Any],
+        tool_call: Dict[str, Any],
+    ) -> float:
+        """Generate and deliver progress without blocking post-tool processing."""
+        progress_started = time.perf_counter()
+        wait_text, wait_payload = await _tool_start_progress(**progress_args)
+        generation_ms = (time.perf_counter() - progress_started) * 1000.0
+        func = _canonical_tool_name(str(tool_call.get("function") or "").strip())
+        await execution.dispatch_wait_callback(
+            wait_callback,
+            func=func,
+            plugin_obj=registry.get(func),
+            wait_text=wait_text,
+            wait_payload=wait_payload,
+        )
+        return generation_ms
+
+    async def _settle_tool_progress(task: Optional[asyncio.Task[float]]) -> None:
+        nonlocal progress_ms_total
+        if task is None:
+            return
+        try:
+            progress_ms_total += max(0.0, float(await task))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Progress delivery is best-effort and must not fail a completed tool.
+            return
+
+    async def _cancel_tool_progress(task: Optional[asyncio.Task[float]]) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _remember_failed_source_for_step(step_id: str, candidate: Any) -> str:
         normalized = _canonical_web_source_url(candidate)
@@ -5450,7 +5517,9 @@ async def _run_hydra_turn_impl(
             state_update_deterministic_count=state_update_deterministic_count,
             state_update_llm_count=state_update_llm_count,
             tool_ms=int(max(0.0, tool_ms_total)),
-            checker_ms=int(max(0.0, checker_ms_total)),
+            # Retained in the ledger schema for older metrics readers. The
+            # retired Minos checker is no longer part of the active turn path.
+            checker_ms=0,
             hermes_chat_ms=int(max(0.0, hermes_chat_ms_total)),
             hermes_final_ms=int(max(0.0, hermes_final_ms_total)),
             total_ms=total_ms,
@@ -5830,19 +5899,26 @@ async def _run_hydra_turn_impl(
             ),
             "completed_steps_count": len(completed_tool_steps),
             "total_plan_steps": structured_plan_total_steps,
+            "target_context": {
+                "device": origin_payload.get("device_name"),
+                "room": origin_payload.get("room_name"),
+                "area": origin_payload.get("area_name"),
+            },
             "platform_preamble": tool_platform_preamble,
             "max_tokens": None,
         }
-        progress_started = time.perf_counter()
+        progress_delivery_task: Optional[asyncio.Task[float]] = None
         try:
             if admin_guard is None:
-                # Progress copy and the actual tool are independent. Starting
-                # both now removes an entire LLM round trip from the critical
-                # path while still emitting the generated status before Hydra
-                # publishes the tool result.
-                progress_task = asyncio.create_task(_tool_start_progress(**progress_args))
-                tool_task = asyncio.create_task(
-                    _execute_tool_call(
+                # Progress generation/playback and tool execution are independent.
+                # Keep the spoken status, but let result normalization, state
+                # updates, and final rendering continue underneath its playback.
+                doer_exec, progress_delivery_task = await execution.execute_while_progress_runs(
+                    progress_awaitable=_run_tool_progress(
+                        progress_args=progress_args,
+                        tool_call=planned_tool,
+                    ),
+                    tool_awaitable=_execute_tool_call(
                         llm_client=llm_client_ai_calls,
                         tool_call=planned_tool,
                         platform=platform,
@@ -5857,30 +5933,10 @@ async def _run_hydra_turn_impl(
                         wait_text="",
                         wait_payload=None,
                         admin_guard=None,
-                    )
+                    ),
                 )
-                try:
-                    wait_text, wait_payload = await progress_task
-                    progress_ms_total += (
-                        time.perf_counter() - progress_started
-                    ) * 1000.0
-                    await execution.dispatch_wait_callback(
-                        wait_callback,
-                        func=_canonical_tool_name(str(planned_tool.get("function") or "").strip()),
-                        plugin_obj=registry.get(
-                            _canonical_tool_name(str(planned_tool.get("function") or "").strip())
-                        ),
-                        wait_text=wait_text,
-                        wait_payload=wait_payload,
-                    )
-                    doer_exec = await tool_task
-                except BaseException:
-                    for pending_task in (progress_task, tool_task):
-                        if not pending_task.done():
-                            pending_task.cancel()
-                    await asyncio.gather(progress_task, tool_task, return_exceptions=True)
-                    raise
             else:
+                progress_started = time.perf_counter()
                 wait_text, wait_payload = await _tool_start_progress(**progress_args)
                 progress_ms_total += (
                     time.perf_counter() - progress_started
@@ -5910,9 +5966,9 @@ async def _run_hydra_turn_impl(
             safe_tool_payload_out = _hermes_safe_tool_payload(raw_tool_payload_out)
             if safe_tool_payload_out:
                 raw_tool_payload_history.append(safe_tool_payload_out)
-        tool_result_for_checker = doer_exec.get("minos_result")
+        tool_result_for_checker = doer_exec.get("checker_result")
         if not isinstance(tool_result_for_checker, dict):
-            tool_result_for_checker = doer_exec.get("checker_result")
+            tool_result_for_checker = doer_exec.get("minos_result")
         normalized_checker_result_out = tool_result_for_checker if isinstance(tool_result_for_checker, dict) else None
         if isinstance(tool_result_for_checker, dict) and not bool(tool_result_for_checker.get("ok")):
             tool_failures_count += 1
@@ -6031,6 +6087,7 @@ async def _run_hydra_turn_impl(
             if final_render_task is not None and not final_render_task.done():
                 final_render_task.cancel()
                 await asyncio.gather(final_render_task, return_exceptions=True)
+            await _cancel_tool_progress(progress_delivery_task)
             raise
 
         if tool_succeeded:
@@ -6058,6 +6115,7 @@ async def _run_hydra_turn_impl(
                         tool_result_payload=tool_result_for_checker,
                     )
                 )
+                await _settle_tool_progress(progress_delivery_task)
                 checker_reason = _tool_failure_checker_reason(tool_result_for_checker) or "complete"
                 return _finish(
                     text=final_text_candidate,
@@ -6066,6 +6124,7 @@ async def _run_hydra_turn_impl(
                     checker_reason_value=checker_reason,
                     retry_tool=queued_retry_tool_for_ledger,
                 )
+            await _settle_tool_progress(progress_delivery_task)
             checker_reason = "continue_plan_step"
             critic_continue_count += 1
             continue
@@ -6077,6 +6136,7 @@ async def _run_hydra_turn_impl(
             user_request_text=turn_request_text or user_text,
             tool_result_payload=tool_result_for_checker,
         )
+        await _settle_tool_progress(progress_delivery_task)
         return _finish(
             text=final_text_candidate or _failed_step_message(None, turn_draft_response, tool_result_for_checker),
             status="blocked",

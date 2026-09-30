@@ -77,6 +77,7 @@ STEREO_STARTUP_REALIGN_THRESHOLD_US = 40_000
 STEREO_STARTUP_REALIGN_MAX_US = 2_000_000
 STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES = 480
 STEREO_REJOIN_REALIGN_MAX_FRAMES = 480_000
+STEREO_REBUFFER_REALIGN_TIMEOUT_S = 1.5
 STEREO_PHASE_EMA_ALPHA = 0.25
 STEREO_PHASE_STABLE_SAMPLES = 2
 MEDIA_RENDER_START_GUARD_MS = 250
@@ -3323,8 +3324,19 @@ async def _adjust_audible_timeline_session(
         not isinstance(playheads.get(selector), dict) for selector in selectors
     ):
         return
-    if now_us - int(session.get("last_phase_sample_server_us") or 0) < int(
-        STEREO_ADJUST_INTERVAL_S * 1_000_000
+    pending_rejoin = session.setdefault("pending_rejoin_realign", {})
+    if not isinstance(pending_rejoin, dict):
+        pending_rejoin = {}
+        session["pending_rejoin_realign"] = pending_rejoin
+    urgent_rebuffer_realign = any(
+        selector in pending_rejoin
+        and _as_bool((playheads.get(selector) or {}).get("rebuffering"), False)
+        for selector in selectors
+    )
+    if (
+        not urgent_rebuffer_realign
+        and now_us - int(session.get("last_phase_sample_server_us") or 0)
+        < int(STEREO_ADJUST_INTERVAL_S * 1_000_000)
     ):
         return
 
@@ -3382,18 +3394,15 @@ async def _adjust_audible_timeline_session(
     correction_modes: Dict[str, str] = {}
     phase_errors: Dict[str, float] = {}
     raw_phase_errors: Dict[str, float] = {}
-    pending_rejoin = session.setdefault("pending_rejoin_realign", {})
-    if not isinstance(pending_rejoin, dict):
-        pending_rejoin = {}
-        session["pending_rejoin_realign"] = pending_rejoin
     sampled_phase = False
     for selector in selectors:
         row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
+        rebuffering = _as_bool(row.get("rebuffering"), False)
         if (
             not row
-            or _as_bool(row.get("rebuffering"), False)
             or _text(row.get("session_id")) != _text(session.get("session_id"))
             or "rendered_frames" not in row
+            or (rebuffering and selector not in pending_rejoin)
         ):
             continue
         satellite_time_us = _as_int(row.get("satellite_time_us"), 0)
@@ -3435,6 +3444,8 @@ async def _adjust_audible_timeline_session(
                 raw_phase_errors[selector] = phase_error_frames
                 continue
             pending_rejoin.pop(selector, None)
+        if rebuffering:
+            continue
         if abs(smoothed_error_frames) < threshold_frames:
             phase_directions[selector] = 0
             phase_stable_samples[selector] = 0
@@ -3506,6 +3517,13 @@ async def _adjust_audible_timeline_session(
                 correction + STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES
             ):
                 pending_rejoin.pop(selector, None)
+            row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
+            if _as_bool(row.get("rebuffering"), False):
+                rebuffer_started = session.setdefault("rebuffer_started_server_us", {})
+                if isinstance(rebuffer_started, dict):
+                    # A still-stalled member may need another bounded jump, but
+                    # give the decoder time to apply this one before retrying.
+                    rebuffer_started[selector] = now_us
         if rejoin_applied:
             _vp().logger.warning(
                 "[native-media] realigned playback after rejoin group=%s corrections=%s",
@@ -3742,7 +3760,8 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
     if not isinstance(playheads, dict):
         playheads = {}
         session["playheads"] = playheads
-    playheads[selector] = {**dict(payload), "received_server_us": _monotonic_us()}
+    received_server_us = _monotonic_us()
+    playheads[selector] = {**dict(payload), "received_server_us": received_server_us}
     learning_samples = session.setdefault("latency_learning_samples", {})
     observed_latencies = session.setdefault("observed_render_latency_frames", {})
     actual_starts = session.get("actual_starts_us") if isinstance(session.get("actual_starts_us"), dict) else {}
@@ -3821,10 +3840,47 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         ),
     }
     health_rows[selector] = current_health
-    if current_health["rejoin_count"] > _as_int(previous.get("rejoin_count"), 0):
-        pending_rejoin = session.setdefault("pending_rejoin_realign", {})
-        if isinstance(pending_rejoin, dict):
-            pending_rejoin[selector] = current_health["rejoin_count"]
+    pending_rejoin = session.setdefault("pending_rejoin_realign", {})
+    rebuffer_started = session.setdefault("rebuffer_started_server_us", {})
+    if not isinstance(pending_rejoin, dict):
+        pending_rejoin = {}
+        session["pending_rejoin_realign"] = pending_rejoin
+    if not isinstance(rebuffer_started, dict):
+        rebuffer_started = {}
+        session["rebuffer_started_server_us"] = rebuffer_started
+
+    was_rebuffering = _as_bool(previous.get("rebuffering"), False)
+    is_rebuffering = current_health["rebuffering"]
+    if is_rebuffering:
+        rebuffer_started.setdefault(selector, received_server_us)
+    else:
+        rebuffer_started.pop(selector, None)
+
+    rejoin_count_advanced = current_health["rejoin_count"] > _as_int(
+        previous.get("rejoin_count"),
+        0,
+    )
+    rejoin_frames_advanced = (
+        current_health["rejoin_frames"] >= STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES
+        and current_health["rejoin_frames"]
+        > _as_int(previous.get("rejoin_frames"), 0)
+    )
+    rebuffer_timed_out = (
+        is_rebuffering
+        and received_server_us - _as_int(rebuffer_started.get(selector), received_server_us)
+        >= int(STEREO_REBUFFER_REALIGN_TIMEOUT_S * 1_000_000)
+    )
+    if (
+        rejoin_count_advanced
+        or (was_rebuffering and not is_rebuffering)
+        or rejoin_frames_advanced
+        or rebuffer_timed_out
+    ):
+        pending_rejoin[selector] = max(
+            1,
+            current_health["rejoin_count"],
+            current_health["rejoin_frames"],
+        )
     health_changed = (
         current_health["rebuffering"]
         or current_health["underrun_events"] > _as_int(previous.get("underrun_events"), 0)

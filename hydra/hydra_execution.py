@@ -1,4 +1,5 @@
-from typing import Any, Callable, Dict, List, Optional
+import asyncio
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 def _is_awaitable(value: Any) -> bool:
@@ -52,7 +53,26 @@ async def dispatch_wait_callback(
     )
 
 
-async def normalize_tool_result_for_minos(
+async def execute_while_progress_runs(
+    *,
+    progress_awaitable: Awaitable[float],
+    tool_awaitable: Awaitable[Any],
+) -> Tuple[Any, "asyncio.Task[float]"]:
+    """Return the tool result without waiting for progress delivery to finish."""
+    progress_task = asyncio.create_task(progress_awaitable)
+    tool_task = asyncio.create_task(tool_awaitable)
+    try:
+        tool_result = await tool_task
+    except BaseException:
+        for pending_task in (progress_task, tool_task):
+            if not pending_task.done():
+                pending_task.cancel()
+        await asyncio.gather(progress_task, tool_task, return_exceptions=True)
+        raise
+    return tool_result, progress_task
+
+
+async def normalize_tool_result_for_checker(
     *,
     result_payload: Any,
     llm_client: Any,
@@ -71,7 +91,8 @@ async def normalize_tool_result_for_minos(
     safe_data = result_for_llm_fn(normalized) if isinstance(normalized, dict) else {}
     execution_data: Dict[str, Any] = {}
     if isinstance(safe_data, dict):
-        # Keep execution-relevant data compact for Thanatos/Minos; drop presentation-only duplicates.
+        # Keep execution-relevant data compact for the remaining Hydra steps;
+        # drop presentation-only duplicates.
         core_data = safe_data.get("data")
         if isinstance(core_data, dict):
             execution_data.update(core_data)
@@ -141,7 +162,7 @@ async def execute_tool_call(
     canonical_tool_name_fn: Callable[[str], str],
     attach_origin_fn: Callable[..., Dict[str, Any]],
     normalize_plugin_result_fn: Callable[[Any], Dict[str, Any]],
-    normalize_tool_result_for_minos_fn: Callable[..., Any],
+    normalize_tool_result_for_checker_fn: Callable[..., Any],
     action_failure_fn: Callable[..., Dict[str, Any]],
     plugin_display_name_fn: Callable[[Any], str],
     expand_plugin_platforms_fn: Callable[[Any], List[str]],
@@ -166,12 +187,17 @@ async def execute_tool_call(
         guard_result = admin_guard(func)
         if guard_result:
             payload = normalize_plugin_result_fn(guard_result)
-            minos_result = await normalize_tool_result_for_minos_fn(
+            checker_result = await normalize_tool_result_for_checker_fn(
                 result_payload=payload,
                 llm_client=llm_client,
                 platform=platform,
             )
-            return {"payload": payload, "minos_result": minos_result, "checker_result": minos_result}
+            return {
+                "payload": payload,
+                "checker_result": checker_result,
+                # Compatibility alias for older callers and stored payload readers.
+                "minos_result": checker_result,
+            }
 
     await _dispatch_wait_callback(
         wait_callback,
@@ -266,15 +292,20 @@ async def execute_tool_call(
             )
             normalized_payload = normalize_plugin_result_fn(exec_result.get("result"))
 
-    minos_result = await normalize_tool_result_for_minos_fn(
+    checker_result = await normalize_tool_result_for_checker_fn(
         result_payload=normalized_payload,
         llm_client=llm_client,
         platform=platform,
     )
-    return {"payload": normalized_payload, "minos_result": minos_result, "checker_result": minos_result}
+    return {
+        "payload": normalized_payload,
+        "checker_result": checker_result,
+        # Compatibility alias for older callers and stored payload readers.
+        "minos_result": checker_result,
+    }
 
 
-async def normalize_tool_result_for_checker(
+async def normalize_tool_result_for_minos(
     *,
     result_payload: Any,
     llm_client: Any,
@@ -284,7 +315,8 @@ async def normalize_tool_result_for_checker(
     result_for_llm_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
     short_text_fn: Callable[..., str],
 ) -> Dict[str, Any]:
-    return await normalize_tool_result_for_minos(
+    """Compatibility alias retained for integrations using the old Minos name."""
+    return await normalize_tool_result_for_checker(
         result_payload=result_payload,
         llm_client=llm_client,
         platform=platform,

@@ -378,7 +378,7 @@
 .tater-vue-shell .runtime-summary-vue-host { min-width: 0; }
 .toast-root .toast-item { border: 0; text-align: left; cursor: pointer; }
 
-/* Spudex */
+/* Terminal (the internal view id remains spudex for compatibility) */
 .view-root[data-view="spudex"] > .tater-spudex-mount { width: 100%; }
 .tsx-spudex {
   --tsx-potato: #d89b58;

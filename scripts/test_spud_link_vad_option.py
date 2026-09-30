@@ -59,7 +59,8 @@ class SpudLinkVadOptionTests(unittest.TestCase):
             self.assertIn(f"area === '{tab}'", speech_panel)
         self.assertIn('<ModelFields :sections="visibleVoiceSections"', speech_panel)
         self.assertLess(speech_panel.index("Speech recognition"), speech_panel.index("<ModelFields"))
-        self.assertIn('{ id: "vad", label: "Speech-End Detection (VAD)"', route_ui)
+        self.assertIn('id: "vad"', route_ui)
+        self.assertIn('label: "Speech-End Detection (VAD)"', route_ui)
         self.assertIn("function routeUsesHub", route_ui)
         self.assertIn("The Hub detects when speech ends; this Tater keeps a local fallback", route_ui)
 

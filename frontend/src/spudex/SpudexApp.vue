@@ -62,8 +62,8 @@ const chatMessages = computed<ChatMessageType[]>(() => {
 const nonChatLogs = computed(() => logs.value.filter((entry: JsonRow) => !["user", "assistant"].includes(canonical(entry.stream))));
 const liveStatus = computed(() => {
   const session = currentChatSession.value || selectedSession.value;
-  if (busy.value === "chat") return "Starting Spudex chat…";
-  if (!session) return activeCount.value ? `${activeCount.value} active Spudex process${activeCount.value === 1 ? "" : "es"}` : "Ready for a Spudex task.";
+  if (busy.value === "chat") return "Starting Terminal chat…";
+  if (!session) return activeCount.value ? `${activeCount.value} active Terminal process${activeCount.value === 1 ? "" : "es"}` : "Ready for a Terminal task.";
   const plan = Array.isArray(session.plan) ? session.plan : [];
   const current = plan.find((row: JsonRow) => canonical(row.status) === "in_progress");
   if (current?.step) return `Working: ${current.step}`;
@@ -151,7 +151,7 @@ async function refreshState(quiet = false) {
     props.state.payload = await getJson<SpudexPayload>(props.options.endpoints.root);
     ensureSelections();
     syncSettings();
-  } catch (requestError) { if (!quiet) notify(requestError instanceof Error ? requestError.message : "Spudex refresh failed.", "error"); }
+  } catch (requestError) { if (!quiet) notify(requestError instanceof Error ? requestError.message : "Terminal refresh failed.", "error"); }
   finally { if (!quiet && busy.value === "refresh") busy.value = ""; }
 }
 async function fetchLogs(sessionId: string, after: number): Promise<JsonRow> {
@@ -198,8 +198,8 @@ function schedulePoll() {
 
 async function sendChat() {
   const message = chatMessage.value.trim();
-  if (!message) { notify("Enter a Spudex chat message first.", "error"); return; }
-  if (chatBusy.value) { notify("Spudex is still working in this chat.", "error"); return; }
+  if (!message) { notify("Enter a Terminal chat message first.", "error"); return; }
+  if (chatBusy.value) { notify("Terminal is still working in this chat.", "error"); return; }
   busy.value = "chat";
   try {
     const sessionId = canonical(selectedSession.value?.source) === "spudex_chat" ? selectedSessionId.value : "";
@@ -207,18 +207,18 @@ async function sendChat() {
     const nextId = text(result.session?.id);
     if (nextId) selectSession(nextId, false);
     chatMessage.value = "";
-    notify("Spudex task started.");
+    notify("Terminal task started.");
     await refreshState(true); await refreshLogs(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Spudex chat failed.", "error"); }
+  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Terminal chat failed.", "error"); }
   finally { busy.value = ""; }
 }
 async function newChat() {
   busy.value = "new-chat";
   try {
-    const result = await postJson<JsonRow>(props.options.endpoints.chatSession, { label: "New Spudex chat" });
-    selectSession(text(result.session?.id), false); chatMessage.value = ""; notify("New Spudex chat created.");
+    const result = await postJson<JsonRow>(props.options.endpoints.chatSession, { label: "New Terminal chat" });
+    selectSession(text(result.session?.id), false); chatMessage.value = ""; notify("New Terminal chat created.");
     await refreshState(true); await refreshLogs(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "New Spudex chat failed.", "error"); }
+  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "New Terminal chat failed.", "error"); }
   finally { busy.value = ""; }
 }
 async function runCommand() {
@@ -231,12 +231,12 @@ async function runCommand() {
     manualCwd.value = text(result.session?.cwd) || manualCwd.value;
     manualCwdDisplay.value = text(result.session?.cwd_display) || manualCwdDisplay.value;
     selectSession(id, false); selectManualSession(id, false, true); command.value = "";
-    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : result.builtin ? "Command completed." : "Spudex session started.");
+    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : result.builtin ? "Command completed." : "Terminal session started.");
     await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(false)]);
   } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Command failed.", "error"); }
   finally { busy.value = ""; }
 }
-async function stopSession(id: string, label = "Spudex session") {
+async function stopSession(id: string, label = "Terminal session") {
   if (!id) return;
   busy.value = `stop-${id}`;
   try { await postJson<JsonRow>(sessionEndpoint(id, "/stop")); notify(`${label} stop requested.`); await refreshState(true); }
@@ -245,13 +245,13 @@ async function stopSession(id: string, label = "Spudex session") {
 }
 async function closeSession(session: JsonRow) {
   const id = text(session.id); if (!id) return;
-  if (isActive(session) && !window.confirm("Close this running Spudex session? Its active command will be stopped.")) return;
+  if (isActive(session) && !window.confirm("Close this running Terminal session? Its active command will be stopped.")) return;
   busy.value = `close-${id}`;
   try {
     await requestDelete(sessionEndpoint(id));
     if (id === selectedSessionId.value) selectSession("", false);
     if (id === manualSessionId.value) selectManualSession("", false);
-    notify("Spudex session closed."); await refreshState(true);
+    notify("Terminal session closed."); await refreshState(true);
   } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Close failed.", "error"); }
   finally { busy.value = ""; }
 }
@@ -265,8 +265,8 @@ async function saveSettings() {
   busy.value = "settings";
   try {
     await postJson<JsonRow>(props.options.endpoints.settings, { values: { ...settingsDraft, allowed_platforms: settingsDraft.allowed_platforms?.length ? settingsDraft.allowed_platforms : ["webui"] } });
-    settingsDirty.value = false; notify("Spudex settings saved."); await refreshState(true); syncSettings(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Spudex settings failed.", "error"); }
+    settingsDirty.value = false; notify("Terminal settings saved."); await refreshState(true); syncSettings(true);
+  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Terminal settings failed.", "error"); }
   finally { busy.value = ""; }
 }
 function togglePlatform(value: string, checked: boolean) {
@@ -294,9 +294,9 @@ defineExpose({ refresh: () => refreshAll(false) });
 <template>
   <div class="tater-vue-surface tsx-spudex">
     <header class="tsx-spudex-header">
-      <div class="tsx-brand"><span class="tsx-spud-mark" aria-hidden="true"><i /><i /><i /></span><div><span class="tv-eyebrow">Tater agent workspace</span><h1>Spudex</h1></div></div>
-      <nav class="tv-tabs tsx-tabs" aria-label="Spudex sections"><button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'workbench' && activeCount">{{ activeCount }}</span></button></nav>
-      <div class="tsx-header-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy ? 'Working' : 'Live' }}</span><button class="tv-button tsx-icon-button" type="button" aria-label="Refresh Spudex" title="Refresh" @click="refreshAll(false)">↻</button></div>
+      <div class="tsx-brand"><span class="tsx-spud-mark" aria-hidden="true"><i /><i /><i /></span><div><span class="tv-eyebrow">Tater agent workspace</span><h1>Terminal</h1></div></div>
+      <nav class="tv-tabs tsx-tabs" aria-label="Terminal sections"><button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'workbench' && activeCount">{{ activeCount }}</span></button></nav>
+      <div class="tsx-header-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy ? 'Working' : 'Live' }}</span><button class="tv-button tsx-icon-button" type="button" aria-label="Refresh Terminal" title="Refresh" @click="refreshAll(false)">↻</button></div>
     </header>
     <div v-if="notice || error" class="tv-notice" :class="{ error: Boolean(error) }">{{ error || notice }}</div>
 
@@ -304,9 +304,9 @@ defineExpose({ refresh: () => refreshAll(false) });
       <div class="tsx-spud-bar">
         <div class="tsx-session-switcher">
           <span class="tsx-bar-label"><i :class="{ live: selectedActive }" />Session</span>
-          <select :value="selectedSessionId" aria-label="Selected Spudex session" @change="selectSessionFromEvent">
+          <select :value="selectedSessionId" aria-label="Selected Terminal session" @change="selectSessionFromEvent">
             <option v-if="!sessions.length" value="">No sessions yet</option>
-            <option v-for="session in sessions" :key="session.id" :value="String(session.id)">{{ session.label || session.command || 'Spudex session' }} · {{ statusLabel(session.status) }}</option>
+            <option v-for="session in sessions" :key="session.id" :value="String(session.id)">{{ session.label || session.command || 'Terminal session' }} · {{ statusLabel(session.status) }}</option>
           </select>
           <button class="tv-button primary tsx-new-chat" type="button" :disabled="busy === 'new-chat'" @click="newChat"><span aria-hidden="true">＋</span> New chat</button>
         </div>
@@ -314,7 +314,7 @@ defineExpose({ refresh: () => refreshAll(false) });
           <span class="tsx-bar-label"><i :class="{ live: modelProcesses.length }" />Runtime <b>{{ modelProcessCount }}</b></span>
           <div class="tsx-process-strip">
             <span v-if="!modelProcesses.length" class="tsx-runtime-quiet">No tracked processes</span>
-            <article v-for="process in modelProcesses" :key="process.session_id" :title="[process.command, process.cwd].filter(Boolean).join(' · ')"><span>{{ process.label || process.command || 'Spudex process' }}</span><small>{{ process.pid ? `PID ${process.pid}` : 'Starting' }}</small><button type="button" aria-label="Stop model process" title="Kill process" @click="stopSession(String(process.session_id), 'Model process')">×</button></article>
+            <article v-for="process in modelProcesses" :key="process.session_id" :title="[process.command, process.cwd].filter(Boolean).join(' · ')"><span>{{ process.label || process.command || 'Terminal process' }}</span><small>{{ process.pid ? `PID ${process.pid}` : 'Starting' }}</small><button type="button" aria-label="Stop model process" title="Kill process" @click="stopSession(String(process.session_id), 'Model process')">×</button></article>
           </div>
         </div>
         <div class="tsx-session-tools">
@@ -326,17 +326,17 @@ defineExpose({ refresh: () => refreshAll(false) });
 
       <div class="tsx-workbench-grid">
         <section class="tv-panel tsx-chat-card">
-          <header class="tsx-pane-head"><div><span class="tsx-pane-icon chat" aria-hidden="true">✦</span><div><strong>Chat with Tater</strong><small>{{ selectedSession?.label || selectedSession?.command || 'A fresh Spudex chat' }}</small></div></div><span class="tv-state" :class="{ good: selectedActive }">{{ selectedSession ? statusLabel(selectedSession.status) : 'Ready' }}</span></header>
+          <header class="tsx-pane-head"><div><span class="tsx-pane-icon chat" aria-hidden="true">✦</span><div><strong>Chat with Tater</strong><small>{{ selectedSession?.label || selectedSession?.command || 'A fresh Terminal chat' }}</small></div></div><span class="tv-state" :class="{ good: selectedActive }">{{ selectedSession ? statusLabel(selectedSession.status) : 'Ready' }}</span></header>
           <div class="tsx-chat-scroll">
             <div v-if="currentChatSession && chatMessages.length" class="tsx-chat-feed"><ChatMessage v-for="(message, index) in chatMessages" :key="`${index}-${message.role}`" :message="message" :profile="options.profile || {}" :files-endpoint="options.endpoints.chatFiles" /></div>
-            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something through Spudex.</p></div>
+            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something through Terminal.</p></div>
           </div>
-          <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Spudex…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
+          <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Terminal…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
         </section>
 
         <section class="tv-panel tsx-terminal-card">
-          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@spudex:{{ selectedSession?.cwd_display || '~' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
-          <div class="tsx-terminal-body" role="log" aria-label="Spudex command output" aria-live="polite">
+          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@terminal:{{ selectedSession?.cwd_display || '~' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
+          <div class="tsx-terminal-body" role="log" aria-label="Terminal command output" aria-live="polite">
             <div v-if="nonChatLogs.length" class="tsx-log-list"><article v-for="entry in nonChatLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><time>{{ relativeTime(entry.ts) }}</time><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article></div>
             <div v-else class="tsx-terminal-empty"><span>&gt;_</span><strong>Waiting for activity</strong><small>Commands, tool output, and system messages will appear here.</small></div>
           </div>
@@ -348,7 +348,7 @@ defineExpose({ refresh: () => refreshAll(false) });
     <section v-else-if="activeTab === 'manual'" class="tsx-manual">
       <section class="tsx-manual-terminal">
         <header class="tsx-manual-head">
-          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Spudex Terminal</strong><small>tater@spudex:{{ manualCwdDisplay }}</small></div></div>
+          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Terminal</strong><small>tater@terminal:{{ manualCwdDisplay }}</small></div></div>
           <div class="tsx-manual-actions"><span class="tsx-manual-state"><i :class="{ live: manualActive || busy === 'run' }" />{{ busy === 'run' || manualActive ? 'Running' : selectedManualSession ? statusLabel(selectedManualSession.status) : 'Ready' }}</span><button class="tv-button" type="button" :disabled="!selectedManualSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" :disabled="!manualLogs.length" @click="manualLogs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!manualActive" @click="stopSession(manualSessionId, 'Manual session')">Stop</button></div>
         </header>
         <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
@@ -365,8 +365,8 @@ defineExpose({ refresh: () => refreshAll(false) });
     </section>
 
     <section v-else class="tsx-settings">
-      <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Spudex availability</h2><p>Choose where Hydra can expose Spudex terminal tools.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Starting folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Spudex.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
-      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Terminal capability</span><h2>Full access</h2><p>Use one setting for both Spudex Chat and the Manual terminal.</p></div><label class="tsx-master-toggle" :class="{ danger: settingsDraft.full_access }"><span>{{ settingsDraft.full_access ? 'Full access' : 'Restricted' }}</span><input v-model="settingsDraft.full_access" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: settingsDraft.full_access }"><strong>{{ settingsDraft.full_access ? 'Full access is on.' : 'Restricted mode is on.' }}</strong> {{ settingsDraft.full_access ? 'Spudex can run any command available to Tater, including shells, installs, network tools, containers, and host-affecting commands.' : 'Spudex applies its command allow-list and available OS isolation.' }}</div><div v-if="settingsDraft.full_access" class="tsx-policy-notice danger"><strong>Use with care.</strong> Commands may read environment credentials, change or delete host files, install software, control applications, and contact external services.</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code>.</span><span>Agent Lab is a starting folder, not a filesystem boundary.</span><span>Processes stay tracked and stoppable.</span></div></div>
+      <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Terminal availability</h2><p>Choose where Hydra can expose Terminal tools.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Starting folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Terminal.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
+      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Terminal capability</span><h2>Full access</h2><p>Use one setting for both Terminal Chat and the manual terminal.</p></div><label class="tsx-master-toggle" :class="{ danger: settingsDraft.full_access }"><span>{{ settingsDraft.full_access ? 'Full access' : 'Restricted' }}</span><input v-model="settingsDraft.full_access" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: settingsDraft.full_access }"><strong>{{ settingsDraft.full_access ? 'Full access is on.' : 'Restricted mode is on.' }}</strong> {{ settingsDraft.full_access ? 'Terminal can run any command available to Tater, including shells, installs, network tools, containers, and host-affecting commands.' : 'Terminal applies its command allow-list and available OS isolation.' }}</div><div v-if="settingsDraft.full_access" class="tsx-policy-notice danger"><strong>Use with care.</strong> Commands may read environment credentials, change or delete host files, install software, control applications, and contact external services.</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code>.</span><span>Agent Lab is a starting folder, not a filesystem boundary.</span><span>Processes stay tracked and stoppable.</span></div></div>
       <div class="tsx-settings-save"><span>Model routing remains in Settings → Models.</span><button class="tv-button primary" type="button" :disabled="busy === 'settings' || !settingsDirty" @click="saveSettings">{{ busy === 'settings' ? 'Saving…' : 'Save settings' }}</button></div>
     </section>
   </div>

@@ -1,42 +1,46 @@
-# Tater v1.2.3
+# Tater v1.2.4
 
-Tater v1.2.3 adds native Amazon Echo satellites, a richer display experience,
-steadier room presence, and reliability improvements throughout Tater.
+Tater v1.2.4 adds first-class Tater Open WebUI support, clearer Terminal naming,
+faster Hydra tool feedback, and more reliable native satellite audio.
 
 ## What's Changed
 
-### New Echo Satellites
+### Tater Open WebUI and Spud Link
 
-- Adds first-class support for the Echo Dot 2nd Gen and Echo Show 5 1st Gen,
-  including pairing, settings, artwork, stereo playback, and OTA updates.
-- Gives Echo Show users weather and room sensors, camera notifications, visual
-  voice states, and on-screen intercom.
-- Releases the companion [Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware)
-  repository for factory installs and satellite updates.
+- Adds a dedicated Spud Link client role and polished pairing flow for Tater
+  Open WebUI.
+- Shares `tater/base`, `tater/hydra`, speech-to-text, and text-to-speech while
+  keeping the linked WebUI's local terminal on its own host.
+- Registers each linked WebUI account as a discoverable identity so it can be
+  connected to a Person and receive the correct permissions.
+- Adds an optional dedicated coding-model route for Tater Open WebUI Base calls;
+  Hydra keeps its normal model and capability routing.
 
-### Better Presence and Audio
+### Terminal and Hydra
 
-- Adds calibrated BLE identities, live room history, home/away tracking, and a
-  dedicated Presence interface and API.
-- Keeps devices steady when multiple satellites in the same room hear them,
-  while still responding quickly when a device really moves.
-- Improves stereo reply playback, live wake-word changes, wake sounds, and
-  satellite voice feedback.
+- Renames the user-facing Spudex workspace and settings to **Terminal** while
+  preserving compatibility with existing configuration and integrations.
+- Runs Hydra's live progress generation alongside tool execution so quick tools
+  no longer wait for a status sentence before starting.
+- Makes progress updates more specific about the requested action and target
+  without exposing credentials or internal tool details.
 
-### More Reliable Day to Day
+### Native Satellite Audio
 
-- Hardens Redis recovery and cleanup so interrupted processes do not leave
-  Tater or its satellites offline.
-- Improves face identity, integration state cleanup, sensor events, weather
-  displays, and repeated announcement playback.
+- Improves stereo recovery when a satellite rebuffers or rejoins playback,
+  including bounded realignment and steadier rate corrections.
+- Makes media handoffs and live volume changes session-aware so stale cleanup
+  cannot interrupt replacement playback.
+- Normalizes background audio for reliable overlays and uses consistent public
+  playback URLs for native speech and media assets.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.2.3 through
+- macOS users already running v1.0.1 or later can install v1.2.4 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.2.3` or `latest` for the CPU image and
-  `v1.2.3-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.2.4` or `latest` for the CPU image and
+  `v1.2.4-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

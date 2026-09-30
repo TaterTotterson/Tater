@@ -25,7 +25,7 @@ const emit = defineEmits<{
 
 const tabs = [
   { id: "huggingface", label: "Hugging Face", short: "Find, download, and remove local models." },
-  { id: "routing", label: "LLM", short: "Base servers, Spudex, Beast roles, and local runtime tuning." },
+  { id: "routing", label: "LLM", short: "Base servers, Tater Open WebUI, Terminal, Beast roles, and local runtime tuning." },
   { id: "speech", label: "Speech", short: "Listening, reply voices, announcements, and playback." },
   { id: "wake", label: "Wake Word", short: "Live wake model, trainer, and STT verification settings." },
   { id: "vision", label: "Vision", short: "Still-image understanding and multimodal runtime." },
@@ -58,7 +58,7 @@ const activeSpec = computed(() => tabs.find((tab) => tab.id === activeTab.value)
 const localModels = computed<JsonRow>(() => draft.local_llm_models && typeof draft.local_llm_models === "object" ? draft.local_llm_models as JsonRow : {});
 const actionSpec = computed(() => {
   switch (activeTab.value) {
-    case "routing": return { label: "Save & Apply LLM Settings", note: "Saves Base, Spudex, and Beast routes, then loads selected local models." };
+    case "routing": return { label: "Save & Apply LLM Settings", note: "Saves Base, Tater Open WebUI, Terminal, and Beast routes, then loads selected local models." };
     case "speech": return { label: "Save Speech Settings", note: "Saves listening, reply, announcement, playback, and native voice-model settings." };
     case "wake": return { label: "Apply To All Satellites", note: "Applies the wake model and verification mode together to every connected satellite." };
     case "vision": return { label: "Save & Apply Vision Settings", note: "Saves image understanding and loads the selected local model when needed." };
@@ -171,13 +171,16 @@ function llmPayload(): JsonRow {
     "hydra_hf_transformers_context_tokens", "hydra_hf_transformers_device", "hydra_hf_transformers_dtype", "hydra_hf_transformers_device_map", "hydra_hf_transformers_attn_implementation", "hydra_hf_transformers_trust_remote_code",
     "hydra_llama_cpp_context_tokens", "hydra_llama_cpp_mtp_enabled", "hydra_llama_cpp_speculative_method", "hydra_llama_cpp_mtp_draft_tokens", "hydra_llama_cpp_mtp_draft_model", "hydra_llama_cpp_n_batch", "hydra_llama_cpp_n_ubatch", "hydra_llama_cpp_flash_attn", "hydra_llama_cpp_offload_kqv", "hydra_llama_cpp_slot_count",
     "hydra_mlx_lm_context_tokens", "hydra_mlx_lm_trust_remote_code", "hydra_mlx_lm_lazy_load", "hydra_mlx_engine_prefill_step_size", "hydra_mlx_engine_kv_bits", "hydra_mlx_engine_kv_group_size", "hydra_mlx_engine_quantized_kv_start",
-    "spudex_llm_provider", "spudex_llm_host", "spudex_llm_model", "hydra_beast_mode_enabled",
+    "spudex_llm_provider", "spudex_llm_host", "spudex_llm_model",
+    "tater_open_webui_llm_provider", "tater_open_webui_llm_host", "tater_open_webui_llm_port", "tater_open_webui_llm_model", "tater_open_webui_llm_api_key", "tater_open_webui_llm_llama_cpp_slot",
+    "hydra_beast_mode_enabled",
   ];
   const payload: JsonRow = Object.fromEntries(keys.map((key) => [key, draft[key]]));
   Object.assign(payload, {
     hydra_llm_provider: primary.provider || "openai_compatible", hydra_llm_host: primary.host || "", hydra_llm_port: primary.port || "", hydra_llm_model: primary.model || "", hydra_llm_api_key: primary.api_key || "", hydra_llama_cpp_base_slot: primary.llama_cpp_slot || "", hydra_base_servers: servers,
   });
   const targets: Array<JsonRow | null> = servers.map((row) => loadTarget(row.provider, row.model, { roles: ["Base"] }));
+  if (draft.tater_open_webui_llm_provider) targets.push(loadTarget(draft.tater_open_webui_llm_provider, draft.tater_open_webui_llm_model, { roles: ["Tater Open WebUI"] }));
   if (draft.spudex_llm_provider) targets.push(loadTarget(draft.spudex_llm_provider, draft.spudex_llm_model));
   ["astraeus", "thanatos", "hermes"].forEach((role) => {
     ["provider", "host", "port", "model", "api_key", "llama_cpp_slot"].forEach((suffix) => { payload[`hydra_llm_${role}_${suffix}`] = draft[`hydra_llm_${role}_${suffix}`] ?? ""; });
@@ -191,7 +194,8 @@ function validateLlm(): string {
   const servers = Array.isArray(draft.hydra_base_servers) ? draft.hydra_base_servers as JsonRow[] : [];
   const missingServer = servers.findIndex((row) => isLocalProvider(row.provider) && !String(row.model || "").trim());
   if (missingServer >= 0) return `Choose a downloaded model for ${missingServer === 0 ? "the primary Base server" : `fallback server ${missingServer}`}.`;
-  if (draft.spudex_llm_provider && isLocalProvider(draft.spudex_llm_provider) && !String(draft.spudex_llm_model || "").trim()) return "Choose a downloaded model for Spudex.";
+  if (draft.tater_open_webui_llm_provider && !String(draft.tater_open_webui_llm_model || "").trim()) return "Choose a model for Tater Open WebUI.";
+  if (draft.spudex_llm_provider && isLocalProvider(draft.spudex_llm_provider) && !String(draft.spudex_llm_model || "").trim()) return "Choose a downloaded model for Terminal.";
   if (draft.hydra_beast_mode_enabled) {
     for (const role of ["astraeus", "thanatos", "hermes"]) {
       if (isLocalProvider(draft[`hydra_llm_${role}_provider`]) && !String(draft[`hydra_llm_${role}_model`] || "").trim()) return `Choose a downloaded model for ${role.charAt(0).toUpperCase() + role.slice(1)}.`;

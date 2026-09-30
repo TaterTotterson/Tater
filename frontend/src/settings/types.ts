@@ -65,6 +65,7 @@ export interface SpudLinkSettings extends JsonRow {
   public_url?: string;
   pairing_enabled?: boolean;
   allow_spudlets?: boolean;
+  allow_tater_open_webui?: boolean;
   allow_little_spuds?: boolean;
   little_spud_tools_enabled?: boolean;
   telemetry_enabled?: boolean;

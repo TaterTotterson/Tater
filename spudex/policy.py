@@ -94,7 +94,7 @@ POLICY_EXPLANATIONS = {
     },
     "empty_command": {
         "title": "Empty command",
-        "reason": "The spudex did not receive a command to run.",
+        "reason": "Terminal did not receive a command to run.",
         "toggle": "",
     },
 }
@@ -157,9 +157,9 @@ def resolve_spudex_directory(value: Any, *, cwd: Path) -> Path:
 def resolve_spudex_file_path(value: Any, *, cwd: Path | None = None) -> Path:
     raw = str(value or "").strip()
     if not raw:
-        raise ValueError("Spudex file path is required.")
+        raise ValueError("Terminal file path is required.")
     if raw in {".", "/", "~", "~/"}:
-        raise ValueError("Spudex file path must name a file, not a directory.")
+        raise ValueError("Terminal file path must name a file, not a directory.")
 
     if raw.startswith("~/"):
         candidate = AGENT_LAB_DIR / raw[2:]
@@ -170,7 +170,7 @@ def resolve_spudex_file_path(value: Any, *, cwd: Path | None = None) -> Path:
 
     resolved = candidate.resolve()
     if resolved.is_dir():
-        raise ValueError("Spudex file path must name a file, not a directory.")
+        raise ValueError("Terminal file path must name a file, not a directory.")
     return resolved
 
 
@@ -237,25 +237,25 @@ def validate_spudex_command(argv: List[str], cwd: Path, settings: Dict[str, Any]
     if command_path.is_absolute() and not bool(settings.get("allow_absolute_executables")):
         return {"ok": False, "code": "absolute_executable_blocked", "message": "Use commands from PATH, not absolute executables."}
     if command in SHELL_COMMANDS and not bool(settings.get("allow_shell_commands")):
-        return {"ok": False, "code": "shell_blocked", "message": f"`{command}` shells are blocked for the Tater spudex sandbox."}
+        return {"ok": False, "code": "shell_blocked", "message": f"`{command}` shells are blocked for the Tater Terminal sandbox."}
     if command in HOST_ADMIN_COMMANDS and not bool(settings.get("allow_host_admin_commands")):
-        return {"ok": False, "code": "host_admin_blocked", "message": f"`{command}` is a host/admin command and is blocked for the Tater spudex sandbox."}
+        return {"ok": False, "code": "host_admin_blocked", "message": f"`{command}` is a host/admin command and is blocked for the Tater Terminal sandbox."}
     if command in REMOTE_CONTROL_COMMANDS and not bool(settings.get("allow_remote_control")):
-        return {"ok": False, "code": "remote_control_blocked", "message": f"`{command}` is a remote/control tool and is blocked for the Tater spudex sandbox."}
+        return {"ok": False, "code": "remote_control_blocked", "message": f"`{command}` is a remote/control tool and is blocked for the Tater Terminal sandbox."}
     if command in CONTAINER_COMMANDS and not bool(settings.get("allow_containers")):
-        return {"ok": False, "code": "container_blocked", "message": f"`{command}` container commands are blocked for the Tater spudex sandbox."}
+        return {"ok": False, "code": "container_blocked", "message": f"`{command}` container commands are blocked for the Tater Terminal sandbox."}
     if _looks_like_host_install(argv) and not bool(settings.get("allow_host_package_managers")):
         return {
             "ok": False,
             "code": "host_install_blocked",
-            "message": f"`{command}` is a host package manager. Host app installs need a dedicated installer workflow, not the sandbox spudex.",
+            "message": f"`{command}` is a host package manager. Host app installs need a dedicated installer workflow, not the Terminal sandbox.",
         }
     if _uses_inline_eval(argv) and not bool(settings.get("allow_inline_eval")):
         return {"ok": False, "code": "inline_eval_blocked", "message": "Inline interpreter eval is blocked. Write a script file and run it instead."}
     if _looks_like_network(argv) and not bool(settings.get("allow_network")):
         return {"ok": False, "code": "network_blocked", "message": f"`{command}` needs network access, which is disabled."}
     if _looks_like_install(argv) and not bool(settings.get("allow_installs")):
-        return {"ok": False, "code": "install_blocked", "message": "Install commands are disabled for the Tater spudex sandbox."}
+        return {"ok": False, "code": "install_blocked", "message": "Install commands are disabled for the Tater Terminal sandbox."}
 
     return {"ok": True}
 
@@ -269,7 +269,7 @@ def explain_policy_block(block: Dict[str, Any] | str) -> Dict[str, Any]:
         message = ""
     info = POLICY_EXPLANATIONS.get(code, {})
     title = str(info.get("title") or "Command blocked")
-    reason = str(info.get("reason") or message or "The spudex policy rejected this command.")
+    reason = str(info.get("reason") or message or "The Terminal policy rejected this command.")
     toggle = str(info.get("toggle") or "").strip()
     return {
         "code": code,

@@ -115,6 +115,7 @@ function platformLabel(value: unknown): string {
   const token = String(value || "").trim();
   const labels: Record<string, string> = {
     webui: "WebUI",
+    tater_open_webui: "Tater Open WebUI",
     little_spud: "Little Spud",
     homekit: "HomeKit",
     macos: "macOS",

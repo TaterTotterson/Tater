@@ -9,6 +9,16 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueSpudexTests(unittest.TestCase):
+    def test_terminal_is_the_user_facing_name_while_routes_stay_compatible(self) -> None:
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
+
+        self.assertIn('{ id: "spudex", label: "Terminal"', shell)
+        self.assertIn("<h1>Terminal</h1>", source)
+        self.assertIn('aria-label="Terminal command"', source)
+        self.assertNotIn('label: "Spudex"', shell)
+        self.assertNotIn("<h1>Spudex</h1>", source)
+
     def test_spudex_is_loaded_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
         shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")

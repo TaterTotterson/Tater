@@ -129,7 +129,7 @@ class NativePublicBaseUrlTests(unittest.TestCase):
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/media/[0-9a-f]+$",
         )
 
-    def test_native_media_preparation_keeps_existing_mp3_without_reencoding(self) -> None:
+    def test_native_music_preparation_keeps_existing_mp3_without_reencoding(self) -> None:
         payload = b"ID3already-compressed"
         with mock.patch.object(
             vp.subprocess,
@@ -140,12 +140,37 @@ class NativePublicBaseUrlTests(unittest.TestCase):
                 payload,
                 media_type="audio/mpeg",
                 filename="music.mp3",
-                playback_kind="background",
+                playback_kind="music",
             )
 
         self.assertEqual(prepared["bytes"], payload)
         self.assertEqual(prepared["media_type"], "audio/mpeg")
         self.assertFalse(prepared["transcoded"])
+
+    def test_native_background_mp3_is_normalized_for_overlay_playback(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=b"ID3normalized", stderr=b"")
+        with (
+            mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
+            mock.patch.object(vp.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            prepared = vp._prepare_native_media_asset_sync(
+                b"ID3high-bitrate-with-artwork",
+                media_type="audio/mpeg",
+                filename="background.mp3",
+                playback_kind="background",
+            )
+
+        self.assertEqual(prepared["bytes"], b"ID3normalized")
+        self.assertTrue(prepared["transcoded"])
+        self.assertEqual(
+            prepared["bitrate_kbps"],
+            vp.NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS,
+        )
+        command = run_mock.call_args.args[0]
+        self.assertIn("128k", command)
+        self.assertIn("48000", command)
+        self.assertIn("-vn", command)
+        self.assertIn("-map_metadata", command)
 
     def test_native_tts_mp3_url_serves_the_prepared_asset_type(self) -> None:
         with (
@@ -198,7 +223,7 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         command = run_mock.call_args.args[0]
         self.assertIn("96k", command)
 
-    def test_native_background_preparation_uses_music_bitrate_and_preserves_channels(self) -> None:
+    def test_native_background_preparation_uses_overlay_safe_bitrate_and_preserves_channels(self) -> None:
         completed = mock.Mock(returncode=0, stdout=b"ID3music", stderr=b"")
         with (
             mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
@@ -211,9 +236,9 @@ class NativePublicBaseUrlTests(unittest.TestCase):
                 playback_kind="background",
             )
 
-        self.assertEqual(prepared["bitrate_kbps"], 192)
+        self.assertEqual(prepared["bitrate_kbps"], 128)
         command = run_mock.call_args.args[0]
-        self.assertIn("192k", command)
+        self.assertIn("128k", command)
         self.assertNotIn("-ac", command)
 
     def test_remote_music_url_is_eligible_for_persistent_passthrough(self) -> None:

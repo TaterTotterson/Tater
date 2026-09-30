@@ -22,7 +22,7 @@ const viewSpecs: Array<{ id: AppView; label: string; subtitle: string }> = [
   { id: "portals", label: "Portals", subtitle: "Portal runtime controls and full Portal Shop manager." },
   { id: "cores", label: "Cores", subtitle: "Core runtime controls and full Core Shop manager." },
   { id: "integrations", label: "Integrations", subtitle: "Service endpoints, credentials, devices, runtime, and integration updates." },
-  { id: "spudex", label: "Spudex", subtitle: "Policy-controlled terminal sessions for Tater." },
+  { id: "spudex", label: "Terminal", subtitle: "Terminal sessions and coding work for Tater." },
   { id: "settings", label: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 ];
 const allowedViews = new Set(viewSpecs.map((view) => view.id));

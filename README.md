@@ -304,7 +304,7 @@ After Tater is running, open TaterOS and finish the first-run setup:
    - add more Base servers for round-robin regular AI calls
    - enable `Beast Mode` and set per-head model settings for Astraeus/Hermes
 
-Hydra model settings are saved by TaterOS and used at runtime. Base, Spudex, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
+Hydra model settings are saved by TaterOS and used at runtime. Base, Terminal, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
 
 ### Local Models
 

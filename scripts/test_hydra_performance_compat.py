@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import helpers
+import hydra as hydra_runtime
 from hydra import hydra_prompts
 from hydra import hydra_ledger
 from hydra import hydra_doer_state
@@ -1524,6 +1525,45 @@ class PromptCacheLayoutTests(unittest.TestCase):
             ascii_only_platforms=(),
         )
         self.assertGreater(prompt.index(marker), prompt.index("Execution role"))
+
+
+class SpecificProgressPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_payload_includes_action_arguments_and_voice_target(self):
+        class Client:
+            def __init__(self):
+                self.messages = []
+
+            async def chat(self, **kwargs):
+                self.messages = list(kwargs.get("messages") or [])
+                return _local_result("I'm setting a 10-second timer on the kitchen Echo Show.")
+
+        client = Client()
+        text, payload = await hydra_runtime._tool_start_progress(
+            llm_client=client,
+            platform="voice_core",
+            tool_call={
+                "function": "voicepe_remote_timer",
+                "arguments": {
+                    "query": "set a timer for 10 seconds",
+                    "api_token": "do-not-expose",
+                },
+            },
+            round_request_text="Set a timer for 10 seconds",
+            current_plan_step={
+                "id": "s1",
+                "nl": "Set a 10-second timer on the kitchen Echo Show",
+            },
+            completed_steps_count=0,
+            total_plan_steps=1,
+            target_context={"device": "Kitchen Echo Show", "area": "Kitchen"},
+        )
+
+        prompt_payload = json.loads(client.messages[-1]["content"])
+        self.assertEqual(text, "I'm setting a 10-second timer on the kitchen Echo Show.")
+        self.assertEqual(prompt_payload["arguments"]["query"], "set a timer for 10 seconds")
+        self.assertNotIn("api_token", prompt_payload["arguments"])
+        self.assertEqual(prompt_payload["target_context"]["device"], "Kitchen Echo Show")
+        self.assertEqual(payload["instruction"], "Set a 10-second timer on the kitchen Echo Show")
 
 
 class DeterministicStateUpdateTests(unittest.IsolatedAsyncioTestCase):

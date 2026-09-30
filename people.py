@@ -15,6 +15,7 @@ from verba_kernel import normalize_platform
 
 
 PEOPLE_STORE_KEY = "tater:people:v1"
+TATER_OPEN_WEBUI_IDENTITIES_KEY = "tater:tater_open_webui:identities:v1"
 DISCOVERY_MAX_KEYS = 200
 DISCOVERY_MAX_ROWS_PER_KEY = 200
 PERSON_INSTRUCTIONS_MAX_CHARS = 2000
@@ -130,6 +131,116 @@ def _client(redis_client: Any = None) -> Any:
     from helpers import redis_client as shared_redis
 
     return shared_redis
+
+
+def tater_open_webui_external_id(node_id: Any, user_id: Any) -> str:
+    """Return the stable People alias for one WebUI account on one linked installation."""
+    resolved_node_id = _text(node_id)
+    resolved_user_id = _text(user_id)
+    if not resolved_node_id or not resolved_user_id:
+        raise ValueError("node_id and user_id are required")
+    return f"{resolved_node_id}:{resolved_user_id}"
+
+
+def tater_open_webui_origin(
+    *,
+    node_id: Any,
+    node_name: Any,
+    user_id: Any,
+    user_name: Any,
+    session_id: Any = "",
+) -> Dict[str, Any]:
+    external_id = tater_open_webui_external_id(node_id, user_id)
+    label = _text(user_name) or _text(user_id)
+    return {
+        "platform": "tater_open_webui",
+        "user": label,
+        "username": label,
+        "display_name": label,
+        "user_id": external_id,
+        "external_id": external_id,
+        "webui_user_id": _text(user_id),
+        "node_id": _text(node_id),
+        "device_name": _text(node_name) or "Tater Open WebUI",
+        **({"session_id": _text(session_id)} if _text(session_id) else {}),
+    }
+
+
+def register_tater_open_webui_identity(
+    *,
+    node_id: Any,
+    node_name: Any,
+    user_id: Any,
+    user_name: Any,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    """Record an authenticated WebUI account so it can be linked in Settings > People."""
+    client = _client(redis_client)
+    external_id = tater_open_webui_external_id(node_id, user_id)
+    now = _now()
+    existing: Dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        raw = client.hget(TATER_OPEN_WEBUI_IDENTITIES_KEY, external_id)
+        parsed = json.loads(_text(raw)) if raw else {}
+        if isinstance(parsed, dict):
+            existing = parsed
+    label = _text(user_name) or _text(user_id)
+    row = {
+        "platform": "tater_open_webui",
+        "external_id": external_id,
+        "label": label,
+        "kind": "webui_user",
+        "source": f"Tater Open WebUI · {_text(node_name) or 'Linked installation'}",
+        "node_id": _text(node_id),
+        "node_name": _text(node_name) or "Tater Open WebUI",
+        "webui_user_id": _text(user_id),
+        "first_seen": float(existing.get("first_seen") or now),
+        "last_seen": now,
+        "last_updated": now,
+        "forgettable": True,
+    }
+    client.hset(TATER_OPEN_WEBUI_IDENTITIES_KEY, external_id, json.dumps(row, ensure_ascii=False))
+    return row
+
+
+def tater_open_webui_identity_status(
+    *,
+    node_id: Any,
+    node_name: Any,
+    user_id: Any,
+    user_name: Any,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    client = _client(redis_client)
+    external_id = tater_open_webui_external_id(node_id, user_id)
+    raw = None
+    with contextlib.suppress(Exception):
+        raw = client.hget(TATER_OPEN_WEBUI_IDENTITIES_KEY, external_id)
+    registered = bool(raw)
+    origin = tater_open_webui_origin(
+        node_id=node_id,
+        node_name=node_name,
+        user_id=user_id,
+        user_name=user_name,
+    )
+    resolution = resolve_person(platform="tater_open_webui", origin=origin, redis_client=client)
+    person_id = _text(resolution.get("person_id") or resolution.get("master_user_id"))
+    return {
+        "registered": registered,
+        "linked": bool(resolution.get("matched")),
+        "identity": {
+            "platform": "tater_open_webui",
+            "external_id": external_id,
+            "label": _text(user_name) or _text(user_id),
+            "node_id": _text(node_id),
+            "node_name": _text(node_name) or "Tater Open WebUI",
+        },
+        "person": {
+            "id": person_id,
+            "name": _text(resolution.get("display_name")),
+            "is_admin": bool(person_id and person_is_admin(person_id, client)),
+        } if person_id else None,
+    }
 
 
 def _normalize_alias(row: Any) -> Optional[Dict[str, Any]]:
@@ -629,6 +740,21 @@ def _discover_webui_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Di
                     )
 
 
+def _discover_tater_open_webui_aliases(
+    out: Dict[str, Dict[str, Any]],
+    linked: Dict[str, Dict[str, str]],
+    redis_client: Any,
+) -> None:
+    raw_rows: Dict[Any, Any] = {}
+    with contextlib.suppress(Exception):
+        raw_rows = redis_client.hgetall(TATER_OPEN_WEBUI_IDENTITIES_KEY) or {}
+    for raw in raw_rows.values():
+        with contextlib.suppress(Exception):
+            row = json.loads(_text(raw))
+            if isinstance(row, dict):
+                _add_discovered_alias(out, linked, row)
+
+
 def _discover_voice_aliases(out: Dict[str, Dict[str, Any]], linked: Dict[str, Dict[str, str]]) -> None:
     with contextlib.suppress(Exception):
         from tater_voice import speaker_id as esphome_speaker_id
@@ -827,6 +953,7 @@ def discovered_identities(redis_client: Any = None) -> List[Dict[str, Any]]:
         for alias in list(person.get("aliases") or []):
             _add_discovered_alias(out, linked, alias)
     _discover_webui_aliases(out, linked, client)
+    _discover_tater_open_webui_aliases(out, linked, client)
     _discover_voice_aliases(out, linked)
     _discover_portal_history_aliases(out, linked, client)
     _discover_memory_core_aliases(out, linked, client)
@@ -1200,7 +1327,12 @@ def forget_discovered_identity(*, platform: str, external_id: str, redis_client:
 
     wanted_key = _alias_key(normalized_platform, wanted_external_id)
     linked_aliases = _linked_alias_index(store)
-    if normalized_platform == "webui":
+    if normalized_platform == "tater_open_webui":
+        removed_rows = 0
+        with contextlib.suppress(Exception):
+            removed_rows = int(client.hdel(TATER_OPEN_WEBUI_IDENTITIES_KEY, wanted_external_id) or 0)
+        cleanup = {"deleted_keys": 0, "rewritten_keys": 0, "removed_rows": removed_rows}
+    elif normalized_platform == "webui":
         cleanup = _forget_webui_identity(client=client, wanted_key=wanted_key, linked_aliases=linked_aliases)
     else:
         cleanup = _forget_portal_history_identity(

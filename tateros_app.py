@@ -89,7 +89,15 @@ from system_tasks import core_task_run_manager, system_task_manager
 from tater_voice import firmware as esphome_firmware_module
 from tater_voice import home as esphome_home_module
 from tater_voice import native_satellite as native_satellite_module
-from admin_gate import DEFAULT_ADMIN_ONLY_PLUGINS, REDIS_KEY as ADMIN_GATE_KEY, get_admin_only_plugins
+from admin_gate import (
+    DEFAULT_ADMIN_ONLY_PLUGINS,
+    REDIS_KEY as ADMIN_GATE_KEY,
+    admin_denial_message,
+    get_admin_only_plugins,
+    is_admin_only_plugin,
+    origin_is_admin,
+    resolve_admin_status,
+)
 from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
 from hydra import (
     HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
@@ -109,6 +117,7 @@ from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_
 from notify import notifier_destination_catalog
 from notify.media import BLOB_PREFIX as NOTIFY_BLOB_PREFIX, load_queue_attachments
 from notify.queue import is_expired as is_notify_expired, queue_key as notify_queue_key
+from verba_result import action_failure
 from helpers import (
     DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
     DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
@@ -400,17 +409,20 @@ TATER_API_SETTINGS_KEY = "tater:openai_api:settings"
 TATER_API_MODE_DIRECT = "direct"
 TATER_API_MODE_HYDRA = "hydra"
 TATER_API_MODE_CHOICES = {TATER_API_MODE_DIRECT, TATER_API_MODE_HYDRA}
+TATER_OPEN_WEBUI_LLM_KEY_PREFIX = "tater:tater_open_webui:llm:"
 SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
 SPUD_LINK_NODES_KEY = "tater:spudlink:nodes:v1"
 SPUD_LINK_MODE_DISABLED = "disabled"
 SPUD_LINK_MODE_HUB = "hub"
 SPUD_LINK_MODE_SPUDLET = "spudlet"
 SPUD_LINK_MODE_LITTLE_SPUD = "little_spud"
+SPUD_LINK_MODE_TATER_OPEN_WEBUI = "tater_open_webui"
 SPUD_LINK_MODE_CHOICES = {
     SPUD_LINK_MODE_DISABLED,
     SPUD_LINK_MODE_HUB,
     SPUD_LINK_MODE_SPUDLET,
     SPUD_LINK_MODE_LITTLE_SPUD,
+    SPUD_LINK_MODE_TATER_OPEN_WEBUI,
 }
 SPUD_LINK_TATER_MODE_CHOICES = {
     SPUD_LINK_MODE_DISABLED,
@@ -4024,7 +4036,17 @@ def _local_llm_model_usage(provider: str, model: str) -> List[str]:
             _normalize_hydra_llm_provider(spudex_settings.get("llm_provider")) == provider_token
             and str(spudex_settings.get("llm_model") or "").strip() == model_token
         ):
-            usage.append("Spudex LLM")
+            usage.append("Terminal LLM")
+    except Exception:
+        pass
+
+    try:
+        webui_settings = _tater_open_webui_llm_settings()
+        if (
+            _normalize_hydra_llm_provider(webui_settings.get("provider")) == provider_token
+            and str(webui_settings.get("model") or "").strip() == model_token
+        ):
+            usage.append("Tater Open WebUI LLM")
     except Exception:
         pass
 
@@ -4717,6 +4739,50 @@ def _set_hydra_legacy_base_keys(base_rows: List[Dict[str, str]]) -> None:
 
 def _hydra_role_llm_key(role: str, field: str) -> str:
     return f"{HYDRA_ROLE_LLM_KEY_PREFIX}{str(role or '').strip()}:{str(field or '').strip()}"
+
+
+def _tater_open_webui_llm_key(field: str) -> str:
+    return f"{TATER_OPEN_WEBUI_LLM_KEY_PREFIX}{str(field or '').strip()}"
+
+
+def _tater_open_webui_llm_settings() -> Dict[str, str]:
+    raw_provider = str(redis_client.get(_tater_open_webui_llm_key("provider")) or "").strip()
+    return {
+        # An empty provider is intentional: it means "use the Base model pool".
+        "provider": _normalize_hydra_llm_provider(raw_provider) if raw_provider else "",
+        "host": str(redis_client.get(_tater_open_webui_llm_key("host")) or "").strip(),
+        "port": str(redis_client.get(_tater_open_webui_llm_key("port")) or "").strip(),
+        "model": str(redis_client.get(_tater_open_webui_llm_key("model")) or "").strip(),
+        "api_key": str(redis_client.get(_tater_open_webui_llm_key("api_key")) or "").strip(),
+        "llama_cpp_slot": str(redis_client.get(_tater_open_webui_llm_key("llama_cpp_slot")) or "").strip(),
+    }
+
+
+def _tater_open_webui_llm_client_kwargs() -> Dict[str, Any]:
+    settings = _tater_open_webui_llm_settings()
+    provider = str(settings.get("provider") or "").strip()
+    model = str(settings.get("model") or "").strip()
+    if not provider or not model:
+        return {"redis_conn": redis_client}
+
+    kwargs: Dict[str, Any] = {
+        "redis_conn": redis_client,
+        "provider": provider,
+        "model": model,
+    }
+    if not _is_local_hydra_llm_provider(provider):
+        endpoint = _build_hydra_llm_endpoint(settings.get("host"), settings.get("port"))
+        if not endpoint:
+            return {"redis_conn": redis_client}
+        kwargs["host"] = endpoint
+        api_key = str(settings.get("api_key") or "").strip()
+        if api_key:
+            kwargs["api_key"] = api_key
+    if _is_llama_cpp_hydra_llm_provider(provider):
+        slot = str(settings.get("llama_cpp_slot") or "").strip()
+        if slot:
+            kwargs["llama_cpp_slot"] = slot
+    return kwargs
 
 
 def _discover_runtime_webui_tabs(
@@ -5965,6 +6031,10 @@ def _normalize_spud_link_mode(value: Any, default: str = SPUD_LINK_MODE_DISABLED
         "little": SPUD_LINK_MODE_LITTLE_SPUD,
         "little_spud": SPUD_LINK_MODE_LITTLE_SPUD,
         "tools": SPUD_LINK_MODE_LITTLE_SPUD,
+        "tater_webui": SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+        "tater_open_webui": SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+        "open_webui": SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+        "webui": SPUD_LINK_MODE_TATER_OPEN_WEBUI,
     }
     token = aliases.get(token, token)
     if token in SPUD_LINK_MODE_CHOICES:
@@ -6056,13 +6126,19 @@ def _spud_link_pairing_payload(
     default_role: str = SPUD_LINK_MODE_LITTLE_SPUD,
 ) -> Dict[str, Any]:
     role = _normalize_spud_link_mode(default_role, default=SPUD_LINK_MODE_LITTLE_SPUD)
-    if role not in {SPUD_LINK_MODE_SPUDLET, SPUD_LINK_MODE_LITTLE_SPUD}:
+    if role not in {
+        SPUD_LINK_MODE_SPUDLET,
+        SPUD_LINK_MODE_LITTLE_SPUD,
+        SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+    }:
         role = SPUD_LINK_MODE_LITTLE_SPUD
     supported_roles: List[str] = []
     if bool(settings.get("allow_little_spuds")):
         supported_roles.append(SPUD_LINK_MODE_LITTLE_SPUD)
     if bool(settings.get("allow_spudlets")):
         supported_roles.append(SPUD_LINK_MODE_SPUDLET)
+    if bool(settings.get("allow_tater_open_webui")):
+        supported_roles.append(SPUD_LINK_MODE_TATER_OPEN_WEBUI)
     if supported_roles and role not in supported_roles:
         role = supported_roles[0]
     request_url = _spud_link_external_request_base_url(request)
@@ -6122,7 +6198,7 @@ def _spud_link_qr_svg_data_url(value: str) -> str:
 def _spud_link_pairing_code(role: Any) -> str:
     """Create a readable code for Spudlets and an opaque code for QR clients."""
     normalized_role = _normalize_spud_link_mode(role, default=SPUD_LINK_MODE_LITTLE_SPUD)
-    if normalized_role == SPUD_LINK_MODE_SPUDLET:
+    if normalized_role in {SPUD_LINK_MODE_SPUDLET, SPUD_LINK_MODE_TATER_OPEN_WEBUI}:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         value = "".join(secrets.choice(alphabet) for _ in range(12))
         return f"SPUD-{value[:6]}-{value[6:]}"
@@ -6173,6 +6249,7 @@ def _load_spud_link_settings(*, include_secret: bool = False) -> Dict[str, Any]:
         "public_url": str(raw.get("public_url") or "").strip(),
         "pairing_enabled": _as_bool_flag(raw.get("pairing_enabled"), default=False),
         "allow_spudlets": _as_bool_flag(raw.get("allow_spudlets"), default=True),
+        "allow_tater_open_webui": _as_bool_flag(raw.get("allow_tater_open_webui"), default=True),
         "allow_little_spuds": _as_bool_flag(raw.get("allow_little_spuds"), default=True),
         "little_spud_tools_enabled": _as_bool_flag(raw.get("little_spud_tools_enabled"), default=True),
         "telemetry_enabled": _as_bool_flag(raw.get("telemetry_enabled"), default=True),
@@ -6205,6 +6282,7 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
         "spud_link_public_url",
         "spud_link_pairing_enabled",
         "spud_link_allow_spudlets",
+        "spud_link_allow_tater_open_webui",
         "spud_link_allow_little_spuds",
         "spud_link_little_spud_tools_enabled",
         "spud_link_telemetry_enabled",
@@ -6233,6 +6311,10 @@ def _save_spud_link_settings_from_updates(updates: Dict[str, Any]) -> None:
     if "spud_link_allow_spudlets" in updates:
         mapping["allow_spudlets"] = (
             "true" if _as_bool_flag(updates.get("spud_link_allow_spudlets"), default=True) else "false"
+        )
+    if "spud_link_allow_tater_open_webui" in updates:
+        mapping["allow_tater_open_webui"] = (
+            "true" if _as_bool_flag(updates.get("spud_link_allow_tater_open_webui"), default=True) else "false"
         )
     if "spud_link_allow_little_spuds" in updates:
         mapping["allow_little_spuds"] = (
@@ -6299,7 +6381,7 @@ def _spud_link_node_score(node: Dict[str, Any]) -> float:
 def _spud_link_node_fingerprint(node: Dict[str, Any]) -> str:
     source = node if isinstance(node, dict) else {}
     role = _normalize_spud_link_mode(source.get("role"), default=SPUD_LINK_MODE_SPUDLET)
-    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+    if role not in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_TATER_OPEN_WEBUI}:
         return ""
     metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
     stable_keys = (
@@ -6315,7 +6397,9 @@ def _spud_link_node_fingerprint(node: Dict[str, Any]) -> str:
     for key in stable_keys:
         value = str(metadata.get(key) or source.get(key) or "").strip()
         if value:
-            return f"little_spud:stable:{key}:{_spud_link_dedupe_token(value)}"
+            return f"{role}:stable:{key}:{_spud_link_dedupe_token(value)}"
+    if role == SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+        return ""
     identity = _spud_link_identity_from_node(source)
     user_name = _spud_link_dedupe_token(identity.get("user_name"))
     device_name = _spud_link_dedupe_token(identity.get("device_name"))
@@ -7082,6 +7166,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
         "client_roles": {
             "little_spud": "Little Spud",
             "spudlet": "Spudlet",
+            "tater_open_webui": "Tater Open WebUI",
         },
         "local_status": {
             "node_name": settings.get("node_name") or _spud_link_local_node_name(),
@@ -7108,6 +7193,7 @@ def _spud_link_public_settings_payload() -> Dict[str, Any]:
             "notifications": is_server,
             "little_spud_clients": is_server and bool(settings.get("allow_little_spuds")),
             "spudlet_clients": is_server and bool(settings.get("allow_spudlets")),
+            "tater_open_webui_clients": is_server and bool(settings.get("allow_tater_open_webui")),
         },
         "model_routing": model_routing,
         "paired_hub": paired_hub,
@@ -7127,15 +7213,47 @@ def _extract_tater_api_token(request: Request) -> str:
 
 def _require_tater_api_request(request: Request) -> Dict[str, Any]:
     settings = _load_tater_api_settings(include_secret=True)
+    expected = str(settings.get("api_key") or "").strip()
+    supplied = _extract_tater_api_token(request)
+    if bool(settings.get("enabled")) and expected and supplied and hmac.compare_digest(supplied, expected):
+        return settings
+
+    if supplied:
+        try:
+            spud_link_settings = _require_spud_link_server_enabled()
+            node = _find_spud_link_node_by_token(supplied)
+        except HTTPException:
+            node = {}
+        role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_DISABLED)
+        if role == SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+            _spud_link_touch_node_from_request(node, request)
+            node["activity"] = _spud_link_sanitize_activity(
+                {
+                    "last_call_at": time.time(),
+                    "last_call_mode": "tater_open_webui_api",
+                    "last_model": str(request.url.path or "").rsplit("/", 1)[-1],
+                    "last_user": str(request.headers.get("x-spudlink-user") or "").strip(),
+                    "last_user_id": str(request.headers.get("x-spudlink-user-id") or "").strip(),
+                    "last_device": str(request.headers.get("x-spudlink-device") or "").strip(),
+                    "role": role,
+                },
+                allow_previews=bool(spud_link_settings.get("request_previews_enabled")),
+            )
+            _spud_link_store_node(node)
+            return {
+                **settings,
+                "enabled": True,
+                "hydra_tools_enabled": True,
+                "auth_mode": "spud_link",
+                "linked_node_id": str(node.get("id") or ""),
+                "linked_node_name": str(node.get("name") or node.get("node_name") or "Tater Open WebUI"),
+            }
+
     if not bool(settings.get("enabled")):
         raise HTTPException(status_code=404, detail="Tater OpenAI-compatible API is disabled.")
-    expected = str(settings.get("api_key") or "").strip()
     if not expected:
         raise HTTPException(status_code=403, detail="Tater OpenAI-compatible API key is not configured.")
-    supplied = _extract_tater_api_token(request)
-    if not supplied or not hmac.compare_digest(supplied, expected):
-        raise HTTPException(status_code=401, detail="Invalid Tater API key.")
-    return settings
+    raise HTTPException(status_code=401, detail="Invalid Tater API key or Tater Open WebUI link token.")
 
 
 def _openai_content_to_text(content: Any) -> str:
@@ -7268,6 +7386,8 @@ def _openai_chat_completion_response(
 async def _run_tater_api_direct_completion(
     payload: Any,
     messages: List[Dict[str, str]],
+    *,
+    llm_client_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     generation_kwargs: Dict[str, Any] = {"activity": "external_api"}
     fields_set = getattr(payload, "model_fields_set", None)
@@ -7288,7 +7408,9 @@ async def _run_tater_api_direct_completion(
         generation_kwargs["stop"] = payload.stop
 
     perf: Dict[str, Any] = {}
-    async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
+    client_kwargs = dict(llm_client_kwargs or {})
+    client_kwargs.setdefault("redis_conn", redis_client)
+    async with get_llm_client_from_env(**client_kwargs) as llm_client:
         result = await llm_client.chat(messages, stream=False, **generation_kwargs)
         try:
             perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
@@ -7349,6 +7471,25 @@ async def _run_tater_api_hydra_completion(
     verba_registry_module.ensure_verbas_loaded()
     registry = dict(verba_registry_module.get_verba_registry() or {}) if tools_enabled else {}
 
+    admin_guard: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None
+    if platform_token == "tater_open_webui":
+        resolve_admin_status(platform=platform_token, origin=origin, redis_client=redis_client)
+
+        def _tater_open_webui_admin_guard(func_name: str) -> Optional[Dict[str, Any]]:
+            if not is_admin_only_plugin(func_name):
+                return None
+            if origin_is_admin(platform_token, origin, redis_client):
+                return None
+            message = admin_denial_message(platform_token, origin, redis_client)
+            return action_failure(
+                code="admin_only",
+                message=message,
+                needs=["Link this Tater Open WebUI account to a Person marked as admin."],
+                say_hint=message,
+            )
+
+        admin_guard = _tater_open_webui_admin_guard
+
     perf: Dict[str, Any] = {}
     async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
         result = await run_hydra_turn(
@@ -7364,6 +7505,7 @@ async def _run_tater_api_hydra_completion(
             redis_client=redis_client,
             platform_preamble=platform_preamble,
             wait_callback=wait_callback,
+            admin_guard=admin_guard,
         )
         try:
             perf = llm_client.get_perf_stats(reset=False) if hasattr(llm_client, "get_perf_stats") else {}
@@ -7619,13 +7761,71 @@ async def _run_tater_api_chat_completion(
         raise HTTPException(status_code=400, detail="messages must include at least one text message.")
     mode = _tater_api_mode_for_model(payload.model, str(settings.get("mode") or TATER_API_MODE_DIRECT))
     if mode == TATER_API_MODE_HYDRA:
+        if str(settings.get("auth_mode") or "").strip() == "spud_link" and str(
+            settings.get("linked_node_id") or ""
+        ).strip():
+            metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+            node_id = str(settings.get("linked_node_id") or "").strip()
+            node_name = str(settings.get("linked_node_name") or "Tater Open WebUI").strip()
+            user_id = str(
+                request.headers.get("x-spudlink-user-id")
+                or metadata.get("user_id")
+                or payload.user
+                or ""
+            ).strip()
+            user_name = str(
+                request.headers.get("x-spudlink-user")
+                or payload.user_name
+                or metadata.get("user_name")
+                or user_id
+            ).strip()
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Tater Open WebUI user identity is required for Hydra.")
+            people_module.register_tater_open_webui_identity(
+                node_id=node_id,
+                node_name=node_name,
+                user_id=user_id,
+                user_name=user_name,
+                redis_client=redis_client,
+            )
+            session_id = str(request.headers.get("x-tater-session") or metadata.get("chat_id") or "default").strip()
+            origin = people_module.tater_open_webui_origin(
+                node_id=node_id,
+                node_name=node_name,
+                user_id=user_id,
+                user_name=user_name,
+                session_id=session_id,
+            )
+            return await _run_tater_api_hydra_completion(
+                payload,
+                messages,
+                tools_enabled=bool(settings.get("hydra_tools_enabled")),
+                request=request,
+                platform="tater_open_webui",
+                origin_override=origin,
+                scope_override=f"user:{origin['external_id']}:chat:{session_id}",
+                platform_preamble=(
+                    "Tater Open WebUI delegated capability request. The authenticated WebUI account identity "
+                    "has been resolved through Settings > People when linked."
+                ),
+                context_extra={"tater_open_webui": True, "webui_user_id": user_id},
+            )
         return await _run_tater_api_hydra_completion(
             payload,
             messages,
             tools_enabled=bool(settings.get("hydra_tools_enabled")),
             request=request,
         )
-    return await _run_tater_api_direct_completion(payload, messages)
+    direct_client_kwargs: Optional[Dict[str, Any]] = None
+    if str(settings.get("auth_mode") or "").strip() == "spud_link" and str(
+        settings.get("linked_node_id") or ""
+    ).strip():
+        direct_client_kwargs = _tater_open_webui_llm_client_kwargs()
+    return await _run_tater_api_direct_completion(
+        payload,
+        messages,
+        llm_client_kwargs=direct_client_kwargs,
+    )
 
 
 async def _stream_openai_chat_completion(completion: Dict[str, Any], *, include_done: bool = True):
@@ -7707,6 +7907,22 @@ def _require_spud_link_server_enabled() -> Dict[str, Any]:
 def _require_spud_link_node_request(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     settings = _require_spud_link_server_enabled()
     node = _find_spud_link_node_by_token(_extract_spud_link_token(request))
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role == SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+        path = str(request.url.path or "").rstrip("/")
+        allowed_paths = {
+            "/api/spudlink/heartbeat",
+            "/api/spudlink/v1/forget",
+            "/api/spudlink/v1/tater-open-webui/status",
+            "/api/spudlink/v1/tater-open-webui/identity",
+            "/api/spudlink/v1/tts/speech",
+            "/api/spudlink/v1/stt/transcribe",
+        }
+        if path not in allowed_paths:
+            raise HTTPException(
+                status_code=403,
+                detail="This Tater Open WebUI link is not authorized for that Spud Link endpoint.",
+            )
     return settings, node
 
 
@@ -7732,6 +7948,8 @@ def _spud_link_mode_label(mode: Any) -> str:
         return "Little Spud"
     if token == SPUD_LINK_MODE_SPUDLET:
         return "Spudlet"
+    if token == SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+        return "Tater Open WebUI"
     return "Disabled"
 
 
@@ -9888,6 +10106,12 @@ class AppSettingsRequest(BaseModel):
     spudex_llm_provider: Optional[str] = None
     spudex_llm_host: Optional[str] = None
     spudex_llm_model: Optional[str] = None
+    tater_open_webui_llm_provider: Optional[str] = None
+    tater_open_webui_llm_host: Optional[str] = None
+    tater_open_webui_llm_port: Optional[str] = None
+    tater_open_webui_llm_model: Optional[str] = None
+    tater_open_webui_llm_api_key: Optional[str] = None
+    tater_open_webui_llm_llama_cpp_slot: Optional[Any] = None
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
     hydra_local_model_load_targets: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
@@ -9925,6 +10149,7 @@ class AppSettingsRequest(BaseModel):
     spud_link_public_url: Optional[str] = None
     spud_link_pairing_enabled: Optional[bool] = None
     spud_link_allow_spudlets: Optional[bool] = None
+    spud_link_allow_tater_open_webui: Optional[bool] = None
     spud_link_allow_little_spuds: Optional[bool] = None
     spud_link_little_spud_tools_enabled: Optional[bool] = None
     spud_link_telemetry_enabled: Optional[bool] = None
@@ -10000,6 +10225,7 @@ class SpudLinkSettingsRequest(BaseModel):
     spud_link_public_url: Optional[str] = None
     spud_link_pairing_enabled: Optional[bool] = None
     spud_link_allow_spudlets: Optional[bool] = None
+    spud_link_allow_tater_open_webui: Optional[bool] = None
     spud_link_allow_little_spuds: Optional[bool] = None
     spud_link_little_spud_tools_enabled: Optional[bool] = None
     spud_link_telemetry_enabled: Optional[bool] = None
@@ -10168,7 +10394,7 @@ async def _spud_link_cors_middleware(request: Request, call_next: Callable[[Requ
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = str(
         request.headers.get("access-control-request-headers")
-        or "authorization, content-type, accept, x-spudlink-device, x-spudlink-token, x-spudlink-user"
+        or "authorization, content-type, accept, x-spudlink-device, x-spudlink-token, x-spudlink-user, x-spudlink-user-id"
     )
     response.headers["Access-Control-Allow-Private-Network"] = "true"
     response.headers["Access-Control-Max-Age"] = "600"
@@ -10354,7 +10580,7 @@ async def _shutdown_event() -> None:
         from spudex.runner import shutdown_spudex_runtime
 
         await _run_shutdown_step("system task scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
-        await _run_shutdown_step("Spudex runtime", shutdown_spudex_runtime, timeout=6.0)
+        await _run_shutdown_step("Terminal runtime", shutdown_spudex_runtime, timeout=6.0)
         await _run_shutdown_step(
             "portal runtime",
             lambda: asyncio.to_thread(portal_runtime.stop_all, timeout=8.0),
@@ -11411,6 +11637,16 @@ def _runtime_local_llm_roles(llm_rows: List[Dict[str, Any]]) -> None:
         if model and _is_local_hydra_llm_provider(provider):
             base_keys.add((provider, model))
             _assign(provider, model, "Base LLM")
+
+    try:
+        webui_settings = _tater_open_webui_llm_settings()
+        _assign(
+            webui_settings.get("provider"),
+            webui_settings.get("model"),
+            "Tater Open WebUI",
+        )
+    except Exception:
+        pass
 
     modality_settings: List[Tuple[str, str, Dict[str, Any]]] = []
     try:
@@ -14852,7 +15088,7 @@ def _spudex_platform_options(settings: Any) -> List[Dict[str, Any]]:
 
     for token in sorted(allowed):
         if token == "all":
-            add("all", "All platforms", running=True, description="Allow Spudex anywhere Hydra is running", kind="special")
+            add("all", "All platforms", running=True, description="Allow Terminal anywhere Hydra is running", kind="special")
         elif token not in options:
             add(token, _runtime_platform_label(token), running=False, description="Saved platform, currently stopped", kind="saved")
 
@@ -14892,7 +15128,7 @@ async def run_spudex_command(payload: SpudexRunRequest) -> Dict[str, Any]:
         command=payload.command,
         argv=payload.argv,
         cwd=payload.cwd or "",
-        label=payload.label or "Spudex command",
+        label=payload.label or "Terminal command",
         source="ui",
         platform="webui",
         redis_client=redis_client,
@@ -14909,7 +15145,7 @@ def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, A
     settings = get_spudex_settings(redis_client)
     cwd_value = settings.get("default_cwd") or "agent_lab"
     cwd = resolve_spudex_cwd(cwd_value)
-    label = str(payload.label or "").strip() or "New Spudex chat"
+    label = str(payload.label or "").strip() or "New Terminal chat"
     session = create_spudex_session(
         label=label,
         cwd=str(cwd),
@@ -14921,7 +15157,7 @@ def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, A
     append_session_log(
         str(session.get("id") or ""),
         stream="system",
-        text="New Spudex chat created. Send a message to start the loop.",
+        text="New Terminal chat created. Send a message to start the loop.",
         level="info",
     )
     return {"ok": True, "session": session}
@@ -14936,7 +15172,7 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
 
     message = str(payload.message or "").strip()
     if not message:
-        raise HTTPException(status_code=400, detail="Spudex chat message is required.")
+        raise HTTPException(status_code=400, detail="Terminal chat message is required.")
     settings = get_spudex_settings(redis_client)
     cwd_value = settings.get("default_cwd") or "agent_lab"
     cwd = resolve_spudex_cwd(cwd_value)
@@ -14945,10 +15181,10 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
     if session and str(session.get("source") or "").strip().lower() != "spudex_chat":
         session = {}
     if session and str(session.get("status") or "").strip().lower() == "running":
-        raise HTTPException(status_code=409, detail="Spudex chat session is already running. Wait for it to finish or stop it first.")
+        raise HTTPException(status_code=409, detail="Terminal chat session is already running. Wait for it to finish or stop it first.")
     if not session:
         session = create_spudex_session(
-            label=f"Spudex chat: {message[:80]}",
+            label=f"Terminal chat: {message[:80]}",
             cwd=str(cwd),
             goal=message,
             source="spudex_chat",
@@ -14957,7 +15193,7 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
     else:
         session = update_spudex_session(
             str(session.get("id") or ""),
-            label=f"Spudex chat: {message[:80]}",
+            label=f"Terminal chat: {message[:80]}",
             cwd=str(cwd),
             cwd_display=display_agent_path(cwd),
             goal=message,
@@ -14986,14 +15222,14 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
                 append_session_log(
                     str(session.get("id") or ""),
                     stream="system",
-                    text=str(err.get("message") or "Spudex chat loop failed."),
+                    text=str(err.get("message") or "Terminal chat loop failed."),
                     level="error",
                 )
         except asyncio.CancelledError:
             append_session_log(
                 str(session.get("id") or ""),
                 stream="system",
-                text="Spudex chat task cancelled from UI.",
+                text="Terminal chat task cancelled from UI.",
                 level="warning",
             )
             finish_spudex_plan(str(session.get("id") or ""), success=False)
@@ -15003,7 +15239,7 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
             append_session_log(
                 str(session.get("id") or ""),
                 stream="system",
-                text=f"Spudex chat loop failed: {exc}",
+                text=f"Terminal chat loop failed: {exc}",
                 level="error",
             )
             finish_spudex_plan(str(session.get("id") or ""), success=False)
@@ -15014,7 +15250,7 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
                 append_session_log(
                     str(session.get("id") or ""),
                     stream="system",
-                    text="Spudex chat loop ended without a final status; marking the session failed.",
+                    text="Terminal chat loop ended without a final status; marking the session failed.",
                     level="error",
                 )
                 finish_spudex_plan(str(session.get("id") or ""), success=False)
@@ -15068,7 +15304,7 @@ async def close_spudex_session_api(session_id: str) -> Dict[str, Any]:
     result = await close_spudex_session(session_id)
     if not bool(result.get("ok")):
         err = result.get("error") if isinstance(result.get("error"), dict) else {}
-        raise HTTPException(status_code=404, detail=str(err.get("message") or "Spudex session was not found."))
+        raise HTTPException(status_code=404, detail=str(err.get("message") or "Terminal session was not found."))
     return result
 
 
@@ -15783,7 +16019,11 @@ def create_spud_link_pairing_code(request: Request, payload: Optional[SpudLinkPa
         payload.role if payload is not None else None,
         default=SPUD_LINK_MODE_DISABLED,
     )
-    if pairing_role in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_SPUDLET}:
+    if pairing_role in {
+        SPUD_LINK_MODE_LITTLE_SPUD,
+        SPUD_LINK_MODE_SPUDLET,
+        SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+    }:
         pairing_payload_role = pairing_role
     elif bool(settings.get("allow_little_spuds")):
         pairing_payload_role = SPUD_LINK_MODE_LITTLE_SPUD
@@ -15793,6 +16033,8 @@ def create_spud_link_pairing_code(request: Request, payload: Optional[SpudLinkPa
         raise HTTPException(status_code=400, detail="Enable Little Spud clients before creating this QR code.")
     if pairing_payload_role == SPUD_LINK_MODE_SPUDLET and not bool(settings.get("allow_spudlets")):
         raise HTTPException(status_code=400, detail="Enable Spudlet clients before creating this pairing code.")
+    if pairing_payload_role == SPUD_LINK_MODE_TATER_OPEN_WEBUI and not bool(settings.get("allow_tater_open_webui")):
+        raise HTTPException(status_code=400, detail="Enable Tater Open WebUI clients before creating this pairing code.")
     pairing_settings = dict(settings)
     if payload is not None:
         home_url = payload.home_url if payload.home_url is not None else payload.spud_link_home_url
@@ -15861,7 +16103,11 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
         default=SPUD_LINK_MODE_DISABLED,
     )
     requested_role = _normalize_spud_link_mode(payload.role, default=SPUD_LINK_MODE_SPUDLET)
-    if expected_role in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_SPUDLET}:
+    if expected_role in {
+        SPUD_LINK_MODE_LITTLE_SPUD,
+        SPUD_LINK_MODE_SPUDLET,
+        SPUD_LINK_MODE_TATER_OPEN_WEBUI,
+    }:
         if payload.role and requested_role != expected_role:
             raise HTTPException(status_code=403, detail=f"This pairing invite is only for {_spud_link_mode_label(expected_role)}.")
         role = expected_role
@@ -15875,6 +16121,8 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
         raise HTTPException(status_code=403, detail="Spudlets are not allowed by this Spud Link server.")
     if role == SPUD_LINK_MODE_LITTLE_SPUD and not bool(settings.get("allow_little_spuds")):
         raise HTTPException(status_code=403, detail="Little Spuds are not allowed by this Spud Link server.")
+    if role == SPUD_LINK_MODE_TATER_OPEN_WEBUI and not bool(settings.get("allow_tater_open_webui")):
+        raise HTTPException(status_code=403, detail="Tater Open WebUI clients are not allowed by this Spud Link server.")
 
     node_token = f"spudlink-{secrets.token_urlsafe(32)}"
     now = time.time()
@@ -15897,7 +16145,10 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
     redis_client.hdel(SPUD_LINK_SETTINGS_KEY, "pairing_code_hash", "pairing_expires_at", "pairing_role")
     server_mode = _normalize_spud_link_tater_mode(settings.get("mode"))
     is_server = server_mode in SPUD_LINK_SERVER_MODE_CHOICES
-    hydra_tools_enabled = is_server and bool(settings.get("little_spud_tools_enabled"))
+    is_tater_open_webui = role == SPUD_LINK_MODE_TATER_OPEN_WEBUI
+    hydra_tools_enabled = is_server and (
+        is_tater_open_webui or bool(settings.get("little_spud_tools_enabled"))
+    )
     server_payload = {
         "name": settings.get("node_name") or _spud_link_local_node_name(),
         "assistant_name": _tater_assistant_first_name(),
@@ -15909,16 +16160,17 @@ def pair_spud_link_node(payload: SpudLinkPairRequest, request: Request) -> Dict[
             "models": is_server,
             "stt": is_server,
             "tts": is_server,
-            "vision": is_server,
-            "audio": is_server,
-            "video": is_server,
-            "speaker_id": is_server,
-            "emotion_id": is_server,
-            "face_id": is_server,
+            "vision": is_server and not is_tater_open_webui,
+            "audio": is_server and not is_tater_open_webui,
+            "video": is_server and not is_tater_open_webui,
+            "speaker_id": is_server and not is_tater_open_webui,
+            "emotion_id": is_server and not is_tater_open_webui,
+            "face_id": is_server and not is_tater_open_webui,
             "tools": hydra_tools_enabled,
-            "notifications": is_server,
+            "notifications": is_server and not is_tater_open_webui,
             "music": (
                 is_server
+                and not is_tater_open_webui
                 and _as_bool_flag(
                     redis_client.get("music_core_running"),
                     default=False,
@@ -16091,11 +16343,15 @@ def spud_link_heartbeat(payload: SpudLinkHeartbeatRequest, request: Request) -> 
 def spud_link_forget_pairing(request: Request) -> Dict[str, Any]:
     _settings, node = _require_spud_link_node_request(request)
     role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
-    if role != SPUD_LINK_MODE_LITTLE_SPUD:
-        raise HTTPException(status_code=403, detail="Only paired Little Spud clients can forget themselves.")
+    if role not in {SPUD_LINK_MODE_LITTLE_SPUD, SPUD_LINK_MODE_TATER_OPEN_WEBUI}:
+        raise HTTPException(status_code=403, detail="This paired client cannot forget itself.")
 
     node_id = str(node.get("id") or "").strip()
-    cleanup = _spud_link_forget_little_spud_node(node)
+    cleanup = (
+        _spud_link_forget_little_spud_node(node)
+        if role == SPUD_LINK_MODE_LITTLE_SPUD
+        else {"deleted_history": 0, "deleted_active_runs": 0}
+    )
     removed = int(redis_client.hdel(SPUD_LINK_NODES_KEY, node_id) or 0) if node_id else 0
     return {
         "ok": True,
@@ -16930,6 +17186,123 @@ async def spud_link_chat_completions(
         status_code=410,
         detail="Spud Link uses native Tater endpoints. Use /api/spudlink/v1/tater/llm for Spudlets or /api/spudlink/v1/tater/chat for Little Spuds.",
     )
+
+
+@app.get("/api/spudlink/v1/tater-open-webui/status")
+def spud_link_tater_open_webui_status(request: Request) -> Dict[str, Any]:
+    settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_DISABLED)
+    if role != SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+        raise HTTPException(status_code=403, detail="This endpoint requires a paired Tater Open WebUI client.")
+
+    _spud_link_touch_node_from_request(node, request)
+    speech = get_shared_speech_settings()
+    stt_ready = bool(str(speech.get("stt_backend") or "").strip())
+    tts_ready = bool(str(speech.get("tts_backend") or "").strip())
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "tater_open_webui_status",
+            "last_user": str(request.headers.get("x-spudlink-user") or "").strip(),
+            "last_device": str(request.headers.get("x-spudlink-device") or "").strip(),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "client": "Tater Open WebUI",
+        "node": _spud_link_node_response(node),
+        "server": {
+            "name": str(settings.get("node_name") or _spud_link_local_node_name()),
+            "assistant_name": _tater_assistant_first_name(),
+        },
+        "models": {
+            "base": "tater/base",
+            "hydra": "tater/hydra",
+        },
+        "speech": {
+            "stt": stt_ready,
+            "stt_backend": str(speech.get("stt_backend") or "").strip(),
+            "tts": tts_ready,
+            "tts_backend": str(speech.get("tts_backend") or "").strip(),
+            "tts_model": str(speech.get("tts_model") or "").strip(),
+            "tts_voice": str(speech.get("tts_voice") or "").strip(),
+            "streaming_stt": stt_ready,
+        },
+        "capabilities": {
+            "normal_chat": True,
+            "hydra": True,
+            "stt": stt_ready,
+            "tts": tts_ready,
+            "streaming_stt": stt_ready,
+            "local_terminal": False,
+        },
+    }
+
+
+def _tater_open_webui_account_identity(request: Request, *, register: bool) -> Dict[str, Any]:
+    settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_DISABLED)
+    if role != SPUD_LINK_MODE_TATER_OPEN_WEBUI:
+        raise HTTPException(status_code=403, detail="This endpoint requires a paired Tater Open WebUI client.")
+
+    user_id = str(request.headers.get("x-spudlink-user-id") or "").strip()
+    user_name = str(request.headers.get("x-spudlink-user") or user_id).strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="X-SpudLink-User-ID is required.")
+    node_id = str(node.get("id") or "").strip()
+    node_name = str(node.get("name") or "Tater Open WebUI").strip()
+    if register:
+        people_module.register_tater_open_webui_identity(
+            node_id=node_id,
+            node_name=node_name,
+            user_id=user_id,
+            user_name=user_name,
+            redis_client=redis_client,
+        )
+    status = people_module.tater_open_webui_identity_status(
+        node_id=node_id,
+        node_name=node_name,
+        user_id=user_id,
+        user_name=user_name,
+        redis_client=redis_client,
+    )
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "tater_open_webui_identity",
+            "last_user": user_name,
+            "last_user_id": user_id,
+            "last_device": str(request.headers.get("x-spudlink-device") or "").strip(),
+            "role": role,
+        },
+        allow_previews=bool(settings.get("request_previews_enabled")),
+    )
+    _spud_link_store_node(node)
+    state = "linked" if status.get("linked") else "pending" if status.get("registered") else "unregistered"
+    return {
+        "ok": True,
+        "connected": True,
+        "state": state,
+        **status,
+        "server": {
+            "name": str(settings.get("node_name") or _spud_link_local_node_name()),
+            "assistant_name": _tater_assistant_first_name(),
+        },
+    }
+
+
+@app.get("/api/spudlink/v1/tater-open-webui/identity")
+def get_tater_open_webui_account_identity(request: Request) -> Dict[str, Any]:
+    return _tater_open_webui_account_identity(request, register=False)
+
+
+@app.post("/api/spudlink/v1/tater-open-webui/identity")
+def register_tater_open_webui_account_identity(request: Request) -> Dict[str, Any]:
+    return _tater_open_webui_account_identity(request, register=True)
 
 
 def _require_spud_link_model_request(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -20108,6 +20481,7 @@ def get_settings() -> Dict[str, Any]:
     except Exception:
         logger.exception("[settings] failed loading spudex model settings")
         spudex_settings = {}
+    tater_open_webui_llm_settings = _tater_open_webui_llm_settings()
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
@@ -20504,6 +20878,12 @@ def get_settings() -> Dict[str, Any]:
         "spudex_llm_provider": _normalize_hydra_llm_provider(spudex_settings.get("llm_provider") or ""),
         "spudex_llm_host": str(spudex_settings.get("llm_host") or ""),
         "spudex_llm_model": str(spudex_settings.get("llm_model") or ""),
+        "tater_open_webui_llm_provider": str(tater_open_webui_llm_settings.get("provider") or ""),
+        "tater_open_webui_llm_host": str(tater_open_webui_llm_settings.get("host") or ""),
+        "tater_open_webui_llm_port": str(tater_open_webui_llm_settings.get("port") or ""),
+        "tater_open_webui_llm_model": str(tater_open_webui_llm_settings.get("model") or ""),
+        "tater_open_webui_llm_api_key": str(tater_open_webui_llm_settings.get("api_key") or ""),
+        "tater_open_webui_llm_llama_cpp_slot": str(tater_open_webui_llm_settings.get("llama_cpp_slot") or ""),
         "hydra_base_servers": hydra_base_servers,
         "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
         "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
@@ -20524,6 +20904,7 @@ def get_settings() -> Dict[str, Any]:
         "spud_link_public_url": str(spud_link_settings.get("public_url") or ""),
         "spud_link_pairing_enabled": bool(spud_link_settings.get("pairing_enabled")),
         "spud_link_allow_spudlets": bool(spud_link_settings.get("allow_spudlets")),
+        "spud_link_allow_tater_open_webui": bool(spud_link_settings.get("allow_tater_open_webui")),
         "spud_link_allow_little_spuds": bool(spud_link_settings.get("allow_little_spuds")),
         "spud_link_little_spud_tools_enabled": bool(spud_link_settings.get("little_spud_tools_enabled")),
         "spud_link_telemetry_enabled": bool(spud_link_settings.get("telemetry_enabled")),
@@ -22004,6 +22385,14 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_mlx_engine_quantized_kv_start",
     }
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
+    tater_open_webui_model_keys = {
+        "tater_open_webui_llm_provider",
+        "tater_open_webui_llm_host",
+        "tater_open_webui_llm_port",
+        "tater_open_webui_llm_model",
+        "tater_open_webui_llm_api_key",
+        "tater_open_webui_llm_llama_cpp_slot",
+    }
     vision_model_keys = {
         "vision_mode",
         "vision_provider",
@@ -22041,6 +22430,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             current = {}
         return _single_local_model_target(current.get("llm_provider"), current.get("llm_model"))
 
+    def _current_tater_open_webui_local_targets() -> List[Dict[str, str]]:
+        current = _tater_open_webui_llm_settings()
+        return _single_local_model_target(current.get("provider"), current.get("model"))
+
     def _current_beast_local_targets() -> List[Dict[str, str]]:
         targets: List[Dict[str, str]] = []
         for role_id in HYDRA_BEAST_CONFIG_ROLE_IDS:
@@ -22058,6 +22451,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     current_scope_local_targets = {
         "base": _hf_llm_warmup_models(resolve_hydra_base_servers(redis_conn=redis_client, include_legacy=True)),
         "spudex": _current_spudex_local_targets(),
+        "tater_open_webui": _current_tater_open_webui_local_targets(),
         "vision": _current_vision_local_targets(),
         "audio_understanding": _current_media_understanding_local_targets("audio"),
         "video_understanding": _current_media_understanding_local_targets("video"),
@@ -22068,6 +22462,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         touched_local_model_scopes.add("base")
     if any(key in updates for key in spudex_model_keys):
         touched_local_model_scopes.add("spudex")
+    if any(key in updates for key in tater_open_webui_model_keys):
+        touched_local_model_scopes.add("tater_open_webui")
     if any(key in updates for key in vision_model_keys):
         touched_local_model_scopes.add("vision")
     for media_kind in ("audio", "video"):
@@ -22864,7 +23260,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         spudex_host = str(updates.get("spudex_llm_host", current_spudex.get("llm_host") or "") or "").strip()
         spudex_model = str(updates.get("spudex_llm_model", current_spudex.get("llm_model") or "") or "").strip()
         if _is_local_hydra_llm_provider(spudex_provider):
-            spudex_model = _require_downloaded_local_model(spudex_provider, spudex_model, "Spudex")
+            spudex_model = _require_downloaded_local_model(spudex_provider, spudex_model, "Terminal")
             spudex_host = ""
         save_spudex_settings(
             {
@@ -22875,6 +23271,98 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             },
             redis_client,
         )
+
+    if any(key in updates for key in tater_open_webui_model_keys):
+        current_webui = _tater_open_webui_llm_settings()
+        raw_provider = str(
+            updates.get("tater_open_webui_llm_provider", current_webui.get("provider") or "") or ""
+        ).strip()
+        webui_provider = _normalize_hydra_llm_provider(raw_provider) if raw_provider else ""
+        webui_host = str(
+            updates.get("tater_open_webui_llm_host", current_webui.get("host") or "") or ""
+        ).strip()
+        webui_port = str(
+            updates.get("tater_open_webui_llm_port", current_webui.get("port") or "") or ""
+        ).strip()
+        webui_model = str(
+            updates.get("tater_open_webui_llm_model", current_webui.get("model") or "") or ""
+        ).strip()
+        webui_api_key = str(
+            updates.get("tater_open_webui_llm_api_key", current_webui.get("api_key") or "") or ""
+        ).strip()
+        webui_slot = str(
+            updates.get(
+                "tater_open_webui_llm_llama_cpp_slot",
+                current_webui.get("llama_cpp_slot") or "",
+            )
+            or ""
+        ).strip()
+
+        if webui_provider:
+            if not webui_model:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Choose a model for the dedicated Tater Open WebUI route.",
+                )
+            if webui_provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "A dedicated Tater Open WebUI route cannot point back through Spud Link. "
+                        "Choose Use Base model when Base already routes through a paired hub."
+                    ),
+                )
+            if _is_local_hydra_llm_provider(webui_provider):
+                webui_model = _require_downloaded_local_model(
+                    webui_provider,
+                    webui_model,
+                    "Tater Open WebUI",
+                )
+                webui_host = ""
+                webui_port = ""
+                webui_api_key = ""
+            else:
+                if webui_port:
+                    if not webui_port.isdigit() or not 1 <= int(webui_port) <= 65535:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="tater_open_webui_llm_port must be an integer between 1 and 65535",
+                        )
+                    webui_port = str(int(webui_port))
+                if not _build_hydra_llm_endpoint(webui_host, webui_port):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Enter a valid host for the dedicated Tater Open WebUI route.",
+                    )
+            if _is_llama_cpp_hydra_llm_provider(webui_provider):
+                webui_slot = _normalize_llama_cpp_slot_payload_value(
+                    "tater_open_webui_llm_llama_cpp_slot",
+                    webui_slot,
+                )
+            else:
+                webui_slot = ""
+        else:
+            # Base mode has no independent route. Clearing every field keeps the
+            # fallback explicit and prevents stale credentials from being reused.
+            webui_host = ""
+            webui_port = ""
+            webui_model = ""
+            webui_api_key = ""
+            webui_slot = ""
+
+        for field, value in {
+            "provider": webui_provider,
+            "host": webui_host,
+            "port": webui_port,
+            "model": webui_model,
+            "api_key": webui_api_key,
+            "llama_cpp_slot": webui_slot,
+        }.items():
+            key = _tater_open_webui_llm_key(field)
+            if value:
+                redis_client.set(key, value)
+            else:
+                redis_client.delete(key)
 
     esphome_result: Dict[str, Any] = {}
     if "esphome_settings" in updates:
