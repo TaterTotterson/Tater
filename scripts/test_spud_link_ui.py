@@ -42,6 +42,8 @@ class SpudLinkUiTests(unittest.TestCase):
         self.assertIn('This Tater Open WebUI link is not authorized', backend)
         self.assertIn('"/api/spudlink/v1/tts/speech"', backend)
         self.assertIn('"/api/spudlink/v1/stt/transcribe"', backend)
+        self.assertIn('generated_file_prefix = "/api/spudlink/v1/files/"', backend)
+        self.assertIn("path.startswith(generated_file_prefix)", backend)
         self.assertIn('v-model="draft.allow_tater_open_webui"', app)
         self.assertIn('Link the coding workspace', app)
 

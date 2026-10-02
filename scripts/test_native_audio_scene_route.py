@@ -39,6 +39,8 @@ class FakeVoicePipeline:
         self.stored = []
         self.downloaded = []
         self.prepared = []
+        self.rendered = []
+        self.render_scene_error = None
 
     @staticmethod
     def _require_api_auth(_token):
@@ -99,6 +101,35 @@ class FakeVoicePipeline:
         self.prepared.append(dict(prepared))
         return prepared
 
+    async def _render_native_audio_scene_asset(
+        self,
+        foreground_bytes,
+        **kwargs,
+    ):
+        if self.render_scene_error is not None:
+            raise self.render_scene_error
+        render = {
+            "foreground_bytes": bytes(foreground_bytes or b""),
+            **kwargs,
+        }
+        self.rendered.append(render)
+        foreground_duration_s = 1.0
+        duration_s = (
+            foreground_duration_s
+            + (int(kwargs.get("start_delay_ms", 0)) / 1000.0)
+            + (int(kwargs.get("ducking_release_ms", 0)) / 1000.0)
+            + (int(kwargs.get("fade_ms", 0)) / 1000.0)
+        )
+        return {
+            "bytes": b"rendered-scene",
+            "media_type": "audio/mpeg",
+            "filename": "announcement-scene.mp3",
+            "rendered_audio_scene": True,
+            "foreground_duration_s": foreground_duration_s,
+            "duration_s": duration_s,
+            "start_delay_ms": int(kwargs.get("start_delay_ms", 0)),
+        }
+
     @staticmethod
     def _native_persistent_media_source_url(
         source_url,
@@ -121,11 +152,11 @@ class FakeVoicePipeline:
                 "filename": filename,
             }
         )
-        return (
-            "http://voice-core/media/background"
-            if filename.startswith("background-audio")
-            else "http://voice-core/media/foreground"
-        )
+        if filename.startswith("announcement-scene"):
+            return "http://voice-core/media/scene"
+        if filename.startswith("background-audio"):
+            return "http://voice-core/media/background"
+        return "http://voice-core/media/foreground"
 
 
 def _load_route_functions(fake_vp):
@@ -138,6 +169,7 @@ def _load_route_functions(fake_vp):
     wanted = {
         "_native_audio_scene_payload",
         "_native_ducking_payload",
+        "_render_native_audio_scene",
         "native_satellite_play_group",
         "native_satellite_play",
     }
@@ -354,30 +386,34 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
             },
         }
 
-    def test_supported_satellite_audio_scene_uses_buffered_session_and_overlay(self) -> None:
+    def test_supported_satellite_audio_scene_uses_one_rendered_session(self) -> None:
         result = asyncio.run(self.routes.native_satellite_play(self._payload(), None))
 
         self.assertTrue(result["audio_scene_started"])
         self.assertTrue(result["media_session_started"])
-        self.assertTrue(result["audio_overlay_started"])
+        self.assertFalse(result["audio_overlay_started"])
+        self.assertTrue(result["rendered_audio_scene_started"])
         self.assertEqual(self.commands, [])
-        members, background = self.group_calls[0]
+        members, scene = self.group_calls[0]
         self.assertEqual(members[0]["selector"], "native:kitchen")
         self.assertEqual(members[0]["channel"], "mono")
-        self.assertEqual(members[0]["volume_percent"], 60)
-        self.assertEqual(background["media_url"], "http://voice-core/media/background")
-        self.assertTrue(background["loop"])
-        selector, overlay = self.single_overlay_calls[0]
-        self.assertEqual(selector, "native:kitchen")
-        self.assertEqual(overlay["foreground_url"], "http://voice-core/media/foreground")
-        self.assertEqual(overlay["ducking"]["target_percent"], 35)
-        self.assertTrue(overlay["stop_media_when_finished"])
-        self.assertEqual(overlay["background_fade_out_ms"], 500)
+        self.assertEqual(members[0]["volume_percent"], 100)
+        self.assertEqual(scene["media_url"], "http://voice-core/media/scene")
+        self.assertFalse(scene["loop"])
+        self.assertEqual(scene["content_type"], "announcement")
+        self.assertEqual(self.single_overlay_calls, [])
         self.assertEqual(self.vp.background_source_url, "https://example.test/morning.mp3")
-        self.assertEqual([row["playback_kind"] for row in self.vp.prepared], ["tts", "background"])
+        self.assertEqual([row["playback_kind"] for row in self.vp.prepared], ["tts"])
         self.assertTrue(self.vp.prepared[0]["transcoded"])
-        self.assertFalse(self.vp.prepared[1]["transcoded"])
         self.assertTrue(all(row["media_type"] == "audio/mpeg" for row in self.vp.stored))
+        self.assertEqual(len(self.vp.rendered), 1)
+        render = self.vp.rendered[0]
+        self.assertEqual(render["background_volume_percent"], 60)
+        self.assertEqual(render["ducking_target_percent"], 35)
+        self.assertEqual(render["start_delay_ms"], 0)
+        self.assertEqual(render["fade_ms"], 500)
+        self.assertTrue(render["background_loop"])
+        self.assertEqual(render["background_bytes"], b"background")
 
     def test_older_scene_satellite_keeps_compatibility_mixer(self) -> None:
         self.capabilities["synchronized_media_sessions"] = False
@@ -391,15 +427,27 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(self.group_calls, [])
         self.assertEqual(self.single_overlay_calls, [])
 
+    def test_audio_scene_lead_in_is_clamped_and_preserved_for_legacy_scene(self) -> None:
+        self.capabilities["synchronized_media_sessions"] = False
+        payload = self._payload()
+        payload["audio_scene"]["foreground"] = {"start_delay_ms": 45000}
+
+        asyncio.run(self.routes.native_satellite_play(payload, None))
+
+        self.assertEqual(
+            self.commands[0][2]["foreground"]["start_delay_ms"],
+            30000,
+        )
+
     def test_buffered_scene_failure_does_not_race_the_legacy_mixer(self) -> None:
-        self.single_overlay_error = RuntimeError("overlay rejected")
+        self.vp.render_scene_error = RuntimeError("render rejected")
 
         with self.assertRaises(FakeHttpException) as raised:
             asyncio.run(self.routes.native_satellite_play(self._payload(), None))
 
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("Buffered audio scene failed", raised.exception.detail)
-        self.assertEqual(self.single_overlay_calls[0][0], "native:kitchen")
+        self.assertIn("Rendered audio scene failed", raised.exception.detail)
+        self.assertEqual(self.single_overlay_calls, [])
         self.assertEqual(
             [message_type for _selector, message_type, _payload in self.commands],
             ["media.session.stop"],
@@ -429,6 +477,63 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertTrue(all(row["volume_percent"] == 65 for row in members))
         self.assertEqual(kwargs["start_lead_ms"], 1125)
         self.assertTrue(kwargs["compatibility_checked"])
+
+    def test_multi_destination_audio_scene_renders_once_for_one_group_start(self) -> None:
+        self.stereo_pair = {
+            "id": "bedroom12",
+            "selector": "stereo:bedroom12",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        payload = {
+            "selectors": ["native:kitchen", "stereo:bedroom12"],
+            "audio_b64": base64.b64encode(b"group speech").decode("ascii"),
+            "media_type": "audio/wav",
+            "filename": "tts.wav",
+            "wait_for_completion": True,
+            "timeout_s": 40,
+            "audio_scene": {
+                "background": {
+                    "url": "https://example.test/morning.mp3",
+                    "loop": True,
+                    "volume_percent": 60,
+                },
+                "foreground": {"start_delay_ms": 1500},
+                "ducking": {
+                    "target_percent": 35,
+                    "attack_ms": 150,
+                    "release_ms": 350,
+                },
+                "finish": {"fade_ms": 500},
+            },
+        }
+
+        result = asyncio.run(self.routes.native_satellite_play_group(payload, None))
+
+        self.assertTrue(result["audio_scene_started"])
+        self.assertTrue(result["rendered_audio_scene_started"])
+        self.assertFalse(result["audio_overlay_started"])
+        self.assertEqual(result["played_selectors"], ["native:kitchen", "stereo:bedroom12"])
+        self.assertEqual(len(self.vp.rendered), 1)
+        members, scene = self.group_calls[0]
+        self.assertEqual(
+            [(member["selector"], member["channel"]) for member in members],
+            [
+                ("native:kitchen", "mono"),
+                ("native:left", "left"),
+                ("native:right", "right"),
+            ],
+        )
+        self.assertEqual(scene["media_url"], "http://voice-core/media/scene")
+        self.assertTrue(scene["session_id"].endswith("-scene"))
+        self.assertEqual(scene["content_type"], "announcement")
+        self.assertEqual(scene["channel_mode"], "mixed")
+        self.assertFalse(scene["loop"])
+        self.assertTrue(scene["wait_for_completion"])
+        self.assertAlmostEqual(scene["completion_timeout_s"], 42.35, places=2)
+        self.assertEqual(self.vp.prepared, [])
+        self.assertEqual(len(self.vp.stored), 1)
+        self.assertEqual(self.vp.stored[0]["filename"], "announcement-scene.mp3")
 
     def test_multi_satellite_music_keeps_remote_source_as_live_stream(self) -> None:
         source_url = "http://tube.test/api/tater/local/stream?transcode=1&profile=audio_sync"
@@ -694,23 +799,25 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         }
         payload = self._payload()
         payload["selector"] = "stereo:bedroom12"
+        payload["audio_scene"]["foreground"] = {"start_delay_ms": 2500}
 
         result = asyncio.run(self.routes.native_satellite_play(payload, None))
 
         self.assertTrue(result["audio_scene_started"])
         self.assertTrue(result["media_session_started"])
-        self.assertTrue(result["audio_overlay_started"])
-        self.assertEqual([row[0] for row in self.stereo_calls], ["media", "overlay"])
-        background = self.stereo_calls[0][2]
-        overlay = self.stereo_calls[1][2]
-        self.assertEqual(background["media_url"], "http://voice-core/media/background")
-        self.assertTrue(background["loop"])
-        self.assertEqual(background["volume_percent"], 60)
-        self.assertEqual(overlay["foreground_url"], "http://voice-core/media/foreground")
-        self.assertEqual(overlay["ducking"]["target_percent"], 35)
-        self.assertEqual(overlay["start_server_us"], 123456789)
-        self.assertTrue(overlay["stop_media_when_finished"])
-        self.assertEqual(overlay["background_fade_out_ms"], 500)
+        self.assertFalse(result["audio_overlay_started"])
+        self.assertTrue(result["rendered_audio_scene_started"])
+        self.assertEqual([row[0] for row in self.stereo_calls], ["media"])
+        scene = self.stereo_calls[0][2]
+        self.assertEqual(scene["media_url"], "http://voice-core/media/scene")
+        self.assertFalse(scene["loop"])
+        self.assertEqual(scene["volume_percent"], 100)
+        self.assertEqual(scene["content_type"], "announcement")
+        self.assertEqual(scene["channel_mode"], "stereo")
+        self.assertEqual(scene["completion_timeout_s"], 183.35)
+        self.assertEqual(self.single_overlay_calls, [])
+        self.assertEqual(self.vp.rendered[0]["start_delay_ms"], 2500)
+        self.assertEqual(self.vp.rendered[0]["ducking_target_percent"], 35)
 
 
 if __name__ == "__main__":

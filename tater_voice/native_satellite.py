@@ -2510,12 +2510,18 @@ async def prepare_group_media_session(
             60.0,
             max(15.0, 8.0 + (max(0, _as_int(start_position_ms, 0)) / 15000.0)),
         )
-        result = await send_request(
-            member["selector"],
-            "media.session.prepare",
-            prepare_payload,
-            timeout_s=seek_prepare_timeout_s,
-        )
+        try:
+            result = await send_request(
+                member["selector"],
+                "media.session.prepare",
+                prepare_payload,
+                timeout_s=seek_prepare_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"{member['selector']} timed out preparing media after "
+                f"{seek_prepare_timeout_s:.1f} seconds"
+            ) from exc
         if not _as_bool(result.get("ok"), False):
             raise RuntimeError(_text(result.get("error")) or f"{member['selector']} did not prepare audio.")
         return result

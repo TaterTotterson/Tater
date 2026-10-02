@@ -329,6 +329,29 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             native_satellite._stereo_sessions["whole-home"]["use_rendered_clock"]
         )
 
+    async def test_prepare_timeout_identifies_the_member_and_duration(self) -> None:
+        async def fake_clock(selector):
+            return {"selector": selector, "offset_us": 0, "round_trip_us": 100}
+
+        async def fake_request(selector, message_type, payload, *, timeout_s=3.0):
+            raise asyncio.TimeoutError()
+
+        with (
+            mock.patch.object(native_satellite, "_stereo_clock_probe", side_effect=fake_clock),
+            mock.patch.object(native_satellite, "send_request", side_effect=fake_request),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"native:kitchen timed out preparing media after 15\.0 seconds",
+            ):
+                await native_satellite.prepare_group_media_session(
+                    [{"selector": "native:kitchen", "channel": "mono"}],
+                    group_id="kitchen",
+                    session_id="announcement-1",
+                    media_url="http://tater/media/announcement.mp3",
+                    compatibility_checked=True,
+                )
+
     async def test_mixed_render_clock_support_falls_back_for_entire_group(self) -> None:
         members = [
             {"selector": "native:left", "channel": "left"},

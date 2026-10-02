@@ -21,6 +21,21 @@ class _CompletedResponse:
         }
 
 
+class _GroupCompletedResponse:
+    status_code = 200
+
+    @staticmethod
+    def json():
+        return {
+            "ok": True,
+            "played_selectors": ["native:kitchen", "stereo:office12"],
+            "media_session_started": True,
+            "audio_scene_started": True,
+            "rendered_audio_scene_started": True,
+            "playback_completed": True,
+        }
+
+
 class StereoTtsCompletionTests(unittest.IsolatedAsyncioTestCase):
     def test_external_pair_defers_device_reopen_until_group_completion(self) -> None:
         self.assertFalse(
@@ -88,6 +103,40 @@ class StereoTtsCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["playback_completed_count"], 1)
         self.assertTrue(post.call_args.kwargs["json"]["wait_for_completion"])
         self.assertEqual(post.call_args.kwargs["timeout"], 195.0)
+
+    def test_multi_destination_audio_scene_uses_one_synchronized_group_request(self) -> None:
+        audio_scene = {
+            "background": {"url": "https://example.test/morning.mp3"},
+            "foreground": {"start_delay_ms": 2000},
+        }
+        with (
+            mock.patch.object(speech_tts, "_voice_core_base_url", return_value="http://127.0.0.1:8501"),
+            mock.patch.object(speech_tts, "_voice_core_auth_headers", return_value={}),
+            mock.patch.object(
+                speech_tts.requests,
+                "post",
+                return_value=_GroupCompletedResponse(),
+            ) as post,
+        ):
+            result = speech_tts._voice_core_play_media_sync(
+                selectors=["native:kitchen", "stereo:office12"],
+                source_url="",
+                audio_bytes=b"wav",
+                timeout_s=180.0,
+                audio_scene=audio_scene,
+                wait_for_completion=True,
+            )
+
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(post.call_args.args[0].endswith("/api/tater/satellite/v1/play-group"))
+        self.assertEqual(
+            post.call_args.kwargs["json"]["selectors"],
+            ["native:kitchen", "stereo:office12"],
+        )
+        self.assertEqual(post.call_args.kwargs["json"]["audio_scene"], audio_scene)
+        self.assertEqual(result["sent_count"], 2)
+        self.assertEqual(result["audio_scene_sent_count"], 2)
+        self.assertTrue(result["playback_completed"])
 
     async def test_announcement_result_exposes_voice_core_completion(self) -> None:
         captured = {}

@@ -148,20 +148,46 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         self.assertFalse(prepared["transcoded"])
 
     def test_native_background_mp3_is_normalized_for_overlay_playback(self) -> None:
-        completed = mock.Mock(returncode=0, stdout=b"ID3normalized", stderr=b"")
-        with (
-            mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
-            mock.patch.object(vp.subprocess, "run", return_value=completed) as run_mock,
-        ):
-            prepared = vp._prepare_native_media_asset_sync(
-                b"ID3high-bitrate-with-artwork",
-                media_type="audio/mpeg",
-                filename="background.mp3",
-                playback_kind="background",
-            )
+        completed = mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
-        self.assertEqual(prepared["bytes"], b"ID3normalized")
+        def encode_to_file(command, **kwargs):
+            pathlib.Path(command[-1]).write_bytes(b"ID3normalized-Info-duration")
+            return completed
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(
+                    vp,
+                    "_native_media_ffmpeg_binary",
+                    return_value="/test/ffmpeg",
+                ) as ffmpeg_mock,
+                mock.patch.object(
+                    vp,
+                    "_native_background_media_cache_dir",
+                    return_value=pathlib.Path(temp_dir),
+                ),
+                mock.patch.object(vp.subprocess, "run", side_effect=encode_to_file) as run_mock,
+            ):
+                prepared = vp._prepare_native_media_asset_sync(
+                    b"ID3high-bitrate-with-artwork",
+                    media_type="audio/mpeg",
+                    filename="background.mp3",
+                    playback_kind="background",
+                )
+                cached = vp._prepare_native_media_asset_sync(
+                    b"ID3high-bitrate-with-artwork",
+                    media_type="audio/mpeg",
+                    filename="background.mp3",
+                    playback_kind="background",
+                )
+
+        self.assertEqual(prepared["bytes"], b"ID3normalized-Info-duration")
         self.assertTrue(prepared["transcoded"])
+        self.assertFalse(prepared["cache_hit"])
+        self.assertEqual(cached["bytes"], prepared["bytes"])
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(ffmpeg_mock.call_count, 1)
         self.assertEqual(
             prepared["bitrate_kbps"],
             vp.NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS,
@@ -171,6 +197,8 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         self.assertIn("48000", command)
         self.assertIn("-vn", command)
         self.assertIn("-map_metadata", command)
+        self.assertEqual(command[command.index("-write_xing") + 1], "1")
+        self.assertNotEqual(command[-1], "pipe:1")
 
     def test_native_tts_mp3_url_serves_the_prepared_asset_type(self) -> None:
         with (
@@ -224,17 +252,28 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         self.assertIn("96k", command)
 
     def test_native_background_preparation_uses_overlay_safe_bitrate_and_preserves_channels(self) -> None:
-        completed = mock.Mock(returncode=0, stdout=b"ID3music", stderr=b"")
-        with (
-            mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
-            mock.patch.object(vp.subprocess, "run", return_value=completed) as run_mock,
-        ):
-            prepared = vp._prepare_native_media_asset_sync(
-                b"fLaCmusic",
-                media_type="audio/flac",
-                filename="background.flac",
-                playback_kind="background",
-            )
+        completed = mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+        def encode_to_file(command, **kwargs):
+            pathlib.Path(command[-1]).write_bytes(b"ID3music-Xing-duration")
+            return completed
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(vp, "_native_media_ffmpeg_binary", return_value="/test/ffmpeg"),
+                mock.patch.object(
+                    vp,
+                    "_native_background_media_cache_dir",
+                    return_value=pathlib.Path(temp_dir),
+                ),
+                mock.patch.object(vp.subprocess, "run", side_effect=encode_to_file) as run_mock,
+            ):
+                prepared = vp._prepare_native_media_asset_sync(
+                    b"fLaCmusic",
+                    media_type="audio/flac",
+                    filename="background.flac",
+                    playback_kind="background",
+                )
 
         self.assertEqual(prepared["bitrate_kbps"], 128)
         command = run_mock.call_args.args[0]

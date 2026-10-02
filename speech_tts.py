@@ -2651,8 +2651,83 @@ def _voice_core_play_media_sync(
     audio_scene_fallback_count = 0
     playback_completed_count = 0
     audio_scene_warnings: list[str] = []
+    pending_selectors = list(clean_selectors)
 
-    for selector in clean_selectors:
+    if isinstance(audio_scene, dict) and audio_scene and len(clean_selectors) > 1:
+        group_payload = dict(payload_template)
+        group_payload["selectors"] = list(clean_selectors)
+        try:
+            response = requests.post(
+                f"{base_url}/api/tater/satellite/v1/play-group",
+                json=group_payload,
+                headers=_voice_core_auth_headers(),
+                timeout=(
+                    max(90.0, min(615.0, float(timeout_s or 180.0) + 15.0))
+                    if wait_for_completion
+                    else 90
+                ),
+            )
+            logger.info(
+                "[speech_tts] Tater satellite group announcement attempt selectors=%s status=%s",
+                len(clean_selectors),
+                int(getattr(response, "status_code", 0) or 0),
+            )
+            if response.status_code < 400:
+                response_payload: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    parsed_response = response.json()
+                    if isinstance(parsed_response, dict):
+                        response_payload = parsed_response
+                raw_played_selectors = response_payload.get("played_selectors")
+                played_selectors = (
+                    [
+                        _text(selector)
+                        for selector in list(raw_played_selectors or [])
+                        if _text(selector)
+                    ]
+                    if isinstance(raw_played_selectors, list)
+                    else list(clean_selectors)
+                )
+                played_selector_set = set(played_selectors)
+                sent_count += len(played_selectors)
+                pending_selectors = [
+                    selector
+                    for selector in clean_selectors
+                    if selector not in played_selector_set
+                ]
+                if bool(response_payload.get("audio_scene_started")):
+                    audio_scene_sent_count += len(played_selectors)
+                else:
+                    audio_scene_fallback_count += len(played_selectors)
+                    fallback_reason = _text(
+                        response_payload.get("audio_scene_fallback_reason")
+                    )
+                    if fallback_reason:
+                        audio_scene_warnings.extend(
+                            f"{selector} ({fallback_reason})"
+                            for selector in played_selectors
+                        )
+                if bool(response_payload.get("playback_completed")):
+                    playback_completed_count += len(played_selectors)
+            else:
+                detail = ""
+                with contextlib.suppress(Exception):
+                    parsed = response.json()
+                    detail = _text(parsed.get("detail"))
+                logger.warning(
+                    "[speech_tts] synchronized group announcement unavailable; "
+                    "using per-destination fallback status=%s error=%s",
+                    int(getattr(response, "status_code", 0) or 0),
+                    detail or "request rejected",
+                )
+        except Exception as exc:
+            logger.warning(
+                "[speech_tts] synchronized group announcement failed; "
+                "using per-destination fallback error=%s",
+                exc,
+            )
+
+    for selector in pending_selectors:
         payload = dict(payload_template)
         payload["selector"] = selector
         try:

@@ -885,6 +885,7 @@ def _native_audio_scene_payload(raw: Any) -> Dict[str, Any]:
     vp = _vp()
     scene = raw if isinstance(raw, dict) else {}
     background = scene.get("background") if isinstance(scene.get("background"), dict) else {}
+    foreground = scene.get("foreground") if isinstance(scene.get("foreground"), dict) else {}
     ducking = scene.get("ducking") if isinstance(scene.get("ducking"), dict) else {}
     finish = scene.get("finish") if isinstance(scene.get("finish"), dict) else {}
     background_url = vp._text(background.get("url") or scene.get("background_url"))
@@ -894,8 +895,8 @@ def _native_audio_scene_payload(raw: Any) -> Dict[str, Any]:
     def _percent(value: Any, default: int) -> int:
         return max(0, min(100, int(vp._as_float(value, float(default)))))
 
-    def _milliseconds(value: Any, default: int) -> int:
-        return max(0, min(10000, int(vp._as_float(value, float(default)))))
+    def _milliseconds(value: Any, default: int, maximum: int = 10000) -> int:
+        return max(0, min(maximum, int(vp._as_float(value, float(default)))))
 
     scene_id = vp._text(scene.get("scene_id"))[:64]
     normalized: Dict[str, Any] = {
@@ -906,10 +907,13 @@ def _native_audio_scene_payload(raw: Any) -> Dict[str, Any]:
         },
         "foreground": {
             "volume_percent": _percent(
-                (scene.get("foreground") or {}).get("volume_percent")
-                if isinstance(scene.get("foreground"), dict)
-                else None,
+                foreground.get("volume_percent"),
                 100,
+            ),
+            "start_delay_ms": _milliseconds(
+                foreground.get("start_delay_ms", scene.get("tts_start_delay_ms")),
+                0,
+                30000,
             ),
         },
         "ducking": {
@@ -949,6 +953,58 @@ def _native_ducking_payload(raw: Any = None) -> Dict[str, int]:
     }
 
 
+async def _render_native_audio_scene(
+    vp: Any,
+    audio_scene: Dict[str, Any],
+    foreground_bytes: bytes,
+    *,
+    foreground_media_type: str,
+    foreground_filename: str,
+) -> Dict[str, Any]:
+    background = (
+        audio_scene.get("background")
+        if isinstance(audio_scene.get("background"), dict)
+        else {}
+    )
+    foreground = (
+        audio_scene.get("foreground")
+        if isinstance(audio_scene.get("foreground"), dict)
+        else {}
+    )
+    scene_ducking = (
+        audio_scene.get("ducking")
+        if isinstance(audio_scene.get("ducking"), dict)
+        else {}
+    )
+    finish = (
+        audio_scene.get("finish")
+        if isinstance(audio_scene.get("finish"), dict)
+        else {}
+    )
+    background_source_url = vp._text(background.get("url"))
+    background_bytes, background_media_type = await vp._download_media_source(
+        background_source_url
+    )
+    return await vp._render_native_audio_scene_asset(
+        foreground_bytes,
+        foreground_media_type=foreground_media_type,
+        foreground_filename=foreground_filename,
+        background_bytes=background_bytes,
+        background_media_type=(
+            vp._text(background_media_type) or "application/octet-stream"
+        ),
+        background_filename="background-audio",
+        background_loop=bool(background.get("loop", True)),
+        foreground_volume_percent=int(foreground.get("volume_percent", 100)),
+        background_volume_percent=int(background.get("volume_percent", 60)),
+        start_delay_ms=int(foreground.get("start_delay_ms", 0)),
+        ducking_target_percent=int(scene_ducking.get("target_percent", 35)),
+        ducking_attack_ms=int(scene_ducking.get("attack_ms", 150)),
+        ducking_release_ms=int(scene_ducking.get("release_ms", 350)),
+        fade_ms=int(finish.get("fade_ms", 500)),
+    )
+
+
 @router.post("/api/tater/satellite/v1/play-group")
 async def native_satellite_play_group(
     payload: Dict[str, Any],
@@ -982,6 +1038,9 @@ async def native_satellite_play_group(
     media_start_position_ms = max(0, int(vp._as_float(payload.get("start_position_ms"), 0.0)))
     media_loop = vp._as_bool(payload.get("loop"), False)
     start_lead_ms = max(250, min(5000, int(vp._as_float(payload.get("start_lead_ms"), 750.0))))
+    timeout_s = vp._as_float(payload.get("timeout_s"), 180.0)
+    wait_for_completion = vp._as_bool(payload.get("wait_for_completion"), False)
+    audio_scene = _native_audio_scene_payload(payload.get("audio_scene"))
     raw_player_settings = payload.get("player_settings")
     player_settings = raw_player_settings if isinstance(raw_player_settings, dict) else {}
 
@@ -1160,7 +1219,7 @@ async def native_satellite_play_group(
 
     passthrough_url = (
         ""
-        if audio_b64
+        if audio_b64 or audio_scene
         else vp._native_persistent_media_source_url(
             source_url,
             media_content_type=media_content_type,
@@ -1181,7 +1240,44 @@ async def native_satellite_play_group(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Failed to fetch audio source: {exc}") from exc
     media_type = requested_media_type or fetched_media_type or "application/octet-stream"
-    if not passthrough_url:
+    scene_summary: Dict[str, Any] = {}
+    rendered_audio_scene_started = False
+    if audio_scene:
+        try:
+            scene_asset = await _render_native_audio_scene(
+                vp,
+                audio_scene,
+                media_bytes,
+                foreground_media_type=media_type,
+                foreground_filename=filename,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Failed to render synchronized announcement: {exc}",
+            ) from exc
+        media_bytes = bytes(scene_asset.get("bytes") or b"")
+        media_type = vp._text(scene_asset.get("media_type")) or "audio/mpeg"
+        filename = vp._text(scene_asset.get("filename")) or "announcement-scene.mp3"
+        media_content_type = "announcement"
+        media_start_position_ms = 0
+        media_loop = False
+        rendered_audio_scene_started = True
+        scene_summary = {
+            key: value
+            for key, value in scene_asset.items()
+            if key != "bytes"
+        }
+        scene_duration_s = max(0.0, vp._as_float(scene_asset.get("duration_s"), 0.0))
+        foreground_duration_s = max(
+            0.0,
+            vp._as_float(scene_asset.get("foreground_duration_s"), 0.0),
+        )
+        completion_timeout_s = timeout_s + max(
+            0.0,
+            scene_duration_s - foreground_duration_s,
+        )
+    elif not passthrough_url:
         prepared_asset = await vp._prepare_native_media_asset(
             media_bytes,
             media_type=media_type,
@@ -1191,10 +1287,14 @@ async def native_satellite_play_group(
         media_bytes = bytes(prepared_asset.get("bytes") or b"")
         media_type = vp._text(prepared_asset.get("media_type")) or media_type
         filename = vp._text(prepared_asset.get("filename")) or filename
+        completion_timeout_s = timeout_s
+    else:
+        completion_timeout_s = timeout_s
     playback_id = uuid.uuid4().hex
+    session_id = f"{playback_id}-scene" if audio_scene else playback_id
     playback_url = passthrough_url or vp._store_media_url(
         playback_members[0]["selector"],
-        playback_id,
+        session_id,
         media_bytes,
         media_type=media_type,
         filename=filename,
@@ -1208,7 +1308,7 @@ async def native_satellite_play_group(
             playback_members,
             group_id=group_id,
             group_selector=f"group:{group_id}",
-            session_id=playback_id,
+            session_id=session_id,
             media_url=playback_url,
             start_position_ms=media_start_position_ms,
             loop=media_loop,
@@ -1219,6 +1319,8 @@ async def native_satellite_play_group(
             channel_mode="mixed" if any(row.get("channel") != "mono" for row in playback_members) else "mono",
             start_lead_ms=start_lead_ms,
             compatibility_checked=True,
+            wait_for_completion=wait_for_completion,
+            completion_timeout_s=completion_timeout_s,
         )
     except Exception as exc:
         raise HTTPException(status_code=409, detail=f"Failed to queue synchronized playback: {exc}") from exc
@@ -1236,8 +1338,13 @@ async def native_satellite_play_group(
         "start_lead_ms": start_lead_ms,
         "playback_mode": "synchronized_group",
         "media_session_started": True,
+        "audio_scene_started": rendered_audio_scene_started,
+        "rendered_audio_scene_started": rendered_audio_scene_started,
+        "audio_overlay_started": False,
         **result,
     }
+    if rendered_audio_scene_started:
+        response["audio_scene_render"] = scene_summary
     if skipped_destinations:
         response["warnings"] = [
             "Skipped unavailable playback destinations: "
@@ -1416,75 +1523,83 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
     media_session_started = False
     media_session_fallback_reason = ""
     audio_overlay_started = False
+    rendered_audio_scene_started = False
+    rendered_scene_cache: Dict[str, Any] = {}
+
+    async def _render_audio_scene() -> Dict[str, Any]:
+        if rendered_scene_cache:
+            return rendered_scene_cache
+        scene_asset = await _render_native_audio_scene(
+            vp,
+            audio_scene,
+            media_bytes,
+            foreground_media_type=media_type,
+            foreground_filename=filename,
+        )
+        scene_session_id = f"{playback_id}-scene"
+        scene_url = vp._store_media_url(
+            selector,
+            scene_session_id,
+            bytes(scene_asset.get("bytes") or b""),
+            media_type=vp._text(scene_asset.get("media_type")) or "audio/mpeg",
+            filename=(
+                vp._text(scene_asset.get("filename"))
+                or "announcement-scene.mp3"
+            ),
+        )
+        if not scene_url:
+            raise RuntimeError("Failed to store rendered announcement audio")
+        scene_summary = {
+            key: value
+            for key, value in scene_asset.items()
+            if key != "bytes"
+        }
+        rendered_scene_cache.update(
+            {
+                "session_id": scene_session_id,
+                "url": scene_url,
+                "asset": scene_asset,
+                "summary": scene_summary,
+            }
+        )
+        return rendered_scene_cache
+
+    def _scene_completion_timeout(scene: Dict[str, Any]) -> float:
+        asset = scene.get("asset") if isinstance(scene.get("asset"), dict) else {}
+        scene_duration_s = max(0.0, vp._as_float(asset.get("duration_s"), 0.0))
+        foreground_duration_s = max(
+            0.0,
+            vp._as_float(asset.get("foreground_duration_s"), 0.0),
+        )
+        return timeout_s + max(0.0, scene_duration_s - foreground_duration_s)
+
     if stereo_pair:
         try:
             from .. import native_satellite
 
             if audio_scene:
-                background = (
-                    audio_scene.get("background")
-                    if isinstance(audio_scene.get("background"), dict)
-                    else {}
-                )
-                background_source_url = vp._text(background.get("url"))
-                background_bytes, background_media_type = await vp._download_media_source(
-                    background_source_url
-                )
-                background_asset = await vp._prepare_native_media_asset(
-                    background_bytes,
-                    media_type=background_media_type or "application/octet-stream",
-                    filename="background-audio",
-                    playback_kind="background",
-                )
-                background_url = vp._store_media_url(
-                    selector,
-                    f"{playback_id}-background",
-                    bytes(background_asset.get("bytes") or b""),
-                    media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
-                    filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
-                )
-                if not background_url:
-                    raise RuntimeError("Failed to store stereo background audio for playback")
-                background_result = await native_satellite.prepare_stereo_media_session(
+                scene = await _render_audio_scene()
+                scene_result = await native_satellite.prepare_stereo_media_session(
                     stereo_pair,
-                    session_id=f"{playback_id}-background",
-                    media_url=background_url,
-                    volume_percent=int(background.get("volume_percent", 60)),
-                    loop=bool(background.get("loop", True)),
-                    content_type="background",
+                    session_id=vp._text(scene.get("session_id")),
+                    media_url=vp._text(scene.get("url")),
+                    volume_percent=100,
+                    loop=False,
+                    content_type="announcement",
                     channel_mode="stereo",
-                )
-                foreground = (
-                    audio_scene.get("foreground")
-                    if isinstance(audio_scene.get("foreground"), dict)
-                    else {}
-                )
-                finish = (
-                    audio_scene.get("finish")
-                    if isinstance(audio_scene.get("finish"), dict)
-                    else {}
-                )
-                overlay_result = await native_satellite.start_stereo_overlay(
-                    stereo_pair,
-                    overlay_id=playback_id,
-                    foreground_url=playback_url,
-                    foreground_kind=tts_kind or "tts",
-                    foreground_volume_percent=int(foreground.get("volume_percent", 100)),
-                    ducking=dict(audio_scene.get("ducking") or {}),
-                    start_server_us=int(background_result.get("start_server_us") or 0),
-                    stop_media_when_finished=True,
-                    background_fade_out_ms=int(finish.get("fade_ms", 350)),
                     wait_for_completion=wait_for_completion,
-                    completion_timeout_s=timeout_s,
+                    completion_timeout_s=_scene_completion_timeout(scene),
                 )
                 result = {
-                    **background_result,
-                    "overlay": overlay_result,
+                    **scene_result,
                     "stereo_audio_scene_started": True,
+                    "rendered_audio_scene_started": True,
+                    "rendered_scene_url": vp._text(scene.get("url")),
+                    "audio_scene_render": dict(scene.get("summary") or {}),
                 }
                 audio_scene_started = True
                 media_session_started = True
-                audio_overlay_started = True
+                rendered_audio_scene_started = True
             elif persistent_media_requested:
                 result = await native_satellite.prepare_stereo_media_session(
                     stereo_pair,
@@ -1534,109 +1649,68 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                 selector,
                 "audio_scenes",
             )
-            buffered_scene_supported = bool(audio_scene)
+            rendered_scene_supported = bool(audio_scene)
             for capability in (
                 "persistent_media_sessions",
-                "tts_overlays",
                 "synchronized_media_sessions",
-                "synchronized_tts_overlays",
                 "media_playhead_telemetry",
                 "media_drift_correction",
             ):
-                if buffered_scene_supported and not await native_satellite.client_has_capability(
+                if rendered_scene_supported and not await native_satellite.client_has_capability(
                     selector,
                     capability,
                 ):
-                    buffered_scene_supported = False
+                    rendered_scene_supported = False
 
-            if audio_scene and buffered_scene_supported:
+            if audio_scene and rendered_scene_supported:
                 try:
-                    background = audio_scene.get("background") if isinstance(audio_scene.get("background"), dict) else {}
-                    background_source_url = vp._text(background.get("url"))
-                    background_bytes, background_media_type = await vp._download_media_source(background_source_url)
-                    background_asset = await vp._prepare_native_media_asset(
-                        background_bytes,
-                        media_type=background_media_type or "application/octet-stream",
-                        filename="background-audio",
-                        playback_kind="background",
-                    )
-                    background_session_id = f"{playback_id}-background"
-                    background_url = vp._store_media_url(
-                        selector,
-                        background_session_id,
-                        bytes(background_asset.get("bytes") or b""),
-                        media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
-                        filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
-                    )
-                    if not background_url:
-                        raise RuntimeError("Failed to store background audio for playback")
-
+                    scene = await _render_audio_scene()
                     group_id = f"single-{playback_id[:12]}"
-                    background_result = await native_satellite.prepare_group_media_session(
+                    scene_result = await native_satellite.prepare_group_media_session(
                         [
                             {
                                 "selector": selector,
                                 "channel": "mono",
                                 "delay_ms": 0,
-                                "volume_percent": int(background.get("volume_percent", 60)),
+                                "volume_percent": 100,
                             }
                         ],
                         group_id=group_id,
                         group_selector=selector,
-                        session_id=background_session_id,
-                        media_url=background_url,
-                        loop=bool(background.get("loop", True)),
-                        content_type="background",
+                        session_id=vp._text(scene.get("session_id")),
+                        media_url=vp._text(scene.get("url")),
+                        loop=False,
+                        content_type="announcement",
                         channel_mode="mono",
-                    )
-                    foreground = (
-                        audio_scene.get("foreground")
-                        if isinstance(audio_scene.get("foreground"), dict)
-                        else {}
-                    )
-                    finish = (
-                        audio_scene.get("finish")
-                        if isinstance(audio_scene.get("finish"), dict)
-                        else {}
-                    )
-                    overlay_result = await native_satellite.start_single_overlay(
-                        selector,
-                        group_id=vp._text(background_result.get("group_id")) or group_id,
-                        overlay_id=playback_id,
-                        foreground_url=playback_url,
-                        foreground_kind=tts_kind or "tts",
-                        foreground_volume_percent=int(foreground.get("volume_percent", 100)),
-                        ducking=dict(audio_scene.get("ducking") or {}),
-                        start_server_us=int(background_result.get("start_server_us") or 0),
-                        stop_media_when_finished=True,
-                        background_fade_out_ms=int(finish.get("fade_ms", 350)),
                         wait_for_completion=wait_for_completion,
-                        completion_timeout_s=timeout_s,
+                        completion_timeout_s=_scene_completion_timeout(scene),
                     )
                     result = {
-                        **background_result,
-                        "overlay": overlay_result,
+                        **scene_result,
                         "single_audio_scene_started": True,
+                        "rendered_audio_scene_started": True,
+                        "rendered_scene_url": vp._text(scene.get("url")),
+                        "audio_scene_render": dict(scene.get("summary") or {}),
                     }
                     audio_scene_started = True
                     media_session_started = True
-                    audio_overlay_started = True
+                    rendered_audio_scene_started = True
                 except Exception as exc:
                     with contextlib.suppress(Exception):
                         await native_satellite.send_command(
                             selector,
                             "media.session.stop",
                             {
-                                "session_id": f"{playback_id}-background",
-                                "reason": "single_audio_scene_fallback",
+                                "session_id": f"{playback_id}-scene",
+                                "reason": "rendered_audio_scene_failed",
                             },
                         )
                     vp.logger.warning(
-                        "[voice_core] buffered audio scene failed selector=%s error=%s",
+                        "[voice_core] rendered audio scene failed selector=%s error=%s",
                         selector,
                         exc,
                     )
-                    raise RuntimeError(f"Buffered audio scene failed: {exc}") from exc
+                    raise RuntimeError(f"Rendered audio scene failed: {exc}") from exc
 
             if audio_scene and not audio_scene_started and scene_supported:
                 try:
@@ -1665,6 +1739,9 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                             "url": playback_url,
                             "kind": tts_kind or "tts",
                             "volume_percent": int((audio_scene.get("foreground") or {}).get("volume_percent", 100)),
+                            "start_delay_ms": int(
+                                (audio_scene.get("foreground") or {}).get("start_delay_ms", 0)
+                            ),
                         },
                         "background": {
                             "url": background_url,
@@ -1784,6 +1861,7 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         "media_session_started": media_session_started,
         "media_session_fallback_reason": media_session_fallback_reason,
         "audio_overlay_started": audio_overlay_started,
+        "rendered_audio_scene_started": rendered_audio_scene_started,
         **result,
     }
 

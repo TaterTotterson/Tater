@@ -1,46 +1,46 @@
-# Tater v1.2.4
+# Tater v1.2.5
 
-Tater v1.2.4 adds first-class Tater Open WebUI support, clearer Terminal naming,
-faster Hydra tool feedback, and more reliable native satellite audio.
+Tater v1.2.5 gives native satellite announcements one synchronized audio
+timeline and completes generated-media delivery to Tater Open WebUI.
 
 ## What's Changed
 
-### Tater Open WebUI and Spud Link
+### Synchronized Announcement Scenes
 
-- Adds a dedicated Spud Link client role and polished pairing flow for Tater
-  Open WebUI.
-- Shares `tater/base`, `tater/hydra`, speech-to-text, and text-to-speech while
-  keeping the linked WebUI's local terminal on its own host.
-- Registers each linked WebUI account as a discoverable identity so it can be
-  connected to a Person and receive the correct permissions.
-- Adds an optional dedicated coding-model route for Tater Open WebUI Base calls;
-  Hydra keeps its normal model and capability routing.
+- Renders an announcement's background audio, foreground speech, lead-in,
+  ducking, release, and fade into one seekable MP3 before playback.
+- Starts that same rendered timeline across a single satellite, stereo pair, or
+  mixed multi-room group so music and speech remain aligned everywhere.
+- Sends multi-destination audio scenes through one synchronized group request
+  and can wait for the complete rendered scene before reporting completion.
+- Keeps the existing compatibility mixer available for older satellites that
+  do not support synchronized media sessions.
 
-### Terminal and Hydra
+### Faster and More Reliable Native Audio
 
-- Renames the user-facing Spudex workspace and settings to **Terminal** while
-  preserving compatibility with existing configuration and integrations.
-- Runs Hydra's live progress generation alongside tool execution so quick tools
-  no longer wait for a status sentence before starting.
-- Makes progress updates more specific about the requested action and target
-  without exposing credentials or internal tool details.
+- Normalizes reusable background tracks with seekable Info/Xing duration
+  metadata and caches prepared MP3 assets to avoid repeated transcoding.
+- Preserves configured foreground delays and extends completion timeouts to
+  include the scene's release and fade tail.
+- Reports the exact satellite and timeout duration when a group member cannot
+  prepare its media session, making playback failures easier to diagnose.
 
-### Native Satellite Audio
+### Tater Open WebUI Generated Media
 
-- Improves stereo recovery when a satellite rebuffers or rejoins playback,
-  including bounded realignment and steadier rate corrections.
-- Makes media handoffs and live volume changes session-aware so stale cleanup
-  cannot interrupt replacement playback.
-- Normalizes background audio for reliable overlays and uses consistent public
-  playback URLs for native speech and media assets.
+- Allows an authenticated, paired Tater Open WebUI client to retrieve the
+  generated artifact URLs returned by its own Hydra calls.
+- Completes the secure delivery path used to persist and display generated
+  images, audio, video, and ordinary files in Tater Open WebUI chats.
+- Keeps every other restricted Spud Link endpoint outside the Tater Open WebUI
+  role's allowlist.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.2.4 through
+- macOS users already running v1.0.1 or later can install v1.2.5 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.2.4` or `latest` for the CPU image and
-  `v1.2.4-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.2.5` or `latest` for the CPU image and
+  `v1.2.5-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

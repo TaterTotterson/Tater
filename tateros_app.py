@@ -7918,7 +7918,11 @@ def _require_spud_link_node_request(request: Request) -> Tuple[Dict[str, Any], D
             "/api/spudlink/v1/tts/speech",
             "/api/spudlink/v1/stt/transcribe",
         }
-        if path not in allowed_paths:
+        generated_file_prefix = "/api/spudlink/v1/files/"
+        generated_file_download = path.startswith(generated_file_prefix) and bool(
+            path[len(generated_file_prefix) :].strip("/")
+        )
+        if path not in allowed_paths and not generated_file_download:
             raise HTTPException(
                 status_code=403,
                 detail="This Tater Open WebUI link is not authorized for that Spud Link endpoint.",

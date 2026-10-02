@@ -30,6 +30,7 @@ except Exception:  # Python 3.13 removed audioop
     _audioop = None
 import copy
 import contextlib
+import hashlib
 import html
 import importlib
 import inspect
@@ -432,8 +433,10 @@ DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
 NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS = 96
 NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS = 192
 NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS = 128
+NATIVE_SATELLITE_AUDIO_SCENE_MP3_BITRATE_KBPS = 128
 NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ = 48000
 NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S = 60.0
+NATIVE_SATELLITE_BACKGROUND_CACHE_VERSION = "xing-v1"
 
 DEFAULT_EOU_MODE = "server"
 DEFAULT_VAD_BACKEND = "webrtc" if remote_only_enabled() else "silero"
@@ -4861,6 +4864,31 @@ def _native_media_mp3_filename(filename: str) -> str:
     return f"{stem}.mp3"
 
 
+def _native_background_media_cache_dir() -> Path:
+    return agent_lab_path("cache", "native_media", "background")
+
+
+def _native_media_mp3_has_duration_header(media_bytes: bytes) -> bool:
+    # LAME writes either an Info header for constant-bitrate output or a Xing
+    # header for variable-bitrate output. Both include the frame count that lets
+    # a satellite learn the duration without scanning the entire asset first.
+    header = bytes(media_bytes or b"")[:8192]
+    return b"Info" in header or b"Xing" in header
+
+
+def _native_background_media_cache_key(media_bytes: bytes) -> str:
+    profile = (
+        f"{NATIVE_SATELLITE_BACKGROUND_CACHE_VERSION}:"
+        f"{NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS}:"
+        f"{NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ}"
+    ).encode("ascii")
+    digest = hashlib.sha256()
+    digest.update(profile)
+    digest.update(b"\0")
+    digest.update(bytes(media_bytes or b""))
+    return digest.hexdigest()
+
+
 def _prepare_native_media_asset_sync(
     media_bytes: bytes,
     *,
@@ -4892,6 +4920,44 @@ def _prepare_native_media_asset_sync(
             "transcoded": False,
         }
 
+    bitrate_kbps = (
+        NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS
+        if kind == "background"
+        else (
+            NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS
+            if kind in {"music", "media"}
+            else NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS
+        )
+    )
+    started_at = time.monotonic()
+    background_cache_path: Optional[Path] = None
+    if kind == "background":
+        cache_key = _native_background_media_cache_key(data)
+        background_cache_path = _native_background_media_cache_dir() / f"{cache_key}.mp3"
+        try:
+            cached = background_cache_path.read_bytes()
+        except (FileNotFoundError, OSError):
+            cached = b""
+        if cached and _native_media_mp3_has_duration_header(cached):
+            logger.info(
+                "[native-media] reused cached background MP3 source_bytes=%d "
+                "prepared_bytes=%d elapsed_ms=%.1f filename=%s",
+                len(data),
+                len(cached),
+                (time.monotonic() - started_at) * 1000.0,
+                safe_filename,
+            )
+            return {
+                "bytes": cached,
+                "media_type": "audio/mpeg",
+                "filename": _native_media_mp3_filename(safe_filename),
+                "transcoded": True,
+                "source_media_type": mime,
+                "source_bytes": len(data),
+                "bitrate_kbps": bitrate_kbps,
+                "cache_hit": True,
+            }
+
     ffmpeg = _native_media_ffmpeg_binary()
     if not ffmpeg:
         logger.warning(
@@ -4909,15 +4975,7 @@ def _prepare_native_media_asset_sync(
             "warning": "ffmpeg is unavailable",
         }
 
-    bitrate_kbps = (
-        NATIVE_SATELLITE_BACKGROUND_MP3_BITRATE_KBPS
-        if kind == "background"
-        else (
-            NATIVE_SATELLITE_MUSIC_MP3_BITRATE_KBPS
-            if kind in {"music", "media"}
-            else NATIVE_SATELLITE_SPEECH_MP3_BITRATE_KBPS
-        )
-    )
+    output_path: Optional[Path] = None
     command = [
         ffmpeg,
         "-hide_banner",
@@ -4937,12 +4995,21 @@ def _prepare_native_media_asset_sync(
         "-b:a",
         f"{bitrate_kbps}k",
         "-write_xing",
-        "0",
-        "-f",
-        "mp3",
-        "pipe:1",
     ]
     try:
+        if kind == "background":
+            cache_dir = _native_background_media_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            handle, raw_output_path = tempfile.mkstemp(
+                prefix=".preparing-",
+                suffix=".mp3",
+                dir=str(cache_dir),
+            )
+            os.close(handle)
+            output_path = Path(raw_output_path)
+            command.extend(("1", "-y", str(output_path)))
+        else:
+            command.extend(("0", "-f", "mp3", "pipe:1"))
         completed = subprocess.run(
             command,
             input=data,
@@ -4951,10 +5018,26 @@ def _prepare_native_media_asset_sync(
             check=False,
             timeout=NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S,
         )
-        encoded = bytes(completed.stdout or b"")
+        encoded = (
+            output_path.read_bytes()
+            if output_path is not None
+            else bytes(completed.stdout or b"")
+        )
         if int(completed.returncode or 0) != 0 or not encoded:
             detail = bytes(completed.stderr or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(detail or f"ffmpeg exited with status {completed.returncode}")
+        if kind == "background" and not _native_media_mp3_has_duration_header(encoded):
+            raise RuntimeError("prepared background MP3 is missing an Info/Xing duration header")
+        if output_path is not None and background_cache_path is not None:
+            try:
+                os.replace(output_path, background_cache_path)
+                output_path = None
+            except OSError as exc:
+                logger.warning(
+                    "[native-media] could not cache prepared background MP3 path=%s error=%s",
+                    background_cache_path,
+                    _text(exc) or exc.__class__.__name__,
+                )
     except Exception as exc:
         logger.warning(
             "[native-media] satellite MP3 preparation failed; using original asset "
@@ -4971,16 +5054,22 @@ def _prepare_native_media_asset_sync(
             "transcoded": False,
             "warning": _text(exc) or exc.__class__.__name__,
         }
+    finally:
+        if output_path is not None:
+            with contextlib.suppress(OSError):
+                output_path.unlink()
 
     prepared_filename = _native_media_mp3_filename(safe_filename)
     logger.info(
         "[native-media] prepared satellite MP3 kind=%s source_type=%s source_bytes=%d "
-        "prepared_bytes=%d bitrate_kbps=%d filename=%s",
+        "prepared_bytes=%d bitrate_kbps=%d cache=%s elapsed_ms=%.1f filename=%s",
         kind or "audio",
         mime,
         len(data),
         len(encoded),
         bitrate_kbps,
+        "miss" if kind == "background" else "disabled",
+        (time.monotonic() - started_at) * 1000.0,
         prepared_filename,
     )
     return {
@@ -4991,6 +5080,7 @@ def _prepare_native_media_asset_sync(
         "source_media_type": mime,
         "source_bytes": len(data),
         "bitrate_kbps": bitrate_kbps,
+        "cache_hit": False,
     }
 
 
@@ -5007,6 +5097,287 @@ async def _prepare_native_media_asset(
         media_type=media_type,
         filename=filename,
         playback_kind=playback_kind,
+    )
+
+
+def _native_media_input_suffix(media_type: str, filename: str) -> str:
+    suffix = Path(_text(filename)).suffix.lower()
+    if suffix in {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}:
+        return suffix
+    mime = _text(media_type).split(";", 1)[0].strip().lower()
+    return {
+        "audio/aac": ".aac",
+        "audio/flac": ".flac",
+        "audio/m4a": ".m4a",
+        "audio/mp4": ".m4a",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/ogg": ".ogg",
+        "audio/opus": ".opus",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+    }.get(mime, ".audio")
+
+
+def _native_media_duration_s_sync(ffmpeg: str, source_path: Path) -> float:
+    # Decode at a deliberately low sample rate so duration discovery works for
+    # WAV, MP3, FLAC, and uploaded formats without requiring a second binary.
+    completed = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source_path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S,
+    )
+    pcm_bytes = bytes(completed.stdout or b"")
+    if int(completed.returncode or 0) != 0 or not pcm_bytes:
+        detail = bytes(completed.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail or "ffmpeg could not measure the foreground audio")
+    return len(pcm_bytes) / float(8000 * 2)
+
+
+def _render_native_audio_scene_asset_sync(
+    foreground_bytes: bytes,
+    *,
+    foreground_media_type: str,
+    foreground_filename: str,
+    background_bytes: bytes,
+    background_media_type: str,
+    background_filename: str,
+    background_loop: bool = True,
+    foreground_volume_percent: int = 100,
+    background_volume_percent: int = 60,
+    start_delay_ms: int = 0,
+    ducking_target_percent: int = 35,
+    ducking_attack_ms: int = 150,
+    ducking_release_ms: int = 350,
+    fade_ms: int = 500,
+) -> Dict[str, Any]:
+    """Render a complete announcement scene onto one deterministic timeline."""
+    foreground_data = bytes(foreground_bytes or b"")
+    background_data = bytes(background_bytes or b"")
+    if not foreground_data:
+        raise RuntimeError("Foreground announcement audio is empty")
+    if not background_data:
+        raise RuntimeError("Background announcement audio is empty")
+
+    ffmpeg = _native_media_ffmpeg_binary()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is unavailable")
+
+    foreground_volume = max(0, min(100, int(foreground_volume_percent))) / 100.0
+    background_volume = max(0, min(100, int(background_volume_percent))) / 100.0
+    ducked_fraction = max(0, min(100, int(ducking_target_percent))) / 100.0
+    delay_s = max(0, min(30000, int(start_delay_ms))) / 1000.0
+    attack_s = max(0, min(10000, int(ducking_attack_ms))) / 1000.0
+    release_s = max(0, min(10000, int(ducking_release_ms))) / 1000.0
+    fade_s = max(0, min(10000, int(fade_ms))) / 1000.0
+    started_at = time.monotonic()
+
+    with tempfile.TemporaryDirectory(prefix="tater-audio-scene-") as temp_dir:
+        temp_root = Path(temp_dir)
+        foreground_path = temp_root / (
+            "foreground"
+            + _native_media_input_suffix(foreground_media_type, foreground_filename)
+        )
+        background_path = temp_root / (
+            "background"
+            + _native_media_input_suffix(background_media_type, background_filename)
+        )
+        output_path = temp_root / "announcement-scene.mp3"
+        foreground_path.write_bytes(foreground_data)
+        background_path.write_bytes(background_data)
+
+        foreground_duration_s = _native_media_duration_s_sync(ffmpeg, foreground_path)
+        if foreground_duration_s <= 0.0:
+            raise RuntimeError("Foreground announcement audio has no playable duration")
+
+        speech_start_s = delay_s
+        speech_end_s = speech_start_s + foreground_duration_s
+        fade_start_s = speech_end_s + release_s
+        total_duration_s = max(0.05, fade_start_s + fade_s)
+        tail_s = release_s + fade_s
+
+        if attack_s > 0.0:
+            attack_expression = (
+                f"if(lt(t,{speech_start_s:.6f}),1,"
+                f"if(lt(t,{speech_start_s + attack_s:.6f}),"
+                f"1-(1-{ducked_fraction:.6f})*(t-{speech_start_s:.6f})/{attack_s:.6f},"
+            )
+            attack_closers = 1
+        else:
+            attack_expression = f"if(lt(t,{speech_start_s:.6f}),1,"
+            attack_closers = 0
+
+        if release_s > 0.0:
+            release_expression = (
+                f"if(lt(t,{speech_end_s:.6f}),{ducked_fraction:.6f},"
+                f"if(lt(t,{fade_start_s:.6f}),"
+                f"{ducked_fraction:.6f}+(1-{ducked_fraction:.6f})"
+                f"*(t-{speech_end_s:.6f})/{release_s:.6f},1))"
+            )
+        else:
+            release_expression = (
+                f"if(lt(t,{speech_end_s:.6f}),{ducked_fraction:.6f},1)"
+            )
+        duck_expression = (
+            attack_expression
+            + release_expression
+            + (")" * attack_closers)
+            + ")"
+        )
+
+        background_filter = (
+            f"[0:a:0]aresample={NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ},"
+            "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"volume='{background_volume:.6f}*({duck_expression})':eval=frame,"
+            f"apad=pad_dur={total_duration_s:.6f},"
+            f"atrim=duration={total_duration_s:.6f}[background]"
+        )
+        foreground_filter = (
+            f"[1:a:0]atrim=duration={foreground_duration_s:.6f},asetpts=PTS-STARTPTS,"
+            f"aresample={NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ},"
+            "aformat=sample_fmts=fltp:channel_layouts=mono,"
+            "pan=stereo|c0=c0|c1=c0,"
+            f"volume={foreground_volume:.6f},"
+            f"adelay={int(round(delay_s * 1000.0))}|{int(round(delay_s * 1000.0))},"
+            f"apad=pad_dur={tail_s:.6f}[foreground]"
+        )
+        mix_filter = (
+            "[background][foreground]"
+            "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
+            f"atrim=duration={total_duration_s:.6f}"
+        )
+        if fade_s > 0.0:
+            mix_filter += f",afade=t=out:st={fade_start_s:.6f}:d={fade_s:.6f}"
+        mix_filter += ",alimiter=limit=0.98:latency=1[scene]"
+
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ]
+        if background_loop:
+            command.extend(("-stream_loop", "-1"))
+        command.extend(
+            [
+                "-i",
+                str(background_path),
+            ]
+        )
+        command.extend([
+            "-i",
+            str(foreground_path),
+            "-filter_complex",
+            ";".join((background_filter, foreground_filter, mix_filter)),
+            "-map",
+            "[scene]",
+            "-vn",
+            "-map_metadata",
+            "-1",
+            "-ar",
+            str(NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ),
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            f"{NATIVE_SATELLITE_AUDIO_SCENE_MP3_BITRATE_KBPS}k",
+            "-write_xing",
+            "1",
+            "-y",
+            str(output_path),
+        ])
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=NATIVE_SATELLITE_TRANSCODE_TIMEOUT_S,
+        )
+        rendered = output_path.read_bytes() if output_path.is_file() else b""
+        if int(completed.returncode or 0) != 0 or not rendered:
+            detail = bytes(completed.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or f"ffmpeg exited with status {completed.returncode}")
+        if not _native_media_mp3_has_duration_header(rendered):
+            raise RuntimeError("Rendered announcement MP3 is missing an Info/Xing duration header")
+
+    elapsed_ms = (time.monotonic() - started_at) * 1000.0
+    logger.info(
+        "[native-media] rendered announcement scene foreground_s=%.3f total_s=%.3f "
+        "delay_ms=%d source_bytes=%d rendered_bytes=%d elapsed_ms=%.1f",
+        foreground_duration_s,
+        total_duration_s,
+        int(round(delay_s * 1000.0)),
+        len(foreground_data) + len(background_data),
+        len(rendered),
+        elapsed_ms,
+    )
+    return {
+        "bytes": rendered,
+        "media_type": "audio/mpeg",
+        "filename": "announcement-scene.mp3",
+        "transcoded": True,
+        "rendered_audio_scene": True,
+        "foreground_duration_s": foreground_duration_s,
+        "duration_s": total_duration_s,
+        "start_delay_ms": int(round(delay_s * 1000.0)),
+        "bitrate_kbps": NATIVE_SATELLITE_AUDIO_SCENE_MP3_BITRATE_KBPS,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+async def _render_native_audio_scene_asset(
+    foreground_bytes: bytes,
+    *,
+    foreground_media_type: str,
+    foreground_filename: str,
+    background_bytes: bytes,
+    background_media_type: str,
+    background_filename: str,
+    background_loop: bool = True,
+    foreground_volume_percent: int = 100,
+    background_volume_percent: int = 60,
+    start_delay_ms: int = 0,
+    ducking_target_percent: int = 35,
+    ducking_attack_ms: int = 150,
+    ducking_release_ms: int = 350,
+    fade_ms: int = 500,
+) -> Dict[str, Any]:
+    return await run_background(
+        _render_native_audio_scene_asset_sync,
+        foreground_bytes,
+        foreground_media_type=foreground_media_type,
+        foreground_filename=foreground_filename,
+        background_bytes=background_bytes,
+        background_media_type=background_media_type,
+        background_filename=background_filename,
+        background_loop=background_loop,
+        foreground_volume_percent=foreground_volume_percent,
+        background_volume_percent=background_volume_percent,
+        start_delay_ms=start_delay_ms,
+        ducking_target_percent=ducking_target_percent,
+        ducking_attack_ms=ducking_attack_ms,
+        ducking_release_ms=ducking_release_ms,
+        fade_ms=fade_ms,
     )
 
 
