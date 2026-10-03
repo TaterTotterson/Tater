@@ -777,12 +777,12 @@ def build_weather_summary(
     if core_installed is None:
         core_installed = _environment_core_installed()
     if not core_installed:
-        return {**result, "available": False}
+        return {**result, "available": False, "environment_installed": False}
 
     redis_obj = client or redis_client
     snapshots = _environment_provider_snapshots(redis_obj)
     if not snapshots:
-        return {**result, "available": False}
+        return {**result, "available": False, "environment_installed": True}
 
     live_provider = _environment_source_provider(
         _environment_setting(
@@ -1016,6 +1016,7 @@ def build_weather_summary(
     return {
         **result,
         "available": True,
+        "environment_installed": True,
         "temperature_text": f"{temperature}°" if temperature else "",
         "temperature_unit": preferred_unit,
         "indoor_temperature_text": f"{indoor_temperature}°" if indoor_temperature else "",

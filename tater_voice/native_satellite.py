@@ -477,11 +477,18 @@ def _screen_notifications_supported(payload: Dict[str, Any]) -> bool:
     return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_notifications"), False)
 
 
-def _screen_weather_payload(selector: str = "") -> Dict[str, Any]:
+def _screen_weather_payload(selector: str = "", room: str = "", include_thermostat: bool = False) -> Dict[str, Any]:
     from . import display_feed
 
     try:
-        return display_feed.build_weather_summary(selector=selector)
+        weather = display_feed.build_weather_summary(selector=selector)
+        if include_thermostat:
+            from . import screen_thermostat
+
+            weather["thermostat"] = screen_thermostat.summary(
+                environment_installed=bool(weather.get("environment_installed")), room=room,
+            )
+        return weather
     except Exception:
         _vp().logger.warning("[native-satellite] screen weather refresh failed", exc_info=True)
         return {"available": False}
@@ -4366,12 +4373,22 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     reported_volume_changed = False
     reported_volume_board = ""
     settings_result_changed = False
+    thermostat_room = ""
+    thermostat_authorized = False
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
             return None
         row["last_seen_ts"] = _now()
         row["last_message_type"] = msg_type
+        if msg_type == "thermostat.set":
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            hello_details = _message_payload(hello)
+            thermostat_room = _text(hello_details.get("room"))
+            capabilities = hello_details.get("capabilities")
+            thermostat_authorized = bool(
+                isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_thermostat"), False)
+            )
         if msg_type in {"status", "settings.changed"}:
             reported_settings = (
                 payload.get("settings")
@@ -4528,6 +4545,27 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             _notify_state_change("settings", selector)
     if settings_result_changed:
         _notify_state_change("settings_result", selector)
+    if msg_type == "thermostat.set":
+        from . import display_feed, screen_thermostat
+
+        try:
+            if not thermostat_authorized:
+                raise ValueError("Satellite does not support thermostat control")
+            result = await asyncio.to_thread(
+                screen_thermostat.set_target, payload, room=thermostat_room,
+                environment_installed=display_feed._environment_core_installed(),
+            )
+        except Exception as exc:
+            _vp().logger.warning("[native-satellite] thermostat update failed selector=%s: %s", selector, exc)
+            result = {"ok": False, "error": str(exc)}
+        try:
+            fresh = await asyncio.to_thread(_screen_weather_payload, selector, thermostat_room, True)
+            if not result.get("ok") and isinstance(fresh.get("thermostat"), dict):
+                fresh["thermostat"]["message"] = "Could not update thermostat"
+            await send_command(selector, "display.weather", fresh)
+        except Exception:
+            _vp().logger.warning("[native-satellite] thermostat screen refresh failed", exc_info=True)
+        return _envelope("thermostat.set.ack", result, message_id=_text(message.get("id")))
     if msg_type == "ambient.observation.request":
         from . import reachy_ambient
 
@@ -4696,14 +4734,15 @@ async def handle_websocket(websocket: WebSocket) -> None:
         await send_json(_envelope("settings", _firmware_settings_payload(selector, board=_text(payload.get("board")))))
 
         if _screen_weather_supported(payload):
-            first_weather = await asyncio.to_thread(_screen_weather_payload, selector)
+            thermostat_supported = _as_bool((payload.get("capabilities") or {}).get("screen_thermostat"), False)
+            first_weather = await asyncio.to_thread(_screen_weather_payload, selector, _text(payload.get("room")), thermostat_supported)
             await send_json(_envelope("display.weather", first_weather))
 
             async def send_screen_weather() -> None:
                 previous = json.dumps(first_weather, sort_keys=True, separators=(",", ":"))
                 while True:
                     await asyncio.sleep(NATIVE_SCREEN_WEATHER_REFRESH_S)
-                    weather = await asyncio.to_thread(_screen_weather_payload, selector)
+                    weather = await asyncio.to_thread(_screen_weather_payload, selector, _text(payload.get("room")), thermostat_supported)
                     encoded = json.dumps(weather, sort_keys=True, separators=(",", ":"))
                     if encoded == previous:
                         continue
