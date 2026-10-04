@@ -894,13 +894,51 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         "esp32s3box",
         "esp32s3box3",
     }
-    if is_s3_box:
+    is_echo_display = board_token in {
+        "checkers",
+        "echo-show-5",
+        "echo-show-5-1st-gen",
+        "rook",
+        "echo-spot",
+    } or compact_board in {
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "rook",
+        "echospot",
+    }
+    if is_s3_box or is_echo_display:
         settings_rows = [
             item
             for item in settings_rows
             if esphome_runtime.text(item.get("key"))
             not in {"native_led_brightness", "native_led_color", "native_led_animations"}
         ]
+    if is_echo_display:
+        theme_labels = {
+            "tater": "Tater Harvest",
+            "ocean": "Ocean Current",
+            "violet": "Violet Bloom",
+            "forest": "Forest Moss",
+            "sunset": "Sunset Rose",
+        }
+        theme_key = esphome_runtime.lower(live_settings.get("display_theme")) or "tater"
+        volume_index = next(
+            (
+                index + 1
+                for index, item in enumerate(settings_rows)
+                if esphome_runtime.text(item.get("key")) == "native_volume"
+            ),
+            len(settings_rows),
+        )
+        settings_rows[volume_index:volume_index] = [
+            _native_detail_row(
+                "native_display_theme",
+                "Display Theme",
+                theme_labels.get(theme_key, "Tater Harvest"),
+            )
+        ]
+    if is_s3_box:
         night_enabled = esphome_runtime.as_bool(live_settings.get("screen_night_mode_enabled"), False)
         night_label = "Off"
         if night_enabled:

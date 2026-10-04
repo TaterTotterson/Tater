@@ -112,12 +112,14 @@ class SharedFaceIdentityTests(unittest.TestCase):
             "reference_centroids": references,
             "observations": [
                 {
-                    "id": f"observation_{identity_id}",
-                    "embedding": references[0],
+                    "id": f"observation_{identity_id}_{index}",
+                    "embedding": reference,
                     "embedding_model_signature": signature,
                     "face_b64": "ZmFjZQ==",
                     "quality": 1.0,
+                    "reference_status": "trusted",
                 }
+                for index, reference in enumerate(references)
             ],
         }
 
@@ -249,11 +251,13 @@ class SharedFaceIdentityTests(unittest.TestCase):
             "reference_centroids": references,
             "observations": [
                 {
-                    "id": f"observation_{identity_id}",
-                    "embedding": references[0],
+                    "id": f"observation_{identity_id}_{index}",
+                    "embedding": reference,
                     "embedding_model_signature": "facenet512|cosine|2",
                     "face_b64": "ZmFjZQ==",
+                    "reference_status": "trusted",
                 }
+                for index, reference in enumerate(references)
             ],
         }
 
@@ -320,6 +324,105 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(matched_id, "")
         self.assertAlmostEqual(distance, 0.40)
 
+    def test_linked_identity_ignores_provisional_and_legacy_references(self):
+        identity = self.stored_identity(
+            "face_fred",
+            [[1.0, 0.0], [0.995, 0.099875]],
+            person_name="Fred",
+        )
+        identity["observations"].extend(
+            [
+                {
+                    "id": "observation_wrong_auto",
+                    "embedding": [0.0, 1.0],
+                    "embedding_model_signature": "facenet512|cosine|2",
+                    "face_b64": "d3Jvbmc=",
+                    "reference_status": "provisional",
+                },
+                {
+                    "id": "observation_wrong_legacy",
+                    "embedding": [-1.0, 0.0],
+                    "embedding_model_signature": "facenet512|cosine|2",
+                    "face_b64": "bGVnYWN5",
+                },
+            ]
+        )
+
+        matched_id, _distance = face_identity.match_identity(
+            {"face_fred": identity},
+            [0.0, 1.0],
+            threshold=0.30,
+            model_signature="facenet512|cosine|2",
+        )
+
+        self.assertEqual(matched_id, "")
+        self.assertEqual(len(face_identity.trusted_reference_embeddings(identity, "facenet512|cosine|2")), 2)
+
+    def test_linked_identity_without_trusted_images_does_not_auto_match(self):
+        identity = self.stored_identity("face_fred", [[1.0, 0.0]], person_name="Fred")
+        identity["observations"][0].pop("reference_status")
+
+        matched_id, distance = face_identity.match_identity(
+            {"face_fred": identity},
+            [1.0, 0.0],
+            threshold=0.30,
+            model_signature="facenet512|cosine|2",
+        )
+
+        self.assertEqual(matched_id, "")
+        self.assertEqual(distance, float("inf"))
+
+    def test_adaface_extended_match_requires_support_and_margin(self):
+        signature = "adaface ir-50 webface4m|cosine|2|test-revisio"
+
+        def known(identity_id, angles):
+            references = [
+                [math.cos(math.radians(angle)), math.sin(math.radians(angle))]
+                for angle in angles
+            ]
+            identity = self.burst_identity(identity_id, references, identity_id.title())
+            identity["embedding_model_signature"] = signature
+            return identity
+
+        clear = {
+            "face_fred": known("face_fred", [58, 60, 62]),
+            "face_wilma": known("face_wilma", [115, 120, 125]),
+        }
+        ambiguous = {
+            "face_fred": known("face_fred", [58, 60, 62]),
+            "face_wilma": known("face_wilma", [62, 64, 66]),
+        }
+
+        self.assertEqual(
+            face_identity.match_identity(clear, [1.0, 0.0], threshold=0.40, model_signature=signature)[0],
+            "face_fred",
+        )
+        self.assertEqual(
+            face_identity.match_identity(ambiguous, [1.0, 0.0], threshold=0.40, model_signature=signature)[0],
+            "",
+        )
+
+    def test_burst_checks_later_frames_before_creating_an_unknown(self):
+        fred = self.burst_identity(
+            "face_fred",
+            [[1.0, 0.0], [0.995, 0.099875]],
+            "Fred",
+        )
+        self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY] = {"face_fred": json.dumps(fred)}
+        frames = [
+            [self.burst_detection([math.cos(math.radians(40)), math.sin(math.radians(40))], x=100, threshold=0.10)],
+            [self.burst_detection([1.0, 0.0], x=103, threshold=0.10)],
+        ]
+
+        saved = face_identity.record_detection_burst(
+            frames,
+            event_id="late-clear-frame",
+            redis_client=self.redis,
+        )
+
+        self.assertEqual([row["id"] for row in saved], ["face_fred"])
+        self.assertEqual(set(face_identity.identity_rows(self.redis)), {"face_fred"})
+
     def test_people_face_action_links_the_shared_profile(self):
         person = people.create_person("Fred", self.redis)
         identity = face_identity.record_detection(
@@ -340,7 +443,9 @@ class SharedFaceIdentityTests(unittest.TestCase):
         face = result["people"]["faces"][0]
         self.assertTrue(face["linked"])
         self.assertEqual(face["person_name"], "Fred")
-        self.assertEqual(face["gallery"][0]["event_id"], "front-door")
+        self.assertNotIn("gallery", face)
+        gallery = face_identity.ui_gallery(identity["id"], redis_client=self.redis)
+        self.assertEqual(gallery["observations"][0]["event_id"], "front-door")
         self.assertEqual(
             face_identity.recognized_people([identity["id"]], self.redis)[0]["person_name"],
             "Fred",
@@ -369,7 +474,9 @@ class SharedFaceIdentityTests(unittest.TestCase):
         face = result["people"]["faces"][0]
         self.assertEqual(face["person_name"], "Fred")
         self.assertEqual(face["capture_count"], 1)
-        self.assertEqual(face["gallery"][0]["source"]["kind"], "people_face_enrollment")
+        gallery = face_identity.ui_gallery(face["id"], redis_client=self.redis)
+        self.assertEqual(gallery["observations"][0]["source"]["kind"], "people_face_enrollment")
+        self.assertEqual(gallery["observations"][0]["reference_status"], "trusted")
 
     def test_people_face_enrollment_rejects_multiple_faces_without_saving(self):
         person = people.create_person("Fred", self.redis)
@@ -396,12 +503,41 @@ class SharedFaceIdentityTests(unittest.TestCase):
 
         self.assertEqual(face_identity.identity_rows(self.redis), {})
 
+    def test_manual_enrollment_anchors_an_existing_linked_profile(self):
+        person = people.create_person("Fred", self.redis)
+        identity = face_identity.record_detection(
+            self.detection([1.0, 0.0]),
+            event_id="automatic-capture",
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
+
+        with (
+            patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
+            patch.object(face_identity.face_id_runtime, "analyze_image", return_value=[self.detection([0.995, 0.1])]),
+        ):
+            result = face_identity.enroll_person_image(
+                b"jpeg",
+                person_id=person["id"],
+                source={"kind": "people_face_enrollment"},
+                redis_client=self.redis,
+            )
+
+        self.assertEqual(result["identity_id"], identity["id"])
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(len(face_identity.observations(saved)), 2)
+        self.assertEqual(
+            [face_identity.observation_reference_status(row) for row in face_identity.observations(saved)].count("trusted"),
+            1,
+        )
+
     def test_people_face_enrollment_does_not_reassign_an_existing_face(self):
         fred = people.create_person("Fred", self.redis)
         wilma = people.create_person("Wilma", self.redis)
         identity = face_identity.record_detection(
             self.detection([1.0, 0.0]),
             event_id="existing-face",
+            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
             redis_client=self.redis,
         )
         face_identity.save_profile(identity["id"], person_id=wilma["id"], redis_client=self.redis)
@@ -431,6 +567,7 @@ class SharedFaceIdentityTests(unittest.TestCase):
         identity = face_identity.record_detection(
             self.detection([1.0, 0.0]),
             event_id="local-enrollment",
+            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
             redis_client=self.redis,
         )
         face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
@@ -513,6 +650,7 @@ class SharedFaceIdentityTests(unittest.TestCase):
         identity = face_identity.record_detection(
             self.detection(facenet_embedding),
             event_id="local-facenet-enrollment",
+            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
             redis_client=self.redis,
         )
         face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
@@ -580,6 +718,7 @@ class SharedFaceIdentityTests(unittest.TestCase):
         identity = face_identity.record_detection(
             self.detection(facenet_embedding),
             event_id="facenet-enrollment",
+            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
             redis_client=self.redis,
         )
         face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
@@ -685,6 +824,87 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertNotIn("reference_centroids", saved)
         self.assertNotIn("face_b64", saved)
 
+    def test_gallery_pages_every_stored_image_and_filters_review_state(self):
+        identity = {
+            "id": "face_gallery",
+            "person_id": "person_fred",
+            "person_name": "Fred",
+            "name": "Fred",
+            "embedding_model_signature": "facenet512|cosine|2",
+            "observations": [
+                {
+                    "id": "trusted",
+                    "embedding": [1.0, 0.0],
+                    "embedding_model_signature": "facenet512|cosine|2",
+                    "face_b64": "dHJ1c3RlZA==",
+                    "reference_status": "trusted",
+                    "seen_at": "2026-09-03T10:00:00Z",
+                },
+                {
+                    "id": "provisional",
+                    "embedding": [0.99, 0.1],
+                    "embedding_model_signature": "facenet512|cosine|2",
+                    "face_b64": "cHJvdmlzaW9uYWw=",
+                    "reference_status": "provisional",
+                    "seen_at": "2026-09-02T10:00:00Z",
+                },
+                {
+                    "id": "legacy_without_vector",
+                    "face_b64": "bGVnYWN5",
+                    "seen_at": "2026-09-01T10:00:00Z",
+                },
+            ],
+        }
+        face_identity.save_identity(identity, self.redis)
+
+        first = face_identity.ui_gallery("face_gallery", offset=0, limit=2, redis_client=self.redis)
+        second = face_identity.ui_gallery("face_gallery", offset=2, limit=2, redis_client=self.redis)
+        unreviewed = face_identity.ui_gallery("face_gallery", status="unreviewed", redis_client=self.redis)
+
+        self.assertEqual(first["all_total"], 3)
+        self.assertEqual(len(first["observations"]), 2)
+        self.assertTrue(first["has_more"])
+        self.assertEqual([row["id"] for row in second["observations"]], ["legacy_without_vector"])
+        self.assertEqual([row["id"] for row in unreviewed["observations"]], ["legacy_without_vector"])
+        self.assertEqual(first["status_counts"], {"provisional": 1, "trusted": 1, "unreviewed": 1})
+
+    def test_trusting_selected_images_rebuilds_the_linked_matching_bank(self):
+        person = people.create_person("Fred", self.redis)
+        first = face_identity.record_detection(
+            self.detection([1.0, 0.0]),
+            event_id="auto-one",
+            redis_client=self.redis,
+        )
+        second = face_identity.record_detection(
+            self.detection([0.995, 0.099875]),
+            event_id="auto-two",
+            matched_identity_id=first["id"],
+            redis_client=self.redis,
+        )
+        face_identity.save_profile(first["id"], person_id=person["id"], redis_client=self.redis)
+        observation_ids = [row["id"] for row in face_identity.observations(second)]
+
+        action = people.handle_action(
+            "people_face_trust_images",
+            {
+                "identity_id": first["id"],
+                "values": {"observation_ids": observation_ids, "trusted": True},
+            },
+            self.redis,
+        )
+        saved = face_identity.identity_rows(self.redis)[first["id"]]
+
+        self.assertEqual(action["message"], "Marked 2 face images trusted.")
+        self.assertEqual(len(face_identity.trusted_reference_embeddings(saved)), 2)
+        self.assertEqual(
+            face_identity.match_identity(
+                {first["id"]: saved},
+                [1.0, 0.0],
+                model_signature=saved["embedding_model_signature"],
+            )[0],
+            first["id"],
+        )
+
     def test_legacy_image_less_anchor_vectors_are_scrubbed_on_read(self):
         self.redis.hashes[face_identity.SHARED_IDENTITIES_KEY] = {
             "face_legacy": json.dumps(
@@ -747,7 +967,9 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertIn("const cameraActive = ref(false)", app)
         self.assertIn('v-if="selectedFace"', app)
         self.assertIn(':aria-pressed="selectedObservations.includes', app)
-        self.assertIn("Select all", app)
+        self.assertIn("Select shown", app)
+        self.assertIn("people_face_trust_images", app)
+        self.assertIn("Load more", app)
         self.assertIn("Permanently delete", app)
         self.assertIn("people-face-gallery", app)
         self.assertIn("people-face-enroll-dialog", app)

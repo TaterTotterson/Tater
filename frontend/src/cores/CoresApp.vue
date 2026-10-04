@@ -44,7 +44,8 @@ const runningCount = computed(() => runtimeItems.value.filter((row: JsonRow) => 
 const trustedRepos = computed(() => Array.isArray(shop.value.repos?.trusted) ? shop.value.repos.trusted : []);
 const dynamicTabs = computed<CoreTabSpec[]>(() => (Array.isArray(tabsPayload.value.tabs) ? tabsPayload.value.tabs : [])
   .filter((tab: JsonRow) => text(tab.core_key))
-  .map((tab: JsonRow) => ({ ...tab, core_key: text(tab.core_key) })));
+  .map((tab: JsonRow) => ({ ...tab, core_key: text(tab.core_key) }))
+  .sort((a: CoreTabSpec, b: CoreTabSpec) => text(a.label || a.core_key).localeCompare(text(b.label || b.core_key), undefined, { sensitivity: "base", numeric: true })));
 const availableTopTabs = computed(() => new Set(["manage", ...dynamicTabs.value.map((tab) => tab.core_key)]));
 const activeSpec = computed(() => dynamicTabs.value.find((tab) => tab.core_key === activeTab.value) || null);
 const activePanelState = computed(() => panelStates[activeTab.value] || null);

@@ -88,7 +88,7 @@ function visible(field: JsonRow): boolean {
 
 function readonly(field: JsonRow): boolean {
   const rawType = String(field.type || "").trim().toLowerCase();
-  return props.disabled || Boolean(field.disabled || field.read_only || field.readonly || ["table", "readonly", "section", "led_preview"].includes(rawType));
+  return props.disabled || Boolean(field.disabled || field.read_only || field.readonly || ["table", "readonly", "section", "led_preview", "display_theme_preview"].includes(rawType));
 }
 
 function setValue(field: JsonRow, event: Event) {
@@ -121,6 +121,32 @@ function ledPreviewStyle(): Record<string, string> {
     "--tm-led-strength": String(.42 + (brightness / 100) * .58),
   };
 }
+
+function displayThemes(field: JsonRow): JsonRow[] {
+  return Array.isArray(field.themes) ? field.themes : [];
+}
+
+function selectedDisplayTheme(field: JsonRow): JsonRow {
+  const selected = String(props.values.display_theme || "tater");
+  return displayThemes(field).find((row) => String(row.value || "") === selected)
+    || displayThemes(field)[0]
+    || {};
+}
+
+function displayThemeColors(field: JsonRow): string[] {
+  const colors = selectedDisplayTheme(field).colors;
+  return Array.isArray(colors) ? colors.map(String).slice(0, 4) : ["#ff8430", "#34e2b7", "#9a70ff", "#ffd05c"];
+}
+
+function displayThemeStyle(field: JsonRow): Record<string, string> {
+  const colors = displayThemeColors(field);
+  return {
+    "--tm-display-primary": colors[0] || "#ff8430",
+    "--tm-display-listening": colors[1] || colors[0] || "#34e2b7",
+    "--tm-display-thinking": colors[2] || colors[0] || "#9a70ff",
+    "--tm-display-highlight": colors[3] || colors[0] || "#ffd05c",
+  };
+}
 </script>
 
 <template>
@@ -147,6 +173,25 @@ function ledPreviewStyle(): Record<string, string> {
                 </div>
                 <div><strong>{{ state.label }}</strong><small>{{ ledAnimationLabel(state) }}</small></div>
               </article>
+            </div>
+          </div>
+
+          <div v-else-if="visible(field) && typeOf(field) === 'display_theme_preview'" class="tm-field tm-field-wide tm-display-theme-preview">
+            <span class="tm-field-label">
+              {{ field.label || "Theme Preview" }}
+              <small>{{ selectedDisplayTheme(field).label || "Tater Harvest" }}</small>
+            </span>
+            <div class="tm-display-theme-stage" :style="displayThemeStyle(field)" aria-hidden="true">
+              <span class="tm-display-theme-orb" />
+              <span class="tm-display-theme-clock">10:42</span>
+              <span class="tm-display-theme-greeting">GOOD MORNING</span>
+              <span class="tm-display-theme-weather">72°</span>
+              <span class="tm-display-theme-condition">CLEAR SKIES</span>
+              <span class="tm-display-theme-reply">Ready when you are</span>
+            </div>
+            <div class="tm-display-theme-swatches">
+              <i v-for="color in displayThemeColors(field)" :key="color" :style="{ background: color }" />
+              <span>{{ selectedDisplayTheme(field).description }}</span>
             </div>
           </div>
 

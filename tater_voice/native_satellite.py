@@ -77,7 +77,7 @@ STEREO_STARTUP_REALIGN_THRESHOLD_US = 40_000
 STEREO_STARTUP_REALIGN_MAX_US = 2_000_000
 STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES = 480
 STEREO_REJOIN_REALIGN_MAX_FRAMES = 480_000
-STEREO_REBUFFER_REALIGN_TIMEOUT_S = 1.5
+STEREO_MUSIC_REJOIN_REALIGN_MAX_FRAMES = 24_000
 STEREO_PHASE_EMA_ALPHA = 0.25
 STEREO_PHASE_STABLE_SAMPLES = 2
 MEDIA_RENDER_START_GUARD_MS = 250
@@ -359,6 +359,8 @@ def _default_name_for_board(board: Any) -> str:
         "respeaker-xvf3800": "Tater ReSpeaker XVF3800",
         "s3-box": "Tater S3 Box",
         "biscuit": "Tater Echo Dot 2",
+        "checkers": "Tater Echo Show 5",
+        "rook": "Tater Echo Spot",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")
 
 
@@ -477,21 +479,16 @@ def _screen_notifications_supported(payload: Dict[str, Any]) -> bool:
     return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_notifications"), False)
 
 
-def _screen_weather_payload(selector: str = "", room: str = "", include_thermostat: bool = False) -> Dict[str, Any]:
+def _screen_weather_payload(selector: str = "") -> Dict[str, Any]:
     from . import display_feed
 
     try:
-        weather = display_feed.build_weather_summary(selector=selector)
-        if include_thermostat:
-            from . import screen_thermostat
-
-            weather["thermostat"] = screen_thermostat.summary(
-                environment_installed=bool(weather.get("environment_installed")), room=room,
-            )
-        return weather
+        weather = dict(display_feed.build_weather_summary(selector=selector))
     except Exception:
         _vp().logger.warning("[native-satellite] screen weather refresh failed", exc_info=True)
-        return {"available": False}
+        weather = {"available": False}
+    weather["assistant_name"] = display_feed._assistant_first_name()
+    return weather
 
 
 def _native_display_targets(selector: str, hello_payload: Dict[str, Any]) -> set[str]:
@@ -2365,6 +2362,7 @@ async def prepare_stereo_media_session(
             "selector": left,
             "channel": "mono" if mono else "left",
             "delay_ms": max(0, min(250, _as_int(pair_row.get("left_delay_ms"), 0))),
+            "stereo_member": True,
             "volume_percent": int(
                 round(base_volume * max(0, min(100, _as_int(pair_row.get("left_volume_percent"), 100))) / 100.0)
             ),
@@ -2373,6 +2371,7 @@ async def prepare_stereo_media_session(
             "selector": right,
             "channel": "mono" if mono else "right",
             "delay_ms": max(0, min(250, _as_int(pair_row.get("right_delay_ms"), 0))),
+            "stereo_member": True,
             "volume_percent": int(
                 round(base_volume * max(0, min(100, _as_int(pair_row.get("right_volume_percent"), 100))) / 100.0)
             ),
@@ -2434,6 +2433,7 @@ async def prepare_group_media_session(
                 "channel": _lower(member.get("channel")) or "mono",
                 "delay_ms": max(0, min(2000, _as_int(member.get("delay_ms"), 0))),
                 "volume_percent": max(0, min(100, _as_int(member.get("volume_percent"), 100))),
+                "stereo_member": _as_bool(member.get("stereo_member"), False),
             }
         )
     selectors = [member["selector"] for member in member_rows]
@@ -2622,6 +2622,11 @@ async def prepare_group_media_session(
         "pair_selector": _text(group_selector),
         "session_id": group_session_id,
         "selectors": selectors,
+        "stereo_members": [
+            member["selector"]
+            for member in member_rows
+            if _as_bool(member.get("stereo_member"), False)
+        ],
         "reference_selector": selectors[0],
         "left_selector": selectors[0],
         "right_selector": selectors[1] if len(selectors) > 1 else "",
@@ -3341,15 +3346,8 @@ async def _adjust_audible_timeline_session(
     if not isinstance(pending_rejoin, dict):
         pending_rejoin = {}
         session["pending_rejoin_realign"] = pending_rejoin
-    urgent_rebuffer_realign = any(
-        selector in pending_rejoin
-        and _as_bool((playheads.get(selector) or {}).get("rebuffering"), False)
-        for selector in selectors
-    )
-    if (
-        not urgent_rebuffer_realign
-        and now_us - int(session.get("last_phase_sample_server_us") or 0)
-        < int(STEREO_ADJUST_INTERVAL_S * 1_000_000)
+    if now_us - int(session.get("last_phase_sample_server_us") or 0) < int(
+        STEREO_ADJUST_INTERVAL_S * 1_000_000
     ):
         return
 
@@ -3408,6 +3406,17 @@ async def _adjust_audible_timeline_session(
     phase_errors: Dict[str, float] = {}
     raw_phase_errors: Dict[str, float] = {}
     sampled_phase = False
+    stereo_members = {
+        _text(member)
+        for member in list(session.get("stereo_members") or [])
+        if _text(member)
+    }
+    is_music_session = _lower(session.get("content_type")) in {
+        "music",
+        "audio",
+        "song",
+        "media",
+    }
     for selector in selectors:
         row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
         rebuffering = _as_bool(row.get("rebuffering"), False)
@@ -3415,7 +3424,10 @@ async def _adjust_audible_timeline_session(
             not row
             or _text(row.get("session_id")) != _text(session.get("session_id"))
             or "rendered_frames" not in row
-            or (rebuffering and selector not in pending_rejoin)
+            # A jump consumes already-decoded frames. Issuing one while the
+            # decoder is empty prevents its normal underrun recovery and can
+            # turn a brief dropout into a watchdog failure.
+            or rebuffering
         ):
             continue
         satellite_time_us = _as_int(row.get("satellite_time_us"), 0)
@@ -3447,8 +3459,13 @@ async def _adjust_audible_timeline_session(
         phase_ema[selector] = smoothed_error_frames
         if selector in pending_rejoin:
             if phase_error_frames > STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES:
+                rejoin_max_frames = (
+                    STEREO_MUSIC_REJOIN_REALIGN_MAX_FRAMES
+                    if is_music_session and selector in stereo_members
+                    else STEREO_REJOIN_REALIGN_MAX_FRAMES
+                )
                 correction = min(
-                    STEREO_REJOIN_REALIGN_MAX_FRAMES,
+                    rejoin_max_frames,
                     int(round(phase_error_frames)),
                 )
                 corrections[selector] = correction
@@ -3457,8 +3474,6 @@ async def _adjust_audible_timeline_session(
                 raw_phase_errors[selector] = phase_error_frames
                 continue
             pending_rejoin.pop(selector, None)
-        if rebuffering:
-            continue
         if abs(smoothed_error_frames) < threshold_frames:
             phase_directions[selector] = 0
             phase_stable_samples[selector] = 0
@@ -3525,18 +3540,10 @@ async def _adjust_audible_timeline_session(
             for selector, correction in applied.items()
             if correction_modes.get(selector) == "jump"
         }
-        for selector, correction in rejoin_applied.items():
-            if raw_phase_errors.get(selector, 0.0) <= (
-                correction + STEREO_REJOIN_REALIGN_THRESHOLD_FRAMES
-            ):
-                pending_rejoin.pop(selector, None)
-            row = playheads.get(selector) if isinstance(playheads.get(selector), dict) else {}
-            if _as_bool(row.get("rebuffering"), False):
-                rebuffer_started = session.setdefault("rebuffer_started_server_us", {})
-                if isinstance(rebuffer_started, dict):
-                    # A still-stalled member may need another bounded jump, but
-                    # give the decoder time to apply this one before retrying.
-                    rebuffer_started[selector] = now_us
+        for selector in rejoin_applied:
+            # One jump per confirmed rejoin. A persistent network stall must
+            # recover at the decoder rather than trigger repeated skips.
+            pending_rejoin.pop(selector, None)
         if rejoin_applied:
             _vp().logger.warning(
                 "[native-media] realigned playback after rejoin group=%s corrections=%s",
@@ -3854,21 +3861,12 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
     }
     health_rows[selector] = current_health
     pending_rejoin = session.setdefault("pending_rejoin_realign", {})
-    rebuffer_started = session.setdefault("rebuffer_started_server_us", {})
     if not isinstance(pending_rejoin, dict):
         pending_rejoin = {}
         session["pending_rejoin_realign"] = pending_rejoin
-    if not isinstance(rebuffer_started, dict):
-        rebuffer_started = {}
-        session["rebuffer_started_server_us"] = rebuffer_started
 
     was_rebuffering = _as_bool(previous.get("rebuffering"), False)
     is_rebuffering = current_health["rebuffering"]
-    if is_rebuffering:
-        rebuffer_started.setdefault(selector, received_server_us)
-    else:
-        rebuffer_started.pop(selector, None)
-
     rejoin_count_advanced = current_health["rejoin_count"] > _as_int(
         previous.get("rejoin_count"),
         0,
@@ -3878,24 +3876,18 @@ def _record_stereo_playhead(selector: str, payload: Dict[str, Any]) -> None:
         and current_health["rejoin_frames"]
         > _as_int(previous.get("rejoin_frames"), 0)
     )
-    rebuffer_timed_out = (
-        is_rebuffering
-        and received_server_us - _as_int(rebuffer_started.get(selector), received_server_us)
-        >= int(STEREO_REBUFFER_REALIGN_TIMEOUT_S * 1_000_000)
-    )
-    if (
-        rejoin_count_advanced
-        or (was_rebuffering and not is_rebuffering)
+    inferred_rejoin = (
+        (was_rebuffering and not is_rebuffering)
         or rejoin_frames_advanced
-        or rebuffer_timed_out
-    ):
+    )
+    if rejoin_count_advanced or inferred_rejoin:
         pending_rejoin[selector] = max(
             1,
             current_health["rejoin_count"],
             current_health["rejoin_frames"],
         )
     health_changed = (
-        current_health["rebuffering"]
+        current_health["rebuffering"] != was_rebuffering
         or current_health["underrun_events"] > _as_int(previous.get("underrun_events"), 0)
         or current_health["rejoin_count"] > _as_int(previous.get("rejoin_count"), 0)
     )
@@ -4373,22 +4365,12 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     reported_volume_changed = False
     reported_volume_board = ""
     settings_result_changed = False
-    thermostat_room = ""
-    thermostat_authorized = False
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
             return None
         row["last_seen_ts"] = _now()
         row["last_message_type"] = msg_type
-        if msg_type == "thermostat.set":
-            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
-            hello_details = _message_payload(hello)
-            thermostat_room = _text(hello_details.get("room"))
-            capabilities = hello_details.get("capabilities")
-            thermostat_authorized = bool(
-                isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_thermostat"), False)
-            )
         if msg_type in {"status", "settings.changed"}:
             reported_settings = (
                 payload.get("settings")
@@ -4545,27 +4527,6 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             _notify_state_change("settings", selector)
     if settings_result_changed:
         _notify_state_change("settings_result", selector)
-    if msg_type == "thermostat.set":
-        from . import display_feed, screen_thermostat
-
-        try:
-            if not thermostat_authorized:
-                raise ValueError("Satellite does not support thermostat control")
-            result = await asyncio.to_thread(
-                screen_thermostat.set_target, payload, room=thermostat_room,
-                environment_installed=display_feed._environment_core_installed(),
-            )
-        except Exception as exc:
-            _vp().logger.warning("[native-satellite] thermostat update failed selector=%s: %s", selector, exc)
-            result = {"ok": False, "error": str(exc)}
-        try:
-            fresh = await asyncio.to_thread(_screen_weather_payload, selector, thermostat_room, True)
-            if not result.get("ok") and isinstance(fresh.get("thermostat"), dict):
-                fresh["thermostat"]["message"] = "Could not update thermostat"
-            await send_command(selector, "display.weather", fresh)
-        except Exception:
-            _vp().logger.warning("[native-satellite] thermostat screen refresh failed", exc_info=True)
-        return _envelope("thermostat.set.ack", result, message_id=_text(message.get("id")))
     if msg_type == "ambient.observation.request":
         from . import reachy_ambient
 
@@ -4734,15 +4695,14 @@ async def handle_websocket(websocket: WebSocket) -> None:
         await send_json(_envelope("settings", _firmware_settings_payload(selector, board=_text(payload.get("board")))))
 
         if _screen_weather_supported(payload):
-            thermostat_supported = _as_bool((payload.get("capabilities") or {}).get("screen_thermostat"), False)
-            first_weather = await asyncio.to_thread(_screen_weather_payload, selector, _text(payload.get("room")), thermostat_supported)
+            first_weather = await asyncio.to_thread(_screen_weather_payload, selector)
             await send_json(_envelope("display.weather", first_weather))
 
             async def send_screen_weather() -> None:
                 previous = json.dumps(first_weather, sort_keys=True, separators=(",", ":"))
                 while True:
                     await asyncio.sleep(NATIVE_SCREEN_WEATHER_REFRESH_S)
-                    weather = await asyncio.to_thread(_screen_weather_payload, selector, _text(payload.get("room")), thermostat_supported)
+                    weather = await asyncio.to_thread(_screen_weather_payload, selector)
                     encoded = json.dumps(weather, sort_keys=True, separators=(",", ":"))
                     if encoded == previous:
                         continue

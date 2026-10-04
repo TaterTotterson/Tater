@@ -122,6 +122,10 @@ def _exact_satellite_image_src(value: Any) -> str:
     if not token:
         return ""
     compact = token.replace("-", "")
+    if token in {"rook", "echo-spot", "echo-spot-2017", "echo-spot-1st-gen", "tater-echo-spot"} or compact in {
+        "rook", "echospot", "echospot2017", "echospot1stgen", "amazonechospot", "taterechospot",
+    }:
+        return _named_satellite_image_src("echo-spot-rook.png")
     if token in {
         "checkers",
         "echo-show-5",
@@ -199,6 +203,8 @@ def device_image_src(*name_candidates: Any) -> str:
         token = esphome_runtime.lower(raw_name)
         if not token:
             continue
+        if any(part in token for part in ("rook", "echo spot", "echo-spot", "echo_spot")):
+            return _named_satellite_image_src("echo-spot-rook.png")
         if any(
             part in token
             for part in (

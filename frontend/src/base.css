@@ -2573,6 +2573,24 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   font-size: 0.67rem;
 }
 
+.people-face-gallery-filters {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 1px;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.people-face-gallery-filters label {
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+  color: #d8d0c7;
+  font-weight: 700;
+}
+
 .people-face-review-selection-tools {
   display: flex;
   align-items: center;
@@ -2648,6 +2666,46 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   white-space: nowrap;
 }
 
+.people-face-capture-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 0;
+}
+
+.people-face-reference-status {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: #b9afa6;
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.people-face-reference-status.trusted {
+  border-color: rgba(95, 211, 147, 0.34);
+  background: rgba(48, 143, 91, 0.15);
+  color: #9ce3b9;
+}
+
+.people-face-reference-status.provisional {
+  border-color: rgb(var(--accent-soft-rgb) / 0.3);
+  background: rgb(var(--accent-soft-rgb) / 0.1);
+  color: var(--accent-soft);
+}
+
+.people-face-capture-source {
+  overflow: hidden;
+  color: #8d837a;
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .people-face-selection-mark {
   position: absolute;
   top: 11px;
@@ -2694,6 +2752,23 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   background: rgba(27, 28, 31, 0.96);
   box-shadow: 0 -10px 26px rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(12px);
+}
+
+.people-face-trust-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.people-face-load-more {
+  justify-self: center;
+  margin: 2px auto;
+}
+
+.people-face-gallery-loading {
+  padding: 18px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
 }
 
 .people-face-destination {
@@ -2783,6 +2858,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
     flex-direction: column;
   }
 
+  .people-face-gallery-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .people-face-review-selection-tools {
     justify-content: flex-start;
     flex-wrap: wrap;
@@ -2800,6 +2880,11 @@ body[data-popup-effect="melt"] .app-shell.sidebar-expanding .sidebar::after {
   .people-face-review-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .people-face-trust-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
 
   .people-face-destination {

@@ -182,6 +182,134 @@ class AirPlayBridgeTests(unittest.TestCase):
         self.assertEqual(rows[0]["raop_port"], 5000)
         self.assertEqual(rows[0]["protocol"], "airplay2")
 
+    def test_recent_airplay2_survives_an_incomplete_raop_only_scan(self) -> None:
+        ap2 = {
+            "id": "804af2c57d78",
+            "name": "Kitchen",
+            "host": "10.0.0.24",
+            "airplay_port": 7000,
+            "airplay_properties": {"features": "0x1234"},
+            "airplay_service_name": "Kitchen._airplay._tcp.local.",
+            "manufacturer": "Sonos",
+            "protocol": "airplay2",
+            "airplay2_seen_ts": 1000.0,
+        }
+        raop = {
+            "id": "804af2c57d78",
+            "name": "Kitchen",
+            "host": "10.0.0.24",
+            "airplay_port": 0,
+            "raop_port": 5000,
+            "protocol": "raop",
+        }
+        retained = airplay_bridge._retain_recent_airplay2_rows(
+            [raop], [ap2], now_ts=1010.0
+        )[0]
+        self.assertEqual(retained["airplay_port"], 7000)
+        self.assertTrue(retained["discovery_retained_airplay2"])
+        self.assertEqual(retained["discovery_legacy_fallback"]["raop_port"], 5000)
+        self.assertEqual(retained["manufacturer"], "Sonos")
+        expired = airplay_bridge._retain_recent_airplay2_rows(
+            [raop], [ap2], now_ts=1000.0 + airplay_bridge.AIRPLAY_RECENT_AP2_TTL_SECONDS + 1
+        )[0]
+        self.assertEqual(expired["protocol"], "raop")
+        different_host = airplay_bridge._retain_recent_airplay2_rows(
+            [{**raop, "host": "10.0.0.99"}], [ap2], now_ts=1010.0
+        )[0]
+        self.assertEqual(different_host["protocol"], "raop")
+
+    def test_discovery_retries_before_retaining_recent_airplay2(self) -> None:
+        ap2 = {
+            "id": "804af2c57d78", "host": "10.0.0.24", "airplay_port": 7000,
+            "airplay_properties": {"features": "0x1234"}, "protocol": "airplay2",
+        }
+        raop = {
+            "id": "804af2c57d78", "host": "10.0.0.24", "airplay_port": 0,
+            "raop_port": 5000, "protocol": "raop",
+        }
+        with (
+            mock.patch.object(airplay_bridge.time, "time", return_value=1000.0),
+            mock.patch.object(airplay_bridge, "_cached_discovery_rows", return_value=(990.0, [ap2])),
+            mock.patch.object(airplay_bridge, "_browse_airplay", side_effect=[[raop], [raop]]) as browse,
+            mock.patch.object(airplay_bridge, "_cache_discovery_rows"),
+        ):
+            airplay_bridge._discovery_rows = []
+            airplay_bridge._discovery_ts = 0.0
+            rows = airplay_bridge.discover_airplay_devices(force=True)
+        self.assertEqual(browse.call_count, 2)
+        self.assertEqual(rows[0]["protocol"], "airplay2")
+        self.assertTrue(rows[0]["discovery_retained_airplay2"])
+        airplay_bridge._discovery_rows = []
+        airplay_bridge._discovery_ts = 0.0
+
+    def test_discovery_retry_recovers_airplay2_and_keeps_raop_details(self) -> None:
+        ap2 = {
+            "id": "804af2c57d78", "host": "10.0.0.24", "airplay_port": 7000,
+            "airplay_properties": {"features": "0x1234"}, "protocol": "airplay2",
+        }
+        raop = {
+            "id": "804af2c57d78", "host": "10.0.0.24", "airplay_port": 0,
+            "raop_port": 5000, "protocol": "raop",
+        }
+        with (
+            mock.patch.object(airplay_bridge.time, "time", return_value=1000.0),
+            mock.patch.object(airplay_bridge, "_cached_discovery_rows", return_value=(990.0, [ap2])),
+            mock.patch.object(airplay_bridge, "_browse_airplay", side_effect=[[raop], [ap2]]),
+            mock.patch.object(airplay_bridge, "_cache_discovery_rows"),
+        ):
+            airplay_bridge._discovery_rows = []
+            airplay_bridge._discovery_ts = 0.0
+            rows = airplay_bridge.discover_airplay_devices(force=True)
+        self.assertEqual(rows[0]["protocol"], "airplay2")
+        self.assertEqual(rows[0]["raop_port"], 5000)
+        self.assertNotIn("discovery_retained_airplay2", rows[0])
+        airplay_bridge._discovery_rows = []
+        airplay_bridge._discovery_ts = 0.0
+
+    def test_retained_airplay2_connection_can_fall_back_to_raop(self) -> None:
+        class Member:
+            def __init__(self, **kwargs):
+                self.target = kwargs["target"]
+                self.device = kwargs["device"]
+                self.volume_percent = kwargs["volume_percent"]
+                self.route_protocol = ""
+                self.route_flow = ""
+                self.route_timing = ""
+
+            def prepare(self, _timeout):
+                if self.device.get("airplay_port"):
+                    raise RuntimeError("AirPlay 2 connection failed")
+                self.route_protocol = "raop"
+                self.route_flow = "legacy"
+                self.route_timing = "ntp"
+
+            def stop(self):
+                return None
+
+        legacy = {
+            "id": "804af2c57d78", "name": "Kitchen", "host": "10.0.0.24",
+            "raop_port": 5000, "airplay_port": 0,
+        }
+        retained = {
+            **legacy, "airplay_port": 7000,
+            "discovery_retained_airplay2": True,
+            "discovery_legacy_fallback": legacy,
+        }
+        with (
+            mock.patch.object(airplay_bridge, "ensure_airplay_cli", return_value="/bin/cliairplay"),
+            mock.patch.object(airplay_bridge, "_find_ffmpeg", return_value="/bin/ffmpeg"),
+            mock.patch.object(airplay_bridge, "stop_airplay_targets"),
+            mock.patch.object(airplay_bridge, "discover_airplay_devices", return_value=[retained]),
+            mock.patch.object(airplay_bridge, "ensure_airplay_ptp_daemon", return_value={}),
+            mock.patch.object(airplay_bridge, "_AirPlayMember", Member),
+        ):
+            result = airplay_bridge.prepare_airplay_group_sync(
+                targets=["804af2c57d78"], source_url="https://example.test/audio.mp3"
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["routes"]["airplay:804af2c57d78"]["timing"], "ntp")
+        self.assertIn("using legacy RAOP timing", result["warnings"][0])
+
     def test_sonos_sender_uses_automatic_airplay_route_and_lan_interface(self) -> None:
         member = airplay_bridge._AirPlayMember(
             target="airplay:804af2c57d78",

@@ -40,6 +40,14 @@ const selectedPersonId = ref("");
 const selectedFaceId = ref("");
 const selectedObservations = ref<string[]>([]);
 const galleryTarget = ref("");
+const galleryRows = ref<JsonRow[]>([]);
+const galleryTotal = ref(0);
+const galleryAllTotal = ref(0);
+const galleryHasMore = ref(false);
+const galleryLoading = ref(false);
+const galleryError = ref("");
+const galleryFilter = ref("all");
+const galleryStatusCounts = ref<JsonRow>({});
 const enrollmentOpen = ref(false);
 const enrollmentPersonId = ref("");
 const enrollmentUpload = ref<FaceUpload | null>(null);
@@ -47,6 +55,8 @@ const enrollmentPreview = ref("");
 const cameraActive = ref(false);
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 let cameraStream: MediaStream | null = null;
+let galleryRequestId = 0;
+const galleryPageSize = 48;
 
 const personDraft = reactive({ display_name: "", is_admin: false, instructions: "" });
 const faceDrafts = reactive<Record<string, { person_id: string; name: string; merge_target: string }>>({});
@@ -101,10 +111,6 @@ function faceContext(person: JsonRow): JsonRow {
 
 function aliases(person: JsonRow | null): JsonRow[] {
   return person && Array.isArray(person.aliases) ? person.aliases : [];
-}
-
-function gallery(face: JsonRow | null): JsonRow[] {
-  return face && Array.isArray(face.gallery) ? face.gallery : [];
 }
 
 function initial(value: unknown, fallback = "P"): string {
@@ -306,16 +312,64 @@ async function deleteFace(face: JsonRow) {
   await runAction("people_face_delete", { identity_id: String(face.id || "") }, "Face identity removed.");
 }
 
+async function loadGallery(reset = false) {
+  const identityId = selectedFaceId.value;
+  if (!identityId || (galleryLoading.value && !reset)) return;
+  const requestId = ++galleryRequestId;
+  if (reset) {
+    galleryRows.value = [];
+    galleryTotal.value = 0;
+    galleryAllTotal.value = 0;
+    galleryHasMore.value = false;
+    selectedObservations.value = [];
+  }
+  galleryLoading.value = true;
+  galleryError.value = "";
+  try {
+    const offset = reset ? 0 : galleryRows.value.length;
+    const query = new URLSearchParams({
+      offset: String(offset),
+      limit: String(galleryPageSize),
+      status: galleryFilter.value,
+    });
+    const result = await getJson<JsonRow>(`${props.endpoint}/faces/${encodeURIComponent(identityId)}/observations?${query.toString()}`);
+    if (requestId !== galleryRequestId || identityId !== selectedFaceId.value) return;
+    const incoming = Array.isArray(result.observations) ? result.observations as JsonRow[] : [];
+    galleryRows.value = reset ? incoming : [...galleryRows.value, ...incoming];
+    galleryTotal.value = Number(result.total || 0);
+    galleryAllTotal.value = Number(result.all_total || 0);
+    galleryHasMore.value = Boolean(result.has_more);
+    galleryStatusCounts.value = result.status_counts && typeof result.status_counts === "object" ? result.status_counts as JsonRow : {};
+  } catch (loadError) {
+    if (requestId === galleryRequestId) {
+      galleryError.value = loadError instanceof Error ? loadError.message : "Saved face images could not be loaded.";
+    }
+  } finally {
+    if (requestId === galleryRequestId) galleryLoading.value = false;
+  }
+}
+
 function openGallery(face: JsonRow) {
   selectedFaceId.value = String(face.id || "");
   selectedObservations.value = [];
   galleryTarget.value = "";
+  galleryFilter.value = "all";
+  void loadGallery(true);
 }
 
 function closeGallery() {
+  galleryRequestId += 1;
   selectedFaceId.value = "";
   selectedObservations.value = [];
   galleryTarget.value = "";
+  galleryRows.value = [];
+  galleryLoading.value = false;
+  galleryError.value = "";
+  galleryStatusCounts.value = {};
+}
+
+function changeGalleryFilter() {
+  void loadGallery(true);
 }
 
 function toggleObservation(id: unknown) {
@@ -335,7 +389,7 @@ async function moveObservations() {
     identity_id: String(selectedFace.value.id || ""),
     values: { target_identity_id: galleryTarget.value, observation_ids: selectedObservations.value },
   }, "Face images moved.");
-  if (completed) selectedObservations.value = [];
+  if (completed && selectedFaceId.value) await loadGallery(true);
 }
 
 async function removeObservations() {
@@ -345,7 +399,29 @@ async function removeObservations() {
     identity_id: String(selectedFace.value.id || ""),
     values: { observation_ids: selectedObservations.value },
   }, "Face images permanently deleted.");
-  if (completed) selectedObservations.value = [];
+  if (completed && selectedFaceId.value) await loadGallery(true);
+}
+
+async function setObservationTrust(trusted: boolean) {
+  if (!selectedFace.value || !selectedObservations.value.length) return;
+  const completed = await runAction("people_face_trust_images", {
+    identity_id: String(selectedFace.value.id || ""),
+    values: { observation_ids: selectedObservations.value, trusted },
+  }, trusted ? "Face images trusted." : "Face images marked provisional.");
+  if (completed && selectedFaceId.value) await loadGallery(true);
+}
+
+function referenceStatusLabel(value: unknown): string {
+  const status = String(value || "unreviewed");
+  if (status === "trusted") return "Trusted";
+  if (status === "provisional") return "Provisional";
+  return "Unreviewed";
+}
+
+function observationSource(observation: JsonRow): string {
+  const source = observation.source && typeof observation.source === "object" ? observation.source as JsonRow : {};
+  const kind = String(source.kind || "camera capture").replaceAll("_", " ");
+  return kind.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function openEnrollment() {
@@ -496,7 +572,14 @@ onBeforeUnmount(stopCamera);
 
     <template v-else>
       <section class="tv-panel tset-form-card"><header class="tpeople-section-head"><div><span class="tv-eyebrow">Face ID</span><h2>Known faces</h2><p>Link faces to people, review captures, and merge duplicates.</p></div><div class="tpeople-head-actions"><span class="people-badge" :class="faceStatus.loaded ? 'linked' : 'muted'">{{ faceStatus.loaded ? "Model ready" : "Model not ready" }}</span><button class="tv-button primary" type="button" :disabled="!people.length" @click="openEnrollment">Add a face</button></div></header></section>
-      <div v-if="editableFaces.length" class="people-face-grid"><article v-for="entry in editableFaces" :key="entry.face.id" class="people-face-card"><div class="people-face-summary"><div class="people-face-avatar"><img v-if="entry.face.image_src" :src="entry.face.image_src" :alt="entry.face.name || 'Unknown face'" loading="lazy" /><span v-else>{{ initial(entry.face.name, '?') }}</span></div><div class="people-face-copy"><div class="people-identity-title-row"><strong>{{ entry.face.name || `Unknown face · ${String(entry.face.id).slice(-6)}` }}</strong><span class="people-badge" :class="entry.face.person_id ? 'linked' : 'muted'">{{ entry.face.person_id ? `Linked to ${entry.face.person_name}` : "Not linked" }}</span></div><span>{{ Number(entry.face.capture_count || 0) }} captures · {{ Number(entry.face.event_count || 0) }} events</span><small>{{ timeLabel(entry.face.last_seen) }}</small></div></div><div class="people-face-fields"><label class="people-field">Person<select v-model="entry.draft.person_id"><option value="">Not linked</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.display_name }}</option></select></label><label class="people-field">Face name<input v-model="entry.draft.name" type="text" maxlength="80" placeholder="Used when not linked" /></label><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="saveFace(entry.face, entry.draft)">Save</button></div><button v-if="gallery(entry.face).length" class="people-face-review-trigger" type="button" @click="openGallery(entry.face)"><span class="people-face-review-trigger-copy"><small>Saved face images</small><strong>Review {{ gallery(entry.face).length }} images</strong></span><span class="people-face-review-trigger-action">Open gallery →</span></button><div class="people-face-footer"><select v-model="entry.draft.merge_target"><option value="">Merge profile into…</option><option v-for="candidate in faces.filter((candidate) => candidate.id !== entry.face.id)" :key="candidate.id" :value="candidate.id">{{ candidate.name || `Unknown face · ${String(candidate.id).slice(-6)}` }}</option></select><button class="tv-button" type="button" :disabled="Boolean(busy) || !entry.draft.merge_target" @click="mergeFace(entry.face, entry.draft)">Merge</button><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="deleteFace(entry.face)">Remove profile</button></div></article></div>
+      <div v-if="editableFaces.length" class="people-face-grid">
+        <article v-for="entry in editableFaces" :key="entry.face.id" class="people-face-card">
+          <div class="people-face-summary"><div class="people-face-avatar"><img v-if="entry.face.image_src" :src="entry.face.image_src" :alt="entry.face.name || 'Unknown face'" loading="lazy" /><span v-else>{{ initial(entry.face.name, '?') }}</span></div><div class="people-face-copy"><div class="people-identity-title-row"><strong>{{ entry.face.name || `Unknown face · ${String(entry.face.id).slice(-6)}` }}</strong><span class="people-badge" :class="entry.face.person_id ? 'linked' : 'muted'">{{ entry.face.person_id ? `Linked to ${entry.face.person_name}` : "Not linked" }}</span></div><span>{{ Number(entry.face.capture_count || 0) }} captures · {{ Number(entry.face.event_count || 0) }} events</span><small>{{ timeLabel(entry.face.last_seen) }}</small></div></div>
+          <div class="people-face-fields"><label class="people-field">Person<select v-model="entry.draft.person_id"><option value="">Not linked</option><option v-for="person in people" :key="person.id" :value="person.id">{{ person.display_name }}</option></select></label><label class="people-field">Face name<input v-model="entry.draft.name" type="text" maxlength="80" placeholder="Used when not linked" /></label><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="saveFace(entry.face, entry.draft)">Save</button></div>
+          <button v-if="Number(entry.face.capture_count || 0)" class="people-face-review-trigger" type="button" @click="openGallery(entry.face)"><span class="people-face-review-trigger-copy"><small>{{ entry.face.review_required ? "Review needed" : "Saved face images" }}</small><strong>Browse all {{ Number(entry.face.capture_count || 0) }} images</strong></span><span class="people-face-review-trigger-action">Open gallery →</span></button>
+          <div class="people-face-footer"><select v-model="entry.draft.merge_target"><option value="">Merge profile into…</option><option v-for="candidate in faces.filter((candidate) => candidate.id !== entry.face.id)" :key="candidate.id" :value="candidate.id">{{ candidate.name || `Unknown face · ${String(candidate.id).slice(-6)}` }}</option></select><button class="tv-button" type="button" :disabled="Boolean(busy) || !entry.draft.merge_target" @click="mergeFace(entry.face, entry.draft)">Merge</button><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="deleteFace(entry.face)">Remove profile</button></div>
+        </article>
+      </div>
       <p v-else class="tv-empty">{{ faceStatus.enabled ? "No faces have been added yet." : "Face ID is disabled. Enable it under Models › Face ID." }}</p>
     </template>
 
@@ -505,7 +588,34 @@ onBeforeUnmount(stopCamera);
     </PopupTransition>
 
     <PopupTransition :open="Boolean(selectedFace)" backdrop-class="tv-modal-backdrop tpeople tset-modal" @close="closeGallery">
-      <section v-if="selectedFace" class="tv-modal people-face-review-dialog" role="dialog" aria-modal="true" aria-labelledby="people-face-review-title"><header><div><span class="tv-eyebrow">Face ID gallery</span><h2 id="people-face-review-title">{{ selectedFace.name || "Unknown face" }}</h2><p>{{ gallery(selectedFace).length }} saved images · select the captures you want to organize.</p></div><button class="tv-button" type="button" @click="closeGallery">Close</button></header><div class="people-face-review-toolbar"><div><strong>Choose saved images</strong><span>Selected images can be moved or permanently deleted.</span></div><div class="people-face-review-selection-tools"><span class="people-face-selection-count">{{ selectedObservations.length }} selected</span><button class="tv-button" type="button" :disabled="selectedObservations.length === gallery(selectedFace).length" @click="selectedObservations = gallery(selectedFace).map((row) => String(row.id))">Select all</button><button class="tv-button" type="button" :disabled="!selectedObservations.length" @click="selectedObservations = []">Clear</button></div></div><div class="people-face-gallery"><button v-for="observation in gallery(selectedFace)" :key="observation.id" class="people-face-capture" :class="{ 'is-selected': selectedObservations.includes(String(observation.id)) }" type="button" :aria-pressed="selectedObservations.includes(String(observation.id))" @click="toggleObservation(observation.id)"><img :src="observation.image_src" :alt="`Face captured ${timeLabel(observation.seen_at)}`" loading="lazy" /><span class="people-face-capture-time">{{ timeLabel(observation.seen_at) }}</span><span class="people-face-selection-mark">✓</span></button></div><div class="people-face-review-actions"><label class="people-face-destination">Move selected images to<select v-model="galleryTarget"><option value="">Choose face profile…</option><option v-for="face in faces.filter((candidate) => candidate.id !== selectedFace?.id)" :key="face.id" :value="face.id">{{ face.name || `Unknown face · ${String(face.id).slice(-6)}` }}</option><option value="__new_unknown__">New unknown face</option></select></label><button class="tv-button primary" type="button" :disabled="Boolean(busy) || !selectedObservations.length || !galleryTarget" @click="moveObservations">Move selected</button><button class="tv-button danger" type="button" :disabled="Boolean(busy) || !selectedObservations.length" @click="removeObservations">Permanently delete</button></div></section>
+      <section v-if="selectedFace" class="tv-modal people-face-review-dialog" role="dialog" aria-modal="true" aria-labelledby="people-face-review-title">
+        <header><div><span class="tv-eyebrow">Face ID gallery</span><h2 id="people-face-review-title">{{ selectedFace.name || "Unknown face" }}</h2><p>Showing {{ galleryRows.length }} of {{ galleryTotal }} {{ galleryFilter === "all" ? `saved images (${galleryAllTotal} total)` : `${galleryFilter} images` }}.</p></div><button class="tv-button" type="button" @click="closeGallery">Close</button></header>
+        <div class="people-face-review-toolbar">
+          <div><strong>Choose saved images</strong><span>Trust correct captures so they can improve matching. Move or remove incorrect ones.</span></div>
+          <div class="people-face-review-selection-tools"><span class="people-face-selection-count">{{ selectedObservations.length }} selected</span><button class="tv-button" type="button" :disabled="!galleryRows.length || selectedObservations.length === galleryRows.length" @click="selectedObservations = galleryRows.map((row) => String(row.id))">Select shown</button><button class="tv-button" type="button" :disabled="!selectedObservations.length" @click="selectedObservations = []">Clear</button></div>
+        </div>
+        <div class="people-face-gallery-filters">
+          <label>Status<select v-model="galleryFilter" @change="changeGalleryFilter"><option value="all">All ({{ galleryAllTotal }})</option><option value="trusted">Trusted ({{ Number(galleryStatusCounts.trusted || 0) }})</option><option value="provisional">Provisional ({{ Number(galleryStatusCounts.provisional || 0) }})</option><option value="unreviewed">Unreviewed ({{ Number(galleryStatusCounts.unreviewed || 0) }})</option></select></label>
+          <span>Only trusted images are used to recognize a linked person.</span>
+        </div>
+        <div v-if="galleryError" class="tv-notice error">{{ galleryError }}</div>
+        <div v-if="galleryRows.length" class="people-face-gallery">
+          <button v-for="observation in galleryRows" :key="observation.id" class="people-face-capture" :class="{ 'is-selected': selectedObservations.includes(String(observation.id)) }" type="button" :aria-pressed="selectedObservations.includes(String(observation.id))" @click="toggleObservation(observation.id)">
+            <img :src="observation.image_src" :alt="`Face captured ${timeLabel(observation.seen_at)}`" loading="lazy" />
+            <span class="people-face-capture-meta"><span class="people-face-capture-time">{{ timeLabel(observation.seen_at) }}</span><span class="people-face-reference-status" :class="String(observation.reference_status || 'unreviewed')">{{ referenceStatusLabel(observation.reference_status) }}</span></span>
+            <small class="people-face-capture-source">{{ observationSource(observation) }}</small>
+            <span class="people-face-selection-mark">✓</span>
+          </button>
+        </div>
+        <p v-else-if="!galleryLoading && !galleryError" class="people-empty-inline">No {{ galleryFilter === "all" ? "saved" : galleryFilter }} face images.</p>
+        <button v-if="galleryHasMore" class="tv-button people-face-load-more" type="button" :disabled="galleryLoading" @click="loadGallery(false)">{{ galleryLoading ? "Loading…" : `Load more (${galleryRows.length} of ${galleryTotal})` }}</button>
+        <div v-else-if="galleryLoading" class="people-face-gallery-loading">Loading saved images…</div>
+        <div class="people-face-review-actions">
+          <div class="people-face-trust-actions"><button class="tv-button primary" type="button" :disabled="Boolean(busy) || !selectedObservations.length" @click="setObservationTrust(true)">Trust selected</button><button class="tv-button" type="button" :disabled="Boolean(busy) || !selectedObservations.length" @click="setObservationTrust(false)">Mark provisional</button></div>
+          <label class="people-face-destination">Move selected images to<select v-model="galleryTarget"><option value="">Choose face profile…</option><option v-for="face in faces.filter((candidate) => candidate.id !== selectedFace?.id)" :key="face.id" :value="face.id">{{ face.name || `Unknown face · ${String(face.id).slice(-6)}` }}</option><option value="__new_unknown__">New unknown face</option></select></label>
+          <button class="tv-button" type="button" :disabled="Boolean(busy) || !selectedObservations.length || !galleryTarget" @click="moveObservations">Move selected</button><button class="tv-button danger" type="button" :disabled="Boolean(busy) || !selectedObservations.length" @click="removeObservations">Permanently delete</button>
+        </div>
+      </section>
     </PopupTransition>
 
     <PopupTransition :open="enrollmentOpen" backdrop-class="tv-modal-backdrop tpeople tset-modal" @close="closeEnrollment">

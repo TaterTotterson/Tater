@@ -417,7 +417,212 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
             native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
         )
 
-    async def test_persistent_rebuffer_arms_timeout_realign_without_firmware_hint(self) -> None:
+    async def test_live_music_stereo_member_restores_recovery_realign(self) -> None:
+        selector = "native:sat1-left"
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": [selector],
+            "stereo_members": [selector],
+            "content_type": "music",
+            "playheads": {},
+        }
+        native_satellite._stereo_adjust_tasks["group-1"] = asyncio.current_task()
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        payload = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "rendered_frames": 48_000,
+            "sample_rate_hz": 48_000,
+            "satellite_time_us": 5_000_000,
+            "buffered_frames": 0,
+            "rebuffering": True,
+            "underrun_events": 1,
+            "background_underrun_events": 1,
+            "rejoin_count": 0,
+            "rejoin_frames": 0,
+        }
+        with mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline):
+            native_satellite._record_stereo_playhead(selector, payload)
+            native_satellite._record_stereo_playhead(
+                selector,
+                {
+                    **payload,
+                    "rendered_frames": 52_800,
+                    "buffered_frames": 24_000,
+                    "rebuffering": False,
+                },
+            )
+            self.assertIn(
+                selector,
+                native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+            )
+            native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"].clear()
+
+            native_satellite._record_stereo_playhead(
+                selector,
+                {
+                    **payload,
+                    "rendered_frames": 57_600,
+                    "buffered_frames": 24_000,
+                    "rebuffering": False,
+                    "rejoin_frames": 6_688,
+                },
+            )
+            self.assertIn(
+                selector,
+                native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+            )
+            native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"].clear()
+
+            native_satellite._record_stereo_playhead(
+                selector,
+                {
+                    **payload,
+                    "rendered_frames": 62_400,
+                    "buffered_frames": 24_000,
+                    "rebuffering": False,
+                    "rejoin_count": 1,
+                    "rejoin_frames": 6_688,
+                },
+            )
+
+        self.assertIn(
+            selector,
+            native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+        )
+        self.assertNotIn(
+            "rejoin_realign_verification",
+            native_satellite._stereo_sessions["group-1"],
+        )
+
+    async def test_live_music_stereo_member_does_not_jump_while_stalled(self) -> None:
+        selector = "native:sat1-right"
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": [selector],
+            "stereo_members": [selector],
+            "content_type": "music",
+            "playheads": {},
+        }
+        native_satellite._stereo_adjust_tasks["group-1"] = asyncio.current_task()
+        payload = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "rendered_frames": 48_000,
+            "sample_rate_hz": 48_000,
+            "satellite_time_us": 5_000_000,
+            "buffered_frames": 0,
+            "rebuffering": True,
+            "underrun_events": 1,
+            "background_underrun_events": 1,
+            "rejoin_count": 0,
+            "rejoin_frames": 0,
+        }
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline):
+            with mock.patch.object(native_satellite, "_monotonic_us", return_value=5_000_000):
+                native_satellite._record_stereo_playhead(selector, payload)
+            with mock.patch.object(native_satellite, "_monotonic_us", return_value=8_000_000):
+                native_satellite._record_stereo_playhead(
+                    selector,
+                    {**payload, "satellite_time_us": 8_000_000},
+                )
+
+        session = native_satellite._stereo_sessions["group-1"]
+        self.assertNotIn(selector, session["pending_rejoin_realign"])
+        self.assertNotIn("rebuffer_rescue_pending", session)
+        self.assertNotIn("rebuffer_rescue_attempts", session)
+
+    async def test_stalled_music_stereo_member_waits_for_decoder_recovery(self) -> None:
+        now_us = 7_000_000
+        selector = "native:sat1-right"
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": [selector],
+            "stereo_members": [selector],
+            "content_type": "music",
+            "clock_offsets_us": {selector: 0},
+            "member_delays_ms": {selector: 0},
+            "audible_start_server_us": 4_000_000,
+            "start_position_frames": {selector: 0},
+            "last_phase_sample_server_us": now_us - 100_000,
+            "use_rendered_clock": True,
+            "pending_rejoin_realign": {selector: 1},
+            "playheads": {
+                selector: {
+                    "session_id": "session-1",
+                    "sample_rate_hz": 48_000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 48_000,
+                    "rebuffering": True,
+                },
+            },
+        }
+        native_satellite._clients[selector] = {
+            "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
+        }
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with (
+            mock.patch.object(
+                native_satellite,
+                "send_request",
+                new=mock.AsyncMock(return_value={"ok": True}),
+            ) as send_request,
+            mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline),
+            mock.patch.object(native_satellite, "_monotonic_us", return_value=now_us),
+        ):
+            await native_satellite._adjust_stereo_session("group-1")
+
+        send_request.assert_not_awaited()
+        session = native_satellite._stereo_sessions["group-1"]
+        self.assertIn(selector, session["pending_rejoin_realign"])
+
+    async def test_stereo_announcement_keeps_inferred_recovery_realign(self) -> None:
+        selector = "native:sat1-left"
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": [selector],
+            "stereo_members": [selector],
+            "content_type": "announcement",
+            "playheads": {},
+        }
+        native_satellite._stereo_adjust_tasks["group-1"] = asyncio.current_task()
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        payload = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "rendered_frames": 48_000,
+            "sample_rate_hz": 48_000,
+            "satellite_time_us": 5_000_000,
+            "buffered_frames": 0,
+            "rebuffering": True,
+            "underrun_events": 1,
+            "background_underrun_events": 1,
+            "rejoin_count": 0,
+            "rejoin_frames": 0,
+        }
+        with mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline):
+            native_satellite._record_stereo_playhead(selector, payload)
+            native_satellite._record_stereo_playhead(
+                selector,
+                {
+                    **payload,
+                    "rendered_frames": 52_800,
+                    "buffered_frames": 24_000,
+                    "rebuffering": False,
+                },
+            )
+
+        self.assertIn(
+            selector,
+            native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+        )
+
+    async def test_persistent_rebuffer_waits_for_recovery_before_arming_realign(self) -> None:
         selector = "native:sat1-left"
         native_satellite._stereo_sessions["group-1"] = {
             "session_id": "session-1",
@@ -447,13 +652,30 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
                 selector,
                 native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
             )
-            later_us = 5_000_000 + int(
-                native_satellite.STEREO_REBUFFER_REALIGN_TIMEOUT_S * 1_000_000
-            ) + 1
+            later_us = 8_000_000
             with mock.patch.object(native_satellite, "_monotonic_us", return_value=later_us):
                 native_satellite._record_stereo_playhead(
                     selector,
                     {**payload, "satellite_time_us": later_us},
+                )
+            self.assertNotIn(
+                selector,
+                native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+            )
+            with mock.patch.object(
+                native_satellite,
+                "_monotonic_us",
+                return_value=later_us + 100_000,
+            ):
+                native_satellite._record_stereo_playhead(
+                    selector,
+                    {
+                        **payload,
+                        "satellite_time_us": later_us + 100_000,
+                        "rendered_frames": 52_800,
+                        "buffered_frames": 24_000,
+                        "rebuffering": False,
+                    },
                 )
 
         self.assertIn(
@@ -461,7 +683,7 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
             native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
         )
 
-    async def test_pending_rebuffer_member_jumps_to_shared_audible_timeline(self) -> None:
+    async def test_pending_rebuffer_member_waits_then_jumps_to_shared_audible_timeline(self) -> None:
         now_us = 5_000_000
         selectors = ["native:sat1-left", "native:sat1-right"]
         native_satellite._stereo_sessions["group-1"] = {
@@ -474,7 +696,7 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
             "member_delays_ms": {selector: 0 for selector in selectors},
             "audible_start_server_us": now_us - 3_000_000,
             "start_position_frames": {selector: 0 for selector in selectors},
-            "last_phase_sample_server_us": now_us,
+            "last_phase_sample_server_us": 0,
             "use_rendered_clock": True,
             "pending_rejoin_realign": {selectors[1]: 6_688},
             "playheads": {
@@ -504,7 +726,6 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
         )
         voice_pipeline = mock.Mock(logger=mock.Mock())
         with (
-            mock.patch.object(native_satellite, "_monotonic_us", return_value=now_us),
             mock.patch.object(
                 native_satellite,
                 "send_request",
@@ -512,7 +733,35 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
             ) as send_request,
             mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline),
         ):
-            await native_satellite._adjust_stereo_session("group-1")
+            with mock.patch.object(native_satellite, "_monotonic_us", return_value=now_us):
+                await native_satellite._adjust_stereo_session("group-1")
+            send_request.assert_not_awaited()
+            self.assertIn(
+                selectors[1],
+                native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+            )
+
+            recovered_us = now_us + 2_100_000
+            session = native_satellite._stereo_sessions["group-1"]
+            session["playheads"][selectors[0]].update(
+                {
+                    "satellite_time_us": recovered_us,
+                    "rendered_frames": 244_800,
+                }
+            )
+            session["playheads"][selectors[1]].update(
+                {
+                    "satellite_time_us": recovered_us,
+                    "rendered_frames": 196_800,
+                    "rebuffering": False,
+                }
+            )
+            with mock.patch.object(
+                native_satellite,
+                "_monotonic_us",
+                return_value=recovered_us,
+            ):
+                await native_satellite._adjust_stereo_session("group-1")
 
         send_request.assert_awaited_once()
         self.assertEqual(send_request.await_args.args[0], selectors[1])
@@ -523,6 +772,128 @@ class NativeMediaSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             selectors[1],
             native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+        )
+
+    async def test_confirmed_stereo_rejoin_gets_only_one_bounded_jump(self) -> None:
+        now_us = 5_000_000
+        selectors = ["native:sat1-left", "native:sat1-right"]
+        native_satellite._stereo_sessions["group-1"] = {
+            "session_id": "session-1",
+            "group_id": "group-1",
+            "selectors": selectors,
+            "stereo_members": selectors,
+            "content_type": "music",
+            "reference_selector": selectors[0],
+            "clock_offsets_us": {selector: 0 for selector in selectors},
+            "clock_sync_server_us": now_us,
+            "member_delays_ms": {selector: 0 for selector in selectors},
+            "audible_start_server_us": now_us - 3_000_000,
+            "start_position_frames": {selector: 0 for selector in selectors},
+            "last_phase_sample_server_us": 0,
+            "use_rendered_clock": True,
+            "pending_rejoin_realign": {selectors[1]: 1},
+            "playheads": {
+                selectors[0]: {
+                    "session_id": "session-1",
+                    "sample_rate_hz": 48_000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 144_000,
+                    "rebuffering": False,
+                },
+                selectors[1]: {
+                    "session_id": "session-1",
+                    "sample_rate_hz": 48_000,
+                    "satellite_time_us": now_us,
+                    "rendered_frames": 96_000,
+                    "rebuffering": False,
+                },
+            },
+        }
+        native_satellite._clients.update(
+            {
+                selector: {
+                    "hello": {"payload": {"capabilities": {"media_rate_slew": True}}}
+                }
+                for selector in selectors
+            }
+        )
+        voice_pipeline = mock.Mock(logger=mock.Mock())
+        with (
+            mock.patch.object(
+                native_satellite,
+                "send_request",
+                new=mock.AsyncMock(return_value={"ok": True}),
+            ) as send_request,
+            mock.patch.object(native_satellite, "_vp", return_value=voice_pipeline),
+        ):
+            with mock.patch.object(native_satellite, "_monotonic_us", return_value=now_us):
+                await native_satellite._adjust_stereo_session("group-1")
+
+            session = native_satellite._stereo_sessions["group-1"]
+            self.assertNotIn(selectors[1], session["pending_rejoin_realign"])
+
+            stable_one_us = now_us + 2_100_000
+            session["playheads"][selectors[0]].update(
+                {
+                    "satellite_time_us": stable_one_us,
+                    "rendered_frames": 244_800,
+                }
+            )
+            session["playheads"][selectors[1]].update(
+                {
+                    "satellite_time_us": stable_one_us,
+                    "rendered_frames": 214_800,
+                }
+            )
+            with mock.patch.object(
+                native_satellite,
+                "_monotonic_us",
+                return_value=stable_one_us,
+            ):
+                await native_satellite._adjust_stereo_session("group-1")
+
+            stable_two_us = stable_one_us + 2_100_000
+            session["playheads"][selectors[0]].update(
+                {
+                    "satellite_time_us": stable_two_us,
+                    "rendered_frames": 345_600,
+                }
+            )
+            session["playheads"][selectors[1]].update(
+                {
+                    "satellite_time_us": stable_two_us,
+                    "rendered_frames": 315_600,
+                }
+            )
+            with mock.patch.object(
+                native_satellite,
+                "_monotonic_us",
+                return_value=stable_two_us,
+            ):
+                await native_satellite._adjust_stereo_session("group-1")
+
+        # Ordinary small drift slews may occur later, but the rejoin itself
+        # must never trigger another jump without a new recovery event.
+        first_payload = send_request.await_args_list[0].args[2]
+        self.assertEqual(first_payload["mode"], "jump")
+        self.assertEqual(
+            first_payload["correction_frames"],
+            native_satellite.STEREO_MUSIC_REJOIN_REALIGN_MAX_FRAMES,
+        )
+        self.assertEqual(
+            sum(
+                call.args[2]["mode"] == "jump"
+                for call in send_request.await_args_list
+            ),
+            1,
+        )
+        self.assertNotIn(
+            selectors[1],
+            native_satellite._stereo_sessions["group-1"]["pending_rejoin_realign"],
+        )
+        self.assertNotIn(
+            "rejoin_realign_verification",
+            native_satellite._stereo_sessions["group-1"],
         )
 
     async def test_member_disconnect_aborts_group_and_stops_remaining_satellite(self) -> None:

@@ -65,6 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "screen_night_brightness": 10,
     "screen_night_start": "22:00",
     "screen_night_end": "07:00",
+    "display_theme": "tater",
     "led_brightness": 80,
     "led_color": "#ff5a1f",
     "led_listening_animation": "directional",
@@ -92,9 +93,6 @@ FIRMWARE_SETTING_KEYS = (
     "wake_sound_enabled",
     "wake_sound",
     "wake_sound_url",
-    "aec_enabled",
-    "aec_strength_percent",
-    "aec_delay_ms",
     "continued_chat",
     "barge_in_enabled",
     "volume_percent",
@@ -103,6 +101,7 @@ FIRMWARE_SETTING_KEYS = (
     "screen_night_brightness",
     "screen_night_start",
     "screen_night_end",
+    "display_theme",
     "led_brightness",
     "led_color",
     "led_listening_animation",
@@ -115,6 +114,39 @@ FIRMWARE_SETTING_KEYS = (
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
 WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
+DISPLAY_THEMES = (
+    {
+        "value": "tater",
+        "label": "Tater Harvest",
+        "description": "The original warm Tater palette.",
+        "colors": ["#ff8430", "#34e2b7", "#9a70ff", "#ffd05c"],
+    },
+    {
+        "value": "ocean",
+        "label": "Ocean Current",
+        "description": "Cool cyan, seafoam, and deep blue.",
+        "colors": ["#3ecbff", "#49e6c2", "#6686ff", "#9cf4ff"],
+    },
+    {
+        "value": "violet",
+        "label": "Violet Bloom",
+        "description": "Rich violet with lavender and rose accents.",
+        "colors": ["#b07cff", "#ef8dff", "#758cff", "#ffb5dc"],
+    },
+    {
+        "value": "forest",
+        "label": "Forest Moss",
+        "description": "Natural greens with mint and golden light.",
+        "colors": ["#75d66e", "#55e6b7", "#d4b95f", "#c9f27c"],
+    },
+    {
+        "value": "sunset",
+        "label": "Sunset Rose",
+        "description": "Coral, amber, and dusky magenta.",
+        "colors": ["#ff6f61", "#ffad55", "#c674ff", "#ffd06a"],
+    },
+)
+DISPLAY_THEME_VALUES = {str(row["value"]) for row in DISPLAY_THEMES}
 GLOBAL_SATELLITE_CONTROL_KEYS = (
     "wake_engine",
     "wake_word",
@@ -805,10 +837,41 @@ _SCREEN_SETTING_KEYS = {
 
 _SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
 
+_DISPLAY_THEME_SETTING_KEYS = {"display_theme"}
+_DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
+    "display_theme_section",
+    "display_theme_preview",
+}
+
+
+def _board_supports_display_theme(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {
+        "checkers",
+        "echo-show-5",
+        "echo-show-5-1st-gen",
+        "rook",
+        "echo-spot",
+    } or compact in {
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "rook",
+        "echospot",
+    }
+
+
+def _display_theme_value(value: Any) -> str:
+    token = _lower(value).replace("-", "_")
+    return token if token in DISPLAY_THEME_VALUES else str(DEFAULTS["display_theme"])
+
 
 def _board_supports_led_settings(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
+    if _board_supports_display_theme(board):
+        return False
     if token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"}:
         return False
     if compact in {"s3box", "s3box3", "esp32s3box", "esp32s3box3"}:
@@ -1041,6 +1104,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
             source.get("screen_night_end"),
             str(DEFAULTS["screen_night_end"]),
         ),
+        "display_theme": _display_theme_value(source.get("display_theme")),
         "led_brightness": _as_int(source.get("led_brightness"), int(DEFAULTS["led_brightness"]), minimum=0, maximum=100),
         "led_color": _led_color_value(source.get("led_color")),
         "led_listening_animation": _led_animation_value(source.get("led_listening_animation"), "led_listening_animation"),
@@ -1077,12 +1141,10 @@ def firmware_settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[s
     current = settings_snapshot(selector, board=board)
     output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
     if not _board_supports_led_settings(board):
-        for key in (
-            "led_listening_animation",
-            "led_thinking_animation",
-            "led_tool_call_animation",
-            "led_replying_animation",
-        ):
+        for key in _LED_FIELD_KEYS:
+            output.pop(key, None)
+    if not _board_supports_display_theme(board):
+        for key in _DISPLAY_THEME_SETTING_KEYS:
             output.pop(key, None)
     if _board_supports_screen_settings(board):
         now = datetime.now().astimezone()
@@ -1344,38 +1406,6 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "description": "Satellite behavior and diagnostics.",
         },
         {
-            "key": "aec_enabled",
-            "label": "Acoustic Echo Cancellation",
-            "type": "checkbox",
-            "value": current["aec_enabled"],
-            "default": DEFAULTS["aec_enabled"],
-            "description": "Experimental. Leave off unless testing echo cancellation tuning for wake sounds, replies, timers, or intercom audio.",
-        },
-        {
-            "key": "aec_strength_percent",
-            "label": "AEC Strength",
-            "type": "number",
-            "value": current["aec_strength_percent"],
-            "default": DEFAULTS["aec_strength_percent"],
-            "min": 0,
-            "max": 100,
-            "step": 1,
-            "show_when": {"source_key": "aec_enabled", "equals": True},
-            "description": "Higher values suppress more speaker echo. Lower values preserve more near-end speech for barge-in.",
-        },
-        {
-            "key": "aec_delay_ms",
-            "label": "AEC Delay",
-            "type": "number",
-            "value": current["aec_delay_ms"],
-            "default": DEFAULTS["aec_delay_ms"],
-            "min": 0,
-            "max": 220,
-            "step": 5,
-            "show_when": {"source_key": "aec_enabled", "equals": True},
-            "description": "Reference delay between speaker output and mic pickup. 85 ms is the default starting point.",
-        },
-        {
             "key": "continued_chat",
             "label": "Continued Chat Reopen",
             "type": "checkbox",
@@ -1453,6 +1483,30 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "step": 1,
             "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
             "description": "Brightness used between Dim At and Restore At. Setting this to 0 turns the screen off overnight.",
+        },
+        {
+            "key": "display_theme_section",
+            "label": "Display Theme",
+            "type": "section",
+            "description": "Choose the color personality used by this satellite's screen and voice-state glow.",
+        },
+        {
+            "key": "display_theme",
+            "label": "Color Theme",
+            "type": "select",
+            "value": current["display_theme"],
+            "default": DEFAULTS["display_theme"],
+            "options": [
+                {"value": row["value"], "label": row["label"]}
+                for row in DISPLAY_THEMES
+            ],
+            "description": "Changes the screen accents live. Reply glow follows the selected theme's primary color.",
+        },
+        {
+            "key": "display_theme_preview",
+            "label": "Theme Preview",
+            "type": "display_theme_preview",
+            "themes": [dict(row) for row in DISPLAY_THEMES],
         },
         {
             "key": "led_section",
@@ -1591,6 +1645,8 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
                 ]
     if not (_selector_token(selector) and _board_supports_screen_settings(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
+    if not (_selector_token(selector) and _board_supports_display_theme(board)):
+        fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
     return fields
 
 

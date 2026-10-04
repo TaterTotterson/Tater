@@ -10605,6 +10605,16 @@ async def _shutdown_event() -> None:
             ),
             timeout=6.0,
         )
+        await _run_shutdown_step(
+            "shared media relays",
+            lambda: asyncio.to_thread(
+                __import__(
+                    "tater_voice.shared_media_relay",
+                    fromlist=["shutdown_shared_media_relays"],
+                ).shutdown_shared_media_relays
+            ),
+            timeout=6.0,
+        )
         await _run_shutdown_step("integration runtime", stop_integration_runtime, timeout=10.0)
         await _run_shutdown_step(
             "core runtime",
@@ -10700,6 +10710,10 @@ async def _webui_auth_middleware(request: Request, call_next):
     if path.startswith("/api/speech/tts/runtime/"):
         return await call_next(request)
     if path.startswith("/api/media/runtime/"):
+        return await call_next(request)
+    if path.startswith("/api/media/shared/"):
+        # Native media clients cannot attach the WebUI cookie. Shared relay
+        # URLs carry their own short-lived, unguessable token.
         return await call_next(request)
     if path.startswith("/api/external-audio/v1/streams/"):
         # Live external-audio URLs carry their own short-lived, unguessable
@@ -20239,6 +20253,27 @@ def get_people_settings() -> Dict[str, Any]:
     return people_module.panel_payload(redis_client)
 
 
+@app.get("/api/settings/people/faces/{identity_id}/observations")
+def get_people_face_observations(
+    identity_id: str,
+    offset: int = 0,
+    limit: int = 48,
+    status: str = "all",
+) -> Dict[str, Any]:
+    try:
+        return face_identity.ui_gallery(
+            identity_id,
+            offset=offset,
+            limit=limit,
+            status=status,
+            redis_client=redis_client,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Face identity not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Invalid face gallery request.") from exc
+
+
 @app.get("/api/settings/face-id/status")
 def get_face_id_status() -> Dict[str, Any]:
     return face_identity.service_status(redis_client)
@@ -21254,6 +21289,66 @@ def _runtime_media_proxy_response(asset_id: str, filename: str, request: Request
 @app.head("/api/media/runtime/{asset_id}/{filename:path}")
 async def get_runtime_media_proxy(asset_id: str, filename: str, request: Request) -> Response:
     return await asyncio.to_thread(_runtime_media_proxy_response, asset_id, filename, request)
+
+
+@app.get("/api/media/shared/{relay_id}/{filename:path}")
+@app.head("/api/media/shared/{relay_id}/{filename:path}")
+def get_shared_media_relay(
+    relay_id: str,
+    filename: str,
+    request: Request,
+    token: str = "",
+    start: float = 0.0,
+) -> Response:
+    try:
+        from tater_voice.shared_media_relay import (
+            describe_shared_media_relay,
+            open_shared_media_relay,
+        )
+
+        if not 0.0 <= start <= 12 * 60 * 60:
+            raise ValueError("Shared media start must be within 12 hours.")
+        relay = describe_shared_media_relay(relay_id, token)
+        media_type = str(relay["media_type"])
+        saved_filename = str(relay["filename"])
+    except Exception as exc:
+        from tater_voice.shared_media_relay import SharedMediaRelayError
+
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(exc, SharedMediaRelayError):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=f"Shared media is unavailable: {exc}") from exc
+
+    safe_filename = Path(str(saved_filename or filename or "media.bin")).name
+    header_filename = "".join(
+        char if 32 <= ord(char) < 127 and char not in {'"', "\\"} else "_"
+        for char in safe_filename
+    ) or "media.bin"
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Content-Disposition": f'inline; filename="{header_filename}"',
+    }
+    # Finished Music Core tracks are immutable files. Let Starlette serve
+    # Content-Length and byte ranges so MPV can seek instead of rebuffering an
+    # unseekable chunked response. Live AirPlay remains progressively streamed.
+    if relay["complete"] and start == 0.0:
+        return FileResponse(relay["path"], media_type=media_type, headers=headers)
+    if request.method.upper() == "HEAD":
+        return Response(media_type=media_type, headers=headers)
+    try:
+        body, _, _ = open_shared_media_relay(
+            relay_id, token, start_seconds=start
+        )
+    except Exception as exc:
+        from tater_voice.shared_media_relay import SharedMediaRelayError
+
+        if isinstance(exc, SharedMediaRelayError):
+            raise HTTPException(status_code=416, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=f"Shared media is unavailable: {exc}") from exc
+    return StreamingResponse(body, media_type=media_type, headers=headers)
 
 
 def _ai_task_background_audio_response(kind: str, filename: str) -> FileResponse:

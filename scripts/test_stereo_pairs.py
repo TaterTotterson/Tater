@@ -264,6 +264,11 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         right_start = commit_calls[1][2]["start_at_us"]
         self.assertEqual(right_start - left_start, 4000)
         self.assertIn("bedroom12", native_satellite._stereo_sessions)
+        self.assertEqual(
+            native_satellite._stereo_sessions["bedroom12"]["stereo_members"],
+            ["native:left", "native:right"],
+        )
+        self.assertTrue(all(member["stereo_member"] for member in result["members"]))
 
     async def test_multi_room_group_prepares_every_member_and_shares_one_start(self) -> None:
         calls = []

@@ -22,13 +22,13 @@ const props = defineProps<{
 const emit = defineEmits<{ notify: [message: string, tone?: string] }>();
 
 const tabs = [
-  { id: "satellites", label: "Satellites", short: "Pair & control", icon: "SAT", description: "Pair devices, manage rooms, volume, playback, and live satellite settings." },
-  { id: "firmware", label: "Firmware", short: "Update & recover", icon: "FW", description: "Install official firmware over OTA or USB and follow progress live." },
-  { id: "stereo", label: "Stereo Pairs", short: "Left & right", icon: "2X", description: "Create synchronized left and right playback destinations." },
-  { id: "airplay", label: "AirPlay Input", short: "Stream to sats", icon: "AP", description: "Send audio from Apple devices into Tater satellites and speaker groups." },
-  { id: "presence", label: "Presence", short: "Live room map", icon: "BLE", description: "Watch nearby Bluetooth devices move between the rooms covered by native satellites." },
-  { id: "stats", label: "Stats", short: "Quality & latency", icon: "LIVE", description: "Live voice quality, latency, fallbacks, and per-satellite outcomes." },
-  { id: "platform", label: "Settings", short: "Shared behavior", icon: "SET", description: "Shared satellite behavior and native voice-pipeline settings." },
+  { id: "satellites", label: "Satellites", description: "Pair devices, manage rooms, volume, playback, and live satellite settings." },
+  { id: "firmware", label: "Firmware", description: "Install official firmware over OTA or USB and follow progress live." },
+  { id: "stereo", label: "Stereo Pairs", description: "Create synchronized left and right playback destinations." },
+  { id: "airplay", label: "AirPlay Input", description: "Send audio from Apple devices into Tater satellites and speaker groups." },
+  { id: "presence", label: "Presence", description: "Watch nearby Bluetooth devices move between the rooms covered by native satellites." },
+  { id: "stats", label: "Stats", description: "Live voice quality, latency, fallbacks, and per-satellite outcomes." },
+  { id: "platform", label: "Settings", description: "Shared satellite behavior and native voice-pipeline settings." },
 ] as const;
 const tabIds = new Set(tabs.map((tab) => tab.id));
 const normalize = (value: unknown) => {
@@ -113,7 +113,7 @@ onBeforeUnmount(() => {
     </section>
 
     <nav class="tv-tabs tvoice-tabs" aria-label="Satellite settings sections">
-      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="select(tab.id)"><span class="tvoice-tab-mark">{{ tab.icon }}</span><span><b>{{ tab.label }}</b><small>{{ tab.short }}</small></span></button>
+      <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="select(tab.id)">{{ tab.label }}</button>
     </nav>
 
     <div class="tset-context"><span>{{ activeSpec.label }}</span><p>{{ activeSpec.description }}</p></div>

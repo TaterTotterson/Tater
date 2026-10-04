@@ -1125,6 +1125,7 @@ async def native_satellite_play_group(
                         ),
                         "volume_percent": calibrated_volume,
                         "destination_selector": selector,
+                        "stereo_member": True,
                     }
                 )
             continue
@@ -1141,6 +1142,7 @@ async def native_satellite_play_group(
                 "delay_ms": destination_delay_ms,
                 "volume_percent": destination_volume_percent,
                 "destination_selector": selector,
+                "stereo_member": False,
             }
         )
     if not member_rows:

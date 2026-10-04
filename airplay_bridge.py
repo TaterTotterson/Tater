@@ -31,6 +31,7 @@ AIRPLAY_TARGET_PREFIX = "airplay:"
 AIRPLAY_REGISTRY_KEY = "tater:airplay:players:registry:v1"
 AIRPLAY_DISCOVERY_CACHE_TTL_SECONDS = 60.0
 AIRPLAY_DISCOVERY_STALE_TTL_SECONDS = 24 * 60 * 60.0
+AIRPLAY_RECENT_AP2_TTL_SECONDS = 5 * 60.0
 AIRPLAY_CLI_VERSION = "0.4.12"
 AIRPLAY_CLI_RELEASE_ROOT = (
     f"https://github.com/music-assistant/airplay-cli/releases/download/v{AIRPLAY_CLI_VERSION}"
@@ -632,6 +633,46 @@ def _cached_discovery_rows(*, maximum_age_s: float) -> tuple[float, List[Dict[st
     return timestamp, rows
 
 
+def _retain_recent_airplay2_rows(
+    rows: List[Dict[str, Any]], previous: List[Dict[str, Any]], *, now_ts: float
+) -> List[Dict[str, Any]]:
+    """Keep a recent AP2 endpoint when mDNS briefly returns only its RAOP record."""
+    def recently_seen(row: Dict[str, Any]) -> bool:
+        try:
+            age = now_ts - float(row.get("airplay2_seen_ts") or 0)
+        except (TypeError, ValueError):
+            return False
+        return 0 <= age <= AIRPLAY_RECENT_AP2_TTL_SECONDS
+
+    prior = {
+        normalize_airplay_id(row.get("id")): row
+        for row in previous
+        if isinstance(row, dict)
+        and row.get("airplay_port")
+        and recently_seen(row)
+    }
+    stable: List[Dict[str, Any]] = []
+    for row in rows:
+        old = prior.get(normalize_airplay_id(row.get("id")))
+        if not old or row.get("airplay_port") or _text(old.get("host")) != _text(row.get("host")):
+            if row.get("airplay_port"):
+                row = {**row, "airplay2_seen_ts": now_ts}
+            stable.append(row)
+            continue
+        retained = dict(row)
+        retained["airplay_port"] = old["airplay_port"]
+        retained["airplay_properties"] = dict(old.get("airplay_properties") or {})
+        retained["airplay_service_name"] = _text(old.get("airplay_service_name"))
+        retained["server"] = _text(old.get("server")) or _text(row.get("server"))
+        retained["manufacturer"] = _text(row.get("manufacturer")) or _text(old.get("manufacturer"))
+        retained["model"] = _text(row.get("model")) or _text(old.get("model"))
+        retained["protocol"] = "airplay2"
+        retained["discovery_retained_airplay2"] = True
+        retained["discovery_legacy_fallback"] = dict(row)
+        stable.append(retained)
+    return stable
+
+
 def discover_airplay_devices(
     *,
     timeout_s: float = 2.0,
@@ -650,12 +691,60 @@ def discover_airplay_devices(
                 _discovery_rows = cached
                 _discovery_ts = timestamp
                 return [dict(row) for row in cached]
+        recent_rows: List[Dict[str, Any]] = []
+        recent_ts = 0.0
+        if _discovery_rows and now - _discovery_ts <= AIRPLAY_RECENT_AP2_TTL_SECONDS:
+            recent_rows = [dict(row) for row in _discovery_rows]
+            recent_ts = _discovery_ts
+        else:
+            recent_ts, recent_rows = _cached_discovery_rows(
+                maximum_age_s=AIRPLAY_RECENT_AP2_TTL_SECONDS
+            )
+        for row in recent_rows:
+            if row.get("airplay_port") and not row.get("airplay2_seen_ts"):
+                row["airplay2_seen_ts"] = recent_ts
         try:
             rows = _browse_airplay(timeout_s)
         except Exception as exc:
             logger.warning("[airplay_bridge] discovery failed: %s", exc)
             rows = []
         if rows:
+            recent_ap2 = {
+                normalize_airplay_id(row.get("id"))
+                for row in recent_rows
+                if isinstance(row, dict)
+                and row.get("airplay_port")
+                and now - float(row.get("airplay2_seen_ts") or 0) <= AIRPLAY_RECENT_AP2_TTL_SECONDS
+            }
+            downgraded = {
+                normalize_airplay_id(row.get("id"))
+                for row in rows
+                if not row.get("airplay_port")
+                and normalize_airplay_id(row.get("id")) in recent_ap2
+            }
+            if downgraded:
+                try:
+                    retry_rows = _browse_airplay(timeout_s)
+                    retry_by_id = {
+                        normalize_airplay_id(row.get("id")): row
+                        for row in retry_rows
+                        if isinstance(row, dict)
+                    }
+                    recovered: List[Dict[str, Any]] = []
+                    for row in rows:
+                        retry = retry_by_id.get(normalize_airplay_id(row.get("id")), {})
+                        if retry.get("airplay_port"):
+                            merged = dict(retry)
+                            for key in ("raop_port", "raop_properties", "raop_service_name"):
+                                if not merged.get(key):
+                                    merged[key] = row.get(key)
+                            recovered.append(merged)
+                        else:
+                            recovered.append(row)
+                    rows = recovered
+                except Exception as exc:
+                    logger.debug("[airplay_bridge] AirPlay 2 discovery retry failed: %s", exc)
+            rows = _retain_recent_airplay2_rows(rows, recent_rows, now_ts=now)
             _discovery_rows = rows
             _discovery_ts = now
             _cache_discovery_rows(rows, now_ts=now)
@@ -1403,6 +1492,7 @@ def prepare_airplay_group_sync(
         return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "No AirPlay receivers are available."}
 
     prepared: List[_AirPlayMember] = []
+    route_warnings: List[str] = []
     with ThreadPoolExecutor(max_workers=len(members)) as executor:
         future_members = {
             executor.submit(member.prepare, max(5.0, min(30.0, float(timeout_s)))): member
@@ -1414,12 +1504,47 @@ def prepare_airplay_group_sync(
                 future.result()
                 prepared.append(member)
             except Exception as exc:
-                failures.append(f"{member.target} ({exc})")
                 member.stop()
+                legacy = member.device.get("discovery_legacy_fallback")
+                if not isinstance(legacy, dict) or not legacy.get("raop_port"):
+                    failures.append(f"{member.target} ({exc})")
+                    continue
+                fallback = _AirPlayMember(
+                    target=member.target,
+                    device=legacy,
+                    binary=binary,
+                    ffmpeg=ffmpeg,
+                    source_url=source_url,
+                    start_position_seconds=start_position_seconds,
+                    volume_percent=member.volume_percent,
+                    title=title,
+                    artist=artist,
+                    album=album,
+                    duration_seconds=duration_seconds,
+                    group_id=group_id,
+                )
+                try:
+                    fallback.prepare(max(5.0, min(30.0, float(timeout_s))))
+                    prepared.append(fallback)
+                    route_warnings.append(
+                        f"{fallback.device.get('name') or fallback.target} could not reconnect via "
+                        "AirPlay 2; using legacy RAOP timing for this session."
+                    )
+                except Exception as fallback_exc:
+                    fallback.stop()
+                    failures.append(f"{member.target} (AirPlay 2: {exc}; RAOP: {fallback_exc})")
     if not prepared:
         return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "AirPlay preparation failed."}
 
     group = _AirPlayGroup(group_id, prepared)
+    for member in prepared:
+        if member.device.get("airplay_port") and member.route_protocol == "raop":
+            route_warnings.append(
+                f"{member.device.get('name') or member.target} negotiated legacy RAOP timing "
+                "instead of AirPlay 2 for this session."
+            )
+    if route_warnings:
+        logger.warning("[airplay_bridge] group route fallback: %s", "; ".join(route_warnings))
     with _session_lock:
         _active_groups[group_id] = group
         for member in prepared:
@@ -1444,8 +1569,8 @@ def prepare_airplay_group_sync(
     }
     if ptp_daemon:
         result["ptp_daemon"] = ptp_daemon
-    if failures:
-        result["warnings"] = failures
+    if failures or route_warnings:
+        result["warnings"] = failures + route_warnings
     return result
 
 

@@ -777,12 +777,12 @@ def build_weather_summary(
     if core_installed is None:
         core_installed = _environment_core_installed()
     if not core_installed:
-        return {**result, "available": False, "environment_installed": False}
+        return {**result, "available": False}
 
     redis_obj = client or redis_client
     snapshots = _environment_provider_snapshots(redis_obj)
     if not snapshots:
-        return {**result, "available": False, "environment_installed": True}
+        return {**result, "available": False}
 
     live_provider = _environment_source_provider(
         _environment_setting(
@@ -813,9 +813,9 @@ def build_weather_summary(
     preferred_unit = _environment_temperature_unit(redis_obj)
     selected_slots: Dict[str, Dict[str, Any]] = {}
     slot_specs: Dict[str, str] = {}
-    profile_found = False
-    if _text(selector):
-        slot_specs, profile_found = _slot_map_from_saved_display_profile(
+    selector_controls_slots = bool(_text(selector))
+    if selector_controls_slots:
+        slot_specs, _ = _slot_map_from_saved_display_profile(
             {"selector": _text(selector), "target": _text(selector)},
             redis_obj,
         )
@@ -852,7 +852,7 @@ def build_weather_summary(
         return _text(slot.get("display") or slot.get("state") or slot.get("value"))
 
     def slot_is_visible(alias: str) -> bool:
-        return not profile_found or alias in slot_specs
+        return not selector_controls_slots or alias in slot_specs
 
     temperature_row = _environment_temperature_reading(live_snapshot)
     if temperature_row is None:
@@ -868,7 +868,7 @@ def build_weather_summary(
     condition = _environment_reading_text(condition_row)
 
     temperature = selected_temperature("temp_out") if slot_is_visible("temp_out") else ""
-    if not temperature and not profile_found:
+    if not temperature and not selector_controls_slots:
         temperature = _environment_number_text(
             temperature_row.get("value") if isinstance(temperature_row, dict) else None
         )
@@ -933,7 +933,7 @@ def build_weather_summary(
         or _environment_category_reading(live_snapshot, "rain")
 
     indoor_temperature = selected_temperature("temp_in") if slot_is_visible("temp_in") else ""
-    if not indoor_temperature and not profile_found:
+    if not indoor_temperature and not selector_controls_slots:
         indoor_row = _environment_indoor_temperature_reading(live_snapshot)
         if indoor_row is None:
             for candidate_snapshot in snapshots.values():
@@ -945,7 +945,7 @@ def build_weather_summary(
             indoor_temperature = _environment_number_text(indoor_row.get("value"))
 
     indoor_humidity = selected_text("humidity_in") if slot_is_visible("humidity_in") else ""
-    if not indoor_humidity and not profile_found:
+    if not indoor_humidity and not selector_controls_slots:
         indoor_humidity_row = _environment_indoor_humidity_reading(live_snapshot)
         if indoor_humidity_row is None:
             for candidate_snapshot in snapshots.values():
@@ -968,7 +968,7 @@ def build_weather_summary(
         else:
             feels_like_relation = "same"
     humidity = selected_text("humidity_out") if slot_is_visible("humidity_out") else ""
-    if not humidity and not profile_found:
+    if not humidity and not selector_controls_slots:
         humidity_number = _environment_number_text(
             humidity_row.get("value") if isinstance(humidity_row, dict) else None
         )
@@ -986,15 +986,15 @@ def build_weather_summary(
         else (_text(wind_row.get("unit")) if isinstance(wind_row, dict) else "")
     )
     wind_direction = _environment_wind_direction_text(wind_direction_row)
-    if profile_found:
+    if selector_controls_slots:
         wind_text = selected_text("wind_speed") if slot_is_visible("wind_speed") else ""
     else:
         wind_text = " ".join(part for part in (wind_direction, wind_speed, wind_unit) if part)
     lightning_text = selected_text("lightning_strikes") if slot_is_visible("lightning_strikes") else ""
-    if not lightning_text and not profile_found:
+    if not lightning_text and not selector_controls_slots:
         lightning_text = _environment_reading_text(lightning_row)
     rain_text = selected_text("rain_rate") if slot_is_visible("rain_rate") else ""
-    if not rain_text and not profile_found:
+    if not rain_text and not selector_controls_slots:
         rain_text = _environment_reading_text(rain_row)
 
     received_at = _environment_received_at(live_snapshot, condition_snapshot)
@@ -1016,7 +1016,6 @@ def build_weather_summary(
     return {
         **result,
         "available": True,
-        "environment_installed": True,
         "temperature_text": f"{temperature}°" if temperature else "",
         "temperature_unit": preferred_unit,
         "indoor_temperature_text": f"{indoor_temperature}°" if indoor_temperature else "",

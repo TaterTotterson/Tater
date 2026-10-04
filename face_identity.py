@@ -32,6 +32,7 @@ OBSERVATION_LIMIT = 500
 REFERENCE_LIMIT = 24
 MODEL_SWITCH_STATE_KEY = "tater:face_id:model_switch:v1"
 FACENET_KNOWN_MATCH_THRESHOLD = 0.45
+ADAFACE_KNOWN_MATCH_THRESHOLD = 0.65
 KNOWN_MATCH_MIN_MARGIN = 0.10
 KNOWN_MATCH_MIN_REFERENCES = 2
 SINGLE_KNOWN_MATCH_MIN_REFERENCES = 3
@@ -46,6 +47,14 @@ BURST_TRACK_STRICT_EXTENSION = 0.08
 BURST_TRACK_DISTANCE_EXTENSION = 0.35
 BURST_TRACK_MAX_SPATIAL_DISTANCE = 1.75
 BURST_TRACK_MAX_AREA_RATIO = 3.0
+REFERENCE_STATUS_TRUSTED = "trusted"
+REFERENCE_STATUS_PROVISIONAL = "provisional"
+REFERENCE_STATUS_UNREVIEWED = "unreviewed"
+REFERENCE_STATUSES = {
+    REFERENCE_STATUS_TRUSTED,
+    REFERENCE_STATUS_PROVISIONAL,
+    REFERENCE_STATUS_UNREVIEWED,
+}
 
 _identity_lock = threading.RLock()
 _model_switch_lock = threading.RLock()
@@ -122,7 +131,7 @@ def identity_rows(redis_client: Any = None) -> Dict[str, Dict[str, Any]]:
     rows = _read_hash(client, SHARED_IDENTITIES_KEY)
     for identity_id, identity in list(rows.items()):
         current_observations = observations(identity)
-        image_observations = image_backed_observations(identity)
+        image_observations = stored_face_observations(identity)
         has_image_less_vectors = len(current_observations) != len(image_observations)
         has_profile_vectors_without_images = not image_observations and any(
             identity.get(key) for key in ("centroid", "reference_centroids")
@@ -326,6 +335,24 @@ def image_backed_observations(identity: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def stored_face_observations(identity: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return every stored capture image, including rows whose old vector is unusable."""
+    return [row for row in observations(identity) if _text(row.get("face_b64"))]
+
+
+def observation_reference_status(observation: Dict[str, Any]) -> str:
+    explicit = _text(observation.get("reference_status")).lower()
+    if explicit in REFERENCE_STATUSES:
+        return explicit
+    source = observation.get("source") if isinstance(observation.get("source"), dict) else {}
+    if _text(source.get("kind")).lower() in {
+        "manual_face_enrollment",
+        "people_face_enrollment",
+    }:
+        return REFERENCE_STATUS_TRUSTED
+    return REFERENCE_STATUS_UNREVIEWED
+
+
 def observation_embedding(
     observation: Dict[str, Any],
     model_signature: str = "",
@@ -390,6 +417,53 @@ def reference_embeddings(identity: Dict[str, Any], model_signature: str = "") ->
     for row in image_rows:
         add(observation_embedding(row, wanted, fallback_signature=fallback_signature))
     return references
+
+
+def trusted_reference_embeddings(
+    identity: Dict[str, Any],
+    model_signature: str = "",
+) -> List[List[float]]:
+    """Return only references explicitly confirmed for a linked person."""
+    trusted_rows = [
+        row
+        for row in image_backed_observations(identity)
+        if observation_reference_status(row) == REFERENCE_STATUS_TRUSTED
+    ]
+    if not trusted_rows:
+        return []
+    # Read the confirmed observations themselves. Stored centroids may include
+    # older provisional or incorrectly assigned faces. Keep separate confirmed
+    # views even when they are visually close; the guarded matcher relies on
+    # more than one independently approved capture.
+    references: List[List[float]] = []
+    fallback_signature = _text(identity.get("embedding_model_signature"))
+    for row in trusted_rows:
+        embedding = observation_embedding(
+            row,
+            model_signature,
+            fallback_signature=fallback_signature,
+        )
+        if not embedding:
+            continue
+        if any(cosine_distance(embedding, existing) < 0.0001 for existing in references):
+            continue
+        references.append(embedding)
+        if len(references) >= REFERENCE_LIMIT:
+            break
+    return references
+
+
+def matching_reference_embeddings(
+    identity: Dict[str, Any],
+    model_signature: str = "",
+) -> List[List[float]]:
+    if (
+        _text(identity.get("person_id"))
+        or _text(identity.get("person_name"))
+        or _text(identity.get("name"))
+    ):
+        return trusted_reference_embeddings(identity, model_signature=model_signature)
+    return reference_embeddings(identity, model_signature=model_signature)
 
 
 def curate_reference_embeddings(
@@ -460,7 +534,7 @@ def match_identity(
     maximum = _float(threshold, _float(getattr(face_id_runtime, "MATCH_THRESHOLD", 0.30), 0.30))
     candidates: List[Dict[str, Any]] = []
     for identity_id, identity in identities.items():
-        references = reference_embeddings(identity, model_signature=model_signature)
+        references = matching_reference_embeddings(identity, model_signature=model_signature)
         distances = sorted(cosine_distance(embedding, reference) for reference in references)
         if not distances:
             continue
@@ -491,12 +565,16 @@ def match_identity(
     if known and float(known[0]["distance"]) <= maximum:
         return _text(known[0]["id"]), float(known[0]["distance"])
 
-    # FaceNet's general cutoff is deliberately strict. For an enrolled person,
-    # accept a wider pose/lighting variation only when several saved views agree
-    # and the next enrolled person is clearly farther away. This recovers strong
-    # household matches without globally loosening anonymous clustering.
+    # General model cutoffs remain strict for anonymous clustering. A linked
+    # person can accept wider pose and lighting variation only when multiple
+    # user-confirmed references agree and the next person is clearly farther.
     signature = _text(model_signature).lower()
-    known_maximum = FACENET_KNOWN_MATCH_THRESHOLD if "facenet512" in signature else maximum
+    if "facenet512" in signature:
+        known_maximum = FACENET_KNOWN_MATCH_THRESHOLD
+    elif "adaface" in signature:
+        known_maximum = ADAFACE_KNOWN_MATCH_THRESHOLD
+    else:
+        known_maximum = maximum
     if known and known_maximum > maximum:
         best_known = known[0]
         second_distance = float(known[1]["distance"]) if len(known) > 1 else float("inf")
@@ -668,7 +746,7 @@ def match_identity_burst(
             or _text(identity.get("name"))
         ):
             continue
-        references = reference_embeddings(identity, model_signature=wanted_signature)
+        references = trusted_reference_embeddings(identity, model_signature=wanted_signature)
         if not references:
             continue
         frame_distances = [
@@ -727,6 +805,7 @@ def _detection_observation(
     event_id: str,
     seen_at: str,
     quality: float,
+    reference_status: str = REFERENCE_STATUS_PROVISIONAL,
     source: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     area = detection.get("facial_area") if isinstance(detection.get("facial_area"), dict) else {}
@@ -745,6 +824,11 @@ def _detection_observation(
         },
         "face_b64": _text(detection.get("crop_b64")),
         "face_content_type": _text(detection.get("crop_content_type")) or "image/jpeg",
+        "reference_status": (
+            _text(reference_status).lower()
+            if _text(reference_status).lower() in REFERENCE_STATUSES
+            else REFERENCE_STATUS_PROVISIONAL
+        ),
     }
     embedding_model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
     model_signature = _text(detection.get("embedding_model_signature"))
@@ -866,7 +950,7 @@ def rebuild_identity(
 ) -> Dict[str, Any]:
     payload = dict(identity)
     payload.pop("anchor_references", None)
-    normalized = image_backed_observations({"observations": rows})
+    normalized = stored_face_observations({"observations": rows})
     payload["observations"] = normalized
     payload["observation_count"] = len(normalized)
     payload = _rebuild_embedding_profiles(payload, normalized)
@@ -877,7 +961,17 @@ def rebuild_identity(
         payload["first_seen"] = _text(chronological[0].get("seen_at"))
         payload["last_seen"] = _text(chronological[-1].get("seen_at"))
         payload["last_event_id"] = _text(chronological[-1].get("event_id"))
-        best = max(normalized, key=lambda row: _float(row.get("quality")))
+        trusted = [
+            row
+            for row in normalized
+            if observation_reference_status(row) == REFERENCE_STATUS_TRUSTED
+        ]
+        hero_candidates = trusted if trusted and (
+            _text(payload.get("person_id"))
+            or _text(payload.get("person_name"))
+            or _text(payload.get("name"))
+        ) else normalized
+        best = max(hero_candidates, key=lambda row: _float(row.get("quality")))
         if _text(best.get("face_b64")):
             payload["best_quality"] = _float(best.get("quality"))
             payload["face_b64"] = _text(best.get("face_b64"))
@@ -900,6 +994,8 @@ def record_detection(
     seen_at: str = "",
     source: Optional[Dict[str, Any]] = None,
     matched_identity_id: str = "",
+    reference_status: str = REFERENCE_STATUS_PROVISIONAL,
+    skip_matching: bool = False,
     redis_client: Any = None,
 ) -> Dict[str, Any]:
     client = _client(redis_client)
@@ -929,12 +1025,12 @@ def record_detection(
         if identity_id and identity_id not in identities:
             identity_id = ""
         if identity_id:
-            references = reference_embeddings(identities[identity_id], model_signature=model_signature)
+            references = matching_reference_embeddings(identities[identity_id], model_signature=model_signature)
             distance = min(
                 (cosine_distance(embedding, reference) for reference in references),
                 default=0.0,
             )
-        else:
+        elif not skip_matching:
             identity_id, distance = match_identity(
                 identities,
                 embedding,
@@ -976,15 +1072,17 @@ def record_detection(
             None,
         )
         if duplicate is not None:
+            if _text(reference_status).lower() == REFERENCE_STATUS_TRUSTED:
+                for row in existing:
+                    if _text(row.get("id")) == _text(duplicate.get("id")):
+                        row["reference_status"] = REFERENCE_STATUS_TRUSTED
+                        break
+                identity = rebuild_identity(identity, existing, keep_name=True)
+                identity["last_distance"] = round(max(0.0, float(distance)), 5)
+                identity = save_identity(identity, client)
             _save_event_identity_ids(client, event_token, [*_event_identity_ids(client, event_token), identity_id])
             return identity
 
-        identity["observation_count"] = _int(identity.get("observation_count"), 0, minimum=0) + 1
-        if _text(identity.get("last_event_id")) != event_token:
-            identity["event_count"] = _int(identity.get("event_count"), 0, minimum=0) + 1
-            identity["last_event_id"] = event_token
-        identity["last_seen"] = timestamp
-        identity["last_distance"] = round(max(0.0, float(distance)), 5)
         existing.insert(
             0,
             _detection_observation(
@@ -993,15 +1091,12 @@ def record_detection(
                 event_id=event_token,
                 seen_at=timestamp,
                 quality=quality,
+                reference_status=reference_status,
                 source=source,
             ),
         )
-        identity["observations"] = existing[:OBSERVATION_LIMIT]
-        if quality >= _float(identity.get("best_quality")) and _text(detection.get("crop_b64")):
-            identity["best_quality"] = round(quality, 5)
-            identity["face_b64"] = _text(detection.get("crop_b64"))
-            identity["face_content_type"] = _text(detection.get("crop_content_type")) or "image/jpeg"
-        identity = _rebuild_embedding_profiles(identity, identity["observations"])
+        identity = rebuild_identity(identity, existing[:OBSERVATION_LIMIT], keep_name=True)
+        identity["last_distance"] = round(max(0.0, float(distance)), 5)
         saved = save_identity(identity, client)
         _save_event_identity_ids(client, event_token, [*_event_identity_ids(client, event_token), identity_id])
         return saved
@@ -1032,7 +1127,29 @@ def record_detection_burst(
             model_signature=signature,
         )
         track_identity_id = consensus_id
-        recorded_detections = _selected_burst_detections(detections) if consensus_id else detections
+        ambiguous_known_track = False
+        if not track_identity_id:
+            direct_known_ids: List[str] = []
+            for detection in detections:
+                candidate_id, _distance = match_identity(
+                    identities_before,
+                    valid_embedding(detection.get("embedding")),
+                    threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
+                    model_signature=signature,
+                )
+                candidate = identities_before.get(candidate_id) or {}
+                if candidate_id and (
+                    _text(candidate.get("person_id"))
+                    or _text(candidate.get("person_name"))
+                    or _text(candidate.get("name"))
+                ):
+                    direct_known_ids.append(candidate_id)
+            unique_known_ids = list(dict.fromkeys(direct_known_ids))
+            if len(unique_known_ids) == 1:
+                track_identity_id = unique_known_ids[0]
+            elif len(unique_known_ids) > 1:
+                ambiguous_known_track = True
+        recorded_detections = _selected_burst_detections(detections) if track_identity_id else detections
         for detection in recorded_detections:
             try:
                 identity = record_detection(
@@ -1041,6 +1158,7 @@ def record_detection_burst(
                     seen_at=seen_at,
                     source=source,
                     matched_identity_id=track_identity_id,
+                    skip_matching=ambiguous_known_track and not track_identity_id,
                     redis_client=client,
                 )
             except ValueError:
@@ -1563,8 +1681,9 @@ def enroll_person_image(
     detection = detections[0]
     embedding = valid_embedding(detection.get("embedding"))
     model = detection.get("embedding_model") if isinstance(detection.get("embedding_model"), dict) else {}
+    identities = identity_rows(client)
     existing_id, _distance = match_identity(
-        identity_rows(client),
+        identities,
         embedding,
         threshold=_float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD),
         model_signature=_text(detection.get("embedding_model_signature")),
@@ -1583,11 +1702,31 @@ def enroll_person_image(
                 "Choose that Person or review the existing face profile first."
             )
 
+    target_identity_id = existing_id
+    if not target_identity_id:
+        linked_profiles = [
+            identity
+            for identity in identities.values()
+            if _text(identity.get("person_id")) == wanted_person_id
+        ]
+        if linked_profiles:
+            linked_profiles.sort(
+                key=lambda identity: (
+                    len(trusted_reference_embeddings(identity)),
+                    len(observations(identity)),
+                    _text(identity.get("last_seen")),
+                ),
+                reverse=True,
+            )
+            target_identity_id = _text(linked_profiles[0].get("id"))
+
     identity = record_detection(
         detection,
         event_id=f"manual_face_enrollment_{uuid.uuid4().hex[:16]}",
         seen_at=_now_iso(),
         source=source_payload,
+        matched_identity_id=target_identity_id,
+        reference_status=REFERENCE_STATUS_TRUSTED,
         redis_client=client,
     )
     identity = save_profile(
@@ -1601,7 +1740,7 @@ def enroll_person_image(
         "identity_id": _text(identity.get("id")),
         "person_id": wanted_person_id,
         "person_name": wanted_person_name,
-        "matched_existing": bool(existing_ids),
+        "matched_existing": bool(target_identity_id),
         **routing,
     }
 
@@ -1802,8 +1941,6 @@ def move_observations(
         remaining = [row for row in source_rows if _text(row.get("id")) not in selected_ids]
         if len(selected) != len(selected_ids):
             raise ValueError("One or more selected face images are no longer available.")
-        if not all(valid_embedding(row.get("embedding")) for row in selected):
-            raise ValueError("One or more selected face captures no longer has a saved face vector.")
         target_token = resolve_identity_id(target_id, client)
         if create_unknown or not target_token:
             target_token = f"face_{uuid.uuid4().hex[:16]}"
@@ -1814,6 +1951,16 @@ def move_observations(
             target = dict(identities.get(target_token) or {})
             if not target:
                 raise KeyError("Destination person not found.")
+        destination_is_linked = bool(
+            _text(target.get("person_id"))
+            or _text(target.get("person_name"))
+            or _text(target.get("name"))
+        )
+        selected_status = REFERENCE_STATUS_TRUSTED if destination_is_linked else REFERENCE_STATUS_PROVISIONAL
+        selected = [
+            {**row, "reference_status": selected_status}
+            for row in selected
+        ]
         target = rebuild_identity(target, [*observations(target), *selected], keep_name=True)
         target = save_identity(target, client)
         source_removed = not remaining
@@ -1839,6 +1986,37 @@ def move_observations(
                 redis_client=client,
             )
     return {"source": {} if source_removed else source, "target": target, "source_removed": source_removed, "moved": len(selected)}
+
+
+def set_observation_trust(
+    identity_id: str,
+    observation_ids: Iterable[Any],
+    *,
+    trusted: bool,
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    client = _client(redis_client)
+    token = resolve_identity_id(identity_id, client)
+    selected_ids = {_text(value) for value in observation_ids if _text(value)}
+    if not selected_ids:
+        raise ValueError("Select at least one face image to update.")
+    with _identity_lock:
+        identity = dict(identity_rows(client).get(token) or {})
+        if not identity:
+            raise KeyError("Face identity not found.")
+        current = observations(identity)
+        available_ids = {_text(row.get("id")) for row in current}
+        if not selected_ids.issubset(available_ids):
+            raise ValueError("One or more selected face images are no longer available.")
+        status = REFERENCE_STATUS_TRUSTED if trusted else REFERENCE_STATUS_PROVISIONAL
+        updated = [
+            {**row, "reference_status": status}
+            if _text(row.get("id")) in selected_ids
+            else row
+            for row in current
+        ]
+        identity = save_identity(rebuild_identity(identity, updated, keep_name=True), client)
+    return {"identity": identity, "updated": len(selected_ids), "reference_status": status}
 
 
 def remove_observations(identity_id: str, observation_ids: Iterable[Any], redis_client: Any = None) -> Dict[str, Any]:
@@ -1884,29 +2062,88 @@ def delete_identity(identity_id: str, redis_client: Any = None) -> bool:
     return _delete_identity_row(token, client)
 
 
-def ui_rows(redis_client: Any = None) -> List[Dict[str, Any]]:
+def _ui_observation_row(observation: Dict[str, Any]) -> Dict[str, Any]:
+    face_b64 = _text(observation.get("face_b64"))
+    content_type = _text(observation.get("face_content_type")) or "image/jpeg"
+    status = observation_reference_status(observation)
+    return {
+        "id": _text(observation.get("id")),
+        "image_src": f"data:{content_type};base64,{face_b64}" if face_b64 else "",
+        "seen_at": _text(observation.get("seen_at")),
+        "event_id": _text(observation.get("event_id")),
+        "source": observation.get("source") if isinstance(observation.get("source"), dict) else {},
+        "reference_status": status,
+        "trusted": status == REFERENCE_STATUS_TRUSTED,
+    }
+
+
+def ui_gallery(
+    identity_id: str,
+    *,
+    offset: int = 0,
+    limit: int = 48,
+    status: str = "all",
+    redis_client: Any = None,
+) -> Dict[str, Any]:
+    client = _client(redis_client)
+    token = resolve_identity_id(identity_id, client)
+    identity = identity_rows(client).get(token) or {}
+    if not identity:
+        raise KeyError("Face identity not found.")
+    rows = [
+        row
+        for row in observations(identity)
+        if _text(row.get("id")) and _text(row.get("face_b64"))
+    ]
+    status_counts = {
+        reference_status: sum(
+            1 for row in rows if observation_reference_status(row) == reference_status
+        )
+        for reference_status in sorted(REFERENCE_STATUSES)
+    }
+    wanted_status = _text(status).lower() or "all"
+    if wanted_status != "all" and wanted_status not in REFERENCE_STATUSES:
+        raise ValueError("Face image status must be all, trusted, provisional, or unreviewed.")
+    filtered = (
+        rows
+        if wanted_status == "all"
+        else [row for row in rows if observation_reference_status(row) == wanted_status]
+    )
+    start = _int(offset, 0, minimum=0)
+    page_size = min(100, max(1, _int(limit, 48, minimum=1)))
+    page = filtered[start:start + page_size]
+    return {
+        "identity_id": token,
+        "status": wanted_status,
+        "offset": start,
+        "limit": page_size,
+        "total": len(filtered),
+        "all_total": len(rows),
+        "has_more": start + len(page) < len(filtered),
+        "status_counts": status_counts,
+        "observations": [_ui_observation_row(row) for row in page],
+    }
+
+
+def ui_rows(redis_client: Any = None, *, include_gallery: bool = True) -> List[Dict[str, Any]]:
     client = _client(redis_client)
     rows: List[Dict[str, Any]] = []
     for identity in identity_rows(client).values():
         identity_id = _text(identity.get("id"))
         name = display_name(identity, client)
-        gallery = []
-        for observation in observations(identity):
-            face_b64 = _text(observation.get("face_b64"))
-            observation_id = _text(observation.get("id"))
-            if not face_b64 or not observation_id or not valid_embedding(observation.get("embedding")):
-                continue
-            gallery.append(
-                {
-                    "id": observation_id,
-                    "image_src": f"data:{_text(observation.get('face_content_type')) or 'image/jpeg'};base64,{face_b64}",
-                    "seen_at": _text(observation.get("seen_at")),
-                    "event_id": _text(observation.get("event_id")),
-                    "source": observation.get("source") if isinstance(observation.get("source"), dict) else {},
-                }
-            )
+        gallery_rows = [
+            observation
+            for observation in observations(identity)
+            if _text(observation.get("id")) and _text(observation.get("face_b64"))
+        ]
+        gallery = [_ui_observation_row(observation) for observation in gallery_rows] if include_gallery else []
+        status_counts = {
+            status: sum(1 for observation in gallery_rows if observation_reference_status(observation) == status)
+            for status in sorted(REFERENCE_STATUSES)
+        }
         hero_b64 = _text(identity.get("face_b64"))
         hero_type = _text(identity.get("face_content_type")) or "image/jpeg"
+        fallback_image = _text(_ui_observation_row(gallery_rows[0]).get("image_src")) if gallery_rows else ""
         rows.append(
             {
                 "id": identity_id,
@@ -1915,12 +2152,19 @@ def ui_rows(redis_client: Any = None) -> List[Dict[str, Any]]:
                 "person_id": _text(identity.get("person_id")),
                 "person_name": person_name(identity.get("person_id"), client),
                 "linked": bool(_text(identity.get("person_id"))),
-                "image_src": f"data:{hero_type};base64,{hero_b64}" if hero_b64 else (gallery[0]["image_src"] if gallery else ""),
+                "image_src": f"data:{hero_type};base64,{hero_b64}" if hero_b64 else fallback_image,
                 "last_seen": _text(identity.get("last_seen")),
                 "first_seen": _text(identity.get("first_seen")),
                 "event_count": _int(identity.get("event_count"), 0, minimum=0),
-                "capture_count": _int(identity.get("observation_count"), len(gallery), minimum=0),
-                "gallery": gallery,
+                "capture_count": len(gallery_rows),
+                "trusted_count": status_counts[REFERENCE_STATUS_TRUSTED],
+                "provisional_count": status_counts[REFERENCE_STATUS_PROVISIONAL],
+                "unreviewed_count": status_counts[REFERENCE_STATUS_UNREVIEWED],
+                "review_required": bool(_text(identity.get("person_id"))) and (
+                    status_counts[REFERENCE_STATUS_PROVISIONAL] > 0
+                    or status_counts[REFERENCE_STATUS_UNREVIEWED] > 0
+                ),
+                **({"gallery": gallery} if include_gallery else {}),
             }
         )
     rows.sort(key=lambda row: (0 if row["linked"] else 1, _text(row.get("name")).casefold(), _text(row.get("last_seen"))), reverse=False)

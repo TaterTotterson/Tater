@@ -41,6 +41,7 @@ DEFAULT_INPUT_IDLE_SECONDS = 8.0
 EXTERNAL_NATIVE_START_LEAD_MS = 2500
 PCM_IO_CHUNK_BYTES = 16 * 1024
 MP3_STREAM_BITRATE_KBPS = 192
+AIRPLAY_STARTUP_VOLUME_PERCENT = 80
 DEFAULT_ROUTE_MAX_ATTEMPTS = 5
 DEFAULT_RECEIVER_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_RECEIVER_RESTART_DELAYS = (5.0, 15.0)
@@ -475,7 +476,10 @@ class _ExternalAudioRuntime:
         self._last_audio_at = 0.0
         self._active_session: Dict[str, Any] = {}
         self._route_thread: Optional[threading.Thread] = None
-        self._sender_volume_percent = 100
+        # Shairport volume metadata can arrive just after the first PCM.  Use a
+        # conservative value for that short gap, then follow the sender's real
+        # volume as soon as its pvol metadata arrives.
+        self._sender_volume_percent = AIRPLAY_STARTUP_VOLUME_PERCENT
         self._pending_volume_percent: Optional[int] = None
         self._volume_thread: Optional[threading.Thread] = None
         self._chunks_received = 0
@@ -1422,6 +1426,11 @@ class _ExternalAudioRuntime:
         with self._lock:
             process_running = self._receiver is not None and self._receiver.poll() is None
             session = self._active_session
+            route_result = (
+                session.get("route_result")
+                if isinstance(session.get("route_result"), dict)
+                else {}
+            )
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "status": self._status,
@@ -1442,6 +1451,12 @@ class _ExternalAudioRuntime:
                 "routed": bool(session.get("routed")),
                 "routing": bool(session.get("routing")),
                 "route_error": _text(session.get("route_error")),
+                "route_warnings": [
+                    _text(item) for item in list(route_result.get("warnings") or []) if _text(item)
+                ],
+                "airplay_timing_mode": _text(route_result.get("airplay_bridge_timing_mode")),
+                "airplay_routes": dict(route_result.get("airplay_bridge_routes") or {}),
+                "group_shared_stream": bool(route_result.get("group_shared_stream")),
                 "superseded_selectors": list(session.get("superseded_selectors") or []),
                 "metadata": dict(self._metadata),
                 "sender_volume_percent": self._sender_volume_percent,

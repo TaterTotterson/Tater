@@ -209,6 +209,7 @@ async function saveDisplay(item: JsonRow, profile: JsonRow): Promise<boolean> {
     selector: profile.selector || token,
     display_url: profile.display_url,
     profile_kind: profile.profile_kind,
+    screen_target: profile.screen_target,
     slots: { ...(displayDrafts[token] || {}) },
   }, `${token}:display`, "Display settings saved.");
   if (result) displayDirty[token] = false;

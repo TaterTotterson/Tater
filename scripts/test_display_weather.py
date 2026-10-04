@@ -53,6 +53,28 @@ def weather_snapshot(**overrides):
 
 
 class DisplayWeatherTests(unittest.TestCase):
+    def test_native_screen_weather_carries_assistant_first_name(self) -> None:
+        client = FakeRedis({"tater:first_name": "Jarvis"})
+        with mock.patch.object(display_feed, "redis_client", client), mock.patch.object(
+            display_feed, "build_weather_summary", return_value={"available": False}
+        ):
+            result = native_satellite._screen_weather_payload("native:checkers")
+
+        self.assertFalse(result["available"])
+        self.assertEqual("Jarvis", result["assistant_name"])
+
+        with mock.patch.object(display_feed, "redis_client", FakeRedis()), mock.patch.object(
+            display_feed, "build_weather_summary", return_value={"available": True}
+        ):
+            self.assertEqual("Tater", native_satellite._screen_weather_payload()["assistant_name"])
+
+        with mock.patch.object(native_satellite, "_vp", return_value=mock.Mock()), mock.patch.object(
+            display_feed, "redis_client", client
+        ), mock.patch.object(
+            display_feed, "build_weather_summary", side_effect=RuntimeError("weather offline")
+        ):
+            self.assertEqual("Jarvis", native_satellite._screen_weather_payload()["assistant_name"])
+
     def test_environment_weather_is_compact_and_display_ready(self) -> None:
         client = FakeRedis(
             {"environment:latest:weather_api": weather_snapshot()},
@@ -194,6 +216,66 @@ class DisplayWeatherTests(unittest.TestCase):
         self.assertEqual("", result["rain_text"])
         self.assertEqual("", result["lightning_text"])
 
+    def test_profile_with_every_slot_cleared_keeps_only_condition_art_data(self) -> None:
+        profile = {
+            "target": "native_rook",
+            "template": "native_screen",
+            "screen_target": "rook",
+            "selector": "native:rook",
+            "slots": {},
+        }
+        client = FakeRedis(
+            {"environment:latest:weather_api": weather_snapshot()},
+            {"ENVIRONMENT_TEMPERATURE_UNIT": "F"},
+            {"tater:display:profiles:v1": {"native_rook": json.dumps(profile)}},
+        )
+
+        result = display_feed.build_weather_summary(
+            client=client,
+            core_installed=True,
+            selector="native:rook",
+        )
+
+        self.assertEqual("partly", result["condition_kind"])
+        self.assertEqual("Partly cloudy", result["condition"])
+        for key in (
+            "temperature_text",
+            "feels_like_text",
+            "humidity_text",
+            "indoor_temperature_text",
+            "indoor_humidity_text",
+            "wind_text",
+            "rain_text",
+            "lightning_text",
+        ):
+            self.assertEqual("", result[key], key)
+
+    def test_screen_without_saved_profile_defaults_to_condition_art_only(self) -> None:
+        client = FakeRedis(
+            {"environment:latest:weather_api": weather_snapshot()},
+            {"ENVIRONMENT_TEMPERATURE_UNIT": "F"},
+        )
+
+        result = display_feed.build_weather_summary(
+            client=client,
+            core_installed=True,
+            selector="native:rook-without-profile",
+        )
+
+        self.assertEqual("partly", result["condition_kind"])
+        self.assertEqual("Partly cloudy", result["condition"])
+        for key in (
+            "temperature_text",
+            "feels_like_text",
+            "humidity_text",
+            "indoor_temperature_text",
+            "indoor_humidity_text",
+            "wind_text",
+            "rain_text",
+            "lightning_text",
+        ):
+            self.assertEqual("", result[key], key)
+
     def test_uninstalled_core_uses_device_orb_even_with_cached_data(self) -> None:
         client = FakeRedis({"environment:latest:weather_api": weather_snapshot()})
         result = display_feed.build_weather_summary(client=client, core_installed=False)
@@ -300,6 +382,36 @@ class DisplayWeatherTests(unittest.TestCase):
             self.assertEqual("", field["options"][0]["value"])
             self.assertEqual("Do not show", field["options"][0]["label"])
 
+    def test_rook_only_offers_the_four_sensor_slots_its_round_layout_renders(self) -> None:
+        status = {
+            "clients": {
+                "native:rook": {
+                    "connected": True,
+                    "name": "Game Room Spot",
+                    "board": "rook",
+                    "firmware_target": "rook",
+                    "capabilities": {"screen_weather": True},
+                    "device_info": {
+                        "friendly_name": "Game Room Spot",
+                        "model": "rook",
+                    },
+                }
+            }
+        }
+        with mock.patch.object(
+            firmware,
+            "_tater_sensor_select_state",
+            return_value={"ready": True, "options": [{"value": "", "label": "None"}], "message": ""},
+        ), mock.patch.object(firmware, "_display_profile_rows_from_store", return_value={}):
+            payload = firmware.display_sensor_profiles_payload(status)
+
+        profile = payload["profiles"][0]
+        self.assertEqual("rook", profile["screen_target"])
+        self.assertEqual(
+            ["temp_out", "humidity_out", "temp_in", "humidity_in"],
+            [field["key"] for field in profile["fields"]],
+        )
+
     def test_echo_profile_save_skips_s3_entities_and_refreshes_the_native_screen(self) -> None:
         client = FakeRedis()
         send_command = mock.Mock(return_value="queued")
@@ -320,6 +432,7 @@ class DisplayWeatherTests(unittest.TestCase):
                 "target": "native_echo_show",
                 "selector": "native:echo-show",
                 "profile_kind": "native_screen",
+                "screen_target": "checkers",
                 "slots": {"temp_in": "environment:ecowitt:station:hallway"},
             })
 
@@ -331,6 +444,7 @@ class DisplayWeatherTests(unittest.TestCase):
         )
         stored = json.loads(client.hashes["tater:display:profiles:v1"]["native_echo_show"])
         self.assertEqual("native_screen", stored["template"])
+        self.assertEqual("checkers", stored["screen_target"])
         self.assertEqual(
             "environment:ecowitt:station:hallway",
             stored["slots"]["temp_in"],

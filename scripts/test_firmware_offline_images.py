@@ -17,6 +17,7 @@ class FirmwareOfflineImageTests(unittest.TestCase):
     BOARD_CASES = {
         "biscuit": ("biscuit", "echo-dot-2.png"),
         "checkers": ("checkers", "echo-show-5.png"),
+        "rook": ("rook", "echo-spot-rook.png"),
         "thirdreality-s420": ("thirdreality_s420", "thirdreality-s420.png"),
         "voice-pe": ("voicepe", "voicepe.png"),
         "satellite1": ("satellite1", "sat1.png"),

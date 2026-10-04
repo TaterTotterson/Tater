@@ -524,6 +524,9 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
                 ("native:right", "right"),
             ],
         )
+        self.assertFalse(members[0]["stereo_member"])
+        self.assertTrue(members[1]["stereo_member"])
+        self.assertTrue(members[2]["stereo_member"])
         self.assertEqual(scene["media_url"], "http://voice-core/media/scene")
         self.assertTrue(scene["session_id"].endswith("-scene"))
         self.assertEqual(scene["content_type"], "announcement")

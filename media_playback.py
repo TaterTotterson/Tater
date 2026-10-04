@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -218,6 +218,38 @@ def _runtime_media_proxy_source_url(
             base_url = f"http://127.0.0.1:{_main_app_port()}"
     safe_filename = Path(_text(filename) or "media.bin").name
     return f"{base_url}/api/media/runtime/{asset_id}/{quote(safe_filename)}"
+
+
+def _shared_native_media_source_url(
+    source_url: str,
+    *,
+    media_type: str,
+    filename: str,
+    completion_wait_s: float = 0.0,
+    duration_seconds: float = 0.0,
+) -> tuple[str, Dict[str, Any]]:
+    """Open one upstream and return the LAN URL shared by synchronized players."""
+    from speech_tts import _service_base_url_for_peer
+    from tater_voice.shared_media_relay import register_shared_media_relay
+
+    relay = register_shared_media_relay(
+        source_url,
+        media_type=media_type,
+        filename=filename,
+        completion_wait_s=completion_wait_s,
+        expected_duration_seconds=duration_seconds,
+    )
+    relay_id = _text(relay.get("relay_id"))
+    token = _text(relay.get("token"))
+    if not relay_id or not token:
+        raise RuntimeError("Tater did not create the shared stereo media stream.")
+    safe_filename = Path(_text(relay.get("filename")) or filename or "media.bin").name
+    base_url = _service_base_url_for_peer().rstrip("/")
+    query = urlencode({"token": token})
+    return (
+        f"{base_url}/api/media/shared/{quote(relay_id)}/{quote(safe_filename)}?{query}",
+        relay,
+    )
 
 
 def _voice_session_owner_map(sessions: Any) -> Dict[str, str]:
@@ -961,6 +993,52 @@ def play_media_url_targets(
         result["runtime_source_url"] = runtime_source_url
 
     warnings: List[str] = list(routing_warnings)
+    native_selector_members = _voice_core_selector_members(voice_core_selectors)
+    has_native_stereo_pair = any(
+        len(members) > 1 for members in native_selector_members.values()
+    )
+    shared_playback_source_url = playback_source_url
+    tater_encoded_group_source = any(
+        marker in playback_source_url.lower()
+        for marker in (
+            "/api/external-audio/v1/streams/",
+            "/api/cores/music_core/webhook/native-mp3",
+        )
+    )
+    synchronized_group_targets = len(voice_core_selectors) + len(airplay_players)
+    if (
+        (has_native_stereo_pair or (synchronized_group_targets > 1 and tater_encoded_group_source))
+        and _text(media_content_type).lower() in {"music", "audio", "song", "media"}
+        and playback_source_url.lower().startswith(("http://", "https://"))
+    ):
+        try:
+            shared_playback_source_url, relay = _shared_native_media_source_url(
+                playback_source_url,
+                media_type=clean_media_type,
+                filename=safe_filename,
+                duration_seconds=_as_float(duration_seconds, 0.0),
+                # Music Core produces a finite track, generally much faster
+                # than real time. Start from a complete, seekable file when
+                # possible. Live AirPlay must remain progressive.
+                completion_wait_s=(
+                    min(20.0, max(5.0, _as_float(duration_seconds, 0.0) / 20.0))
+                    if has_native_stereo_pair
+                    and "/api/cores/music_core/webhook/native-mp3" in playback_source_url.lower()
+                    else 0.0
+                ),
+            )
+            result["native_shared_stream"] = True
+            result["group_shared_stream"] = True
+            result["native_shared_stream_complete"] = bool(relay.get("complete"))
+            result["native_shared_stream_initial_bytes"] = int(
+                relay.get("initial_bytes") or 0
+            )
+        except Exception as exc:
+            warnings.append(f"Synchronized shared stream: {_text(exc)}")
+            logger.warning(
+                "[media_playback] shared group source was unavailable; using the original source: %s",
+                exc,
+            )
     sent_count = 0
     airplay_prepared: Dict[str, Any] = {}
     airplay_primed: Dict[str, Any] = {}
@@ -1030,7 +1108,7 @@ def play_media_url_targets(
     # satellite timeline is committed, then start both transports from the
     # same Unix-millisecond anchor below.
     if airplay_players:
-        airplay_source_url = playback_source_url
+        airplay_source_url = shared_playback_source_url
 
         if _text(airplay_group_id):
             try:
@@ -1113,6 +1191,8 @@ def play_media_url_targets(
         result["airplay_bridge_prepared_count"] = int(
             airplay_prepared.get("prepared_count") or 0
         )
+        if isinstance(airplay_prepared.get("routes"), dict):
+            result["airplay_bridge_routes"] = dict(airplay_prepared["routes"])
         if _text(airplay_prepared.get("group_id")):
             result["airplay_bridge_group_id"] = _text(airplay_prepared.get("group_id"))
         warnings.extend(
@@ -1196,7 +1276,9 @@ def play_media_url_targets(
     voice_result: Dict[str, Any] = {}
     if voice_core_selectors and (not airplay_players or airplay_prepared.get("ok")):
         native_start_lead_ms = max(
-            NATIVE_GROUP_START_LEAD_MS if len(voice_core_selectors) > 1 else 0,
+            NATIVE_GROUP_START_LEAD_MS
+            if len(voice_core_selectors) > 1 or has_native_stereo_pair
+            else 0,
             min(5000, max(0, int(minimum_native_start_lead_ms or 0))),
         )
         if sonos_speakers:
@@ -1251,7 +1333,7 @@ def play_media_url_targets(
             result["airplay_native_start_lead_ms"] = native_start_lead_ms
         voice_result = _voice_core_play_media_sync(
             selectors=voice_core_selectors,
-            source_url=playback_source_url,
+            source_url=shared_playback_source_url,
             audio_bytes=bytes(audio_bytes or b"") if isinstance(audio_bytes, (bytes, bytearray)) else None,
             text=text,
             media_type=clean_media_type,
@@ -1370,6 +1452,8 @@ def play_media_url_targets(
 
                 stop_airplay_targets(airplay_players)
         result["airplay_bridge_sent_count"] = int(airplay_result.get("sent_count") or 0)
+        if _text(airplay_result.get("timing_mode")):
+            result["airplay_bridge_timing_mode"] = _text(airplay_result["timing_mode"])
         if airplay_result.get("start_unix_ms") is not None:
             result["airplay_bridge_start_unix_ms"] = int(airplay_result["start_unix_ms"])
         sent_count += int(airplay_result.get("sent_count") or 0)

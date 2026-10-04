@@ -1092,7 +1092,7 @@ def panel_payload(redis_client: Any = None) -> Dict[str, Any]:
     store = load_store(client)
     people = _people_with_face_context(list(store.get("people") or []), client)
     identities = discovered_identities(client)
-    faces = face_identity.ui_rows(client)
+    faces = face_identity.ui_rows(client, include_gallery=False)
     linked_count = len([row for row in identities if _text(row.get("person_id"))])
     admin_count = len([person for person in people if _as_bool(person.get("is_admin"), False)])
     face_linked_count = len(
@@ -1528,6 +1528,29 @@ def handle_action(action: str, payload: Dict[str, Any], redis_client: Any = None
             "ok": True,
             "action": token,
             "message": f"Moved {moved} face image{'s' if moved != 1 else ''}.",
+            "people": panel_payload(client),
+        }
+
+    if token == "people_face_trust_images":
+        identity_id = _text(body.get("identity_id") or values.get("identity_id"))
+        observation_ids = [
+            _text(value)
+            for value in (values.get("observation_ids") or body.get("observation_ids") or [])
+            if _text(value)
+        ]
+        trusted = _as_bool(values.get("trusted", body.get("trusted", True)), True)
+        result = face_identity.set_observation_trust(
+            identity_id,
+            observation_ids,
+            trusted=trusted,
+            redis_client=client,
+        )
+        updated = int(result.get("updated") or 0)
+        state = "trusted" if trusted else "provisional"
+        return {
+            "ok": True,
+            "action": token,
+            "message": f"Marked {updated} face image{'s' if updated != 1 else ''} {state}.",
             "people": panel_payload(client),
         }
 

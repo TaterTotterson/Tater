@@ -72,6 +72,27 @@ class ExternalAudioTests(unittest.TestCase):
         self.assertEqual(runtime._active_session, {})
         self.assertEqual(status["targets"], ["voice_core:native:office"])
 
+    def test_status_reports_group_timing_and_fallback_warnings(self) -> None:
+        runtime = external_audio._ExternalAudioRuntime()
+        runtime._active_session = {
+            "id": "airplay-session",
+            "routed": True,
+            "route_result": {
+                "warnings": ["Kitchen negotiated legacy RAOP timing."],
+                "airplay_bridge_timing_mode": "mixed",
+                "airplay_bridge_routes": {
+                    "airplay:kitchen": {"protocol": "raop", "timing": "ntp"}
+                },
+                "group_shared_stream": True,
+            },
+        }
+
+        status = runtime.status()
+        self.assertEqual(status["airplay_timing_mode"], "mixed")
+        self.assertEqual(status["route_warnings"], ["Kitchen negotiated legacy RAOP timing."])
+        self.assertEqual(status["airplay_routes"]["airplay:kitchen"]["timing"], "ntp")
+        self.assertTrue(status["group_shared_stream"])
+
     def test_volume_only_change_reroutes_without_restarting_receiver(self) -> None:
         runtime = external_audio._ExternalAudioRuntime()
         runtime._config = runtime._normalized_config(
@@ -375,17 +396,17 @@ class ExternalAudioTests(unittest.TestCase):
             self.assertEqual(
                 call["target_volume_percent"],
                 {
-                    "voice_core:native:kitchen": 100,
-                    "voice_core:native:office": 100,
-                    "sonos:RINCON_DEN": 100,
-                    "airplay:living-room": 100,
+                    "voice_core:native:kitchen": 80,
+                    "voice_core:native:office": 80,
+                    "sonos:RINCON_DEN": 80,
+                    "airplay:living-room": 80,
                 },
             )
             self.assertEqual(
                 call["target_transport_mode"],
                 {"sonos:RINCON_DEN": "airplay"},
             )
-            self.assertEqual(call["volume_percent"], 100)
+            self.assertEqual(call["volume_percent"], 80)
             self.assertEqual(call["media_type"], "audio/mpeg")
             self.assertEqual(call["filename"], "external-audio-live.mp3")
             self.assertEqual(call["media_content_type"], "music")

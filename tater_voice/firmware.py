@@ -228,6 +228,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
     "checkers",
+    "rook",
     "satellite1_rpi_satellite",
     "satellite1_rpi_standalone",
     "thirdreality_s420",
@@ -262,6 +263,12 @@ _S3BOX_DISPLAY_SLOT_KEYS: Dict[str, str] = {
     "rain_rate": "sensor_rain_rate",
     "lightning_strikes": "sensor_lightning_strikes",
 }
+_ROOK_DISPLAY_SLOT_ALIASES: Tuple[str, ...] = (
+    "temp_out",
+    "humidity_out",
+    "temp_in",
+    "humidity_in",
+)
 _INTEGRATION_SOURCE_LABELS: Dict[str, str] = {
     "environment": "Environment Core",
     "homeassistant": "Home Assistant",
@@ -297,6 +304,18 @@ _ENVIRONMENT_DISPLAY_SENSOR_CATEGORIES = {
 }
 
 _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
+    {
+        "key": "rook",
+        "label": "Tater Echo Spot (2017)",
+        "usb_recovery": False,
+        "match_tokens": {
+            "rook",
+            "echo spot 2017",
+            "echo spot 1st generation",
+            "amazon echo spot",
+            "tater echo spot",
+        },
+    },
     {
         "key": "biscuit",
         "label": "Tater Echo Dot 2",
@@ -1051,7 +1070,7 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
-    if key in {"biscuit", "checkers"}:
+    if key in {"biscuit", "checkers", "rook"}:
         return {
             "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
             "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
@@ -1170,6 +1189,10 @@ def _load_echo_firmware_manifest(
         raw_artifacts = raw_device.get("artifacts") if isinstance(raw_device.get("artifacts"), dict) else {}
         artifacts: Dict[str, Dict[str, Any]] = {}
         for kind in ("factory", "ota"):
+            if kind == "ota" and not _as_bool(raw_device.get("ota"), False):
+                continue
+            if kind == "factory" and not _as_bool(raw_device.get("factory_install"), False):
+                continue
             raw_artifact = raw_artifacts.get(kind) if isinstance(raw_artifacts.get(kind), dict) else None
             if not isinstance(raw_artifact, dict):
                 continue
@@ -1193,7 +1216,8 @@ def _load_echo_firmware_manifest(
                 "flash_transport": "tater_native_ota" if kind == "ota" else "external_factory_installer",
                 "browser_flash_supported": False,
                 "instructions_url": (
-                    f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}#install-on-an-echo-dot-2"
+                    f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}/blob/main/"
+                    f"factory/{'rook-linux' if target == 'rook' else 'checkers-linux' if target == 'checkers' else 'biscuit'}/README.md"
                     if kind == "factory"
                     else ""
                 ),
@@ -1393,6 +1417,8 @@ def _prebuilt_artifact_meta(context: Dict[str, Any], kind: str) -> Dict[str, Any
 
 
 def _prebuilt_artifact_available(context: Dict[str, Any], kind: str) -> bool:
+    if _lower(kind) == "ota" and context.get("ota_supported") is False:
+        return False
     prebuilt = context.get("prebuilt_firmware") if isinstance(context.get("prebuilt_firmware"), dict) else {}
     artifacts = prebuilt.get("artifacts") if isinstance(prebuilt.get("artifacts"), dict) else {}
     artifact = artifacts.get(_lower(kind)) if isinstance(artifacts.get(_lower(kind)), dict) else None
@@ -1742,6 +1768,7 @@ def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
         "target": target,
         "target_label": target_label,
         "template": _text(values.get("display_profile_kind")) or "s3box_display",
+        "screen_target": _lower(values.get("display_screen_target")),
         "selector": _text(selector),
         "updated_at": time.time(),
         "slots": slots,
@@ -1884,7 +1911,17 @@ def _cleanup_stale_display_profiles(target: str, selector: str) -> None:
             redis_client.hdel(DISPLAY_PROFILE_HASH_KEY, saved_target)
 
 
-def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _display_slot_aliases(screen_target: Any = "") -> Tuple[str, ...]:
+    if _lower(screen_target) == "rook":
+        return _ROOK_DISPLAY_SLOT_ALIASES
+    return tuple(_S3BOX_DISPLAY_SLOT_KEYS)
+
+
+def _display_sensor_field_rows(
+    slots: Dict[str, str],
+    sensor_select: Dict[str, Any],
+    aliases: Optional[Tuple[str, ...]] = None,
+) -> List[Dict[str, Any]]:
     ready = bool(sensor_select.get("ready"))
     message = _text(sensor_select.get("message"))
     options = copy.deepcopy(sensor_select.get("options")) if isinstance(sensor_select.get("options"), list) else []
@@ -1903,7 +1940,8 @@ def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, A
     else:
         blank_option["label"] = "Do not show"
     fields: List[Dict[str, Any]] = []
-    for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
+    for alias in aliases or tuple(_S3BOX_DISPLAY_SLOT_KEYS):
+        profile_key = _S3BOX_DISPLAY_SLOT_KEYS[alias]
         fields.append(
             {
                 "key": alias,
@@ -1922,11 +1960,16 @@ def _display_sensor_field_rows(slots: Dict[str, str], sensor_select: Dict[str, A
     return fields
 
 
-def _display_sensor_slots_from_context(context: Dict[str, Any], saved_profile: Dict[str, Any]) -> Dict[str, str]:
+def _display_sensor_slots_from_context(
+    context: Dict[str, Any],
+    saved_profile: Dict[str, Any],
+    aliases: Optional[Tuple[str, ...]] = None,
+) -> Dict[str, str]:
+    visible_aliases = aliases or tuple(_S3BOX_DISPLAY_SLOT_KEYS)
     saved_slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
     if saved_slots:
-        return {alias: _text(saved_slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS}
-    return {alias: "" for alias in _S3BOX_DISPLAY_SLOT_KEYS}
+        return {alias: _text(saved_slots.get(alias)) for alias in visible_aliases}
+    return {alias: "" for alias in visible_aliases}
 
 
 def _display_sensor_profile_from_context(
@@ -1944,7 +1987,9 @@ def _display_sensor_profile_from_context(
         return None
     saved_profile, saved_profile_target = _saved_display_profile_for_context(target, _text(selector), context, saved_profiles)
     item = context.get("item") if isinstance(context.get("item"), dict) else {}
-    slots = _display_sensor_slots_from_context(context, saved_profile)
+    screen_target = _lower(context.get("screen_target") or saved_profile.get("screen_target"))
+    aliases = _display_slot_aliases(screen_target)
+    slots = _display_sensor_slots_from_context(context, saved_profile, aliases)
     target_label = _text(saved_profile.get("target_label"))
     if not target_label:
         target_label = _text(context.get("display_target_label"))
@@ -1960,8 +2005,9 @@ def _display_sensor_profile_from_context(
         "updated_at": saved_profile.get("updated_at"),
         "display_url": _text(context.get("display_base_url")),
         "profile_kind": profile_kind,
+        "screen_target": screen_target,
         "_saved_target": saved_profile_target,
-        "fields": _display_sensor_field_rows(slots, sensor_select),
+        "fields": _display_sensor_field_rows(slots, sensor_select, aliases),
     }
 
 
@@ -1986,6 +2032,8 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             continue
         slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
         target_label = _text(saved_profile.get("target_label"))
+        screen_target = _lower(saved_profile.get("screen_target"))
+        aliases = _display_slot_aliases(screen_target)
         profiles_by_target[target] = {
             "target": target,
             "target_label": target_label,
@@ -1996,9 +2044,11 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             "updated_at": saved_profile.get("updated_at"),
             "display_url": _tater_display_base_url_for_selector(saved_profile.get("selector") or target),
             "profile_kind": _text(saved_profile.get("template")) or "s3box_display",
+            "screen_target": screen_target,
             "fields": _display_sensor_field_rows(
-                {alias: _text(slots.get(alias)) for alias in _S3BOX_DISPLAY_SLOT_KEYS},
+                {alias: _text(slots.get(alias)) for alias in aliases},
                 sensor_select,
+                aliases,
             ),
         }
 
@@ -2167,6 +2217,9 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     if profile_kind not in {"s3box_display", "native_screen"}:
         profile_kind = "native_screen" if selector.startswith("native:") else "s3box_display"
     values["display_profile_kind"] = profile_kind
+    screen_target = _lower(body.get("screen_target"))
+    if screen_target in {"checkers", "rook"}:
+        values["display_screen_target"] = screen_target
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
             values[profile_key] = _text(slot_source.get(alias))
@@ -2229,6 +2282,14 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _template_key_from_hardware_identity(value: Any) -> str:
     token = _lower(value).replace("_", "-")
     compact = re.sub(r"[^a-z0-9]+", "", token)
+    if token in {"rook", "echo-spot", "echo-spot-2017", "echo-spot-1st-gen"} or compact in {
+        "rook",
+        "echospot2017",
+        "echospot1stgen",
+        "amazonechospot",
+        "taterechospot",
+    }:
+        return "rook"
     if token in {"biscuit", "echo-dot-2", "echo-dot-gen-2"} or compact in {
         "biscuit",
         "echodot2",
@@ -2394,6 +2455,10 @@ def _build_device_context(
     display_base_url = _tater_display_base_url_for_peer(host)
     device_info = client_row.get("device_info") if isinstance(client_row.get("device_info"), dict) else {}
     metadata = client_row.get("metadata") if isinstance(client_row.get("metadata"), dict) else {}
+    capabilities = client_row.get("capabilities") if isinstance(client_row.get("capabilities"), dict) else {}
+    if not capabilities and isinstance(metadata.get("capabilities"), dict):
+        capabilities = metadata["capabilities"]
+    ota_supported = not (template_key == "rook" and capabilities.get("ota") is False)
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
@@ -2469,6 +2534,7 @@ def _build_device_context(
         ),
         "prebuilt_firmware_available": bool(prebuilt_firmware.get("available")),
         "prebuilt_firmware": _prebuilt_artifact_ui_summary(prebuilt_firmware),
+        "ota_supported": ota_supported,
         "hero_badges": firmware_badges,
         "hero_image_src": esphome_ui_helpers.device_image_src(
             template_spec.get("key"),
@@ -2491,6 +2557,9 @@ def _build_device_context(
         "display_target_label": display_target_label if display_target_label != display_target else "",
         "native_firmware": True,
     }
+    if not ota_supported:
+        item["prebuilt_firmware"]["artifacts"].pop("ota", None)
+        item["firmware_update_status"] = "This Echo Spot build needs one USB update to enable OTA."
 
     return {
         "selector": selector_token,
@@ -2508,6 +2577,7 @@ def _build_device_context(
             "source_label": _text(prebuilt_firmware.get("manifest_url")),
         },
         "prebuilt_firmware": prebuilt_firmware,
+        "ota_supported": ota_supported,
         "native_firmware": True,
         "display_target": display_target,
         "display_target_label": display_target_label if display_target_label != display_target else "",
@@ -2606,9 +2676,17 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 if _text(value)
             )
-            native_screen = _as_bool(capabilities.get("screen_weather"), False) or "checkers" in hardware_tokens
+            native_screen = _as_bool(capabilities.get("screen_weather"), False) or any(
+                target in hardware_tokens for target in ("checkers", "rook")
+            )
             if not native_screen:
                 continue
+            screen_target = template_key if template_key in {"checkers", "rook"} else ""
+            if not screen_target:
+                if "rook" in hardware_tokens:
+                    screen_target = "rook"
+                elif "checkers" in hardware_tokens:
+                    screen_target = "checkers"
             title = (
                 _text(device_info.get("friendly_name"))
                 or _text(row.get("name"))
@@ -2619,6 +2697,7 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             model = _text(device_info.get("model")) or _text(metadata.get("board")) or "Tater screen"
             context = {
                 "template_key": "native_screen",
+                "screen_target": screen_target,
                 "display_target": selector_token,
                 "display_target_label": title,
                 "display_base_url": "",
@@ -2818,8 +2897,10 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
             row_payload["prebuilt_firmware_factory_available"] = bool(
                 isinstance(row_artifacts.get("factory"), dict) and _text(row_artifacts["factory"].get("path"))
             )
-            if bool(item.get("connected")) and not bool(item.get("unmatched_template")):
+            if row_payload["prebuilt_firmware_ota_available"] and bool(item.get("connected")) and not bool(item.get("unmatched_template")):
                 firmware_flash_targets.append(dict(row_payload))
+            if not row_payload["prebuilt_firmware_ota_available"]:
+                continue
             if not bool(item.get("firmware_update_available")):
                 continue
             if bool(item.get("unmatched_template")):
@@ -5066,6 +5147,8 @@ def _start_flash_session(
         )
 
     host = _text(context.get("host"))
+    if context.get("ota_supported") is False:
+        raise RuntimeError("This Echo Spot build cannot receive OTA yet. Install an OTA-capable Rook build over USB once.")
     prebuilt_upload = _prebuilt_artifact_available(context, "ota")
     if not prebuilt_upload:
         raise RuntimeError("No prebuilt OTA image is available for this firmware target.")

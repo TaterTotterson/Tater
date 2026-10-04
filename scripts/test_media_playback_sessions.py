@@ -287,6 +287,124 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(voice.call_args.kwargs["start_lead_ms"], 2500)
 
+    def test_stereo_pair_uses_one_shared_source_and_normal_group_start(self) -> None:
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_selector_members",
+                return_value={
+                    "stereo:office": ["native:office-left", "native:office-right"]
+                },
+            ),
+            mock.patch.object(
+                media_playback,
+                "_shared_native_media_source_url",
+                return_value=(
+                    "http://tater.local:8501/api/media/shared/relay/song.mp3?token=secret",
+                    {"initial_bytes": 131072},
+                ),
+            ) as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={"ok": True, "sent_count": 1, "media_session_sent_count": 1},
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:stereo:office"],
+                "http://tater.local:8501/api/cores/music_core/webhook/native-mp3?stream_id=one",
+                media_type="audio/mpeg",
+                media_content_type="music",
+                filename="song.mp3",
+                duration_seconds=196,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["native_shared_stream"])
+        self.assertEqual(result["native_shared_stream_initial_bytes"], 131072)
+        shared_source.assert_called_once()
+        self.assertGreater(shared_source.call_args.kwargs["completion_wait_s"], 0)
+        self.assertEqual(shared_source.call_args.kwargs["duration_seconds"], 196)
+        self.assertIn(
+            "/api/media/shared/relay/song.mp3",
+            voice.call_args.kwargs["source_url"],
+        )
+        self.assertEqual(
+            voice.call_args.kwargs["start_lead_ms"],
+            media_playback.NATIVE_GROUP_START_LEAD_MS,
+        )
+
+    def test_single_satellite_keeps_original_source_without_stereo_relay(self) -> None:
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_selector_members",
+                return_value={"native:kitchen": ["native:kitchen"]},
+            ),
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={"ok": True, "sent_count": 1, "media_session_sent_count": 1},
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen"],
+                "https://provider.test/song.mp3",
+                media_type="audio/mpeg",
+                media_content_type="music",
+            )
+
+        self.assertTrue(result["ok"])
+        shared_source.assert_not_called()
+        self.assertEqual(
+            voice.call_args.kwargs["source_url"],
+            "https://provider.test/song.mp3",
+        )
+        self.assertEqual(voice.call_args.kwargs["start_lead_ms"], 0)
+
+    def test_live_airplay_group_uses_one_encoded_source_for_native_and_airplay(self) -> None:
+        import airplay_bridge
+
+        shared_url = "http://tater.local:8501/api/media/shared/group/live.mp3?token=secret"
+        with (
+            mock.patch.object(
+                media_playback, "_shared_native_media_source_url",
+                return_value=(shared_url, {"initial_bytes": 4096, "complete": False}),
+            ) as shared_source,
+            mock.patch.object(
+                airplay_bridge, "prepare_airplay_group_sync",
+                return_value={"ok": True, "group_id": "group-one", "prepared_count": 1},
+            ) as prepare,
+            mock.patch.object(
+                airplay_bridge, "prime_airplay_group_sync",
+                return_value={"ok": True, "group_id": "group-one", "primed_count": 1},
+            ),
+            mock.patch.object(
+                airplay_bridge, "commit_airplay_group_sync",
+                return_value={"ok": True, "sent_count": 1},
+            ),
+            mock.patch.object(
+                media_playback, "_voice_core_play_media_sync",
+                return_value={
+                    "ok": True, "sent_count": 1, "media_session_sent_count": 1,
+                    "audible_start_unix_ms": 2000000000125,
+                },
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "airplay:804af2c57d78"],
+                "http://tater.local:8501/api/external-audio/v1/streams/session/live.mp3?cursor=0",
+                source_owner="external_audio",
+                media_content_type="music",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["group_shared_stream"])
+        shared_source.assert_called_once()
+        self.assertEqual(prepare.call_args.kwargs["source_url"], shared_url)
+        self.assertEqual(voice.call_args.kwargs["source_url"], shared_url)
+
     def test_airplay_bridge_uses_the_native_group_wall_clock_anchor(self) -> None:
         import airplay_bridge
 
@@ -781,6 +899,11 @@ class MediaPlaybackSessionTests(unittest.TestCase):
     def test_runtime_media_proxy_is_public_for_lan_players(self) -> None:
         app_source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text()
         self.assertIn('path.startswith("/api/media/runtime/")', app_source)
+
+    def test_shared_media_relay_is_public_only_through_its_tokenized_path(self) -> None:
+        app_source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text()
+        self.assertIn('path.startswith("/api/media/shared/")', app_source)
+        self.assertIn('@app.get("/api/media/shared/{relay_id}/{filename:path}")', app_source)
 
     def test_generic_media_player_uses_its_play_media_action(self) -> None:
         devices = [
