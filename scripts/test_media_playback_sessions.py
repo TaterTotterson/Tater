@@ -334,6 +334,100 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             media_playback.NATIVE_GROUP_START_LEAD_MS,
         )
 
+    def test_external_group_can_opt_in_to_shared_source(self) -> None:
+        source_url = "https://personal-music.test/stream/song.wav"
+        shared_url = "http://tater.local:8501/api/media/shared/relay/song.wav?token=secret"
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_selector_members",
+                return_value={
+                    "native:kitchen": ["native:kitchen"],
+                    "native:office": ["native:office"],
+                },
+            ),
+            mock.patch.object(
+                media_playback,
+                "_shared_native_media_source_url",
+                return_value=(shared_url, {"initial_bytes": 4096, "complete": False}),
+            ) as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={"ok": True, "sent_count": 2, "media_session_sent_count": 2},
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "voice_core:native:office"],
+                source_url,
+                media_type="audio/wav",
+                filename="song.wav",
+                shared_group_source=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["group_shared_stream"])
+        shared_source.assert_called_once()
+        self.assertEqual(shared_source.call_args.args, (source_url,))
+        self.assertEqual(shared_source.call_args.kwargs["completion_wait_s"], 0.0)
+        self.assertEqual(voice.call_args.kwargs["source_url"], shared_url)
+
+    def test_external_group_without_opt_in_keeps_original_source(self) -> None:
+        source_url = "https://personal-music.test/stream/song.wav"
+        with (
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={"ok": True, "sent_count": 2, "media_session_sent_count": 2},
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "voice_core:native:office"],
+                source_url,
+                media_type="audio/wav",
+                filename="song.wav",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("group_shared_stream", False))
+        shared_source.assert_not_called()
+        self.assertEqual(voice.call_args.kwargs["source_url"], source_url)
+
+    def test_external_group_opt_in_survives_resume_retry(self) -> None:
+        source_url = "https://personal-music.test/stream/song.wav"
+        shared_url = "http://tater.local:8501/api/media/shared/relay/song.wav?token=secret"
+        with (
+            mock.patch.object(
+                media_playback,
+                "_shared_native_media_source_url",
+                return_value=(shared_url, {"initial_bytes": 4096, "complete": False}),
+            ) as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                side_effect=[
+                    {"ok": False, "sent_count": 0, "error": "resume failed"},
+                    {"ok": True, "sent_count": 2, "media_session_sent_count": 2},
+                ],
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "voice_core:native:office"],
+                source_url,
+                media_type="audio/wav",
+                start_position_seconds=30.0,
+                shared_group_source=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["resume_fallback_used"])
+        self.assertTrue(result["group_shared_stream"])
+        self.assertEqual(shared_source.call_count, 2)
+        self.assertEqual(voice.call_count, 2)
+        self.assertEqual(voice.call_args.kwargs["source_url"], shared_url)
+        self.assertEqual(voice.call_args.kwargs["start_position_seconds"], 0.0)
+
     def test_single_satellite_keeps_original_source_without_stereo_relay(self) -> None:
         with (
             mock.patch.object(
@@ -362,6 +456,27 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             "https://provider.test/song.mp3",
         )
         self.assertEqual(voice.call_args.kwargs["start_lead_ms"], 0)
+
+    def test_single_satellite_opt_in_keeps_original_source(self) -> None:
+        source_url = "https://personal-music.test/stream/song.wav"
+        with (
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={"ok": True, "sent_count": 1, "media_session_sent_count": 1},
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen"],
+                source_url,
+                media_type="audio/wav",
+                shared_group_source=True,
+            )
+
+        self.assertTrue(result["ok"])
+        shared_source.assert_not_called()
+        self.assertEqual(voice.call_args.kwargs["source_url"], source_url)
 
     def test_live_airplay_group_uses_one_encoded_source_for_native_and_airplay(self) -> None:
         import airplay_bridge

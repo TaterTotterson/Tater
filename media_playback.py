@@ -897,8 +897,14 @@ def play_media_url_targets(
     timeout_s: float = DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS,
     respect_reply_playback: bool = False,
     source_owner: str = "media_playback",
+    shared_group_source: bool = False,
     _resume_fallback_attempted: bool = False,
 ) -> Dict[str, Any]:
+    """Play media, optionally sharing one HTTP source across a synchronized group.
+
+    Set ``shared_group_source=True`` for a Core/Verba's multi-target satellite
+    or AirPlay HTTP source. Existing callers keep their current routing.
+    """
     grouped = split_announcement_targets(targets)
     homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
     voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
@@ -1007,7 +1013,13 @@ def play_media_url_targets(
     )
     synchronized_group_targets = len(voice_core_selectors) + len(airplay_players)
     if (
-        (has_native_stereo_pair or (synchronized_group_targets > 1 and tater_encoded_group_source))
+        (
+            has_native_stereo_pair
+            or (
+                synchronized_group_targets > 1
+                and (tater_encoded_group_source or shared_group_source)
+            )
+        )
         and _text(media_content_type).lower() in {"music", "audio", "song", "media"}
         and playback_source_url.lower().startswith(("http://", "https://"))
     ):
@@ -1402,6 +1414,7 @@ def play_media_url_targets(
                 timeout_s=timeout_s,
                 respect_reply_playback=respect_reply_playback,
                 source_owner=source_owner,
+                shared_group_source=shared_group_source,
                 _resume_fallback_attempted=True,
             )
             retry_result["resume_fallback_used"] = True
