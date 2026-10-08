@@ -100,6 +100,18 @@ class TaterBuildVersionTests(unittest.TestCase):
             dockerfile = (REPO_ROOT / dockerfile_name).read_text(encoding="utf-8")
             self.assertIn("COPY . .", dockerfile)
 
+    def test_docker_latest_tag_is_reserved_for_the_cpu_image(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+        cpu_job, nvidia_job = workflow.split("\n  nvidia:\n", maxsplit=1)
+
+        self.assertEqual(workflow.count("latest=false"), 2)
+        self.assertIn("type=raw,value=latest", cpu_job)
+        self.assertNotIn("type=raw,value=latest", nvidia_job)
+        self.assertIn("type=raw,value=nvidia", nvidia_job)
+        self.assertIn("type=ref,event=tag,suffix=-nvidia", nvidia_job)
+
     def test_auth_bootstrap_and_sidebar_display_are_wired(self) -> None:
         backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
