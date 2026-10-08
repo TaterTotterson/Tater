@@ -196,12 +196,14 @@ class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _MockSendspinPlayer:
-    def __init__(self) -> None:
+    def __init__(self, *, presentation: bool = False) -> None:
         self.runner: web.AppRunner | None = None
         self.port = 0
         self.audio_packets: list[bytes] = []
         self.json_types: list[str] = []
+        self.json_messages: list[dict[str, object]] = []
         self.time_sequence = 0
+        self.presentation = presentation
 
     async def start(self) -> None:
         app = web.Application()
@@ -236,7 +238,14 @@ class _MockSendspinPlayer:
                     "client_id": f"mock-{self.port}",
                     "name": "Mock Player",
                     "version": 1,
-                    "supported_roles": ["player@v1"],
+                    "supported_roles": [
+                        "player@v1",
+                        *(
+                            ["metadata@v1", "artwork@v1", "color@v1", "visualizer@v1"]
+                            if self.presentation
+                            else []
+                        ),
+                    ],
                     "player@v1_support": {
                         "supported_formats": [
                             {
@@ -247,6 +256,33 @@ class _MockSendspinPlayer:
                             }
                         ]
                     },
+                    **(
+                        {
+                            "artwork@v1_support": {
+                                "channels": [
+                                    {
+                                        "source": "album",
+                                        "format": "jpeg",
+                                        "media_width": 512,
+                                        "media_height": 512,
+                                    }
+                                ]
+                            },
+                            "visualizer@v1_support": {
+                                "buffer_capacity": 65536,
+                                "rate_max": 20,
+                                "types": ["loudness", "spectrum", "peak"],
+                                "spectrum": {
+                                    "n_disp_bins": 12,
+                                    "scale": "mel",
+                                    "f_min": 60,
+                                    "f_max": 16000,
+                                },
+                            },
+                        }
+                        if self.presentation
+                        else {}
+                    ),
                 },
             }
         )
@@ -255,6 +291,7 @@ class _MockSendspinPlayer:
                 payload = json.loads(message.data)
                 message_type = payload.get("type")
                 self.json_types.append(message_type)
+                self.json_messages.append(payload)
                 if message_type == "server/hello":
                     await ws.send_json(
                         {
@@ -273,6 +310,75 @@ class _MockSendspinPlayer:
 
 
 class SendspinReplyWireIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_presentation_roles_are_sent_only_to_players_that_advertise_them(self) -> None:
+        legacy = _MockSendspinPlayer()
+        rich = _MockSendspinPlayer(presentation=True)
+        await legacy.start()
+        await rich.start()
+        source_reads = [_little_endian_pcm([1200, -1200] * 960), None]
+
+        def read_pcm(_maximum: int, _timeout: float) -> bytes | None:
+            return source_reads.pop(0)
+
+        try:
+            with (
+                mock.patch.object(sendspin_playback, "SENDSPIN_HANDSHAKE_TIMEOUT_S", 2.0),
+                mock.patch.object(sendspin_playback, "SENDSPIN_END_MARGIN_S", 0.01),
+            ):
+                result = await sendspin_playback.start_live_pcm_stream(
+                    "presentation-test",
+                    [
+                        {
+                            "selector": "native:legacy",
+                            "host": "127.0.0.1",
+                            "port": legacy.port,
+                        },
+                        {
+                            "selector": "native:echo",
+                            "host": "127.0.0.1",
+                            "port": rich.port,
+                        },
+                    ],
+                    read_pcm,
+                    input_sample_rate=48_000,
+                    start_lead_ms=250,
+                    title="Garden Song",
+                    artist="The Taters",
+                    album="Backyard",
+                    artwork_bytes=(
+                        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+                        b"\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00"
+                        b"\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+                    ),
+                    artwork_content_type="image/png",
+                    duration_seconds=1.0,
+                )
+                await asyncio.sleep(0.35)
+        finally:
+            await sendspin_playback.stop_live_stream("presentation-test")
+            await legacy.close()
+            await rich.close()
+
+        self.assertTrue(result["sendspin_live_stream_started"])
+        self.assertTrue(legacy.audio_packets)
+        self.assertEqual({packet[0] for packet in legacy.audio_packets}, {4})
+        rich_message_ids = {packet[0] for packet in rich.audio_packets}
+        self.assertIn(4, rich_message_ids)
+        self.assertIn(8, rich_message_ids)
+        self.assertIn(16, rich_message_ids)
+        self.assertIn(20, rich_message_ids)
+        self.assertNotIn("server/activate", legacy.json_types)
+        self.assertIn("server/activate", rich.json_types)
+        self.assertIn("server/state", rich.json_types)
+        rich_start = next(
+            message
+            for message in rich.json_messages
+            if message.get("type") == "stream/start"
+        )
+        self.assertIn("artwork", rich_start["payload"])
+        self.assertIn("visualizer", rich_start["payload"])
+
     async def test_two_players_receive_one_identical_timestamped_timeline(self) -> None:
         left = _MockSendspinPlayer()
         right = _MockSendspinPlayer()

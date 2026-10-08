@@ -73,6 +73,7 @@ DEFAULTS: Dict[str, Any] = {
     "continued_chat": True,
     "barge_in_enabled": False,
     "volume_percent": 80,
+    "audio_output_mode": "auto",
     "screen_brightness": 80,
     "screen_night_mode_enabled": False,
     "screen_night_brightness": 10,
@@ -115,6 +116,7 @@ FIRMWARE_SETTING_KEYS = (
     "continued_chat",
     "barge_in_enabled",
     "volume_percent",
+    "audio_output_mode",
     "screen_brightness",
     "screen_night_mode_enabled",
     "screen_night_brightness",
@@ -1107,10 +1109,10 @@ def _global_wake_verifier_mode() -> str:
     return mode if mode in WAKE_VERIFIER_MODES else "off"
 
 
-def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
-    token = _lower(board).replace("_", "-")
-    compact = token.replace("-", "").replace(" ", "")
-    if token in {
+def _is_sat1_board(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {
         "satellite1",
         "satellite-1",
         "sat1",
@@ -1122,7 +1124,11 @@ def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
         "sat1",
         "satellite1betarev41",
         "sat1betarev41",
-    }:
+    }
+
+
+def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
+    if _is_sat1_board(board):
         return {
             "wake_sensitivity": "high",
             "wake_environment": "far_field",
@@ -1159,6 +1165,16 @@ _DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
     "display_theme_section",
     "display_theme_preview",
 }
+
+_AUDIO_OUTPUT_SETTING_KEYS = {"audio_output_mode"}
+_AUDIO_OUTPUT_FIELD_KEYS = _AUDIO_OUTPUT_SETTING_KEYS | {"audio_output_section"}
+
+
+def _audio_output_mode_value(value: Any) -> str:
+    token = _lower(value).replace("-", "_")
+    aliases = {"speaker": "internal", "line_out": "aux", "lineout": "aux"}
+    token = aliases.get(token, token)
+    return token if token in {"auto", "internal", "aux", "both"} else str(DEFAULTS["audio_output_mode"])
 
 
 def _board_supports_display_theme(board: Any = "") -> bool:
@@ -1451,6 +1467,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "continued_chat": _as_bool(source.get("continued_chat"), bool(DEFAULTS["continued_chat"])),
         "barge_in_enabled": _as_bool(source.get("barge_in_enabled"), bool(DEFAULTS["barge_in_enabled"])),
         "volume_percent": _as_int(source.get("volume_percent"), int(DEFAULTS["volume_percent"]), minimum=0, maximum=100),
+        "audio_output_mode": _audio_output_mode_value(source.get("audio_output_mode")),
         "screen_brightness": _as_int(
             source.get("screen_brightness"),
             int(DEFAULTS["screen_brightness"]),
@@ -1553,6 +1570,9 @@ def firmware_settings_snapshot(
         output.pop("led_music_animation", None)
     if not _board_supports_display_theme(board):
         for key in _DISPLAY_THEME_SETTING_KEYS:
+            output.pop(key, None)
+    if not _is_sat1_board(board):
+        for key in _AUDIO_OUTPUT_SETTING_KEYS:
             output.pop(key, None)
     if _board_supports_screen_settings(board):
         now = datetime.now().astimezone()
@@ -2036,6 +2056,26 @@ def settings_fields(
             "step": 1,
         },
         {
+            "key": "audio_output_section",
+            "label": "Sat1 Audio Output",
+            "type": "section",
+            "description": "Choose the Sat1 internal speaker, 3.5 mm line-out, or both outputs.",
+        },
+        {
+            "key": "audio_output_mode",
+            "label": "Audio Output",
+            "type": "select",
+            "value": current["audio_output_mode"],
+            "default": DEFAULTS["audio_output_mode"],
+            "options": [
+                {"value": "auto", "label": "Automatic (Jack Detection)"},
+                {"value": "internal", "label": "Internal Speaker"},
+                {"value": "aux", "label": "AUX / Line-Out"},
+                {"value": "both", "label": "Internal + AUX"},
+            ],
+            "description": "Automatic switches to the 3.5 mm output when a plug is detected. AUX requires powered speakers or an external amplifier.",
+        },
+        {
             "key": "screen_section",
             "label": "S3 Box Display",
             "type": "section",
@@ -2275,6 +2315,8 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_theme(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
+    if not (_selector_token(selector) and _is_sat1_board(board)):
+        fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
     return fields
 
 

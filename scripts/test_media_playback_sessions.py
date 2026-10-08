@@ -105,6 +105,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 "sendspin_live_stream_started": True,
                 "stream_id": stream_id,
                 "members": ["native:left", "native:right"],
+                "start_unix_ms": 2_000_000_000_000,
             }
 
         with (
@@ -142,6 +143,10 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertEqual(
             result["voice_core_sessions"][0]["selectors"],
             ["native:left", "native:right"],
+        )
+        self.assertEqual(
+            result["voice_core_sessions"][0]["start_unix_ms"],
+            2_000_000_000_000,
         )
         post.assert_not_called()
 
@@ -203,8 +208,8 @@ class MediaPlaybackSessionTests(unittest.TestCase):
 
         stopped = []
 
-        async def fake_stop(stream_id):
-            stopped.append(stream_id)
+        async def fake_stop(stream_id, *, reason="stopped"):
+            stopped.append((stream_id, reason))
             return {"ok": True, "stopped": True}
 
         with (
@@ -229,7 +234,10 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertEqual(warnings, [])
-        self.assertEqual(stopped, ["airplay-stream-1"])
+        self.assertEqual(
+            stopped,
+            [("airplay-stream-1", "external_audio_manual_stop")],
+        )
         legacy_stop.assert_not_called()
 
     def test_native_only_airplay_group_bypasses_the_shared_relay(self) -> None:

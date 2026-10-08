@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import io
 import ipaddress
 import inspect
 import json
 import logging
+import math
 import os
 import shutil
 import struct
@@ -43,6 +46,11 @@ SENDSPIN_SAMPLE_RATE = 48_000
 SENDSPIN_CHANNELS = 2
 SENDSPIN_BIT_DEPTH = 16
 SENDSPIN_AUDIO_MESSAGE = 4
+SENDSPIN_ARTWORK_MESSAGE = 8
+SENDSPIN_VISUALIZER_LOUDNESS_MESSAGE = 16
+SENDSPIN_VISUALIZER_BEAT_MESSAGE = 17
+SENDSPIN_VISUALIZER_SPECTRUM_MESSAGE = 19
+SENDSPIN_VISUALIZER_PEAK_MESSAGE = 20
 SENDSPIN_CHUNK_FRAMES = 960  # 20 ms at 48 kHz
 SENDSPIN_START_LEAD_US = 1_000_000
 SENDSPIN_BUFFER_AHEAD_US = 800_000
@@ -52,10 +60,16 @@ SENDSPIN_LIVE_INPUT_RATE = 44_100
 SENDSPIN_LIVE_READ_BYTES = 16 * 1024
 SENDSPIN_AIRPLAY_SAMPLE_RATE = 44_100
 SENDSPIN_AIRPLAY_PRIME_SECONDS = 3.0
+SENDSPIN_OUTCOME_LIMIT = 256
+SENDSPIN_OUTCOME_RETENTION_MS = 15 * 60 * 1000
 
 
 class SendspinPlaybackError(RuntimeError):
     """Raised when Sendspin audio cannot be delivered to every target."""
+
+
+class SendspinSourceError(SendspinPlaybackError):
+    """Raised when the media source or decoder fails during a live stream."""
 
 
 def _text(value: Any) -> str:
@@ -207,6 +221,140 @@ def _audio_packet(timestamp_us: int, pcm: bytes) -> bytes:
     return bytes((SENDSPIN_AUDIO_MESSAGE,)) + struct.pack(">q", int(timestamp_us)) + bytes(pcm)
 
 
+def _timed_binary_packet(message_id: int, timestamp_us: int, payload: bytes) -> bytes:
+    return bytes((int(message_id) & 0xFF,)) + struct.pack(">q", int(timestamp_us)) + bytes(payload)
+
+
+def _fallback_track_colors(seed: Any) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    digest = hashlib.sha256((_text(seed) or "Tater Music").encode("utf-8")).digest()
+    primary = tuple(48 + (channel % 160) for channel in digest[:3])
+    accent = tuple(80 + (channel % 176) for channel in digest[3:6])
+    return primary, accent
+
+
+@dataclass(frozen=True)
+class _SendspinPresentation:
+    artwork: bytes
+    artwork_format: str
+    artwork_width: int
+    artwork_height: int
+    primary_color: tuple[int, int, int]
+    accent_color: tuple[int, int, int]
+
+
+def _prepare_sendspin_presentation(
+    artwork: bytes | None,
+    artwork_content_type: Any,
+    *,
+    color_seed: Any,
+) -> _SendspinPresentation:
+    """Normalize optional artwork and derive stable presentation colors.
+
+    The Sendspin artwork channel is intentionally capped at 512px JPEG so a
+    display-capable Echo receives a small bounded payload.  Devices that do
+    not advertise artwork never receive this data.
+    """
+    primary, accent = _fallback_track_colors(color_seed)
+    payload = bytes(artwork or b"")
+    if not payload:
+        return _SendspinPresentation(b"", "", 0, 0, primary, accent)
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(payload)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = ImageOps.fit(image, (512, 512), method=Image.Resampling.LANCZOS)
+            palette_source = image.resize((48, 48), Image.Resampling.BILINEAR)
+            colors = palette_source.getcolors(maxcolors=48 * 48) or []
+            colors.sort(key=lambda item: item[0], reverse=True)
+            if colors:
+                def primary_score(item: tuple[int, tuple[int, int, int]]) -> float:
+                    count, (red, green, blue) = item
+                    high = max(red, green, blue)
+                    low = min(red, green, blue)
+                    saturation = (high - low) / max(1.0, float(high))
+                    brightness = high / 255.0
+                    return math.sqrt(max(1, count)) * (0.3 + saturation) * (0.35 + brightness)
+
+                primary = tuple(int(channel) for channel in max(colors, key=primary_score)[1])
+
+                def accent_score(item: tuple[int, tuple[int, int, int]]) -> float:
+                    count, (red, green, blue) = item
+                    high = max(red, green, blue)
+                    low = min(red, green, blue)
+                    saturation = (high - low) / max(1.0, float(high))
+                    brightness = high / 255.0
+                    distance = math.sqrt(
+                        sum((value - base) ** 2 for value, base in zip((red, green, blue), primary))
+                    ) / 441.7
+                    return math.sqrt(max(1, count)) * saturation * brightness * (0.35 + distance)
+
+                accent = tuple(int(channel) for channel in max(colors, key=accent_score)[1])
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=86, optimize=True)
+            normalized = output.getvalue()
+            if not normalized or len(normalized) > 4 * 1024 * 1024:
+                raise ValueError("normalized artwork is empty or too large")
+            return _SendspinPresentation(
+                normalized,
+                "jpeg",
+                image.width,
+                image.height,
+                primary,
+                accent,
+            )
+    except Exception as exc:
+        logger.debug(
+            "[sendspin] artwork could not be prepared (%s): %s",
+            _text(artwork_content_type) or "unknown",
+            exc,
+        )
+        return _SendspinPresentation(b"", "", 0, 0, primary, accent)
+
+
+def _pcm_visualizer_values(pcm: bytes, bins: int) -> tuple[int, int, list[int]]:
+    """Return normalized loudness, peak, and optional spectrum values."""
+    samples = array("h")
+    samples.frombytes(bytes(pcm or b""))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        return 0, 0, []
+    squared = sum(int(value) * int(value) for value in samples)
+    rms = math.sqrt(squared / len(samples)) / 32768.0
+    peak = max(abs(int(value)) for value in samples) / 32768.0
+    loudness = max(0, min(65535, round(min(1.0, rms * 2.4) * 65535)))
+    peak_byte = max(0, min(255, round(min(1.0, peak) * 255)))
+    if bins <= 0:
+        return loudness, peak_byte, []
+    spectrum: list[int] = []
+    try:
+        import numpy as np
+
+        values = np.frombuffer(bytes(pcm or b""), dtype="<i2").astype(np.float32)
+        if values.size >= 2:
+            values = values.reshape((-1, 2)).mean(axis=1)
+        windowed = values * np.hanning(values.size)
+        magnitudes = np.abs(np.fft.rfft(windowed))
+        frequencies = np.fft.rfftfreq(values.size, 1.0 / SENDSPIN_SAMPLE_RATE)
+        edges = np.geomspace(60.0, 16_000.0, bins + 1)
+        raw = []
+        for index in range(bins):
+            selected = magnitudes[
+                (frequencies >= edges[index]) & (frequencies < edges[index + 1])
+            ]
+            raw.append(float(np.sqrt(np.mean(selected * selected))) if selected.size else 0.0)
+        ceiling = max(raw, default=0.0)
+        if ceiling > 0:
+            spectrum = [
+                max(0, min(65535, round(math.sqrt(value / ceiling) * 65535)))
+                for value in raw
+            ]
+    except Exception:
+        spectrum = []
+    return loudness, peak_byte, spectrum
+
+
 def _scale_pcm_s16le(pcm: bytes, volume_percent: Any) -> bytes:
     volume = _as_int(volume_percent, 100, 0, 100)
     payload = bytes(pcm or b"")
@@ -306,10 +454,10 @@ class _FfmpegPcmReader:
     def __init__(self, source_url: str, *, start_position_seconds: float = 0.0) -> None:
         source = _text(source_url)
         if not source.lower().startswith(("http://", "https://")):
-            raise SendspinPlaybackError("Sendspin music playback requires an HTTP media source.")
+            raise SendspinSourceError("Sendspin music playback requires an HTTP media source.")
         ffmpeg = _ffmpeg_binary()
         if not ffmpeg:
-            raise SendspinPlaybackError("ffmpeg is unavailable for Sendspin music playback.")
+            raise SendspinSourceError("ffmpeg is unavailable for Sendspin music playback.")
         command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
         position = max(0.0, float(start_position_seconds or 0.0))
         if position > 0:
@@ -349,7 +497,7 @@ class _FfmpegPcmReader:
             return None
         stdout = self.process.stdout
         if stdout is None:
-            raise SendspinPlaybackError("ffmpeg did not expose its Sendspin PCM output.")
+            raise SendspinSourceError("ffmpeg did not expose its Sendspin PCM output.")
         chunk = stdout.read(max(4, int(maximum)))
         if chunk:
             return bytes(chunk)
@@ -358,7 +506,7 @@ class _FfmpegPcmReader:
             detail = ""
             if self.process.stderr is not None:
                 detail = self.process.stderr.read().decode("utf-8", errors="replace").strip()
-            raise SendspinPlaybackError(
+            raise SendspinSourceError(
                 detail or f"ffmpeg exited with status {return_code} while decoding Sendspin music."
             )
         return None
@@ -415,6 +563,10 @@ class _SendspinPeer:
         self.time_responses = 0
         self.error = ""
         self.closing = False
+        self.active_roles: set[str] = {"player@v1"}
+        self._last_visualizer_timestamp_us = 0
+        self._last_visualizer_loudness = 0.0
+        self._last_beat_timestamp_us = 0
 
     async def open(self, *, server_id: str, server_name: str) -> None:
         url = _websocket_url(self.host, port=self.port)
@@ -548,6 +700,70 @@ class _SendspinPeer:
                 f"{self.selector or self.host} does not support Sendspin v1 PCM 48 kHz stereo."
             )
 
+    def supports_role(self, role: str) -> bool:
+        return _text(role) in {
+            _text(value) for value in list(self.client_hello.get("supported_roles") or [])
+        }
+
+    def visualizer_config(self) -> Dict[str, Any]:
+        if not self.supports_role("visualizer@v1"):
+            return {}
+        support = self.client_hello.get("visualizer@v1_support")
+        support = support if isinstance(support, dict) else {}
+        offered = {
+            _text(value).lower()
+            for value in list(support.get("types") or [])
+            if _text(value)
+        }
+        accepted = [
+            value
+            for value in ("loudness", "beat", "spectrum", "peak")
+            if value in offered
+        ]
+        if not accepted:
+            return {}
+        spectrum_support = support.get("spectrum")
+        spectrum_support = spectrum_support if isinstance(spectrum_support, dict) else {}
+        bins = _as_int(spectrum_support.get("n_disp_bins"), 12, 1, 32)
+        if "spectrum" not in accepted:
+            bins = 0
+        return {
+            "types": accepted,
+            "rate_max": _as_int(support.get("rate_max"), 20, 1, 20),
+            "spectrum_bins": bins,
+        }
+
+    def accepts_jpeg_artwork(self) -> bool:
+        if not self.supports_role("artwork@v1"):
+            return False
+        support = self.client_hello.get("artwork@v1_support")
+        support = support if isinstance(support, dict) else {}
+        return any(
+            isinstance(channel, dict)
+            and _text(channel.get("source")).lower() in {"", "album"}
+            and _text(channel.get("format")).lower() in {"jpeg", "jpg"}
+            for channel in list(support.get("channels") or [])
+        )
+
+    async def activate_supported_presentation_roles(self) -> None:
+        optional = [
+            role
+            for role in ("metadata@v1", "artwork@v1", "color@v1", "visualizer@v1")
+            if self.supports_role(role)
+        ]
+        if not optional:
+            return
+        self.active_roles = {"player@v1", *optional}
+        await self.send_json(
+            {
+                "type": "server/activate",
+                "payload": {
+                    "activities": ["playback"],
+                    "active_roles": ["player@v1", *optional],
+                },
+            }
+        )
+
     async def wait_ready(self) -> None:
         try:
             await asyncio.wait_for(
@@ -587,6 +803,137 @@ class _SendspinPeer:
         packet = _audio_packet(timestamp_us, pcm)
         async with self.send_lock:
             await self.ws.send_bytes(packet)
+
+    async def send_binary(self, packet: bytes) -> None:
+        if self.ws is None or self.ws.closed:
+            raise SendspinPlaybackError(
+                f"{self.selector or self.host} Sendspin connection is closed."
+            )
+        async with self.send_lock:
+            await self.ws.send_bytes(bytes(packet))
+
+    async def send_presentation_start(
+        self,
+        *,
+        presentation: _SendspinPresentation,
+        timestamp_us: int,
+        title: str,
+        artist: str,
+        album: str,
+        start_position_seconds: float,
+        duration_seconds: float,
+    ) -> None:
+        metadata: Dict[str, Any] | None = None
+        color: Dict[str, Any] | None = None
+        if "metadata@v1" in self.active_roles:
+            metadata = {
+                "timestamp": int(timestamp_us),
+                "title": _text(title),
+                "artist": _text(artist),
+                "album_artist": _text(artist),
+                "album": _text(album),
+                "progress": {
+                    "track_progress": max(0, round(float(start_position_seconds or 0.0) * 1000)),
+                    "track_duration": max(0, round(float(duration_seconds or 0.0) * 1000)),
+                    "playback_speed": 1000,
+                },
+            }
+        if "color@v1" in self.active_roles:
+            color = {
+                "timestamp": int(timestamp_us),
+                "primary": list(presentation.primary_color),
+                "accent": list(presentation.accent_color),
+            }
+        if metadata is not None or color is not None:
+            await self.send_json(
+                {
+                    "type": "server/state",
+                    "payload": {"metadata": metadata, "color": color},
+                }
+            )
+        if presentation.artwork and self.accepts_jpeg_artwork() and "artwork@v1" in self.active_roles:
+            await self.send_binary(
+                _timed_binary_packet(
+                    SENDSPIN_ARTWORK_MESSAGE,
+                    timestamp_us,
+                    presentation.artwork,
+                )
+            )
+
+    async def send_visualizer(self, timestamp_us: int, pcm: bytes) -> None:
+        if "visualizer@v1" not in self.active_roles:
+            return
+        config = self.visualizer_config()
+        types = set(config.get("types") or [])
+        if not types:
+            return
+        minimum_interval_us = round(1_000_000 / max(1, int(config.get("rate_max") or 20)))
+        if (
+            self._last_visualizer_timestamp_us
+            and timestamp_us - self._last_visualizer_timestamp_us < minimum_interval_us
+        ):
+            return
+        self._last_visualizer_timestamp_us = timestamp_us
+        loudness, peak, spectrum = _pcm_visualizer_values(
+            pcm,
+            int(config.get("spectrum_bins") or 0),
+        )
+        loudness_ratio = loudness / 65535.0
+        packets = []
+        if "loudness" in types:
+            packets.append(
+                _timed_binary_packet(
+                    SENDSPIN_VISUALIZER_LOUDNESS_MESSAGE,
+                    timestamp_us,
+                    struct.pack(">H", loudness),
+                )
+            )
+        if "peak" in types:
+            packets.append(
+                _timed_binary_packet(
+                    SENDSPIN_VISUALIZER_PEAK_MESSAGE,
+                    timestamp_us,
+                    bytes((peak,)),
+                )
+            )
+        if (
+            "beat" in types
+            and loudness_ratio >= 0.16
+            and loudness_ratio >= max(0.18, self._last_visualizer_loudness * 1.28)
+            and timestamp_us - self._last_beat_timestamp_us >= 240_000
+        ):
+            packets.append(
+                _timed_binary_packet(
+                    SENDSPIN_VISUALIZER_BEAT_MESSAGE,
+                    timestamp_us,
+                    b"\x01",
+                )
+            )
+            self._last_beat_timestamp_us = timestamp_us
+        if "spectrum" in types and spectrum:
+            packets.append(
+                _timed_binary_packet(
+                    SENDSPIN_VISUALIZER_SPECTRUM_MESSAGE,
+                    timestamp_us,
+                    b"".join(struct.pack(">H", value) for value in spectrum),
+                )
+            )
+        self._last_visualizer_loudness = (
+            self._last_visualizer_loudness * 0.72 + loudness_ratio * 0.28
+        )
+        await asyncio.gather(*(self.send_binary(packet) for packet in packets))
+
+    async def clear_presentation(self) -> None:
+        if "metadata@v1" in self.active_roles or "color@v1" in self.active_roles:
+            await self.send_json(
+                {
+                    "type": "server/state",
+                    "payload": {
+                        "metadata": None if "metadata@v1" in self.active_roles else {},
+                        "color": None if "color@v1" in self.active_roles else {},
+                    },
+                }
+            )
 
     async def close(self) -> None:
         self.closing = True
@@ -744,10 +1091,156 @@ class _LiveStreamState:
     task: Optional[asyncio.Task[Dict[str, Any]]] = None
     start_server_us: int = 0
     start_unix_ms: int = 0
+    expected_duration_s: float = 0.0
+    frames_sent: int = 0
+    stop_reason: str = ""
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    start_position_seconds: float = 0.0
+    presentation: Optional[_SendspinPresentation] = None
 
 
 _active_live_streams: Dict[str, _LiveStreamState] = {}
 _live_target_owners: Dict[str, str] = {}
+_stream_outcomes: Dict[str, Dict[str, Any]] = {}
+
+
+def _stream_members(state: _LiveStreamState) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *(
+                    _text(target.get("selector"))
+                    for target in state.targets
+                    if _text(target.get("selector"))
+                ),
+                *(_text(target) for target in state.airplay_targets if _text(target)),
+            ]
+        )
+    )
+
+
+def _prune_stream_outcomes(now_ms: Optional[int] = None) -> None:
+    current_ms = int(now_ms if now_ms is not None else time.time_ns() // 1_000_000)
+    cutoff = current_ms - SENDSPIN_OUTCOME_RETENTION_MS
+    for stream_id, row in list(_stream_outcomes.items()):
+        if int(row.get("ended_unix_ms") or 0) < cutoff:
+            _stream_outcomes.pop(stream_id, None)
+    overflow = len(_stream_outcomes) - SENDSPIN_OUTCOME_LIMIT
+    if overflow > 0:
+        oldest = sorted(
+            _stream_outcomes,
+            key=lambda stream_id: int(
+                _stream_outcomes[stream_id].get("ended_unix_ms") or 0
+            ),
+        )
+        for stream_id in oldest[:overflow]:
+            _stream_outcomes.pop(stream_id, None)
+
+
+def _record_stream_outcome(
+    state: _LiveStreamState,
+    *,
+    status: str,
+    error: str = "",
+    error_kind: str = "",
+    duration_s: Optional[float] = None,
+) -> Dict[str, Any]:
+    ended_unix_ms = time.time_ns() // 1_000_000
+    actual_duration_s = (
+        max(0.0, float(duration_s))
+        if duration_s is not None
+        else max(0.0, state.frames_sent / float(SENDSPIN_SAMPLE_RATE))
+    )
+    row: Dict[str, Any] = {
+        "stream_id": state.stream_id,
+        "status": _text(status).lower() or "failed",
+        "error": _text(error)[:1000],
+        "error_kind": _text(error_kind).lower(),
+        "stop_reason": _text(state.stop_reason).lower(),
+        "started_unix_ms": max(0, int(state.start_unix_ms or 0)),
+        "ended_unix_ms": ended_unix_ms,
+        "duration_s": round(actual_duration_s, 3),
+        "expected_duration_s": round(max(0.0, state.expected_duration_s), 3),
+        "members": _stream_members(state),
+        "group_id": state.stream_id,
+    }
+    _stream_outcomes[state.stream_id] = row
+    _prune_stream_outcomes(ended_unix_ms)
+    return dict(row)
+
+
+async def stream_outcomes(
+    stream_ids: Iterable[Any], *, since_unix_ms: int = 0
+) -> Dict[str, Any]:
+    """Return retained terminal outcomes for the requested live stream ids."""
+    _prune_stream_outcomes()
+    requested = list(dict.fromkeys(_text(value) for value in stream_ids if _text(value)))
+    since = max(0, int(since_unix_ms or 0))
+    outcomes = {
+        stream_id: {
+            **_stream_outcomes[stream_id],
+            "members": list(_stream_outcomes[stream_id].get("members") or []),
+        }
+        for stream_id in requested
+        if stream_id in _stream_outcomes
+        and int(_stream_outcomes[stream_id].get("ended_unix_ms") or 0) >= since
+    }
+    return {"ok": True, "outcomes": outcomes}
+
+
+def _finish_live_stream(
+    state: _LiveStreamState,
+    owned_targets: Iterable[str],
+    finished: asyncio.Task[Dict[str, Any]],
+) -> None:
+    clean_id = state.stream_id
+    if _active_live_streams.get(clean_id) is state:
+        _active_live_streams.pop(clean_id, None)
+    for selector in owned_targets:
+        if _live_target_owners.get(selector) == clean_id:
+            _live_target_owners.pop(selector, None)
+
+    error = ""
+    if finished.cancelled():
+        status = "replaced" if state.stop_reason == "replaced" else "stopped"
+        _record_stream_outcome(state, status=status)
+    else:
+        failure = finished.exception()
+        if failure is not None:
+            error = _text(failure) or failure.__class__.__name__
+            _record_stream_outcome(
+                state,
+                status="failed",
+                error=error,
+                error_kind=(
+                    "source"
+                    if isinstance(failure, SendspinSourceError)
+                    else "transport"
+                    if isinstance(failure, SendspinPlaybackError)
+                    else "internal"
+                ),
+            )
+            logger.warning(
+                "[sendspin] live stream ended with an error stream=%s error=%s",
+                clean_id,
+                error,
+            )
+        else:
+            result = finished.result()
+            _record_stream_outcome(
+                state,
+                status="completed",
+                duration_s=float(result.get("duration_s") or 0.0),
+            )
+
+    callback = state.on_finished
+    if callable(callback):
+        with contextlib.suppress(Exception):
+            callback_result = callback(clean_id, error)
+            if inspect.isawaitable(callback_result):
+                asyncio.create_task(callback_result)
 
 
 async def _stream_live_pcm(
@@ -778,6 +1271,9 @@ async def _stream_live_pcm(
                     *(peer.open(server_id="tater-sendspin", server_name="Tater") for peer in peers)
                 )
                 await asyncio.gather(*(peer.wait_ready() for peer in peers))
+                await asyncio.gather(
+                    *(peer.activate_supported_presentation_roles() for peer in peers)
+                )
                 await asyncio.sleep(0.1)
                 await _broadcast_json(
                     peers,
@@ -790,20 +1286,53 @@ async def _stream_live_pcm(
                         },
                     },
                 )
-                await _broadcast_json(
-                    peers,
-                    {
-                        "type": "stream/start",
-                        "payload": {
-                            "player": {
-                                "codec": "pcm",
-                                "sample_rate": SENDSPIN_SAMPLE_RATE,
-                                "channels": SENDSPIN_CHANNELS,
-                                "bit_depth": SENDSPIN_BIT_DEPTH,
-                            }
-                        },
-                    },
+                presentation = state.presentation or _prepare_sendspin_presentation(
+                    None,
+                    "",
+                    color_seed=state.title or group_name,
                 )
+                for peer in peers:
+                    stream_payload: Dict[str, Any] = {
+                        "player": {
+                            "codec": "pcm",
+                            "sample_rate": SENDSPIN_SAMPLE_RATE,
+                            "channels": SENDSPIN_CHANNELS,
+                            "bit_depth": SENDSPIN_BIT_DEPTH,
+                        }
+                    }
+                    if (
+                        presentation.artwork
+                        and "artwork@v1" in peer.active_roles
+                        and peer.accepts_jpeg_artwork()
+                    ):
+                        stream_payload["artwork"] = {
+                            "channels": [
+                                {
+                                    "source": "album",
+                                    "format": presentation.artwork_format,
+                                    "width": presentation.artwork_width,
+                                    "height": presentation.artwork_height,
+                                }
+                            ]
+                        }
+                    visualizer = peer.visualizer_config()
+                    if visualizer and "visualizer@v1" in peer.active_roles:
+                        visual_payload: Dict[str, Any] = {
+                            "types": list(visualizer.get("types") or []),
+                            "rate_max": int(visualizer.get("rate_max") or 20),
+                        }
+                        bins = int(visualizer.get("spectrum_bins") or 0)
+                        if bins > 0:
+                            visual_payload["spectrum"] = {
+                                "n_disp_bins": bins,
+                                "scale": "mel",
+                                "f_min": 60,
+                                "f_max": 16_000,
+                            }
+                        stream_payload["visualizer"] = visual_payload
+                    await peer.send_json(
+                        {"type": "stream/start", "payload": stream_payload}
+                    )
             stream_started = True
 
             frame_bytes = SENDSPIN_CHANNELS * (SENDSPIN_BIT_DEPTH // 8)
@@ -842,11 +1371,18 @@ async def _stream_live_pcm(
             async def next_chunk() -> Optional[bytes]:
                 nonlocal source_finished
                 while len(pending) < chunk_bytes and not source_finished:
-                    source = await asyncio.to_thread(
-                        read_pcm,
-                        SENDSPIN_LIVE_READ_BYTES,
-                        0.5,
-                    )
+                    try:
+                        source = await asyncio.to_thread(
+                            read_pcm,
+                            SENDSPIN_LIVE_READ_BYTES,
+                            0.5,
+                        )
+                    except SendspinSourceError:
+                        raise
+                    except Exception as exc:
+                        raise SendspinSourceError(
+                            _text(exc) or "The Sendspin media source failed."
+                        ) from exc
                     if source is None:
                         source_finished = True
                         break
@@ -890,7 +1426,7 @@ async def _stream_live_pcm(
                             or "An AirPlay bridge rejected Sendspin audio."
                         )
                 if not primed_chunks:
-                    raise SendspinPlaybackError(
+                    raise SendspinSourceError(
                         "The Sendspin media source contained no audio."
                     )
                 airplay_ready = await asyncio.to_thread(
@@ -921,6 +1457,28 @@ async def _stream_live_pcm(
             state.start_unix_ms = (
                 unix_now_us + (start_us - monotonic_now_us)
             ) // 1_000
+
+            if peers:
+                presentation = state.presentation or _prepare_sendspin_presentation(
+                    None,
+                    "",
+                    color_seed=state.title or group_name,
+                )
+                await asyncio.gather(
+                    *(
+                        peer.send_presentation_start(
+                            presentation=presentation,
+                            timestamp_us=start_us,
+                            title=state.title or group_name,
+                            artist=state.artist,
+                            album=state.album,
+                            start_position_seconds=state.start_position_seconds,
+                            duration_seconds=state.expected_duration_s + state.start_position_seconds,
+                        )
+                        for peer in peers
+                    ),
+                    return_exceptions=True,
+                )
 
             if airplay_group_id:
                 airplay_commit_task = asyncio.create_task(
@@ -961,7 +1519,7 @@ async def _stream_live_pcm(
                             or "An AirPlay bridge rejected Sendspin audio."
                         )
                 if peers:
-                    await asyncio.gather(
+                    deliveries = await asyncio.gather(
                         *(
                             peer.send_audio(
                                 timestamp_us,
@@ -971,9 +1529,27 @@ async def _stream_live_pcm(
                                 ),
                             )
                             for peer in peers
-                        )
+                        ),
+                        return_exceptions=True,
                     )
+                    failed = [
+                        (peer, result)
+                        for peer, result in zip(peers, deliveries)
+                        if isinstance(result, BaseException)
+                    ]
+                    if failed:
+                        peer, failure = failed[0]
+                        raise SendspinPlaybackError(
+                            f"{peer.selector or peer.host}: "
+                            f"{_text(failure) or failure.__class__.__name__}"
+                        ) from failure
+                    if frames_sent % (SENDSPIN_CHUNK_FRAMES * 3) == 0:
+                        await asyncio.gather(
+                            *(peer.send_visualizer(timestamp_us, chunk) for peer in peers),
+                            return_exceptions=True,
+                        )
                 frames_sent += SENDSPIN_CHUNK_FRAMES
+                state.frames_sent = frames_sent
 
             for chunk in primed_chunks:
                 await publish_chunk(chunk, airplay_already_written=True)
@@ -991,7 +1567,9 @@ async def _stream_live_pcm(
                 chunk = await next_chunk()
                 if chunk is None:
                     if frames_sent <= 0:
-                        raise SendspinPlaybackError("The Sendspin media source contained no audio.")
+                        raise SendspinSourceError(
+                            "The Sendspin media source contained no audio."
+                        )
                     break
                 await publish_chunk(chunk, airplay_already_written=False)
                 if airplay_commit_task is None:
@@ -1072,9 +1650,35 @@ async def _stream_live_pcm(
         finally:
             if stream_started:
                 with contextlib.suppress(Exception):
-                    await _broadcast_json(
-                        peers,
-                        {"type": "stream/end", "payload": {"roles": ["player"]}},
+                    await asyncio.gather(
+                        *(
+                            peer.send_json(
+                                {
+                                    "type": "stream/end",
+                                    "payload": {
+                                        "roles": [
+                                            "player",
+                                            *(
+                                                ["artwork"]
+                                                if "artwork@v1" in peer.active_roles
+                                                else []
+                                            ),
+                                            *(
+                                                ["visualizer"]
+                                                if "visualizer@v1" in peer.active_roles
+                                                else []
+                                            ),
+                                        ]
+                                    },
+                                }
+                            )
+                            for peer in peers
+                        )
+                    )
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(
+                        *(peer.clear_presentation() for peer in peers),
+                        return_exceptions=True,
                     )
                 with contextlib.suppress(Exception):
                     await _broadcast_json(
@@ -1103,11 +1707,15 @@ async def _stream_live_pcm(
                     await asyncio.to_thread(close_pcm)
 
 
-async def _stop_live_streams_for_targets(selectors: Iterable[Any]) -> None:
-    await stop_live_streams_for_targets(selectors)
+async def _stop_live_streams_for_targets(
+    selectors: Iterable[Any], *, reason: str = "replaced"
+) -> None:
+    await stop_live_streams_for_targets(selectors, reason=reason)
 
 
-async def stop_live_streams_for_targets(selectors: Iterable[Any]) -> Dict[str, Any]:
+async def stop_live_streams_for_targets(
+    selectors: Iterable[Any], *, reason: str = "stopped"
+) -> Dict[str, Any]:
     """Stop every active Sendspin stream that owns one of the given members."""
     stream_ids = {
         _live_target_owners.get(_text(selector), "")
@@ -1116,7 +1724,7 @@ async def stop_live_streams_for_targets(selectors: Iterable[Any]) -> Dict[str, A
     }
     active_ids = sorted(stream_id for stream_id in stream_ids if stream_id)
     for stream_id in active_ids:
-        await stop_live_stream(stream_id)
+        await stop_live_stream(stream_id, reason=reason)
     return {"ok": True, "stopped_count": len(active_ids), "stream_ids": active_ids}
 
 
@@ -1135,7 +1743,11 @@ async def start_live_pcm_stream(
     title: str = "",
     artist: str = "",
     album: str = "",
+    artwork_bytes: bytes | None = None,
+    artwork_content_type: str = "",
     duration_seconds: float = 0.0,
+    start_position_seconds: float = 0.0,
+    expected_duration_seconds: float = 0.0,
     on_finished: Optional[Callable[[str, str], Any]] = None,
     close_pcm: Optional[Callable[[], Any]] = None,
 ) -> Dict[str, Any]:
@@ -1158,6 +1770,15 @@ async def start_live_pcm_stream(
     if not callable(read_pcm):
         raise SendspinPlaybackError("The live Sendspin PCM reader is unavailable.")
 
+    presentation = await asyncio.to_thread(
+        _prepare_sendspin_presentation,
+        artwork_bytes,
+        artwork_content_type,
+        color_seed="\x00".join(
+            value for value in (_text(title), _text(artist), _text(album), _text(group_name)) if value
+        ),
+    )
+
     owned_targets = [
         *(
             _text(target.get("selector"))
@@ -1166,9 +1787,9 @@ async def start_live_pcm_stream(
         ),
         *clean_airplay_targets,
     ]
-    await _stop_live_streams_for_targets(owned_targets)
+    await _stop_live_streams_for_targets(owned_targets, reason="replaced")
     if clean_id in _active_live_streams:
-        await stop_live_stream(clean_id)
+        await stop_live_stream(clean_id, reason="replaced")
 
     volumes = {
         _text(target.get("selector")): _as_int(
@@ -1249,6 +1870,12 @@ async def start_live_pcm_stream(
         ),
         airplay_prepare_result=dict(airplay_prepare_result),
         on_finished=on_finished,
+        expected_duration_s=max(0.0, float(expected_duration_seconds or 0.0)),
+        title=_text(title),
+        artist=_text(artist),
+        album=_text(album),
+        start_position_seconds=max(0.0, float(start_position_seconds or 0.0)),
+        presentation=presentation,
     )
     task = asyncio.create_task(
         _stream_live_pcm(
@@ -1266,30 +1893,9 @@ async def start_live_pcm_stream(
     for selector in owned_targets:
         _live_target_owners[selector] = clean_id
 
-    def _finished(finished: asyncio.Task[Dict[str, Any]]) -> None:
-        if _active_live_streams.get(clean_id) is state:
-            _active_live_streams.pop(clean_id, None)
-        for selector in owned_targets:
-            if _live_target_owners.get(selector) == clean_id:
-                _live_target_owners.pop(selector, None)
-        error = ""
-        if not finished.cancelled():
-            failure = finished.exception()
-            if failure is not None:
-                error = _text(failure) or failure.__class__.__name__
-                logger.warning(
-                    "[sendspin] live stream ended with an error stream=%s error=%s",
-                    clean_id,
-                    error,
-                )
-        callback = state.on_finished
-        if callable(callback):
-            with contextlib.suppress(Exception):
-                callback_result = callback(clean_id, error)
-                if inspect.isawaitable(callback_result):
-                    asyncio.create_task(callback_result)
-
-    task.add_done_callback(_finished)
+    task.add_done_callback(
+        lambda finished: _finish_live_stream(state, owned_targets, finished)
+    )
     try:
         await asyncio.wait_for(
             state.started_event.wait(),
@@ -1367,14 +1973,18 @@ async def start_media_url_stream(
     title: str = "",
     artist: str = "",
     album: str = "",
+    artwork_bytes: bytes | None = None,
+    artwork_content_type: str = "",
     duration_seconds: float = 0.0,
     on_finished: Optional[Callable[[str, str], Any]] = None,
 ) -> Dict[str, Any]:
     """Decode one finite media URL and publish it as a Sendspin PCM timeline."""
+    start_position = max(0.0, float(start_position_seconds or 0.0))
+    requested_duration = max(0.0, float(duration_seconds or 0.0))
     reader = await asyncio.to_thread(
         _FfmpegPcmReader,
         source_url,
-        start_position_seconds=max(0.0, float(start_position_seconds or 0.0)),
+        start_position_seconds=start_position,
     )
     try:
         return await start_live_pcm_stream(
@@ -1391,7 +2001,15 @@ async def start_media_url_stream(
             title=title,
             artist=artist,
             album=album,
-            duration_seconds=duration_seconds,
+            artwork_bytes=artwork_bytes,
+            artwork_content_type=artwork_content_type,
+            duration_seconds=requested_duration,
+            start_position_seconds=start_position,
+            expected_duration_seconds=(
+                max(0.0, requested_duration - start_position)
+                if requested_duration > 0
+                else 0.0
+            ),
             on_finished=on_finished,
             close_pcm=reader.close,
         )
@@ -1445,13 +2063,16 @@ async def set_live_stream_volumes(
     return {"ok": True, "stream_id": clean_id, "volume_percent": updated}
 
 
-async def stop_live_stream(stream_id: str) -> Dict[str, Any]:
+async def stop_live_stream(
+    stream_id: str, *, reason: str = "stopped"
+) -> Dict[str, Any]:
     clean_id = _text(stream_id)
     state = _active_live_streams.get(clean_id)
     if state is None or state.task is None:
         return {"ok": True, "stream_id": clean_id, "stopped": False}
     task = state.task
     if not task.done():
+        state.stop_reason = _text(reason).lower() or "stopped"
         task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await task

@@ -348,6 +348,8 @@ def _voice_core_play_sendspin_media_sync(
     title: str,
     artist: str,
     album: str,
+    artwork_bytes: bytes | None,
+    artwork_content_type: str,
     duration_seconds: float,
     volume_percent: int,
     target_volume_percent: Dict[str, Any] | None,
@@ -480,6 +482,12 @@ def _voice_core_play_sendspin_media_sync(
             title=_text(title) or _text(text) or "Tater Music",
             artist=_text(artist) or "Tater",
             album=_text(album) or "Tater Music",
+            artwork_bytes=(
+                bytes(artwork_bytes)
+                if isinstance(artwork_bytes, (bytes, bytearray))
+                else None
+            ),
+            artwork_content_type=_text(artwork_content_type),
             duration_seconds=max(0.0, float(duration_seconds or 0.0)),
         )
 
@@ -528,6 +536,7 @@ def _voice_core_play_sendspin_media_sync(
                 "session_id": stream_id,
                 "selectors": members,
                 "transport": "sendspin",
+                "start_unix_ms": int(sendspin_result.get("start_unix_ms") or 0),
             }
         ],
     }
@@ -546,6 +555,8 @@ def _voice_core_play_media_sync(
     title: str = "",
     artist: str = "",
     album: str = "",
+    artwork_bytes: bytes | None = None,
+    artwork_content_type: str = "",
     duration_seconds: float = 0.0,
     volume_percent: int = 100,
     target_volume_percent: Dict[str, Any] | None = None,
@@ -676,6 +687,8 @@ def _voice_core_play_media_sync(
             title=title,
             artist=artist,
             album=album,
+            artwork_bytes=artwork_bytes,
+            artwork_content_type=artwork_content_type,
             duration_seconds=duration_seconds,
             volume_percent=volume_percent,
             target_volume_percent=target_volume_percent,
@@ -937,7 +950,7 @@ def _voice_core_stop_media_sync(
                 continue
             try:
                 native_satellite.run_on_runtime_loop(
-                    sendspin_playback.stop_live_stream(stream_id),
+                    sendspin_playback.stop_live_stream(stream_id, reason=reason),
                     timeout=8.0,
                 )
             except Exception as exc:
@@ -1180,6 +1193,8 @@ def play_media_url_targets(
     title: str = "",
     artist: str = "",
     album: str = "",
+    artwork_bytes: bytes | None = None,
+    artwork_content_type: str = "",
     duration_seconds: float = 0.0,
     volume_percent: int = 100,
     start_position_seconds: float = 0.0,
@@ -1419,6 +1434,12 @@ def play_media_url_targets(
             title=title,
             artist=artist,
             album=album,
+            artwork_bytes=(
+                bytes(artwork_bytes)
+                if isinstance(artwork_bytes, (bytes, bytearray))
+                else None
+            ),
+            artwork_content_type=artwork_content_type,
             duration_seconds=duration_seconds,
             volume_percent=volume_percent,
             target_volume_percent=effective_target_volume_percent,
@@ -1493,6 +1514,8 @@ def play_media_url_targets(
                 title=title,
                 artist=artist,
                 album=album,
+                artwork_bytes=artwork_bytes,
+                artwork_content_type=artwork_content_type,
                 duration_seconds=duration_seconds,
                 volume_percent=volume_percent,
                 start_position_seconds=0.0,
