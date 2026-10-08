@@ -49,7 +49,7 @@ class S420LedSettingsTests(unittest.TestCase):
             "led_thinking_animation",
             "led_replying_animation",
         ):
-            expected = {"pulse", "breathe", "heartbeat", "solid"}
+            expected = {"off", "pulse", "breathe", "heartbeat", "solid"}
             if key == "led_replying_animation":
                 expected.add("audio_glow")
             self.assertEqual(

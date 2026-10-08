@@ -15936,7 +15936,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 							}, null, 40, zM), [[$, h.oww_wake_word_url]]),
 							Y("small", null, B(w.value.oww_wake_word_url?.description), 1)
 						])) : Z("", !0),
-						P.value === "hey_tater" ? (q(), J("div", BM, B(M.value ? "The built-in selection always keeps both Hey Tater detectors paired." : "The built-in OWW slot is ready in Tater. Until a firmware release includes the trained Hey Tater OWW model, choose a custom bundle."), 1)) : Z("", !0)
+						P.value === "hey_tater" ? (q(), J("div", BM, B(M.value ? "The built-in selection always keeps both Hey Tater detectors paired." : "The built-in selection uses the Hey Tater openWakeWord model included with current Echo firmware."), 1)) : Z("", !0)
 					])) : Z("", !0)
 				])) : (q(), J("div", VM, [Y("strong", null, B(ie.value) + " selected", 1), Y("span", null, B(de[D.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
 			])) : Z("", !0),

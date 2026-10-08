@@ -155,6 +155,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertIn('Dual Wake Word', source)
         self.assertNotIn('v-model="wakeValues.wake_mww_enabled"', source)
         self.assertNotIn('v-model="wakeValues.wake_oww_enabled"', source)
+        self.assertIn("included with current Echo firmware", source)
 
     def test_oww_only_ui_describes_bundle_as_an_oww_package(self) -> None:
         redis = MemoryRedis(
