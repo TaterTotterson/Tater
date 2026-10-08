@@ -34,7 +34,7 @@ AIRPLAY_CLI_VERSION="0.4.12"
 SHAIRPORT_SYNC_VERSION="5.2.1"
 AIRPLAY_SENDER_BIN=""
 AIRPLAY_RECEIVER_BIN=""
-AIRPLAY_FFMPEG_BIN=""
+MEDIA_FFMPEG_BIN=""
 
 # GPU wheels can be several gigabytes. Avoid keeping a second copy in pip's
 # shared download cache during setup.
@@ -663,7 +663,7 @@ ensure_linux_airplay_sender_permissions() {
   ok "AirPlay sender has permission to use its PTP ports"
 }
 
-resolve_airplay_ffmpeg() {
+resolve_media_ffmpeg() {
   venv_python="$1"
   configured_ffmpeg="${TATER_FFMPEG_PATH:-${FFMPEG_PATH:-}}"
   if [ "${configured_ffmpeg}" ] && [ -x "${configured_ffmpeg}" ]; then
@@ -712,11 +712,11 @@ install_airplay_runtime_dependencies() {
     || fail "The AirPlay receiver did not pass its version and feature checks."
   ok "AirPlay receiver ${SHAIRPORT_SYNC_VERSION} is ready"
 
-  AIRPLAY_FFMPEG_BIN="$(resolve_airplay_ffmpeg "${venv_python}")"
-  [ -x "${AIRPLAY_FFMPEG_BIN}" ] || fail "FFmpeg is required for AirPlay playback."
-  "${AIRPLAY_FFMPEG_BIN}" -version >/dev/null 2>&1 \
+  MEDIA_FFMPEG_BIN="$(resolve_media_ffmpeg "${venv_python}")"
+  [ -x "${MEDIA_FFMPEG_BIN}" ] || fail "FFmpeg is required for media decoding."
+  "${MEDIA_FFMPEG_BIN}" -version >/dev/null 2>&1 \
     || fail "The selected FFmpeg executable did not pass its self-check."
-  ok "AirPlay FFmpeg runtime is ready"
+  ok "Media decoding FFmpeg runtime is ready"
 
   AIRPLAY_SENDER_BIN="$(
     TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
@@ -1596,8 +1596,8 @@ write_profile_env() {
     if [ "${AIRPLAY_RECEIVER_BIN:-}" ]; then
       say "export TATER_SHAIRPORT_SYNC_PATH=\"\${TATER_SHAIRPORT_SYNC_PATH:-${AIRPLAY_RECEIVER_BIN}}\""
     fi
-    if [ "${AIRPLAY_FFMPEG_BIN:-}" ]; then
-      say "export TATER_FFMPEG_PATH=\"\${TATER_FFMPEG_PATH:-${AIRPLAY_FFMPEG_BIN}}\""
+    if [ "${MEDIA_FFMPEG_BIN:-}" ]; then
+      say "export TATER_FFMPEG_PATH=\"\${TATER_FFMPEG_PATH:-${MEDIA_FFMPEG_BIN}}\""
     fi
     if [ "${profile}" = "edge" ]; then
       say "export TATER_REMOTE_ONLY=\"\${TATER_REMOTE_ONLY:-1}\""
@@ -1654,7 +1654,7 @@ verify_install() {
   TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
   TATER_AIRPLAY_CLI_PATH="${AIRPLAY_SENDER_BIN:-${TATER_AIRPLAY_CLI_PATH:-}}" \
   TATER_SHAIRPORT_SYNC_PATH="${AIRPLAY_RECEIVER_BIN:-${TATER_SHAIRPORT_SYNC_PATH:-}}" \
-  TATER_FFMPEG_PATH="${AIRPLAY_FFMPEG_BIN:-${TATER_FFMPEG_PATH:-}}" \
+  TATER_FFMPEG_PATH="${MEDIA_FFMPEG_BIN:-${TATER_FFMPEG_PATH:-}}" \
   "${venv_python}" - <<'PY'
 import importlib.util
 import os
@@ -1677,16 +1677,17 @@ print(f"redis_runtime={'system:' + redis_server if redis_server else 'redislite'
 
 print("core imports ok")
 
-from airplay_bridge import _find_ffmpeg, ensure_airplay_cli
+from airplay_bridge import ensure_airplay_cli
 from external_audio import SHAIRPORT_SYNC_VERSION, _find_shairport_sync
+from tater_voice.sendspin_playback import _ffmpeg_binary
 
-ffmpeg = _find_ffmpeg()
+ffmpeg = _ffmpeg_binary()
 if not ffmpeg:
-    raise SystemExit("AirPlay FFmpeg runtime is unavailable")
+    raise SystemExit("Media decoding FFmpeg runtime is unavailable")
 completed = subprocess.run([ffmpeg, "-version"], text=True, capture_output=True, timeout=10)
 if completed.returncode != 0:
-    raise SystemExit("AirPlay FFmpeg runtime failed its self-check")
-print(f"airplay_ffmpeg={ffmpeg}")
+    raise SystemExit("Media decoding FFmpeg runtime failed its self-check")
+print(f"media_ffmpeg={ffmpeg}")
 
 sender = ensure_airplay_cli()
 print(f"airplay_sender={sender}")

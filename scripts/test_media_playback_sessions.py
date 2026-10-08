@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest import mock
 import sys
@@ -66,6 +67,201 @@ class _PartialGroupResponse:
 
 
 class MediaPlaybackSessionTests(unittest.TestCase):
+    def test_music_core_native_route_uses_one_sendspin_media_timeline(self) -> None:
+        from tater_voice import native_satellite, sendspin_playback
+
+        async def targets(_selectors):
+            return [
+                {
+                    "selector": "native:left",
+                    "logical_selector": "stereo:office",
+                    "host": "192.0.2.10",
+                    "port": 8928,
+                    "volume_percent": 80,
+                    "delay_ms": 5,
+                },
+                {
+                    "selector": "native:right",
+                    "logical_selector": "stereo:office",
+                    "host": "192.0.2.11",
+                    "port": 8928,
+                    "volume_percent": 100,
+                    "delay_ms": 15,
+                },
+            ]
+
+        async def start_media(stream_id, resolved_targets, source_url, **kwargs):
+            self.assertTrue(stream_id.startswith("music-"))
+            self.assertEqual(source_url, "https://example.test/song.flac")
+            self.assertEqual(
+                [row["volume_percent"] for row in resolved_targets],
+                [48, 60],
+            )
+            self.assertEqual([row["delay_ms"] for row in resolved_targets], [0, 10])
+            self.assertEqual(kwargs["start_position_seconds"], 37.25)
+            self.assertEqual(kwargs["start_lead_ms"], 900)
+            return {
+                "ok": True,
+                "sendspin_live_stream_started": True,
+                "stream_id": stream_id,
+                "members": ["native:left", "native:right"],
+            }
+
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_handoff_media_sync",
+                return_value={"ok": True, "selectors": [], "sessions": []},
+            ),
+            mock.patch.object(native_satellite, "sendspin_targets_for_selectors", side_effect=targets),
+            mock.patch.object(sendspin_playback, "start_media_url_stream", side_effect=start_media),
+            mock.patch.object(
+                native_satellite,
+                "run_on_runtime_loop",
+                side_effect=lambda awaitable, **_kwargs: asyncio.run(awaitable),
+            ),
+            mock.patch.object(media_playback.requests, "post") as post,
+        ):
+            result = media_playback._voice_core_play_media_sync(
+                selectors=["stereo:office"],
+                source_url="https://example.test/song.flac",
+                media_type="audio/flac",
+                media_content_type="music",
+                title="Three Little Birds",
+                volume_percent=60,
+                target_volume_percent={"voice_core:stereo:office": 60},
+                target_sync_offset_ms={"voice_core:stereo:office": -25},
+                start_position_seconds=37.25,
+                start_lead_ms=900,
+                source_owner="music_core",
+            )
+
+        self.assertTrue(result["sendspin_live_stream_started"])
+        self.assertEqual(result["sent_count"], 1)
+        self.assertEqual(result["voice_core_sessions"][0]["transport"], "sendspin")
+        self.assertEqual(
+            result["voice_core_sessions"][0]["selectors"],
+            ["native:left", "native:right"],
+        )
+        post.assert_not_called()
+
+    def test_external_airplay_native_route_uses_sendspin_instead_of_media_session_http(self) -> None:
+        import external_audio
+
+        sendspin_result = {
+            "ok": True,
+            "sent_count": 2,
+            "sendspin_sent_count": 2,
+            "sendspin_live_stream_started": True,
+            "voice_core_sessions": [
+                {
+                    "target": "sendspin:airplay-1",
+                    "session_id": "airplay-1",
+                    "selectors": ["native:kitchen", "native:office"],
+                    "transport": "sendspin",
+                }
+            ],
+        }
+        with (
+            mock.patch.object(
+                media_playback,
+                "_voice_core_handoff_media_sync",
+                return_value={"ok": True, "selectors": [], "sessions": []},
+            ),
+            mock.patch.object(
+                external_audio,
+                "start_external_audio_sendspin_route",
+                return_value=sendspin_result,
+            ) as start_sendspin,
+            mock.patch.object(media_playback.requests, "post") as post,
+        ):
+            result = media_playback._voice_core_play_media_sync(
+                selectors=["native:kitchen", "native:office"],
+                source_url="http://tater.local/live.mp3",
+                media_content_type="music",
+                volume_percent=72,
+                target_sync_offset_ms={"voice_core:native:office": 25},
+                start_lead_ms=900,
+                source_owner="external_audio",
+            )
+
+        self.assertTrue(result["sendspin_live_stream_started"])
+        self.assertEqual(result["voice_core_sessions"][0]["transport"], "sendspin")
+        start_sendspin.assert_called_once_with(
+            ["native:kitchen", "native:office"],
+            airplay_targets=[],
+            volume_percent=72,
+            target_volume_percent=None,
+            target_sync_offset_ms={"voice_core:native:office": 25},
+            start_lead_ms=900,
+            title="AirPlay",
+        )
+        post.assert_not_called()
+
+    def test_external_airplay_stop_ends_sendspin_without_legacy_media_command(self) -> None:
+        from tater_voice import native_satellite, sendspin_playback
+
+        stopped = []
+
+        async def fake_stop(stream_id):
+            stopped.append(stream_id)
+            return {"ok": True, "stopped": True}
+
+        with (
+            mock.patch.object(sendspin_playback, "stop_live_stream", side_effect=fake_stop),
+            mock.patch.object(
+                native_satellite,
+                "run_on_runtime_loop",
+                side_effect=lambda awaitable, **_kwargs: asyncio.run(awaitable),
+            ),
+            mock.patch.object(native_satellite, "fade_and_stop_media_session_if_matches") as legacy_stop,
+        ):
+            warnings = media_playback._voice_core_stop_media_sync(
+                [],
+                expected_sessions=[
+                    {
+                        "session_id": "airplay-stream-1",
+                        "selectors": ["native:kitchen", "native:office"],
+                        "transport": "sendspin",
+                    }
+                ],
+                reason="external_audio_manual_stop",
+            )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(stopped, ["airplay-stream-1"])
+        legacy_stop.assert_not_called()
+
+    def test_native_only_airplay_group_bypasses_the_shared_relay(self) -> None:
+        with (
+            mock.patch.object(
+                media_playback, "_shared_native_media_source_url"
+            ) as shared_source,
+            mock.patch.object(
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={
+                    "ok": True,
+                    "sent_count": 2,
+                    "sendspin_sent_count": 2,
+                    "voice_core_sessions": [],
+                },
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "voice_core:native:office"],
+                "http://tater.local/api/external-audio/v1/streams/live.mp3",
+                media_content_type="music",
+                source_owner="external_audio",
+            )
+
+        self.assertTrue(result["ok"])
+        shared_source.assert_not_called()
+        self.assertEqual(
+            voice.call_args.kwargs["source_url"],
+            "http://tater.local/api/external-audio/v1/streams/live.mp3",
+        )
+
     def test_voice_core_music_request_declares_persistent_media_role(self) -> None:
         with (
             mock.patch.object(media_playback, "_voice_core_base_url", return_value="http://127.0.0.1:8501"),
@@ -287,7 +483,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(voice.call_args.kwargs["start_lead_ms"], 2500)
 
-    def test_stereo_pair_uses_one_shared_source_and_normal_group_start(self) -> None:
+    def test_music_core_stereo_pair_uses_sendspin_without_shared_relay(self) -> None:
         with (
             mock.patch.object(
                 media_playback,
@@ -296,14 +492,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                     "stereo:office": ["native:office-left", "native:office-right"]
                 },
             ),
-            mock.patch.object(
-                media_playback,
-                "_shared_native_media_source_url",
-                return_value=(
-                    "http://tater.local:8501/api/media/shared/relay/song.mp3?token=secret",
-                    {"initial_bytes": 131072},
-                ),
-            ) as shared_source,
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
             mock.patch.object(
                 media_playback,
                 "_voice_core_play_media_sync",
@@ -312,22 +501,20 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         ):
             result = media_playback.play_media_url_targets(
                 ["voice_core:stereo:office"],
-                "http://tater.local:8501/api/cores/music_core/webhook/native-mp3?stream_id=one",
-                media_type="audio/mpeg",
+                "https://provider.test/song.flac",
+                media_type="audio/flac",
                 media_content_type="music",
-                filename="song.mp3",
+                filename="song.flac",
                 duration_seconds=196,
+                source_owner="music_core",
             )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["native_shared_stream"])
-        self.assertEqual(result["native_shared_stream_initial_bytes"], 131072)
-        shared_source.assert_called_once()
-        self.assertGreater(shared_source.call_args.kwargs["completion_wait_s"], 0)
-        self.assertEqual(shared_source.call_args.kwargs["duration_seconds"], 196)
-        self.assertIn(
-            "/api/media/shared/relay/song.mp3",
+        self.assertFalse(result.get("group_shared_stream", False))
+        shared_source.assert_not_called()
+        self.assertEqual(
             voice.call_args.kwargs["source_url"],
+            "https://provider.test/song.flac",
         )
         self.assertEqual(
             voice.call_args.kwargs["start_lead_ms"],
@@ -369,7 +556,6 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertTrue(result["group_shared_stream"])
         shared_source.assert_called_once()
         self.assertEqual(shared_source.call_args.args, (source_url,))
-        self.assertEqual(shared_source.call_args.kwargs["completion_wait_s"], 0.0)
         self.assertEqual(voice.call_args.kwargs["source_url"], shared_url)
 
     def test_external_group_without_opt_in_keeps_original_source(self) -> None:
@@ -478,88 +664,88 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         shared_source.assert_not_called()
         self.assertEqual(voice.call_args.kwargs["source_url"], source_url)
 
-    def test_live_airplay_group_uses_one_encoded_source_for_native_and_airplay(self) -> None:
-        import airplay_bridge
-
-        shared_url = "http://tater.local:8501/api/media/shared/group/live.mp3?token=secret"
+    def test_live_airplay_group_uses_one_sendspin_pcm_source_for_native_and_airplay(self) -> None:
+        source_url = "http://tater.local:8501/api/external-audio/v1/streams/session/live.mp3?cursor=0"
         with (
-            mock.patch.object(
-                media_playback, "_shared_native_media_source_url",
-                return_value=(shared_url, {"initial_bytes": 4096, "complete": False}),
-            ) as shared_source,
-            mock.patch.object(
-                airplay_bridge, "prepare_airplay_group_sync",
-                return_value={"ok": True, "group_id": "group-one", "prepared_count": 1},
-            ) as prepare,
-            mock.patch.object(
-                airplay_bridge, "prime_airplay_group_sync",
-                return_value={"ok": True, "group_id": "group-one", "primed_count": 1},
-            ),
-            mock.patch.object(
-                airplay_bridge, "commit_airplay_group_sync",
-                return_value={"ok": True, "sent_count": 1},
-            ),
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
             mock.patch.object(
                 media_playback, "_voice_core_play_media_sync",
                 return_value={
-                    "ok": True, "sent_count": 1, "media_session_sent_count": 1,
+                    "ok": True,
+                    "sent_count": 2,
+                    "native_sent_count": 1,
+                    "airplay_bridge_sent_count": 1,
+                    "airplay_bridge_prepared_count": 1,
+                    "airplay_bridge_group_id": "sendspin-airplay-one",
+                    "group_shared_stream": True,
                     "audible_start_unix_ms": 2000000000125,
                 },
             ) as voice,
         ):
             result = media_playback.play_media_url_targets(
                 ["voice_core:native:kitchen", "airplay:804af2c57d78"],
-                "http://tater.local:8501/api/external-audio/v1/streams/session/live.mp3?cursor=0",
+                source_url,
                 source_owner="external_audio",
                 media_content_type="music",
             )
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["group_shared_stream"])
-        shared_source.assert_called_once()
-        self.assertEqual(prepare.call_args.kwargs["source_url"], shared_url)
-        self.assertEqual(voice.call_args.kwargs["source_url"], shared_url)
+        self.assertEqual(result["sent_count"], 2)
+        shared_source.assert_not_called()
+        self.assertEqual(voice.call_args.kwargs["source_url"], source_url)
+        self.assertEqual(voice.call_args.kwargs["airplay_players"], ["804af2c57d78"])
 
-    def test_airplay_bridge_uses_the_native_group_wall_clock_anchor(self) -> None:
-        import airplay_bridge
+    def test_music_core_group_uses_one_shared_source_for_native_and_airplay(self) -> None:
+        source_url = "https://provider.test/song.flac"
+        with (
+            mock.patch.object(media_playback, "_shared_native_media_source_url") as shared_source,
+            mock.patch.object(
+                media_playback, "_voice_core_play_media_sync",
+                return_value={
+                    "ok": True,
+                    "sent_count": 2,
+                    "native_sent_count": 1,
+                    "airplay_bridge_sent_count": 1,
+                    "airplay_bridge_prepared_count": 1,
+                    "group_shared_stream": True,
+                    "audible_start_unix_ms": 2000000000125,
+                },
+            ) as voice,
+        ):
+            result = media_playback.play_media_url_targets(
+                ["voice_core:native:kitchen", "airplay:804af2c57d78"],
+                source_url,
+                source_owner="music_core",
+                media_type="audio/flac",
+                media_content_type="music",
+                filename="song.flac",
+            )
 
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["group_shared_stream"])
+        shared_source.assert_not_called()
+        self.assertEqual(voice.call_args.kwargs["source_url"], source_url)
+        self.assertEqual(voice.call_args.kwargs["airplay_players"], ["804af2c57d78"])
+
+    def test_airplay_bridge_is_owned_by_the_sendspin_group(self) -> None:
         order = []
-
-        def prepare(**kwargs):
-            order.append(("prepare", kwargs))
-            return {
-                "ok": True,
-                "group_id": "airplay-group-1",
-                "prepared_count": 1,
-            }
 
         def voice(**kwargs):
             order.append(("voice", kwargs))
             return {
                 "ok": True,
-                "sent_count": 1,
-                "media_session_sent_count": 1,
+                "sent_count": 2,
+                "native_sent_count": 1,
+                "airplay_bridge_sent_count": 1,
+                "airplay_bridge_prepared_count": 1,
+                "airplay_bridge_group_id": "sendspin-airplay-1",
+                "group_shared_stream": True,
                 "start_unix_ms": 2000000000000,
                 "audible_start_unix_ms": 2000000000125,
             }
 
-        def prime(**kwargs):
-            order.append(("prime", kwargs))
-            return {"ok": True, "group_id": kwargs["group_id"], "primed_count": 1}
-
-        def commit(**kwargs):
-            order.append(("commit", kwargs))
-            return {
-                "ok": True,
-                "sent_count": 1,
-                "group_id": kwargs["group_id"],
-                "start_unix_ms": kwargs["start_unix_ms"],
-            }
-
         with (
-            mock.patch.object(airplay_bridge, "prepare_airplay_group_sync", side_effect=prepare),
-            mock.patch.object(airplay_bridge, "prime_airplay_group_sync", side_effect=prime),
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync", side_effect=commit),
             mock.patch.object(media_playback, "_voice_core_play_media_sync", side_effect=voice),
         ):
             result = media_playback.play_media_url_targets(
@@ -578,73 +764,31 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual([entry[0] for entry in order], ["prepare", "prime", "voice", "commit"])
-        self.assertEqual(
-            order[0][1]["source_url"],
-            "https://provider.test/song.mp3",
-        )
+        self.assertEqual([entry[0] for entry in order], ["voice"])
         self.assertNotIn("airplay_proxy_used", result)
-        self.assertEqual(order[0][1]["targets"], ["804af2c57d78"])
-        self.assertEqual(order[2][1]["start_lead_ms"], 750)
-        self.assertEqual(order[2][1]["source_owner"], "external_audio")
-        self.assertEqual(order[3][1]["start_unix_ms"], 2000000000125)
-        self.assertEqual(order[3][1]["reference_sync_offset_ms"], -80)
-        self.assertEqual(
-            order[3][1]["target_sync_offset_ms"],
-            {"airplay:804af2c57d78": 120},
-        )
-        self.assertFalse(order[3][1]["allow_reanchor"])
-        self.assertEqual(result["airplay_bridge_primed_count"], 1)
+        self.assertEqual(order[0][1]["airplay_players"], ["804af2c57d78"])
+        self.assertEqual(order[0][1]["source_owner"], "external_audio")
+        self.assertEqual(result["airplay_bridge_group_id"], "sendspin-airplay-1")
         self.assertEqual(result["airplay_bridge_sent_count"], 1)
         self.assertEqual(result["sent_count"], 2)
 
-    def test_next_track_reuses_the_connected_airplay_group(self) -> None:
-        import airplay_bridge
-
+    def test_next_track_replaces_legacy_airplay_group_with_sendspin_bridge(self) -> None:
         order = []
-
-        def reuse(**kwargs):
-            order.append(("reuse", kwargs))
-            return {
-                "ok": True,
-                "reused": True,
-                "group_id": kwargs["group_id"],
-                "prepared_count": 1,
-                "primed_count": 1,
-                "minimum_start_unix_ms": 1001900,
-                "clock_readiness": {
-                    "airplay:804af2c57d78": {
-                        "mode": "ptp",
-                        "state": "ready",
-                        "ready_at_unix_ms": 1000000,
-                    }
-                },
-            }
 
         def voice(**kwargs):
             order.append(("voice", kwargs))
             return {
                 "ok": True,
-                "sent_count": 1,
-                "media_session_sent_count": 1,
+                "sent_count": 2,
+                "native_sent_count": 1,
+                "airplay_bridge_sent_count": 1,
+                "airplay_bridge_prepared_count": 1,
+                "airplay_bridge_group_id": "sendspin-airplay-next",
+                "group_shared_stream": True,
                 "start_unix_ms": 1001900,
             }
 
-        def commit(**kwargs):
-            order.append(("commit", kwargs))
-            return {
-                "ok": True,
-                "sent_count": 1,
-                "group_id": kwargs["group_id"],
-                "start_unix_ms": kwargs["start_unix_ms"],
-            }
-
         with (
-            mock.patch.object(media_playback.time, "time", return_value=1000.0),
-            mock.patch.object(airplay_bridge, "reuse_airplay_group_sync", side_effect=reuse),
-            mock.patch.object(airplay_bridge, "prepare_airplay_group_sync") as prepare,
-            mock.patch.object(airplay_bridge, "prime_airplay_group_sync") as prime,
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync", side_effect=commit),
             mock.patch.object(media_playback, "_voice_core_play_media_sync", side_effect=voice),
         ):
             result = media_playback.play_media_url_targets(
@@ -658,38 +802,25 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["airplay_bridge_reused"])
-        self.assertEqual([entry[0] for entry in order], ["reuse", "voice", "commit"])
-        self.assertEqual(order[0][1]["reference_sync_offset_ms"], -80)
-        self.assertEqual(order[1][1]["start_lead_ms"], 1900)
-        self.assertEqual(order[2][1]["group_id"], "airplay-group-1")
-        prepare.assert_not_called()
-        prime.assert_not_called()
+        self.assertEqual([entry[0] for entry in order], ["voice"])
+        self.assertEqual(result["airplay_bridge_group_id"], "sendspin-airplay-next")
+        self.assertEqual(order[0][1]["airplay_players"], ["804af2c57d78"])
 
-    def test_failed_warm_reuse_falls_back_to_a_fresh_group(self) -> None:
-        import airplay_bridge
-
+    def test_airplay_only_playback_uses_a_fresh_sendspin_bridge(self) -> None:
         with (
             mock.patch.object(
-                airplay_bridge,
-                "reuse_airplay_group_sync",
-                return_value={"ok": False, "error": "session ended", "reusable": False},
-            ) as reuse,
-            mock.patch.object(
-                airplay_bridge,
-                "prepare_airplay_group_sync",
-                return_value={"ok": True, "group_id": "airplay-fresh", "prepared_count": 1},
-            ) as prepare,
-            mock.patch.object(
-                airplay_bridge,
-                "prime_airplay_group_sync",
-                return_value={"ok": True, "group_id": "airplay-fresh", "primed_count": 1},
-            ),
-            mock.patch.object(
-                airplay_bridge,
-                "commit_airplay_group_sync",
-                return_value={"ok": True, "group_id": "airplay-fresh", "sent_count": 1},
-            ),
+                media_playback,
+                "_voice_core_play_media_sync",
+                return_value={
+                    "ok": True,
+                    "sent_count": 1,
+                    "native_sent_count": 0,
+                    "airplay_bridge_sent_count": 1,
+                    "airplay_bridge_prepared_count": 1,
+                    "airplay_bridge_group_id": "sendspin-airplay-fresh",
+                    "group_shared_stream": True,
+                },
+            ) as voice,
         ):
             result = media_playback.play_media_url_targets(
                 ["airplay:804af2c57d78"],
@@ -698,41 +829,26 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["airplay_bridge_group_id"], "airplay-fresh")
-        self.assertEqual(result["airplay_bridge_reuse_fallback"], "session ended")
-        reuse.assert_called_once()
-        prepare.assert_called_once()
+        self.assertEqual(result["airplay_bridge_group_id"], "sendspin-airplay-fresh")
+        self.assertEqual(voice.call_args.kwargs["selectors"], [])
+        self.assertEqual(voice.call_args.kwargs["airplay_players"], ["804af2c57d78"])
 
     def test_automatic_sonos_route_uses_airplay_when_a_satellite_is_selected(self) -> None:
-        import airplay_bridge
         import announcement_targets
 
         order = []
-
-        def prepare(**kwargs):
-            order.append(("prepare", kwargs))
-            return {"ok": True, "group_id": "airplay-auto-1", "prepared_count": 1}
 
         def voice(**kwargs):
             order.append(("voice", kwargs))
             return {
                 "ok": True,
-                "sent_count": 1,
-                "media_session_sent_count": 1,
+                "sent_count": 2,
+                "native_sent_count": 1,
+                "airplay_bridge_sent_count": 1,
+                "airplay_bridge_prepared_count": 1,
+                "airplay_bridge_group_id": "sendspin-airplay-auto-1",
+                "group_shared_stream": True,
                 "start_unix_ms": 2000000000000,
-            }
-
-        def prime(**kwargs):
-            order.append(("prime", kwargs))
-            return {"ok": True, "group_id": kwargs["group_id"], "primed_count": 1}
-
-        def commit(**kwargs):
-            order.append(("commit", kwargs))
-            return {
-                "ok": True,
-                "sent_count": 1,
-                "group_id": kwargs["group_id"],
-                "start_unix_ms": kwargs["start_unix_ms"],
             }
 
         with (
@@ -741,9 +857,6 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 "resolve_sonos_airplay_target",
                 return_value="airplay:804af2c57d78",
             ),
-            mock.patch.object(airplay_bridge, "prepare_airplay_group_sync", side_effect=prepare),
-            mock.patch.object(airplay_bridge, "prime_airplay_group_sync", side_effect=prime),
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync", side_effect=commit),
             mock.patch.object(media_playback, "_voice_core_play_media_sync", side_effect=voice),
             mock.patch.object(media_playback, "_sonos_playback_sync") as sonos,
         ):
@@ -756,14 +869,14 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual([entry[0] for entry in order], ["prepare", "prime", "voice", "commit"])
-        self.assertEqual(order[0][1]["targets"], ["804af2c57d78"])
+        self.assertEqual([entry[0] for entry in order], ["voice"])
+        self.assertEqual(order[0][1]["airplay_players"], ["804af2c57d78"])
         self.assertEqual(
             order[0][1]["target_volume_percent"]["airplay:804af2c57d78"],
             63,
         )
         self.assertEqual(
-            order[3][1]["target_sync_offset_ms"]["airplay:804af2c57d78"],
+            order[0][1]["target_sync_offset_ms"]["airplay:804af2c57d78"],
             140,
         )
         self.assertEqual(result["sonos_airplay_target_count"], 1)
@@ -806,26 +919,20 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertEqual(sonos.call_args.kwargs["speakers"], ["RINCON_KITCHEN"])
 
     def test_external_audio_sonos_only_route_is_forced_through_airplay(self) -> None:
-        import airplay_bridge
         import announcement_targets
 
         order = []
 
-        def prepare(**kwargs):
-            order.append(("prepare", kwargs))
-            return {"ok": True, "group_id": "airplay-sonos-live", "prepared_count": 1}
-
-        def prime(**kwargs):
-            order.append(("prime", kwargs))
-            return {"ok": True, "group_id": kwargs["group_id"], "primed_count": 1}
-
-        def commit(**kwargs):
-            order.append(("commit", kwargs))
+        def voice(**kwargs):
+            order.append(("voice", kwargs))
             return {
                 "ok": True,
                 "sent_count": 1,
-                "group_id": kwargs["group_id"],
-                "start_unix_ms": kwargs["start_unix_ms"],
+                "native_sent_count": 0,
+                "airplay_bridge_sent_count": 1,
+                "airplay_bridge_prepared_count": 1,
+                "airplay_bridge_group_id": "sendspin-airplay-sonos-live",
+                "group_shared_stream": True,
             }
 
         with (
@@ -834,9 +941,9 @@ class MediaPlaybackSessionTests(unittest.TestCase):
                 "resolve_sonos_airplay_target",
                 return_value="airplay:804af2c57d78",
             ),
-            mock.patch.object(airplay_bridge, "prepare_airplay_group_sync", side_effect=prepare),
-            mock.patch.object(airplay_bridge, "prime_airplay_group_sync", side_effect=prime),
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync", side_effect=commit),
+            mock.patch.object(
+                media_playback, "_voice_core_play_media_sync", side_effect=voice
+            ),
             mock.patch.object(media_playback, "_sonos_playback_sync") as sonos,
         ):
             result = media_playback.play_media_url_targets(
@@ -847,7 +954,8 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual([entry[0] for entry in order], ["prepare", "prime", "commit"])
+        self.assertEqual([entry[0] for entry in order], ["voice"])
+        self.assertEqual(order[0][1]["airplay_players"], ["804af2c57d78"])
         self.assertEqual(
             result["sonos_airplay_routes"],
             {"sonos:RINCON_KITCHEN": "airplay:804af2c57d78"},
@@ -876,29 +984,10 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertIn("skipped to preserve sync", result["warnings"][0])
         sonos.assert_not_called()
 
-    def test_mixed_airplay_group_primes_before_satellite_and_aborts_when_satellite_fails(self) -> None:
+    def test_mixed_sendspin_bridge_reports_group_start_failure_atomically(self) -> None:
         import airplay_bridge
 
         with (
-            mock.patch.object(
-                airplay_bridge,
-                "prepare_airplay_group_sync",
-                return_value={
-                    "ok": True,
-                    "group_id": "airplay-failed-native",
-                    "prepared_count": 1,
-                },
-            ),
-            mock.patch.object(
-                airplay_bridge,
-                "prime_airplay_group_sync",
-                return_value={
-                    "ok": True,
-                    "group_id": "airplay-failed-native",
-                    "primed_count": 1,
-                },
-            ) as prime,
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync") as commit,
             mock.patch.object(airplay_bridge, "stop_airplay_targets") as stop,
             mock.patch.object(
                 media_playback,
@@ -912,36 +1001,20 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertFalse(result["ok"])
-        stop.assert_called_once_with(["804af2c57d78"])
-        prime.assert_called_once_with(group_id="airplay-failed-native", timeout_s=30.0)
-        commit.assert_not_called()
+        stop.assert_not_called()
         self.assertIn("satellite did not prepare", result["error"])
 
-    def test_mixed_airplay_group_does_not_start_satellite_when_airplay_priming_fails(self) -> None:
-        import airplay_bridge
-
+    def test_mixed_sendspin_bridge_surfaces_airplay_preparation_failure(self) -> None:
         with (
             mock.patch.object(
-                airplay_bridge,
-                "prepare_airplay_group_sync",
-                return_value={
-                    "ok": True,
-                    "group_id": "airplay-failed-prime",
-                    "prepared_count": 1,
-                },
-            ),
-            mock.patch.object(
-                airplay_bridge,
-                "prime_airplay_group_sync",
+                media_playback,
+                "_voice_core_play_media_sync",
                 return_value={
                     "ok": False,
-                    "group_id": "airplay-failed-prime",
-                    "primed_count": 0,
+                    "sent_count": 0,
                     "error": "receiver audio feed did not start",
                 },
-            ),
-            mock.patch.object(airplay_bridge, "commit_airplay_group_sync") as commit,
-            mock.patch.object(media_playback, "_voice_core_play_media_sync") as voice,
+            ) as voice,
         ):
             result = media_playback.play_media_url_targets(
                 ["voice_core:native:kitchen", "airplay:804af2c57d78"],
@@ -949,8 +1022,7 @@ class MediaPlaybackSessionTests(unittest.TestCase):
             )
 
         self.assertFalse(result["ok"])
-        voice.assert_not_called()
-        commit.assert_not_called()
+        voice.assert_called_once()
         self.assertIn("receiver audio feed did not start", result["error"])
 
     def test_mixed_group_compensates_for_normalized_native_member_delays(self) -> None:

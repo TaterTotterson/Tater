@@ -67,6 +67,8 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         global_values = {
             native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
             "wake_engine": "micro_wake_word",
+            "wake_mww_enabled": "True",
+            "wake_oww_enabled": "False",
             "wake_word": "custom_url",
             "wake_word_url": "http://trainer.test/hey_tater.json",
             "continued_chat": "True",
@@ -134,12 +136,14 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
 
     def test_wake_verification_card_is_below_shared_wake_settings(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "WakeWordModels.vue").read_text(encoding="utf-8")
-        wake_group = '=== "global_satellite_model_settings"'
+        mww_group = '=== "mww_satellite_model_settings"'
+        echo_group = '=== "echo_satellite_model_settings"'
         verifier_group = '=== "wake_verifier"'
         wake_fields = 'class="tm-form-card tm-wake-engine-card"'
         verifier_fields = 'class="tm-form-card tm-wake-verifier-card"'
 
-        self.assertIn(wake_group, source)
+        self.assertIn(mww_group, source)
+        self.assertIn(echo_group, source)
         self.assertIn(verifier_group, source)
         self.assertLess(source.index(wake_fields), source.index(verifier_fields))
         self.assertEqual(source.count("Apply To All Satellites"), 0)

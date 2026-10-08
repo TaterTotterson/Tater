@@ -785,11 +785,11 @@ private final class BackendManager {
             try ffmpegCheck.run()
             ffmpegCheck.waitUntilExit()
         } catch {
-            appendLog("Private runtime could not check the AirPlay FFmpeg runtime.\n")
+            appendLog("Private runtime could not check the media decoding runtime.\n")
             return false
         }
         if ffmpegCheck.terminationStatus != 0 {
-            appendLog("Private runtime is missing its AirPlay FFmpeg or discovery dependency.\n")
+            appendLog("Private runtime is missing its media decoder or AirPlay discovery dependency.\n")
             return false
         }
         return true

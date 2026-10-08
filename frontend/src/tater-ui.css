@@ -1599,6 +1599,10 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tm-wake-engine-card, .tm-wake-training-card, .tm-wake-verifier-card { border-color: color-mix(in srgb, var(--tv-accent) 26%, var(--tv-border)); }
 .tm-wake-source-panel, .tm-media-section, .tm-identity-section, .tm-face-model-section { display: grid; min-width: 0; gap: 10px; padding: 12px; border: 1px solid var(--tv-border); border-radius: 12px; background: color-mix(in srgb, var(--tv-surface) 84%, transparent); }
 .tm-wake-source-grid, .tm-wake-verifier-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tm-wake-source-grid-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tm-wake-model-block { display: grid; min-width: 0; gap: 9px; padding-top: 11px; border-top: 1px solid var(--tv-border); }
+.tm-wake-model-note { padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--tv-accent) 24%, var(--tv-border)); border-radius: 10px; color: var(--tv-muted); background: var(--tv-accent-soft); font-size: .58rem; line-height: 1.45; }
+.tm-wake-model-note.warning { border-color: rgb(239 178 75 / 32%); color: #efb24b; background: rgb(239 178 75 / 8%); }
 .tm-wake-engine-note, .tm-media-route-summary { display: grid; min-width: 0; grid-template-columns: 40px minmax(0, 1fr); align-items: center; gap: 10px; padding: 11px; border: 1px solid color-mix(in srgb, var(--tv-accent) 24%, var(--tv-border)); border-radius: 11px; background: var(--tv-accent-soft); }
 .tm-wake-engine-note > strong { color: var(--tv-text); font-size: .69rem; }
 .tm-wake-engine-note > span { color: var(--tv-muted); font-size: .61rem; line-height: 1.42; }
@@ -2343,18 +2347,21 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tm-led-halo { position: absolute; inset: 11px 22px; border: 1px solid color-mix(in srgb, var(--tm-led-color) 28%, transparent); border-radius: 50%; opacity: .25; }
 .tm-led-stage.animation-solid .tm-led-dot { opacity: .8; animation: none; }
 .tm-led-stage.animation-solid .tm-led-core { opacity: 1; animation: none; }
-.tm-led-stage:is(.animation-pulse, .animation-heartbeat) .tm-led-dot { animation-name: tm-led-pulse; animation-duration: 1.15s; }
+.tm-led-stage:is(.animation-pulse, .animation-heartbeat, .animation-music_pulse) .tm-led-dot { animation-name: tm-led-pulse; animation-duration: 1.15s; }
 .tm-led-stage.animation-heartbeat .tm-led-core { animation-name: tm-led-heartbeat; animation-duration: 1.25s; }
 .tm-led-stage.animation-breathe .tm-led-dot { animation-name: tm-led-breathe-dots; animation-duration: 2.1s; animation-delay: 0s; }
 .tm-led-stage:is(.animation-sparkle, .animation-shimmer, .animation-twinkle) .tm-led-dot { animation-name: tm-led-sparkle; animation-duration: 1.35s; animation-delay: calc(var(--tm-led-i) * -173ms); }
-.tm-led-stage:is(.animation-ping_pong, .animation-scanner, .animation-wave, .animation-theater) .tm-led-dot { animation-name: tm-led-wave; animation-duration: 1.1s; animation-direction: alternate; }
+.tm-led-stage:is(.animation-ping_pong, .animation-scanner, .animation-wave, .animation-theater, .animation-music_wave) .tm-led-dot { animation-name: tm-led-wave; animation-duration: 1.1s; animation-direction: alternate; }
 .tm-led-stage:is(.animation-ripple, .animation-voice_ring) .tm-led-halo { animation: tm-led-ripple 1.4s ease-out infinite; }
-.tm-led-stage:is(.animation-comet, .animation-dual_comet, .animation-spinner, .animation-orbit, .animation-directional) .tm-led-dot { animation-name: tm-led-chase; }
+.tm-led-stage:is(.animation-comet, .animation-dual_comet, .animation-spinner, .animation-orbit, .animation-directional, .animation-music_orbit) .tm-led-dot { animation-name: tm-led-chase; }
 .tm-led-stage.animation-dual_comet .tm-led-dot:nth-of-type(2n) { animation-delay: calc((var(--tm-led-i) * -100ms) - 600ms); }
-.tm-led-stage.animation-equalizer .tm-led-dot { animation-name: tm-led-equalizer; animation-duration: .85s; }
+.tm-led-stage:is(.animation-equalizer, .animation-music_bars) .tm-led-dot { animation-name: tm-led-equalizer; animation-duration: .85s; }
 .tm-led-stage.animation-audio_glow .tm-led-dot { animation: tm-led-audio-glow 1.6s cubic-bezier(.22, .7, .24, 1) infinite; animation-delay: 0s; }
 .tm-led-stage.animation-audio_glow .tm-led-core { animation: tm-led-audio-glow-core 1.6s cubic-bezier(.22, .7, .24, 1) infinite; }
 .tm-led-stage.animation-audio_glow .tm-led-halo { animation: tm-led-audio-glow-halo 1.6s cubic-bezier(.22, .7, .24, 1) infinite; }
+.tm-led-stage.animation-music_pulse .tm-led-core { animation: tm-led-audio-glow-core 1.25s cubic-bezier(.22, .7, .24, 1) infinite; }
+.tm-led-stage:is(.animation-music_bars, .animation-music_wave) .tm-led-core { animation-duration: 1.05s; }
+.tm-led-stage.animation-off .tm-led-dot, .tm-led-stage.animation-off .tm-led-core, .tm-led-stage.animation-off .tm-led-halo { box-shadow: none; opacity: 0; animation: none; }
 .tm-led-stage-single .tm-led-dot, .tm-led-stage-single .tm-led-halo { display: none; }
 .tm-led-stage-single .tm-led-core { width: 18px; height: 18px; }
 @keyframes tm-led-chase { 0%, 58%, 100% { opacity: .12; } 12% { opacity: 1; } 27% { opacity: .46; } }

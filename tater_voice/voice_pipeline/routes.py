@@ -576,6 +576,49 @@ async def native_satellite_wake_package_model(package_id: str) -> Response:
     )
 
 
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/manifest.wake-bundle.json")
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/bundle.wake-bundle.json")
+async def native_satellite_wake_package_bundle(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.bundle_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=body, media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/oww-metadata.json")
+async def native_satellite_oww_metadata(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.oww_metadata_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=body, media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/oww-model.onnx")
+async def native_satellite_oww_model(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.oww_model_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=body, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/tater/satellite/v1/settings")
 async def native_satellite_settings(selector: str = "", x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
@@ -618,7 +661,8 @@ async def linked_trainer_wake_word_save(
             {
                 "wake_word": "custom_url",
                 "wake_word_url": wake_word_url,
-            }
+            },
+            wake_family="mww",
         )
         wake_trainer_link.record_publish(
             wake_word=wake_word_name,
@@ -1498,7 +1542,8 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
             **result,
         }
 
-    if not passthrough_url:
+    sendspin_transient_pair = bool(stereo_pair and not persistent_media_requested)
+    if not passthrough_url and not sendspin_transient_pair:
         prepared_asset = await vp._prepare_native_media_asset(
             media_bytes,
             media_type=media_type,
@@ -1577,18 +1622,17 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
 
     if stereo_pair:
         try:
-            from .. import native_satellite
+            from .. import native_satellite, sendspin_playback
 
             if audio_scene:
                 scene = await _render_audio_scene()
-                scene_result = await native_satellite.prepare_stereo_media_session(
+                scene_asset = scene.get("asset") if isinstance(scene.get("asset"), dict) else {}
+                targets = await native_satellite.sendspin_stereo_pair_targets(stereo_pair)
+                scene_result = await sendspin_playback.play_stereo_pair_audio(
                     stereo_pair,
-                    session_id=vp._text(scene.get("session_id")),
-                    media_url=vp._text(scene.get("url")),
-                    volume_percent=100,
-                    loop=False,
-                    content_type="announcement",
-                    channel_mode="stereo",
+                    targets,
+                    bytes(scene_asset.get("bytes") or b""),
+                    preserve_stereo=True,
                     wait_for_completion=wait_for_completion,
                     completion_timeout_s=_scene_completion_timeout(scene),
                 )
@@ -1600,7 +1644,6 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     "audio_scene_render": dict(scene.get("summary") or {}),
                 }
                 audio_scene_started = True
-                media_session_started = True
                 rendered_audio_scene_started = True
             elif persistent_media_requested:
                 result = await native_satellite.prepare_stereo_media_session(
@@ -1617,32 +1660,18 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                     channel_mode="stereo",
                 )
                 media_session_started = True
-            elif native_satellite.stereo_pair_media_active(stereo_pair):
-                result = await native_satellite.start_stereo_overlay(
-                    stereo_pair,
-                    overlay_id=playback_id,
-                    foreground_url=playback_url,
-                    foreground_kind=tts_kind or "tts",
-                    ducking=ducking,
-                    wait_for_completion=wait_for_completion,
-                    completion_timeout_s=timeout_s,
-                )
-                audio_overlay_started = True
             else:
-                result = await native_satellite.prepare_stereo_media_session(
+                targets = await native_satellite.sendspin_stereo_pair_targets(stereo_pair)
+                result = await sendspin_playback.play_stereo_pair_audio(
                     stereo_pair,
-                    session_id=playback_id,
-                    media_url=playback_url,
-                    volume_percent=100,
-                    loop=False,
-                    content_type="tts",
-                    channel_mode="mono",
+                    targets,
+                    media_bytes,
+                    preserve_stereo=False,
                     wait_for_completion=wait_for_completion,
                     completion_timeout_s=timeout_s,
                 )
-                media_session_started = True
         except Exception as exc:
-            raise HTTPException(status_code=409, detail=f"Failed to queue stereo-pair playback: {exc}") from exc
+            raise HTTPException(status_code=409, detail=f"Failed to queue Sendspin stereo-pair playback: {exc}") from exc
     elif selector.startswith("native:"):
         try:
             from .. import native_satellite

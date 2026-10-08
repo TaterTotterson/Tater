@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import announcement_targets
-from tater_voice import native_satellite, stereo_pairs
+from tater_voice import native_live_settings, native_satellite, stereo_pairs
 
 
 class _FakeRedis:
@@ -104,6 +104,27 @@ class StereoPairPersistenceTests(unittest.TestCase):
         self.assertIn("Tater Stereo: Office Stereo", pair_option["label"])
         self.assertIn("ready", pair_option["label"])
 
+    def test_pair_members_receive_persistent_sendspin_channel_modes(self) -> None:
+        stereo_pairs.save_pair(
+            {
+                "name": "Office Stereo",
+                "left_selector": "native:left",
+                "right_selector": "native:right",
+            }
+        )
+        with mock.patch.object(
+            native_live_settings,
+            "firmware_settings_snapshot",
+            side_effect=lambda *_args, **_kwargs: {},
+        ):
+            left = native_satellite._firmware_settings_payload("native:left")
+            right = native_satellite._firmware_settings_payload("native:right")
+            unpaired = native_satellite._firmware_settings_payload("native:kitchen")
+
+        self.assertEqual(left["output_channel_mode"], "left")
+        self.assertEqual(right["output_channel_mode"], "right")
+        self.assertEqual(unpaired["output_channel_mode"], "stereo")
+
     def test_saved_native_satellite_remains_available_while_offline(self) -> None:
         self.redis.values[announcement_targets.REDIS_VOICE_SATELLITE_REGISTRY_KEY] = json.dumps(
             [
@@ -171,6 +192,162 @@ class StereoCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         native_satellite._stereo_sessions.clear()
         native_satellite._clients.clear()
         native_satellite._clients.update(self.original_clients)
+
+    async def test_sendspin_pair_compatibility_uses_new_player_capabilities(self) -> None:
+        capabilities = {
+            "sendspin_player": True,
+            "sendspin_version": 1,
+            "sendspin_output_channel_selection": True,
+        }
+        for selector in ("native:left", "native:right"):
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "hello": {"payload": {"capabilities": capabilities}},
+            }
+
+        result = await native_satellite.sendspin_stereo_pair_compatibility(
+            "native:left",
+            "native:right",
+        )
+
+        self.assertTrue(result["ok"])
+
+    async def test_sendspin_pair_targets_use_connected_satellite_hosts(self) -> None:
+        capabilities = {
+            "sendspin_player": True,
+            "sendspin_version": 1,
+            "sendspin_output_channel_selection": True,
+        }
+        for selector, host in (
+            ("native:left", "192.0.2.10"),
+            ("native:right", "192.0.2.11"),
+        ):
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "client_host": host,
+                "hello": {"payload": {"capabilities": capabilities}},
+            }
+
+        targets = await native_satellite.sendspin_stereo_pair_targets(
+            {
+                "left_selector": "native:left",
+                "right_selector": "native:right",
+            }
+        )
+
+        self.assertEqual(
+            [(target["selector"], target["host"], target["channel"]) for target in targets],
+            [
+                ("native:left", "192.0.2.10", "left"),
+                ("native:right", "192.0.2.11", "right"),
+            ],
+        )
+
+    async def test_sendspin_group_targets_expand_pairs_and_keep_individual_satellites(self) -> None:
+        capabilities = {
+            "sendspin_player": True,
+            "sendspin_version": 1,
+            "sendspin_output_channel_selection": True,
+        }
+        for selector, host in (
+            ("native:left", "192.0.2.10"),
+            ("native:right", "192.0.2.11"),
+            ("native:kitchen", "192.0.2.12"),
+        ):
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "client_host": host,
+                "hello": {"payload": {"capabilities": capabilities}},
+            }
+
+        pair = {
+            "selector": "stereo:office",
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+            "left_delay_ms": 8,
+            "right_delay_ms": 20,
+            "left_volume_percent": 85,
+            "right_volume_percent": 100,
+        }
+        with (
+            mock.patch("tater_voice.stereo_pairs.is_stereo_selector", side_effect=lambda value: value == "stereo:office"),
+            mock.patch("tater_voice.stereo_pairs.get_pair", side_effect=lambda value: pair if value == "stereo:office" else {}),
+        ):
+            targets = await native_satellite.sendspin_targets_for_selectors(
+                ["stereo:office", "native:kitchen"]
+            )
+
+        self.assertEqual(
+            [
+                (
+                    target["selector"],
+                    target["logical_selector"],
+                    target["channel"],
+                    target["delay_ms"],
+                    target["volume_percent"],
+                )
+                for target in targets
+            ],
+            [
+                ("native:left", "stereo:office", "left", 8, 85),
+                ("native:right", "stereo:office", "right", 20, 100),
+                ("native:kitchen", "native:kitchen", "stereo", 0, 100),
+            ],
+        )
+
+    async def test_pair_setting_pushes_left_right_and_restores_stereo(self) -> None:
+        pair = {
+            "left_selector": "native:left",
+            "right_selector": "native:right",
+        }
+        queues = {}
+        for selector in ("native:left", "native:right"):
+            queue = asyncio.Queue()
+            queues[selector] = queue
+            native_satellite._clients[selector] = {
+                "connected": True,
+                "hello": {"payload": {"board": "voice-pe"}},
+                "queue": queue,
+            }
+
+        with (
+            mock.patch.object(stereo_pairs, "list_pairs", return_value=[pair]),
+            mock.patch.object(native_live_settings, "settings_snapshot", return_value={}),
+            mock.patch.object(
+                native_live_settings,
+                "firmware_settings_snapshot",
+                side_effect=lambda *_args, **_kwargs: {},
+            ),
+        ):
+            result = await native_satellite.push_stereo_pair_settings(
+                ["native:left", "native:right"]
+            )
+
+        self.assertEqual(result["pushed"], ["native:left", "native:right"])
+        self.assertEqual(
+            queues["native:left"].get_nowait()["payload"]["output_channel_mode"],
+            "left",
+        )
+        self.assertEqual(
+            queues["native:right"].get_nowait()["payload"]["output_channel_mode"],
+            "right",
+        )
+
+        with (
+            mock.patch.object(stereo_pairs, "list_pairs", return_value=[]),
+            mock.patch.object(native_live_settings, "settings_snapshot", return_value={}),
+            mock.patch.object(
+                native_live_settings,
+                "firmware_settings_snapshot",
+                side_effect=lambda *_args, **_kwargs: {},
+            ),
+        ):
+            await native_satellite.push_stereo_pair_settings(["native:left"])
+
+        self.assertEqual(
+            queues["native:left"].get_nowait()["payload"]["output_channel_mode"],
+            "stereo",
+        )
 
     async def test_group_member_status_separates_ready_offline_and_old_firmware(self) -> None:
         capabilities = {

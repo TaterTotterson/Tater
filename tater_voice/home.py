@@ -145,6 +145,62 @@ def _global_satellite_model_settings_item_form(native_status: Dict[str, Any]) ->
     }
 
 
+def _wake_family_connected_count(native_status: Dict[str, Any], family: str) -> int:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    count = 0
+    for row in clients.values():
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            continue
+        capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+        board = esphome_runtime.text(row.get("board"))
+        if native_live_settings.wake_family_for(capabilities=capabilities, board=board) == family:
+            count += 1
+    return count
+
+
+def _wake_family_model_settings_item_form(native_status: Dict[str, Any], family: str) -> Dict[str, Any]:
+    echo = family == "echo"
+    connected = _wake_family_connected_count(native_status, family)
+    return {
+        "id": f"voice_{family}_satellite_model_settings",
+        "group": f"{family}_satellite_model_settings",
+        "profile": family,
+        "title": "Echo Wake Word" if echo else "microWakeWord Satellites",
+        "subtitle": (
+            "Used automatically by Echo firmware that advertises openWakeWord support. "
+            if echo
+            else "Used automatically by ESP and other satellites that support microWakeWord only. "
+        ) + f"Changes apply immediately to {connected} connected satellite(s) in this group.",
+        "sections": (
+            native_live_settings.echo_model_settings_sections()
+            if echo
+            else native_live_settings.mww_model_settings_sections()
+        ),
+        "save_action": "voice_global_satellite_settings_save",
+        "save_label": "Apply Wake Profile",
+        "remove_action": "",
+    }
+
+
+def _wake_trainer_settings_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    connected = sum(
+        1
+        for row in clients.values()
+        if isinstance(row, dict) and bool(row.get("connected"))
+    )
+    return {
+        "id": "voice_global_wake_trainer_settings",
+        "group": "global_wake_trainer_settings",
+        "title": "Wake Word Trainer Feedback",
+        "subtitle": f"Shared by all wake-capable satellites ({connected} connected).",
+        "sections": native_live_settings.wake_trainer_settings_sections(),
+        "save_action": "voice_global_satellite_settings_save",
+        "save_label": "Apply Trainer Settings",
+        "remove_action": "",
+    }
+
+
 def _stereo_pair_member_options(
     native_status: Dict[str, Any],
     *,
@@ -153,22 +209,17 @@ def _stereo_pair_member_options(
     clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
     rows: List[Dict[str, str]] = [{"value": "", "label": "Select a satellite"}]
     seen = {""}
-    required = {
-        "synchronized_media_sessions",
-        "stereo_channel_selection",
-        "media_playhead_telemetry",
-        "media_drift_correction",
-    }
+    required = {"sendspin_player", "sendspin_output_channel_selection"}
     for selector, raw in sorted(clients.items(), key=lambda item: esphome_runtime.text(item[0])):
         if not isinstance(raw, dict) or not bool(raw.get("connected")):
             continue
         token = esphome_runtime.text(selector)
         capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {}
         try:
-            session_version = int(float(capabilities.get("audio_session_version") or 0))
+            sendspin_version = int(float(capabilities.get("sendspin_version") or 0))
         except Exception:
-            session_version = 0
-        if session_version < 2 or any(not bool(capabilities.get(name)) for name in required):
+            sendspin_version = 0
+        if sendspin_version < 1 or any(not bool(capabilities.get(name)) for name in required):
             continue
         name = esphome_runtime.text(raw.get("device_name")) or token
         room = esphome_runtime.text(raw.get("room"))
@@ -190,16 +241,14 @@ def _stereo_pair_ready(pair: Dict[str, Any], native_status: Dict[str, Any]) -> b
         row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
         capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
         try:
-            session_version = int(float(capabilities.get("audio_session_version") or 0))
+            sendspin_version = int(float(capabilities.get("sendspin_version") or 0))
         except Exception:
-            session_version = 0
+            sendspin_version = 0
         if (
             not bool(row.get("connected"))
-            or session_version < 2
-            or not bool(capabilities.get("synchronized_media_sessions"))
-            or not bool(capabilities.get("stereo_channel_selection"))
-            or not bool(capabilities.get("media_playhead_telemetry"))
-            or not bool(capabilities.get("media_drift_correction"))
+            or sendspin_version < 1
+            or not bool(capabilities.get("sendspin_player"))
+            or not bool(capabilities.get("sendspin_output_channel_selection"))
         ):
             return False
     return True
@@ -292,9 +341,9 @@ def _stereo_pair_item_forms(native_status: Dict[str, Any]) -> List[Dict[str, Any
                 "id": pair.get("selector"),
                 "group": "stereo_pair",
                 "title": pair.get("name") or "Stereo Pair",
-                "subtitle": "Synchronized left/right Tater satellite pair",
+                "subtitle": "Sendspin left/right Tater satellite pair",
                 "detail": (
-                    "Ready for synchronized playback"
+                    "Ready for Sendspin synchronized playback"
                     if ready
                     else "Unavailable until both satellites are connected with current firmware"
                 ),
@@ -321,7 +370,7 @@ def _stereo_pair_item_forms(native_status: Dict[str, Any]) -> List[Dict[str, Any
             "id": "stereo:new",
             "group": "stereo_pair_create",
             "title": "Create Stereo Pair",
-            "subtitle": "Combine two updated Tater Native satellites into one synchronized destination.",
+            "subtitle": "Combine two Sendspin-enabled Tater Native satellites into one synchronized destination.",
             "detail": "Choose which satellite is physically on the left and right.",
             "connected": False,
             "hero_badges": [{"label": "New Pair", "tone": "muted"}],
@@ -352,7 +401,7 @@ def _wake_trainer_link_item_form() -> Dict[str, Any]:
         "title": "Wake Word Trainer",
         "subtitle": (
             "Securely link the trainer with a short pairing code. Once linked, only that trainer "
-            "can publish a new wake word to every satellite."
+            "can publish a new microWakeWord model to compatible satellites."
         ),
         "linked": linked,
         "status_label": "Linked" if linked else "Not Linked",
@@ -860,6 +909,13 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
                 _native_detail_row("native_server_audio_drain_timeouts", "Tater Drain Timeouts", audio_transport.get("queue_drain_timeouts")),
             ]
         )
+    board_token = esphome_runtime.lower(board).replace("_", "-").replace(" ", "-")
+    compact_board = board_token.replace("-", "")
+    is_biscuit = board_token in {"biscuit", "echo-dot-2", "echo-dot-2nd-gen"} or compact_board in {
+        "biscuit",
+        "echodot2",
+        "echodot2ndgen",
+    }
     settings_rows = [
         _native_detail_row("native_wake_word", "Wake Word", live_settings.get("wake_profile_name") or live_settings.get("wake_word")),
         _native_detail_row("native_wake_tuning_label", "Wake Tuning", wake_tuning_label),
@@ -880,14 +936,13 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
                     esphome_runtime.text(live_settings.get("led_tool_call_animation")) or "ping_pong",
                     esphome_runtime.text(live_settings.get("led_replying_animation")) or "audio_glow",
                 ]
+                + ([esphome_runtime.text(live_settings.get("led_music_animation")) or "audio_glow"] if is_biscuit else [])
             ),
         ),
         _native_detail_row("native_continued_chat", "Continued Chat", "On" if bool(live_settings.get("continued_chat", True)) else "Off"),
         _native_detail_row("native_barge_in", "Barge-In", "On" if bool(live_settings.get("barge_in_enabled", False)) else "Off"),
         _native_detail_row("native_trainer_feedback", "Trainer Feedback", ", ".join(capture_bits) if capture_bits else "Off"),
     ]
-    board_token = esphome_runtime.lower(board).replace("_", "-").replace(" ", "-")
-    compact_board = board_token.replace("-", "")
     is_s3_box = board_token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact_board in {
         "s3box",
         "s3box3",
@@ -1190,7 +1245,9 @@ def get_runtime_payload(
     }
     item_forms = [
         _global_satellite_settings_item_form(native_status),
-        _global_satellite_model_settings_item_form(native_status),
+        _wake_family_model_settings_item_form(native_status, "mww"),
+        _wake_family_model_settings_item_form(native_status, "echo"),
+        _wake_trainer_settings_item_form(native_status),
         _wake_trainer_link_item_form(),
         _wake_verifier_item_form(native_status),
     ]
@@ -1515,20 +1572,24 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         }
 
     if action_name == "voice_global_satellite_settings_save":
+        wake_family = esphome_runtime.text(body.get("profile")).lower()
         values = native_live_settings.resolve_wake_word_source_values(
             esphome_runtime.payload_values(body)
         )
-        allowed_values = {
-            key: value
-            for key, value in values.items()
-            if key in native_live_settings.GLOBAL_SATELLITE_CONTROL_KEYS
-        }
+        allowed_keys = (
+            native_live_settings.WAKE_FAMILY_PERSISTED_KEYS
+            if wake_family in native_live_settings.WAKE_FAMILIES
+            else set(native_live_settings.GLOBAL_SATELLITE_CONTROL_KEYS)
+        )
+        allowed_values = {key: value for key, value in values.items() if key in allowed_keys}
         if not allowed_values:
             raise ValueError("No global satellite settings were provided.")
-        result = native_satellite.run_on_runtime_loop(
-            native_satellite.save_live_settings(allowed_values),
-            timeout=15.0,
+        save_operation = (
+            native_satellite.save_live_settings(allowed_values, wake_family=wake_family)
+            if wake_family in native_live_settings.WAKE_FAMILIES
+            else native_satellite.save_live_settings(allowed_values)
         )
+        result = native_satellite.run_on_runtime_loop(save_operation, timeout=15.0)
         if "continued_chat" in allowed_values:
             esphome_settings.save_settings_values(
                 {
@@ -1549,6 +1610,15 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
                 _native_satellite_status_snapshot()
             ),
             "global_satellite_model_settings": _global_satellite_model_settings_item_form(
+                _native_satellite_status_snapshot()
+            ),
+            "mww_satellite_model_settings": _wake_family_model_settings_item_form(
+                _native_satellite_status_snapshot(), "mww"
+            ),
+            "echo_satellite_model_settings": _wake_family_model_settings_item_form(
+                _native_satellite_status_snapshot(), "echo"
+            ),
+            "global_wake_trainer_settings": _wake_trainer_settings_item_form(
                 _native_satellite_status_snapshot()
             ),
         }
@@ -1630,7 +1700,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         selector = esphome_runtime.payload_selector(body)
         values = esphome_runtime.payload_values(body)
         compatibility = native_satellite.run_on_runtime_loop(
-            native_satellite.stereo_pair_compatibility(
+            native_satellite.sendspin_stereo_pair_compatibility(
                 esphome_runtime.text(values.get("left_selector")),
                 esphome_runtime.text(values.get("right_selector")),
             ),
@@ -1642,22 +1712,42 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
                 or "The selected satellites are not ready for stereo pairing."
             )
         existing_id = stereo_pairs.pair_id_from_selector(selector)
+        previous = stereo_pairs.get_pair(existing_id) if existing_id else {}
         saved = stereo_pairs.save_pair(values, pair_id=existing_id)
+        affected_members = [
+            previous.get("left_selector"),
+            previous.get("right_selector"),
+            saved.get("left_selector"),
+            saved.get("right_selector"),
+        ]
+        push = native_satellite.run_on_runtime_loop(
+            native_satellite.push_stereo_pair_settings(affected_members),
+            timeout=10.0,
+        )
         return {
             "ok": True,
             "action": action_name,
             "selector": saved.get("selector"),
             "pair": saved,
+            "push": push,
             "message": f"Saved stereo pair {saved.get('name')}.",
         }
 
     if action_name == "voice_stereo_pair_remove":
         selector = esphome_runtime.payload_selector(body)
+        previous = stereo_pairs.get_pair(selector)
         removed = stereo_pairs.remove_pair(selector)
+        push = native_satellite.run_on_runtime_loop(
+            native_satellite.push_stereo_pair_settings(
+                [previous.get("left_selector"), previous.get("right_selector")]
+            ),
+            timeout=10.0,
+        )
         return {
             "ok": True,
             "action": action_name,
             **removed,
+            "push": push,
             "message": "Stereo pair deleted." if removed.get("removed") else "Stereo pair was already removed.",
         }
 

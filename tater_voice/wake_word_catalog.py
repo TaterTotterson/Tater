@@ -23,7 +23,7 @@ _REMOTE_TIMEOUT_SECONDS = 6.0
 _CACHE_TTL_SECONDS = 10 * 60.0
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 _SOURCE_PATTERN = re.compile(r"^microWakeWordsV(?P<version>[0-9]+)$", re.IGNORECASE)
-_CATALOG_PATH_PATTERN = re.compile(
+_CATALOG_JSON_PATH_PATTERN = re.compile(
     r"^/TaterTotterson/Tater-Wake-Words/main/microWakeWordsV[0-9]+/[^/]+\.json$",
     re.IGNORECASE,
 )
@@ -35,7 +35,16 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def is_catalog_url(value: Any) -> bool:
+def _catalog_type(value: Any) -> str:
+    token = _text(value).lower().replace("-", "_")
+    if token in {"oww", "openwakeword", "open_wake_word"}:
+        return "oww"
+    if token in {"dual", "paired", "dual_wake_word"}:
+        return "dual"
+    return "mww"
+
+
+def is_catalog_url(value: Any, *, model_type: Any = "mww") -> bool:
     token = _text(value)
     if not token:
         return False
@@ -43,17 +52,26 @@ def is_catalog_url(value: Any) -> bool:
         parsed = urlparse(token)
     except ValueError:
         return False
-    return (
+    if not (
         parsed.scheme.lower() == "https"
         and parsed.netloc.lower() == "raw.githubusercontent.com"
-        and bool(_CATALOG_PATH_PATTERN.fullmatch(parsed.path))
-    )
+        and bool(_CATALOG_JSON_PATH_PATTERN.fullmatch(parsed.path))
+    ):
+        return False
+    filename = parsed.path.rsplit("/", 1)[-1].lower()
+    if _catalog_type(model_type) in {"oww", "dual"}:
+        return filename.endswith(".wake-bundle.json")
+    return not filename.endswith((".esphome.json", ".oww.json", ".wake-bundle.json"))
 
 
-def require_catalog_url(value: Any) -> str:
+def require_catalog_url(value: Any, *, model_type: Any = "mww") -> str:
     token = _text(value)
-    if not is_catalog_url(token):
-        raise ValueError("Select a wake word from the official Tater Wake Word Catalog.")
+    catalog_type = _catalog_type(model_type)
+    if not is_catalog_url(token, model_type=catalog_type):
+        label = "Wake Word" if catalog_type == "mww" else (
+            "openWakeWord" if catalog_type == "oww" else "Dual Wake Word"
+        )
+        raise ValueError(f"Select a wake word from the official Tater {label} Catalog.")
     return token
 
 
@@ -96,11 +114,17 @@ def entries_from_manifest(payload: Any) -> List[Dict[str, Any]]:
         url = _text(row.get("url") or row.get("download_url") or row.get("json_url")) or _raw_url(path)
         if not is_catalog_url(url):
             continue
+        bundle_path = _text(row.get("bundle_path"))
+        bundle_url = _text(row.get("bundle_url")) or _raw_url(bundle_path)
+        dual_model = bool(row.get("dual_model")) and is_catalog_url(
+            bundle_url,
+            model_type="dual",
+        )
         slug = _text(row.get("slug") or row.get("name") or row.get("key"))
         label = _text(row.get("label") or row.get("title"))
         if not label:
             label = (slug or url.rsplit("/", 1)[-1].removesuffix(".json")).replace("_", " ").title()
-        entries[url] = {
+        entry = {
             "id": _text(row.get("id")) or f"{source}:{slug}",
             "slug": slug,
             "label": label,
@@ -109,6 +133,16 @@ def entries_from_manifest(payload: Any) -> List[Dict[str, Any]]:
             "version": version,
             "version_label": version_label,
         }
+        if dual_model:
+            entry.update(
+                {
+                    "dual_model": True,
+                    "bundle_url": bundle_url,
+                    "openwakeword_metadata_url": _text(row.get("openwakeword_metadata_url")),
+                    "openwakeword_model_url": _text(row.get("openwakeword_model_url")),
+                }
+            )
+        entries[url] = entry
 
     return sorted(
         entries.values(),
@@ -174,18 +208,34 @@ def load_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
     return payload
 
 
-def field_payload(*, current_url: Any = "", current_label: Any = "") -> Dict[str, Any]:
-    selected_url = _text(current_url) if is_catalog_url(current_url) else ""
+def field_payload(
+    *,
+    current_url: Any = "",
+    current_label: Any = "",
+    model_type: Any = "mww",
+) -> Dict[str, Any]:
+    catalog_type = _catalog_type(model_type)
+    selected_url = (
+        _text(current_url)
+        if is_catalog_url(current_url, model_type=catalog_type)
+        else ""
+    )
     catalog = load_catalog()
     entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+    if catalog_type in {"oww", "dual"}:
+        entries = [row for row in entries if row.get("dual_model") and _text(row.get("bundle_url"))]
+        url_key = "bundle_url"
+    else:
+        url_key = "url"
     options = [
         {
-            "value": _text(row.get("url")),
+            "value": _text(row.get(url_key)),
             "label": f"{_text(row.get('label'))} [{_text(row.get('version_label'))}]",
         }
         for row in entries
-        if _text(row.get("url"))
+        if _text(row.get(url_key))
     ]
+    official_count = len(options)
     if selected_url and not any(_text(row.get("value")) == selected_url for row in options):
         options.insert(
             0,
@@ -195,15 +245,38 @@ def field_payload(*, current_url: Any = "", current_label: Any = "") -> Dict[str
             },
         )
 
-    versions = catalog.get("versions") if isinstance(catalog.get("versions"), list) else []
+    versions = sorted(
+        {
+            int(row.get("version") or 0)
+            for row in entries
+            if 0 < int(row.get("version") or 0) < 999
+        }
+    )
+    if catalog_type == "mww" and not versions:
+        versions = (
+            catalog.get("versions")
+            if isinstance(catalog.get("versions"), list)
+            else []
+        )
     version_text = "–".join(f"V{version}" for version in (versions[:1] + versions[-1:])) if versions else ""
     if len(versions) == 1:
         version_text = f"V{versions[0]}"
-    description = (
-        f"{len(options)} official wake models"
-        f"{f' across {version_text}' if version_text else ''}. "
-        "The version is shown beside every wake word."
-    )
+    catalog_label = {
+        "mww": "microWakeWord models",
+        "oww": "openWakeWord packages",
+        "dual": "matched dual-model bundles",
+    }[catalog_type]
+    if official_count:
+        description = (
+            f"{official_count} official {catalog_label}"
+            f"{f' across {version_text}' if version_text else ''}. "
+            "The version is shown beside every wake word."
+        )
+    else:
+        description = (
+            f"No official {catalog_label} have been published yet. "
+            "This list will populate automatically when verified V7 wake words are added."
+        )
     warning = _text(catalog.get("warning"))
     if warning:
         description = f"{description} {warning}"
@@ -211,6 +284,8 @@ def field_payload(*, current_url: Any = "", current_label: Any = "") -> Dict[str
         "options": options,
         "selected_url": selected_url,
         "description": description,
+        "catalog_type": catalog_type,
+        "count": official_count,
         "warning": warning,
         "repository_url": CATALOG_REPOSITORY_URL,
     }

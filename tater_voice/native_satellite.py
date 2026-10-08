@@ -991,14 +991,45 @@ def _live_settings_payload(selector: str = "", *, board: str = "") -> Dict[str, 
     return native_live_settings.settings_snapshot(selector, board=board)
 
 
-def _firmware_settings_payload(selector: str = "", *, board: str = "") -> Dict[str, Any]:
+def _sendspin_output_channel_mode(selector: str = "") -> str:
+    from . import stereo_pairs
+
+    token = _canonical_selector(selector)
+    if not token:
+        return "stereo"
+    for pair in stereo_pairs.list_pairs():
+        if _canonical_selector(pair.get("left_selector")) == token:
+            return "left"
+        if _canonical_selector(pair.get("right_selector")) == token:
+            return "right"
+    return "stereo"
+
+
+def _firmware_settings_payload(
+    selector: str = "",
+    *,
+    board: str = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     from . import native_live_settings
 
-    settings = native_live_settings.firmware_settings_snapshot(selector, board=board)
-    if _lower(board) != "biscuit" or _lower(settings.get("wake_word")) != "custom_url":
+    settings = native_live_settings.firmware_settings_snapshot(
+        selector,
+        board=board,
+        capabilities=capabilities,
+    )
+    settings["output_channel_mode"] = _sendspin_output_channel_mode(selector)
+    if native_live_settings.wake_family_for(capabilities=capabilities, board=board) != "echo":
         return settings
-    source_url = _text(settings.get("wake_word_url"))
-    if not source_url:
+    dual_custom_bundle = (
+        bool(settings.get("wake_mww_enabled"))
+        and bool(settings.get("wake_oww_enabled"))
+        and _lower(settings.get("oww_wake_word")) == "custom_url"
+        and bool(_text(settings.get("oww_wake_word_url")))
+    )
+    mww_source_url = _text(settings.get("wake_word_url")) if _lower(settings.get("wake_word")) == "custom_url" else ""
+    oww_source_url = _text(settings.get("oww_wake_word_url")) if _lower(settings.get("oww_wake_word")) == "custom_url" else ""
+    if not mww_source_url and not oww_source_url:
         return settings
     row = _clients.get(_canonical_selector(selector))
     peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
@@ -1006,7 +1037,16 @@ def _firmware_settings_payload(selector: str = "", *, board: str = "") -> Dict[s
         from . import wake_package_proxy
 
         service_url = _vp()._service_base_url_for_peer(peer_host)
-        settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, source_url)
+        if dual_custom_bundle:
+            manifest_url, bundle_url = wake_package_proxy.register_dual_bundle(service_url, oww_source_url)
+            settings["wake_word"] = "custom_url"
+            settings["wake_word_url"] = manifest_url
+            settings["oww_wake_word"] = "paired_bundle"
+            settings["oww_wake_word_url"] = bundle_url
+        elif mww_source_url:
+            settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, mww_source_url)
+        if oww_source_url and not dual_custom_bundle:
+            settings["oww_wake_word_url"] = wake_package_proxy.register_bundle(service_url, oww_source_url)
     except (ValueError, RuntimeError) as exc:
         _vp().logger.warning(
             "[native-satellite] could not prepare local wake package selector=%s: %s",
@@ -2218,6 +2258,180 @@ async def stereo_pair_compatibility(left_selector: str, right_selector: str) -> 
             "missing_capabilities": missing,
         }
     return {"ok": True, "left_selector": left, "right_selector": right}
+
+
+async def sendspin_stereo_pair_compatibility(left_selector: str, right_selector: str) -> Dict[str, Any]:
+    left = _canonical_selector(left_selector)
+    right = _canonical_selector(right_selector)
+    if not left.startswith("native:") or not right.startswith("native:"):
+        return {"ok": False, "error": "Stereo pairs require two Tater Native satellites."}
+    if left == right:
+        return {"ok": False, "error": "Left and right satellites must be different."}
+
+    missing: list[str] = []
+    disconnected: list[str] = []
+    async with _clients_lock:
+        for selector in (left, right):
+            row = _clients.get(selector)
+            if not isinstance(row, dict) or not bool(row.get("connected")):
+                disconnected.append(selector)
+                continue
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            capabilities = _capabilities(_message_payload(hello))
+            absent = sorted(
+                name
+                for name in ("sendspin_player", "sendspin_output_channel_selection")
+                if not bool(capabilities.get(name))
+            )
+            try:
+                sendspin_version = int(float(capabilities.get("sendspin_version") or 0))
+            except Exception:
+                sendspin_version = 0
+            if sendspin_version < 1:
+                absent.append("sendspin_version_1")
+            if absent:
+                missing.append(f"{selector} ({', '.join(absent)})")
+    if disconnected:
+        return {
+            "ok": False,
+            "error": f"Both stereo satellites must be connected: {', '.join(disconnected)}.",
+            "disconnected": disconnected,
+        }
+    if missing:
+        return {
+            "ok": False,
+            "error": "Update satellite firmware before creating this Sendspin stereo pair: " + "; ".join(missing),
+            "missing_capabilities": missing,
+        }
+    return {"ok": True, "left_selector": left, "right_selector": right}
+
+
+async def sendspin_stereo_pair_targets(pair: Dict[str, Any]) -> list[Dict[str, Any]]:
+    pair_row = pair if isinstance(pair, dict) else {}
+    left = _canonical_selector(pair_row.get("left_selector"))
+    right = _canonical_selector(pair_row.get("right_selector"))
+    compatibility = await sendspin_stereo_pair_compatibility(left, right)
+    if not compatibility.get("ok"):
+        raise RuntimeError(_text(compatibility.get("error")) or "Stereo pair is unavailable.")
+
+    targets: list[Dict[str, Any]] = []
+    async with _clients_lock:
+        for selector, channel in ((left, "left"), (right, "right")):
+            row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
+            host = _text(row.get("client_host"))
+            if not host:
+                raise RuntimeError(f"{selector} has no reachable Sendspin host address.")
+            targets.append(
+                {
+                    "selector": selector,
+                    "host": host,
+                    "port": 8928,
+                    "channel": channel,
+                }
+            )
+    return targets
+
+
+async def sendspin_targets_for_selectors(selectors: list[Any]) -> list[Dict[str, Any]]:
+    """Expand native destinations into reachable Sendspin player endpoints."""
+    from . import stereo_pairs
+
+    expanded: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_selector in list(selectors or []):
+        logical_selector = _text(raw_selector)
+        if logical_selector.startswith("voice_core:"):
+            logical_selector = logical_selector.removeprefix("voice_core:")
+        pair = (
+            stereo_pairs.get_pair(logical_selector)
+            if stereo_pairs.is_stereo_selector(logical_selector)
+            else {}
+        )
+        if isinstance(pair, dict) and pair:
+            members = (
+                (
+                    _canonical_selector(pair.get("left_selector")),
+                    "left",
+                    _as_int(pair.get("left_delay_ms"), 0),
+                    max(0, min(100, _as_int(pair.get("left_volume_percent"), 100))),
+                ),
+                (
+                    _canonical_selector(pair.get("right_selector")),
+                    "right",
+                    _as_int(pair.get("right_delay_ms"), 0),
+                    max(0, min(100, _as_int(pair.get("right_volume_percent"), 100))),
+                ),
+            )
+        else:
+            members = ((_canonical_selector(logical_selector), "stereo", 0, 100),)
+        for member, channel, delay_ms, volume_percent in members:
+            if not member or not member.startswith("native:"):
+                raise RuntimeError(f"{logical_selector or raw_selector} is not a native satellite destination.")
+            if member in seen:
+                continue
+            seen.add(member)
+            expanded.append(
+                {
+                    "selector": member,
+                    "logical_selector": logical_selector,
+                    "channel": channel,
+                    "delay_ms": max(0, min(2000, int(delay_ms))),
+                    "volume_percent": volume_percent,
+                    "requires_channel_selection": channel in {"left", "right"},
+                }
+            )
+
+    if not expanded:
+        raise RuntimeError("No native Sendspin satellites were selected.")
+
+    missing: list[str] = []
+    disconnected: list[str] = []
+    targets: list[Dict[str, Any]] = []
+    async with _clients_lock:
+        for expanded_row in expanded:
+            selector = _text(expanded_row.get("selector"))
+            row = _clients.get(selector) if isinstance(_clients.get(selector), dict) else {}
+            if not row or not bool(row.get("connected")):
+                disconnected.append(selector)
+                continue
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            capabilities = _capabilities(_message_payload(hello))
+            absent: list[str] = []
+            if not bool(capabilities.get("sendspin_player")):
+                absent.append("sendspin_player")
+            try:
+                sendspin_version = int(float(capabilities.get("sendspin_version") or 0))
+            except Exception:
+                sendspin_version = 0
+            if sendspin_version < 1:
+                absent.append("sendspin_version_1")
+            if bool(expanded_row.get("requires_channel_selection")) and not bool(
+                capabilities.get("sendspin_output_channel_selection")
+            ):
+                absent.append("sendspin_output_channel_selection")
+            host = _text(row.get("client_host"))
+            if not host:
+                absent.append("reachable_host")
+            if absent:
+                missing.append(f"{selector} ({', '.join(absent)})")
+                continue
+            targets.append(
+                {
+                    **expanded_row,
+                    "host": host,
+                    "port": 8928,
+                }
+            )
+    if disconnected:
+        raise RuntimeError(
+            "Sendspin satellites must be connected: " + ", ".join(disconnected)
+        )
+    if missing:
+        raise RuntimeError(
+            "Update satellite firmware before using Sendspin playback: "
+            + "; ".join(missing)
+        )
+    return targets
 
 
 async def media_group_member_status(selectors: list[str]) -> Dict[str, Any]:
@@ -4171,12 +4385,15 @@ def _record_stereo_overlay_finished(selector: str, payload: Dict[str, Any]) -> N
 async def push_live_settings(selector: str = "") -> Dict[str, Any]:
     token = _canonical_selector(selector)
     response_board = ""
+    response_capabilities: Dict[str, Any] = {}
     pushed: list[str] = []
     async with _clients_lock:
         targets = {token: _clients.get(token)} if token else dict(_clients)
         if token and isinstance(targets.get(token), dict):
             hello = targets[token].get("hello") if isinstance(targets[token].get("hello"), dict) else {}
-            response_board = _text(_message_payload(hello).get("board"))
+            response_payload = _message_payload(hello)
+            response_board = _text(response_payload.get("board"))
+            response_capabilities = _capabilities(response_payload)
         for target_selector, row in targets.items():
             if not isinstance(row, dict) or not bool(row.get("connected")):
                 continue
@@ -4186,15 +4403,54 @@ async def push_live_settings(selector: str = "") -> Dict[str, Any]:
             queue = row.get("queue")
             if not isinstance(queue, asyncio.Queue):
                 continue
-            queued = _envelope("settings", _firmware_settings_payload(str(target_selector), board=board))
+            capabilities = _capabilities(payload)
+            queued = _envelope(
+                "settings",
+                _firmware_settings_payload(
+                    str(target_selector),
+                    board=board,
+                    capabilities=capabilities,
+                ),
+            )
             _queue_command(queue, queued)
             pushed.append(str(target_selector))
     settings = _live_settings_payload(token, board=response_board)
-    firmware_settings = _firmware_settings_payload(token, board=response_board)
+    firmware_settings = _firmware_settings_payload(
+        token,
+        board=response_board,
+        capabilities=response_capabilities,
+    )
     return {"ok": True, "settings": settings, "firmware_settings": firmware_settings, "pushed": pushed, "count": len(pushed)}
 
 
-async def save_live_settings(values: Dict[str, Any], *, selector: str = "") -> Dict[str, Any]:
+async def push_stereo_pair_settings(selectors: list[str]) -> Dict[str, Any]:
+    members: list[str] = []
+    for raw_selector in list(selectors or []):
+        selector = _canonical_selector(raw_selector)
+        if selector.startswith("native:") and selector not in members:
+            members.append(selector)
+    results = [await push_live_settings(selector) for selector in members]
+    pushed = sorted(
+        {
+            pushed_selector
+            for result in results
+            for pushed_selector in list(result.get("pushed") or [])
+        }
+    )
+    return {
+        "ok": True,
+        "members": members,
+        "pushed": pushed,
+        "count": len(pushed),
+    }
+
+
+async def save_live_settings(
+    values: Dict[str, Any],
+    *,
+    selector: str = "",
+    wake_family: str = "",
+) -> Dict[str, Any]:
     from . import native_live_settings
 
     token = _canonical_selector(selector)
@@ -4203,7 +4459,12 @@ async def save_live_settings(values: Dict[str, Any], *, selector: str = "") -> D
         row = _clients.get(token) if token else {}
         hello = row.get("hello") if isinstance(row, dict) and isinstance(row.get("hello"), dict) else {}
         board = _text(_message_payload(hello).get("board"))
-    result = native_live_settings.save_settings(values or {}, selector=token, board=board)
+    if wake_family:
+        if token:
+            raise ValueError("Wake-family settings cannot be saved as a device override.")
+        result = native_live_settings.save_wake_family_settings(wake_family, values or {})
+    else:
+        result = native_live_settings.save_settings(values or {}, selector=token, board=board)
     push_result = await push_live_settings(token)
     result["push"] = push_result
     _notify_state_change("settings", token)
@@ -4692,7 +4953,16 @@ async def handle_websocket(websocket: WebSocket) -> None:
         )
 
         await send_json(_envelope("state", {"state": "idle"}))
-        await send_json(_envelope("settings", _firmware_settings_payload(selector, board=_text(payload.get("board")))))
+        await send_json(
+            _envelope(
+                "settings",
+                _firmware_settings_payload(
+                    selector,
+                    board=_text(payload.get("board")),
+                    capabilities=_capabilities(payload),
+                ),
+            )
+        )
 
         if _screen_weather_supported(payload):
             first_weather = await asyncio.to_thread(_screen_weather_payload, selector)

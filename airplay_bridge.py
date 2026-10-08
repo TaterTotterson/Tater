@@ -57,11 +57,9 @@ AIRPLAY_CLI_ASSETS = {
 AIRPLAY_PREPARE_TIMEOUT_SECONDS = 18.0
 AIRPLAY_START_ACK_TIMEOUT_SECONDS = 5.0
 AIRPLAY_SOLO_START_LEAD_MS = 500
-AIRPLAY_NATIVE_START_LEAD_MS = 3000
 AIRPLAY_CLOCK_READY_TIMEOUT_SECONDS = 4.0
 AIRPLAY_SONOS_BUFFER_DEPTH_MS = 1750
-AIRPLAY_WARM_FLUSH_TIMEOUT_SECONDS = 3.0
-AIRPLAY_WARM_SPLICE_MARGIN_MS = 150
+AIRPLAY_START_MARGIN_MS = 150
 AIRPLAY_PTP_DAEMON_START_TIMEOUT_SECONDS = 3.0
 AIRPLAY_PTP_DAEMON_RESTART_LIMIT = 1
 AIRPLAY_PTP_CONTROL_HOST = "127.0.0.1"
@@ -112,28 +110,6 @@ def airplay_target_value(value: Any) -> str:
 
 def _runtime_root() -> Path:
     return runtime_dir() / "airplay_bridge"
-
-
-def _find_ffmpeg() -> str:
-    configured = _text(os.getenv("TATER_FFMPEG_PATH") or os.getenv("FFMPEG_PATH"))
-    candidates = [
-        configured,
-        _text(shutil.which("ffmpeg")),
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
-    ]
-    try:
-        import imageio_ffmpeg
-
-        candidates.append(_text(imageio_ffmpeg.get_ffmpeg_exe()))
-    except Exception:
-        pass
-    for raw_path in candidates:
-        path = Path(raw_path).expanduser() if raw_path else None
-        if path and path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-    return ""
 
 
 def _platform_key() -> tuple[str, str]:
@@ -819,32 +795,27 @@ class _AirPlayMember:
         target: str,
         device: Dict[str, Any],
         binary: str,
-        ffmpeg: str,
-        source_url: str,
-        start_position_seconds: float,
         volume_percent: int,
         title: str,
         artist: str,
         album: str,
         duration_seconds: float,
         group_id: str,
+        pcm_sample_rate: int = 44_100,
     ) -> None:
         self.target = airplay_target_value(target)
         self.device = dict(device)
         self.binary = binary
-        self.ffmpeg_binary = ffmpeg
-        self.source_url = _text(source_url)
-        self.start_position_seconds = max(0.0, float(start_position_seconds or 0.0))
         self.volume_percent = _as_int(volume_percent, 75, 0, 100)
         self.title = _text(title) or "Tater Music"
         self.artist = _text(artist) or "Tater"
         self.album = _text(album) or "Tater Music"
         self.duration_seconds = max(0, int(float(duration_seconds or 0.0)))
         self.group_id = group_id
+        self.pcm_sample_rate = _as_int(pcm_sample_rate, 44_100, 8_000, 192_000)
         self.run_dir: Optional[Path] = None
         self.command_fd: Optional[int] = None
         self.process: Optional[subprocess.Popen[bytes]] = None
-        self.ffmpeg_process: Optional[subprocess.Popen[bytes]] = None
         self.connected = False
         self.audio_present = False
         self.playing = False
@@ -856,14 +827,11 @@ class _AirPlayMember:
         self.route_flow = ""
         self.route_timing = ""
         self.latency_lead_ms = 0
-        self.warm_lead_ms = 0
-        self.flushed = False
-        self.flushed_head_unix_ms = 0
         self.start_ack_ms = 0
         self.error = ""
         self.status_lines: queue.Queue[str] = queue.Queue(maxsize=200)
         self._condition = threading.Condition()
-        self._replace_lock = threading.Lock()
+        self._stdin_lock = threading.Lock()
         self._closed = False
 
     def _build_args(self, command_pipe: Path) -> List[str]:
@@ -900,7 +868,7 @@ class _AirPlayMember:
             "--cmdpipe",
             str(command_pipe),
             "--samplerate",
-            "44100",
+            str(self.pcm_sample_rate),
             "--bitdepth",
             "16",
             "--channels",
@@ -974,16 +942,6 @@ class _AirPlayMember:
             if "[status] latency " in lowered:
                 fields = dict(part.split("=", 1) for part in clean.split() if "=" in part)
                 self.latency_lead_ms = _as_int(fields.get("lead_ms"), 0, 0, 30_000)
-                self.warm_lead_ms = _as_int(fields.get("warm_lead_ms"), 0, 0, 30_000)
-            if "[status] flushed" in lowered:
-                fields = dict(part.split("=", 1) for part in clean.split() if "=" in part)
-                self.flushed_head_unix_ms = _as_int(
-                    fields.get("head_unix_ms"),
-                    0,
-                    0,
-                    9_999_999_999_999,
-                )
-                self.flushed = True
             if "[status] clock_ready " in lowered:
                 fields = dict(part.split("=", 1) for part in clean.split() if "=" in part)
                 mode = _text(fields.get("mode")).lower()
@@ -999,9 +957,7 @@ class _AirPlayMember:
                     # receiver's PTP clock has not converged yet.  Treating that
                     # forecast as ready lets the native timeline become fixed
                     # while Sonos is still correcting its clock, which makes an
-                    # otherwise shared start anchor audibly miss.  Warm groups
-                    # already report ``ready`` and do not pay this cold-start
-                    # wait on track replacement.
+                    # otherwise shared start anchor audibly miss.
                     # NTP routes explicitly have no measurable readiness state;
                     # they must not wait for a PTP-only ``ready`` transition.
                     self.clock_ready_resolved = mode == "ntp" or state in {"ready", "stalled"}
@@ -1022,7 +978,6 @@ class _AirPlayMember:
                 "[status] audio ",
                 "[status] latency ",
                 "[status] clock_ready ",
-                "[status] flushed",
                 "[status] started ",
                 "[status] eof",
             )
@@ -1102,62 +1057,42 @@ class _AirPlayMember:
             )
         )
 
-    def begin_audio(self, timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS) -> None:
-        if self.process is None or self.process.poll() is not None or not self.connected:
+    def write_sendspin_pcm(self, pcm: bytes) -> None:
+        """Forward one Sendspin PCM chunk to this member's AirPlay transport."""
+        process = self.process
+        stdin = process.stdin if process is not None else None
+        if (
+            self._closed
+            or process is None
+            or process.poll() is not None
+            or stdin is None
+            or getattr(stdin, "closed", False)
+            or not self.connected
+        ):
             raise RuntimeError(f"AirPlay receiver {self.device.get('name')} is not connected.")
-        if self.ffmpeg_process is not None and self.ffmpeg_process.poll() is None:
+        payload = bytes(pcm or b"")
+        if not payload:
             return
+        with self._stdin_lock:
+            stdin.write(payload)
+            stdin.flush()
 
-        assert self.process.stdin is not None
-        ffmpeg_args = [
-            self.ffmpeg_binary,
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-        ]
-        if self.start_position_seconds > 0:
-            ffmpeg_args.extend(["-ss", f"{self.start_position_seconds:.3f}"])
-        ffmpeg_args.extend(
-            [
-                "-i",
-                self.source_url,
-                "-vn",
-                "-sn",
-                "-dn",
-                "-ac",
-                "2",
-                "-ar",
-                "44100",
-                "-f",
-                "s16le",
-                "pipe:1",
-            ]
-        )
-        self.ffmpeg_process = subprocess.Popen(
-            ffmpeg_args,
-            stdin=subprocess.DEVNULL,
-            stdout=self.process.stdin,
-            stderr=subprocess.PIPE,
-            **_safe_subprocess_options(),
-        )
+    def wait_sendspin_ready(
+        self,
+        timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wait until bridged PCM and the receiver clock are ready to anchor."""
         if not self._wait_for(lambda: self.audio_present, timeout_s):
-            detail = self.error
-            if not detail and self.ffmpeg_process.poll() not in (None, 0):
-                stderr = self.ffmpeg_process.stderr
-                detail = _text(stderr.read(2048) if stderr else "")
-            raise RuntimeError(detail or f"AirPlay receiver {self.device.get('name')} did not buffer audio.")
-        # Sonos can acknowledge a scheduled START yet hold its renderer silent
-        # when the first metadata push arrived before PCM initialized the AirPlay
-        # stream. Re-send identity and volume after [STATUS] audio, matching the
-        # order that produces an audible renderer in Music Assistant's flow.
+            raise RuntimeError(
+                self.error
+                or f"AirPlay receiver {self.device.get('name')} did not buffer Sendspin audio."
+            )
         self.send_metadata()
         self.send_command(f"VOLUME={self.volume_percent}")
-        clock_ready = self._wait_for(
+        if not self._wait_for(
             lambda: self.clock_ready_resolved,
             min(AIRPLAY_CLOCK_READY_TIMEOUT_SECONDS, max(0.1, float(timeout_s))),
-        )
-        if not clock_ready:
+        ):
             raise RuntimeError(
                 f"AirPlay receiver {self.device.get('name')} did not stabilize its playback clock."
             )
@@ -1165,86 +1100,6 @@ class _AirPlayMember:
             raise RuntimeError(
                 f"AirPlay receiver {self.device.get('name')} did not establish its playback clock."
             )
-
-    def _terminate_ffmpeg(self) -> None:
-        process = self.ffmpeg_process
-        if process is None or process.poll() is not None:
-            return
-        with contextlib.suppress(Exception):
-            process.terminate()
-        with contextlib.suppress(Exception):
-            process.wait(timeout=2.0)
-        if process.poll() is None:
-            with contextlib.suppress(Exception):
-                process.kill()
-            with contextlib.suppress(Exception):
-                process.wait(timeout=1.0)
-
-    def replace_audio(
-        self,
-        *,
-        source_url: str,
-        start_position_seconds: float,
-        volume_percent: int,
-        title: str,
-        artist: str,
-        album: str,
-        duration_seconds: float,
-        timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
-    ) -> None:
-        """Flush and refill one track without rebuilding the receiver session."""
-        with self._replace_lock:
-            process = self.process
-            stdin = process.stdin if process is not None else None
-            if (
-                self._closed
-                or process is None
-                or process.poll() is not None
-                or stdin is None
-                or getattr(stdin, "closed", False)
-                or not self.connected
-            ):
-                raise RuntimeError(f"AirPlay receiver {self.device.get('name')} cannot be reused.")
-
-            # No old bytes may arrive between FLUSH and its acknowledgement.
-            # Tater retains the CLI stdin writer while replacing only ffmpeg.
-            self._terminate_ffmpeg()
-            with self._condition:
-                self.flushed = False
-                self.flushed_head_unix_ms = 0
-                self.audio_present = False
-                self.playing = False
-                self.start_ack_ms = 0
-                self.error = ""
-            self.send_command("ACTION=FLUSH")
-            if not self._wait_for(
-                lambda: self.flushed,
-                min(
-                    AIRPLAY_WARM_FLUSH_TIMEOUT_SECONDS,
-                    max(0.1, float(timeout_s)),
-                ),
-            ):
-                raise RuntimeError(
-                    self.error
-                    or f"AirPlay receiver {self.device.get('name')} did not acknowledge its warm flush."
-                )
-
-            # FLUSH re-arms the binary's one-shot audio status. Reset our copy
-            # after the ack as well so only the replacement track can satisfy it.
-            with self._condition:
-                self.audio_present = False
-                self.playing = False
-                self.start_ack_ms = 0
-            self.source_url = _text(source_url)
-            self.start_position_seconds = max(0.0, float(start_position_seconds or 0.0))
-            self.volume_percent = _as_int(volume_percent, self.volume_percent, 0, 100)
-            self.title = _text(title) or "Tater Music"
-            self.artist = _text(artist) or "Tater"
-            self.album = _text(album) or "Tater Music"
-            self.duration_seconds = max(0, int(float(duration_seconds or 0.0)))
-            self.send_metadata()
-            self.send_command(f"VOLUME={self.volume_percent}")
-            self.begin_audio(timeout_s=max(5.0, min(30.0, float(timeout_s))))
 
     def send_command(self, command: str) -> None:
         if self.command_fd is None:
@@ -1289,7 +1144,6 @@ class _AirPlayMember:
             self._closed = True
         with contextlib.suppress(Exception):
             self.send_command("ACTION=STOP")
-        self._terminate_ffmpeg()
         if self.process is not None and self.process.stdin is not None:
             with contextlib.suppress(Exception):
                 self.process.stdin.close()
@@ -1418,36 +1272,39 @@ def stop_airplay_group_sync(group_id: str) -> Dict[str, Any]:
         return {"ok": False, "sent_count": 0, "warnings": [_text(exc)], "error": _text(exc)}
 
 
-def prepare_airplay_group_sync(
+def prepare_sendspin_airplay_bridge(
     *,
     targets: List[str],
-    source_url: str,
-    start_position_seconds: float = 0.0,
     volume_percent: int = 75,
     target_volume_percent: Optional[Dict[str, Any]] = None,
     title: str = "Tater Music",
     artist: str = "Tater",
     album: str = "Tater Music",
     duration_seconds: float = 0.0,
+    pcm_sample_rate: int = 44_100,
     timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
-    clean_targets = [airplay_target_value(target) for target in targets if airplay_target_value(target)]
+    """Connect AirPlay outputs that will consume Tater's Sendspin PCM stream."""
+    clean_targets = [
+        airplay_target_value(target)
+        for target in targets
+        if airplay_target_value(target)
+    ]
     clean_targets = list(dict.fromkeys(clean_targets))
     if not clean_targets:
-        return {"ok": False, "sent_count": 0, "error": "No AirPlay bridge targets selected."}
-    if not _text(source_url):
-        return {"ok": False, "sent_count": 0, "error": "AirPlay playback URL is missing."}
+        return {"ok": False, "prepared_count": 0, "error": "No AirPlay bridge targets selected."}
 
     binary = ensure_airplay_cli()
-    ffmpeg = _find_ffmpeg()
-    if not ffmpeg:
-        return {"ok": False, "sent_count": 0, "error": "ffmpeg is required for AirPlay playback."}
     stop_airplay_targets(clean_targets)
-    devices = {airplay_target_value(row.get("id")): row for row in discover_airplay_devices(force=True)}
+    devices = {
+        airplay_target_value(row.get("id")): row
+        for row in discover_airplay_devices(force=True)
+    }
     native_airplay_devices = [
         devices.get(target)
         for target in clean_targets
-        if isinstance(devices.get(target), dict) and devices.get(target, {}).get("airplay_port")
+        if isinstance(devices.get(target), dict)
+        and devices.get(target, {}).get("airplay_port")
     ]
     ptp_daemon: Dict[str, Any] = {}
     if native_airplay_devices:
@@ -1460,12 +1317,14 @@ def prepare_airplay_group_sync(
         except Exception as exc:
             return {
                 "ok": False,
-                "sent_count": 0,
+                "prepared_count": 0,
                 "error": f"AirPlay shared clock could not start: {_text(exc)}",
             }
-    group_id = f"airplay-{uuid.uuid4().hex[:16]}"
+
+    group_id = f"sendspin-airplay-{uuid.uuid4().hex[:16]}"
     members: List[_AirPlayMember] = []
     failures: List[str] = []
+    route_warnings: List[str] = []
     for target in clean_targets:
         device = devices.get(target)
         if not device or not bool(device.get("available", True)):
@@ -1477,25 +1336,29 @@ def prepare_airplay_group_sync(
                 target=target,
                 device=device,
                 binary=binary,
-                ffmpeg=ffmpeg,
-                source_url=source_url,
-                start_position_seconds=start_position_seconds,
                 volume_percent=max(0, min(100, target_volume)),
                 title=title,
                 artist=artist,
                 album=album,
                 duration_seconds=duration_seconds,
                 group_id=group_id,
+                pcm_sample_rate=pcm_sample_rate,
             )
         )
     if not members:
-        return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "No AirPlay receivers are available."}
+        return {
+            "ok": False,
+            "prepared_count": 0,
+            "error": "; ".join(failures) or "No AirPlay receivers are available.",
+        }
 
     prepared: List[_AirPlayMember] = []
-    route_warnings: List[str] = []
     with ThreadPoolExecutor(max_workers=len(members)) as executor:
         future_members = {
-            executor.submit(member.prepare, max(5.0, min(30.0, float(timeout_s)))): member
+            executor.submit(
+                member.prepare,
+                max(5.0, min(30.0, float(timeout_s))),
+            ): member
             for member in members
         }
         for future in as_completed(future_members):
@@ -1513,15 +1376,13 @@ def prepare_airplay_group_sync(
                     target=member.target,
                     device=legacy,
                     binary=binary,
-                    ffmpeg=ffmpeg,
-                    source_url=source_url,
-                    start_position_seconds=start_position_seconds,
                     volume_percent=member.volume_percent,
                     title=title,
                     artist=artist,
                     album=album,
                     duration_seconds=duration_seconds,
                     group_id=group_id,
+                    pcm_sample_rate=pcm_sample_rate,
                 )
                 try:
                     fallback.prepare(max(5.0, min(30.0, float(timeout_s))))
@@ -1532,32 +1393,27 @@ def prepare_airplay_group_sync(
                     )
                 except Exception as fallback_exc:
                     fallback.stop()
-                    failures.append(f"{member.target} (AirPlay 2: {exc}; RAOP: {fallback_exc})")
+                    failures.append(
+                        f"{member.target} (AirPlay 2: {exc}; RAOP: {fallback_exc})"
+                    )
     if not prepared:
-        return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "AirPlay preparation failed."}
+        return {
+            "ok": False,
+            "prepared_count": 0,
+            "error": "; ".join(failures) or "AirPlay preparation failed.",
+        }
 
     group = _AirPlayGroup(group_id, prepared)
-    for member in prepared:
-        if member.device.get("airplay_port") and member.route_protocol == "raop":
-            route_warnings.append(
-                f"{member.device.get('name') or member.target} negotiated legacy RAOP timing "
-                "instead of AirPlay 2 for this session."
-            )
-    if route_warnings:
-        logger.warning("[airplay_bridge] group route fallback: %s", "; ".join(route_warnings))
     with _session_lock:
         _active_groups[group_id] = group
         for member in prepared:
             _target_groups[member.target] = group_id
     result: Dict[str, Any] = {
         "ok": True,
+        "sendspin_bridge": True,
         "group_id": group_id,
         "prepared_count": len(prepared),
         "prepared_targets": [member.target for member in prepared],
-        "timing_modes": {
-            member.target: member.route_timing or "unknown"
-            for member in prepared
-        },
         "routes": {
             member.target: {
                 "protocol": member.route_protocol or "unknown",
@@ -1574,23 +1430,46 @@ def prepare_airplay_group_sync(
     return result
 
 
-def prime_airplay_group_sync(
-    *,
-    group_id: str,
-    timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
-) -> Dict[str, Any]:
-    """Begin a paced PCM feed after every non-AirPlay member is prepared."""
+def write_sendspin_airplay_bridge_pcm(group_id: str, pcm: bytes) -> Dict[str, Any]:
+    """Write one already-paced PCM chunk to every AirPlay bridge member."""
     with _session_lock:
         group = _active_groups.get(_text(group_id))
     if not group:
-        return {"ok": False, "primed_count": 0, "error": "AirPlay bridge group is unavailable."}
-
+        return {"ok": False, "sent_count": 0, "error": "AirPlay bridge group is unavailable."}
     failures: List[str] = []
-    primed: List[_AirPlayMember] = []
+    sent_count = 0
+    for member in group.members:
+        try:
+            member.write_sendspin_pcm(pcm)
+            sent_count += 1
+        except Exception as exc:
+            failures.append(f"{member.target} ({exc})")
+    result: Dict[str, Any] = {
+        "ok": sent_count == len(group.members),
+        "sent_count": sent_count,
+    }
+    if failures:
+        result["warnings"] = failures
+        result["error"] = "; ".join(failures)
+    return result
+
+
+def wait_sendspin_airplay_bridge_ready(
+    group_id: str,
+    *,
+    timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    """Wait until bridged audio and every receiver clock can accept an anchor."""
+    with _session_lock:
+        group = _active_groups.get(_text(group_id))
+    if not group:
+        return {"ok": False, "ready_count": 0, "error": "AirPlay bridge group is unavailable."}
+    failures: List[str] = []
+    ready: List[_AirPlayMember] = []
     with ThreadPoolExecutor(max_workers=max(1, len(group.members))) as executor:
         future_members = {
             executor.submit(
-                member.begin_audio,
+                member.wait_sendspin_ready,
                 max(5.0, min(30.0, float(timeout_s))),
             ): member
             for member in group.members
@@ -1599,30 +1478,25 @@ def prime_airplay_group_sync(
             member = future_members[future]
             try:
                 future.result()
-                primed.append(member)
+                ready.append(member)
             except Exception as exc:
                 failures.append(f"{member.target} ({exc})")
-
-    if failures or len(primed) != len(group.members):
-        failed_group = _forget_group(group.group_id)
-        if failed_group:
-            failed_group.stop()
+    if failures or len(ready) != len(group.members):
         return {
             "ok": False,
-            "primed_count": len(primed),
-            "error": "; ".join(failures) or "AirPlay audio priming failed.",
+            "ready_count": len(ready),
+            "error": "; ".join(failures) or "AirPlay Sendspin bridge was not ready.",
         }
     now_unix_ms = int(time.time() * 1000)
     minimum_start_lead_ms = max(
         AIRPLAY_SOLO_START_LEAD_MS,
-        max((member.latency_lead_ms for member in primed), default=0)
-        + AIRPLAY_WARM_SPLICE_MARGIN_MS,
+        max((member.latency_lead_ms for member in ready), default=0)
+        + AIRPLAY_START_MARGIN_MS,
     )
     return {
         "ok": True,
-        "group_id": group.group_id,
-        "primed_count": len(primed),
-        "primed_targets": [member.target for member in primed],
+        "ready_count": len(ready),
+        "ready_targets": [member.target for member in ready],
         "minimum_start_lead_ms": minimum_start_lead_ms,
         "minimum_start_unix_ms": now_unix_ms + minimum_start_lead_ms,
         "clock_readiness": {
@@ -1631,167 +1505,17 @@ def prime_airplay_group_sync(
                 "state": member.clock_ready_state,
                 "ready_at_unix_ms": member.clock_ready_at_unix_ms,
             }
-            for member in primed
+            for member in ready
         },
     }
 
 
-def reuse_airplay_group_sync(
-    *,
-    group_id: str,
-    targets: List[str],
-    source_url: str,
-    start_position_seconds: float = 0.0,
-    volume_percent: int = 75,
-    target_volume_percent: Optional[Dict[str, Any]] = None,
-    target_sync_offset_ms: Optional[Dict[str, Any]] = None,
-    reference_sync_offset_ms: int = 0,
-    title: str = "Tater Music",
-    artist: str = "Tater",
-    album: str = "Tater Music",
-    duration_seconds: float = 0.0,
-    timeout_s: float = AIRPLAY_PREPARE_TIMEOUT_SECONDS,
-) -> Dict[str, Any]:
-    """Warm-flush an active group and refill it with a replacement track."""
-    clean_targets = [airplay_target_value(target) for target in targets if airplay_target_value(target)]
-    clean_targets = list(dict.fromkeys(clean_targets))
-    with _session_lock:
-        group = _active_groups.get(_text(group_id))
-    if not group:
-        return {
-            "ok": False,
-            "reusable": False,
-            "primed_count": 0,
-            "error": "AirPlay bridge group is unavailable.",
-        }
-    if set(clean_targets) != {member.target for member in group.members}:
-        stale_group = _forget_group(group.group_id)
-        if stale_group:
-            stale_group.stop()
-        return {
-            "ok": False,
-            "reusable": False,
-            "primed_count": 0,
-            "error": "The selected AirPlay receivers changed.",
-        }
-    if not _text(source_url):
-        return {
-            "ok": False,
-            "reusable": False,
-            "primed_count": 0,
-            "error": "AirPlay playback URL is missing.",
-        }
-
-    failures: List[str] = []
-    reused: List[_AirPlayMember] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(group.members))) as executor:
-        future_members = {}
-        for member in group.members:
-            target_volume = _target_setting(target_volume_percent, member.target, volume_percent)
-            future_members[
-                executor.submit(
-                    member.replace_audio,
-                    source_url=source_url,
-                    start_position_seconds=start_position_seconds,
-                    volume_percent=max(0, min(100, target_volume)),
-                    title=title,
-                    artist=artist,
-                    album=album,
-                    duration_seconds=duration_seconds,
-                    timeout_s=max(5.0, min(30.0, float(timeout_s))),
-                )
-            ] = member
-        for future in as_completed(future_members):
-            member = future_members[future]
-            try:
-                future.result()
-                reused.append(member)
-            except Exception as exc:
-                failures.append(f"{member.target} ({exc})")
-
-    if failures or len(reused) != len(group.members):
-        failed_group = _forget_group(group.group_id)
-        if failed_group:
-            failed_group.stop()
-        return {
-            "ok": False,
-            "reusable": False,
-            "primed_count": len(reused),
-            "error": "; ".join(failures) or "AirPlay warm replacement failed.",
-        }
-
-    now_unix_ms = int(time.time() * 1000)
-    reference_offset = _as_int(reference_sync_offset_ms, 0, -1000, 1000)
-    minimum_start_unix_ms = now_unix_ms + AIRPLAY_SOLO_START_LEAD_MS
-    for member in reused:
-        offset = _target_setting(target_sync_offset_ms, member.target, 0)
-        if member.warm_lead_ms > 0:
-            minimum_start_unix_ms = max(
-                minimum_start_unix_ms,
-                now_unix_ms
-                + member.warm_lead_ms
-                + AIRPLAY_WARM_SPLICE_MARGIN_MS
-                - offset
-                + reference_offset,
-            )
-        if member.flushed_head_unix_ms > 0:
-            minimum_start_unix_ms = max(
-                minimum_start_unix_ms,
-                member.flushed_head_unix_ms
-                + AIRPLAY_WARM_SPLICE_MARGIN_MS
-                - offset
-                + reference_offset,
-            )
-
-    group.start_unix_ms = 0
-    return {
-        "ok": True,
-        "reusable": True,
-        "reused": True,
-        "group_id": group.group_id,
-        "prepared_count": len(reused),
-        "primed_count": len(reused),
-        "prepared_targets": [member.target for member in reused],
-        "primed_targets": [member.target for member in reused],
-        "minimum_start_unix_ms": minimum_start_unix_ms,
-        "minimum_start_lead_ms": max(0, minimum_start_unix_ms - now_unix_ms),
-        "clock_readiness": {
-            member.target: {
-                "mode": member.clock_ready_mode,
-                "state": member.clock_ready_state,
-                "ready_at_unix_ms": member.clock_ready_at_unix_ms,
-            }
-            for member in reused
-        },
-        "warm_constraints": {
-            member.target: {
-                "warm_lead_ms": member.warm_lead_ms,
-                "flushed_head_unix_ms": member.flushed_head_unix_ms,
-            }
-            for member in reused
-        },
-        "timing_modes": {
-            member.target: member.route_timing or "unknown"
-            for member in reused
-        },
-        "routes": {
-            member.target: {
-                "protocol": member.route_protocol or "unknown",
-                "flow": member.route_flow or "unknown",
-                "timing": member.route_timing or "unknown",
-            }
-            for member in reused
-        },
-    }
-
-
-def commit_airplay_group_sync(
+def start_sendspin_airplay_bridge(
     *,
     group_id: str,
     start_unix_ms: int,
     reference_sync_offset_ms: int = 0,
     target_sync_offset_ms: Optional[Dict[str, Any]] = None,
-    allow_reanchor: bool = False,
 ) -> Dict[str, Any]:
     with _session_lock:
         group = _active_groups.get(_text(group_id))
@@ -1806,16 +1530,14 @@ def commit_airplay_group_sync(
         }
     base_start_ms = int(start_unix_ms)
     if base_start_ms <= int(time.time() * 1000) + 250:
-        if not allow_reanchor:
-            expired_group = _forget_group(group.group_id)
-            if expired_group:
-                expired_group.stop()
-            return {
-                "ok": False,
-                "sent_count": 0,
-                "error": "The shared AirPlay start instant expired before every player was ready.",
-            }
-        base_start_ms = int(time.time() * 1000) + AIRPLAY_SOLO_START_LEAD_MS
+        expired_group = _forget_group(group.group_id)
+        if expired_group:
+            expired_group.stop()
+        return {
+            "ok": False,
+            "sent_count": 0,
+            "error": "The shared Sendspin start instant expired before every AirPlay player was ready.",
+        }
     reference_offset = _as_int(reference_sync_offset_ms, 0, -1000, 1000)
 
     starts: List[Dict[str, Any]] = []
@@ -1842,23 +1564,6 @@ def commit_airplay_group_sync(
             except Exception as exc:
                 failures.append(f"{member.target} ({exc})")
 
-    # AirPlay-only groups can converge on a later instant if a receiver rejects
-    # the first anchor. A native-satellite reference cannot be moved after its
-    # commit, so mixed groups report the rare correction for calibration instead.
-    if allow_reanchor and starts:
-        corrected_base = max(
-            row["actual_unix_ms"] - row["sync_offset_ms"] + reference_offset
-            for row in starts
-        )
-        if corrected_base > base_start_ms + 2:
-            return commit_airplay_group_sync(
-                group_id=group_id,
-                start_unix_ms=corrected_base + 150,
-                reference_sync_offset_ms=reference_offset,
-                target_sync_offset_ms=target_sync_offset_ms,
-                allow_reanchor=False,
-            )
-
     group.start_unix_ms = base_start_ms
     warnings = list(failures)
     corrected = [row for row in starts if abs(int(row.get("correction_ms") or 0)) > 10]
@@ -1870,7 +1575,7 @@ def commit_airplay_group_sync(
         {member.route_timing for member in group.members if member.route_timing}
     )
     result: Dict[str, Any] = {
-        "ok": bool(starts),
+        "ok": len(starts) == len(group.members),
         "sent_count": len(starts),
         "group_id": group_id,
         "start_unix_ms": base_start_ms,
@@ -1879,11 +1584,11 @@ def commit_airplay_group_sync(
     }
     if warnings:
         result["warnings"] = warnings
-    if not starts:
+    if failures or len(starts) != len(group.members):
         result["error"] = "; ".join(failures) or "AirPlay bridge start failed."
-        group = _forget_group(group_id)
-        if group:
-            group.stop()
+        failed_group = _forget_group(group_id)
+        if failed_group:
+            failed_group.stop()
     return result
 
 

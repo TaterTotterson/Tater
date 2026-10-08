@@ -15,13 +15,17 @@ from . import wake_word_catalog
 
 SETTINGS_HASH_KEY = "voice_native_satellite_live_settings"
 DEVICE_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:device:"
+WAKE_FAMILY_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:wake-family:"
 GLOBAL_VOICE_SETTINGS_HASH_KEY = "voice_core_settings"
 GLOBAL_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
 GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY = "_global_satellite_voice_settings_v1"
+WAKE_FAMILY_SETTINGS_MIGRATION_KEY = "_wake_family_settings_v1"
 WAKE_PROFILE_FETCH_TIMEOUT_S = 4.0
 
 DEFAULTS: Dict[str, Any] = {
     "wake_engine": "micro_wake_word",
+    "wake_mww_enabled": True,
+    "wake_oww_enabled": True,
     "wake_word": "hey_tater",
     "wake_word_url": "",
     "wake_model_revision": "",
@@ -29,22 +33,31 @@ DEFAULTS: Dict[str, Any] = {
     "wake_profile_name": "Hey Tater",
     "wake_profile_source_url": "",
     "wake_profile_model_url": "",
-    "wake_profile_threshold": 0.97,
+    "wake_profile_threshold": 0.98,
     "wake_profile_sliding_window": 5,
-    "wake_profile_close_miss_threshold": 0.78,
+    "wake_profile_close_miss_threshold": 0.81,
     "wake_profile_error": "",
+    "oww_wake_word": "hey_tater",
+    "oww_wake_word_url": "",
+    "oww_model_revision": "",
+    "oww_profile_name": "Hey Tater",
+    "oww_profile_threshold": 0.99,
+    "oww_profile_patience": 3,
+    "oww_profile_confirmation_threshold": 0.92,
+    "oww_profile_confirmation_patience": 3,
+    "oww_profile_error": "",
     "wake_sensitivity": "normal",
     "wake_environment": "balanced",
     "wake_tuning_override_enabled": False,
-    "wake_threshold_override": 0.97,
+    "wake_threshold_override": 0.98,
     "wake_sliding_window_override": 5,
-    "wake_close_miss_threshold_override": 0.78,
+    "wake_close_miss_threshold_override": 0.81,
     "wake_tuning_overrides": "{}",
-    "wake_threshold": 0.97,
+    "wake_threshold": 0.98,
     "wake_sliding_window": 5,
     "capture_wake_audio": False,
     "capture_close_misses": False,
-    "close_miss_threshold": 0.78,
+    "close_miss_threshold": 0.81,
     "trainer_app_url": "http://trainer.local:8789",
     "wake_verifier_mode": "off",
     "wake_verifier_phrase": "",
@@ -72,13 +85,19 @@ DEFAULTS: Dict[str, Any] = {
     "led_thinking_animation": "sparkle",
     "led_tool_call_animation": "ping_pong",
     "led_replying_animation": "audio_glow",
+    "led_music_animation": "audio_glow",
     "logging_level": "info",
 }
 FIRMWARE_SETTING_KEYS = (
     "wake_engine",
+    "wake_mww_enabled",
+    "wake_oww_enabled",
     "wake_word",
     "wake_word_url",
     "wake_model_revision",
+    "oww_wake_word",
+    "oww_wake_word_url",
+    "oww_model_revision",
     "wake_sensitivity",
     "wake_environment",
     "wake_threshold",
@@ -108,10 +127,13 @@ FIRMWARE_SETTING_KEYS = (
     "led_thinking_animation",
     "led_tool_call_animation",
     "led_replying_animation",
+    "led_music_animation",
     "logging_level",
 )
 
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
+WAKE_DETECTOR_MODES = {"mww", "oww", "dual"}
+WAKE_FAMILIES = {"mww", "echo"}
 WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
 DISPLAY_THEMES = (
@@ -149,8 +171,12 @@ DISPLAY_THEMES = (
 DISPLAY_THEME_VALUES = {str(row["value"]) for row in DISPLAY_THEMES}
 GLOBAL_SATELLITE_CONTROL_KEYS = (
     "wake_engine",
+    "wake_mww_enabled",
+    "wake_oww_enabled",
     "wake_word",
     "wake_word_url",
+    "oww_wake_word",
+    "oww_wake_word_url",
     "capture_wake_audio",
     "capture_close_misses",
     "trainer_app_url",
@@ -170,12 +196,41 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "wake_profile_close_miss_threshold",
     "wake_profile_error",
     "wake_model_revision",
+    "oww_model_revision",
+    "oww_profile_name",
+    "oww_profile_threshold",
+    "oww_profile_patience",
+    "oww_profile_confirmation_threshold",
+    "oww_profile_confirmation_patience",
+    "oww_profile_error",
 )
 GLOBAL_SATELLITE_PERSISTED_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | set(GLOBAL_WAKE_PROFILE_KEYS)
+WAKE_FAMILY_PERSISTED_KEYS = {
+    "wake_engine",
+    "wake_detector_mode",
+    "wake_mww_enabled",
+    "wake_oww_enabled",
+    "wake_word",
+    "wake_word_url",
+    "oww_wake_word",
+    "oww_wake_word_url",
+} | set(GLOBAL_WAKE_PROFILE_KEYS)
+SHARED_SATELLITE_CONTROL_KEYS = {
+    "capture_wake_audio",
+    "capture_close_misses",
+    "trainer_app_url",
+    "wake_sound_enabled",
+    "wake_sound",
+    "wake_sound_url",
+    "continued_chat",
+    "barge_in_enabled",
+}
 GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
     "wake_section",
     "wake_word_catalog_url",
+    "oww_wake_word_catalog_url",
     "wake_profile_name",
+    "oww_profile_name",
     "training_section",
     "playback_section",
 }
@@ -243,10 +298,21 @@ BUILTIN_WAKE_PROFILES: Dict[str, Dict[str, Any]] = {
         "wake_profile_name": "Hey Tater",
         "wake_profile_source_url": "",
         "wake_profile_model_url": "",
-        "wake_profile_threshold": 0.97,
+        "wake_profile_threshold": 0.98,
         "wake_profile_sliding_window": 5,
-        "wake_profile_close_miss_threshold": 0.78,
+        "wake_profile_close_miss_threshold": 0.81,
         "wake_profile_error": "",
+    }
+}
+BUILTIN_OWW_PROFILES: Dict[str, Dict[str, Any]] = {
+    "hey_tater": {
+        "oww_profile_name": "Hey Tater",
+        "oww_profile_threshold": 0.99,
+        "oww_profile_patience": 3,
+        "oww_profile_confirmation_threshold": 0.92,
+        "oww_profile_confirmation_patience": 3,
+        "oww_profile_error": "",
+        "oww_model_revision": "",
     }
 }
 WAKE_WORDS = {row[0]: {"label": row[1]} for row in WAKE_WORD_ROWS}
@@ -361,19 +427,34 @@ def _animation_rows(*preferred: str) -> List[tuple[str, str]]:
     return rows
 
 
-LED_LISTENING_ANIMATIONS = [
+def _with_no_animation(rows: List[tuple[str, str]]) -> List[tuple[str, str]]:
+    return [("off", "No Animation"), *rows]
+
+
+LED_LISTENING_ANIMATIONS = _with_no_animation([
     row for row in _animation_rows("directional", "pulse", "spinner", "breathe")
     if row[0] != "audio_glow"
-]
-LED_THINKING_ANIMATIONS = [
+])
+LED_THINKING_ANIMATIONS = _with_no_animation([
     row for row in _animation_rows("sparkle", "shimmer", "twinkle", "breathe")
     if row[0] != "audio_glow"
-]
-LED_TOOL_CALL_ANIMATIONS = [
+])
+LED_TOOL_CALL_ANIMATIONS = _with_no_animation([
     row for row in _animation_rows("ping_pong", "scanner", "orbit", "comet")
     if row[0] != "audio_glow"
+])
+LED_REPLYING_ANIMATIONS = _with_no_animation(
+    _animation_rows("audio_glow", "voice_ring", "wave", "ripple", "equalizer")
+)
+LED_MUSIC_ANIMATIONS = [
+    ("off", "No Animation"),
+    ("audio_glow", "Audio Glow"),
+    ("music_pulse", "Beat Pulse"),
+    ("music_bars", "Level Bars"),
+    ("music_orbit", "Reactive Orbit"),
+    ("music_wave", "Reactive Wave"),
 ]
-LED_REPLYING_ANIMATIONS = _animation_rows("audio_glow", "voice_ring", "wave", "ripple", "equalizer")
+LED_MUSIC_ANIMATION_VALUES = {value for value, _label in LED_MUSIC_ANIMATIONS}
 LED_ANIMATION_VALUES = {
     value
     for rows in (
@@ -391,6 +472,7 @@ S420_LED_DEFAULTS = {
     "led_replying_animation": "audio_glow",
 }
 S420_LED_ANIMATIONS = [
+    ("off", "No Animation"),
     ("audio_glow", "Audio Glow"),
     ("pulse", "Tater Pulse"),
     ("breathe", "Tater Breathe"),
@@ -578,6 +660,140 @@ def _fetch_wake_profile_json(wake_word_url: str) -> Dict[str, Any]:
     }
 
 
+def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url: str) -> Dict[str, Any]:
+    builtin = BUILTIN_OWW_PROFILES.get(wake_word)
+    if builtin:
+        return dict(builtin)
+    if wake_word == "custom_url" and bundle_url and _text(source.get("oww_wake_word_url")) == bundle_url:
+        return {
+            "oww_profile_name": _text(source.get("oww_profile_name")) or "Custom Wake Word",
+            "oww_profile_threshold": round(
+                _as_float(source.get("oww_profile_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
+                3,
+            ),
+            "oww_profile_patience": _as_int(
+                source.get("oww_profile_patience"),
+                int(DEFAULTS["oww_profile_patience"]),
+                minimum=1,
+                maximum=20,
+            ),
+            "oww_profile_confirmation_threshold": round(
+                _as_float(
+                    source.get("oww_profile_confirmation_threshold"),
+                    float(DEFAULTS["oww_profile_confirmation_threshold"]),
+                    minimum=0.01,
+                    maximum=1.0,
+                ),
+                3,
+            ),
+            "oww_profile_confirmation_patience": _as_int(
+                source.get("oww_profile_confirmation_patience"),
+                int(DEFAULTS["oww_profile_confirmation_patience"]),
+                minimum=1,
+                maximum=20,
+            ),
+            "oww_profile_error": _text(source.get("oww_profile_error")),
+            "oww_model_revision": _text(source.get("oww_model_revision")),
+        }
+    return {
+        "oww_profile_name": "Custom Wake Word" if wake_word == "custom_url" else "Hey Tater",
+        "oww_profile_threshold": float(DEFAULTS["oww_profile_threshold"]),
+        "oww_profile_patience": int(DEFAULTS["oww_profile_patience"]),
+        "oww_profile_confirmation_threshold": float(DEFAULTS["oww_profile_confirmation_threshold"]),
+        "oww_profile_confirmation_patience": int(DEFAULTS["oww_profile_confirmation_patience"]),
+        "oww_profile_error": "",
+        "oww_model_revision": "",
+    }
+
+
+def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
+    url = _text(bundle_url)
+    fallback = {
+        "oww_profile_name": "Custom Wake Word",
+        "oww_profile_threshold": float(DEFAULTS["oww_profile_threshold"]),
+        "oww_profile_patience": int(DEFAULTS["oww_profile_patience"]),
+        "oww_profile_confirmation_threshold": float(DEFAULTS["oww_profile_confirmation_threshold"]),
+        "oww_profile_confirmation_patience": int(DEFAULTS["oww_profile_confirmation_patience"]),
+        "oww_model_revision": "",
+    }
+    if not _is_url(url):
+        return {**fallback, "oww_profile_error": "openWakeWord bundle URL is missing or invalid."}
+    try:
+        request = Request(url, headers={"User-Agent": "Tater-Native-Satellite/0.1"})
+        with urlopen(request, timeout=WAKE_PROFILE_FETCH_TIMEOUT_S) as response:
+            raw = response.read(128 * 1024)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        return {**fallback, "oww_profile_error": f"Could not read openWakeWord bundle: {exc}"}
+    if not isinstance(payload, dict):
+        return {**fallback, "oww_profile_error": "openWakeWord bundle did not contain an object."}
+    micro = payload.get("micro_wake_word") if isinstance(payload.get("micro_wake_word"), dict) else {}
+    oww = payload.get("open_wake_word") if isinstance(payload.get("open_wake_word"), dict) else {}
+    artifacts = oww.get("artifacts") if isinstance(oww.get("artifacts"), dict) else {}
+    onnx_artifacts = [
+        row
+        for row in artifacts.values()
+        if isinstance(row, dict) and _text(row.get("file")).lower().endswith(".onnx")
+    ]
+    has_onnx = len(onnx_artifacts) == 1
+    onnx_sha = _text(onnx_artifacts[0].get("sha256")).lower() if has_onnx else ""
+    threshold = round(
+        _as_float(oww.get("recommended_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
+        3,
+    )
+    patience = _as_int(
+        oww.get("recommended_patience"),
+        int(DEFAULTS["oww_profile_patience"]),
+        minimum=1,
+        maximum=20,
+    )
+    confirmation_threshold = round(
+        _as_float(
+            oww.get("recommended_confirmation_threshold"),
+            threshold,
+            minimum=0.01,
+            maximum=1.0,
+        ),
+        3,
+    )
+    confirmation_patience = _as_int(
+        oww.get("recommended_confirmation_patience"),
+        patience,
+        minimum=1,
+        maximum=20,
+    )
+    bundle_type = _text(payload.get("type"))
+    manifest_ref = _text(micro.get("manifest"))
+    mww_model_ref = _text(micro.get("model"))
+    manifest_sha = _text(micro.get("manifest_sha256")).lower()
+    mww_model_sha = _text(micro.get("model_sha256")).lower()
+    metadata_sha = _text(oww.get("metadata_sha256")).lower()
+    digest_values = (manifest_sha, mww_model_sha, metadata_sha, onnx_sha)
+    has_micro = (
+        manifest_ref.lower().endswith(".json")
+        and mww_model_ref.lower().endswith(".tflite")
+        and all(len(value) == 64 and all(character in "0123456789abcdef" for character in value) for value in digest_values)
+    )
+    error = ""
+    if payload.get("schema_version") != 1 or bundle_type != "tater_wake_word_bundle" or not has_micro or not has_onnx:
+        error = "URL is not a complete Tater dual-model bundle with matching MWW TFLite and OWW ONNX artifacts."
+    return {
+        "oww_profile_name": _text(payload.get("wake_word") or payload.get("label") or payload.get("key")) or "Custom Wake Word",
+        "oww_profile_threshold": threshold,
+        "oww_profile_patience": patience,
+        "oww_profile_confirmation_threshold": confirmation_threshold,
+        "oww_profile_confirmation_patience": confirmation_patience,
+        "oww_profile_error": error,
+        "oww_model_revision": hashlib.sha256(raw).hexdigest(),
+        "wake_bundle_url": url,
+        "wake_bundle_manifest_url": urljoin(url, manifest_ref) if manifest_ref else "",
+        "wake_bundle_model_url": urljoin(url, mww_model_ref) if mww_model_ref else "",
+        "wake_bundle_phrase": _text(payload.get("wake_word")),
+        "wake_bundle_manifest_sha256": manifest_sha,
+        "wake_bundle_model_sha256": mww_model_sha,
+    }
+
+
 def _wake_sound_value(value: Any) -> str:
     token = _lower(value).replace("_", "-")
     if token in WAKE_SOUND_ALIASES:
@@ -642,6 +858,12 @@ def _led_animation_value(value: Any, default_key: str) -> str:
     token = _lower(value).replace("-", "_")
     fallback = str(DEFAULTS.get(default_key) or "pulse")
     return token if token in LED_ANIMATION_VALUES else fallback
+
+
+def _led_music_animation_value(value: Any) -> str:
+    token = _lower(value).replace("-", "_")
+    fallback = str(DEFAULTS["led_music_animation"])
+    return token if token in LED_MUSIC_ANIMATION_VALUES else fallback
 
 
 def _time_value(value: Any, fallback: str) -> str:
@@ -710,6 +932,48 @@ def _raw_settings(selector: Any = "") -> Dict[str, Any]:
         return dict(redis_client.hgetall(settings_hash_key(selector)) or {})
     except Exception:
         return {}
+
+
+def wake_family_hash_key(family: Any) -> str:
+    token = _lower(family)
+    if token not in WAKE_FAMILIES:
+        raise ValueError(f"Unsupported wake family: {family}")
+    return f"{WAKE_FAMILY_SETTINGS_HASH_PREFIX}{token}"
+
+
+def _raw_wake_family_settings(family: Any) -> Dict[str, Any]:
+    try:
+        return dict(redis_client.hgetall(wake_family_hash_key(family)) or {})
+    except Exception:
+        return {}
+
+
+def _wake_detector_mode(value: Any, source: Dict[str, Any] | None = None) -> str:
+    token = _lower(value)
+    if token in WAKE_DETECTOR_MODES:
+        return token
+    row = source or {}
+    mww_enabled = _as_bool(row.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
+    oww_enabled = _as_bool(row.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
+    if mww_enabled and oww_enabled:
+        return "dual"
+    if oww_enabled:
+        return "oww"
+    return "mww"
+
+
+def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = "") -> str:
+    caps = capabilities if isinstance(capabilities, dict) else {}
+    if any(
+        _as_bool(caps.get(key), False)
+        for key in ("openwakeword", "wake_detector_selection", "dual_wake_confirmation")
+    ):
+        return "echo"
+    # Board fallback keeps settings correct while an older Echo build is connecting
+    # before it has advertised the newer detector capability flags.
+    if _lower(board).replace("_", "-") in {"biscuit", "checkers", "rook"}:
+        return "echo"
+    return "mww"
 
 
 def migrate_selector(old_selector: Any, new_selector: Any) -> bool:
@@ -783,6 +1047,58 @@ def _global_settings_with_migration() -> Dict[str, Any]:
     return {**existing, **migrated}
 
 
+def _ensure_wake_family_settings() -> None:
+    global_raw = _global_settings_with_migration()
+    if _as_bool(global_raw.get(WAKE_FAMILY_SETTINGS_MIGRATION_KEY), False):
+        return
+
+    legacy = normalize_settings(global_raw)
+    legacy_mode = _wake_detector_mode(global_raw.get("wake_detector_mode"), legacy)
+    mww_values = {
+        key: legacy.get(key)
+        for key in WAKE_FAMILY_PERSISTED_KEYS
+        if key in legacy
+    }
+    mww_values.update(
+        {
+            "wake_detector_mode": "mww",
+            "wake_mww_enabled": True,
+            "wake_oww_enabled": False,
+        }
+    )
+    echo_values = {
+        key: legacy.get(key)
+        for key in WAKE_FAMILY_PERSISTED_KEYS
+        if key in legacy
+    }
+    echo_values.update(
+        {
+            "wake_detector_mode": legacy_mode,
+            "wake_mww_enabled": legacy_mode in {"mww", "dual"},
+            "wake_oww_enabled": legacy_mode in {"oww", "dual"},
+        }
+    )
+    try:
+        if not _raw_wake_family_settings("mww"):
+            redis_client.hset(
+                wake_family_hash_key("mww"),
+                mapping={key: str(value) for key, value in mww_values.items()},
+            )
+        if not _raw_wake_family_settings("echo"):
+            redis_client.hset(
+                wake_family_hash_key("echo"),
+                mapping={key: str(value) for key, value in echo_values.items()},
+            )
+        redis_client.hset(
+            SETTINGS_HASH_KEY,
+            mapping={WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true"},
+        )
+    except Exception:
+        # A temporary Redis outage must not prevent settings from being rendered;
+        # both family snapshots can still fall back to the legacy global values.
+        return
+
+
 def _global_wake_verifier_mode() -> str:
     try:
         mode = _lower(redis_client.hget(GLOBAL_VOICE_SETTINGS_HASH_KEY, GLOBAL_WAKE_VERIFIER_MODE_KEY))
@@ -824,6 +1140,7 @@ _LED_FIELD_KEYS = {
     "led_thinking_animation",
     "led_tool_call_animation",
     "led_replying_animation",
+    "led_music_animation",
     "led_preview",
 }
 
@@ -879,6 +1196,16 @@ def _board_supports_led_settings(board: Any = "") -> bool:
     return True
 
 
+def _is_biscuit_board(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {"biscuit", "echo-dot-2", "echo-dot-2nd-gen"} or compact in {
+        "biscuit",
+        "echodot2",
+        "echodot2ndgen",
+    }
+
+
 def _is_s420_board(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
@@ -926,15 +1253,27 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
     wake_verifier_mode = _lower(source.get("wake_verifier_mode")) or str(DEFAULTS["wake_verifier_mode"])
     if wake_verifier_mode not in WAKE_VERIFIER_MODES:
         wake_verifier_mode = str(DEFAULTS["wake_verifier_mode"])
+    wake_mww_enabled = _as_bool(source.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
+    wake_oww_enabled = _as_bool(source.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
     wake_word = _wake_word_value(source.get("wake_word"))
     wake_word_url = _text(source.get("wake_word_url"))
     if wake_word == "custom_url" and not wake_word_url and _is_url(source.get("wake_word")):
         wake_word_url = _text(source.get("wake_word"))
     if wake_word != "custom_url":
         wake_word_url = ""
+    oww_wake_word = _wake_word_value(source.get("oww_wake_word"))
+    oww_wake_word_url = _text(source.get("oww_wake_word_url"))
+    if oww_wake_word == "custom_url" and not oww_wake_word_url and _is_url(source.get("oww_wake_word")):
+        oww_wake_word_url = _text(source.get("oww_wake_word"))
+    if oww_wake_word != "custom_url":
+        oww_wake_word_url = ""
+    if wake_mww_enabled and wake_oww_enabled and oww_wake_word == "hey_tater":
+        wake_word = "hey_tater"
+        wake_word_url = ""
     wake_sensitivity = _wake_sensitivity_value(source.get("wake_sensitivity"))
     wake_environment = _wake_environment_value(source.get("wake_environment"))
     profile = _wake_profile_from_source(source, wake_word, wake_word_url)
+    oww_profile = _oww_profile_from_source(source, oww_wake_word, oww_wake_word_url)
     profile_key = _text(profile.get("wake_profile_key")) or _wake_profile_key(wake_word, wake_word_url)
     profile_threshold = round(
         _as_float(profile.get("wake_profile_threshold"), float(DEFAULTS["wake_profile_threshold"]), minimum=0.01, maximum=0.99),
@@ -1019,6 +1358,8 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         wake_sound_url = ""
     return {
         "wake_engine": wake_engine,
+        "wake_mww_enabled": wake_mww_enabled,
+        "wake_oww_enabled": wake_oww_enabled,
         "wake_word": wake_word,
         "wake_word_url": wake_word_url,
         "wake_model_revision": _text(profile.get("wake_model_revision")),
@@ -1030,6 +1371,36 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "wake_profile_sliding_window": profile_window,
         "wake_profile_close_miss_threshold": profile_close_miss_threshold,
         "wake_profile_error": _text(profile.get("wake_profile_error")),
+        "oww_wake_word": oww_wake_word,
+        "oww_wake_word_url": oww_wake_word_url,
+        "oww_model_revision": _text(oww_profile.get("oww_model_revision")),
+        "oww_profile_name": _text(oww_profile.get("oww_profile_name")) or str(DEFAULTS["oww_profile_name"]),
+        "oww_profile_threshold": round(
+            _as_float(oww_profile.get("oww_profile_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
+            3,
+        ),
+        "oww_profile_patience": _as_int(
+            oww_profile.get("oww_profile_patience"),
+            int(DEFAULTS["oww_profile_patience"]),
+            minimum=1,
+            maximum=20,
+        ),
+        "oww_profile_confirmation_threshold": round(
+            _as_float(
+                oww_profile.get("oww_profile_confirmation_threshold"),
+                float(DEFAULTS["oww_profile_confirmation_threshold"]),
+                minimum=0.01,
+                maximum=1.0,
+            ),
+            3,
+        ),
+        "oww_profile_confirmation_patience": _as_int(
+            oww_profile.get("oww_profile_confirmation_patience"),
+            int(DEFAULTS["oww_profile_confirmation_patience"]),
+            minimum=1,
+            maximum=20,
+        ),
+        "oww_profile_error": _text(oww_profile.get("oww_profile_error")),
         "wake_sensitivity": wake_sensitivity,
         "wake_environment": wake_environment,
         "wake_tuning_override_enabled": bool(override_enabled),
@@ -1111,6 +1482,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "led_thinking_animation": _led_animation_value(source.get("led_thinking_animation"), "led_thinking_animation"),
         "led_tool_call_animation": _led_animation_value(source.get("led_tool_call_animation"), "led_tool_call_animation"),
         "led_replying_animation": _led_animation_value(source.get("led_replying_animation"), "led_replying_animation"),
+        "led_music_animation": _led_music_animation_value(source.get("led_music_animation")),
         "logging_level": logging_level,
     }
 
@@ -1137,12 +1509,48 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     return current
 
 
-def firmware_settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
+def wake_family_settings_snapshot(family: Any) -> Dict[str, Any]:
+    token = _lower(family)
+    if token not in WAKE_FAMILIES:
+        raise ValueError(f"Unsupported wake family: {family}")
+    _ensure_wake_family_settings()
+    global_settings = normalize_settings(_global_settings_with_migration())
+    raw = _raw_wake_family_settings(token)
+    current = normalize_settings(raw, base=global_settings)
+    mode = "mww" if token == "mww" else _wake_detector_mode(raw.get("wake_detector_mode"), current)
+    current["wake_detector_mode"] = mode
+    current["wake_mww_enabled"] = mode in {"mww", "dual"}
+    current["wake_oww_enabled"] = mode in {"oww", "dual"}
+    return current
+
+
+def firmware_settings_snapshot(
+    selector: Any = "",
+    *,
+    board: Any = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     current = settings_snapshot(selector, board=board)
+    family = wake_family_for(capabilities=capabilities, board=board)
+    family_settings = wake_family_settings_snapshot(family)
+    current = normalize_settings(
+        {
+            key: family_settings.get(key)
+            for key in WAKE_FAMILY_PERSISTED_KEYS
+            if key in family_settings
+        },
+        base=current,
+    )
     output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
+    if family == "mww":
+        output["wake_mww_enabled"] = True
+        for key in ("wake_oww_enabled", "oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
+            output.pop(key, None)
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
             output.pop(key, None)
+    if not _is_biscuit_board(board):
+        output.pop("led_music_animation", None)
     if not _board_supports_display_theme(board):
         for key in _DISPLAY_THEME_SETTING_KEYS:
             output.pop(key, None)
@@ -1178,8 +1586,86 @@ def _profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Di
     return fetched
 
 
-def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, Any]]:
-    current = settings_snapshot(selector, board=board)
+def _oww_profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Dict[str, Any]:
+    source = {**DEFAULTS, **(current_raw or {}), **(values or {})}
+    wake_word = _wake_word_value(source.get("oww_wake_word"))
+    bundle_url = _text(source.get("oww_wake_word_url"))
+    if wake_word == "custom_url" and not bundle_url and _is_url(source.get("oww_wake_word")):
+        bundle_url = _text(source.get("oww_wake_word"))
+    if wake_word != "custom_url":
+        return dict(BUILTIN_OWW_PROFILES.get(wake_word) or BUILTIN_OWW_PROFILES["hey_tater"])
+    fetched = _fetch_oww_profile_json(bundle_url)
+    fetch_error = _text(fetched.get("oww_profile_error"))
+    if not fetch_error:
+        return fetched
+    if (
+        _text(current_raw.get("oww_wake_word_url")) == bundle_url
+        and _text(current_raw.get("oww_profile_name"))
+        and _text(current_raw.get("oww_model_revision"))
+    ):
+        existing = _oww_profile_from_source(current_raw, wake_word, bundle_url)
+        existing["oww_profile_error"] = fetch_error
+        return existing
+    return fetched
+
+
+def _wake_phrase_identity(value: Any) -> str:
+    return "".join(character for character in _lower(value) if character.isalnum())
+
+
+def _dual_profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Dict[str, Any]:
+    source = {**DEFAULTS, **(current_raw or {}), **(values or {})}
+    bundle_source = _wake_word_value(source.get("oww_wake_word"))
+    bundle_url = _text(source.get("oww_wake_word_url"))
+    if bundle_source != "custom_url":
+        return {
+            **dict(BUILTIN_WAKE_PROFILES["hey_tater"]),
+            **dict(BUILTIN_OWW_PROFILES["hey_tater"]),
+        }
+
+    fetched = _fetch_oww_profile_json(bundle_url)
+    bundle_error = _text(fetched.get("oww_profile_error"))
+    if bundle_error:
+        unchanged = _text(current_raw.get("oww_wake_word_url")) == bundle_url
+        if unchanged and _text(current_raw.get("wake_profile_source_url")):
+            return {
+                **_wake_profile_from_source(current_raw, "custom_url", _text(current_raw.get("wake_word_url"))),
+                **_oww_profile_from_source(current_raw, "custom_url", bundle_url),
+                "oww_profile_error": bundle_error,
+            }
+        raise ValueError(bundle_error)
+
+    manifest_url = _text(fetched.get("wake_bundle_manifest_url"))
+    mww_profile = _fetch_wake_profile_json(manifest_url)
+    mww_error = _text(mww_profile.get("wake_profile_error"))
+    if mww_error:
+        raise ValueError(f"Dual-model bundle microWakeWord manifest is invalid: {mww_error}")
+    expected_manifest_sha = _text(fetched.get("wake_bundle_manifest_sha256")).lower()
+    if expected_manifest_sha != _text(mww_profile.get("wake_model_revision")).lower():
+        raise ValueError("Dual-model bundle microWakeWord manifest checksum does not match.")
+    expected_model_url = _text(fetched.get("wake_bundle_model_url"))
+    actual_model_url = _text(mww_profile.get("wake_profile_model_url"))
+    if expected_model_url != actual_model_url:
+        raise ValueError("Dual-model bundle microWakeWord manifest names a different model.")
+    bundle_phrase = _wake_phrase_identity(fetched.get("wake_bundle_phrase"))
+    mww_phrase = _wake_phrase_identity(mww_profile.get("wake_profile_name"))
+    if bundle_phrase and mww_phrase and bundle_phrase != mww_phrase:
+        raise ValueError("Dual-model bundle contains different MWW and OWW wake phrases.")
+    return {**mww_profile, **fetched}
+
+
+def settings_fields(
+    selector: Any = "",
+    *,
+    board: Any = "",
+    wake_family: Any = "",
+) -> List[Dict[str, Any]]:
+    family = _lower(wake_family)
+    current = (
+        wake_family_settings_snapshot(family)
+        if family in WAKE_FAMILIES
+        else settings_snapshot(selector, board=board)
+    )
     catalog_selected = current["wake_word"] == "custom_url" and wake_word_catalog.is_catalog_url(
         current["wake_word_url"]
     )
@@ -1192,6 +1678,44 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         else {"options": [], "selected_url": "", "description": ""}
     )
     wake_word_source = "catalog" if catalog_selected else current["wake_word"]
+    dual_wake_mode = current.get("wake_detector_mode") == "dual"
+    oww_catalog_type = "dual" if dual_wake_mode else "oww"
+    oww_catalog_selected = (
+        current["oww_wake_word"] == "custom_url"
+        and wake_word_catalog.is_catalog_url(
+            current["oww_wake_word_url"],
+            model_type=oww_catalog_type,
+        )
+    )
+    oww_catalog_field = (
+        wake_word_catalog.field_payload(
+            current_url=current["oww_wake_word_url"],
+            current_label=current["oww_profile_name"],
+            model_type=oww_catalog_type,
+        )
+        if not _selector_token(selector)
+        else {"options": [], "selected_url": "", "description": ""}
+    )
+    oww_wake_word_source = "catalog" if oww_catalog_selected else current["oww_wake_word"]
+    oww_custom_source_label = (
+        "Custom Matched Bundle" if dual_wake_mode else "Custom openWakeWord Package"
+    )
+    oww_catalog_source_label = (
+        "Dual Wake Word Catalog" if dual_wake_mode else "openWakeWord Catalog"
+    )
+    oww_source_description = (
+        "Choose the bundled Hey Tater pair or a trainer-produced matched wake bundle."
+        if dual_wake_mode
+        else "Choose the built-in Hey Tater model or a trainer-produced openWakeWord package."
+    )
+    oww_url_label = (
+        "Matched Dual-Model Bundle URL" if dual_wake_mode else "openWakeWord Package URL"
+    )
+    oww_url_description = (
+        "Use the matched .wake-bundle.json from a Tater trainer. Tater validates and installs both wake models together."
+        if dual_wake_mode
+        else "Use a trainer-produced .wake-bundle.json package. Only its openWakeWord model is used in openWakeWord mode."
+    )
     fields = [
         {
             "key": "wake_section",
@@ -1206,11 +1730,40 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "value": current["wake_engine"],
             "default": DEFAULTS["wake_engine"],
             "options": [
-                {"value": "micro_wake_word", "label": "microWakeWord"},
+                {"value": "micro_wake_word", "label": "On-device Wake"},
                 {"value": "button", "label": "Button Only"},
                 {"value": "server", "label": "Server Wake Stream"},
                 {"value": "off", "label": "Off"},
             ],
+        },
+        {
+            "key": "wake_detector_mode",
+            "label": "Wake Detection Mode",
+            "type": "select",
+            "value": current.get("wake_detector_mode", "dual"),
+            "default": "dual",
+            "options": [
+                {"value": "mww", "label": "microWakeWord"},
+                {"value": "oww", "label": "openWakeWord"},
+                {"value": "dual", "label": "Dual Wake Word"},
+            ],
+            "description": "Choose one detector, or require microWakeWord and openWakeWord to agree in Dual mode.",
+        },
+        {
+            "key": "wake_mww_enabled",
+            "label": "Enable microWakeWord",
+            "type": "checkbox",
+            "value": current["wake_mww_enabled"],
+            "default": DEFAULTS["wake_mww_enabled"],
+            "description": "Use microWakeWord as the first on-device detector. With openWakeWord also enabled, both models must agree.",
+        },
+        {
+            "key": "wake_oww_enabled",
+            "label": "Enable openWakeWord",
+            "type": "checkbox",
+            "value": current["wake_oww_enabled"],
+            "default": DEFAULTS["wake_oww_enabled"],
+            "description": "Use openWakeWord as a second opinion, or as the primary detector when microWakeWord is disabled.",
         },
         {
             "key": "wake_word",
@@ -1247,6 +1800,58 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "type": "readonly",
             "value": current["wake_profile_name"],
             "description": current["wake_profile_error"] or "Name from the selected built-in profile or custom wake JSON.",
+        },
+        {
+            "key": "oww_wake_word",
+            "label": "openWakeWord Model",
+            "type": "select",
+            "value": oww_wake_word_source,
+            "default": DEFAULTS["oww_wake_word"],
+            "options": [
+                {"value": "hey_tater", "label": "Built-in Hey Tater"},
+                {"value": "catalog", "label": oww_catalog_source_label},
+                {"value": "custom_url", "label": oww_custom_source_label},
+            ],
+            "description": oww_source_description,
+        },
+        {
+            "key": "oww_wake_word_catalog_url",
+            "label": oww_catalog_source_label,
+            "type": "select",
+            "value": oww_catalog_field.get("selected_url") or "",
+            "default": "",
+            "options": (
+                oww_catalog_field.get("options")
+                if isinstance(oww_catalog_field.get("options"), list)
+                else []
+            ),
+            "show_when": {"source_key": "oww_wake_word", "equals": "catalog"},
+            "description": _text(oww_catalog_field.get("description")),
+        },
+        {
+            "key": "oww_wake_word_url",
+            "label": oww_url_label,
+            "type": "text",
+            "value": current["oww_wake_word_url"] if current["oww_wake_word"] == "custom_url" else "",
+            "default": DEFAULTS["oww_wake_word_url"],
+            "placeholder": "https://example.local/hey_tater.wake-bundle.json",
+            "show_when": {"source_key": "oww_wake_word", "equals": "custom_url"},
+            "description": oww_url_description,
+        },
+        {
+            "key": "oww_profile_name",
+            "label": "Loaded openWakeWord Profile",
+            "type": "readonly",
+            "value": current["oww_profile_name"],
+            "description": current["oww_profile_error"] or (
+                (
+                    f"Standalone threshold {current['oww_profile_threshold']} · "
+                    f"dual confirmation {current['oww_profile_confirmation_threshold']} · "
+                    f"{current['oww_profile_confirmation_patience']} consecutive frames."
+                )
+                if current["wake_mww_enabled"] and current["wake_oww_enabled"]
+                else f"Threshold {current['oww_profile_threshold']} · {current['oww_profile_patience']} consecutive frames."
+            ),
         },
         {
             "key": "wake_tuning_section",
@@ -1512,7 +2117,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "key": "led_section",
             "label": "LED Settings",
             "type": "section",
-            "description": "Choose the shared voice LED color and the animation used for each voice cycle.",
+            "description": "Choose the shared LED color and the animations used for voice and music.",
         },
         {
             "key": "led_brightness",
@@ -1527,11 +2132,11 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
         },
         {
             "key": "led_color",
-            "label": "Voice LED Color",
+            "label": "LED Color",
             "type": "color",
             "value": current["led_color"],
             "default": DEFAULTS["led_color"],
-            "description": "Applies to listening, thinking, tool call, and reply animations. Setup, error, OTA, and connection colors stay reserved.",
+            "description": "Applies to listening, thinking, tool call, reply, and music animations. Setup, error, OTA, and connection colors stay reserved.",
         },
         {
             "key": "led_listening_animation",
@@ -1540,6 +2145,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "value": current["led_listening_animation"],
             "default": DEFAULTS["led_listening_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_LISTENING_ANIMATIONS],
+            "description": "Choose No Animation to keep the LEDs dark while listening.",
         },
         {
             "key": "led_thinking_animation",
@@ -1548,6 +2154,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "value": current["led_thinking_animation"],
             "default": DEFAULTS["led_thinking_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_THINKING_ANIMATIONS],
+            "description": "Choose No Animation to keep the LEDs dark while thinking.",
         },
         {
             "key": "led_tool_call_animation",
@@ -1556,6 +2163,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "value": current["led_tool_call_animation"],
             "default": DEFAULTS["led_tool_call_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_TOOL_CALL_ANIMATIONS],
+            "description": "Choose No Animation to keep the LEDs dark during tool calls.",
         },
         {
             "key": "led_replying_animation",
@@ -1564,6 +2172,16 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
             "value": current["led_replying_animation"],
             "default": DEFAULTS["led_replying_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_REPLYING_ANIMATIONS],
+            "description": "Choose No Animation to keep the LEDs dark while Tater replies.",
+        },
+        {
+            "key": "led_music_animation",
+            "label": "Music Animation",
+            "type": "select",
+            "value": current["led_music_animation"],
+            "default": DEFAULTS["led_music_animation"],
+            "options": [{"value": value, "label": label} for value, label in LED_MUSIC_ANIMATIONS],
+            "description": "Audio-reactive Biscuit ring animation for music playback, including Sendspin. Choose No Animation to keep the ring dark.",
         },
         {
             "key": "led_preview",
@@ -1574,6 +2192,7 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
                 {"label": "Thinking", "animation_key": "led_thinking_animation"},
                 {"label": "Tool Call", "animation_key": "led_tool_call_animation"},
                 {"label": "Replying", "animation_key": "led_replying_animation"},
+                {"label": "Music", "animation_key": "led_music_animation"},
             ],
         },
         {
@@ -1643,6 +2262,15 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
                     {"label": "Thinking", "animation_key": "led_thinking_animation"},
                     {"label": "Replying", "animation_key": "led_replying_animation"},
                 ]
+    if not (_selector_token(selector) and _is_biscuit_board(board)):
+        fields = [field for field in fields if _text(field.get("key")) != "led_music_animation"]
+        for field in fields:
+            if _text(field.get("key")) == "led_preview":
+                field["states"] = [
+                    state
+                    for state in field.get("states", [])
+                    if _text(state.get("animation_key")) != "led_music_animation"
+                ]
     if not (_selector_token(selector) and _board_supports_screen_settings(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_theme(board)):
@@ -1650,10 +2278,14 @@ def settings_fields(selector: Any = "", *, board: Any = "") -> List[Dict[str, An
     return fields
 
 
-def _global_settings_sections(groups: List[tuple[str, str, tuple[str, ...]]]) -> List[Dict[str, Any]]:
+def _global_settings_sections(
+    groups: List[tuple[str, str, tuple[str, ...]]],
+    *,
+    wake_family: Any = "",
+) -> List[Dict[str, Any]]:
     fields = {
         _text(field.get("key")): field
-        for field in settings_fields()
+        for field in settings_fields(wake_family=wake_family)
         if isinstance(field, dict) and _text(field.get("key"))
     }
     return [
@@ -1666,13 +2298,64 @@ def _global_settings_sections(groups: List[tuple[str, str, tuple[str, ...]]]) ->
     ]
 
 
+def mww_model_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "microWakeWord Satellites",
+                "Used by ESP satellites and any Tater satellite that does not advertise openWakeWord support.",
+                (
+                    "wake_engine", "wake_word", "wake_word_catalog_url", "wake_word_url",
+                    "wake_profile_name",
+                ),
+            ),
+        ],
+        wake_family="mww",
+    )
+
+
+def echo_model_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "Echo Satellites",
+                "Choose microWakeWord, openWakeWord, or Dual Wake Word mode for OWW-capable Echo firmware.",
+                (
+                    "wake_engine", "wake_detector_mode",
+                    "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
+                    "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
+                    "oww_profile_name",
+                ),
+            ),
+        ],
+        wake_family="echo",
+    )
+
+
+def wake_trainer_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "Trainer Feedback",
+                "Choose which wake clips Tater sends for model improvement, and manage the secure trainer connection that receives them.",
+                ("capture_wake_audio", "capture_close_misses", "trainer_app_url"),
+            ),
+        ]
+    )
+
+
 def global_model_settings_sections() -> List[Dict[str, Any]]:
     return _global_settings_sections(
         [
             (
                 "Wake Word",
                 "",
-                ("wake_engine", "wake_word", "wake_word_catalog_url", "wake_word_url"),
+                (
+                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled",
+                    "wake_word", "wake_word_catalog_url", "wake_word_url",
+                    "wake_profile_name", "oww_wake_word", "oww_wake_word_catalog_url",
+                    "oww_wake_word_url", "oww_profile_name",
+                ),
             ),
             (
                 "Trainer Feedback",
@@ -1702,7 +2385,12 @@ def global_settings_sections() -> List[Dict[str, Any]]:
             (
                 "Wake Word",
                 "",
-                ("wake_engine", "wake_word", "wake_word_catalog_url", "wake_word_url"),
+                (
+                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled",
+                    "wake_word", "wake_word_catalog_url", "wake_word_url",
+                    "wake_profile_name", "oww_wake_word", "oww_wake_word_catalog_url",
+                    "oww_wake_word_url", "oww_profile_name",
+                ),
             ),
             (
                 "Trainer Feedback",
@@ -1726,8 +2414,95 @@ def resolve_wake_word_source_values(values: Dict[str, Any]) -> Dict[str, Any]:
         resolved["wake_word_url"] = wake_word_catalog.require_catalog_url(
             resolved.get("wake_word_catalog_url")
         )
+    oww_source = _lower(resolved.get("oww_wake_word"))
+    if oww_source == "catalog":
+        mode = _wake_detector_mode(resolved.get("wake_detector_mode"), resolved)
+        resolved["oww_wake_word"] = "custom_url"
+        resolved["oww_wake_word_url"] = wake_word_catalog.require_catalog_url(
+            resolved.get("oww_wake_word_catalog_url"),
+            model_type="dual" if mode == "dual" else "oww",
+        )
     resolved.pop("wake_word_catalog_url", None)
+    resolved.pop("oww_wake_word_catalog_url", None)
     return resolved
+
+
+def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, Any]:
+    token = _lower(family)
+    if token not in WAKE_FAMILIES:
+        raise ValueError(f"Unsupported wake family: {family}")
+    _ensure_wake_family_settings()
+    incoming = resolve_wake_word_source_values(dict(values or {}))
+    incoming = {
+        key: value
+        for key, value in incoming.items()
+        if key in WAKE_FAMILY_PERSISTED_KEYS
+    }
+    if not incoming:
+        raise ValueError("No wake-family settings were provided.")
+
+    current_raw = _raw_wake_family_settings(token)
+    current = wake_family_settings_snapshot(token)
+    if token == "mww":
+        mode = "mww"
+    else:
+        mode = _wake_detector_mode(incoming.get("wake_detector_mode"), {**current, **incoming})
+    incoming.update(
+        {
+            "wake_detector_mode": mode,
+            "wake_mww_enabled": mode in {"mww", "dual"},
+            "wake_oww_enabled": mode in {"oww", "dual"},
+        }
+    )
+
+    combined_source = {**DEFAULTS, **current_raw, **incoming}
+    if mode == "dual":
+        dual_profile = _dual_profile_for_save(incoming, current_raw)
+        profile = dual_profile
+        oww_profile = dual_profile
+        if _wake_word_value(combined_source.get("oww_wake_word")) == "custom_url":
+            incoming["wake_word"] = "custom_url"
+            incoming["wake_word_url"] = _text(dual_profile.get("wake_profile_source_url"))
+        else:
+            incoming.update(
+                {
+                    "wake_word": "hey_tater",
+                    "wake_word_url": "",
+                    "oww_wake_word": "hey_tater",
+                    "oww_wake_word_url": "",
+                }
+            )
+    else:
+        profile = _profile_for_save(incoming, current_raw)
+        oww_profile = _oww_profile_for_save(incoming, current_raw)
+
+    normalized = normalize_settings(incoming, base={**current, **profile, **oww_profile})
+    normalized["wake_detector_mode"] = mode
+    normalized["wake_mww_enabled"] = mode in {"mww", "dual"}
+    normalized["wake_oww_enabled"] = mode in {"oww", "dual"}
+    changed = [
+        key
+        for key in WAKE_FAMILY_PERSISTED_KEYS
+        if current.get(key) != normalized.get(key)
+    ]
+    persisted = {
+        key: normalized.get(key)
+        for key in WAKE_FAMILY_PERSISTED_KEYS
+        if key in normalized
+    }
+    if changed:
+        redis_client.hset(
+            wake_family_hash_key(token),
+            mapping={key: str(value) for key, value in persisted.items()},
+        )
+    return {
+        "ok": True,
+        "scope": "wake_family",
+        "family": token,
+        "settings": normalized,
+        "changed_keys": sorted(changed),
+        "updated": len(changed),
+    }
 
 
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:
@@ -1750,15 +2525,37 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
             if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
         }
     current_raw = {**global_raw, **device_raw}
+    combined_source = {**DEFAULTS, **current_raw, **incoming}
+    dual_enabled = (
+        _as_bool(combined_source.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
+        and _as_bool(combined_source.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
+    )
     current = settings_snapshot(token, board=board)
     if token:
         global_wake_word = _wake_word_value(global_raw.get("wake_word"))
         global_wake_url = _text(global_raw.get("wake_word_url"))
         profile = _wake_profile_from_source(global_raw, global_wake_word, global_wake_url)
+        global_oww_word = _wake_word_value(global_raw.get("oww_wake_word"))
+        global_oww_url = _text(global_raw.get("oww_wake_word_url"))
+        oww_profile = _oww_profile_from_source(global_raw, global_oww_word, global_oww_url)
+    elif dual_enabled:
+        dual_profile = _dual_profile_for_save(incoming, current_raw)
+        profile = dual_profile
+        oww_profile = dual_profile
+        selected_bundle = _wake_word_value(combined_source.get("oww_wake_word"))
+        if selected_bundle == "custom_url":
+            incoming["wake_word"] = "custom_url"
+            incoming["wake_word_url"] = _text(dual_profile.get("wake_profile_source_url"))
+        else:
+            incoming["wake_word"] = "hey_tater"
+            incoming["wake_word_url"] = ""
+            incoming["oww_wake_word"] = "hey_tater"
+            incoming["oww_wake_word_url"] = ""
     else:
         profile = _profile_for_save(incoming, current_raw)
+        oww_profile = _oww_profile_for_save(incoming, current_raw)
     current_base = normalize_settings(current_raw, base=board_base)
-    normalized = normalize_settings(incoming, base={**current_base, **profile})
+    normalized = normalize_settings(incoming, base={**current_base, **profile, **oww_profile})
     changed = [key for key, value in normalized.items() if current.get(key) != value]
     persisted = normalized
     if token:

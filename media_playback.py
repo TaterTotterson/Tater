@@ -21,8 +21,6 @@ logger = logging.getLogger("media_playback")
 DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS = 360.0
 NATIVE_GROUP_START_LEAD_MS = 750
 MIXED_SONOS_NATIVE_START_LEAD_MS = 1000
-AIRPLAY_NATIVE_START_LEAD_MS = 750
-AIRPLAY_SOLO_START_LEAD_MS = 500
 RUNTIME_MEDIA_PROXY_TTL_SECONDS = 8 * 60 * 60
 
 _runtime_media_proxy_lock = threading.RLock()
@@ -225,7 +223,6 @@ def _shared_native_media_source_url(
     *,
     media_type: str,
     filename: str,
-    completion_wait_s: float = 0.0,
     duration_seconds: float = 0.0,
 ) -> tuple[str, Dict[str, Any]]:
     """Open one upstream and return the LAN URL shared by synchronized players."""
@@ -236,13 +233,12 @@ def _shared_native_media_source_url(
         source_url,
         media_type=media_type,
         filename=filename,
-        completion_wait_s=completion_wait_s,
         expected_duration_seconds=duration_seconds,
     )
     relay_id = _text(relay.get("relay_id"))
     token = _text(relay.get("token"))
     if not relay_id or not token:
-        raise RuntimeError("Tater did not create the shared stereo media stream.")
+        raise RuntimeError("Tater did not create the shared media stream.")
     safe_filename = Path(_text(relay.get("filename")) or filename or "media.bin").name
     base_url = _service_base_url_for_peer().rstrip("/")
     query = urlencode({"token": token})
@@ -343,9 +339,204 @@ def _voice_core_fade_in_media_sync(
         return {"ok": False, "error": _text(exc)}
 
 
+def _voice_core_play_sendspin_media_sync(
+    selectors: List[str],
+    *,
+    airplay_players: List[str] | None,
+    source_url: str,
+    text: str,
+    title: str,
+    artist: str,
+    album: str,
+    duration_seconds: float,
+    volume_percent: int,
+    target_volume_percent: Dict[str, Any] | None,
+    target_sync_offset_ms: Dict[str, Any] | None,
+    start_position_seconds: float,
+    start_lead_ms: int,
+) -> Dict[str, Any]:
+    """Start one Music Core timeline for native and bridged AirPlay players."""
+    stream_id = f"music-{uuid.uuid4().hex}"
+    clean_airplay_targets = [
+        f"airplay:{_text(player).removeprefix('airplay:')}"
+        for player in list(airplay_players or [])
+        if _text(player)
+    ]
+
+    async def start() -> Dict[str, Any]:
+        from tater_voice import native_satellite, sendspin_playback
+
+        targets = (
+            await native_satellite.sendspin_targets_for_selectors(selectors)
+            if selectors
+            else []
+        )
+        for target in targets:
+            logical_selector = _text(target.get("logical_selector"))
+            member_selector = _text(target.get("selector"))
+            logical_volume = max(
+                0,
+                min(
+                    100,
+                    int(
+                        _target_setting(
+                            target_volume_percent,
+                            logical_selector,
+                            member_selector,
+                            default=volume_percent,
+                        )
+                    ),
+                ),
+            )
+            balance = max(0, min(100, int(target.get("volume_percent") or 0)))
+            target["volume_percent"] = int(round(logical_volume * balance / 100.0))
+            target["delay_ms"] = int(target.get("delay_ms") or 0) + max(
+                -1000,
+                min(
+                    1000,
+                    int(
+                        _target_setting(
+                            target_sync_offset_ms,
+                            logical_selector,
+                            member_selector,
+                            default=0,
+                        )
+                    ),
+                ),
+            )
+        minimum_delay = min(
+            (int(target.get("delay_ms") or 0) for target in targets),
+            default=0,
+        )
+        for target in targets:
+            target["delay_ms"] = max(
+                0,
+                int(target.get("delay_ms") or 0) - minimum_delay,
+            )
+        airplay_volumes = {
+            target: max(
+                0,
+                min(
+                    100,
+                    int(
+                        _target_setting(
+                            target_volume_percent,
+                            target,
+                            target.removeprefix("airplay:"),
+                            default=volume_percent,
+                        )
+                    ),
+                ),
+            )
+            for target in clean_airplay_targets
+        }
+        airplay_offsets = {
+            target: max(
+                -1000,
+                min(
+                    1000,
+                    int(
+                        _target_setting(
+                            target_sync_offset_ms,
+                            target,
+                            target.removeprefix("airplay:"),
+                            default=0,
+                        )
+                    ),
+                ),
+            )
+            for target in clean_airplay_targets
+        }
+        native_reference_offset = min(
+            (
+                max(
+                    -1000,
+                    min(
+                        1000,
+                        int(
+                            _target_setting(
+                                target_sync_offset_ms,
+                                selector,
+                                default=0,
+                            )
+                        ),
+                    ),
+                )
+                for selector in selectors
+            ),
+            default=min(airplay_offsets.values(), default=0),
+        )
+        return await sendspin_playback.start_media_url_stream(
+            stream_id,
+            targets,
+            source_url,
+            start_position_seconds=max(0.0, float(start_position_seconds or 0.0)),
+            group_name=_text(title) or _text(text) or "Tater Music",
+            start_lead_ms=max(250, min(5000, int(start_lead_ms or 1000))),
+            airplay_targets=clean_airplay_targets,
+            airplay_volume_percent=airplay_volumes,
+            airplay_sync_offset_ms=airplay_offsets,
+            airplay_reference_sync_offset_ms=native_reference_offset,
+            title=_text(title) or _text(text) or "Tater Music",
+            artist=_text(artist) or "Tater",
+            album=_text(album) or "Tater Music",
+            duration_seconds=max(0.0, float(duration_seconds or 0.0)),
+        )
+
+    try:
+        from tater_voice import native_satellite
+
+        sendspin_result = native_satellite.run_on_runtime_loop(start(), timeout=35.0)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "sent_count": 0,
+            "error": f"Sendspin music routing failed: {exc}",
+        }
+    if not isinstance(sendspin_result, dict) or not sendspin_result.get("ok"):
+        return {
+            "ok": False,
+            "sent_count": 0,
+            "error": (
+                _text(sendspin_result.get("error"))
+                if isinstance(sendspin_result, dict)
+                else "Sendspin music routing returned no result."
+            ),
+        }
+    members = [
+        _text(member)
+        for member in list(sendspin_result.get("members") or [])
+        if _text(member)
+    ]
+    native_count = len(selectors)
+    airplay_count = int(sendspin_result.get("airplay_bridge_sent_count") or 0)
+    logical_count = native_count + airplay_count
+    return {
+        **sendspin_result,
+        "ok": True,
+        "sent_count": logical_count,
+        "sendspin_sent_count": logical_count,
+        "native_sent_count": native_count,
+        "airplay_bridge_sent_count": airplay_count,
+        "media_session_sent_count": 0,
+        "media_session_fallback_count": 0,
+        "synchronized_group": len(members) > 1,
+        "group_shared_stream": True,
+        "voice_core_sessions": [
+            {
+                "target": f"sendspin:{stream_id}",
+                "session_id": stream_id,
+                "selectors": members,
+                "transport": "sendspin",
+            }
+        ],
+    }
+
+
 def _voice_core_play_media_sync(
     *,
     selectors: List[str],
+    airplay_players: List[str] | None = None,
     source_url: str,
     audio_bytes: bytes | None = None,
     text: str = "",
@@ -355,6 +546,7 @@ def _voice_core_play_media_sync(
     title: str = "",
     artist: str = "",
     album: str = "",
+    duration_seconds: float = 0.0,
     volume_percent: int = 100,
     target_volume_percent: Dict[str, Any] | None = None,
     target_sync_offset_ms: Dict[str, Any] | None = None,
@@ -365,13 +557,26 @@ def _voice_core_play_media_sync(
     source_owner: str = "media_playback",
 ) -> Dict[str, Any]:
     clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
-    if not clean_selectors:
+    clean_airplay_players = [
+        _text(item).removeprefix("airplay:")
+        for item in list(airplay_players or [])
+        if _text(item)
+    ]
+    sendspin_owner = bool(clean_airplay_players) or _text(source_owner) in {
+        "external_audio",
+        "music_core",
+    }
+    if not clean_selectors and not (sendspin_owner and clean_airplay_players):
         return {"ok": False, "sent_count": 0, "error": "No Voice Core satellites selected."}
 
-    handoff = _voice_core_handoff_media_sync(
-        clean_selectors,
-        target_volume_percent=target_volume_percent,
-        volume_percent=volume_percent,
+    handoff = (
+        _voice_core_handoff_media_sync(
+            clean_selectors,
+            target_volume_percent=target_volume_percent,
+            volume_percent=volume_percent,
+        )
+        if clean_selectors
+        else {}
     )
     replaced_members = {
         _text(selector)
@@ -384,11 +589,19 @@ def _voice_core_play_media_sync(
         for selector, members in selector_members.items()
         if any(member in replaced_members for member in members)
     }
-    if _text(source_owner) != "external_audio" and handoff.get("sessions"):
+    if _text(source_owner) != "external_audio":
         with contextlib.suppress(Exception):
             import external_audio
 
-            external_audio.release_external_audio_sessions(handoff.get("sessions"))
+            requested_members = [
+                member
+                for members in selector_members.values()
+                for member in members
+                if member
+            ]
+            external_audio.release_external_audio_selectors(requested_members)
+            if handoff.get("sessions"):
+                external_audio.release_external_audio_sessions(handoff.get("sessions"))
 
     def destination_volume(selector: str) -> int:
         desired = max(
@@ -418,6 +631,65 @@ def _voice_core_play_media_sync(
             result.setdefault("warnings", []).append(
                 f"Playback handoff fade-in: {_text(fade.get('error'))}"
             )
+        return result
+
+    if _text(source_owner) == "external_audio":
+        try:
+            import external_audio
+
+            result = external_audio.start_external_audio_sendspin_route(
+                clean_selectors,
+                airplay_targets=clean_airplay_players,
+                volume_percent=volume_percent,
+                target_volume_percent=target_volume_percent,
+                target_sync_offset_ms=target_sync_offset_ms,
+                start_lead_ms=start_lead_ms,
+                title=title or text or "AirPlay",
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "sent_count": 0,
+                "error": f"Sendspin AirPlay routing failed: {exc}",
+            }
+        if not isinstance(result, dict):
+            return {
+                "ok": False,
+                "sent_count": 0,
+                "error": "Sendspin AirPlay routing returned no result.",
+            }
+        if replaced_members and result.get("ok"):
+            result["playback_handoff"] = {
+                "replaced_selectors": sorted(replaced_members),
+                "fade_out_ms": 180,
+                "fade_in_ms": 0,
+                "fade_in_ok": True,
+            }
+        return result
+
+    if _text(source_owner) == "music_core" or clean_airplay_players:
+        result = _voice_core_play_sendspin_media_sync(
+            clean_selectors,
+            airplay_players=clean_airplay_players,
+            source_url=source_url,
+            text=text,
+            title=title,
+            artist=artist,
+            album=album,
+            duration_seconds=duration_seconds,
+            volume_percent=volume_percent,
+            target_volume_percent=target_volume_percent,
+            target_sync_offset_ms=target_sync_offset_ms,
+            start_position_seconds=start_position_seconds,
+            start_lead_ms=start_lead_ms,
+        )
+        if replaced_members and result.get("ok"):
+            result["playback_handoff"] = {
+                "replaced_selectors": sorted(replaced_members),
+                "fade_out_ms": 180,
+                "fade_in_ms": 0,
+                "fade_in_ok": True,
+            }
         return result
 
     payload_template = {
@@ -646,9 +918,32 @@ def _voice_core_stop_media_sync(
 ) -> List[str]:
     warnings: List[str] = []
     try:
-        from tater_voice import native_satellite, stereo_pairs
+        from tater_voice import native_satellite, sendspin_playback, stereo_pairs
 
-        expected_owners = _voice_session_owner_map(expected_sessions)
+        expected_rows = [
+            dict(row)
+            for row in list(expected_sessions or [])
+            if isinstance(row, dict)
+        ]
+        sendspin_rows = [
+            row for row in expected_rows if _text(row.get("transport")) == "sendspin"
+        ]
+        legacy_rows = [
+            row for row in expected_rows if _text(row.get("transport")) != "sendspin"
+        ]
+        for row in sendspin_rows:
+            stream_id = _text(row.get("session_id"))
+            if not stream_id:
+                continue
+            try:
+                native_satellite.run_on_runtime_loop(
+                    sendspin_playback.stop_live_stream(stream_id),
+                    timeout=8.0,
+                )
+            except Exception as exc:
+                warnings.append(f"{stream_id}: {exc}")
+
+        expected_owners = _voice_session_owner_map(legacy_rows)
         members: List[str] = []
         raw_selectors = list(selectors or [])
         if expected_sessions is not None:
@@ -1004,20 +1299,26 @@ def play_media_url_targets(
         len(members) > 1 for members in native_selector_members.values()
     )
     shared_playback_source_url = playback_source_url
-    tater_encoded_group_source = any(
-        marker in playback_source_url.lower()
-        for marker in (
-            "/api/external-audio/v1/streams/",
-            "/api/cores/music_core/webhook/native-mp3",
-        )
-    )
+    live_group_source = "/api/external-audio/v1/streams/" in playback_source_url.lower()
     synchronized_group_targets = len(voice_core_selectors) + len(airplay_players)
+    source_owner_id = _text(source_owner)
+    sendspin_airplay_bridge = bool(airplay_players)
+    needs_legacy_stereo_relay = (
+        has_native_stereo_pair
+        and source_owner_id not in {"external_audio", "music_core"}
+    )
     if (
-        (
-            has_native_stereo_pair
+        not sendspin_airplay_bridge
+        and
+        (source_owner_id != "external_audio" or bool(airplay_players))
+        and (
+            needs_legacy_stereo_relay
             or (
                 synchronized_group_targets > 1
-                and (tater_encoded_group_source or shared_group_source)
+                and (
+                    live_group_source
+                    or shared_group_source
+                )
             )
         )
         and _text(media_content_type).lower() in {"music", "audio", "song", "media"}
@@ -1029,15 +1330,6 @@ def play_media_url_targets(
                 media_type=clean_media_type,
                 filename=safe_filename,
                 duration_seconds=_as_float(duration_seconds, 0.0),
-                # Music Core produces a finite track, generally much faster
-                # than real time. Start from a complete, seekable file when
-                # possible. Live AirPlay must remain progressive.
-                completion_wait_s=(
-                    min(20.0, max(5.0, _as_float(duration_seconds, 0.0) / 20.0))
-                    if has_native_stereo_pair
-                    and "/api/cores/music_core/webhook/native-mp3" in playback_source_url.lower()
-                    else 0.0
-                ),
             )
             result["native_shared_stream"] = True
             result["group_shared_stream"] = True
@@ -1052,11 +1344,6 @@ def play_media_url_targets(
                 exc,
             )
     sent_count = 0
-    airplay_prepared: Dict[str, Any] = {}
-    airplay_primed: Dict[str, Any] = {}
-    airplay_ready_at_unix_ms = 0
-    airplay_minimum_start_unix_ms = 0
-    airplay_reused = False
     effective_target_volume_percent = dict(target_volume_percent or {})
     effective_target_sync_offset_ms = dict(target_sync_offset_ms or {})
     for sonos_target, bridge_target in sonos_airplay_routes.items():
@@ -1073,220 +1360,14 @@ def play_media_url_targets(
     if sonos_airplay_routes:
         result["sonos_airplay_routes"] = dict(sonos_airplay_routes)
 
-    airplay_offsets = {
-        f"airplay:{player}": max(
-            -1000,
-            min(
-                1000,
-                int(
-                    _target_setting(
-                        effective_target_sync_offset_ms,
-                        f"airplay:{player}",
-                        player,
-                        default=0,
-                    )
-                ),
-            ),
-        )
-        for player in airplay_players
-    }
-    native_reference_offset_ms = min(
-        (
-            max(
-                -1000,
-                min(
-                    1000,
-                    int(
-                        _target_setting(
-                            effective_target_sync_offset_ms,
-                            selector,
-                            default=0,
-                        )
-                    ),
-                ),
-            )
-            for selector in voice_core_selectors
-        ),
-        default=min(airplay_offsets.values(), default=0),
-    )
-
     if _text(airplay_group_id) and not airplay_players:
         with contextlib.suppress(Exception):
             from airplay_bridge import stop_airplay_group_sync
 
             stop_airplay_group_sync(_text(airplay_group_id))
 
-    # AirPlay receivers need time to connect and buffer. Do that before the
-    # satellite timeline is committed, then start both transports from the
-    # same Unix-millisecond anchor below.
-    if airplay_players:
-        airplay_source_url = shared_playback_source_url
-
-        if _text(airplay_group_id):
-            try:
-                from airplay_bridge import reuse_airplay_group_sync
-
-                airplay_prepared = reuse_airplay_group_sync(
-                    group_id=_text(airplay_group_id),
-                    targets=airplay_players,
-                    source_url=airplay_source_url,
-                    start_position_seconds=start_position_seconds,
-                    volume_percent=max(0, min(100, int(_as_float(volume_percent, 100.0)))),
-                    target_volume_percent=effective_target_volume_percent,
-                    target_sync_offset_ms=airplay_offsets,
-                    reference_sync_offset_ms=native_reference_offset_ms,
-                    title=_text(title) or _text(text) or Path(safe_filename).stem or "Tater Music",
-                    artist=_text(artist) or "Tater",
-                    album=_text(album) or "Tater Music",
-                    duration_seconds=max(0.0, _as_float(duration_seconds, 0.0)),
-                    timeout_s=min(30.0, max(5.0, float(timeout_s or 0.0))),
-                )
-            except Exception as exc:
-                airplay_prepared = {
-                    "ok": False,
-                    "reusable": False,
-                    "error": str(exc),
-                    "prepared_count": 0,
-                }
-            if airplay_prepared.get("ok"):
-                airplay_reused = True
-                airplay_primed = dict(airplay_prepared)
-                result["airplay_bridge_reused"] = True
-            else:
-                result["airplay_bridge_reuse_fallback"] = (
-                    _text(airplay_prepared.get("error")) or "warm session unavailable"
-                )
-                logger.info(
-                    "[media_playback] AirPlay warm replacement was unavailable for %s: %s; using a fresh session",
-                    ", ".join(airplay_players),
-                    result["airplay_bridge_reuse_fallback"],
-                )
-                airplay_prepared = {}
-
-        def _prepare_airplay(source: str) -> Dict[str, Any]:
-            from airplay_bridge import prepare_airplay_group_sync
-
-            return prepare_airplay_group_sync(
-                targets=airplay_players,
-                source_url=source,
-                start_position_seconds=start_position_seconds,
-                volume_percent=max(0, min(100, int(_as_float(volume_percent, 100.0)))),
-                target_volume_percent=effective_target_volume_percent,
-                title=_text(title) or _text(text) or Path(safe_filename).stem or "Tater Music",
-                artist=_text(artist) or "Tater",
-                album=_text(album) or "Tater Music",
-                duration_seconds=max(0.0, _as_float(duration_seconds, 0.0)),
-                timeout_s=min(30.0, max(5.0, float(timeout_s or 0.0))),
-            )
-
-        if not airplay_reused:
-            try:
-                airplay_prepared = _prepare_airplay(airplay_source_url)
-            except Exception as exc:
-                airplay_prepared = {"ok": False, "error": str(exc), "prepared_count": 0}
-        if not airplay_reused and not airplay_prepared.get("ok"):
-            first_error = _text(airplay_prepared.get("error"))
-            logger.warning(
-                "[media_playback] AirPlay preparation failed for %s: %s; retrying once",
-                ", ".join(airplay_players),
-                first_error or "unknown error",
-            )
-            time.sleep(0.25)
-            try:
-                # A receiver may still be releasing its previous native Sonos
-                # session. One fresh AirPlay session avoids leaving the other
-                # synchronized destinations playing alone on that transient.
-                airplay_prepared = _prepare_airplay(airplay_source_url)
-                result["airplay_prepare_retried"] = True
-            except Exception as exc:
-                airplay_prepared = {"ok": False, "error": str(exc), "prepared_count": 0}
-        result["airplay_bridge_prepared_count"] = int(
-            airplay_prepared.get("prepared_count") or 0
-        )
-        if isinstance(airplay_prepared.get("routes"), dict):
-            result["airplay_bridge_routes"] = dict(airplay_prepared["routes"])
-        if _text(airplay_prepared.get("group_id")):
-            result["airplay_bridge_group_id"] = _text(airplay_prepared.get("group_id"))
-        warnings.extend(
-            _text(item)
-            for item in list(airplay_prepared.get("warnings") or [])
-            if _text(item)
-        )
-        if not airplay_prepared.get("ok") and _text(airplay_prepared.get("error")):
-            warnings.append(f"AirPlay Bridge: {_text(airplay_prepared.get('error'))}")
-            logger.warning(
-                "[media_playback] AirPlay preparation failed after retry for %s: %s",
-                ", ".join(airplay_players),
-                _text(airplay_prepared.get("error")),
-            )
-
-    # Feed AirPlay before committing any native-satellite timeline. The sender
-    # owns its PCM pacing and reports when the receiver clock will be usable;
-    # scheduling the sat first can leave that fixed timeline behind a corrected
-    # AirPlay start and can also make a failed AirPlay member play the sat alone.
-    if airplay_prepared.get("ok") and not airplay_reused:
-        group_id = _text(airplay_prepared.get("group_id"))
-        try:
-            from airplay_bridge import prime_airplay_group_sync
-
-            airplay_primed = prime_airplay_group_sync(
-                group_id=group_id,
-                timeout_s=min(30.0, max(5.0, float(timeout_s or 0.0))),
-            )
-        except Exception as exc:
-            airplay_primed = {"ok": False, "primed_count": 0, "error": str(exc)}
-        result["airplay_bridge_primed_count"] = int(
-            airplay_primed.get("primed_count") or 0
-        )
-        if airplay_primed.get("ok"):
-            airplay_ready_at_unix_ms = max(
-                (
-                    int(row.get("ready_at_unix_ms") or 0)
-                    for row in dict(airplay_primed.get("clock_readiness") or {}).values()
-                    if isinstance(row, dict)
-                ),
-                default=0,
-            )
-            if airplay_ready_at_unix_ms:
-                result["airplay_ready_at_unix_ms"] = airplay_ready_at_unix_ms
-        else:
-            detail = _text(airplay_primed.get("error")) or "AirPlay audio priming failed."
-            warnings.append(f"AirPlay Bridge: {detail}")
-            logger.warning(
-                "[media_playback] AirPlay audio priming failed for %s: %s",
-                ", ".join(airplay_players),
-                detail,
-            )
-            airplay_prepared = {}
-
-    if airplay_prepared.get("ok") and airplay_reused:
-        result["airplay_bridge_primed_count"] = int(
-            airplay_primed.get("primed_count") or 0
-        )
-
-    if airplay_primed.get("ok"):
-        airplay_ready_at_unix_ms = max(
-            (
-                int(row.get("ready_at_unix_ms") or 0)
-                for row in dict(airplay_primed.get("clock_readiness") or {}).values()
-                if isinstance(row, dict)
-            ),
-            default=0,
-        )
-        airplay_minimum_start_unix_ms = int(
-            airplay_primed.get("minimum_start_unix_ms") or 0
-        )
-        if not airplay_minimum_start_unix_ms:
-            airplay_minimum_start_unix_ms = int(time.time() * 1000) + int(
-                airplay_primed.get("minimum_start_lead_ms") or 0
-            )
-        if airplay_ready_at_unix_ms:
-            result["airplay_ready_at_unix_ms"] = airplay_ready_at_unix_ms
-        if airplay_minimum_start_unix_ms:
-            result["airplay_minimum_start_unix_ms"] = airplay_minimum_start_unix_ms
-
     voice_result: Dict[str, Any] = {}
-    if voice_core_selectors and (not airplay_players or airplay_prepared.get("ok")):
+    if voice_core_selectors or sendspin_airplay_bridge:
         native_start_lead_ms = max(
             NATIVE_GROUP_START_LEAD_MS
             if len(voice_core_selectors) > 1 or has_native_stereo_pair
@@ -1326,25 +1407,9 @@ def play_media_url_targets(
             )
             result["mixed_sync_adjustment_ms"] = adjustment_ms
             result["mixed_native_start_lead_ms"] = native_start_lead_ms
-        if airplay_prepared.get("ok"):
-            minimum_start_lead_ms = max(
-                0,
-                airplay_minimum_start_unix_ms - int(time.time() * 1000),
-            )
-            clock_ready_lead_ms = max(
-                0,
-                airplay_ready_at_unix_ms - int(time.time() * 1000) + 500,
-            )
-            native_start_lead_ms = max(
-                native_start_lead_ms,
-                AIRPLAY_NATIVE_START_LEAD_MS,
-                minimum_start_lead_ms,
-                clock_ready_lead_ms,
-            )
-            native_start_lead_ms = min(5000, native_start_lead_ms)
-            result["airplay_native_start_lead_ms"] = native_start_lead_ms
         voice_result = _voice_core_play_media_sync(
             selectors=voice_core_selectors,
+            airplay_players=airplay_players if sendspin_airplay_bridge else [],
             source_url=shared_playback_source_url,
             audio_bytes=bytes(audio_bytes or b"") if isinstance(audio_bytes, (bytes, bytearray)) else None,
             text=text,
@@ -1354,6 +1419,7 @@ def play_media_url_targets(
             title=title,
             artist=artist,
             album=album,
+            duration_seconds=duration_seconds,
             volume_percent=volume_percent,
             target_volume_percent=effective_target_volume_percent,
             target_sync_offset_ms=effective_target_sync_offset_ms,
@@ -1363,7 +1429,29 @@ def play_media_url_targets(
             respect_reply_playback=respect_reply_playback,
             source_owner=source_owner,
         )
-        result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["voice_core_sent_count"] = int(
+            voice_result.get("native_sent_count")
+            if voice_result.get("native_sent_count") is not None
+            else voice_result.get("sent_count")
+            or 0
+        )
+        if sendspin_airplay_bridge:
+            result["airplay_bridge_sent_count"] = int(
+                voice_result.get("airplay_bridge_sent_count") or 0
+            )
+            result["airplay_bridge_prepared_count"] = int(
+                voice_result.get("airplay_bridge_prepared_count")
+                or voice_result.get("airplay_bridge_sent_count")
+                or 0
+            )
+            for key in (
+                "airplay_bridge_group_id",
+                "airplay_bridge_timing_mode",
+                "airplay_bridge_routes",
+                "airplay_bridge_start_unix_ms",
+            ):
+                if voice_result.get(key) is not None:
+                    result[key] = voice_result[key]
         result["media_session_sent_count"] = int(voice_result.get("media_session_sent_count") or 0)
         result["media_session_fallback_count"] = int(voice_result.get("media_session_fallback_count") or 0)
         result["media_session_warnings"] = [
@@ -1376,18 +1464,19 @@ def play_media_url_targets(
             for item in list(voice_result.get("voice_core_sessions") or [])
             if isinstance(item, dict)
         ]
+        if sendspin_airplay_bridge or voice_result.get("group_shared_stream"):
+            result["group_shared_stream"] = True
+            result["sendspin_sent_count"] = int(
+                voice_result.get("sendspin_sent_count")
+                or voice_result.get("sent_count")
+                or 0
+            )
         sent_count += int(voice_result.get("sent_count") or 0)
         warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
         if not voice_result.get("ok") and _text(voice_result.get("error")):
             warnings.append(_text(voice_result.get("error")))
 
-    if voice_core_selectors and not voice_result.get("ok"):
-        if airplay_prepared.get("ok"):
-            with contextlib.suppress(Exception):
-                from airplay_bridge import stop_airplay_targets
-
-                stop_airplay_targets(airplay_players)
-            airplay_prepared = {}
+    if (voice_core_selectors or sendspin_airplay_bridge) and not voice_result.get("ok"):
         if start_position_seconds > 0 and not _resume_fallback_attempted:
             logger.warning(
                 "[media_playback] Synchronized resume at %.3fs failed; retrying the track from its beginning",
@@ -1428,65 +1517,6 @@ def play_media_url_targets(
             )
             retry_result["warnings"] = retry_warnings
             return retry_result
-
-    if airplay_prepared.get("ok"):
-        group_id = _text(airplay_prepared.get("group_id"))
-        native_anchor_ms = int(
-            voice_result.get("audible_start_unix_ms")
-            or voice_result.get("start_unix_ms")
-            or 0
-        )
-        if native_anchor_ms > 0:
-            start_unix_ms = native_anchor_ms
-            reference_offset_ms = native_reference_offset_ms
-            allow_reanchor = False
-        else:
-            start_unix_ms = max(
-                int(time.time() * 1000) + AIRPLAY_SOLO_START_LEAD_MS,
-                airplay_ready_at_unix_ms + 500,
-                airplay_minimum_start_unix_ms,
-            )
-            reference_offset_ms = min(airplay_offsets.values(), default=0)
-            allow_reanchor = True
-        try:
-            from airplay_bridge import commit_airplay_group_sync
-
-            airplay_result = commit_airplay_group_sync(
-                group_id=group_id,
-                start_unix_ms=start_unix_ms,
-                reference_sync_offset_ms=reference_offset_ms,
-                target_sync_offset_ms=airplay_offsets,
-                allow_reanchor=allow_reanchor,
-            )
-        except Exception as exc:
-            airplay_result = {"ok": False, "sent_count": 0, "error": str(exc)}
-            with contextlib.suppress(Exception):
-                from airplay_bridge import stop_airplay_targets
-
-                stop_airplay_targets(airplay_players)
-        result["airplay_bridge_sent_count"] = int(airplay_result.get("sent_count") or 0)
-        if _text(airplay_result.get("timing_mode")):
-            result["airplay_bridge_timing_mode"] = _text(airplay_result["timing_mode"])
-        if airplay_result.get("start_unix_ms") is not None:
-            result["airplay_bridge_start_unix_ms"] = int(airplay_result["start_unix_ms"])
-        sent_count += int(airplay_result.get("sent_count") or 0)
-        warnings.extend(
-            _text(item)
-            for item in list(airplay_result.get("warnings") or [])
-            if _text(item)
-        )
-        if not airplay_result.get("ok") and _text(airplay_result.get("error")):
-            warnings.append(f"AirPlay Bridge: {_text(airplay_result.get('error'))}")
-            logger.warning(
-                "[media_playback] AirPlay synchronized start failed for %s: %s",
-                ", ".join(airplay_players),
-                _text(airplay_result.get("error")),
-            )
-            if voice_result.get("ok"):
-                warnings.extend(_voice_core_stop_media_sync(voice_core_selectors))
-                sent_count -= int(voice_result.get("sent_count") or 0)
-                result["voice_core_sent_count"] = 0
-                result["media_session_sent_count"] = 0
 
     if sonos_speakers:
         sonos_source_url = playback_source_url

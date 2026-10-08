@@ -4379,22 +4379,6 @@ async def _send_tool_call_visual(
         session.tool_visual_sent = True
 
 
-def _stereo_reply_target_without_active_media(target: Any) -> bool:
-    reply_target = _text(target)
-    if not reply_target.startswith(("voice_core:stereo:", "stereo:")):
-        return False
-    try:
-        from .. import native_satellite, stereo_pairs
-
-        stereo_selector = reply_target.removeprefix("voice_core:")
-        stereo_pair = stereo_pairs.get_pair(stereo_selector)
-        return bool(stereo_pair) and not native_satellite.stereo_pair_media_active(
-            stereo_pair
-        )
-    except Exception:
-        return False
-
-
 async def _play_live_tool_progress_for_session(
     client: Any,
     module: Any,
@@ -4424,16 +4408,6 @@ async def _play_live_tool_progress_for_session(
         return
 
     reply_playback_target = _session_reply_playback_target(selector, session)
-    if _stereo_reply_target_without_active_media(reply_playback_target):
-        logger.info(
-            "[native-voice] skipped spoken tool progress for inactive stereo reply target "
-            "selector=%s target=%s session_id=%s",
-            selector,
-            reply_playback_target,
-            session.session_id,
-        )
-        return
-
     audio_bytes, audio_format, backend_used, _backend_note = await _native_synthesize_text(
         spoken,
         session=session,

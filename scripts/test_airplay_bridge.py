@@ -88,15 +88,6 @@ class AirPlayBridgeTests(unittest.TestCase):
                 Path(temp_dir).resolve() / "airplay_bridge",
             )
 
-    def test_ffmpeg_lookup_supports_packaged_macos_and_docker_paths(self) -> None:
-        with (
-            mock.patch.dict("os.environ", {}, clear=True),
-            mock.patch.object(airplay_bridge.shutil, "which", return_value=None),
-            mock.patch.object(Path, "is_file", return_value=True),
-            mock.patch.object(airplay_bridge.os, "access", return_value=True),
-        ):
-            self.assertEqual(airplay_bridge._find_ffmpeg(), "/opt/homebrew/bin/ffmpeg")
-
     def test_native_setup_and_macos_app_check_airplay_dependencies(self) -> None:
         root = Path(__file__).resolve().parents[1]
         requirements = (root / "requirements.txt").read_text(encoding="utf-8")
@@ -297,14 +288,13 @@ class AirPlayBridgeTests(unittest.TestCase):
         }
         with (
             mock.patch.object(airplay_bridge, "ensure_airplay_cli", return_value="/bin/cliairplay"),
-            mock.patch.object(airplay_bridge, "_find_ffmpeg", return_value="/bin/ffmpeg"),
             mock.patch.object(airplay_bridge, "stop_airplay_targets"),
             mock.patch.object(airplay_bridge, "discover_airplay_devices", return_value=[retained]),
             mock.patch.object(airplay_bridge, "ensure_airplay_ptp_daemon", return_value={}),
             mock.patch.object(airplay_bridge, "_AirPlayMember", Member),
         ):
-            result = airplay_bridge.prepare_airplay_group_sync(
-                targets=["804af2c57d78"], source_url="https://example.test/audio.mp3"
+            result = airplay_bridge.prepare_sendspin_airplay_bridge(
+                targets=["804af2c57d78"]
             )
         self.assertTrue(result["ok"])
         self.assertEqual(result["routes"]["airplay:804af2c57d78"]["timing"], "ntp")
@@ -328,9 +318,6 @@ class AirPlayBridgeTests(unittest.TestCase):
                 "raop_service_name": "804AF2C57D78@Kitchen._raop._tcp.local.",
             },
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.mp3",
-            start_position_seconds=0,
             volume_percent=61,
             title="Song",
             artist="Artist",
@@ -364,52 +351,80 @@ class AirPlayBridgeTests(unittest.TestCase):
             "Song ACTION=STOP",
         )
 
-    def test_airplay_pcm_feed_leaves_pacing_to_cliairplay(self) -> None:
+    def test_sendspin_bridge_writes_pcm_directly_without_ffmpeg(self) -> None:
         member = airplay_bridge._AirPlayMember(
             target="airplay:804af2c57d78",
             device={"name": "Kitchen", "host": "10.0.0.24"},
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.flac",
-            start_position_seconds=12.5,
             volume_percent=61,
             title="Song",
             artist="Artist",
             album="Album",
             duration_seconds=123,
-            group_id="airplay-test",
+            group_id="sendspin-airplay-test",
+            pcm_sample_rate=44_100,
         )
         cli_process = mock.Mock()
         cli_process.poll.return_value = None
-        cli_process.stdin = mock.Mock()
+        cli_process.stdin = io.BytesIO()
         member.process = cli_process
         member.connected = True
-        ffmpeg_process = mock.Mock()
-        ffmpeg_process.poll.return_value = None
-        ffmpeg_process.stderr = io.BytesIO()
 
+        member.write_sendspin_pcm(b"shared-pcm")
+
+        self.assertEqual(cli_process.stdin.getvalue(), b"shared-pcm")
+        args = member._build_args(Path("/tmp/commands.pipe"))
+        self.assertEqual(args[args.index("--samplerate") + 1], "44100")
+
+    def test_sendspin_bridge_preparation_does_not_require_ffmpeg(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        class Member:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+                self.target = kwargs["target"]
+                self.device = kwargs["device"]
+                self.volume_percent = kwargs["volume_percent"]
+                self.route_protocol = "raop"
+                self.route_flow = "buffered"
+                self.route_timing = "ntp"
+
+            def prepare(self, _timeout):
+                return None
+
+            def stop(self):
+                return None
+
+        device = {
+            "id": "804af2c57d78",
+            "name": "Kitchen",
+            "host": "10.0.0.24",
+            "raop_port": 5000,
+            "airplay_port": 0,
+            "available": True,
+        }
         with (
-            mock.patch.object(airplay_bridge.subprocess, "Popen", return_value=ffmpeg_process) as popen,
-            mock.patch.object(member, "_wait_for", return_value=True),
-            mock.patch.object(member, "send_metadata"),
-            mock.patch.object(member, "send_command"),
+            mock.patch.object(airplay_bridge, "ensure_airplay_cli", return_value="/bin/cliairplay"),
+            mock.patch.object(airplay_bridge, "stop_airplay_targets"),
+            mock.patch.object(airplay_bridge, "discover_airplay_devices", return_value=[device]),
+            mock.patch.object(airplay_bridge, "_AirPlayMember", Member),
         ):
-            member.begin_audio()
+            result = airplay_bridge.prepare_sendspin_airplay_bridge(
+                targets=["804af2c57d78"],
+                pcm_sample_rate=44_100,
+            )
 
-        args = popen.call_args.args[0]
-        self.assertNotIn("-re", args)
-        self.assertLess(args.index("-ss"), args.index("-i"))
-        self.assertEqual(args[args.index("-ss") + 1], "12.500")
-        cli_process.stdin.close.assert_not_called()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["sendspin_bridge"])
+        self.assertNotIn("ffmpeg", captured[0])
+        self.assertNotIn("source_url", captured[0])
+        self.assertEqual(captured[0]["pcm_sample_rate"], 44_100)
 
-    def test_member_parses_warm_transition_constraints(self) -> None:
+    def test_member_parses_receiver_latency(self) -> None:
         member = airplay_bridge._AirPlayMember(
             target="airplay:804af2c57d78",
             device={"name": "Kitchen", "host": "10.0.0.24"},
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.flac",
-            start_position_seconds=0,
             volume_percent=61,
             title="Song",
             artist="Artist",
@@ -421,21 +436,13 @@ class AirPlayBridgeTests(unittest.TestCase):
         member._record_line(
             "[STATUS] latency lead_ms=1800 device_render_ms=1750 warm_lead_ms=1750"
         )
-        member._record_line("[STATUS] flushed head_unix_ms=2000000001400")
-
         self.assertEqual(member.latency_lead_ms, 1800)
-        self.assertEqual(member.warm_lead_ms, 1750)
-        self.assertTrue(member.flushed)
-        self.assertEqual(member.flushed_head_unix_ms, 2000000001400)
 
     def test_member_does_not_treat_projected_ptp_readiness_as_stable(self) -> None:
         member = airplay_bridge._AirPlayMember(
             target="airplay:804af2c57d78",
             device={"name": "Kitchen", "host": "10.0.0.24"},
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.flac",
-            start_position_seconds=0,
             volume_percent=61,
             title="Song",
             artist="Artist",
@@ -466,9 +473,6 @@ class AirPlayBridgeTests(unittest.TestCase):
             target="airplay:804af2c57d78",
             device={"name": "Kitchen", "host": "10.0.0.24"},
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.flac",
-            start_position_seconds=0,
             volume_percent=61,
             title="Song",
             artist="Artist",
@@ -490,9 +494,6 @@ class AirPlayBridgeTests(unittest.TestCase):
             target="airplay:804af2c57d78",
             device={"name": "Kitchen", "host": "10.0.0.24"},
             binary="/tmp/cliairplay",
-            ffmpeg="/tmp/ffmpeg",
-            source_url="https://example.test/song.flac",
-            start_position_seconds=0,
             volume_percent=61,
             title="Song",
             artist="Artist",
@@ -505,52 +506,13 @@ class AirPlayBridgeTests(unittest.TestCase):
         cli_process.stdin = mock.Mock()
         member.process = cli_process
         member.connected = True
-        ffmpeg_process = mock.Mock()
-        ffmpeg_process.poll.return_value = None
-        ffmpeg_process.stderr = io.BytesIO()
-
         with (
-            mock.patch.object(airplay_bridge.subprocess, "Popen", return_value=ffmpeg_process),
             mock.patch.object(member, "_wait_for", side_effect=[True, False]),
             mock.patch.object(member, "send_metadata"),
             mock.patch.object(member, "send_command"),
         ):
             with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-                member.begin_audio()
-
-    def test_group_reuse_refills_members_and_reports_safe_warm_anchor(self) -> None:
-        member = mock.Mock()
-        member.target = "airplay:804af2c57d78"
-        member.warm_lead_ms = 1750
-        member.flushed_head_unix_ms = 1001800
-        member.clock_ready_mode = "ptp"
-        member.clock_ready_state = "ready"
-        member.clock_ready_at_unix_ms = 1000000
-        member.route_protocol = "airplay2"
-        member.route_flow = "native"
-        member.route_timing = "ptp"
-        group = airplay_bridge._AirPlayGroup("airplay-reuse-test", [member])
-        with airplay_bridge._session_lock:
-            airplay_bridge._active_groups[group.group_id] = group
-            airplay_bridge._target_groups[member.target] = group.group_id
-        try:
-            with mock.patch.object(airplay_bridge.time, "time", return_value=1000.0):
-                result = airplay_bridge.reuse_airplay_group_sync(
-                    group_id=group.group_id,
-                    targets=[member.target],
-                    source_url="https://example.test/next.flac",
-                    target_sync_offset_ms={member.target: -100},
-                    reference_sync_offset_ms=-80,
-                    title="Next Song",
-                )
-        finally:
-            airplay_bridge._forget_group(group.group_id)
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["reused"])
-        self.assertEqual(result["minimum_start_unix_ms"], 1001970)
-        self.assertEqual(result["minimum_start_lead_ms"], 1970)
-        member.replace_audio.assert_called_once()
+                member.wait_sendspin_ready()
 
     def test_commit_reports_the_active_timing_mode(self) -> None:
         member = mock.Mock()
@@ -564,7 +526,7 @@ class AirPlayBridgeTests(unittest.TestCase):
             airplay_bridge._target_groups[member.target] = group.group_id
         try:
             start_unix_ms = int(airplay_bridge.time.time() * 1000) + 1000
-            result = airplay_bridge.commit_airplay_group_sync(
+            result = airplay_bridge.start_sendspin_airplay_bridge(
                 group_id=group.group_id,
                 start_unix_ms=start_unix_ms,
             )
@@ -574,6 +536,40 @@ class AirPlayBridgeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["timing_mode"], "ptp")
         self.assertEqual(result["start_unix_ms"], start_unix_ms)
+
+    def test_sendspin_bridge_start_is_atomic_when_one_receiver_fails(self) -> None:
+        ready = mock.Mock()
+        ready.target = "airplay:804af2c57d78"
+        ready.audio_present = True
+        ready.route_timing = "ptp"
+        ready.start.side_effect = lambda requested: requested
+        failed = mock.Mock()
+        failed.target = "airplay:112233445566"
+        failed.audio_present = True
+        failed.route_timing = "ptp"
+        failed.start.side_effect = RuntimeError("receiver rejected start")
+        group = airplay_bridge._AirPlayGroup(
+            "sendspin-airplay-atomic-test",
+            [ready, failed],
+        )
+        with airplay_bridge._session_lock:
+            airplay_bridge._active_groups[group.group_id] = group
+            for member in group.members:
+                airplay_bridge._target_groups[member.target] = group.group_id
+
+        start_unix_ms = int(airplay_bridge.time.time() * 1000) + 1000
+        result = airplay_bridge.start_sendspin_airplay_bridge(
+            group_id=group.group_id,
+            start_unix_ms=start_unix_ms,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["sent_count"], 1)
+        self.assertIn("receiver rejected start", result["error"])
+        ready.stop.assert_called_once()
+        failed.stop.assert_called_once()
+        with airplay_bridge._session_lock:
+            self.assertNotIn(group.group_id, airplay_bridge._active_groups)
 
     def test_target_normalization_is_stable(self) -> None:
         self.assertEqual(

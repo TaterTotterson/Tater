@@ -245,6 +245,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.vp = FakeVoicePipeline()
         self.commands = []
         self.stereo_calls = []
+        self.sendspin_calls = []
         self.single_overlay_calls = []
         self.single_overlay_error = None
         self.group_calls = []
@@ -279,6 +280,12 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         async def prepare_stereo_media_session(pair, **kwargs):
             self.stereo_calls.append(("media", pair, kwargs))
             return {"stereo_session_started": True, "start_server_us": 123456789}
+
+        async def sendspin_stereo_pair_targets(pair):
+            return [
+                {"selector": pair["left_selector"], "host": "192.0.2.10", "channel": "left"},
+                {"selector": pair["right_selector"], "host": "192.0.2.11", "channel": "right"},
+            ]
 
         async def prepare_group_media_session(members, **kwargs):
             self.group_calls.append((members, kwargs))
@@ -325,11 +332,25 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         native.client_media_session_active = client_media_session_active
         native.send_command = send_command
         native.prepare_stereo_media_session = prepare_stereo_media_session
+        native.sendspin_stereo_pair_targets = sendspin_stereo_pair_targets
         native.prepare_group_media_session = prepare_group_media_session
         native.media_group_member_status = media_group_member_status
         native.start_stereo_overlay = start_stereo_overlay
         native.start_single_overlay = start_single_overlay
         native.stereo_pair_media_active = lambda _pair: self.media_session_active
+
+        sendspin_playback = types.ModuleType("tater_voice.sendspin_playback")
+
+        async def play_stereo_pair_audio(pair, targets, audio_bytes, **kwargs):
+            self.sendspin_calls.append((pair, targets, bytes(audio_bytes), kwargs))
+            return {
+                "ok": True,
+                "sendspin_playback_started": True,
+                "playback_completed": bool(kwargs.get("wait_for_completion")),
+                "members": [target["selector"] for target in targets],
+            }
+
+        sendspin_playback.play_stereo_pair_audio = play_stereo_pair_audio
 
         stereo_pairs = types.ModuleType("tater_voice.stereo_pairs")
         stereo_pairs.is_stereo_selector = lambda selector: str(selector or "").startswith("stereo:")
@@ -341,6 +362,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
                 "tater_voice",
                 "tater_voice.voice_pipeline",
                 "tater_voice.native_satellite",
+                "tater_voice.sendspin_playback",
                 "tater_voice.stereo_pairs",
             )
         }
@@ -349,10 +371,12 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         voice_pipeline_package = types.ModuleType("tater_voice.voice_pipeline")
         voice_pipeline_package.__path__ = []
         package.native_satellite = native
+        package.sendspin_playback = sendspin_playback
         package.stereo_pairs = stereo_pairs
         sys.modules["tater_voice"] = package
         sys.modules["tater_voice.voice_pipeline"] = voice_pipeline_package
         sys.modules["tater_voice.native_satellite"] = native
+        sys.modules["tater_voice.sendspin_playback"] = sendspin_playback
         sys.modules["tater_voice.stereo_pairs"] = stereo_pairs
         self.routes = _load_route_functions(self.vp)
 
@@ -708,7 +732,7 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         self.assertEqual(self.commands[0][1], "audio.overlay.start")
         self.assertEqual(self.commands[0][2]["ducking"]["target_percent"], 28)
 
-    def test_active_stereo_reply_propagates_exact_completion_wait(self) -> None:
+    def test_active_stereo_reply_uses_sendspin_and_propagates_completion_wait(self) -> None:
         self.stereo_pair = {
             "id": "bedroom12",
             "selector": "stereo:bedroom12",
@@ -728,10 +752,13 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
 
         result = asyncio.run(self.routes.native_satellite_play(payload, None))
 
-        self.assertTrue(result["audio_overlay_started"])
-        overlay = self.stereo_calls[0][2]
-        self.assertTrue(overlay["wait_for_completion"])
-        self.assertEqual(overlay["completion_timeout_s"], 42)
+        self.assertTrue(result["sendspin_playback_started"])
+        self.assertFalse(result["audio_overlay_started"])
+        self.assertEqual(self.stereo_calls, [])
+        sendspin = self.sendspin_calls[0][3]
+        self.assertFalse(sendspin["preserve_stereo"])
+        self.assertTrue(sendspin["wait_for_completion"])
+        self.assertEqual(sendspin["completion_timeout_s"], 42)
 
     def test_stereo_pair_music_uses_synchronized_session(self) -> None:
         self.stereo_pair = {
@@ -781,17 +808,18 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
 
         result = asyncio.run(self.routes.native_satellite_play(payload, None))
 
-        self.assertTrue(result["media_session_started"])
-        media = self.stereo_calls[0][2]
-        self.assertEqual(media["content_type"], "tts")
-        self.assertEqual(media["channel_mode"], "mono")
-        self.assertTrue(media["wait_for_completion"])
-        self.assertEqual(media["completion_timeout_s"], 42)
-        self.assertEqual(len(self.vp.prepared), 1)
-        self.assertEqual(self.vp.prepared[0]["playback_kind"], "tts")
-        self.assertTrue(self.vp.prepared[0]["transcoded"])
-        self.assertEqual(self.vp.stored[0]["media_type"], "audio/mpeg")
-        self.assertEqual(self.vp.stored[0]["filename"], "tts.mp3")
+        self.assertTrue(result["sendspin_playback_started"])
+        self.assertFalse(result["media_session_started"])
+        pair, targets, audio_bytes, sendspin = self.sendspin_calls[0]
+        self.assertEqual(pair["selector"], "stereo:bedroom12")
+        self.assertEqual([target["channel"] for target in targets], ["left", "right"])
+        self.assertEqual(audio_bytes, b"stereo speech")
+        self.assertFalse(sendspin["preserve_stereo"])
+        self.assertTrue(sendspin["wait_for_completion"])
+        self.assertEqual(sendspin["completion_timeout_s"], 42)
+        self.assertEqual(self.vp.prepared, [])
+        self.assertEqual(self.vp.stored[0]["media_type"], "audio/wav")
+        self.assertEqual(self.vp.stored[0]["filename"], "tts.wav")
 
     def test_stereo_pair_audio_scene_synchronizes_background_and_tts(self) -> None:
         self.stereo_pair = {
@@ -807,16 +835,14 @@ class NativeAudioSceneRouteTests(unittest.TestCase):
         result = asyncio.run(self.routes.native_satellite_play(payload, None))
 
         self.assertTrue(result["audio_scene_started"])
-        self.assertTrue(result["media_session_started"])
+        self.assertFalse(result["media_session_started"])
         self.assertFalse(result["audio_overlay_started"])
         self.assertTrue(result["rendered_audio_scene_started"])
-        self.assertEqual([row[0] for row in self.stereo_calls], ["media"])
-        scene = self.stereo_calls[0][2]
-        self.assertEqual(scene["media_url"], "http://voice-core/media/scene")
-        self.assertFalse(scene["loop"])
-        self.assertEqual(scene["volume_percent"], 100)
-        self.assertEqual(scene["content_type"], "announcement")
-        self.assertEqual(scene["channel_mode"], "stereo")
+        self.assertEqual(self.stereo_calls, [])
+        _pair, _targets, audio_bytes, scene = self.sendspin_calls[0]
+        self.assertEqual(audio_bytes, b"rendered-scene")
+        self.assertTrue(scene["preserve_stereo"])
+        self.assertFalse(scene["wait_for_completion"])
         self.assertEqual(scene["completion_timeout_s"], 183.35)
         self.assertEqual(self.single_overlay_calls, [])
         self.assertEqual(self.vp.rendered[0]["start_delay_ms"], 2500)

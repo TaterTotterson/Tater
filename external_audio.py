@@ -1,10 +1,10 @@
-"""Reusable live external-audio input for synchronized Tater satellites.
+"""Reusable live AirPlay input for Sendspin satellites and network speakers.
 
 Shairport Sync receives classic AirPlay/RAOP audio on Linux or macOS and sends
-decoded 44.1 kHz stereo S16LE PCM to this module through standard output. The
-module keeps one shared PCM timeline and transcodes each listener to a live MP3
-stream so every selected player starts from the same byte cursor without the
-fragile pause/resume behavior of an open-ended WAV response.
+decoded 44.1 kHz stereo S16LE PCM to this module through standard output.
+Native satellites consume that shared timeline directly through Sendspin;
+AirPlay bridge destinations can still request an independently encoded MP3
+view from the same cursor.
 """
 
 from __future__ import annotations
@@ -918,6 +918,259 @@ class _ExternalAudioRuntime:
                 result[member] = volume
         return result
 
+    @staticmethod
+    def _target_setting(values: Any, selector: Any, default: int = 0) -> int:
+        settings = values if isinstance(values, dict) else {}
+        token = _text(selector)
+        aliases = [token]
+        if token.startswith("voice_core:"):
+            aliases.append(token.removeprefix("voice_core:"))
+        elif token:
+            aliases.append(f"voice_core:{token}")
+        for alias in aliases:
+            if alias not in settings:
+                continue
+            try:
+                return int(round(float(settings.get(alias))))
+            except (TypeError, ValueError):
+                break
+        return int(default)
+
+    def _sendspin_route_finished(
+        self,
+        session_id: str,
+        stream_id: str,
+        error: str,
+    ) -> None:
+        with self._lock:
+            session = self._active_session
+            if _text(session.get("id")) != _text(session_id):
+                return
+            route_result = (
+                dict(session.get("route_result"))
+                if isinstance(session.get("route_result"), dict)
+                else {}
+            )
+            sessions = [
+                dict(row)
+                for row in list(route_result.get("voice_core_sessions") or [])
+                if isinstance(row, dict)
+            ]
+            matching = [
+                row
+                for row in sessions
+                if _text(row.get("transport")) == "sendspin"
+                and _text(row.get("session_id")) == _text(stream_id)
+            ]
+            if not matching:
+                return
+            route_result["voice_core_sessions"] = [
+                row for row in sessions if row not in matching
+            ]
+            session["route_result"] = route_result
+            session["routed"] = False
+            session["routing"] = False
+            session["route_retry_at"] = time.time() + 2.0
+            session["route_error"] = _text(error)[:500]
+            self._status = "receiving" if not error else "error"
+
+    def start_sendspin_route(
+        self,
+        selectors: Any,
+        *,
+        airplay_targets: Any = None,
+        volume_percent: int,
+        target_volume_percent: Dict[str, Any] | None,
+        target_sync_offset_ms: Dict[str, Any] | None,
+        start_lead_ms: int,
+        title: str = "",
+    ) -> Dict[str, Any]:
+        clean_selectors = _voice_core_selectors(selectors)
+        clean_airplay_targets = _unique_text(
+            [
+                f"airplay:{_text(target).removeprefix('airplay:')}"
+                for target in list(airplay_targets or [])
+                if _text(target)
+            ]
+        )
+        if not clean_selectors and not clean_airplay_targets:
+            return {
+                "ok": False,
+                "sent_count": 0,
+                "error": "No native or AirPlay destinations selected.",
+            }
+        with self._lock:
+            session = dict(self._active_session)
+            session_id = _text(session.get("id"))
+            generation = int(session.get("generation") or 0)
+            cursor = int(session.get("cursor") or 0)
+            if not self._input_active or not session_id:
+                return {"ok": False, "sent_count": 0, "error": "The AirPlay input is no longer active."}
+            group_name = _text(title) or _text(self._config.get("receiver_name")) or "Tater AirPlay"
+
+        cursor_state = {"value": cursor}
+
+        def read_pcm(maximum: int, timeout: float) -> bytes:
+            with self._lock:
+                if _text(self._active_session.get("id")) != session_id:
+                    raise ExternalAudioStreamError("The AirPlay input session ended.")
+            payload, next_cursor = self._timeline.read(
+                cursor_state["value"],
+                generation,
+                maximum=max(FRAME_BYTES, int(maximum)),
+                timeout=max(0.05, float(timeout)),
+            )
+            cursor_state["value"] = next_cursor
+            return payload
+
+        def on_finished(finished_stream_id: str, error: str) -> None:
+            self._sendspin_route_finished(
+                session_id,
+                finished_stream_id,
+                error,
+            )
+
+        stream_id = f"airplay-{session_id}"
+
+        async def start() -> Dict[str, Any]:
+            from tater_voice import native_satellite, sendspin_playback
+
+            targets = (
+                await native_satellite.sendspin_targets_for_selectors(clean_selectors)
+                if clean_selectors
+                else []
+            )
+            for target in targets:
+                logical_selector = _text(target.get("logical_selector"))
+                logical_volume = max(
+                    0,
+                    min(
+                        100,
+                        self._target_setting(
+                            target_volume_percent,
+                            logical_selector,
+                            default=volume_percent,
+                        ),
+                    ),
+                )
+                balance = max(0, min(100, int(target.get("volume_percent") or 0)))
+                target["volume_percent"] = int(round(logical_volume * balance / 100.0))
+                target["delay_ms"] = int(target.get("delay_ms") or 0) + max(
+                    -1000,
+                    min(
+                        1000,
+                        self._target_setting(
+                            target_sync_offset_ms,
+                            logical_selector,
+                            default=0,
+                        ),
+                    ),
+                )
+            minimum_delay = min((int(target.get("delay_ms") or 0) for target in targets), default=0)
+            for target in targets:
+                target["delay_ms"] = max(0, int(target.get("delay_ms") or 0) - minimum_delay)
+            airplay_volumes = {
+                target: max(
+                    0,
+                    min(
+                        100,
+                        self._target_setting(
+                            target_volume_percent,
+                            target,
+                            default=volume_percent,
+                        ),
+                    ),
+                )
+                for target in clean_airplay_targets
+            }
+            airplay_offsets = {
+                target: max(
+                    -1000,
+                    min(
+                        1000,
+                        self._target_setting(
+                            target_sync_offset_ms,
+                            target,
+                            default=0,
+                        ),
+                    ),
+                )
+                for target in clean_airplay_targets
+            }
+            native_reference_offset = min(
+                (
+                    max(
+                        -1000,
+                        min(
+                            1000,
+                            self._target_setting(
+                                target_sync_offset_ms,
+                                selector,
+                                default=0,
+                            ),
+                        ),
+                    )
+                    for selector in clean_selectors
+                ),
+                default=min(airplay_offsets.values(), default=0),
+            )
+            return await sendspin_playback.start_live_pcm_stream(
+                stream_id,
+                targets,
+                read_pcm,
+                group_name=group_name,
+                input_sample_rate=SAMPLE_RATE,
+                start_lead_ms=max(250, min(5000, int(start_lead_ms or 1000))),
+                airplay_targets=clean_airplay_targets,
+                airplay_volume_percent=airplay_volumes,
+                airplay_sync_offset_ms=airplay_offsets,
+                airplay_reference_sync_offset_ms=native_reference_offset,
+                title=group_name,
+                artist="AirPlay",
+                album=_text(self._config.get("receiver_name")) or "Tater AirPlay",
+                on_finished=on_finished,
+            )
+
+        from tater_voice import native_satellite
+
+        sendspin_result = native_satellite.run_on_runtime_loop(start(), timeout=35.0)
+        if not isinstance(sendspin_result, dict) or not sendspin_result.get("ok"):
+            return {
+                "ok": False,
+                "sent_count": 0,
+                "error": _text((sendspin_result or {}).get("error"))
+                if isinstance(sendspin_result, dict)
+                else "Sendspin AirPlay routing failed.",
+            }
+        members = [
+            _text(member)
+            for member in list(sendspin_result.get("members") or [])
+            if _text(member)
+        ]
+        native_count = len(clean_selectors)
+        airplay_count = int(sendspin_result.get("airplay_bridge_sent_count") or 0)
+        logical_count = native_count + airplay_count
+        return {
+            **sendspin_result,
+            "ok": True,
+            "sent_count": logical_count,
+            "sendspin_sent_count": logical_count,
+            "native_sent_count": native_count,
+            "airplay_bridge_sent_count": airplay_count,
+            "media_session_sent_count": 0,
+            "media_session_fallback_count": 0,
+            "synchronized_group": len(members) > 1,
+            "group_shared_stream": True,
+            "voice_core_sessions": [
+                {
+                    "target": f"sendspin:{stream_id}",
+                    "session_id": stream_id,
+                    "selectors": members,
+                    "transport": "sendspin",
+                }
+            ],
+        }
+
     def _apply_route_volume(
         self,
         session_id: str,
@@ -937,14 +1190,46 @@ class _ExternalAudioRuntime:
             logger.warning("[external-audio] volume target resolution failed: %s", exc)
             return
 
-        sessions = list(route_result.get("voice_core_sessions") or [])
-        if sessions:
+        sessions = [
+            dict(row)
+            for row in list(route_result.get("voice_core_sessions") or [])
+            if isinstance(row, dict)
+        ]
+        sendspin_sessions = [
+            row for row in sessions if _text(row.get("transport")) == "sendspin"
+        ]
+        legacy_sessions = [
+            row for row in sessions if _text(row.get("transport")) != "sendspin"
+        ]
+        if sendspin_sessions:
+            try:
+                from tater_voice import native_satellite, sendspin_playback
+
+                member_volumes = self._native_member_volumes(targets, volume_percent)
+                for row in sendspin_sessions:
+                    stream_id = _text(row.get("session_id"))
+                    sendspin_result = native_satellite.run_on_runtime_loop(
+                        sendspin_playback.set_live_stream_volumes(
+                            stream_id,
+                            member_volumes,
+                        ),
+                        timeout=8.0,
+                    )
+                    if not bool((sendspin_result or {}).get("ok")):
+                        warnings.append(
+                            _text((sendspin_result or {}).get("error"))
+                            or f"Sendspin stream {stream_id} did not accept its volume update."
+                        )
+            except Exception as exc:
+                warnings.append(str(exc))
+
+        if legacy_sessions:
             try:
                 from tater_voice import native_satellite
 
                 native_result = native_satellite.run_on_runtime_loop(
                     native_satellite.set_media_sessions_volume_if_matches(
-                        sessions,
+                        legacy_sessions,
                         target_volume_percent=self._native_member_volumes(
                             targets,
                             volume_percent,
@@ -1204,6 +1489,65 @@ class _ExternalAudioRuntime:
             status["released_selectors"] = released_selectors
             return status
 
+    def release_selectors(self, selectors: Any) -> Dict[str, Any]:
+        """Stop a live Sendspin route when newer playback claims any member."""
+        requested = set(_voice_core_selectors(selectors))
+        if not requested:
+            return {"released_selectors": [], **self.status()}
+        stop_stream_ids: list[str] = []
+        released_selectors: list[str] = []
+        with self._lock:
+            session = self._active_session
+            route_result = (
+                dict(session.get("route_result"))
+                if isinstance(session.get("route_result"), dict)
+                else {}
+            )
+            next_sessions: list[Dict[str, Any]] = []
+            for raw in list(route_result.get("voice_core_sessions") or []):
+                row = dict(raw) if isinstance(raw, dict) else {}
+                members = {
+                    _text(member)
+                    for member in list(row.get("selectors") or [])
+                    if _text(member)
+                }
+                if (
+                    _text(row.get("transport")) == "sendspin"
+                    and members.intersection(requested)
+                ):
+                    stream_id = _text(row.get("session_id"))
+                    if stream_id:
+                        stop_stream_ids.append(stream_id)
+                    released_selectors.extend(sorted(members))
+                    continue
+                next_sessions.append(row)
+            if stop_stream_ids:
+                route_result["voice_core_sessions"] = next_sessions
+                session["route_result"] = route_result
+                session["superseded_selectors"] = _unique_text(
+                    [
+                        *list(session.get("superseded_selectors") or []),
+                        *released_selectors,
+                    ]
+                )
+                if not _voice_session_owner_map(next_sessions):
+                    self._status = "receiving"
+
+        if stop_stream_ids:
+            try:
+                from tater_voice import native_satellite, sendspin_playback
+
+                for stream_id in _unique_text(stop_stream_ids):
+                    native_satellite.run_on_runtime_loop(
+                        sendspin_playback.stop_live_stream(stream_id),
+                        timeout=8.0,
+                    )
+            except Exception as exc:
+                logger.warning("[external-audio] Sendspin handoff stop failed: %s", exc)
+        status = self.status()
+        status["released_selectors"] = _unique_text(released_selectors)
+        return status
+
     @staticmethod
     def _stop_route_result(route_result: Dict[str, Any], reason: str) -> None:
         expected_sessions = list(route_result.get("voice_core_sessions") or [])
@@ -1316,13 +1660,7 @@ class _ExternalAudioRuntime:
         return body()
 
     def stream_mp3(self, session_id: Any, token: Any, cursor: Any) -> Iterator[bytes]:
-        """Encode one independent live listener from the shared PCM cursor.
-
-        Each satellite gets its own encoder so stereo members consume exactly
-        the same PCM timeline while MPV receives a stream-native format. This
-        avoids the embedded player's tendency to stop reading an open-ended
-        WAV after a synchronized paused start.
-        """
+        """Encode one independent bridge listener from the shared PCM cursor."""
         with self._lock:
             session = dict(self._active_session)
             if not session or _text(session.get("id")) != _text(session_id):
@@ -1456,6 +1794,15 @@ class _ExternalAudioRuntime:
                 ],
                 "airplay_timing_mode": _text(route_result.get("airplay_bridge_timing_mode")),
                 "airplay_routes": dict(route_result.get("airplay_bridge_routes") or {}),
+                "native_transport": (
+                    "sendspin"
+                    if any(
+                        _text(row.get("transport")) == "sendspin"
+                        for row in list(route_result.get("voice_core_sessions") or [])
+                        if isinstance(row, dict)
+                    )
+                    else ""
+                ),
                 "group_shared_stream": bool(route_result.get("group_shared_stream")),
                 "superseded_selectors": list(session.get("superseded_selectors") or []),
                 "metadata": dict(self._metadata),
@@ -1496,6 +1843,31 @@ def configure_external_audio_runtime(config: Optional[Dict[str, Any]] = None, **
 
 def get_external_audio_status() -> Dict[str, Any]:
     return _runtime.status()
+
+
+def start_external_audio_sendspin_route(
+    selectors: Any,
+    *,
+    airplay_targets: Any = None,
+    volume_percent: int,
+    target_volume_percent: Dict[str, Any] | None = None,
+    target_sync_offset_ms: Dict[str, Any] | None = None,
+    start_lead_ms: int = 1000,
+    title: str = "",
+) -> Dict[str, Any]:
+    return _runtime.start_sendspin_route(
+        selectors,
+        airplay_targets=airplay_targets,
+        volume_percent=volume_percent,
+        target_volume_percent=target_volume_percent,
+        target_sync_offset_ms=target_sync_offset_ms,
+        start_lead_ms=start_lead_ms,
+        title=title,
+    )
+
+
+def release_external_audio_selectors(selectors: Any) -> Dict[str, Any]:
+    return _runtime.release_selectors(selectors)
 
 
 def stream_external_audio_wav(session_id: Any, token: Any, cursor: Any) -> Iterator[bytes]:
@@ -1542,8 +1914,10 @@ __all__ = [
     "build_shairport_sync_config_for_test",
     "configure_external_audio_runtime",
     "get_external_audio_status",
+    "release_external_audio_selectors",
     "release_external_audio_sessions",
     "shutdown_external_audio_runtime",
+    "start_external_audio_sendspin_route",
     "stop_external_audio_input",
     "stream_external_audio_mp3",
     "stream_external_audio_wav",

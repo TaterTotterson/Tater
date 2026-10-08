@@ -149,7 +149,8 @@ class WakeTrainerLinkTests(unittest.TestCase):
             {
                 "wake_word": "custom_url",
                 "wake_word_url": wake_url,
-            }
+            },
+            wake_family="mww",
         )
 
     def test_voice_settings_actions_start_and_poll_tater_pairing(self) -> None:
@@ -176,7 +177,7 @@ class WakeTrainerLinkTests(unittest.TestCase):
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn('=== "wake_trainer_link"', component)
-        self.assertIn('=== "global_satellite_model_settings"', component)
+        self.assertIn('=== "global_wake_trainer_settings"', component)
         self.assertIn("tm-wake-training-card", component)
         self.assertIn("tm-wake-trainer-link", component)
         self.assertIn("tm-wake-trainer-linked", component)

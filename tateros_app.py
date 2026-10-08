@@ -21298,7 +21298,6 @@ def get_shared_media_relay(
     filename: str,
     request: Request,
     token: str = "",
-    start: float = 0.0,
 ) -> Response:
     try:
         from tater_voice.shared_media_relay import (
@@ -21306,16 +21305,12 @@ def get_shared_media_relay(
             open_shared_media_relay,
         )
 
-        if not 0.0 <= start <= 12 * 60 * 60:
-            raise ValueError("Shared media start must be within 12 hours.")
         relay = describe_shared_media_relay(relay_id, token)
         media_type = str(relay["media_type"])
         saved_filename = str(relay["filename"])
     except Exception as exc:
         from tater_voice.shared_media_relay import SharedMediaRelayError
 
-        if isinstance(exc, ValueError):
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if isinstance(exc, SharedMediaRelayError):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=503, detail=f"Shared media is unavailable: {exc}") from exc
@@ -21331,17 +21326,14 @@ def get_shared_media_relay(
         "X-Accel-Buffering": "no",
         "Content-Disposition": f'inline; filename="{header_filename}"',
     }
-    # Finished Music Core tracks are immutable files. Let Starlette serve
-    # Content-Length and byte ranges so MPV can seek instead of rebuffering an
-    # unseekable chunked response. Live AirPlay remains progressively streamed.
-    if relay["complete"] and start == 0.0:
+    # A completed relay is an immutable file. Let Starlette serve Content-Length
+    # and byte ranges; live sources remain progressively streamed below.
+    if relay["complete"]:
         return FileResponse(relay["path"], media_type=media_type, headers=headers)
     if request.method.upper() == "HEAD":
         return Response(media_type=media_type, headers=headers)
     try:
-        body, _, _ = open_shared_media_relay(
-            relay_id, token, start_seconds=start
-        )
+        body, _, _ = open_shared_media_relay(relay_id, token)
     except Exception as exc:
         from tater_voice.shared_media_relay import SharedMediaRelayError
 

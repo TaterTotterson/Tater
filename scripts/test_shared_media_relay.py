@@ -94,11 +94,10 @@ class SharedMediaRelayTests(unittest.TestCase):
                     relay["relay_id"], "wrong-token"
                 )
 
-    def test_finished_mp3_is_shared_and_recovery_starts_on_a_frame(self) -> None:
-        # MPEG-1 Layer III, 192 kbps, 44.1 kHz: 626 bytes per frame.
-        frames = [b"\xff\xfb\xb0\x00" + bytes([index]) * 622 for index in range(100)]
-        mp3 = b"".join(frames)
-        response = _FakeResponse([mp3])
+    def test_finished_source_remains_available_as_the_same_bytes(self) -> None:
+        payload = b"track-data" * shared_media_relay.RELAY_READY_BYTES
+        response = _FakeResponse([payload])
+        response.headers["Content-Type"] = "audio/flac"
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             shared_media_relay,
             "_runtime_root",
@@ -109,42 +108,27 @@ class SharedMediaRelayTests(unittest.TestCase):
             return_value=response,
         ) as get:
             relay = shared_media_relay.register_shared_media_relay(
-                "http://music.test/track.mp3",
-                media_type="audio/mpeg",
-                filename="track.mp3",
+                "http://music.test/track.flac",
+                media_type="audio/flac",
+                filename="track.flac",
             )
-            shared_media_relay._authorized_relay(relay["relay_id"], relay["token"]).thread.join(timeout=2.0)
+            shared_media_relay._authorized_relay(
+                relay["relay_id"], relay["token"]
+            ).thread.join(timeout=2.0)
             info = shared_media_relay.describe_shared_media_relay(
                 relay["relay_id"], relay["token"]
             )
             self.assertTrue(info["complete"])
-            self.assertEqual(info["bytes_written"], len(mp3))
-            self.assertEqual(info["path"].read_bytes(), mp3)
-            recovered, media_type, _ = shared_media_relay.open_shared_media_relay(
-                relay["relay_id"], relay["token"], start_seconds=0.5
+            self.assertEqual(info["bytes_written"], len(payload))
+            self.assertEqual(info["path"].read_bytes(), payload)
+            opened, media_type, _ = shared_media_relay.open_shared_media_relay(
+                relay["relay_id"], relay["token"]
             )
-            self.assertEqual(b"".join(recovered), b"".join(frames[20:]))
-            self.assertEqual(media_type, "audio/mpeg")
+            self.assertEqual(b"".join(opened), payload)
+            self.assertEqual(media_type, "audio/flac")
             self.assertEqual(get.call_count, 1)
 
-    def test_finite_source_waits_for_completion_before_dispatch(self) -> None:
-        response = _FakeResponse([b"x" * shared_media_relay.RELAY_READY_BYTES])
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
-            shared_media_relay,
-            "_runtime_root",
-            return_value=Path(temp_dir),
-        ), mock.patch.object(
-            shared_media_relay.requests,
-            "get",
-            return_value=response,
-        ):
-            relay = shared_media_relay.register_shared_media_relay(
-                "http://music.test/track.mp3", completion_wait_s=2.0
-            )
-            self.assertTrue(relay["complete"])
-            self.assertEqual(relay["initial_bytes"], shared_media_relay.RELAY_READY_BYTES)
-
-    def test_finite_track_remains_available_for_its_expected_playback(self) -> None:
+    def test_finished_track_remains_available_for_its_expected_playback(self) -> None:
         response = _FakeResponse([b"x" * shared_media_relay.RELAY_READY_BYTES])
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             shared_media_relay,
@@ -157,12 +141,13 @@ class SharedMediaRelayTests(unittest.TestCase):
         ):
             relay = shared_media_relay.register_shared_media_relay(
                 "http://music.test/long-track.mp3",
-                completion_wait_s=2.0,
                 expected_duration_seconds=3600.0,
             )
             relay_row = shared_media_relay._authorized_relay(
                 relay["relay_id"], relay["token"]
             )
+            relay_row.thread.join(timeout=2.0)
+            self.assertTrue(relay_row.complete)
             self.assertEqual(relay_row.retention_seconds, 4200.0)
             with shared_media_relay._registry_lock:
                 shared_media_relay._prune_relays_locked(
@@ -173,58 +158,6 @@ class SharedMediaRelayTests(unittest.TestCase):
                     now=relay_row.completed_at + 4201
                 )
                 self.assertNotIn(relay["relay_id"], shared_media_relay._relays)
-
-    def test_live_mp3_recovery_reads_from_the_current_shared_spool(self) -> None:
-        frames = [b"\xff\xfb\xb0\x00" + bytes([index]) * 622 for index in range(60)]
-        release = threading.Event()
-        response = _FakeResponse(
-            [b"".join(frames[:40]), b"".join(frames[40:])],
-            release_event=release,
-        )
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
-            shared_media_relay,
-            "_runtime_root",
-            return_value=Path(temp_dir),
-        ), mock.patch.object(
-            shared_media_relay.requests,
-            "get",
-            return_value=response,
-        ) as get:
-            relay = shared_media_relay.register_shared_media_relay(
-                "http://airplay.test/live.mp3",
-                media_type="audio/mpeg",
-                filename="live.mp3",
-            )
-            self.assertFalse(relay["complete"])
-            recovered, _, _ = shared_media_relay.open_shared_media_relay(
-                relay["relay_id"], relay["token"], start_seconds=0.5
-            )
-            self.assertEqual(next(recovered) + next(recovered), b"".join(frames[20:40]))
-            release.set()
-            self.assertEqual(b"".join(recovered), b"".join(frames[40:]))
-            self.assertEqual(get.call_args.kwargs["stream"], True)
-            self.assertLessEqual(shared_media_relay.RELAY_IO_CHUNK_BYTES, 8 * 1024)
-
-    def test_recovery_does_not_silently_restart_non_mp3_audio(self) -> None:
-        response = _FakeResponse([b"x" * shared_media_relay.RELAY_READY_BYTES])
-        response.headers["Content-Type"] = "audio/wav"
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
-            shared_media_relay,
-            "_runtime_root",
-            return_value=Path(temp_dir),
-        ), mock.patch.object(
-            shared_media_relay.requests,
-            "get",
-            return_value=response,
-        ):
-            relay = shared_media_relay.register_shared_media_relay(
-                "http://music.test/track.wav", media_type="audio/wav"
-            )
-            with self.assertRaises(shared_media_relay.SharedMediaRelayError):
-                shared_media_relay.open_shared_media_relay(
-                    relay["relay_id"], relay["token"], start_seconds=1.0
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

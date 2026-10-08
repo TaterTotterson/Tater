@@ -1,10 +1,9 @@
-"""One-upstream, many-reader media relay for synchronized native playback.
+"""One-upstream, many-reader relay for synchronized mixed media playback.
 
 On-demand music URLs often create a new encoder for every HTTP request.  A
-stereo pair must not receive two independently produced streams: both members
-need the same encoded bytes from byte zero before Tater commits their shared
-start time.  This relay opens the source once, progressively spools it to a
-temporary file, and gives every reader an identical view of that file.
+mixed transport group must not receive independently produced streams. This
+relay opens the source once, progressively spools it to a temporary file, and
+gives every reader an identical view of that file.
 """
 
 from __future__ import annotations
@@ -26,8 +25,8 @@ import requests
 
 logger = logging.getLogger("shared_media_relay")
 
-# At 192 kbps, a 64 KiB requests.iter_content read can wait about 2.7 s
-# before releasing any live AirPlay audio. Keep live relay chunks sub-second.
+# At common compressed-audio bitrates, a 64 KiB requests.iter_content read can
+# wait several seconds before releasing live audio. Keep relay chunks sub-second.
 RELAY_IO_CHUNK_BYTES = 8 * 1024
 RELAY_READY_BYTES = 4 * 1024
 RELAY_READY_TIMEOUT_SECONDS = 20.0
@@ -41,32 +40,6 @@ class SharedMediaRelayError(RuntimeError):
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _mp3_frame_info(header: bytes) -> tuple[int, int] | None:
-    """Return (frame bytes, samples) for a Layer III frame header."""
-    if len(header) != 4 or header[0] != 0xFF or header[1] & 0xE0 != 0xE0:
-        return None
-    version = (header[1] >> 3) & 3
-    layer = (header[1] >> 1) & 3
-    bitrate_index = (header[2] >> 4) & 15
-    rate_index = (header[2] >> 2) & 3
-    if version == 1 or layer != 1 or bitrate_index in (0, 15) or rate_index == 3:
-        return None
-    mpeg1 = version == 3
-    bitrate_table = (
-        (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
-        if mpeg1
-        else (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)
-    )
-    sample_rate = (44100, 48000, 32000)[rate_index]
-    if version == 2:
-        sample_rate //= 2
-    elif version == 0:
-        sample_rate //= 4
-    padding = (header[2] >> 1) & 1
-    frame_bytes = ((144 if mpeg1 else 72) * bitrate_table[bitrate_index] * 1000) // sample_rate + padding
-    return frame_bytes, (1152 if mpeg1 else 576) * 1_000_000 // sample_rate
 
 
 def _runtime_root() -> Path:
@@ -219,18 +192,6 @@ class _SharedMediaRelay:
             detail = self.error or "the source did not produce audio before the startup timeout"
         raise SharedMediaRelayError(f"Shared media source was not ready: {detail}")
 
-    def wait_until_complete(self, *, timeout_s: float) -> bool:
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        with self.condition:
-            while not self.complete:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self.condition.wait(timeout=min(0.5, remaining))
-            if self.error:
-                raise SharedMediaRelayError(f"Shared media source failed: {self.error}")
-            return True
-
     def describe(self) -> Dict[str, Any]:
         with self.condition:
             self.last_access_at = time.time()
@@ -242,57 +203,15 @@ class _SharedMediaRelay:
                 "bytes_written": self.bytes_written,
             }
 
-    def _wait_for_bytes(self, count: int, deadline: float) -> bool:
-        with self.condition:
-            while self.bytes_written < count and not self.complete:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self.condition.wait(timeout=min(0.5, remaining))
-            return self.bytes_written >= count
-
-    def byte_offset_for_seconds(self, seconds: float) -> int:
-        """Map a recovery time to an MP3 frame in this exact shared stream."""
-        target_us = int(max(0.0, seconds) * 1_000_000)
-        if target_us <= 0:
-            return 0
-        if self.media_type not in {"audio/mpeg", "audio/mp3"}:
-            raise SharedMediaRelayError("Timed recovery requires an MP3 shared stream.")
-        deadline = time.monotonic() + 10.0
-        if not self._wait_for_bytes(10, deadline):
-            raise SharedMediaRelayError("The shared stream has no MP3 header.")
-        with self.path.open("rb", buffering=0) as source:
-            header = source.read(10)
-            offset = 0
-            if header[:3] == b"ID3":
-                offset = 10 + sum((header[index] & 0x7F) << shift for index, shift in zip(range(6, 10), (21, 14, 7, 0)))
-                if header[5] & 0x10:
-                    offset += 10
-            elapsed_us = 0
-            while elapsed_us < target_us:
-                if not self._wait_for_bytes(offset + 4, deadline):
-                    raise SharedMediaRelayError("The requested recovery position is not available yet.")
-                source.seek(offset)
-                frame = _mp3_frame_info(source.read(4))
-                if frame is None:
-                    raise SharedMediaRelayError("The shared MP3 stream has an invalid frame boundary.")
-                frame_bytes, duration_us = frame
-                if not self._wait_for_bytes(offset + frame_bytes, deadline):
-                    raise SharedMediaRelayError("The requested recovery frame is not available yet.")
-                offset += frame_bytes
-                elapsed_us += duration_us
-            return offset
-
-    def open(self, *, offset: int = 0) -> Iterator[bytes]:
+    def open(self) -> Iterator[bytes]:
         with self.condition:
             self.reader_count += 1
             self.last_access_at = time.time()
 
         def body() -> Iterator[bytes]:
-            cursor = max(0, int(offset))
+            cursor = 0
             try:
                 with self.path.open("rb", buffering=0) as source:
-                    source.seek(cursor)
                     while True:
                         with self.condition:
                             while cursor >= self.bytes_written and not self.complete:
@@ -307,7 +226,7 @@ class _SharedMediaRelay:
                                 yield chunk
                                 continue
                         if complete:
-                            if error and cursor <= offset:
+                            if error and cursor <= 0:
                                 raise SharedMediaRelayError(error)
                             return
             finally:
@@ -366,7 +285,6 @@ def register_shared_media_relay(
     filename: Any = "media.bin",
     minimum_ready_bytes: int = RELAY_READY_BYTES,
     ready_timeout_s: float = RELAY_READY_TIMEOUT_SECONDS,
-    completion_wait_s: float = 0.0,
     expected_duration_seconds: float = 0.0,
 ) -> Dict[str, Any]:
     url = _text(source_url)
@@ -388,12 +306,6 @@ def register_shared_media_relay(
             minimum_bytes=minimum_ready_bytes,
             timeout_s=ready_timeout_s,
         )
-        if completion_wait_s > 0 and not relay.wait_until_complete(timeout_s=completion_wait_s):
-            logger.warning(
-                "[shared-media] finite source did not finish within %.1fs; using progressive playback relay=%s",
-                completion_wait_s,
-                relay.id[:12],
-            )
     except Exception:
         with _registry_lock:
             _relays.pop(relay.id, None)
@@ -420,12 +332,9 @@ def register_shared_media_relay(
 def open_shared_media_relay(
     relay_id: Any,
     token: Any,
-    *,
-    start_seconds: float = 0.0,
 ) -> tuple[Iterator[bytes], str, str]:
     relay = _authorized_relay(relay_id, token)
-    offset = relay.byte_offset_for_seconds(start_seconds)
-    return relay.open(offset=offset), relay.media_type, relay.filename
+    return relay.open(), relay.media_type, relay.filename
 
 
 def describe_shared_media_relay(relay_id: Any, token: Any) -> Dict[str, Any]:

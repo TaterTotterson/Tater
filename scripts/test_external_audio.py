@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import os
 import subprocess
 import struct
@@ -521,6 +522,232 @@ class ExternalAudioTests(unittest.TestCase):
 
         self.assertEqual(volumes["native:office-left"], 40)
         self.assertEqual(volumes["native:office-right"], 50)
+
+    def test_airplay_native_route_starts_one_live_sendspin_stream(self) -> None:
+        from tater_voice import native_satellite, sendspin_playback
+
+        runtime = external_audio._ExternalAudioRuntime()
+        runtime._config = runtime._normalized_config(
+            {
+                "enabled": True,
+                "targets": ["voice_core:stereo:office", "voice_core:native:kitchen"],
+            }
+        )
+        runtime._input_active = True
+        generation = runtime._timeline.reset()
+        runtime._timeline.write((b"\x10\x00\x20\x00") * 1024)
+        runtime._active_session = {
+            "id": "airplay-input-1",
+            "generation": generation,
+            "cursor": 0,
+            "routed": False,
+        }
+        targets = [
+            {
+                "selector": "native:office-left",
+                "logical_selector": "stereo:office",
+                "host": "192.0.2.10",
+                "port": 8928,
+                "channel": "left",
+                "delay_ms": 5,
+                "volume_percent": 80,
+            },
+            {
+                "selector": "native:office-right",
+                "logical_selector": "stereo:office",
+                "host": "192.0.2.11",
+                "port": 8928,
+                "channel": "right",
+                "delay_ms": 20,
+                "volume_percent": 100,
+            },
+            {
+                "selector": "native:kitchen",
+                "logical_selector": "native:kitchen",
+                "host": "192.0.2.12",
+                "port": 8928,
+                "channel": "stereo",
+                "delay_ms": 0,
+                "volume_percent": 100,
+            },
+        ]
+        captured = {}
+
+        async def fake_start(stream_id, resolved_targets, read_pcm, **kwargs):
+            captured["stream_id"] = stream_id
+            captured["targets"] = [dict(target) for target in resolved_targets]
+            captured["pcm"] = read_pcm(4096, 0.1)
+            captured["kwargs"] = kwargs
+            return {
+                "ok": True,
+                "sendspin_live_stream_started": True,
+                "members": [target["selector"] for target in resolved_targets],
+                "start_server_us": 123456,
+                "start_unix_ms": 2000000000000,
+                "audible_start_server_us": 123456,
+                "audible_start_unix_ms": 2000000000000,
+            }
+
+        with (
+            mock.patch.object(
+                native_satellite,
+                "sendspin_targets_for_selectors",
+                new=mock.AsyncMock(return_value=targets),
+            ),
+            mock.patch.object(sendspin_playback, "start_live_pcm_stream", side_effect=fake_start),
+        ):
+            result = runtime.start_sendspin_route(
+                ["stereo:office", "native:kitchen"],
+                volume_percent=50,
+                target_volume_percent={
+                    "voice_core:stereo:office": 50,
+                    "voice_core:native:kitchen": 60,
+                },
+                target_sync_offset_ms={
+                    "voice_core:stereo:office": 10,
+                    "voice_core:native:kitchen": -20,
+                },
+                start_lead_ms=900,
+                title="Living Room AirPlay",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_count"], 2)
+        self.assertEqual(result["voice_core_sessions"][0]["transport"], "sendspin")
+        self.assertEqual(captured["stream_id"], "airplay-airplay-input-1")
+        self.assertTrue(captured["pcm"])
+        self.assertEqual(
+            [
+                (target["selector"], target["volume_percent"], target["delay_ms"])
+                for target in captured["targets"]
+            ],
+            [
+                ("native:office-left", 40, 35),
+                ("native:office-right", 50, 50),
+                ("native:kitchen", 60, 0),
+            ],
+        )
+        self.assertEqual(captured["kwargs"]["input_sample_rate"], 44_100)
+        self.assertEqual(captured["kwargs"]["start_lead_ms"], 900)
+
+    def test_airplay_only_route_uses_the_live_sendspin_bridge(self) -> None:
+        from tater_voice import native_satellite, sendspin_playback
+
+        runtime = external_audio._ExternalAudioRuntime()
+        runtime._config = runtime._normalized_config({"enabled": True})
+        runtime._input_active = True
+        generation = runtime._timeline.reset()
+        runtime._timeline.write((b"\x10\x00\x20\x00") * 1024)
+        runtime._active_session = {
+            "id": "airplay-input-only",
+            "generation": generation,
+            "cursor": 0,
+            "routed": False,
+        }
+        captured = {}
+
+        async def fake_start(stream_id, resolved_targets, read_pcm, **kwargs):
+            captured["stream_id"] = stream_id
+            captured["targets"] = list(resolved_targets)
+            captured["pcm"] = read_pcm(4096, 0.1)
+            captured["kwargs"] = kwargs
+            return {
+                "ok": True,
+                "sendspin_live_stream_started": True,
+                "members": ["airplay:Living Room"],
+                "airplay_bridge_sent_count": 1,
+                "start_server_us": 123456,
+                "start_unix_ms": 2000000000000,
+            }
+
+        resolve_targets = mock.AsyncMock(return_value=[])
+        with (
+            mock.patch.object(
+                native_satellite,
+                "sendspin_targets_for_selectors",
+                new=resolve_targets,
+            ),
+            mock.patch.object(sendspin_playback, "start_live_pcm_stream", side_effect=fake_start),
+        ):
+            result = runtime.start_sendspin_route(
+                [],
+                airplay_targets=["airplay:Living Room"],
+                volume_percent=60,
+                target_volume_percent={"airplay:Living Room": 45},
+                target_sync_offset_ms={"airplay:Living Room": -30},
+                start_lead_ms=1200,
+                title="AirPlay Input",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_count"], 1)
+        self.assertEqual(result["native_sent_count"], 0)
+        self.assertEqual(result["airplay_bridge_sent_count"], 1)
+        self.assertEqual(captured["stream_id"], "airplay-airplay-input-only")
+        self.assertEqual(captured["targets"], [])
+        self.assertTrue(captured["pcm"])
+        self.assertEqual(captured["kwargs"]["airplay_targets"], ["airplay:Living Room"])
+        self.assertEqual(
+            captured["kwargs"]["airplay_volume_percent"],
+            {"airplay:Living Room": 45},
+        )
+        self.assertEqual(
+            captured["kwargs"]["airplay_sync_offset_ms"],
+            {"airplay:Living Room": -30},
+        )
+        self.assertEqual(captured["kwargs"]["airplay_reference_sync_offset_ms"], -30)
+        self.assertEqual(captured["kwargs"]["start_lead_ms"], 1200)
+        self.assertEqual(resolve_targets.await_count, 0)
+
+    def test_airplay_sender_volume_updates_active_sendspin_stream(self) -> None:
+        from tater_voice import native_satellite, sendspin_playback
+
+        runtime = external_audio._ExternalAudioRuntime()
+        runtime._active_session = {"id": "airplay-input", "routed": True}
+        route_result = {
+            "voice_core_sessions": [
+                {
+                    "session_id": "airplay-airplay-input",
+                    "selectors": ["native:office-left", "native:office-right"],
+                    "transport": "sendspin",
+                }
+            ]
+        }
+        updated = []
+
+        async def fake_set_volume(stream_id, volume_percent):
+            updated.append((stream_id, dict(volume_percent)))
+            return {"ok": True}
+
+        with (
+            mock.patch.object(
+                external_audio._ExternalAudioRuntime,
+                "_native_member_volumes",
+                return_value={"native:office-left": 32, "native:office-right": 40},
+            ),
+            mock.patch.object(sendspin_playback, "set_live_stream_volumes", side_effect=fake_set_volume),
+            mock.patch.object(
+                native_satellite,
+                "run_on_runtime_loop",
+                side_effect=lambda awaitable, **_kwargs: asyncio.run(awaitable),
+            ),
+        ):
+            runtime._apply_route_volume(
+                "airplay-input",
+                route_result,
+                ["voice_core:stereo:office"],
+                40,
+            )
+
+        self.assertEqual(
+            updated,
+            [
+                (
+                    "airplay-airplay-input",
+                    {"native:office-left": 32, "native:office-right": 40},
+                )
+            ],
+        )
 
     def test_bridged_sonos_sender_volume_updates_matching_airplay_session(self) -> None:
         import airplay_bridge
