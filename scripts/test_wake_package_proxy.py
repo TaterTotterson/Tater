@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -93,6 +94,58 @@ class WakePackageProxyTests(unittest.TestCase):
         self.assertEqual(output["oww_wake_word"], "paired_bundle")
         self.assertTrue(output["wake_word_url"].endswith("/manifest.json"))
         self.assertTrue(output["oww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
+
+    def test_explicit_mww_mode_ignores_stale_dual_flags_and_bundle(self) -> None:
+        selector = "native:echo-test"
+        source_url = "https://models.example/jarvis.json"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.238"}
+        settings = {
+            "wake_detector_mode": "mww",
+            "wake_mww_enabled": True,
+            "wake_oww_enabled": True,
+            "wake_word": "custom_url",
+            "wake_word_url": source_url,
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": "https://models.example/stale.wake-bundle.json",
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(selector, board="biscuit")
+
+        self.assertEqual(output["wake_detector_mode"], "mww")
+        self.assertTrue(output["wake_mww_enabled"])
+        self.assertFalse(output["wake_oww_enabled"])
+        self.assertNotIn("oww_wake_word", output)
+        self.assertNotIn("oww_wake_word_url", output)
+        package_id = urlsplit(output["wake_word_url"]).path.split("/")[-2]
+        self.assertEqual(source_url, wake_package_proxy._PACKAGES[package_id]["manifest_url"])
+        self.assertNotIn("mww_manifest_sha256", wake_package_proxy._PACKAGES[package_id])
+
+    def test_deferred_family_save_does_not_push_intermediate_settings(self) -> None:
+        async def exercise() -> dict[str, object]:
+            with (
+                mock.patch.object(
+                    native_live_settings,
+                    "save_wake_family_settings",
+                    return_value={"ok": True, "settings": {"wake_detector_mode": "mww"}},
+                ),
+                mock.patch.object(native_satellite, "push_live_settings", new=mock.AsyncMock()) as push,
+            ):
+                result = await native_satellite.save_live_settings(
+                    {"wake_detector_mode": "mww"},
+                    wake_family="echo",
+                    push=False,
+                )
+                push.assert_not_awaited()
+                return result
+
+        result = asyncio.run(exercise())
+        self.assertTrue(result["push"]["deferred"])
+        self.assertEqual(result["push"]["count"], 0)
 
     def test_oww_bundle_and_artifacts_are_rewritten_to_local_routes(self) -> None:
         source_url = "https://models.example/wakes/jojo.wake-bundle.json"

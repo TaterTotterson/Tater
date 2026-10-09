@@ -1021,9 +1021,26 @@ def _firmware_settings_payload(
     settings["output_channel_mode"] = _sendspin_output_channel_mode(selector)
     if native_live_settings.wake_family_for(capabilities=capabilities, board=board) != "echo":
         return settings
+    mode = _lower(settings.get("wake_detector_mode"))
+    if mode not in {"mww", "oww", "dual"}:
+        flags_present = "wake_mww_enabled" in settings or "wake_oww_enabled" in settings
+        mww_enabled = _as_bool(settings.get("wake_mww_enabled"), False)
+        oww_enabled = _as_bool(settings.get("wake_oww_enabled"), False)
+        if flags_present:
+            mode = "dual" if mww_enabled and oww_enabled else ("oww" if oww_enabled else "mww")
+        else:
+            mode = "oww" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
+    settings["wake_detector_mode"] = mode
+    settings["wake_mww_enabled"] = mode in {"mww", "dual"}
+    settings["wake_oww_enabled"] = mode in {"oww", "dual"}
+    if mode == "mww":
+        for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
+            settings.pop(key, None)
+    elif mode == "oww":
+        for key in ("wake_word", "wake_word_url", "wake_model_revision"):
+            settings.pop(key, None)
     dual_custom_bundle = (
-        bool(settings.get("wake_mww_enabled"))
-        and bool(settings.get("wake_oww_enabled"))
+        mode == "dual"
         and _lower(settings.get("oww_wake_word")) == "custom_url"
         and bool(_text(settings.get("oww_wake_word_url")))
     )
@@ -4450,6 +4467,7 @@ async def save_live_settings(
     *,
     selector: str = "",
     wake_family: str = "",
+    push: bool = True,
 ) -> Dict[str, Any]:
     from . import native_live_settings
 
@@ -4465,7 +4483,11 @@ async def save_live_settings(
         result = native_live_settings.save_wake_family_settings(wake_family, values or {})
     else:
         result = native_live_settings.save_settings(values or {}, selector=token, board=board)
-    push_result = await push_live_settings(token)
+    push_result = (
+        await push_live_settings(token)
+        if push
+        else {"ok": True, "pushed": [], "count": 0, "deferred": True}
+    )
     result["push"] = push_result
     _notify_state_change("settings", token)
     return result

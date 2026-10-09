@@ -203,8 +203,8 @@ async function apply(): Promise<JsonRow> {
     const wakeAction = String(wakeForm.value.save_action || "voice_global_satellite_settings_save");
     const trainerSettingsAction = String(trainerSettingsForm.value.save_action || "voice_global_satellite_settings_save");
     const verifierAction = String(verifierForm.value.save_action || "voice_wake_verifier_save");
-    const first = await action(mwwAction, { id: mwwForm.value.id, profile: mwwForm.value.profile || "mww", values: { ...mwwValues } });
-    const second = await action(wakeAction, { id: wakeForm.value.id, profile: wakeForm.value.profile || "echo", values: { ...wakeValues } });
+    const first = await action(mwwAction, { id: mwwForm.value.id, profile: mwwForm.value.profile || "mww", defer_push: true, values: { ...mwwValues } });
+    const second = await action(wakeAction, { id: wakeForm.value.id, profile: wakeForm.value.profile || "echo", defer_push: true, values: { ...wakeValues } });
     const third = await action(trainerSettingsAction, { id: trainerSettingsForm.value.id, values: { ...trainerSettingsValues } });
     const fourth = await action(verifierAction, { id: verifierForm.value.id, values: { ...verifierValues } });
     localDirty.value = false;

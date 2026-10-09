@@ -15661,10 +15661,12 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 				let e = String(l.value.save_action || "voice_global_satellite_settings_save"), t = String(u.value.save_action || "voice_global_satellite_settings_save"), n = String(d.value.save_action || "voice_global_satellite_settings_save"), r = String(f.value.save_action || "voice_wake_verifier_save"), a = await Ne(e, {
 					id: l.value.id,
 					profile: l.value.profile || "mww",
+					defer_push: !0,
 					values: { ...m }
 				}), o = await Ne(t, {
 					id: u.value.id,
 					profile: u.value.profile || "echo",
+					defer_push: !0,
 					values: { ...h }
 				}), s = await Ne(n, {
 					id: d.value.id,

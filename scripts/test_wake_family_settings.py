@@ -43,6 +43,20 @@ class MemoryRedis:
 
 
 class WakeFamilySettingsTests(unittest.TestCase):
+    @staticmethod
+    def _custom_mww_profile(url: str) -> dict[str, object]:
+        return {
+            "wake_profile_key": f"custom:{url}",
+            "wake_profile_name": "Jarvis",
+            "wake_profile_source_url": url,
+            "wake_profile_model_url": url.rsplit(".", 1)[0] + ".tflite",
+            "wake_profile_threshold": 0.82,
+            "wake_profile_sliding_window": 4,
+            "wake_profile_close_miss_threshold": 0.66,
+            "wake_profile_error": "",
+            "wake_model_revision": "a" * 64,
+        }
+
     def test_existing_global_choice_seeds_both_families_once(self) -> None:
         redis = MemoryRedis(
             {
@@ -104,6 +118,127 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertFalse(firmware["wake_mww_enabled"])
         self.assertTrue(firmware["wake_oww_enabled"])
 
+    def test_dual_to_mww_removes_stale_oww_package_from_firmware_payload(self) -> None:
+        custom_url = "https://models.example/jarvis.json"
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "dual",
+                    "wake_mww_enabled": "true",
+                    "wake_oww_enabled": "true",
+                    "wake_word": "custom_url",
+                    "wake_word_url": "https://models.example/old.json",
+                    "oww_wake_word": "custom_url",
+                    "oww_wake_word_url": "https://models.example/old.wake-bundle.json",
+                },
+            }
+        )
+        with (
+            mock.patch.object(native_live_settings, "redis_client", redis),
+            mock.patch.object(
+                native_live_settings,
+                "_fetch_wake_profile_json",
+                return_value=self._custom_mww_profile(custom_url),
+            ),
+        ):
+            native_live_settings.save_wake_family_settings(
+                "echo",
+                {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "mww",
+                    "wake_word": "custom_url",
+                    "wake_word_url": custom_url,
+                },
+            )
+            firmware = native_live_settings.firmware_settings_snapshot(
+                board="biscuit",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(firmware["wake_detector_mode"], "mww")
+        self.assertTrue(firmware["wake_mww_enabled"])
+        self.assertFalse(firmware["wake_oww_enabled"])
+        self.assertEqual(firmware["wake_word_url"], custom_url)
+        self.assertNotIn("oww_wake_word", firmware)
+        self.assertNotIn("oww_wake_word_url", firmware)
+
+    def test_mww_to_dual_replaces_custom_mww_with_matching_builtin_pair(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "mww",
+                    "wake_mww_enabled": "true",
+                    "wake_oww_enabled": "false",
+                    "wake_word": "custom_url",
+                    "wake_word_url": "https://models.example/jarvis.json",
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            native_live_settings.save_wake_family_settings(
+                "echo",
+                {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "dual",
+                    "oww_wake_word": "hey_tater",
+                },
+            )
+            firmware = native_live_settings.firmware_settings_snapshot(
+                board="rook",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(firmware["wake_detector_mode"], "dual")
+        self.assertTrue(firmware["wake_mww_enabled"])
+        self.assertTrue(firmware["wake_oww_enabled"])
+        self.assertEqual(firmware["wake_word"], "hey_tater")
+        self.assertEqual(firmware["oww_wake_word"], "hey_tater")
+        self.assertEqual(firmware["wake_word_url"], "")
+        self.assertEqual(firmware["oww_wake_word_url"], "")
+
+    def test_invalid_active_custom_url_is_rejected_before_persisting(self) -> None:
+        key = native_live_settings.wake_family_hash_key("echo")
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                key: {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "mww",
+                    "wake_mww_enabled": "true",
+                    "wake_oww_enabled": "false",
+                    "wake_word": "hey_tater",
+                },
+            }
+        )
+        before = dict(redis.rows[key])
+        with (
+            mock.patch.object(native_live_settings, "redis_client", redis),
+            self.assertRaisesRegex(ValueError, "missing or invalid"),
+        ):
+            native_live_settings.save_wake_family_settings(
+                "echo",
+                {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "mww",
+                    "wake_word": "custom_url",
+                    "wake_word_url": "",
+                },
+            )
+        self.assertEqual(redis.rows[key], before)
+
     def test_non_oww_satellites_receive_only_the_mww_profile(self) -> None:
         redis = MemoryRedis(
             {
@@ -137,6 +272,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
 
         self.assertEqual(firmware["wake_word_url"], "https://models.example/esp.json")
         self.assertTrue(firmware["wake_mww_enabled"])
+        self.assertNotIn("wake_detector_mode", firmware)
         self.assertNotIn("wake_oww_enabled", firmware)
         self.assertNotIn("oww_wake_word", firmware)
         self.assertNotIn("oww_wake_word_url", firmware)
@@ -156,6 +292,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertNotIn('v-model="wakeValues.wake_mww_enabled"', source)
         self.assertNotIn('v-model="wakeValues.wake_oww_enabled"', source)
         self.assertIn("included with current Echo firmware", source)
+        self.assertGreaterEqual(source.count("defer_push: true"), 2)
 
     def test_oww_only_ui_describes_bundle_as_an_oww_package(self) -> None:
         redis = MemoryRedis(

@@ -1561,8 +1561,20 @@ def firmware_settings_snapshot(
     output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
     if family == "mww":
         output["wake_mww_enabled"] = True
+        output["wake_oww_enabled"] = False
         for key in ("wake_oww_enabled", "oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
             output.pop(key, None)
+    else:
+        mode = _wake_detector_mode(family_settings.get("wake_detector_mode"), family_settings)
+        output["wake_detector_mode"] = mode
+        output["wake_mww_enabled"] = mode in {"mww", "dual"}
+        output["wake_oww_enabled"] = mode in {"oww", "dual"}
+        if mode == "mww":
+            for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
+                output.pop(key, None)
+        elif mode == "oww":
+            for key in ("wake_word", "wake_word_url", "wake_model_revision"):
+                output.pop(key, None)
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
             output.pop(key, None)
@@ -2514,9 +2526,26 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
                     "oww_wake_word_url": "",
                 }
             )
-    else:
+    elif mode == "mww":
         profile = _profile_for_save(incoming, current_raw)
+        profile_error = _text(profile.get("wake_profile_error"))
+        if profile_error:
+            raise ValueError(profile_error)
+        oww_profile = _oww_profile_from_source(
+            current,
+            _wake_word_value(current.get("oww_wake_word")),
+            _text(current.get("oww_wake_word_url")),
+        )
+    else:
+        profile = _wake_profile_from_source(
+            current,
+            _wake_word_value(current.get("wake_word")),
+            _text(current.get("wake_word_url")),
+        )
         oww_profile = _oww_profile_for_save(incoming, current_raw)
+        profile_error = _text(oww_profile.get("oww_profile_error"))
+        if profile_error:
+            raise ValueError(profile_error)
 
     normalized = normalize_settings(incoming, base={**current, **profile, **oww_profile})
     normalized["wake_detector_mode"] = mode

@@ -1573,6 +1573,7 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
 
     if action_name == "voice_global_satellite_settings_save":
         wake_family = esphome_runtime.text(body.get("profile")).lower()
+        defer_push = esphome_runtime.as_bool(body.get("defer_push"), False)
         values = native_live_settings.resolve_wake_word_source_values(
             esphome_runtime.payload_values(body)
         )
@@ -1584,11 +1585,12 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         allowed_values = {key: value for key, value in values.items() if key in allowed_keys}
         if not allowed_values:
             raise ValueError("No global satellite settings were provided.")
-        save_operation = (
-            native_satellite.save_live_settings(allowed_values, wake_family=wake_family)
-            if wake_family in native_live_settings.WAKE_FAMILIES
-            else native_satellite.save_live_settings(allowed_values)
-        )
+        save_kwargs: Dict[str, Any] = {}
+        if wake_family in native_live_settings.WAKE_FAMILIES:
+            save_kwargs["wake_family"] = wake_family
+        if defer_push:
+            save_kwargs["push"] = False
+        save_operation = native_satellite.save_live_settings(allowed_values, **save_kwargs)
         result = native_satellite.run_on_runtime_loop(save_operation, timeout=15.0)
         if "continued_chat" in allowed_values:
             esphome_settings.save_settings_values(
