@@ -1,46 +1,32 @@
-# Tater v1.5.0
+# Tater v1.5.1
 
-Tater v1.5.0 adds experimental Echo 2 (2017, `radar`) satellite support and
-speaker tuning controls for compatible Echo devices.
+Tater v1.5.1 completes the Echo 2 (Radar) settings experience by adding its
+music-reactive LED ring controls.
 
-## What's Changed
+## What's New
 
-### Echo 2 (Radar)
+### Radar Music Animations
 
-- Adds the 2017 full-size Echo 2 as a recognized native satellite, with the
-  correct name, dedicated transparent device artwork, status display, and
-  settings integration throughout the Satellites page.
-- Adds Radar factory and OTA release discovery from Tater Echo Firmware,
-  including the correct recovery guide and capability-aware eligibility for
-  devices that first need a USB/recovery installation.
-- Supports normal in-app Radar OTA updates after Tater Echo Firmware v2.5.0 is
-  installed. The initial experimental factory installation still follows the
-  hardware-specific recovery procedure documented by the firmware project.
+- Adds the Music Animation selector to the settings popup for Radar
+  satellites, matching the control already available for Biscuit.
+- Includes No Animation, Audio Glow, Beat Pulse, Level Bars, Reactive Orbit,
+  and Reactive Wave choices for ordinary and Sendspin music playback.
+- Sends the selected animation in Radar's live settings payload so the change
+  applies immediately and persists with that satellite's settings.
+- Keeps the control limited to Biscuit and Radar. ESP32 satellites remain
+  unchanged until Tater Native Firmware gains a dedicated music-animation
+  setting and capability.
 
-### Echo Speaker Tuning
-
-- Adds an eight-band equalizer to the settings popup for Biscuit, Radar,
-  Checkers, and Rook when the connected firmware advertises output-chain
-  support.
-- Adds optional speech presence boost, bass protection, and peak-limiter
-  controls with safe defaults and per-satellite persistence.
-- Keeps processing ownership explicit: Tater sends the selected settings while
-  the Echo firmware applies them once at the final hardware output.
-
-### Native Satellite Reliability
-
-- Accepts both map- and list-form capability announcements from native
-  satellites and only exposes controls that the connected firmware supports.
-- Preserves the early authenticated hello acknowledgement while negotiating
-  output-chain support, avoiding setup and recovery watchdog timeouts.
+Radar already supports these animations in Tater Echo Firmware v2.5.0, so no
+additional Radar firmware update is required.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.5.0 through
+- macOS users already running v1.0.1 or later can install v1.5.1 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.5.0` or `latest` for the CPU image and
-  `v1.5.0-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.5.1` or `latest` for the CPU image and
+  `v1.5.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

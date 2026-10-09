@@ -1270,13 +1270,25 @@ def _board_supports_led_settings(board: Any = "") -> bool:
     return True
 
 
-def _is_biscuit_board(board: Any = "") -> bool:
+def _is_echo_ring_board(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
-    return token in {"biscuit", "echo-dot-2", "echo-dot-2nd-gen"} or compact in {
+    return token in {
+        "biscuit",
+        "echo-dot-2",
+        "echo-dot-2nd-gen",
+        "radar",
+        "echo-2",
+        "echo-2-2017",
+        "echo-2nd-gen",
+    } or compact in {
         "biscuit",
         "echodot2",
         "echodot2ndgen",
+        "radar",
+        "echo2",
+        "echo22017",
+        "echo2ndgen",
     }
 
 
@@ -1673,7 +1685,7 @@ def firmware_settings_snapshot(
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
             output.pop(key, None)
-    if not _is_biscuit_board(board):
+    if not _is_echo_ring_board(board):
         output.pop("led_music_animation", None)
     if not _board_supports_display_theme(board):
         for key in _DISPLAY_THEME_SETTING_KEYS:
@@ -2416,7 +2428,7 @@ def settings_fields(
             "value": current["led_music_animation"],
             "default": DEFAULTS["led_music_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_MUSIC_ANIMATIONS],
-            "description": "Audio-reactive Biscuit ring animation for music playback, including Sendspin. Choose No Animation to keep the ring dark.",
+            "description": "Audio-reactive Echo ring animation for music playback, including Sendspin. Choose No Animation to keep the ring dark.",
         },
         {
             "key": "led_preview",
@@ -2497,7 +2509,7 @@ def settings_fields(
                     {"label": "Thinking", "animation_key": "led_thinking_animation"},
                     {"label": "Replying", "animation_key": "led_replying_animation"},
                 ]
-    if not (_selector_token(selector) and _is_biscuit_board(board)):
+    if not (_selector_token(selector) and _is_echo_ring_board(board)):
         fields = [field for field in fields if _text(field.get("key")) != "led_music_animation"]
         for field in fields:
             if _text(field.get("key")) == "led_preview":

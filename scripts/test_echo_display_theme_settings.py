@@ -40,35 +40,44 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
                 for led_key in native_live_settings._LED_FIELD_KEYS:
                     self.assertNotIn(led_key, by_key)
 
-    def test_non_display_satellite_keeps_led_controls_and_hides_theme(self) -> None:
+    def test_echo_ring_satellites_keep_led_controls_and_hide_theme(self) -> None:
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
-            fields = native_live_settings.settings_fields("native:biscuit", board="biscuit")
-        keys = {str(field.get("key") or "") for field in fields}
+            fields_by_board = {
+                board: native_live_settings.settings_fields(f"native:{board}", board=board)
+                for board in ("biscuit", "radar")
+            }
 
-        self.assertIn("led_section", keys)
-        self.assertIn("led_replying_animation", keys)
-        self.assertIn("led_music_animation", keys)
-        self.assertTrue(native_live_settings._DISPLAY_THEME_FIELD_KEYS.isdisjoint(keys))
+        for fields in fields_by_board.values():
+            keys = {str(field.get("key") or "") for field in fields}
+            self.assertIn("led_section", keys)
+            self.assertIn("led_replying_animation", keys)
+            self.assertIn("led_music_animation", keys)
+            self.assertTrue(native_live_settings._DISPLAY_THEME_FIELD_KEYS.isdisjoint(keys))
 
-    def test_music_animation_is_biscuit_only_and_has_audio_reactive_choices(self) -> None:
+    def test_music_animation_is_echo_ring_only_and_has_audio_reactive_choices(self) -> None:
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
             biscuit_fields = native_live_settings.settings_fields("native:biscuit", board="biscuit")
+            radar_fields = native_live_settings.settings_fields("native:radar", board="radar")
             other_fields = native_live_settings.settings_fields("native:voice-pe", board="voice-pe")
         biscuit = {str(field.get("key") or ""): field for field in biscuit_fields}
+        radar = {str(field.get("key") or ""): field for field in radar_fields}
         other_keys = {str(field.get("key") or "") for field in other_fields}
 
-        self.assertEqual(biscuit["led_music_animation"]["value"], "audio_glow")
-        self.assertEqual(
-            {str(option["value"]) for option in biscuit["led_music_animation"]["options"]},
-            {"off", "audio_glow", "music_pulse", "music_bars", "music_orbit", "music_wave"},
-        )
+        for fields in (biscuit, radar):
+            self.assertEqual(fields["led_music_animation"]["value"], "audio_glow")
+            self.assertEqual(
+                {str(option["value"]) for option in fields["led_music_animation"]["options"]},
+                {"off", "audio_glow", "music_pulse", "music_bars", "music_orbit", "music_wave"},
+            )
         self.assertNotIn("led_music_animation", other_keys)
 
         fake = self._redis()
         with mock.patch.object(native_live_settings, "redis_client", fake):
             biscuit_payload = native_live_settings.firmware_settings_snapshot("native:biscuit", board="biscuit")
+            radar_payload = native_live_settings.firmware_settings_snapshot("native:radar", board="radar")
             other_payload = native_live_settings.firmware_settings_snapshot("native:voice-pe", board="voice-pe")
         self.assertEqual(biscuit_payload["led_music_animation"], "audio_glow")
+        self.assertEqual(radar_payload["led_music_animation"], "audio_glow")
         self.assertNotIn("led_music_animation", other_payload)
 
     def test_voice_animations_offer_and_preserve_no_animation(self) -> None:
