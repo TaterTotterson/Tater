@@ -64,7 +64,7 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
         other_keys = {str(field.get("key") or "") for field in other_fields}
 
         for fields in (biscuit, radar):
-            self.assertEqual(fields["led_music_animation"]["value"], "audio_glow")
+            self.assertEqual(fields["led_music_animation"]["value"], "music_bars")
             self.assertEqual(
                 {str(option["value"]) for option in fields["led_music_animation"]["options"]},
                 {"off", "audio_glow", "music_pulse", "music_bars", "music_orbit", "music_wave"},
@@ -76,8 +76,8 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
             biscuit_payload = native_live_settings.firmware_settings_snapshot("native:biscuit", board="biscuit")
             radar_payload = native_live_settings.firmware_settings_snapshot("native:radar", board="radar")
             other_payload = native_live_settings.firmware_settings_snapshot("native:voice-pe", board="voice-pe")
-        self.assertEqual(biscuit_payload["led_music_animation"], "audio_glow")
-        self.assertEqual(radar_payload["led_music_animation"], "audio_glow")
+        self.assertEqual(biscuit_payload["led_music_animation"], "music_bars")
+        self.assertEqual(radar_payload["led_music_animation"], "music_bars")
         self.assertNotIn("led_music_animation", other_payload)
 
     def test_voice_animations_offer_and_preserve_no_animation(self) -> None:

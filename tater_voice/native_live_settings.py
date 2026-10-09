@@ -94,7 +94,7 @@ DEFAULTS: Dict[str, Any] = {
     "led_thinking_animation": "sparkle",
     "led_tool_call_animation": "ping_pong",
     "led_replying_animation": "audio_glow",
-    "led_music_animation": "audio_glow",
+    "led_music_animation": "music_bars",
     "logging_level": "info",
 }
 FIRMWARE_SETTING_KEYS = (

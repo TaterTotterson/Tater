@@ -2,7 +2,8 @@
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
 ARG LLAMA_CPP_REF=master
 ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
-ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
 
 FROM ${LLAMA_CPP_CUDA_BUILDER_IMAGE} AS llama_cpp_builder
 
@@ -32,7 +33,7 @@ RUN git clone --depth 1 --filter=blob:none --no-checkout https://github.com/ggml
  && cmake --build /opt/llama.cpp/build --config Release --target llama-server -j 4 \
  && test -x "$TATER_LLAMA_CPP_SERVER_BIN"
 
-FROM python:3.11-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \

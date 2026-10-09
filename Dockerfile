@@ -1,5 +1,7 @@
-# Use an official Python runtime as a parent image.
-FROM python:3.11-slim
+# Use the official Python runtime through Amazon's public mirror so release
+# builds do not depend on Docker Hub's anonymous pull limits.
+ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 # Prevent some pip noise & keep Python stdout unbuffered
 ENV PIP_NO_CACHE_DIR=1 \
