@@ -105,6 +105,38 @@ function tableRows(field: JsonRow): JsonRow[] {
   return Array.isArray(field.rows) ? field.rows : [];
 }
 
+function equalizerBands(field: JsonRow): JsonRow[] {
+  const configured = Array.isArray(field.bands) ? field.bands as JsonRow[] : [];
+  if (configured.length) return configured;
+  return ["125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "3.5 kHz", "5.5 kHz", "8 kHz"]
+    .map((label, index) => ({ label, index }));
+}
+
+function equalizerValues(field: JsonRow): number[] {
+  const raw = valueOf(field);
+  const values = Array.isArray(raw) ? raw : [];
+  return equalizerBands(field).map((_band, index) => {
+    const value = Number(values[index] ?? 0);
+    return Number.isFinite(value) ? value : 0;
+  });
+}
+
+function equalizerDb(value: number): string {
+  if (value === 0) return "0 dB";
+  return `${value > 0 ? "+" : ""}${value.toFixed(Number.isInteger(value) ? 0 : 1)} dB`;
+}
+
+function setEqualizerBand(field: JsonRow, index: number, event: Event) {
+  const target = event.target as HTMLInputElement;
+  const values = equalizerValues(field);
+  values[index] = Number(target.value);
+  emit("change", keyOf(field), values);
+}
+
+function resetEqualizer(field: JsonRow) {
+  emit("change", keyOf(field), equalizerBands(field).map(() => 0));
+}
+
 function ledAnimation(state: JsonRow): string {
   const raw = String(props.values[String(state.animation_key || "")] || "pulse").trim().toLowerCase();
   return raw.replace(/[^a-z0-9_-]+/g, "_") || "pulse";
@@ -193,6 +225,21 @@ function displayThemeStyle(field: JsonRow): Record<string, string> {
               <i v-for="color in displayThemeColors(field)" :key="color" :style="{ background: color }" />
               <span>{{ selectedDisplayTheme(field).description }}</span>
             </div>
+          </div>
+
+          <div v-else-if="visible(field) && typeOf(field) === 'equalizer'" class="tm-field tm-field-wide tm-equalizer">
+            <div class="tm-equalizer-head">
+              <span class="tm-field-label">{{ field.label || "Equalizer" }} <small>Per-device</small></span>
+              <button class="tv-button" type="button" :disabled="readonly(field)" @click="resetEqualizer(field)">Reset flat</button>
+            </div>
+            <div class="tm-equalizer-bands" role="group" :aria-label="String(field.label || 'Equalizer')">
+              <label v-for="(band, bandIndex) in equalizerBands(field)" :key="String(band.label || bandIndex)">
+                <output>{{ equalizerDb(equalizerValues(field)[bandIndex]) }}</output>
+                <input type="range" :aria-label="`${band.label || `Band ${bandIndex + 1}`} gain`" :min="field.min ?? -12" :max="field.max ?? 12" :step="field.step ?? 0.5" :value="equalizerValues(field)[bandIndex]" :disabled="readonly(field)" @input="setEqualizerBand(field, bandIndex, $event)" />
+                <span>{{ band.label || `Band ${bandIndex + 1}` }}</span>
+              </label>
+            </div>
+            <small v-if="field.description">{{ field.description }}</small>
           </div>
 
           <div v-else-if="visible(field) && typeOf(field) === 'table'" class="tm-field tm-field-wide tm-runtime-table-field">

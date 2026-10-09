@@ -359,6 +359,7 @@ def _default_name_for_board(board: Any) -> str:
         "respeaker-xvf3800": "Tater ReSpeaker XVF3800",
         "s3-box": "Tater S3 Box",
         "biscuit": "Tater Echo Dot 2",
+        "radar": "Tater Echo 2",
         "checkers": "Tater Echo Show 5",
         "rook": "Tater Echo Spot",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")
@@ -930,6 +931,12 @@ def _queue_command(queue: asyncio.Queue, message: Dict[str, Any]) -> None:
 
 def _capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw = payload.get("capabilities")
+    if isinstance(raw, (list, tuple, set)):
+        return {
+            name: True
+            for item in raw
+            if (name := _text(item))
+        }
     if not isinstance(raw, dict):
         return {}
     capabilities: Dict[str, Any] = {}
@@ -1775,16 +1782,22 @@ async def live_settings(selector: str = "") -> Dict[str, Any]:
 
     token = _canonical_selector(selector)
     board = ""
+    capabilities: Dict[str, Any] = {}
     async with _clients_lock:
         row = _clients.get(token) if token else {}
         hello = row.get("hello") if isinstance(row, dict) and isinstance(row.get("hello"), dict) else {}
         payload = _message_payload(hello)
         board = _text(payload.get("board"))
+        capabilities = _capabilities(payload)
     return {
         "ok": True,
         "selector": token,
         "settings": native_live_settings.settings_snapshot(token, board=board),
-        "fields": native_live_settings.settings_fields(token, board=board),
+        "fields": native_live_settings.settings_fields(
+            token,
+            board=board,
+            capabilities=capabilities,
+        ),
     }
 
 
@@ -4930,21 +4943,28 @@ async def handle_websocket(websocket: WebSocket) -> None:
         # setup. Pairing credentials are delivered in this acknowledgement,
         # so delaying it can make a satellite's recovery watchdog close the
         # socket before the device has saved its permanent token.
+        controller_capabilities = {
+            "settings": True,
+            "state": True,
+            "led": True,
+            "play_url": True,
+            "voice_stream": True,
+            "pcm_binary": True,
+            "timers": True,
+            "ota": True,
+        }
+        # Echo a device's output_chain claim in the acknowledgement so speaker
+        # processing ownership remains explicit in both directions. Native
+        # playback is unprocessed; the satellite runs EQ, bass guard, and the
+        # limiter exactly once at its final hardware output.
+        if _capabilities(payload).get("output_chain"):
+            controller_capabilities["output_chain"] = True
         ack_payload = {
             "ok": True,
             "protocol": PROTOCOL_VERSION,
             "selector": selector,
             "server": "tater",
-            "capabilities": {
-                "settings": True,
-                "state": True,
-                "led": True,
-                "play_url": True,
-                "voice_stream": True,
-                "pcm_binary": True,
-                "timers": True,
-                "ota": True,
-            },
+            "capabilities": controller_capabilities,
         }
         device_token = _text(auth.get("device_token"))
         if device_token:

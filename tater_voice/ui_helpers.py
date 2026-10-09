@@ -127,6 +127,24 @@ def _exact_satellite_image_src(value: Any) -> str:
     }:
         return _named_satellite_image_src("echo-spot-rook.png")
     if token in {
+        "radar",
+        "echo-2",
+        "echo-2-2017",
+        "echo-2nd-gen",
+        "echo-2nd-generation",
+        "amazon-echo-2",
+        "tater-echo-2",
+    } or compact in {
+        "radar",
+        "echo2",
+        "echo22017",
+        "echo2ndgen",
+        "echo2ndgeneration",
+        "amazonecho2",
+        "taterecho2",
+    }:
+        return _named_satellite_image_src("echo-2-radar.png")
+    if token in {
         "checkers",
         "echo-show-5",
         "echo-show-5-1st-gen",
@@ -205,6 +223,20 @@ def device_image_src(*name_candidates: Any) -> str:
             continue
         if any(part in token for part in ("rook", "echo spot", "echo-spot", "echo_spot")):
             return _named_satellite_image_src("echo-spot-rook.png")
+        if any(
+            part in token
+            for part in (
+                "radar",
+                "echo 2",
+                "echo-2",
+                "echo_2",
+                "echo 2 2017",
+                "echo 2nd generation",
+                "amazon echo 2",
+                "tater echo 2",
+            )
+        ):
+            return _named_satellite_image_src("echo-2-radar.png")
         if any(
             part in token
             for part in (
@@ -667,12 +699,29 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         settings_save_action = ""
         volume_control: Dict[str, Any] = {}
         if native_device:
+            raw_capabilities = client_row.get("capabilities")
+            if not isinstance(raw_capabilities, (dict, list, tuple, set)):
+                raw_capabilities = meta.get("capabilities")
+            if isinstance(raw_capabilities, dict):
+                native_capabilities = dict(raw_capabilities)
+            elif isinstance(raw_capabilities, (list, tuple, set)):
+                native_capabilities = {
+                    esphome_runtime.text(value): True
+                    for value in raw_capabilities
+                    if esphome_runtime.text(value)
+                }
+            else:
+                native_capabilities = {}
             popup_mode = ""
             popup_config = {
                 "selector": selector,
                 "name": name,
             }
-            native_settings_fields = native_live_settings.settings_fields(selector, board=board)
+            native_settings_fields = native_live_settings.settings_fields(
+                selector,
+                board=board,
+                capabilities=native_capabilities,
+            )
             volume_field = next(
                 (
                     field

@@ -62,6 +62,27 @@ def _echo_manifest() -> dict[str, object]:
                     },
                 },
             },
+            "radar": {
+                "display_name": "Amazon Echo 2nd Generation (2017)",
+                "amazon_codename": "radar",
+                "cpu": "armv7a",
+                "unlock": "amonet-radar-v1.0.0",
+                "factory_install": True,
+                "ota": True,
+                "status": "hardware-tested",
+                "artifacts": {
+                    "factory": {
+                        "name": "tater-echo-radar-v0.4.0-factory.tar.gz",
+                        "sha256": "1" * 64,
+                        "size": 7168,
+                    },
+                    "ota": {
+                        "name": "tater-echo-radar-v0.4.0-ota.bin",
+                        "sha256": "2" * 64,
+                        "size": 3072,
+                    },
+                },
+            },
             "rook": {
                 "display_name": "Amazon Echo Spot 1st Generation (2017)",
                 "amazon_codename": "rook",
@@ -187,6 +208,31 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-rook-v0.4.0-ota.tar.gz"))
         self.assertIn("factory/rook-linux/README.md", info["artifacts"]["factory"]["instructions_url"])
 
+    def test_radar_identity_selects_its_own_verified_ota(self) -> None:
+        row = {
+            "connected": True,
+            "firmware_target": "radar",
+            "board": "radar",
+            "firmware_version": "v0.3.0",
+            "capabilities": {"ota": True},
+        }
+        spec = firmware._match_template_spec("native:echo-2-test", row)
+        self.assertEqual("radar", spec["key"])
+        self.assertFalse(spec["usb_recovery"])
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-2-radar.png"),
+            ui_helpers.device_image_src("radar", "Tater Echo 2"),
+        )
+        source = firmware._firmware_manifest_source("radar")
+        self.assertEqual("echo_targets", source["format"])
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            info = firmware._native_firmware_info("radar")
+        self.assertTrue(info["available"])
+        self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
+        self.assertEqual("2" * 64, info["artifacts"]["ota"]["sha256"])
+        self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-radar-v0.4.0-ota.bin"))
+        self.assertIn("factory/radar/README.md", info["artifacts"]["factory"]["instructions_url"])
+
     def test_rook_manifest_ota_flag_prevents_premature_update(self) -> None:
         payload = _echo_manifest()
         payload["targets"]["rook"]["ota"] = False
@@ -224,6 +270,82 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertNotIn("ota", variant["prebuilt_firmware"]["artifacts"])
         self.assertEqual(
             ui_helpers._named_satellite_image_src("echo-spot-rook.png"), variant["hero_image_src"]
+        )
+
+    def test_old_radar_build_is_not_offered_an_ota_it_rejects(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "radar",
+            "board": "radar",
+            "device_info": {
+                "friendly_name": "Living Room Echo",
+                "model": "radar",
+                "project_version": "v0.0.1",
+            },
+            "capabilities": {"ota": False},
+        }
+        radar_spec = firmware._template_spec_by_key("radar")
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[radar_spec]),
+            mock.patch.object(firmware, "_prebuilt_firmware_panel_summary", return_value={"available": True, "device_count": 4}),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:radar-test": row}})
+        self.assertEqual([], panel["firmware_updates"])
+        self.assertEqual([], panel["firmware_flash_targets"])
+        variant = panel["variants"]["radar"]["native:radar-test"]
+        self.assertFalse(variant["ota_supported"])
+        self.assertNotIn("ota", variant["prebuilt_firmware"]["artifacts"])
+
+    def test_radar_update_is_reported_in_firmware_panel(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "radar",
+            "board": "radar",
+            "device_info": {
+                "name": "radar-test",
+                "friendly_name": "Living Room Echo",
+                "manufacturer": "Tater",
+                "model": "radar",
+                "project_name": "tater.native_satellite",
+                "project_version": "v0.3.0",
+            },
+            "metadata": {
+                "firmware_target": "radar",
+                "board": "radar",
+            },
+            "capabilities": {"ota": True},
+        }
+        radar_spec = firmware._template_spec_by_key("radar")
+        self.assertIsNotNone(radar_spec)
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[radar_spec]),
+            mock.patch.object(
+                firmware,
+                "_prebuilt_firmware_panel_summary",
+                return_value={"available": True, "device_count": 4, "version": "v0.4.0"},
+            ),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:radar-test": row}})
+
+        self.assertEqual(1, panel["firmware_update_count"])
+        update = panel["firmware_updates"][0]
+        self.assertEqual("native:radar-test", update["selector"])
+        self.assertEqual("radar", update["template_key"])
+        self.assertEqual("v0.3.0", update["installed"])
+        self.assertEqual("v0.4.0", update["latest"])
+        self.assertTrue(update["prebuilt_firmware_ota_available"])
+        self.assertTrue(
+            update["prebuilt_firmware"]["artifacts"]["ota"]["path"].endswith(
+                "tater-echo-radar-v0.4.0-ota.bin"
+            )
         )
 
     def test_checkers_update_is_reported_in_firmware_panel(self) -> None:

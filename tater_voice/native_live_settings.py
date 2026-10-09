@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime
 import hashlib
 import json
+import math
 from typing import Any, Dict, List
 from urllib.error import URLError
 from urllib.parse import urljoin
@@ -73,6 +74,13 @@ DEFAULTS: Dict[str, Any] = {
     "continued_chat": True,
     "barge_in_enabled": False,
     "volume_percent": 80,
+    "eq_bands": [0.0] * 8,
+    "eq_loudness": False,
+    "bass_guard_enabled": True,
+    "bass_guard_db": -30.0,
+    "limiter_enabled": True,
+    "limiter_threshold_db": -1.0,
+    "limiter_release_ms": 150.0,
     "audio_output_mode": "auto",
     "screen_brightness": 80,
     "screen_night_mode_enabled": False,
@@ -973,7 +981,7 @@ def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = 
         return "echo"
     # Board fallback keeps settings correct while an older Echo build is connecting
     # before it has advertised the newer detector capability flags.
-    if _lower(board).replace("_", "-") in {"biscuit", "checkers", "rook"}:
+    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "rook"}:
         return "echo"
     return "mww"
 
@@ -1168,6 +1176,56 @@ _DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
 
 _AUDIO_OUTPUT_SETTING_KEYS = {"audio_output_mode"}
 _AUDIO_OUTPUT_FIELD_KEYS = _AUDIO_OUTPUT_SETTING_KEYS | {"audio_output_section"}
+
+_OUTPUT_CHAIN_SETTING_KEYS = {
+    "eq_bands",
+    "eq_loudness",
+    "bass_guard_enabled",
+    "bass_guard_db",
+    "limiter_enabled",
+    "limiter_threshold_db",
+    "limiter_release_ms",
+}
+_OUTPUT_CHAIN_FIELD_KEYS = _OUTPUT_CHAIN_SETTING_KEYS | {
+    "output_chain_section",
+}
+_OUTPUT_CHAIN_WIRE_KEYS = {
+    "eq_bands": "eqBands",
+    "eq_loudness": "eqLoudness",
+    "bass_guard_enabled": "bassGuardEnabled",
+    "bass_guard_db": "bassGuardDb",
+    "limiter_enabled": "limiterEnabled",
+    "limiter_threshold_db": "limiterThreshold",
+    "limiter_release_ms": "limiterRelease",
+}
+_EQ_BAND_LABELS = (
+    "125 Hz",
+    "250 Hz",
+    "500 Hz",
+    "1 kHz",
+    "2 kHz",
+    "3.5 kHz",
+    "5.5 kHz",
+    "8 kHz",
+)
+
+
+def _supports_output_chain(capabilities: Dict[str, Any] | None = None) -> bool:
+    values = capabilities if isinstance(capabilities, dict) else {}
+    return _as_bool(values.get("output_chain"), False)
+
+
+def _eq_bands_value(value: Any) -> List[float]:
+    raw = _json_loads(value, [])
+    if not isinstance(raw, list):
+        raw = []
+    bands: List[float] = []
+    for index in range(len(_EQ_BAND_LABELS)):
+        fallback = float(DEFAULTS["eq_bands"][index])
+        candidate = raw[index] if index < len(raw) else fallback
+        level = _as_float(candidate, fallback, minimum=-12.0, maximum=12.0)
+        bands.append(round(level * 2.0) / 2.0 if math.isfinite(level) else fallback)
+    return bands
 
 
 def _audio_output_mode_value(value: Any) -> str:
@@ -1467,6 +1525,43 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "continued_chat": _as_bool(source.get("continued_chat"), bool(DEFAULTS["continued_chat"])),
         "barge_in_enabled": _as_bool(source.get("barge_in_enabled"), bool(DEFAULTS["barge_in_enabled"])),
         "volume_percent": _as_int(source.get("volume_percent"), int(DEFAULTS["volume_percent"]), minimum=0, maximum=100),
+        "eq_bands": _eq_bands_value(source.get("eq_bands")),
+        "eq_loudness": _as_bool(source.get("eq_loudness"), bool(DEFAULTS["eq_loudness"])),
+        "bass_guard_enabled": _as_bool(
+            source.get("bass_guard_enabled"),
+            bool(DEFAULTS["bass_guard_enabled"]),
+        ),
+        "bass_guard_db": round(
+            _as_float(
+                source.get("bass_guard_db"),
+                float(DEFAULTS["bass_guard_db"]),
+                minimum=-60.0,
+                maximum=0.0,
+            ),
+            1,
+        ),
+        "limiter_enabled": _as_bool(
+            source.get("limiter_enabled"),
+            bool(DEFAULTS["limiter_enabled"]),
+        ),
+        "limiter_threshold_db": round(
+            _as_float(
+                source.get("limiter_threshold_db"),
+                float(DEFAULTS["limiter_threshold_db"]),
+                minimum=-12.0,
+                maximum=0.0,
+            ),
+            1,
+        ),
+        "limiter_release_ms": round(
+            _as_float(
+                source.get("limiter_release_ms"),
+                float(DEFAULTS["limiter_release_ms"]),
+                minimum=20.0,
+                maximum=1000.0,
+            ),
+            1,
+        ),
         "audio_output_mode": _audio_output_mode_value(source.get("audio_output_mode")),
         "screen_brightness": _as_int(
             source.get("screen_brightness"),
@@ -1586,6 +1681,13 @@ def firmware_settings_snapshot(
     if not _is_sat1_board(board):
         for key in _AUDIO_OUTPUT_SETTING_KEYS:
             output.pop(key, None)
+    if _supports_output_chain(capabilities):
+        output.update(
+            {
+                wire_key: current[setting_key]
+                for setting_key, wire_key in _OUTPUT_CHAIN_WIRE_KEYS.items()
+            }
+        )
     if _board_supports_screen_settings(board):
         now = datetime.now().astimezone()
         output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
@@ -1691,6 +1793,7 @@ def settings_fields(
     *,
     board: Any = "",
     wake_family: Any = "",
+    capabilities: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     family = _lower(wake_family)
     current = (
@@ -2068,6 +2171,86 @@ def settings_fields(
             "step": 1,
         },
         {
+            "key": "output_chain_section",
+            "label": "Speaker Equalizer",
+            "type": "section",
+            "description": "Tune this satellite's speaker response. Its hardware speaker filter remains active underneath these controls.",
+        },
+        {
+            "key": "eq_bands",
+            "label": "Eight-Band Equalizer",
+            "type": "equalizer",
+            "value": current["eq_bands"],
+            "default": DEFAULTS["eq_bands"],
+            "bands": [
+                {"label": label, "index": index}
+                for index, label in enumerate(_EQ_BAND_LABELS)
+            ],
+            "min": -12,
+            "max": 12,
+            "step": 0.5,
+            "full_width": True,
+            "description": "Changes apply on the satellite without a firmware rebuild. Reset returns every band to 0 dB.",
+        },
+        {
+            "key": "eq_loudness",
+            "label": "Presence Boost",
+            "type": "checkbox",
+            "value": current["eq_loudness"],
+            "default": DEFAULTS["eq_loudness"],
+            "description": "Adds a broad +5 dB presence lift centered near 2.5 kHz for clearer speech.",
+        },
+        {
+            "key": "bass_guard_enabled",
+            "label": "Bass Protection",
+            "type": "checkbox",
+            "value": current["bass_guard_enabled"],
+            "default": DEFAULTS["bass_guard_enabled"],
+            "description": "Protects the small driver from low-frequency over-excursion. Keep this enabled for normal use.",
+        },
+        {
+            "key": "bass_guard_db",
+            "label": "Bass Protection Floor (dB)",
+            "type": "number",
+            "value": current["bass_guard_db"],
+            "default": DEFAULTS["bass_guard_db"],
+            "min": -60,
+            "max": 0,
+            "step": 1,
+            "show_when": {"source_key": "bass_guard_enabled", "equals": True},
+            "description": "Maximum low-bass reduction when protection is active. The safe default is -30 dB.",
+        },
+        {
+            "key": "limiter_enabled",
+            "label": "Peak Limiter",
+            "type": "checkbox",
+            "value": current["limiter_enabled"],
+            "default": DEFAULTS["limiter_enabled"],
+            "description": "Prevents boosted EQ bands from clipping the speaker output.",
+        },
+        {
+            "key": "limiter_threshold_db",
+            "label": "Limiter Ceiling (dBFS)",
+            "type": "number",
+            "value": current["limiter_threshold_db"],
+            "default": DEFAULTS["limiter_threshold_db"],
+            "min": -12,
+            "max": 0,
+            "step": 0.5,
+            "show_when": {"source_key": "limiter_enabled", "equals": True},
+        },
+        {
+            "key": "limiter_release_ms",
+            "label": "Limiter Release (ms)",
+            "type": "number",
+            "value": current["limiter_release_ms"],
+            "default": DEFAULTS["limiter_release_ms"],
+            "min": 20,
+            "max": 1000,
+            "step": 10,
+            "show_when": {"source_key": "limiter_enabled", "equals": True},
+        },
+        {
             "key": "audio_output_section",
             "label": "Sat1 Audio Output",
             "type": "section",
@@ -2329,6 +2512,8 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
     if not (_selector_token(selector) and _is_sat1_board(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
+    if not (_selector_token(selector) and _supports_output_chain(capabilities)):
+        fields = [field for field in fields if _text(field.get("key")) not in _OUTPUT_CHAIN_FIELD_KEYS]
     return fields
 
 

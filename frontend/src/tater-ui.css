@@ -2222,6 +2222,16 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tvoice-settings-sections .tm-field-sections > .tm-form-card > header p { max-width: 760px; font-size: .61rem; }
 .tvoice-settings-sections .tm-field { padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--tv-border) 82%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--tv-surface) 74%, transparent); }
 .tvoice-settings-sections .tm-toggle-field { min-height: 58px; align-items: center; }
+.tm-equalizer { gap: 10px; }
+.tm-equalizer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tm-equalizer-head .tm-field-label { display: inline-flex; align-items: center; gap: 7px; }
+.tm-equalizer-head .tm-field-label small { color: var(--tv-accent); font-size: .52rem; font-weight: 780; letter-spacing: .05em; text-transform: uppercase; }
+.tm-equalizer-head .tv-button { min-height: 27px; padding: 4px 8px; font-size: .58rem; }
+.tm-equalizer-bands { display: grid; grid-template-columns: repeat(8, minmax(48px, 1fr)); gap: 7px; padding: 10px 8px 8px; border: 1px solid color-mix(in srgb, var(--tv-accent) 16%, var(--tv-border)); border-radius: 10px; background: linear-gradient(180deg, color-mix(in srgb, var(--tv-accent) 5%, var(--tv-surface-strong)), var(--tv-surface)); }
+.tm-equalizer-bands label { display: grid; grid-template-rows: 20px 124px auto; justify-items: center; gap: 6px; min-width: 0; }
+.tm-equalizer-bands output { color: var(--tv-text); font-size: .56rem; font-weight: 760; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tm-equalizer-bands input[type="range"] { width: 124px; height: 20px; margin: 52px -52px; accent-color: var(--tv-accent); transform: rotate(-90deg); }
+.tm-equalizer-bands span { color: var(--tv-muted); font-size: .55rem; font-weight: 720; text-align: center; white-space: nowrap; }
 .tvoice-settings-sync { display: inline-flex; align-items: center; gap: 7px; }
 .tvoice-settings-sync i { width: 7px; height: 7px; border-radius: 50%; background: #66d89b; box-shadow: 0 0 0 4px rgb(102 216 155 / 10%); }
 .tvoice-settings-sync.dirty { color: var(--tv-accent); }
@@ -3081,4 +3091,5 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
   .tvoice-progress-hero > div:first-child { border-right: 0; border-bottom: 1px solid var(--tv-border); }
   .tvoice-flasher-footer, .tvoice-flasher-footer > div { align-items: stretch; flex-direction: column; width: 100%; }
   .tvoice-flasher-footer .tv-button { width: 100%; }
+  .tm-equalizer-bands { grid-template-columns: repeat(8, 52px); justify-content: start; overflow-x: auto; }
 }

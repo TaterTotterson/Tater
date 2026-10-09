@@ -17,6 +17,7 @@ class FirmwareOfflineImageTests(unittest.TestCase):
     BOARD_CASES = {
         "biscuit": ("biscuit", "echo-dot-2.png"),
         "checkers": ("checkers", "echo-show-5.png"),
+        "radar": ("radar", "echo-2-radar.png"),
         "rook": ("rook", "echo-spot-rook.png"),
         "thirdreality-s420": ("thirdreality_s420", "thirdreality-s420.png"),
         "voice-pe": ("voicepe", "voicepe.png"),
@@ -124,6 +125,19 @@ class FirmwareOfflineImageTests(unittest.TestCase):
                 "last_seen_ts": 124.0,
             },
             {
+                "selector": "native:radar-test",
+                "host": "",
+                "name": "Echo 2 Test",
+                "source": "tater_native",
+                "metadata": {
+                    "native_selected": True,
+                    "board": "radar",
+                    "firmware_target": "radar",
+                    "firmware_version": "v0.1.1",
+                },
+                "last_seen_ts": 125.0,
+            },
+            {
                 "selector": "native:show-test",
                 "host": "",
                 "name": "Echo Show Test",
@@ -163,6 +177,14 @@ class FirmwareOfflineImageTests(unittest.TestCase):
                     "firmware_target": "checkers",
                     "firmware_version": "v0.1.5",
                 },
+                "native:radar-test": {
+                    "connected": True,
+                    "device_id": "radar-test",
+                    "device_name": "Echo 2 Test",
+                    "board": "radar",
+                    "firmware_target": "radar",
+                    "firmware_version": "v0.1.1",
+                },
             }
         }
 
@@ -184,6 +206,10 @@ class FirmwareOfflineImageTests(unittest.TestCase):
         self.assertEqual(
             cards["native:show-test"]["hero_image_src"],
             ui_helpers._named_satellite_image_src("echo-show-5.png"),
+        )
+        self.assertEqual(
+            cards["native:radar-test"]["hero_image_src"],
+            ui_helpers._named_satellite_image_src("echo-2-radar.png"),
         )
 
 

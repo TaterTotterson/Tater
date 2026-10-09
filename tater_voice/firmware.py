@@ -228,6 +228,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
     "checkers",
+    "radar",
     "rook",
     "satellite1_rpi_satellite",
     "satellite1_rpi_standalone",
@@ -244,6 +245,12 @@ _PREBUILT_FIRMWARE_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _PREBUILT_OTA_PORT = 3232
 _PREBUILT_OTA_BLOCK_SIZE = 8192
 _PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
+_ECHO_FACTORY_GUIDE_DIRECTORIES = {
+    "biscuit": "biscuit",
+    "checkers": "checkers-linux",
+    "radar": "radar",
+    "rook": "rook-linux",
+}
 
 _S3BOX_SENSOR_FIELD_LABELS: Dict[str, str] = {
     "sensor_temp_out": "Outdoor Temperature",
@@ -314,6 +321,19 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "echo spot 1st generation",
             "amazon echo spot",
             "tater echo spot",
+        },
+    },
+    {
+        "key": "radar",
+        "label": "Tater Echo 2",
+        "usb_recovery": False,
+        "match_tokens": {
+            "radar",
+            "echo 2",
+            "echo 2nd generation",
+            "echo 2 2017",
+            "amazon echo 2",
+            "tater echo 2",
         },
     },
     {
@@ -1070,7 +1090,7 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
-    if key in {"biscuit", "checkers", "rook"}:
+    if key in {"biscuit", "checkers", "radar", "rook"}:
         return {
             "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
             "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
@@ -1217,7 +1237,7 @@ def _load_echo_firmware_manifest(
                 "browser_flash_supported": False,
                 "instructions_url": (
                     f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}/blob/main/"
-                    f"factory/{'rook-linux' if target == 'rook' else 'checkers-linux' if target == 'checkers' else 'biscuit'}/README.md"
+                    f"factory/{_ECHO_FACTORY_GUIDE_DIRECTORIES.get(target, target)}/README.md"
                     if kind == "factory"
                     else ""
                 ),
@@ -2290,6 +2310,15 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         "taterechospot",
     }:
         return "rook"
+    if token in {"radar", "echo-2", "echo-2-2017", "echo-2nd-gen"} or compact in {
+        "radar",
+        "echo2",
+        "echo22017",
+        "echo2ndgen",
+        "amazonecho2",
+        "taterecho2",
+    }:
+        return "radar"
     if token in {"biscuit", "echo-dot-2", "echo-dot-gen-2"} or compact in {
         "biscuit",
         "echodot2",
@@ -2458,7 +2487,10 @@ def _build_device_context(
     capabilities = client_row.get("capabilities") if isinstance(client_row.get("capabilities"), dict) else {}
     if not capabilities and isinstance(metadata.get("capabilities"), dict):
         capabilities = metadata["capabilities"]
-    ota_supported = not (template_key == "rook" and capabilities.get("ota") is False)
+    ota_supported = not (
+        template_key in {"biscuit", "checkers", "radar", "rook"}
+        and capabilities.get("ota") is False
+    )
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
@@ -2559,7 +2591,7 @@ def _build_device_context(
     }
     if not ota_supported:
         item["prebuilt_firmware"]["artifacts"].pop("ota", None)
-        item["firmware_update_status"] = "This Echo Spot build needs one USB update to enable OTA."
+        item["firmware_update_status"] = "This Echo build needs one USB/recovery update to enable OTA."
 
     return {
         "selector": selector_token,
@@ -5148,7 +5180,9 @@ def _start_flash_session(
 
     host = _text(context.get("host"))
     if context.get("ota_supported") is False:
-        raise RuntimeError("This Echo Spot build cannot receive OTA yet. Install an OTA-capable Rook build over USB once.")
+        raise RuntimeError(
+            "This Echo build cannot receive OTA yet. Install an OTA-capable build over USB/recovery once."
+        )
     prebuilt_upload = _prebuilt_artifact_available(context, "ota")
     if not prebuilt_upload:
         raise RuntimeError("No prebuilt OTA image is available for this firmware target.")

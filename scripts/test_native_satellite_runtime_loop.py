@@ -113,6 +113,7 @@ class NativeSatelliteWebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
                             "device_name": "Test Satellite",
                             "board": "s3-box",
                             "firmware_version": "test",
+                            "capabilities": {"output_chain": True},
                         },
                     }
                 )
@@ -128,6 +129,9 @@ class NativeSatelliteWebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(websocket.sent)
             self.assertEqual("hello.ack", websocket.sent[0].get("type"))
             self.assertEqual("tns_test", websocket.sent[0].get("payload", {}).get("device_token"))
+            self.assertTrue(
+                websocket.sent[0].get("payload", {}).get("capabilities", {}).get("output_chain")
+            )
             record_checked = True
             raise native_satellite.WebSocketDisconnect()
 
