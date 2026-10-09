@@ -34,6 +34,10 @@ const currentManager = computed<JsonRow | null>(() => managerTabs.value.find((ro
 const groupTabs = computed<JsonRow[]>(() => currentManager.value && Array.isArray(currentManager.value.groups) ? currentManager.value.groups.filter((row: JsonRow) => text(row.key)) : []);
 const currentGroup = computed<JsonRow | null>(() => groupTabs.value.find((row) => text(row.key) === activeGroup.value) || groupTabs.value[0] || null);
 const itemForms = computed<JsonRow[]>(() => Array.isArray(ui.value.item_forms) ? ui.value.item_forms : []);
+const featuredItems = computed<JsonRow[]>(() => {
+  const group = text(currentManager.value?.featured_item_group);
+  return group ? itemsFor(group) : [];
+});
 const currentChannel = computed<JsonRow | null>(() => channels.value.find((row) => text(row.id) === selectedChannel.value) || channels.value[0] || null);
 const filteredMessages = computed<JsonRow[]>(() => messages.value.filter((row) => (text(row.channel) || "0") === selectedChannel.value));
 const draft = computed({
@@ -212,6 +216,10 @@ onMounted(() => void scrollToBottom(true));
 
     <section v-else-if="currentManager" class="card core-channel-manager">
       <header class="card-head"><div><span class="tv-eyebrow">Meshtastic</span><h3 class="card-title">{{ currentManager.label || currentManager.key }}</h3></div></header>
+      <div v-if="featuredItems.length" class="core-channel-manager-featured">
+        <div class="core-channel-manager-featured-label"><span>{{ currentManager.featured_label || 'Current connection' }}</span><i /></div>
+        <CoreManagerItems :items="featuredItems" :ui="ui" :options="listOptions({ item_group: currentManager.featured_item_group })" :run="run" :busy="isBusy" />
+      </div>
       <template v-if="currentManager.source === 'grouped_items' && groupTabs.length">
         <nav class="core-manager-subtabs" :aria-label="`${currentManager.label || currentManager.key} groups`"><button v-for="group in groupTabs" :key="group.key" type="button" class="core-manager-subtab-btn" :class="{ active: activeGroup === group.key }" @click="activeGroup = group.key">{{ group.label || group.key }}</button></nav>
         <CoreManagerItems v-if="currentGroup" :items="itemsFor(currentGroup.item_group || currentGroup.key)" :ui="ui" :options="listOptions(currentGroup)" :run="run" :busy="isBusy" />

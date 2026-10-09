@@ -443,6 +443,28 @@
 .core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact { min-width: 0; padding: 8px; border-color: color-mix(in srgb, var(--tv-border) 88%, transparent); background: color-mix(in srgb, var(--tv-surface) 90%, transparent); }
 .core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact-label { overflow: hidden; color: var(--tv-muted); font-size: .59rem; letter-spacing: .035em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact-value { color: var(--tv-text); font-size: .7rem; font-weight: 730; line-height: 1.35; }
+.core-channel-manager-featured { display: grid; gap: 8px; padding: 11px; border: 1px solid color-mix(in srgb, var(--tv-accent) 25%, var(--tv-border)); border-radius: 14px; background: radial-gradient(circle at 100% 0, var(--tv-accent-soft), transparent 42%), color-mix(in srgb, var(--tv-surface-strong) 88%, transparent); }
+.core-channel-manager-featured-label { display: flex; align-items: center; gap: 8px; color: var(--tv-muted); font-size: .61rem; font-weight: 780; letter-spacing: .075em; text-transform: uppercase; }
+.core-channel-manager-featured-label i { height: 1px; flex: 1; background: linear-gradient(90deg, var(--tv-border), transparent); }
+.core-channel-manager-featured .core-tab-items { grid-template-columns: 1fr; }
+.core-channel-manager .core-manager-item-variant-pairing_current, .core-channel-manager .core-manager-item-variant-pairing_current_empty { position: relative; overflow: hidden; padding: 15px; border-color: color-mix(in srgb, var(--tv-accent) 35%, var(--tv-border)); background: linear-gradient(135deg, color-mix(in srgb, var(--tv-accent-soft) 45%, var(--tv-surface-strong)), var(--tv-surface)); box-shadow: 0 13px 28px rgb(0 0 0 / 12%); }
+.core-channel-manager .core-manager-item-variant-pairing_current::before, .core-channel-manager .core-manager-item-variant-pairing_current_empty::before { content: ""; position: absolute; top: 15px; right: 18px; width: 36px; height: 36px; border: 2px solid color-mix(in srgb, var(--tv-accent) 55%, transparent); border-radius: 50%; box-shadow: 0 0 0 8px color-mix(in srgb, var(--tv-accent) 8%, transparent), 0 0 24px color-mix(in srgb, var(--tv-accent) 20%, transparent); }
+.core-channel-manager .core-manager-item-variant-pairing_current::after, .core-channel-manager .core-manager-item-variant-pairing_current_empty::after { content: ""; position: absolute; top: 31px; right: 34px; width: 6px; height: 6px; border-radius: 50%; background: var(--tv-accent); box-shadow: 0 0 9px var(--tv-accent); }
+.core-channel-manager .core-manager-item-variant-pairing_current > *, .core-channel-manager .core-manager-item-variant-pairing_current_empty > * { position: relative; z-index: 1; }
+.core-channel-manager .core-manager-item-variant-pairing_current .card-title, .core-channel-manager .core-manager-item-variant-pairing_current_empty .card-title { padding-right: 58px; font-size: 1rem; }
+.core-channel-manager .core-manager-item-variant-pairing_current .core-satellite-subtitle { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .66rem; }
+.core-channel-manager .core-manager-item-variant-pairing_current .core-satellite-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 4px; }
+.core-channel-manager .core-manager-item-variant-pairing_current .tcx-native-actions { justify-content: flex-end; padding-top: 9px; border-top: 1px solid var(--tv-border); }
+.core-channel-manager .core-tab-items-group-pairing_devices { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 11px; align-items: start; }
+.core-channel-manager .core-manager-item-variant-pairing_scan, .core-channel-manager .core-manager-item-variant-pairing_device { padding: 14px; border-color: color-mix(in srgb, var(--tv-border) 88%, var(--tv-accent)); background: linear-gradient(145deg, var(--tv-surface-strong), var(--tv-surface)); box-shadow: 0 10px 24px rgb(0 0 0 / 9%); }
+.core-channel-manager .core-manager-item-variant-pairing_scan .card-title::before, .core-channel-manager .core-manager-item-variant-pairing_device .card-title::before { content: ""; width: 9px; height: 9px; flex: 0 0 9px; border: 2px solid var(--tv-accent); border-radius: 3px; transform: rotate(45deg); box-shadow: 0 0 0 3px var(--tv-accent-soft); }
+.core-channel-manager .core-manager-item-variant-pairing_scan .card-title, .core-channel-manager .core-manager-item-variant-pairing_device .card-title { display: flex; align-items: center; gap: 9px; }
+.core-channel-manager .core-manager-item-variant-pairing_scan .core-satellite-subtitle, .core-channel-manager .core-manager-item-variant-pairing_device .core-satellite-subtitle { color: var(--tv-muted); font: 600 .65rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.core-channel-manager .core-manager-item-variant-pairing_device .core-satellite-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.core-channel-manager .core-manager-item-variant-pairing_device .tcx-native-fields { grid-template-columns: 1fr; margin-top: 10px; }
+.core-channel-manager .core-manager-item-variant-pairing_device .tcx-native-field.type-hidden { display: none; }
+.core-channel-manager .core-manager-item-variant-pairing_device .tcx-native-field.type-password { padding: 10px; border: 1px solid var(--tv-border); border-radius: 10px; background: color-mix(in srgb, var(--tv-surface) 88%, transparent); }
+.core-channel-manager .core-manager-item-variant-pairing_device .tcx-native-actions { justify-content: flex-end; }
 
 @media (max-width: 760px) {
   .core-chat-heading { align-items: flex-start; flex-direction: column; }
@@ -454,6 +476,8 @@
   .core-channel-rail > button { width: auto; min-width: 150px; flex: 0 0 auto; }
   .core-channel-message { max-width: 91%; }
   .core-channel-manager .core-tab-items-group-nodes { grid-template-columns: 1fr; }
+  .core-channel-manager .core-tab-items-group-pairing_devices { grid-template-columns: 1fr; }
+  .core-channel-manager .core-manager-item-variant-pairing_current .core-satellite-facts { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {

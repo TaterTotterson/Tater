@@ -69,6 +69,8 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("filteredMessages", channel_chat)
         self.assertIn("send_message", channel_chat)
         self.assertIn("CoreManagerItems", channel_chat)
+        self.assertIn("featured_item_group", channel_chat)
+        self.assertIn("core-channel-manager-featured", channel_chat)
         self.assertIn("CoreManagerItems", renderer)
         self.assertIn("CoreManagerField", item)
         self.assertIn('v-if="!item.hide_core_key"', item)
@@ -92,6 +94,8 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".core-channel-rail", styles)
         self.assertIn(".core-channel-bubble", styles)
         self.assertIn(".core-manager-item-variant-mesh_node", styles)
+        self.assertIn(".core-manager-item-variant-pairing_current", styles)
+        self.assertIn(".core-manager-item-variant-pairing_device", styles)
         self.assertIn(
             ".tcx-native-manager .core-manager-tabs, .tcx-native-manager .core-manager-subtabs { flex-wrap: nowrap; overflow-x: auto; }",
             styles,
