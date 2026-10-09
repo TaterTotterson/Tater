@@ -428,6 +428,21 @@
 .core-channel-composer > div small { margin-right: auto; color: var(--tv-muted); font-size: .62rem; }
 .core-channel-composer > div span { color: var(--tv-muted); font-size: .62rem; }
 .core-channel-manager { display: grid; min-width: 0; gap: 12px; margin: 12px 20px 20px !important; border-color: var(--tv-border); background: var(--tv-surface); }
+.core-channel-manager .core-tab-items-group-nodes { grid-template-columns: repeat(auto-fill, minmax(285px, 1fr)); gap: 11px; align-items: stretch; }
+.core-channel-manager .core-manager-item-variant-mesh_node { position: relative; min-height: 205px; overflow: hidden; padding: 14px; border-color: color-mix(in srgb, var(--tv-border) 88%, var(--tv-accent)); background: radial-gradient(circle at 100% 0, var(--tv-accent-soft), transparent 38%), linear-gradient(145deg, var(--tv-surface-strong), var(--tv-surface)); box-shadow: 0 12px 28px rgb(0 0 0 / 11%); }
+.core-channel-manager .core-manager-item-variant-mesh_node::after { content: ""; position: absolute; top: -28px; right: -24px; width: 82px; height: 82px; border: 1px solid color-mix(in srgb, var(--tv-accent) 24%, transparent); border-radius: 50%; box-shadow: 0 0 0 13px color-mix(in srgb, var(--tv-accent) 4%, transparent), 0 0 0 27px color-mix(in srgb, var(--tv-accent) 3%, transparent); pointer-events: none; }
+.core-channel-manager .core-manager-item-variant-mesh_node > .card-head { position: relative; z-index: 1; align-items: center; }
+.core-channel-manager .core-manager-item-variant-mesh_node .card-title { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: .95rem; }
+.core-channel-manager .core-manager-item-variant-mesh_node .card-title::before { content: ""; width: 10px; height: 10px; flex: 0 0 10px; border: 2px solid var(--tv-accent); border-radius: 50%; background: var(--tv-surface-strong); box-shadow: 0 0 0 4px var(--tv-accent-soft); }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-summary { position: relative; z-index: 1; margin-top: 2px; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-subtitle { width: fit-content; margin-bottom: 9px; padding: 3px 7px; border: 1px solid var(--tv-border); border-radius: 7px; color: var(--tv-muted); background: color-mix(in srgb, var(--tv-surface) 86%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .65rem; letter-spacing: .025em; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-badges { gap: 6px; margin-bottom: 9px; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-badge { padding: 4px 8px; font-size: .62rem; letter-spacing: .055em; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-detail { min-height: 1.2em; margin-bottom: 10px; color: var(--tv-muted); font-size: .66rem; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact { min-width: 0; padding: 8px; border-color: color-mix(in srgb, var(--tv-border) 88%, transparent); background: color-mix(in srgb, var(--tv-surface) 90%, transparent); }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact-label { overflow: hidden; color: var(--tv-muted); font-size: .59rem; letter-spacing: .035em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-fact-value { color: var(--tv-text); font-size: .7rem; font-weight: 730; line-height: 1.35; }
 
 @media (max-width: 760px) {
   .core-chat-heading { align-items: flex-start; flex-direction: column; }
@@ -438,6 +453,7 @@
   .core-channel-rail-title { display: none; }
   .core-channel-rail > button { width: auto; min-width: 150px; flex: 0 0 auto; }
   .core-channel-message { max-width: 91%; }
+  .core-channel-manager .core-tab-items-group-nodes { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {
@@ -446,6 +462,7 @@
   .core-channel-feed { padding: 16px 11px; }
   .core-channel-composer > div small { display: none; }
   .core-channel-manager { margin-inline: 12px !important; }
+  .core-channel-manager .core-manager-item-variant-mesh_node .core-satellite-facts { grid-template-columns: 1fr; }
 }
 .tater-shell-view-root { position: relative; }
 .tater-shell-refresh-indicator { position: fixed; right: 18px; bottom: 18px; z-index: 90; padding: 7px 11px; border: 1px solid var(--tv-border); border-radius: 999px; color: var(--tv-muted); background: color-mix(in srgb, var(--tv-surface-strong) 92%, transparent); box-shadow: 0 10px 24px rgb(0 0 0 / 18%); font-size: .7rem; backdrop-filter: blur(10px); }

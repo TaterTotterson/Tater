@@ -71,6 +71,7 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("CoreManagerItems", channel_chat)
         self.assertIn("CoreManagerItems", renderer)
         self.assertIn("CoreManagerField", item)
+        self.assertIn('v-if="!item.hide_core_key"', item)
         self.assertIn("type === 'image_checklist'", field)
         self.assertNotIn("renderCorePanel:", app_js)
         self.assertFalse((REPO_ROOT / "frontend" / "src" / "cores" / "components" / "LegacyCorePanel.vue").exists())
@@ -90,6 +91,7 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".core-channel-chat-shell { display: grid;", styles)
         self.assertIn(".core-channel-rail", styles)
         self.assertIn(".core-channel-bubble", styles)
+        self.assertIn(".core-manager-item-variant-mesh_node", styles)
         self.assertIn(
             ".tcx-native-manager .core-manager-tabs, .tcx-native-manager .core-manager-subtabs { flex-wrap: nowrap; overflow-x: auto; }",
             styles,

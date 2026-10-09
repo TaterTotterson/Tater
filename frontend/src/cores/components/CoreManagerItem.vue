@@ -142,7 +142,7 @@ watch(allKnownFields, syncValues, { immediate: true });
   <article class="card core-manager-item tcx-native-item" :class="cardClasses" :data-core-item-group="item.group || ''" :tabindex="item.click_opens_fields ? 0 : undefined" @click="openCard" @keydown="handleKey">
     <div class="card-head">
       <h3 class="card-title">{{ title }}</h3>
-      <div class="core-manager-card-tools"><label v-if="item.selectable" class="core-manager-item-selection"><input class="toggle-input" type="checkbox" :checked="selected" :aria-label="item.selection_label || `Select ${title}`" @change="emit('select', ($event.target as HTMLInputElement).checked)" /><span>Select</span></label><span class="small">{{ item.core_key }}</span></div>
+      <div class="core-manager-card-tools"><label v-if="item.selectable" class="core-manager-item-selection"><input class="toggle-input" type="checkbox" :checked="selected" :aria-label="item.selection_label || `Select ${title}`" @change="emit('select', ($event.target as HTMLInputElement).checked)" /><span>Select</span></label><span v-if="!item.hide_core_key" class="small">{{ item.core_key }}</span></div>
     </div>
 
     <div v-if="hasSummary" class="core-satellite-summary" :class="{ 'no-image': !item.hero_image_src }">

@@ -6280,7 +6280,10 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 }), hp = ["data-core-item-group", "tabindex"], gp = { class: "card-head" }, _p = { class: "card-title" }, vp = { class: "core-manager-card-tools" }, yp = {
 	key: 0,
 	class: "core-manager-item-selection"
-}, bp = ["checked", "aria-label"], xp = { class: "small" }, Sp = {
+}, bp = ["checked", "aria-label"], xp = {
+	key: 1,
+	class: "small"
+}, Sp = {
 	key: 0,
 	class: "core-satellite-image-wrap"
 }, Cp = ["src", "alt"], wp = { class: "core-satellite-summary-main" }, Tp = {
@@ -6431,7 +6434,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 				checked: e.selected,
 				"aria-label": e.item.selection_label || `Select ${u.value}`,
 				onChange: n[0] ||= (e) => r("select", e.target.checked)
-			}, null, 40, bp), n[13] ||= Y("span", null, "Select", -1)])) : Z("", !0), Y("span", xp, B(e.item.core_key), 1)])]),
+			}, null, 40, bp), n[13] ||= Y("span", null, "Select", -1)])) : Z("", !0), e.item.hide_core_key ? Z("", !0) : (q(), J("span", xp, B(e.item.core_key), 1))])]),
 			w.value ? (q(), J("div", {
 				key: 0,
 				class: z(["core-satellite-summary", { "no-image": !e.item.hero_image_src }])
