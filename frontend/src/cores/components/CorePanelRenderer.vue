@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { postJson } from "../../shared/api";
 import type { CoreTabSpec, JsonRow } from "../types";
+import CoreChannelChat from "./CoreChannelChat.vue";
 import CoreManagerField from "./CoreManagerField.vue";
 import CoreManagerItems from "./CoreManagerItems.vue";
 
@@ -24,6 +25,7 @@ const addDirty = new Set<string>();
 
 const body = computed(() => props.payload && typeof props.payload === "object" ? props.payload : {});
 const ui = computed<JsonRow>(() => body.value.ui && typeof body.value.ui === "object" ? body.value.ui : {});
+const isChannelChat = computed(() => text(ui.value.kind) === "channel_chat");
 const isManager = computed(() => text(ui.value.kind) === "settings_manager");
 const stats = computed<JsonRow[]>(() => Array.isArray(body.value.stats) ? body.value.stats : []);
 const itemForms = computed<JsonRow[]>(() => Array.isArray(ui.value.item_forms) ? ui.value.item_forms : []);
@@ -146,6 +148,8 @@ watch(statsControls, (fields) => fields.forEach((field) => { const key = text(fi
 <template>
   <div class="tcx-native-panel" data-core-renderer="vue">
     <div v-if="body.error" class="card"><div class="card-head"><h3 class="card-title">{{ tab.label || tab.core_key }}</h3><span class="small">{{ tab.core_key }}</span></div><div class="tv-notice error">{{ body.error }}</div></div>
+
+    <CoreChannelChat v-else-if="isChannelChat" :payload="payload" :tab="tab" :action-endpoint="actionEndpoint" :refresh="refresh" :notify="notify" />
 
     <div v-else-if="isManager" class="card core-settings-manager tcx-native-manager" :class="appearanceClass" :data-core-live-updates="ui.live_updates ? '1' : '0'">
       <div class="card-head"><h3 class="card-title">{{ tab.label || tab.core_key }}</h3><span class="small">{{ tab.core_key }}</span></div>

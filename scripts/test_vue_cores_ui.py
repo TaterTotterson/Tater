@@ -52,6 +52,7 @@ class VueCoresTests(unittest.TestCase):
     def test_dynamic_panels_use_native_vue_renderers_and_live_core_contracts(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
         renderer = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CorePanelRenderer.vue").read_text(encoding="utf-8")
+        channel_chat = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreChannelChat.vue").read_text(encoding="utf-8")
         item = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerItem.vue").read_text(encoding="utf-8")
         field = (REPO_ROOT / "frontend" / "src" / "cores" / "components" / "CoreManagerField.vue").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
@@ -62,6 +63,12 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn('addEventListener("core-tab"', source)
         self.assertIn("/tab-events", source)
         self.assertIn('data-core-renderer="vue"', renderer)
+        self.assertIn('text(ui.value.kind) === "channel_chat"', renderer)
+        self.assertIn("CoreChannelChat", renderer)
+        self.assertIn('data-core-renderer="vue-channel-chat"', channel_chat)
+        self.assertIn("filteredMessages", channel_chat)
+        self.assertIn("send_message", channel_chat)
+        self.assertIn("CoreManagerItems", channel_chat)
         self.assertIn("CoreManagerItems", renderer)
         self.assertIn("CoreManagerField", item)
         self.assertIn("type === 'image_checklist'", field)
@@ -80,6 +87,9 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn(".tcx-manage-list { display: grid;", styles)
         self.assertIn(".tcx-repo-form { display: grid;", styles)
         self.assertIn(".tcx-native-panel", styles)
+        self.assertIn(".core-channel-chat-shell { display: grid;", styles)
+        self.assertIn(".core-channel-rail", styles)
+        self.assertIn(".core-channel-bubble", styles)
         self.assertIn(
             ".tcx-native-manager .core-manager-tabs, .tcx-native-manager .core-manager-subtabs { flex-wrap: nowrap; overflow-x: auto; }",
             styles,
