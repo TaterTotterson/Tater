@@ -1663,7 +1663,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-required = ["fastapi", "uvicorn", "redis"]
+required = ["fastapi", "uvicorn", "redis", "pychromecast"]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing required packages: " + ", ".join(missing))

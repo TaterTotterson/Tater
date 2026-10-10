@@ -1,47 +1,38 @@
-# Tater v1.5.1
+# Tater v1.5.2
 
-Tater v1.5.1 completes the Echo 2 (Radar) settings experience and makes
-Sendspin's spectrum-driven Level Bars the default music animation for Echo
-satellites.
+Tater v1.5.2 adds direct Google Cast playback support and improves guided
+setup for downloadable integrations.
 
 ## What's New
 
-### Radar Music Animations
+### Google Cast Playback
 
-- Adds the Music Animation selector to the settings popup for Radar
-  satellites, matching the control already available for Biscuit.
-- Includes No Animation, Audio Glow, Beat Pulse, Level Bars, Reactive Orbit,
-  and Reactive Wave choices for ordinary and Sendspin music playback.
-- Sends the selected animation in Radar's live settings payload so the change
-  applies immediately and persists with that satellite's settings.
-- Uses Level Bars by default for Biscuit and Radar when no music-animation
-  preference has been saved. Existing explicit selections remain unchanged.
-- Keeps the control limited to Biscuit and Radar. ESP32 satellites remain
-  unchanged until Tater Native Firmware gains a dedicated music-animation
-  setting and capability.
+- Adds PyChromecast to the standard, edge, CPU Docker, and NVIDIA Docker
+  runtimes so Google Cast support is available wherever Tater runs.
+- Verifies the Cast dependency during setup, container builds, and startup,
+  with a clear recovery message if the runtime is incomplete.
+- Declares Google Cast's Bonjour service on macOS so Tater can discover Cast
+  TVs, speakers, and groups on the local network.
+- Supports the new Google Cast integration from Tater Integrations, including
+  automatic discovery, optional manual hosts, direct media playback, volume,
+  pause, resume, seek, mute, and stop controls.
+- Supports the new Cast Media Verba from Tater Shop. Requests such as
+  “create a song and play it on the office TV” can pass the generated audio or
+  video artifact directly into Cast playback and resolve the TV by its natural
+  device or room name.
 
-### Sendspin LED Visualizer
+### Integration Setup
 
-- Pairs with Tater Echo Firmware v2.5.1 so Biscuit and Radar can use Sendspin's
-  track color, synchronized loudness, beat and peak events, and twelve-bin
-  spectrum data on their LED rings.
-- Level Bars maps the twelve spectrum bins directly to the twelve LEDs, while
-  the other music animations retain their synchronized reactive behavior.
-
-### Docker Publishing
-
-- Uses the official Python base image through Amazon's public container mirror
-  and the CUDA builder through NVIDIA's public NGC registry, avoiding the
-  anonymous Docker Hub rate limit that interrupted the original v1.5.1 image
-  build.
+- Adds guided integration-settings steps so integrations can present clearer
+  setup instructions and configuration flows.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.5.1 through
+- macOS users already running v1.0.1 or later can install v1.5.2 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.5.1` or `latest` for the CPU image and
-  `v1.5.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.5.2` or `latest` for the CPU image and
+  `v1.5.2-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

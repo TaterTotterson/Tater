@@ -46,6 +46,11 @@ if [ -z "${TATER_PYTHON}" ]; then
   fi
 fi
 
+if ! "${TATER_PYTHON}" -c 'import pychromecast' >/dev/null 2>&1; then
+  printf '%s\n' "ERROR PyChromecast is missing from the Tater runtime. Rerun sh setup_tater.sh for this machine, then start Tater again." >&2
+  exit 1
+fi
+
 set -- \
   "${TATER_PYTHON}" -m uvicorn tateros_app:app \
   --host "${HTMLUI_HOST}" \

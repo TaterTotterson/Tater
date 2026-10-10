@@ -12,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_SOURCE = ROOT / "setup_tater.sh"
 SETUP_LIBRARY = SETUP_SOURCE.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0]
+RUN_UI_SOURCE = (ROOT / "run_ui.sh").read_text(encoding="utf-8")
 
 
 def run_setup_functions(body: str, *, environ: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -30,6 +31,13 @@ def run_setup_functions(body: str, *, environ: dict[str, str]) -> subprocess.Com
 
 
 class SetupTaterVenvTests(unittest.TestCase):
+    def test_google_cast_dependency_is_pinned_for_every_runtime_profile(self) -> None:
+        for filename in ("requirements.txt", "requirements-edge.txt"):
+            requirements = (ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("PyChromecast==14.0.10", requirements)
+        self.assertIn('"pychromecast"', SETUP_LIBRARY)
+        self.assertIn("import pychromecast", RUN_UI_SOURCE)
+
     def test_supported_python_versions_match_ai_dependency_wheels(self) -> None:
         completed = run_setup_functions(
             r"""

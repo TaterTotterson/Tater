@@ -54,7 +54,7 @@ class TaterBuildVersionTests(unittest.TestCase):
         )
         self.assertEqual(
             info["NSBonjourServices"],
-            ["_airplay._tcp", "_raop._tcp"],
+            ["_airplay._tcp", "_googlecast._tcp", "_raop._tcp"],
         )
 
     def test_source_version_comes_from_release_info_plist(self) -> None:
