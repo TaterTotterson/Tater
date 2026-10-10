@@ -44,8 +44,8 @@ def _as_float(value: Any, default: float, *, minimum: float | None = None) -> fl
 def _target_setting(
     settings: Dict[str, Any] | None,
     *target_ids: Any,
-    default: float = 0.0,
-) -> float:
+    default: float | None = 0.0,
+) -> float | None:
     source = settings if isinstance(settings, dict) else {}
     aliases: List[str] = []
     for raw_target in target_ids:
@@ -74,7 +74,9 @@ def _target_setting(
                 aliases.append(candidate)
     for alias in aliases:
         if alias in source:
-            return _as_float(source.get(alias), default)
+            return _as_float(source.get(alias), 0.0 if default is None else default)
+    if default is None:
+        return None
     return float(default)
 
 
@@ -1041,7 +1043,7 @@ def _integration_playback_sync(
     source_url: str,
     media_content_type: str = "music",
     media_type: str = "audio/mpeg",
-    volume_percent: int = 100,
+    volume_percent: int | None = 100,
     target_volume_percent: Dict[str, Any] | None = None,
     target_sync_offset_ms: Dict[str, Any] | None = None,
     start_position_seconds: float = 0.0,
@@ -1068,6 +1070,14 @@ def _integration_playback_sync(
         integration_id = target["integration_id"]
         device_id = target["device_id"]
         action = _integration_device_playback_action(integration_id, device_id) or "play_url"
+        target_volume = _target_setting(
+            target_volume_percent,
+            f"integration:{integration_id}:{device_id}",
+            f"{integration_id}:{device_id}",
+            f"ha:{device_id}" if integration_id == "homeassistant" else "",
+            device_id,
+            default=volume_percent,
+        )
         payload = {
             "source_url": source_url,
             "url": source_url,
@@ -1075,22 +1085,6 @@ def _integration_playback_sync(
             "media_content_id": source_url,
             "media_content_type": _text(media_content_type) or "music",
             "media_type": _text(media_type) or "audio/mpeg",
-            "volume_percent": max(
-                0,
-                min(
-                    100,
-                    int(
-                        _target_setting(
-                            target_volume_percent,
-                            f"integration:{integration_id}:{device_id}",
-                            f"{integration_id}:{device_id}",
-                            f"ha:{device_id}" if integration_id == "homeassistant" else "",
-                            device_id,
-                            default=volume_percent,
-                        )
-                    ),
-                ),
-            ),
             "sync_offset_ms": max(
                 -1000,
                 min(
@@ -1114,6 +1108,8 @@ def _integration_playback_sync(
             ),
             "timeout_s": _as_float(timeout_s, DEFAULT_MEDIA_PLAY_TIMEOUT_SECONDS, minimum=1.0),
         }
+        if target_volume is not None:
+            payload["volume_percent"] = max(0, min(100, int(target_volume)))
 
         try:
             result = run_integration_device_action(integration_id, action, device_id, payload)
@@ -1196,7 +1192,7 @@ def play_media_url_targets(
     artwork_bytes: bytes | None = None,
     artwork_content_type: str = "",
     duration_seconds: float = 0.0,
-    volume_percent: int = 100,
+    volume_percent: int | None = 100,
     start_position_seconds: float = 0.0,
     mixed_sync_adjustment_ms: int = 0,
     target_volume_percent: Dict[str, Any] | None = None,
@@ -1602,7 +1598,11 @@ def play_media_url_targets(
                 source_url=playback_source_url,
                 media_content_type=media_content_type,
                 media_type=clean_media_type,
-                volume_percent=max(0, min(100, int(_as_float(volume_percent, 100.0)))),
+                volume_percent=(
+                    None
+                    if volume_percent is None
+                    else max(0, min(100, int(_as_float(volume_percent, 100.0))))
+                ),
                 target_volume_percent=target_volume_percent,
                 target_sync_offset_ms=target_sync_offset_ms,
                 start_position_seconds=start_position_seconds,

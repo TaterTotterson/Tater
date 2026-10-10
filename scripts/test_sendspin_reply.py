@@ -188,6 +188,7 @@ class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         peer.client_state = "synchronized"
+        peer.ws = _FakeWebSocket()
         peer.hello_event.set()
         peer.state_event.set()
         peer.time_event.set()
@@ -368,7 +369,7 @@ class SendspinReplyWireIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(8, rich_message_ids)
         self.assertIn(16, rich_message_ids)
         self.assertIn(20, rich_message_ids)
-        self.assertNotIn("server/activate", legacy.json_types)
+        self.assertIn("server/activate", legacy.json_types)
         self.assertIn("server/activate", rich.json_types)
         self.assertIn("server/state", rich.json_types)
         rich_start = next(

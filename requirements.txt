@@ -6,6 +6,7 @@ imageio-ffmpeg==0.6.0
 beautifulsoup4
 bencodepy
 cryptography
+noiseprotocol==0.3.1
 discord.py
 feedparser
 openai

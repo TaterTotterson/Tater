@@ -1120,6 +1120,35 @@ class MediaPlaybackSessionTests(unittest.TestCase):
 
         self.assertEqual(action, "play_media")
 
+    def test_integration_playback_omits_unspecified_volume(self) -> None:
+        devices = [
+            {
+                "integration_id": "google_cast",
+                "id": "office-tv",
+                "actions": ["play_media"],
+                "capabilities": ["media_player"],
+            }
+        ]
+        with (
+            mock.patch(
+                "integration_registry.get_integration_devices_by_capability",
+                return_value=devices,
+            ),
+            mock.patch(
+                "integration_registry.run_integration_device_action",
+                return_value={"ok": True, "sent_count": 1},
+            ) as run_action,
+        ):
+            result = media_playback._integration_playback_sync(
+                targets=[{"integration_id": "google_cast", "device_id": "office-tv"}],
+                source_url="https://example.test/video.mp4",
+                media_type="video/mp4",
+                volume_percent=None,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("volume_percent", run_action.call_args.args[3])
+
 
 if __name__ == "__main__":
     unittest.main()

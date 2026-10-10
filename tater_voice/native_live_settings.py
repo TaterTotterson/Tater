@@ -237,6 +237,7 @@ SHARED_SATELLITE_CONTROL_KEYS = {
 }
 GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
     "wake_section",
+    "wake_detector_mode",
     "wake_word_catalog_url",
     "oww_wake_word_catalog_url",
     "wake_profile_name",

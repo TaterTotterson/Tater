@@ -294,6 +294,25 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertIn("included with current Echo firmware", source)
         self.assertGreaterEqual(source.count("defer_push: true"), 2)
 
+    def test_detector_mode_is_global_but_not_in_satellite_popups(self) -> None:
+        global_keys = {
+            field["key"]
+            for field in native_live_settings.settings_fields(wake_family="echo")
+        }
+        popup_keys = {
+            field["key"]
+            for field in native_live_settings.settings_fields(
+                "native:test-echo",
+                board="biscuit",
+                capabilities={"openwakeword": True},
+            )
+        }
+
+        self.assertIn("wake_detector_mode", global_keys)
+        self.assertNotIn("wake_detector_mode", popup_keys)
+        self.assertIn("wake_tuning_section", popup_keys)
+        self.assertIn("wake_sensitivity", popup_keys)
+
     def test_oww_only_ui_describes_bundle_as_an_oww_package(self) -> None:
         redis = MemoryRedis(
             {

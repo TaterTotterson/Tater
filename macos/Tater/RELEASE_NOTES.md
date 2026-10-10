@@ -1,38 +1,45 @@
-# Tater v1.5.2
+# Tater v1.5.3
 
-Tater v1.5.2 adds direct Google Cast playback support and improves guided
-setup for downloadable integrations.
+Tater v1.5.3 improves synchronized ThirdReality playback, cleans up satellite
+wake-word controls, and fixes direct Google Cast media playback.
 
 ## What's New
 
+### ThirdReality Sendspin Playback
+
+- Adds secure Sendspin negotiation for newer satellite clients, restoring reply
+  playback through ThirdReality S420 stereo pairs.
+- Keeps compatibility with existing Echo and older plaintext Sendspin clients,
+  so mixed satellite groups continue to work without reconfiguration.
+- Completes the player activation and readiness exchange expected by current
+  Sendspin clients before synchronized audio begins.
+
+### Clearer Satellite Settings
+
+- Removes the global MWW, OWW, and Dual Wake Word selector from individual
+  satellite popups, where it could incorrectly appear on unsupported devices.
+- Keeps room-specific Wake Tuning controls in each satellite popup. Wake mode
+  and model selection remain in Tater's dedicated wake-word settings.
+
 ### Google Cast Playback
 
-- Adds PyChromecast to the standard, edge, CPU Docker, and NVIDIA Docker
-  runtimes so Google Cast support is available wherever Tater runs.
-- Verifies the Cast dependency during setup, container builds, and startup,
-  with a clear recovery message if the runtime is incomplete.
-- Declares Google Cast's Bonjour service on macOS so Tater can discover Cast
-  TVs, speakers, and groups on the local network.
-- Supports the new Google Cast integration from Tater Integrations, including
-  automatic discovery, optional manual hosts, direct media playback, volume,
-  pause, resume, seek, mute, and stop controls.
-- Supports the new Cast Media Verba from Tater Shop. Requests such as
-  “create a song and play it on the office TV” can pass the generated audio or
-  video artifact directly into Cast playback and resolve the TV by its natural
-  device or room name.
-
-### Integration Setup
-
-- Adds guided integration-settings steps so integrations can present clearer
-  setup instructions and configuration flows.
+- Updates the Google Cast integration to launch Cast's Default Media Receiver
+  before loading direct audio or video. This prevents an existing app such as
+  YouTube from silently swallowing a generic media request.
+- Keeps the Cast device's current volume when a playback request does not name
+  a volume instead of defaulting it to 100 percent.
+- Continues to honor explicit requests such as “play this on the office TV at
+  20 percent.”
+- Requires Google Cast integration v1.0.2 and Cast Media Verba v1.0.5 for the
+  complete fix.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.5.2 through
+- macOS users already running v1.0.1 or later can install v1.5.3 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.5.2` or `latest` for the CPU image and
-  `v1.5.2-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.5.3` or `latest` for the CPU image and
+  `v1.5.3-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

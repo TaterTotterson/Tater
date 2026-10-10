@@ -32,6 +32,8 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 import aiohttp
 
+from . import sendspin_noise
+
 try:
     import audioop as _audioop
 except Exception:  # Python 3.13 removed audioop
@@ -553,6 +555,7 @@ class _SendspinPeer:
         self.host = _text(target.get("host"))
         self.port = _as_int(target.get("port"), SENDSPIN_PORT, 1, 65535)
         self.ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self.noise_transport: Optional[sendspin_noise.SendspinNoiseTransport] = None
         self.receiver_task: Optional[asyncio.Task[None]] = None
         self.send_lock = asyncio.Lock()
         self.hello_event = asyncio.Event()
@@ -563,6 +566,7 @@ class _SendspinPeer:
         self.time_responses = 0
         self.error = ""
         self.closing = False
+        self.client_core_version = 0
         self.active_roles: set[str] = {"player@v1"}
         self._last_visualizer_timestamp_us = 0
         self._last_visualizer_loudness = 0.0
@@ -582,8 +586,44 @@ class _SendspinPeer:
             raise SendspinPlaybackError(
                 f"Could not connect to {self.selector or self.host} Sendspin player: {exc}"
             ) from exc
+
+        initial_message = ""
+        try:
+            first = await asyncio.wait_for(self.ws.receive(), timeout=0.75)
+        except asyncio.TimeoutError:
+            first = None
+        if first is not None:
+            if first.type == aiohttp.WSMsgType.TEXT:
+                initial_message = str(first.data)
+                try:
+                    first_payload = json.loads(initial_message)
+                except Exception:
+                    first_payload = {}
+                if isinstance(first_payload, dict) and first_payload.get("type") == "client/init":
+                    try:
+                        (
+                            self.noise_transport,
+                            _client_id,
+                            self.client_core_version,
+                        ) = await sendspin_noise.server_handshake(self.ws, initial_message)
+                    except Exception as exc:
+                        with contextlib.suppress(Exception):
+                            await self.ws.close()
+                        raise SendspinPlaybackError(
+                            f"Could not secure {self.selector or self.host} Sendspin player: {exc}"
+                        ) from exc
+                    initial_message = ""
+            elif first.type in {
+                aiohttp.WSMsgType.CLOSE,
+                aiohttp.WSMsgType.CLOSING,
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.ERROR,
+            }:
+                raise SendspinPlaybackError(
+                    f"{self.selector or self.host} closed its Sendspin connection during setup."
+                )
         self.receiver_task = asyncio.create_task(
-            self._receive_loop(),
+            self._receive_loop(initial_message=initial_message),
             name=f"sendspin-recv-{self.selector or self.host}",
         )
         await self.send_json(
@@ -599,9 +639,18 @@ class _SendspinPeer:
             }
         )
 
-    async def _receive_loop(self) -> None:
+    async def _receive_loop(self, *, initial_message: str = "") -> None:
         try:
             assert self.ws is not None
+            if initial_message:
+                await self._handle_json(initial_message)
+            if self.noise_transport is not None:
+                while True:
+                    raw_message = await self.noise_transport.receive_text()
+                    if raw_message is None:
+                        break
+                    await self._handle_json(raw_message)
+                return
             async for message in self.ws:
                 if message.type == aiohttp.WSMsgType.TEXT:
                     await self._handle_json(message.data)
@@ -640,6 +689,8 @@ class _SendspinPeer:
             return
         if message_type == "client/state":
             self.client_state = _text(payload.get("state")).lower()
+            if payload.get("available") is True:
+                self.client_state = "synchronized"
             if self.client_state == "synchronized":
                 self.state_event.set()
             return
@@ -677,7 +728,7 @@ class _SendspinPeer:
                 f"{self.selector or self.host} did not send a Sendspin hello."
             )
         try:
-            version = int(payload.get("version") or 0)
+            version = int(payload.get("version") or self.client_core_version or 0)
         except Exception:
             version = 0
         roles = {_text(value) for value in list(payload.get("supported_roles") or [])}
@@ -751,8 +802,6 @@ class _SendspinPeer:
             for role in ("metadata@v1", "artwork@v1", "color@v1", "visualizer@v1")
             if self.supports_role(role)
         ]
-        if not optional:
-            return
         self.active_roles = {"player@v1", *optional}
         await self.send_json(
             {
@@ -767,11 +816,19 @@ class _SendspinPeer:
     async def wait_ready(self) -> None:
         try:
             await asyncio.wait_for(
-                asyncio.gather(
-                    self.hello_event.wait(),
-                    self.state_event.wait(),
-                    self.time_event.wait(),
-                ),
+                self.hello_event.wait(), timeout=SENDSPIN_HANDSHAKE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            raise SendspinPlaybackError(
+                f"Timed out awaiting {self.selector or self.host} Sendspin hello."
+            ) from exc
+        if self.error:
+            raise SendspinPlaybackError(f"{self.selector or self.host}: {self.error}")
+        self._validate_hello()
+        await self.activate_supported_presentation_roles()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(self.state_event.wait(), self.time_event.wait()),
                 timeout=SENDSPIN_HANDSHAKE_TIMEOUT_S,
             )
         except asyncio.TimeoutError as exc:
@@ -780,7 +837,6 @@ class _SendspinPeer:
             ) from exc
         if self.error:
             raise SendspinPlaybackError(f"{self.selector or self.host}: {self.error}")
-        self._validate_hello()
         if self.client_state != "synchronized":
             raise SendspinPlaybackError(
                 f"{self.selector or self.host} is busy with native audio."
@@ -793,7 +849,10 @@ class _SendspinPeer:
             )
         payload = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
         async with self.send_lock:
-            await self.ws.send_str(payload)
+            if self.noise_transport is not None:
+                await self.noise_transport.send_str(payload)
+            else:
+                await self.ws.send_str(payload)
 
     async def send_audio(self, timestamp_us: int, pcm: bytes) -> None:
         if self.ws is None or self.ws.closed:
@@ -802,7 +861,10 @@ class _SendspinPeer:
             )
         packet = _audio_packet(timestamp_us, pcm)
         async with self.send_lock:
-            await self.ws.send_bytes(packet)
+            if self.noise_transport is not None:
+                await self.noise_transport.send_bytes(packet)
+            else:
+                await self.ws.send_bytes(packet)
 
     async def send_binary(self, packet: bytes) -> None:
         if self.ws is None or self.ws.closed:
@@ -810,7 +872,10 @@ class _SendspinPeer:
                 f"{self.selector or self.host} Sendspin connection is closed."
             )
         async with self.send_lock:
-            await self.ws.send_bytes(bytes(packet))
+            if self.noise_transport is not None:
+                await self.noise_transport.send_bytes(bytes(packet))
+            else:
+                await self.ws.send_bytes(bytes(packet))
 
     async def send_presentation_start(
         self,
@@ -1271,9 +1336,6 @@ async def _stream_live_pcm(
                     *(peer.open(server_id="tater-sendspin", server_name="Tater") for peer in peers)
                 )
                 await asyncio.gather(*(peer.wait_ready() for peer in peers))
-                await asyncio.gather(
-                    *(peer.activate_supported_presentation_roles() for peer in peers)
-                )
                 await asyncio.sleep(0.1)
                 await _broadcast_json(
                     peers,
