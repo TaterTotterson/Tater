@@ -914,6 +914,14 @@
 .tv-form-grid label.full { grid-column: 1 / -1; }
 .tv-form-grid label small { line-height: 1.35; }
 .tv-form-grid .tv-checkbox { width: 17px !important; min-height: 17px; padding: 0; }
+.ti-settings-steps { display: grid; gap: 12px; }
+.ti-settings-step { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--tv-border); border-radius: 13px; background: color-mix(in srgb, var(--tv-surface-strong) 70%, transparent); }
+.ti-settings-step > header { display: grid; gap: 4px; }
+.ti-settings-step > header h3 { margin: 0; color: var(--tv-text); font-size: .94rem; }
+.ti-settings-step > header p { color: var(--tv-muted); font-size: .75rem; line-height: 1.45; }
+.ti-settings-step .tv-form-grid label.readonly :is(input, textarea, select) { cursor: default; color: var(--tv-muted); background: color-mix(in srgb, var(--tv-surface-strong) 72%, transparent); }
+.ti-settings-step .tv-form-grid label.readonly textarea { resize: vertical; }
+.ti-step-actions { padding-top: 10px; }
 .ti-modal-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--tv-border); }
 .ti-modal-actions > span { margin-right: auto; color: var(--tv-muted); font-size: .72rem; }
 

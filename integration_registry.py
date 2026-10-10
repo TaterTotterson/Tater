@@ -1180,7 +1180,7 @@ def _coerce_definition(module: Any) -> Dict[str, Any]:
         actions = []
     capabilities = _normalize_capabilities(definition.get("capabilities"))
 
-    return {
+    result = {
         "id": integration_id,
         "name": _text(definition.get("name")) or integration_id.replace("_", " ").title(),
         "description": _text(definition.get("description")),
@@ -1190,6 +1190,14 @@ def _coerce_definition(module: Any) -> Dict[str, Any]:
         "fields": [dict(field) for field in fields if isinstance(field, dict)],
         "actions": [dict(action) for action in actions if isinstance(action, dict)],
     }
+    settings_steps = definition.get("settings_steps")
+    if isinstance(settings_steps, list):
+        result["settings_steps"] = [
+            dict(step) for step in settings_steps if isinstance(step, dict)
+        ]
+    if "settings_save" in definition:
+        result["settings_save"] = bool(definition.get("settings_save"))
+    return result
 
 
 def _read_values(module: Any) -> Dict[str, Any]:

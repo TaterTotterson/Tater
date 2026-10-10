@@ -88,6 +88,20 @@ class VueDashboardIntegrationsTests(unittest.TestCase):
         self.assertIn("optionLabel(option)", source)
         self.assertNotIn("innerHTML", source)
 
+    def test_integration_settings_support_guided_steps_and_read_only_results(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+        registry = (REPO_ROOT / "integration_registry.py").read_text(encoding="utf-8")
+
+        self.assertIn("const settingsSteps = computed", source)
+        self.assertIn('class="ti-settings-steps"', source)
+        self.assertIn(':readonly="Boolean(field.readonly || field.read_only)"', source)
+        self.assertIn("settingsIntegration?.settings_save !== false", source)
+        self.assertIn("actionDisabled(action)", source)
+        self.assertIn(".ti-settings-step { display: grid;", styles)
+        self.assertIn('result["settings_steps"]', registry)
+        self.assertIn('result["settings_save"]', registry)
+
     def test_device_and_organize_tabs_use_background_registry_refresh(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "integrations" / "IntegrationsApp.vue").read_text(encoding="utf-8")
 

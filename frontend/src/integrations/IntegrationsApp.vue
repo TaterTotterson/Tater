@@ -60,6 +60,36 @@ const installedRuntimeRows = computed(() => {
 });
 const categories = computed(() => (Array.isArray(registry.value.categories) ? registry.value.categories.filter((row: JsonRow) => Number(row.device_count || 0) > 0) : []));
 const selectedCategory = computed(() => categories.value.find((row: JsonRow) => text(row.id) === activeCategory.value) || categories.value[0] || null);
+const settingsSteps = computed<JsonRow[]>(() => {
+  const integration = settingsIntegration.value;
+  if (!integration) return [];
+  const fields = Array.isArray(integration.fields) ? integration.fields : [];
+  const actions = Array.isArray(integration.actions) ? integration.actions : [];
+  const definitions = Array.isArray(integration.settings_steps) ? integration.settings_steps : [];
+  if (!definitions.length) return [{ id: "settings", fields, actions }];
+
+  const fieldByKey = new Map(fields.map((field: JsonRow) => [text(field.key), field]));
+  const actionById = new Map(actions.map((action: JsonRow) => [text(action.id), action]));
+  const usedFields = new Set<string>();
+  const usedActions = new Set<string>();
+  const steps: JsonRow[] = definitions.map((definition: JsonRow, index: number) => {
+    const stepFields = (Array.isArray(definition.fields) ? definition.fields : []).map((key: unknown) => {
+      const id = text(key);
+      usedFields.add(id);
+      return fieldByKey.get(id);
+    }).filter((field: JsonRow | undefined): field is JsonRow => Boolean(field));
+    const stepActions = (Array.isArray(definition.actions) ? definition.actions : []).map((key: unknown) => {
+      const id = text(key);
+      usedActions.add(id);
+      return actionById.get(id);
+    }).filter((action: JsonRow | undefined): action is JsonRow => Boolean(action));
+    return { ...definition, id: text(definition.id) || `step-${index + 1}`, fields: stepFields, actions: stepActions };
+  });
+  const extraFields = fields.filter((field: JsonRow) => !usedFields.has(text(field.key)));
+  const extraActions = actions.filter((action: JsonRow) => !usedActions.has(text(action.id)));
+  if (extraFields.length || extraActions.length) steps.push({ id: "other", title: "Other settings", fields: extraFields, actions: extraActions });
+  return steps.filter((step: JsonRow) => step.fields.length || step.actions.length);
+});
 const rooms = computed(() => {
   const rows = Array.isArray(registry.value.rooms) ? registry.value.rooms.slice() : [];
   const extra = Array.isArray(registry.value.room_overrides?.rooms) ? registry.value.room_overrides.rooms : [];
@@ -107,12 +137,19 @@ function fieldValue(integration: JsonRow, field: JsonRow): unknown {
   return raw;
 }
 function collectedFieldValues(integration: JsonRow): JsonRow {
-  const values = { ...fieldValues.value };
+  const values: JsonRow = {};
   (Array.isArray(integration.fields) ? integration.fields : []).forEach((field: JsonRow) => {
     const key = text(field.key);
-    if (key && text(field.type).toLowerCase() === "number") values[key] = Number(values[key] ?? field.default ?? 0);
+    if (!key || field.readonly || field.read_only) return;
+    const value = fieldValues.value[key];
+    values[key] = text(field.type).toLowerCase() === "number" ? Number(value ?? field.default ?? 0) : value;
   });
   return values;
+}
+function actionDisabled(action: JsonRow): boolean {
+  if (Boolean(busy.value)) return true;
+  const required = Array.isArray(action.requires) ? action.requires : [];
+  return required.some((key: unknown) => !text(fieldValues.value[text(key)]));
 }
 function eventPayload(row: JsonRow): JsonRow { return row.payload && typeof row.payload === "object" ? row.payload : {}; }
 function eventTitle(row: JsonRow): string {
@@ -389,6 +426,27 @@ draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repo
       <div class="ti-event-list"><article v-for="event in recentEvents" :key="event.seq"><span class="ti-provider">{{ text(event.provider).replaceAll('_', ' ') }}</span><div><strong>{{ eventTitle(event) }}</strong><small>{{ eventPayload(event).room || eventPayload(event).area || eventPayload(event).entity_id || eventPayload(event).ref || '' }}</small></div><span class="tv-state">{{ eventState(event) }}</span><time>{{ relativeTime(event.ts) }}</time></article><div v-if="!recentEvents.length" class="tv-empty">No recent device changes in the current activity window.</div></div>
     </section>
 
-    <PopupTransition :open="Boolean(settingsIntegration)" @close="settingsIntegration = null"><form class="tv-modal" @submit.prevent="saveIntegrationSettings"><header><div><span class="tv-eyebrow">{{ settingsIntegration?.id }}</span><h2>{{ settingsIntegration ? displayName(settingsIntegration) : '' }} settings</h2></div><button class="tv-button" type="button" @click="settingsIntegration = null">Close</button></header><div class="tv-form-grid"><label v-for="field in settingsIntegration?.fields || []" :key="field.key" :class="{ full: field.full_width || field.type === 'textarea' }"><span>{{ field.label || field.key }}</span><input v-if="field.type === 'checkbox'" v-model="fieldValues[field.key]" class="tv-checkbox" type="checkbox" /><textarea v-else-if="field.type === 'textarea'" v-model="fieldValues[field.key]" :rows="field.rows || 3" :placeholder="field.placeholder" /><select v-else-if="field.type === 'select'" v-model="fieldValues[field.key]"><option v-for="option in field.options || []" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><input v-else v-model="fieldValues[field.key]" :type="['password','number','email','url'].includes(field.type) ? field.type : 'text'" :min="field.min" :max="field.max" :step="field.step" :placeholder="field.placeholder" /><small>{{ field.description }}</small></label></div><div v-if="settingsIntegration?.actions?.length" class="ti-modal-actions"><span>Actions</span><button v-for="action in settingsIntegration?.actions || []" :key="action.id" class="tv-button" type="button" @click="runIntegrationAction(action)">{{ action.label || action.id }}</button></div><footer><span>{{ busy || status }}</span><button v-if="settingsIntegration?.fields?.length" class="tv-button primary" type="submit">Save settings</button></footer></form></PopupTransition>
+    <PopupTransition :open="Boolean(settingsIntegration)" @close="settingsIntegration = null">
+      <form class="tv-modal ti-settings-modal" @submit.prevent="saveIntegrationSettings">
+        <header><div><span class="tv-eyebrow">{{ settingsIntegration?.id }}</span><h2>{{ settingsIntegration ? displayName(settingsIntegration) : '' }} settings</h2></div><button class="tv-button" type="button" @click="settingsIntegration = null">Close</button></header>
+        <div class="ti-settings-steps">
+          <section v-for="step in settingsSteps" :key="step.id" class="ti-settings-step">
+            <header v-if="step.eyebrow || step.title || step.description"><span v-if="step.eyebrow" class="tv-eyebrow">{{ step.eyebrow }}</span><h3 v-if="step.title">{{ step.title }}</h3><p v-if="step.description">{{ step.description }}</p></header>
+            <div v-if="step.fields?.length" class="tv-form-grid">
+              <label v-for="field in step.fields" :key="field.key" :class="{ full: field.full_width || field.type === 'textarea', readonly: field.readonly || field.read_only }">
+                <span>{{ field.label || field.key }}</span>
+                <input v-if="field.type === 'checkbox'" v-model="fieldValues[field.key]" class="tv-checkbox" type="checkbox" :disabled="Boolean(field.readonly || field.read_only)" />
+                <textarea v-else-if="field.type === 'textarea'" v-model="fieldValues[field.key]" :rows="field.rows || 3" :placeholder="field.placeholder" :readonly="Boolean(field.readonly || field.read_only)" />
+                <select v-else-if="field.type === 'select'" v-model="fieldValues[field.key]" :disabled="Boolean(field.readonly || field.read_only)"><option v-for="option in field.options || []" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select>
+                <input v-else v-model="fieldValues[field.key]" :type="['password','number','email','url'].includes(field.type) ? field.type : 'text'" :min="field.min" :max="field.max" :step="field.step" :placeholder="field.placeholder" :readonly="Boolean(field.readonly || field.read_only)" :autocomplete="field.autocomplete" />
+                <small>{{ field.description }}</small>
+              </label>
+            </div>
+            <div v-if="step.actions?.length" class="ti-modal-actions ti-step-actions"><span>{{ step.actions.length === 1 ? 'Continue' : 'Actions' }}</span><button v-for="action in step.actions" :key="action.id" class="tv-button" :class="{ primary: action.primary }" type="button" :disabled="actionDisabled(action)" @click="runIntegrationAction(action)">{{ action.label || action.id }}</button></div>
+          </section>
+        </div>
+        <footer><span>{{ busy || status }}</span><button v-if="settingsIntegration?.fields?.length && settingsIntegration?.settings_save !== false" class="tv-button primary" type="submit">Save settings</button></footer>
+      </form>
+    </PopupTransition>
   </div>
 </template>
