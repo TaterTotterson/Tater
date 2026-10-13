@@ -33,6 +33,7 @@ class AutomaticAecSettingsTests(unittest.TestCase):
             for board in (
                 "biscuit",
                 "checkers",
+                "crown",
                 "rook",
                 "voice-pe",
                 "s3-box-3",
@@ -48,6 +49,7 @@ class AutomaticAecSettingsTests(unittest.TestCase):
             for board in (
                 "biscuit",
                 "checkers",
+                "crown",
                 "rook",
                 "voice-pe",
                 "s3-box-3",

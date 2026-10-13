@@ -361,6 +361,7 @@ def _default_name_for_board(board: Any) -> str:
         "biscuit": "Tater Echo Dot 2",
         "radar": "Tater Echo 2",
         "checkers": "Tater Echo Show 5",
+        "crown": "Tater Crown",
         "rook": "Tater Echo Spot",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")
 
@@ -478,6 +479,11 @@ def _screen_weather_supported(payload: Dict[str, Any]) -> bool:
 def _screen_notifications_supported(payload: Dict[str, Any]) -> bool:
     capabilities = payload.get("capabilities")
     return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_notifications"), False)
+
+
+def _screen_last_event_supported(payload: Dict[str, Any]) -> bool:
+    capabilities = payload.get("capabilities")
+    return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_last_event"), False)
 
 
 def _screen_weather_payload(selector: str = "") -> Dict[str, Any]:
@@ -1026,25 +1032,51 @@ def _firmware_settings_payload(
         capabilities=capabilities,
     )
     settings["output_channel_mode"] = _sendspin_output_channel_mode(selector)
-    if native_live_settings.wake_family_for(capabilities=capabilities, board=board) != "echo":
+    family = native_live_settings.wake_family_for(capabilities=capabilities, board=board)
+    if family != "echo":
+        # A shared Dual Wake bundle still supplies the model for MWW-only
+        # satellites. Resolve its manifest through Tater's package proxy, but
+        # never send any OWW setting to firmware that cannot consume it.
+        shared = native_live_settings.shared_wake_settings_snapshot()
+        dual_custom_bundle = (
+            _lower(shared.get("wake_detector_mode")) == "dual"
+            and _lower(shared.get("oww_wake_word")) == "custom_url"
+            and bool(_text(shared.get("oww_wake_word_url")))
+        )
+        if dual_custom_bundle:
+            row = _clients.get(_canonical_selector(selector))
+            peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
+            try:
+                from . import wake_package_proxy
+
+                service_url = _vp()._service_base_url_for_peer(peer_host)
+                manifest_url, _bundle_url = wake_package_proxy.register_dual_bundle(
+                    service_url,
+                    _text(shared.get("oww_wake_word_url")),
+                )
+                settings["wake_word"] = "custom_url"
+                settings["wake_word_url"] = manifest_url
+            except (ValueError, RuntimeError) as exc:
+                _vp().logger.warning(
+                    "[native-satellite] could not prepare MWW half of shared wake bundle selector=%s: %s",
+                    selector or "-",
+                    exc,
+                )
         return settings
     mode = _lower(settings.get("wake_detector_mode"))
-    if mode not in {"mww", "oww", "dual"}:
+    if mode not in {"mww", "dual"}:
         flags_present = "wake_mww_enabled" in settings or "wake_oww_enabled" in settings
         mww_enabled = _as_bool(settings.get("wake_mww_enabled"), False)
         oww_enabled = _as_bool(settings.get("wake_oww_enabled"), False)
         if flags_present:
-            mode = "dual" if mww_enabled and oww_enabled else ("oww" if oww_enabled else "mww")
+            mode = "dual" if mww_enabled and oww_enabled else "mww"
         else:
-            mode = "oww" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
+            mode = "dual" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
     settings["wake_detector_mode"] = mode
-    settings["wake_mww_enabled"] = mode in {"mww", "dual"}
-    settings["wake_oww_enabled"] = mode in {"oww", "dual"}
+    settings["wake_mww_enabled"] = True
+    settings["wake_oww_enabled"] = mode == "dual"
     if mode == "mww":
         for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
-            settings.pop(key, None)
-    elif mode == "oww":
-        for key in ("wake_word", "wake_word_url", "wake_model_revision"):
             settings.pop(key, None)
     dual_custom_bundle = (
         mode == "dual"
@@ -4493,7 +4525,11 @@ async def save_live_settings(
     if wake_family:
         if token:
             raise ValueError("Wake-family settings cannot be saved as a device override.")
-        result = native_live_settings.save_wake_family_settings(wake_family, values or {})
+        result = (
+            native_live_settings.save_shared_wake_settings(values or {})
+            if wake_family == "shared"
+            else native_live_settings.save_wake_family_settings(wake_family, values or {})
+        )
     else:
         result = native_live_settings.save_settings(values or {}, selector=token, board=board)
     push_result = (
@@ -5027,9 +5063,22 @@ async def handle_websocket(websocket: WebSocket) -> None:
             from . import display_bus
 
             display_targets = _native_display_targets(selector, payload)
+            initial_after_seq = 0
+            if _screen_last_event_supported(payload):
+                last_event = await asyncio.to_thread(
+                    display_bus.latest_display_event,
+                    targets=display_targets,
+                )
+                if isinstance(last_event, dict) and last_event:
+                    initial_after_seq = _as_int(last_event.get("seq"), 0)
+                    last_notification = await asyncio.to_thread(
+                        _native_display_notification_payload,
+                        last_event,
+                    )
+                    await send_json(_envelope("display.last_event", last_notification))
 
             async def send_screen_notifications() -> None:
-                after_seq = 0
+                after_seq = initial_after_seq
                 while True:
                     result = await asyncio.to_thread(
                         display_bus.list_display_events,

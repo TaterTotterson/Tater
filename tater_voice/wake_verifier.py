@@ -161,7 +161,11 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
 
     started = time.perf_counter()
     packet = parse_packet(data)
-    settings = native_live_settings.settings_snapshot(selector)
+    # Verification must use the same shared wake profile that produced the
+    # on-device detection. The old per-device/global snapshot omitted the
+    # wake-family profile, so a custom Echo model such as Jarvis was still
+    # compared with the global default phrase (Hey Tater).
+    settings = native_live_settings.shared_wake_settings_snapshot()
     phrase = _target_phrase(settings)
     threshold = _as_float(
         settings.get("wake_verifier_threshold"),

@@ -146,16 +146,29 @@ def _exact_satellite_image_src(value: Any) -> str:
         return _named_satellite_image_src("echo-2-radar.png")
     if token in {
         "checkers",
+        "crown",
         "echo-show-5",
         "echo-show-5-1st-gen",
         "echo-show-5-1st-generation",
+        "echo-show-8",
+        "echo-show-8-1st-gen",
+        "echo-show-8-1st-generation",
+        "tater-crown",
+        "tater-echo-show-8",
         "tater-echo-show",
     } or compact in {
         "checkers",
+        "crown",
         "echoshow5",
         "echoshow51stgen",
         "echoshow51stgeneration",
+        "echoshow8",
+        "echoshow81stgen",
+        "echoshow81stgeneration",
         "amazonechoshow5",
+        "amazonechoshow8",
+        "tatercrown",
+        "taterechoshow8",
         "taterechoshow",
     }:
         return _named_satellite_image_src("echo-show-5.png")
@@ -241,10 +254,16 @@ def device_image_src(*name_candidates: Any) -> str:
             part in token
             for part in (
                 "checkers",
+                "crown",
                 "echo show 5",
                 "echo-show-5",
                 "echo_show_5",
                 "echo show 5 1st generation",
+                "echo show 8",
+                "echo-show-8",
+                "echo_show_8",
+                "echo show 8 1st generation",
+                "tater crown",
                 "tater echo show",
             )
         ):

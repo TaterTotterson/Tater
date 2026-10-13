@@ -45,9 +45,38 @@ class WakePackageProxyTests(unittest.TestCase):
             native_live_settings,
             "firmware_settings_snapshot",
             return_value=dict(settings),
+        ), mock.patch.object(
+            native_live_settings,
+            "shared_wake_settings_snapshot",
+            return_value={"wake_detector_mode": "mww"},
         ):
             output = native_satellite._firmware_settings_payload("native:s3", board="s3-box")
         self.assertEqual({**settings, "output_channel_mode": "stereo"}, output)
+
+    def test_mww_only_satellite_gets_the_mww_half_of_shared_dual_bundle(self) -> None:
+        selector = "native:esp-test"
+        source_url = "https://trainer.example/jarvis.wake-bundle.json"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.239"}
+        settings = {"wake_word": "custom_url", "wake_word_url": "https://models.example/jarvis.json"}
+        shared = {
+            "wake_detector_mode": "dual",
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": source_url,
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_live_settings, "shared_wake_settings_snapshot", return_value=shared),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(selector, board="s3-box")
+
+        self.assertEqual(output["wake_word"], "custom_url")
+        self.assertTrue(output["wake_word_url"].endswith("/manifest.json"))
+        self.assertNotIn("oww_wake_word", output)
+        package_id = urlsplit(output["wake_word_url"]).path.split("/")[-2]
+        self.assertEqual(wake_package_proxy._PACKAGES[package_id]["bundle_url"], source_url)
 
     def test_echo_custom_oww_bundle_uses_tater_lan_proxy(self) -> None:
         selector = "native:echo-test"

@@ -382,6 +382,36 @@ def list_display_events(
     }
 
 
+def latest_display_event(
+    *,
+    targets: Optional[Iterable[str]] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Return the newest matching event, including events whose popup TTL elapsed.
+
+    The bounded Redis event list is already the durable display history. Popup
+    expiry must not erase the event Crown uses for its always-visible Last Event
+    card, so this lookup intentionally does not use ``_load_events``.
+    """
+    store = client or redis_client
+    try:
+        raw_rows = store.lrange(DISPLAY_EVENTS_KEY, 0, -1)
+    except Exception:
+        return {}
+    wanted = [_text(value) for value in (targets or []) if _text(value)]
+    for raw in reversed(raw_rows):
+        try:
+            event = json.loads(_text(raw))
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if wanted and not any(_matches_target(event, target) for target in wanted):
+            continue
+        return event
+    return {}
+
+
 def display_feed_events(target: str = "", *, limit: int = 3, client: Any = None) -> List[Dict[str, Any]]:
     rows = [
         event

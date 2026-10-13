@@ -76,8 +76,8 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertEqual(mww["wake_detector_mode"], "mww")
         self.assertTrue(mww["wake_mww_enabled"])
         self.assertFalse(mww["wake_oww_enabled"])
-        self.assertEqual(echo["wake_detector_mode"], "oww")
-        self.assertFalse(echo["wake_mww_enabled"])
+        self.assertEqual(echo["wake_detector_mode"], "dual")
+        self.assertTrue(echo["wake_mww_enabled"])
         self.assertTrue(echo["wake_oww_enabled"])
         self.assertEqual(
             redis.rows[native_live_settings.SETTINGS_HASH_KEY][
@@ -86,7 +86,41 @@ class WakeFamilySettingsTests(unittest.TestCase):
             "true",
         )
 
-    def test_echo_mode_selector_maps_to_legacy_firmware_booleans(self) -> None:
+    def test_unified_migration_preserves_a_custom_mww_profile_over_default_echo(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("mww"): {
+                    "wake_detector_mode": "mww",
+                    "wake_word": "custom_url",
+                    "wake_word_url": "https://models.example/jarvis.json",
+                    "wake_profile_name": "Jarvis",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_detector_mode": "dual",
+                    "wake_word": "hey_tater",
+                    "oww_wake_word": "hey_tater",
+                    "wake_profile_name": "Hey Tater",
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            shared = native_live_settings.shared_wake_settings_snapshot()
+
+        self.assertEqual(shared["wake_detector_mode"], "mww")
+        self.assertEqual(shared["wake_profile_name"], "Jarvis")
+        self.assertEqual(shared["wake_word_url"], "https://models.example/jarvis.json")
+        self.assertEqual(
+            redis.rows[native_live_settings.SETTINGS_HASH_KEY][
+                native_live_settings.UNIFIED_WAKE_SETTINGS_MIGRATION_KEY
+            ],
+            "true",
+        )
+
+    def test_legacy_oww_only_choice_migrates_to_dual(self) -> None:
         redis = MemoryRedis(
             {
                 native_live_settings.SETTINGS_HASH_KEY: {
@@ -114,8 +148,8 @@ class WakeFamilySettingsTests(unittest.TestCase):
                 capabilities={"openwakeword": True, "wake_detector_selection": True},
             )
 
-        self.assertEqual(result["settings"]["wake_detector_mode"], "oww")
-        self.assertFalse(firmware["wake_mww_enabled"])
+        self.assertEqual(result["settings"]["wake_detector_mode"], "dual")
+        self.assertTrue(firmware["wake_mww_enabled"])
         self.assertTrue(firmware["wake_oww_enabled"])
 
     def test_dual_to_mww_removes_stale_oww_package_from_firmware_payload(self) -> None:
@@ -246,21 +280,17 @@ class WakeFamilySettingsTests(unittest.TestCase):
                     native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
                     native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
                 },
-                native_live_settings.wake_family_hash_key("mww"): {
-                    "wake_engine": "micro_wake_word",
-                    "wake_detector_mode": "mww",
-                    "wake_mww_enabled": "true",
-                    "wake_oww_enabled": "false",
-                    "wake_word": "custom_url",
-                    "wake_word_url": "https://models.example/esp.json",
-                },
                 native_live_settings.wake_family_hash_key("echo"): {
                     "wake_engine": "micro_wake_word",
-                    "wake_detector_mode": "oww",
-                    "wake_mww_enabled": "false",
+                    "wake_detector_mode": "dual",
+                    "wake_mww_enabled": "true",
                     "wake_oww_enabled": "true",
+                    "wake_word": "custom_url",
+                    "wake_word_url": "https://models.example/shared.json",
+                    "wake_profile_name": "Jarvis",
                     "oww_wake_word": "custom_url",
-                    "oww_wake_word_url": "https://models.example/echo.wake-bundle.json",
+                    "oww_wake_word_url": "https://models.example/shared.wake-bundle.json",
+                    "oww_profile_name": "Jarvis",
                 },
             }
         )
@@ -270,14 +300,14 @@ class WakeFamilySettingsTests(unittest.TestCase):
                 capabilities={"local_wake": True},
             )
 
-        self.assertEqual(firmware["wake_word_url"], "https://models.example/esp.json")
+        self.assertEqual(firmware["wake_word_url"], "https://models.example/shared.json")
         self.assertTrue(firmware["wake_mww_enabled"])
         self.assertNotIn("wake_detector_mode", firmware)
         self.assertNotIn("wake_oww_enabled", firmware)
         self.assertNotIn("oww_wake_word", firmware)
         self.assertNotIn("oww_wake_word_url", firmware)
 
-    def test_echo_ui_uses_one_three_choice_mode_selector(self) -> None:
+    def test_ui_uses_one_shared_two_choice_mode_selector(self) -> None:
         source = (
             REPO_ROOT
             / "frontend"
@@ -289,10 +319,14 @@ class WakeFamilySettingsTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('wake_detector_mode', source)
         self.assertIn('Dual Wake Word', source)
+        self.assertIn('Step 1 · All satellites', source)
+        self.assertIn('=== "wake_model_settings"', source)
+        self.assertNotIn('=== "mww_satellite_model_settings"', source)
+        self.assertNotIn('=== "echo_satellite_model_settings"', source)
         self.assertNotIn('v-model="wakeValues.wake_mww_enabled"', source)
         self.assertNotIn('v-model="wakeValues.wake_oww_enabled"', source)
-        self.assertIn("included with current Echo firmware", source)
-        self.assertGreaterEqual(source.count("defer_push: true"), 2)
+        self.assertNotIn('openWakeWord by itself', source)
+        self.assertEqual(source.count("defer_push: true"), 1)
 
     def test_detector_mode_is_global_but_not_in_satellite_popups(self) -> None:
         global_keys = {
@@ -313,7 +347,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertIn("wake_tuning_section", popup_keys)
         self.assertIn("wake_sensitivity", popup_keys)
 
-    def test_oww_only_ui_describes_bundle_as_an_oww_package(self) -> None:
+    def test_persisted_oww_only_profile_is_presented_as_dual(self) -> None:
         redis = MemoryRedis(
             {
                 native_live_settings.SETTINGS_HASH_KEY: {
@@ -339,14 +373,22 @@ class WakeFamilySettingsTests(unittest.TestCase):
             for option in fields["oww_wake_word"]["options"]
             if option["value"] == "custom_url"
         )
-        self.assertEqual(custom_option["label"], "Custom openWakeWord Package")
+        self.assertEqual(fields["wake_detector_mode"]["value"], "dual")
+        self.assertEqual(
+            fields["wake_detector_mode"]["options"],
+            [
+                {"value": "mww", "label": "microWakeWord Only"},
+                {"value": "dual", "label": "Dual Wake Word"},
+            ],
+        )
+        self.assertEqual(custom_option["label"], "Custom Matched Bundle")
         self.assertIn(
-            {"value": "catalog", "label": "openWakeWord Catalog"},
+            {"value": "catalog", "label": "Dual Wake Word Catalog"},
             fields["oww_wake_word"]["options"],
         )
-        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "openWakeWord Catalog")
-        self.assertEqual(fields["oww_wake_word_url"]["label"], "openWakeWord Package URL")
-        self.assertIn("Only its openWakeWord model is used", fields["oww_wake_word_url"]["description"])
+        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Dual Wake Word Catalog")
+        self.assertEqual(fields["oww_wake_word_url"]["label"], "Matched Dual-Model Bundle URL")
+        self.assertIn("sends the microWakeWord manifest to every satellite", fields["oww_wake_word_url"]["description"])
 
     def test_dual_ui_describes_bundle_as_a_matched_pair(self) -> None:
         redis = MemoryRedis(
@@ -381,7 +423,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         )
         self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Dual Wake Word Catalog")
         self.assertEqual(fields["oww_wake_word_url"]["label"], "Matched Dual-Model Bundle URL")
-        self.assertIn("installs both wake models together", fields["oww_wake_word_url"]["description"])
+        self.assertIn("sends the microWakeWord manifest to every satellite", fields["oww_wake_word_url"]["description"])
 
 
 if __name__ == "__main__":

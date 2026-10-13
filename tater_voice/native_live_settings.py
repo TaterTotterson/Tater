@@ -21,6 +21,7 @@ GLOBAL_VOICE_SETTINGS_HASH_KEY = "voice_core_settings"
 GLOBAL_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
 GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY = "_global_satellite_voice_settings_v1"
 WAKE_FAMILY_SETTINGS_MIGRATION_KEY = "_wake_family_settings_v1"
+UNIFIED_WAKE_SETTINGS_MIGRATION_KEY = "_unified_wake_settings_v1"
 WAKE_PROFILE_FETCH_TIMEOUT_S = 4.0
 
 DEFAULTS: Dict[str, Any] = {
@@ -142,7 +143,7 @@ FIRMWARE_SETTING_KEYS = (
 )
 
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
-WAKE_DETECTOR_MODES = {"mww", "oww", "dual"}
+WAKE_DETECTOR_MODES = {"mww", "dual"}
 WAKE_FAMILIES = {"mww", "echo"}
 WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
@@ -963,13 +964,20 @@ def _wake_detector_mode(value: Any, source: Dict[str, Any] | None = None) -> str
     token = _lower(value)
     if token in WAKE_DETECTOR_MODES:
         return token
+    # Standalone openWakeWord used to be a selectable Echo-only mode. The
+    # shared wake profile now has two intentional choices: microWakeWord on
+    # every satellite, or a matched dual bundle whose microWakeWord half also
+    # runs on ESP-class satellites. Treat persisted OWW-only choices as Dual
+    # so existing installations migrate forward without exposing a third mode.
+    if token == "oww":
+        return "dual"
     row = source or {}
     mww_enabled = _as_bool(row.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
     oww_enabled = _as_bool(row.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
     if mww_enabled and oww_enabled:
         return "dual"
     if oww_enabled:
-        return "oww"
+        return "dual"
     return "mww"
 
 
@@ -982,7 +990,7 @@ def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = 
         return "echo"
     # Board fallback keeps settings correct while an older Echo build is connecting
     # before it has advertised the newer detector capability flags.
-    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "rook"}:
+    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "crown", "rook"}:
         return "echo"
     return "mww"
 
@@ -1086,7 +1094,7 @@ def _ensure_wake_family_settings() -> None:
         {
             "wake_detector_mode": legacy_mode,
             "wake_mww_enabled": legacy_mode in {"mww", "dual"},
-            "wake_oww_enabled": legacy_mode in {"oww", "dual"},
+            "wake_oww_enabled": legacy_mode == "dual",
         }
     )
     try:
@@ -1108,6 +1116,61 @@ def _ensure_wake_family_settings() -> None:
         # A temporary Redis outage must not prevent settings from being rendered;
         # both family snapshots can still fall back to the legacy global values.
         return
+
+
+def _wake_row_uses_custom_model(row: Dict[str, Any]) -> bool:
+    return bool(
+        (_wake_word_value(row.get("wake_word")) == "custom_url" and _text(row.get("wake_word_url")))
+        or (
+            _wake_word_value(row.get("oww_wake_word")) == "custom_url"
+            and _text(row.get("oww_wake_word_url"))
+        )
+    )
+
+
+def _shared_wake_raw_settings() -> Dict[str, Any]:
+    """Choose and persist the one profile when upgrading from split families."""
+    _ensure_wake_family_settings()
+    global_raw = _global_settings_with_migration()
+    echo_raw = _raw_wake_family_settings("echo")
+    mww_raw = _raw_wake_family_settings("mww")
+    if _as_bool(global_raw.get(UNIFIED_WAKE_SETTINGS_MIGRATION_KEY), False):
+        return echo_raw or mww_raw
+
+    # Preserve an explicitly selected custom model. Echo wins when both sides
+    # were customized because it is the only former row that can represent a
+    # validated dual bundle; otherwise retain the user's MWW custom model
+    # instead of silently replacing it with the default Hey Tater Echo row.
+    selected = echo_raw or mww_raw
+    if not _wake_row_uses_custom_model(echo_raw) and _wake_row_uses_custom_model(mww_raw):
+        selected = dict(mww_raw)
+        if (
+            _wake_word_value(selected.get("wake_word")) == "custom_url"
+            and _text(selected.get("wake_word_url"))
+            and not _text(selected.get("wake_profile_source_url"))
+        ):
+            selected["wake_profile_source_url"] = _text(selected.get("wake_word_url"))
+        selected.update(
+            {
+                "wake_detector_mode": "mww",
+                "wake_mww_enabled": True,
+                "wake_oww_enabled": False,
+            }
+        )
+
+    try:
+        if selected:
+            redis_client.hset(
+                wake_family_hash_key("echo"),
+                mapping={key: str(value) for key, value in selected.items()},
+            )
+        redis_client.hset(
+            SETTINGS_HASH_KEY,
+            mapping={UNIFIED_WAKE_SETTINGS_MIGRATION_KEY: "true"},
+        )
+    except Exception:
+        return dict(selected)
+    return _raw_wake_family_settings("echo") or dict(selected)
 
 
 def _global_wake_verifier_mode() -> str:
@@ -1243,12 +1306,18 @@ def _board_supports_display_theme(board: Any = "") -> bool:
         "checkers",
         "echo-show-5",
         "echo-show-5-1st-gen",
+        "crown",
+        "echo-show-8",
+        "echo-show-8-1st-gen",
         "rook",
         "echo-spot",
     } or compact in {
         "checkers",
         "echoshow5",
         "echoshow51stgen",
+        "crown",
+        "echoshow8",
+        "echoshow81stgen",
         "rook",
         "echospot",
     }
@@ -1634,18 +1703,46 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     return current
 
 
+def shared_wake_settings_snapshot() -> Dict[str, Any]:
+    """Return the one wake profile shared by every satellite family.
+
+    The former Echo-family row is the canonical row because it can describe
+    both supported modes: MWW-only and a matched MWW+OWW bundle. MWW-only
+    satellites receive a projection of this profile from
+    ``wake_family_settings_snapshot`` below.
+    """
+    global_settings = normalize_settings(_global_settings_with_migration())
+    raw = _shared_wake_raw_settings()
+    current = normalize_settings(raw, base=global_settings)
+    legacy_oww_only = _lower(raw.get("wake_detector_mode")) == "oww" or (
+        not _as_bool(raw.get("wake_mww_enabled"), True)
+        and _as_bool(raw.get("wake_oww_enabled"), False)
+    )
+    if legacy_oww_only and _text(current.get("oww_profile_name")):
+        # The old standalone-OWW row may not contain the bundle's MWW profile
+        # metadata even though the bundle itself does. Both models name the
+        # same validated phrase, so carry that identity into the unified view.
+        current["wake_profile_name"] = _text(current.get("oww_profile_name"))
+    mode = _wake_detector_mode(raw.get("wake_detector_mode"), current)
+    current["wake_detector_mode"] = mode
+    current["wake_mww_enabled"] = mode in {"mww", "dual"}
+    current["wake_oww_enabled"] = mode == "dual"
+    return current
+
+
 def wake_family_settings_snapshot(family: Any) -> Dict[str, Any]:
     token = _lower(family)
     if token not in WAKE_FAMILIES:
         raise ValueError(f"Unsupported wake family: {family}")
-    _ensure_wake_family_settings()
-    global_settings = normalize_settings(_global_settings_with_migration())
-    raw = _raw_wake_family_settings(token)
-    current = normalize_settings(raw, base=global_settings)
-    mode = "mww" if token == "mww" else _wake_detector_mode(raw.get("wake_detector_mode"), current)
-    current["wake_detector_mode"] = mode
-    current["wake_mww_enabled"] = mode in {"mww", "dual"}
-    current["wake_oww_enabled"] = mode in {"oww", "dual"}
+    current = shared_wake_settings_snapshot()
+    if token == "mww":
+        # ESP and other MWW-only satellites use the exact microWakeWord half
+        # of the shared profile. OWW fields remain in this internal snapshot
+        # only long enough for the firmware payload builder to project them
+        # away; they are never sent to an MWW-only device.
+        current["wake_detector_mode"] = "mww"
+        current["wake_mww_enabled"] = True
+        current["wake_oww_enabled"] = False
     return current
 
 
@@ -1675,13 +1772,10 @@ def firmware_settings_snapshot(
     else:
         mode = _wake_detector_mode(family_settings.get("wake_detector_mode"), family_settings)
         output["wake_detector_mode"] = mode
-        output["wake_mww_enabled"] = mode in {"mww", "dual"}
-        output["wake_oww_enabled"] = mode in {"oww", "dual"}
+        output["wake_mww_enabled"] = True
+        output["wake_oww_enabled"] = mode == "dual"
         if mode == "mww":
             for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
-                output.pop(key, None)
-        elif mode == "oww":
-            for key in ("wake_word", "wake_word_url", "wake_model_revision"):
                 output.pop(key, None)
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
@@ -1826,8 +1920,7 @@ def settings_fields(
         else {"options": [], "selected_url": "", "description": ""}
     )
     wake_word_source = "catalog" if catalog_selected else current["wake_word"]
-    dual_wake_mode = current.get("wake_detector_mode") == "dual"
-    oww_catalog_type = "dual" if dual_wake_mode else "oww"
+    oww_catalog_type = "dual"
     oww_catalog_selected = (
         current["oww_wake_word"] == "custom_url"
         and wake_word_catalog.is_catalog_url(
@@ -1845,24 +1938,16 @@ def settings_fields(
         else {"options": [], "selected_url": "", "description": ""}
     )
     oww_wake_word_source = "catalog" if oww_catalog_selected else current["oww_wake_word"]
-    oww_custom_source_label = (
-        "Custom Matched Bundle" if dual_wake_mode else "Custom openWakeWord Package"
-    )
-    oww_catalog_source_label = (
-        "Dual Wake Word Catalog" if dual_wake_mode else "openWakeWord Catalog"
-    )
+    oww_custom_source_label = "Custom Matched Bundle"
+    oww_catalog_source_label = "Dual Wake Word Catalog"
     oww_source_description = (
-        "Choose the bundled Hey Tater pair or a trainer-produced matched wake bundle."
-        if dual_wake_mode
-        else "Choose the built-in Hey Tater model or a trainer-produced openWakeWord package."
+        "Choose the bundled Hey Tater pair or a trainer-produced matched wake bundle. "
+        "ESP satellites use its microWakeWord model; compatible Echo satellites use both."
     )
-    oww_url_label = (
-        "Matched Dual-Model Bundle URL" if dual_wake_mode else "openWakeWord Package URL"
-    )
+    oww_url_label = "Matched Dual-Model Bundle URL"
     oww_url_description = (
-        "Use the matched .wake-bundle.json from a Tater trainer. Tater validates and installs both wake models together."
-        if dual_wake_mode
-        else "Use a trainer-produced .wake-bundle.json package. Only its openWakeWord model is used in openWakeWord mode."
+        "Use the matched .wake-bundle.json from a Tater trainer. Tater validates both models, "
+        "sends the microWakeWord manifest to every satellite, and adds openWakeWord on compatible Echo firmware."
     )
     fields = [
         {
@@ -1891,11 +1976,13 @@ def settings_fields(
             "value": current.get("wake_detector_mode", "dual"),
             "default": "dual",
             "options": [
-                {"value": "mww", "label": "microWakeWord"},
-                {"value": "oww", "label": "openWakeWord"},
+                {"value": "mww", "label": "microWakeWord Only"},
                 {"value": "dual", "label": "Dual Wake Word"},
             ],
-            "description": "Choose one detector, or require microWakeWord and openWakeWord to agree in Dual mode.",
+            "description": (
+                "Use microWakeWord everywhere, or require a matching openWakeWord confirmation on capable Echo satellites. "
+                "ESP satellites always load the microWakeWord half."
+            ),
         },
         {
             "key": "wake_mww_enabled",
@@ -2566,6 +2653,27 @@ def mww_model_settings_sections() -> List[Dict[str, Any]]:
     )
 
 
+def shared_wake_model_settings_sections() -> List[Dict[str, Any]]:
+    return _global_settings_sections(
+        [
+            (
+                "All Satellites",
+                (
+                    "Choose one wake phrase for every satellite. microWakeWord runs everywhere; "
+                    "Dual Wake adds matching openWakeWord confirmation on compatible Echo firmware."
+                ),
+                (
+                    "wake_engine", "wake_detector_mode",
+                    "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
+                    "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
+                    "oww_profile_name",
+                ),
+            ),
+        ],
+        wake_family="echo",
+    )
+
+
 def echo_model_settings_sections() -> List[Dict[str, Any]]:
     return _global_settings_sections(
         [
@@ -2702,8 +2810,8 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
     incoming.update(
         {
             "wake_detector_mode": mode,
-            "wake_mww_enabled": mode in {"mww", "dual"},
-            "wake_oww_enabled": mode in {"oww", "dual"},
+            "wake_mww_enabled": True,
+            "wake_oww_enabled": mode == "dual",
         }
     )
 
@@ -2734,21 +2842,10 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
             _wake_word_value(current.get("oww_wake_word")),
             _text(current.get("oww_wake_word_url")),
         )
-    else:
-        profile = _wake_profile_from_source(
-            current,
-            _wake_word_value(current.get("wake_word")),
-            _text(current.get("wake_word_url")),
-        )
-        oww_profile = _oww_profile_for_save(incoming, current_raw)
-        profile_error = _text(oww_profile.get("oww_profile_error"))
-        if profile_error:
-            raise ValueError(profile_error)
-
     normalized = normalize_settings(incoming, base={**current, **profile, **oww_profile})
     normalized["wake_detector_mode"] = mode
-    normalized["wake_mww_enabled"] = mode in {"mww", "dual"}
-    normalized["wake_oww_enabled"] = mode in {"oww", "dual"}
+    normalized["wake_mww_enabled"] = True
+    normalized["wake_oww_enabled"] = mode == "dual"
     changed = [
         key
         for key in WAKE_FAMILY_PERSISTED_KEYS
@@ -2772,6 +2869,46 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
         "changed_keys": sorted(changed),
         "updated": len(changed),
     }
+
+
+def save_shared_wake_settings(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Save one wake choice and retain an MWW-only compatibility mirror.
+
+    The Echo-capable row is canonical because a dual bundle carries both
+    models. The legacy MWW-family row is mirrored for downgrade compatibility;
+    current firmware payloads derive both satellite families from the
+    canonical row.
+    """
+    result = save_wake_family_settings("echo", values)
+    settings = dict(result.get("settings") or {})
+    projection = {
+        key: settings.get(key)
+        for key in WAKE_FAMILY_PERSISTED_KEYS
+        if key in settings
+    }
+    projection.update(
+        {
+            "wake_detector_mode": "mww",
+            "wake_mww_enabled": True,
+            "wake_oww_enabled": False,
+        }
+    )
+    try:
+        redis_client.hset(
+            wake_family_hash_key("mww"),
+            mapping={key: str(value) for key, value in projection.items()},
+        )
+        redis_client.hset(
+            SETTINGS_HASH_KEY,
+            mapping={UNIFIED_WAKE_SETTINGS_MIGRATION_KEY: "true"},
+        )
+    except Exception:
+        # The canonical save already succeeded. A temporary failure updating
+        # the downgrade-only mirror must not make the live change look failed.
+        pass
+    result["scope"] = "shared_wake"
+    result["family"] = "shared"
+    return result
 
 
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:

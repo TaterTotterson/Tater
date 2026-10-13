@@ -112,10 +112,17 @@ class StereoPairPersistenceTests(unittest.TestCase):
                 "right_selector": "native:right",
             }
         )
-        with mock.patch.object(
-            native_live_settings,
-            "firmware_settings_snapshot",
-            side_effect=lambda *_args, **_kwargs: {},
+        with (
+            mock.patch.object(
+                native_live_settings,
+                "firmware_settings_snapshot",
+                side_effect=lambda *_args, **_kwargs: {},
+            ),
+            mock.patch.object(
+                native_live_settings,
+                "shared_wake_settings_snapshot",
+                return_value={"wake_detector_mode": "mww"},
+            ),
         ):
             left = native_satellite._firmware_settings_payload("native:left")
             right = native_satellite._firmware_settings_payload("native:right")

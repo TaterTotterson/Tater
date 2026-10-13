@@ -102,7 +102,7 @@ class OutputChainSettingsTests(unittest.TestCase):
 
     def test_supported_echo_satellite_popups_contain_equalizer(self) -> None:
         clients = {}
-        for board in ("biscuit", "radar", "checkers", "rook"):
+        for board in ("biscuit", "radar", "checkers", "crown", "rook"):
             selector = f"native:{board}-test"
             clients[selector] = {
                 "selector": selector,
@@ -163,7 +163,7 @@ class OutputChainSettingsTests(unittest.TestCase):
         ):
             items = ui_helpers.satellite_item_forms(status)
 
-        self.assertEqual(4, len(items))
+        self.assertEqual(5, len(items))
         for item in items:
             popup_keys = {str(field.get("key") or "") for field in item["popup_fields"]}
             self.assertIn("output_chain_section", popup_keys, item["board"])

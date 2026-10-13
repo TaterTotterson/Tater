@@ -6772,31 +6772,6 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "no_op_reason": "low_signal_transcript",
         }
 
-    completeness = _transcript_completeness_assessment(transcript)
-    word_count = len(re.findall(r"[a-z0-9']+", transcript.lower()))
-    if (not bool(completeness.get("complete"))) and word_count <= 6:
-        if _claim_continued_chat_retry(session, transcript):
-            logger.info(
-                "[native-voice] partial transcript recovery selector=%s session_id=%s words=%s reason=%s",
-                session.selector,
-                session.session_id,
-                word_count,
-                _text(completeness.get("reason")) or "incomplete",
-            )
-            return {
-                "transcript": transcript,
-                "response_text": _continued_chat_retry_response_text(transcript),
-            }
-        _native_debug(
-            f"clipped transcript bypass selector={session.selector} session_id={session.session_id} "
-            f"reason={_text(completeness.get('reason'))} transcript={transcript!r}"
-        )
-        return {
-            "transcript": transcript,
-            "no_op": True,
-            "no_op_reason": "clipped_ambiguous_transcript",
-        }
-
     try:
         speaker_match = await run_speech(
             esphome_speaker_id.match_speaker_for_audio,

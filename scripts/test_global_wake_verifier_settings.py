@@ -136,14 +136,14 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
 
     def test_wake_verification_card_is_below_shared_wake_settings(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "WakeWordModels.vue").read_text(encoding="utf-8")
-        mww_group = '=== "mww_satellite_model_settings"'
-        echo_group = '=== "echo_satellite_model_settings"'
+        wake_group = '=== "wake_model_settings"'
         verifier_group = '=== "wake_verifier"'
         wake_fields = 'class="tm-form-card tm-wake-engine-card"'
         verifier_fields = 'class="tm-form-card tm-wake-verifier-card"'
 
-        self.assertIn(mww_group, source)
-        self.assertIn(echo_group, source)
+        self.assertIn(wake_group, source)
+        self.assertNotIn('=== "mww_satellite_model_settings"', source)
+        self.assertNotIn('=== "echo_satellite_model_settings"', source)
         self.assertIn(verifier_group, source)
         self.assertLess(source.index(wake_fields), source.index(verifier_fields))
         self.assertEqual(source.count("Apply To All Satellites"), 0)

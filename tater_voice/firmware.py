@@ -228,6 +228,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
     "checkers",
+    "crown",
     "radar",
     "rook",
     "satellite1_rpi_satellite",
@@ -248,6 +249,7 @@ _PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
 _ECHO_FACTORY_GUIDE_DIRECTORIES = {
     "biscuit": "biscuit",
     "checkers": "checkers-linux",
+    "crown": "crown-linux",
     "radar": "radar",
     "rook": "rook-linux",
 }
@@ -359,6 +361,19 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "echo show 5 1st generation",
             "amazon echo show 5",
             "tater echo show",
+        },
+    },
+    {
+        "key": "crown",
+        "label": "Tater Echo Show 8 (1st Gen)",
+        "usb_recovery": False,
+        "match_tokens": {
+            "crown",
+            "echo show 8",
+            "echo show 8 1st generation",
+            "amazon echo show 8",
+            "tater crown",
+            "tater echo show 8",
         },
     },
     {
@@ -1090,7 +1105,7 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
-    if key in {"biscuit", "checkers", "radar", "rook"}:
+    if key in {"biscuit", "checkers", "crown", "radar", "rook"}:
         return {
             "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
             "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
@@ -2238,7 +2253,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         profile_kind = "native_screen" if selector.startswith("native:") else "s3box_display"
     values["display_profile_kind"] = profile_kind
     screen_target = _lower(body.get("screen_target"))
-    if screen_target in {"checkers", "rook"}:
+    if screen_target in {"checkers", "crown", "rook"}:
         values["display_screen_target"] = screen_target
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
@@ -2335,6 +2350,15 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         "taterechoshow",
     }:
         return "checkers"
+    if token in {"crown", "echo-show-8", "echo-show-8-1st-gen"} or compact in {
+        "crown",
+        "echoshow8",
+        "echoshow81stgen",
+        "amazonechoshow8",
+        "tatercrown",
+        "taterechoshow8",
+    }:
+        return "crown"
     if token in {"satellite1-rpi-standalone", "sat1-rpi-standalone"} or compact in {
         "satellite1rpistandalone",
         "sat1rpistandalone",
@@ -2488,7 +2512,7 @@ def _build_device_context(
     if not capabilities and isinstance(metadata.get("capabilities"), dict):
         capabilities = metadata["capabilities"]
     ota_supported = not (
-        template_key in {"biscuit", "checkers", "radar", "rook"}
+        template_key in {"biscuit", "checkers", "crown", "radar", "rook"}
         and capabilities.get("ota") is False
     )
     latest_firmware_version = (
@@ -2709,14 +2733,16 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 if _text(value)
             )
             native_screen = _as_bool(capabilities.get("screen_weather"), False) or any(
-                target in hardware_tokens for target in ("checkers", "rook")
+                target in hardware_tokens for target in ("checkers", "crown", "rook")
             )
             if not native_screen:
                 continue
-            screen_target = template_key if template_key in {"checkers", "rook"} else ""
+            screen_target = template_key if template_key in {"checkers", "crown", "rook"} else ""
             if not screen_target:
                 if "rook" in hardware_tokens:
                     screen_target = "rook"
+                elif "crown" in hardware_tokens:
+                    screen_target = "crown"
                 elif "checkers" in hardware_tokens:
                     screen_target = "checkers"
             title = (

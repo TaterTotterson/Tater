@@ -62,6 +62,27 @@ def _echo_manifest() -> dict[str, object]:
                     },
                 },
             },
+            "crown": {
+                "display_name": "Amazon Echo Show 8 1st Generation (2019)",
+                "amazon_codename": "crown",
+                "cpu": "armv7a",
+                "unlock": "amonet-crown-v2.0.1+",
+                "factory_install": True,
+                "ota": True,
+                "status": "experimental",
+                "artifacts": {
+                    "factory": {
+                        "name": "tater-echo-crown-v0.4.0-factory.tar.gz",
+                        "sha256": "3" * 64,
+                        "size": 9216,
+                    },
+                    "ota": {
+                        "name": "tater-echo-crown-v0.4.0-ota.tar.gz",
+                        "sha256": "4" * 64,
+                        "size": 7168,
+                    },
+                },
+            },
             "radar": {
                 "display_name": "Amazon Echo 2nd Generation (2017)",
                 "amazon_codename": "radar",
@@ -183,6 +204,32 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertTrue(info["available"])
         self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
         self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-checkers-v0.4.0-ota.zip"))
+
+    def test_crown_identity_selects_its_own_verified_ota(self) -> None:
+        row = {
+            "connected": True,
+            "firmware_target": "crown",
+            "board": "crown",
+            "firmware_version": "v0.3.0",
+            "capabilities": {"ota": True, "screen": True},
+        }
+        spec = firmware._match_template_spec("native:crown-test", row)
+        self.assertEqual("crown", spec["key"])
+        self.assertFalse(spec["usb_recovery"])
+        self.assertEqual("Tater Crown", native_satellite._default_name_for_board("crown"))
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+            ui_helpers.device_image_src("crown", "Tater Echo Show 8"),
+        )
+        source = firmware._firmware_manifest_source("crown")
+        self.assertEqual("echo_targets", source["format"])
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            info = firmware._native_firmware_info("crown")
+        self.assertTrue(info["available"])
+        self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
+        self.assertEqual("4" * 64, info["artifacts"]["ota"]["sha256"])
+        self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-crown-v0.4.0-ota.tar.gz"))
+        self.assertIn("factory/crown-linux/README.md", info["artifacts"]["factory"]["instructions_url"])
 
     def test_rook_identity_selects_its_own_ota_and_art(self) -> None:
         row = {
@@ -395,6 +442,76 @@ class EchoFirmwareOtaTests(unittest.TestCase):
                 "tater-echo-checkers-v0.4.0-ota.zip"
             )
         )
+
+    def test_crown_update_is_reported_in_firmware_panel(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "crown",
+            "board": "crown",
+            "device_info": {
+                "name": "crown-test",
+                "friendly_name": "Kitchen Crown",
+                "manufacturer": "Tater",
+                "model": "crown",
+                "project_name": "tater.native_satellite",
+                "project_version": "v0.3.0",
+            },
+            "metadata": {
+                "firmware_target": "crown",
+                "board": "crown",
+            },
+            "capabilities": {"ota": True, "screen": True},
+        }
+        crown_spec = firmware._template_spec_by_key("crown")
+        self.assertIsNotNone(crown_spec)
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[crown_spec]),
+            mock.patch.object(
+                firmware,
+                "_prebuilt_firmware_panel_summary",
+                return_value={"available": True, "device_count": 5, "version": "v0.4.0"},
+            ),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:crown-test": row}})
+
+        self.assertEqual(1, panel["firmware_update_count"])
+        update = panel["firmware_updates"][0]
+        self.assertEqual("native:crown-test", update["selector"])
+        self.assertEqual("crown", update["template_key"])
+        self.assertEqual("v0.3.0", update["installed"])
+        self.assertEqual("v0.4.0", update["latest"])
+        self.assertTrue(update["prebuilt_firmware_ota_available"])
+        self.assertTrue(
+            update["prebuilt_firmware"]["artifacts"]["ota"]["path"].endswith(
+                "tater-echo-crown-v0.4.0-ota.tar.gz"
+            )
+        )
+
+    def test_crown_without_ota_capability_is_not_offered_an_update(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "crown",
+            "board": "crown",
+            "device_info": {"model": "crown", "project_version": "v0.3.0"},
+            "capabilities": {"ota": False, "screen": True},
+        }
+        crown_spec = firmware._template_spec_by_key("crown")
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[crown_spec]),
+            mock.patch.object(firmware, "_prebuilt_firmware_panel_summary", return_value={"available": True}),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:crown-test": row}})
+        self.assertEqual([], panel["firmware_updates"])
+        self.assertEqual([], panel["firmware_flash_targets"])
+        self.assertFalse(panel["variants"]["crown"]["native:crown-test"]["ota_supported"])
 
 
 if __name__ == "__main__":

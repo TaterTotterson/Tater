@@ -182,6 +182,30 @@ def _wake_family_model_settings_item_form(native_status: Dict[str, Any], family:
     }
 
 
+def _shared_wake_model_settings_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
+    clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
+    connected = sum(
+        1
+        for row in clients.values()
+        if isinstance(row, dict) and bool(row.get("connected"))
+    )
+    return {
+        "id": "voice_shared_wake_model_settings",
+        "group": "wake_model_settings",
+        "profile": "shared",
+        "title": "Wake Word",
+        "subtitle": (
+            "One wake phrase for every satellite. ESP and other MWW-only devices use the microWakeWord model; "
+            "compatible Echo devices can add the matching openWakeWord model in Dual Wake mode. "
+            f"Changes apply immediately to {connected} connected satellite(s)."
+        ),
+        "sections": native_live_settings.shared_wake_model_settings_sections(),
+        "save_action": "voice_global_satellite_settings_save",
+        "save_label": "Apply Wake Profile",
+        "remove_action": "",
+    }
+
+
 def _wake_trainer_settings_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
     clients = native_status.get("clients") if isinstance(native_status.get("clients"), dict) else {}
     connected = sum(
@@ -1245,8 +1269,7 @@ def get_runtime_payload(
     }
     item_forms = [
         _global_satellite_settings_item_form(native_status),
-        _wake_family_model_settings_item_form(native_status, "mww"),
-        _wake_family_model_settings_item_form(native_status, "echo"),
+        _shared_wake_model_settings_item_form(native_status),
         _wake_trainer_settings_item_form(native_status),
         _wake_trainer_link_item_form(),
         _wake_verifier_item_form(native_status),
@@ -1579,14 +1602,14 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         )
         allowed_keys = (
             native_live_settings.WAKE_FAMILY_PERSISTED_KEYS
-            if wake_family in native_live_settings.WAKE_FAMILIES
+            if wake_family in native_live_settings.WAKE_FAMILIES or wake_family == "shared"
             else set(native_live_settings.GLOBAL_SATELLITE_CONTROL_KEYS)
         )
         allowed_values = {key: value for key, value in values.items() if key in allowed_keys}
         if not allowed_values:
             raise ValueError("No global satellite settings were provided.")
         save_kwargs: Dict[str, Any] = {}
-        if wake_family in native_live_settings.WAKE_FAMILIES:
+        if wake_family in native_live_settings.WAKE_FAMILIES or wake_family == "shared":
             save_kwargs["wake_family"] = wake_family
         if defer_push:
             save_kwargs["push"] = False
@@ -1614,11 +1637,8 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             "global_satellite_model_settings": _global_satellite_model_settings_item_form(
                 _native_satellite_status_snapshot()
             ),
-            "mww_satellite_model_settings": _wake_family_model_settings_item_form(
-                _native_satellite_status_snapshot(), "mww"
-            ),
-            "echo_satellite_model_settings": _wake_family_model_settings_item_form(
-                _native_satellite_status_snapshot(), "echo"
+            "wake_model_settings": _shared_wake_model_settings_item_form(
+                _native_satellite_status_snapshot()
             ),
             "global_wake_trainer_settings": _wake_trainer_settings_item_form(
                 _native_satellite_status_snapshot()

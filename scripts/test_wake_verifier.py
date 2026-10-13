@@ -51,6 +51,34 @@ class WakeVerifierMatcherTests(unittest.TestCase):
 
 
 class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verifier_uses_the_shared_custom_wake_phrase(self) -> None:
+        from tater_voice import voice_pipeline as vp
+
+        packet = build_packet(b"\x00\x00" * 8000, request_id=89, enforce=True)
+        with (
+            mock.patch.object(
+                native_live_settings,
+                "shared_wake_settings_snapshot",
+                return_value={
+                    "wake_profile_name": "Jarvis",
+                    "wake_verifier_threshold": 0.85,
+                    "wake_verifier_timeout_ms": 500,
+                },
+            ),
+            mock.patch.object(vp, "_selected_stt_backend", return_value="qwen3_asr_llama_cpp"),
+            mock.patch.object(vp, "_resolve_stt_backend", return_value=("qwen3_asr_llama_cpp", "")),
+            mock.patch.object(
+                vp,
+                "_native_transcribe_wake_audio_bytes",
+                new=mock.AsyncMock(return_value="Jarvis."),
+            ),
+        ):
+            result = await wake_verifier.verify_packet(packet, selector="native:kitchen")
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["phrase"], "jarvis")
+        self.assertEqual(result["score"], 1.0)
+
     async def test_verifier_uses_selected_qwen_backend(self) -> None:
         from tater_voice import voice_pipeline as vp
 
@@ -59,7 +87,7 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(
                 native_live_settings,
-                "settings_snapshot",
+                "shared_wake_settings_snapshot",
                 return_value={
                     "wake_word": "hey_tater",
                     "wake_verifier_threshold": 0.85,
@@ -96,7 +124,7 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(
                 native_live_settings,
-                "settings_snapshot",
+                "shared_wake_settings_snapshot",
                 return_value={
                     "wake_word": "hey_tater",
                     "wake_verifier_threshold": 0.85,
@@ -129,7 +157,7 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(
                 native_live_settings,
-                "settings_snapshot",
+                "shared_wake_settings_snapshot",
                 return_value={"wake_word": "hey_tater"},
             ),
             mock.patch.object(vp, "_selected_stt_backend", return_value="mlx_whisper"),
@@ -157,7 +185,7 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch.object(
                 native_live_settings,
-                "settings_snapshot",
+                "shared_wake_settings_snapshot",
                 return_value={"wake_word": "hey_tater"},
             ),
             mock.patch.object(vp, "_selected_stt_backend", return_value="wyoming"),

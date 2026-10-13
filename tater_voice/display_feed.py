@@ -766,6 +766,112 @@ def _tater_display_clock() -> Dict[str, Any]:
     }
 
 
+def _daylight_flag(value: Any) -> Optional[bool]:
+    if isinstance(value, dict):
+        value = value.get("value", value.get("state", value.get("display")))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    token = _lower(value)
+    if token in {"1", "true", "yes", "on", "day", "daylight", "sunny"}:
+        return True
+    if token in {"0", "false", "no", "off", "night", "nighttime", "dark"}:
+        return False
+    return None
+
+
+def _snapshot_solar_value(snapshot: Dict[str, Any], *keys: str) -> Any:
+    if not isinstance(snapshot, dict):
+        return None
+    for key in keys:
+        if snapshot.get(key) not in (None, ""):
+            return snapshot.get(key)
+    attributes = snapshot.get("attributes")
+    if isinstance(attributes, dict):
+        for key in keys:
+            if attributes.get(key) not in (None, ""):
+                return attributes.get(key)
+    row = _environment_reading(snapshot, *keys)
+    if isinstance(row, dict):
+        return row.get("value", row.get("state", row.get("display")))
+    return None
+
+
+def _solar_minutes(value: Any, now: datetime) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000.0
+        try:
+            parsed = datetime.fromtimestamp(timestamp).astimezone()
+            return parsed.hour * 60 + parsed.minute
+        except (OSError, OverflowError, ValueError):
+            return None
+    token = _text(value)
+    if not token:
+        return None
+    try:
+        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.hour * 60 + parsed.minute
+    except ValueError:
+        pass
+    match = re.search(r"(?i)\b(\d{1,2}):(\d{2})(?:\s*([ap]m))?\b", token)
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    meridiem = _lower(match.group(3))
+    if meridiem:
+        hour %= 12
+        if meridiem == "pm":
+            hour += 12
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _environment_daylight(condition: Any, *snapshots: Dict[str, Any]) -> str:
+    now = datetime.now().astimezone()
+    for snapshot in snapshots:
+        value = _snapshot_solar_value(
+            snapshot,
+            "weather_api_is_day",
+            "is_day",
+            "daylight",
+            "day_night",
+        )
+        flag = _daylight_flag(value)
+        if flag is not None:
+            return "day" if flag else "night"
+
+    sunrise = sunset = None
+    for snapshot in snapshots:
+        if sunrise is None:
+            sunrise = _solar_minutes(
+                _snapshot_solar_value(snapshot, "weather_api_sunrise", "sunrise"),
+                now,
+            )
+        if sunset is None:
+            sunset = _solar_minutes(
+                _snapshot_solar_value(snapshot, "weather_api_sunset", "sunset"),
+                now,
+            )
+    if sunrise is not None and sunset is not None:
+        minute = now.hour * 60 + now.minute
+        return "day" if sunrise <= minute < sunset else "night"
+
+    if "night" in _lower(condition):
+        return "night"
+    # The local display clock is always available even when an integration
+    # does not expose solar metadata. This fallback avoids a bright sun during
+    # obvious nighttime hours while exact sunrise/sunset data remains preferred.
+    return "day" if 6 <= now.hour < 18 else "night"
+
+
 def build_weather_summary(
     *,
     client: Any = None,
@@ -1022,6 +1128,7 @@ def build_weather_summary(
         "indoor_humidity_text": indoor_humidity,
         "condition": condition,
         "condition_kind": _environment_weather_kind(condition),
+        "daylight": _environment_daylight(condition, condition_snapshot, live_snapshot),
         "feels_like_text": f"Feels like {feels}°" if feels else "",
         "feels_like_relation": feels_like_relation,
         "humidity_text": humidity,

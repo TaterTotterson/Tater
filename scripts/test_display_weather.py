@@ -6,14 +6,15 @@ import unittest
 from unittest import mock
 
 from notify import core as notify_core
-from tater_voice import display_feed, firmware, native_satellite
+from tater_voice import display_bus, display_feed, firmware, native_satellite
 
 
 class FakeRedis:
-    def __init__(self, values=None, settings=None, hashes=None):
+    def __init__(self, values=None, settings=None, hashes=None, lists=None):
         self.values = values or {}
         self.settings = settings or {}
         self.hashes = hashes or {}
+        self.lists = lists or {}
 
     def get(self, key):
         value = self.values.get(key)
@@ -32,6 +33,12 @@ class FakeRedis:
 
     def hdel(self, key, field):
         self.hashes.setdefault(key, {}).pop(field, None)
+
+    def lrange(self, key, start, end):
+        rows = list(self.lists.get(key, []))
+        if end == -1:
+            return rows[start:]
+        return rows[start : end + 1]
 
 
 def weather_snapshot(**overrides):
@@ -94,6 +101,17 @@ class DisplayWeatherTests(unittest.TestCase):
         self.assertGreater(result["clock_unix_ms"], 0)
         self.assertIsInstance(result["utc_offset_seconds"], int)
         self.assertTrue(result["timezone"])
+
+    def test_environment_weather_prefers_provider_daylight_flag(self) -> None:
+        snapshot = weather_snapshot()
+        snapshot["readings"].append(
+            {"key": "weather_api_is_day", "category": "weather", "value": 0}
+        )
+        client = FakeRedis({"environment:latest:weather_api": snapshot})
+
+        result = display_feed.build_weather_summary(client=client, core_installed=True)
+
+        self.assertEqual("night", result["daylight"])
 
     def test_preferred_temperature_unit_is_applied(self) -> None:
         client = FakeRedis(
@@ -295,6 +313,45 @@ class DisplayWeatherTests(unittest.TestCase):
         self.assertFalse(native_satellite._screen_notifications_supported({
             "capabilities": {"screen_weather": True},
         }))
+        self.assertTrue(native_satellite._screen_last_event_supported({
+            "capabilities": {"screen_last_event": True},
+        }))
+        self.assertFalse(native_satellite._screen_last_event_supported({
+            "capabilities": {"screen_notifications": True},
+        }))
+
+    def test_last_event_survives_popup_expiry_and_respects_target(self) -> None:
+        old = {
+            "id": "garage-old",
+            "seq": 10,
+            "target": "garage",
+            "targets": ["garage"],
+            "expires_at": time.time() - 3600,
+        }
+        latest = {
+            "id": "kitchen-latest",
+            "seq": 11,
+            "target": "kitchen",
+            "targets": ["kitchen"],
+            "expires_at": time.time() - 1800,
+        }
+        unrelated = {
+            "id": "bedroom-newer",
+            "seq": 12,
+            "target": "bedroom",
+            "targets": ["bedroom"],
+            "expires_at": time.time() + 90,
+        }
+        client = FakeRedis(lists={
+            display_bus.DISPLAY_EVENTS_KEY: [
+                json.dumps(old), json.dumps(latest), json.dumps(unrelated),
+            ]
+        })
+
+        result = display_bus.latest_display_event(targets={"kitchen"}, client=client)
+
+        self.assertEqual("kitchen-latest", result["id"])
+        self.assertLess(result["expires_at"], time.time())
 
     def test_native_display_target_matching_supports_selector_name_and_all(self) -> None:
         targets = native_satellite._native_display_targets(

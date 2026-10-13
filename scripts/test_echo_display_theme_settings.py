@@ -23,9 +23,9 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
         fake.hget.return_value = "off"
         return fake
 
-    def test_checkers_and_rook_replace_led_controls_with_display_theme(self) -> None:
+    def test_echo_screens_replace_led_controls_with_display_theme(self) -> None:
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
-            for board in ("checkers", "rook"):
+            for board in ("checkers", "crown", "rook"):
                 fields = native_live_settings.settings_fields(f"native:{board}", board=board)
                 by_key = {str(field.get("key") or ""): field for field in fields}
 
