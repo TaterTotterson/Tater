@@ -32,6 +32,7 @@ from . import ui_helpers as esphome_ui_helpers
 logger = logging.getLogger(__name__)
 
 FIRMWARE_INSTALLED_VERSION_HASH_KEY = "tater:esphome:firmware:installed_versions:v1"
+FIRMWARE_OTA_MIGRATION_HASH_KEY = "tater:firmware:ota_migrations:v1"
 DISPLAY_PROFILE_HASH_KEY = "tater:display:profiles:v1"
 FIRMWARE_WORKSPACE_ROOT = agent_lab_path("firmware")
 FIRMWARE_WEB_FLASH_ROOT = FIRMWARE_WORKSPACE_ROOT / "web_flash"
@@ -278,6 +279,10 @@ _ROOK_DISPLAY_SLOT_ALIASES: Tuple[str, ...] = (
     "temp_in",
     "humidity_in",
 )
+_DISPLAY_ROOM_TEMPERATURE_SLOT_KEYS: Dict[str, str] = {
+    f"room_temp_{index}": f"sensor_room_temp_{index}"
+    for index in range(1, 7)
+}
 _INTEGRATION_SOURCE_LABELS: Dict[str, str] = {
     "environment": "Environment Core",
     "homeassistant": "Home Assistant",
@@ -883,6 +888,61 @@ def _tater_sensor_select_state(current_value: Any) -> Dict[str, Any]:
     }
 
 
+def _room_temperature_sensor_select_state(current_value: Any = "") -> Dict[str, Any]:
+    current = _text(current_value)
+    rows: List[Dict[str, Any]] = []
+    try:
+        from integration_registry import get_integration_device_registry
+
+        registry = get_integration_device_registry(redis_client)
+        for device in registry.get("devices") or []:
+            if not isinstance(device, dict):
+                continue
+            raw_categories = device.get("category_ids") or device.get("capabilities") or []
+            if not isinstance(raw_categories, (list, tuple, set)):
+                raw_categories = [raw_categories]
+            categories = {_lower(value) for value in raw_categories if _text(value)}
+            if not categories.intersection({"temperature", "climate"}):
+                continue
+            integration_id = _text(device.get("integration_id"))
+            device_id = _text(device.get("id") or device.get("ref"))
+            if not integration_id or not device_id:
+                continue
+            room = _text(device.get("room") or device.get("area")) or "Unassigned"
+            name = _text(device.get("name") or device.get("display_name") or device.get("friendly_name") or device_id)
+            rows.append(
+                {
+                    "source": integration_id,
+                    "source_label": _integration_source_label(integration_id),
+                    "room": room,
+                    "name": name,
+                    "value": f"{integration_id}::{device_id}",
+                    "label": f"{room} — {name}",
+                }
+            )
+    except Exception:
+        logger.debug("Could not load integrated temperature sensors", exc_info=True)
+
+    rows.sort(key=lambda row: (_lower(row.get("source_label")), _lower(row.get("room")), _lower(row.get("name"))))
+    known = {_text(row.get("value")) for row in rows}
+    options: List[Dict[str, Any]] = [{"value": "", "label": "Do not show"}]
+    if current and current not in known:
+        options.append({"value": current, "label": f"{current} (current)"})
+    grouped: Dict[str, List[Dict[str, str]]] = {}
+    labels: Dict[str, str] = {}
+    for row in rows:
+        source = _text(row.get("source"))
+        grouped.setdefault(source, []).append({"value": _text(row.get("value")), "label": _text(row.get("label"))})
+        labels[source] = _text(row.get("source_label"))
+    for source in sorted(grouped, key=lambda value: _lower(labels.get(value) or value)):
+        options.append({"label": labels.get(source) or _integration_source_label(source), "options": grouped[source]})
+    return {
+        "ready": bool(rows),
+        "options": options,
+        "message": "" if rows else "Assign temperature sensors to rooms in Integrations to show room temperatures.",
+    }
+
+
 def _clean_terminal_text(value: Any) -> str:
     text_value = _text(value)
     if not text_value:
@@ -1017,6 +1077,48 @@ def _save_recorded_firmware_version(
         "updated_at": str(time.time()),
     }
     redis_client.hset(FIRMWARE_INSTALLED_VERSION_HASH_KEY, key, json.dumps(payload, ensure_ascii=False))
+
+
+def _load_ota_migration(selector: Any, template_key: Any) -> Dict[str, Any]:
+    key = _installed_version_key(selector, template_key)
+    if not key:
+        return {}
+    with contextlib.suppress(Exception):
+        raw = redis_client.hget(FIRMWARE_OTA_MIGRATION_HASH_KEY, key)
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return dict(parsed)
+    return {}
+
+
+def _save_ota_migration(
+    selector: Any,
+    template_key: Any,
+    migration: Dict[str, Any],
+    version: Any,
+    stage: str,
+) -> None:
+    key = _installed_version_key(selector, template_key)
+    if not key:
+        return
+    payload = {
+        "selector": _text(selector),
+        "template_key": _text(template_key),
+        "migration_id": _text(migration.get("id")),
+        "version": _text(version),
+        "stage": _lower(stage),
+        "updated_at": time.time(),
+    }
+    redis_client.hset(FIRMWARE_OTA_MIGRATION_HASH_KEY, key, json.dumps(payload, ensure_ascii=False))
+
+
+def _clear_ota_migration(selector: Any, template_key: Any) -> None:
+    key = _installed_version_key(selector, template_key)
+    if not key:
+        return
+    with contextlib.suppress(Exception):
+        redis_client.hdel(FIRMWARE_OTA_MIGRATION_HASH_KEY, key)
 
 
 def _firmware_version_snapshot(
@@ -1223,8 +1325,10 @@ def _load_echo_firmware_manifest(
             continue
         raw_artifacts = raw_device.get("artifacts") if isinstance(raw_device.get("artifacts"), dict) else {}
         artifacts: Dict[str, Dict[str, Any]] = {}
-        for kind in ("factory", "ota"):
+        for kind in ("factory", "ota", "ota_bridge"):
             if kind == "ota" and not _as_bool(raw_device.get("ota"), False):
+                continue
+            if kind == "ota_bridge" and not _as_bool(raw_device.get("ota"), False):
                 continue
             if kind == "factory" and not _as_bool(raw_device.get("factory_install"), False):
                 continue
@@ -1248,7 +1352,11 @@ def _load_echo_firmware_manifest(
                 "name": name,
                 "sha256": sha256,
                 "size_bytes": size_bytes,
-                "flash_transport": "tater_native_ota" if kind == "ota" else "external_factory_installer",
+                "flash_transport": (
+                    "tater_native_ota"
+                    if kind in {"ota", "ota_bridge"}
+                    else "external_factory_installer"
+                ),
                 "browser_flash_supported": False,
                 "instructions_url": (
                     f"https://github.com/{_ECHO_FIRMWARE_GITHUB_OWNER}/{_ECHO_FIRMWARE_GITHUB_REPO}/blob/main/"
@@ -1259,6 +1367,38 @@ def _load_echo_firmware_manifest(
             }
         if not artifacts:
             continue
+        raw_migrations = raw_device.get("ota_migrations")
+        migrations: List[Dict[str, Any]] = []
+        if raw_migrations is not None and not isinstance(raw_migrations, list):
+            raise RuntimeError(f"Tater Echo {target} OTA migrations are invalid.")
+        for raw_migration in raw_migrations or []:
+            if not isinstance(raw_migration, dict):
+                raise RuntimeError(f"Tater Echo {target} OTA migration is invalid.")
+            migration_id = _lower(raw_migration.get("id"))
+            capability = _lower(raw_migration.get("required_capability"))
+            minimum = _as_int(raw_migration.get("minimum_capability_version"), 0, minimum=0)
+            bridge_kind = _lower(raw_migration.get("bridge_artifact"))
+            final_kind = _lower(raw_migration.get("final_artifact")) or "ota"
+            if (
+                not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", migration_id)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", capability)
+                or minimum < 1
+                or bridge_kind == final_kind
+                or bridge_kind not in artifacts
+                or final_kind not in artifacts
+                or artifacts[bridge_kind].get("flash_transport") != "tater_native_ota"
+                or artifacts[final_kind].get("flash_transport") != "tater_native_ota"
+            ):
+                raise RuntimeError(f"Tater Echo {target} OTA migration is invalid.")
+            migrations.append(
+                {
+                    "id": migration_id,
+                    "required_capability": capability,
+                    "minimum_capability_version": minimum,
+                    "bridge_artifact": bridge_kind,
+                    "final_artifact": final_kind,
+                }
+            )
         display_version = version[1:] if version.startswith("v") else version
         devices.append(
             {
@@ -1271,6 +1411,7 @@ def _load_echo_firmware_manifest(
                 "project": "tater.echo",
                 "flash_transport": "tater_native_ota",
                 "artifacts": artifacts,
+                "ota_migrations": migrations,
                 "support": {
                     key: copy.deepcopy(value)
                     for key, value in raw_device.items()
@@ -1796,7 +1937,7 @@ def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
         target_label = raw_target
     slots = {
         alias: _text(values.get(key))
-        for alias, key in _S3BOX_DISPLAY_SLOT_KEYS.items()
+        for alias, key in {**_S3BOX_DISPLAY_SLOT_KEYS, **_DISPLAY_ROOM_TEMPERATURE_SLOT_KEYS}.items()
         if _text(values.get(key))
     }
     payload = {
@@ -1952,6 +2093,11 @@ def _display_slot_aliases(screen_target: Any = "") -> Tuple[str, ...]:
     return tuple(_S3BOX_DISPLAY_SLOT_KEYS)
 
 
+def _display_room_temperature_aliases(screen_target: Any = "") -> Tuple[str, ...]:
+    maximum = 3 if _lower(screen_target) == "rook" else 6
+    return tuple(f"room_temp_{index}" for index in range(1, maximum + 1))
+
+
 def _display_sensor_field_rows(
     slots: Dict[str, str],
     sensor_select: Dict[str, Any],
@@ -1995,6 +2141,32 @@ def _display_sensor_field_rows(
     return fields
 
 
+def _display_room_temperature_field_rows(
+    slots: Dict[str, str],
+    sensor_select: Dict[str, Any],
+    aliases: Tuple[str, ...],
+) -> List[Dict[str, Any]]:
+    ready = bool(sensor_select.get("ready"))
+    message = _text(sensor_select.get("message"))
+    options = copy.deepcopy(sensor_select.get("options")) if isinstance(sensor_select.get("options"), list) else []
+    return [
+        {
+            "key": alias,
+            "label": f"Room Temperature {index}",
+            "type": "select",
+            "value": _text(slots.get(alias)),
+            "options": copy.deepcopy(options),
+            "disabled": not ready,
+            "description": (
+                "Choose a temperature sensor. Tater uses the room assigned to that sensor as its label."
+                if ready
+                else message
+            ),
+        }
+        for index, alias in enumerate(aliases, start=1)
+    ]
+
+
 def _display_sensor_slots_from_context(
     context: Dict[str, Any],
     saved_profile: Dict[str, Any],
@@ -2011,6 +2183,7 @@ def _display_sensor_profile_from_context(
     selector: str,
     context: Dict[str, Any],
     sensor_select: Dict[str, Any],
+    room_temperature_select: Dict[str, Any],
     saved_profiles: Dict[str, Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     profile_kind = _lower(context.get("template_key"))
@@ -2025,6 +2198,13 @@ def _display_sensor_profile_from_context(
     screen_target = _lower(context.get("screen_target") or saved_profile.get("screen_target"))
     aliases = _display_slot_aliases(screen_target)
     slots = _display_sensor_slots_from_context(context, saved_profile, aliases)
+    saved_slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
+    room_aliases = (
+        _display_room_temperature_aliases(screen_target)
+        if profile_kind == "native_screen" and screen_target in {"checkers", "crown", "rook"}
+        else ()
+    )
+    room_slots = {alias: _text(saved_slots.get(alias)) for alias in room_aliases}
     target_label = _text(saved_profile.get("target_label"))
     if not target_label:
         target_label = _text(context.get("display_target_label"))
@@ -2042,12 +2222,26 @@ def _display_sensor_profile_from_context(
         "profile_kind": profile_kind,
         "screen_target": screen_target,
         "_saved_target": saved_profile_target,
-        "fields": _display_sensor_field_rows(slots, sensor_select, aliases),
+        "fields": [
+            *(
+                [{"key": "weather_slots_section", "type": "section", "label": "Weather sensors", "description": "Choose the readings shown on the home screen."}]
+                if room_aliases
+                else []
+            ),
+            *_display_sensor_field_rows(slots, sensor_select, aliases),
+            *(
+                [{"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on Checkers and Crown."}]
+                if room_aliases
+                else []
+            ),
+            *_display_room_temperature_field_rows(room_slots, room_temperature_select, room_aliases),
+        ],
     }
 
 
 def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
     sensor_select = _tater_sensor_select_state("")
+    room_temperature_select = _room_temperature_sensor_select_state("")
     saved_profiles = _display_profile_rows_from_store()
     profiles_by_target: Dict[str, Dict[str, Any]] = {}
     attached_saved_targets: Set[str] = set()
@@ -2055,7 +2249,13 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     for row in display_contexts:
         selector = _text(row.get("selector"))
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        profile = _display_sensor_profile_from_context(selector, context, sensor_select, saved_profiles)
+        profile = _display_sensor_profile_from_context(
+            selector,
+            context,
+            sensor_select,
+            room_temperature_select,
+            saved_profiles,
+        )
         if isinstance(profile, dict) and _text(profile.get("target")):
             saved_target = _text(profile.pop("_saved_target", ""))
             if saved_target and saved_target != _text(profile.get("target")):
@@ -2069,6 +2269,12 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
         target_label = _text(saved_profile.get("target_label"))
         screen_target = _lower(saved_profile.get("screen_target"))
         aliases = _display_slot_aliases(screen_target)
+        saved_template = _text(saved_profile.get("template")) or "s3box_display"
+        room_aliases = (
+            _display_room_temperature_aliases(screen_target)
+            if saved_template == "native_screen" and screen_target in {"checkers", "crown", "rook"}
+            else ()
+        )
         profiles_by_target[target] = {
             "target": target,
             "target_label": target_label,
@@ -2078,13 +2284,30 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             "connected": False,
             "updated_at": saved_profile.get("updated_at"),
             "display_url": _tater_display_base_url_for_selector(saved_profile.get("selector") or target),
-            "profile_kind": _text(saved_profile.get("template")) or "s3box_display",
+            "profile_kind": saved_template,
             "screen_target": screen_target,
-            "fields": _display_sensor_field_rows(
-                {alias: _text(slots.get(alias)) for alias in aliases},
-                sensor_select,
-                aliases,
-            ),
+            "fields": [
+                *(
+                    [{"key": "weather_slots_section", "type": "section", "label": "Weather sensors", "description": "Choose the readings shown on the home screen."}]
+                    if room_aliases
+                    else []
+                ),
+                *_display_sensor_field_rows(
+                    {alias: _text(slots.get(alias)) for alias in aliases},
+                    sensor_select,
+                    aliases,
+                ),
+                *(
+                    [{"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on Checkers and Crown."}]
+                    if room_aliases
+                    else []
+                ),
+                *_display_room_temperature_field_rows(
+                    {alias: _text(slots.get(alias)) for alias in room_aliases},
+                    room_temperature_select,
+                    room_aliases,
+                ),
+            ],
         }
 
     profiles = sorted(
@@ -2099,8 +2322,8 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     if not active and profiles:
         active = _text(profiles[0].get("target"))
     return {
-        "ready": bool(sensor_select.get("ready")),
-        "message": _text(sensor_select.get("message")),
+        "ready": bool(sensor_select.get("ready")) or bool(room_temperature_select.get("ready")),
+        "message": _text(sensor_select.get("message") or room_temperature_select.get("message")),
         "profiles": profiles,
         "active_target": active,
     }
@@ -2266,6 +2489,17 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
             values[profile_key] = _text(body.get(profile_key))
         else:
             values.setdefault(profile_key, "")
+    for alias, profile_key in _DISPLAY_ROOM_TEMPERATURE_SLOT_KEYS.items():
+        if alias in slot_source:
+            values[profile_key] = _text(slot_source.get(alias))
+        elif profile_key in slot_source:
+            values[profile_key] = _text(slot_source.get(profile_key))
+        elif alias in body:
+            values[profile_key] = _text(body.get(alias))
+        elif profile_key in body:
+            values[profile_key] = _text(body.get(profile_key))
+        else:
+            values.setdefault(profile_key, "")
     _display_profile_save(selector, values)
 
     display_url = _normalize_http_base_url(body.get("display_url")) or _tater_display_base_url_for_selector(selector)
@@ -2280,16 +2514,21 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         display_bus.request_display_refresh(target, reason="sensor_profile")
     if profile_kind == "native_screen":
         with contextlib.suppress(Exception):
-            from . import display_feed, native_satellite
+            from . import display_climate, display_feed, native_satellite
 
             weather = display_feed.build_weather_summary(selector=selector)
             native_satellite.run_on_runtime_loop(
                 native_satellite.send_command(selector, "display.weather", weather),
                 timeout=3.0,
             )
+            climate = display_climate.build_climate_summary(selector=selector)
+            native_satellite.run_on_runtime_loop(
+                native_satellite.send_command(selector, "display.climate", climate),
+                timeout=3.0,
+            )
 
     display_name = target_label or (raw_target if raw_target and raw_target != target else target)
-    message = f"Updated display sensors for {display_name}."
+    message = f"Updated display sensors and room temperatures for {display_name}."
     if display_name and display_name != target:
         message = f"{message} Device target set to {target}."
     if bool(display_url_result.get("applied")):
@@ -2476,6 +2715,38 @@ def _matched_template_key(selector: str, client_row: Dict[str, Any]) -> str:
     return _text(matched.get("key")) if isinstance(matched, dict) else ""
 
 
+def _capability_version(capabilities: Dict[str, Any], name: Any) -> int:
+    value = capabilities.get(_text(name))
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return _as_int(value, 0, minimum=0)
+
+
+def _required_ota_migration(
+    prebuilt_firmware: Dict[str, Any],
+    capabilities: Dict[str, Any],
+    pending: Dict[str, Any],
+) -> Dict[str, Any]:
+    device = prebuilt_firmware.get("device") if isinstance(prebuilt_firmware.get("device"), dict) else {}
+    migrations = device.get("ota_migrations") if isinstance(device.get("ota_migrations"), list) else []
+    release_version = _text(prebuilt_firmware.get("version"))
+    for row in migrations:
+        if not isinstance(row, dict):
+            continue
+        capability = _text(row.get("required_capability"))
+        minimum = _as_int(row.get("minimum_capability_version"), 0, minimum=0)
+        current = _capability_version(capabilities, capability)
+        pending_matches = bool(
+            _text(pending.get("migration_id")) == _text(row.get("id"))
+            and _text(pending.get("version")) == release_version
+        )
+        if current < minimum:
+            return {**row, "stage": "bridge", "current_capability_version": current}
+        if pending_matches:
+            return {**row, "stage": "final", "current_capability_version": current}
+    return {}
+
+
 def _build_device_context(
     selector: str,
     client_row: Dict[str, Any],
@@ -2520,6 +2791,8 @@ def _build_device_context(
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
         else _text(prebuilt_device.get("firmware_version"))
     )
+    pending_migration = _load_ota_migration(selector_token, template_key)
+    ota_migration = _required_ota_migration(prebuilt_firmware, capabilities, pending_migration)
     firmware_project = _text(prebuilt_device.get("project")) or "tater.native_satellite"
     matched_template_key = _matched_template_key(selector_token, client_row)
     update_if_missing_installed = bool(
@@ -2535,6 +2808,8 @@ def _build_device_context(
         latest_firmware_version,
         update_if_missing_installed=update_if_missing_installed,
     )
+    if ota_migration:
+        version_snapshot["update_available"] = True
     if usb_recovery:
         display_name = f"{_text(template_spec.get('label')) or 'Firmware'} Browser USB Recovery"
     else:
@@ -2612,9 +2887,12 @@ def _build_device_context(
         "display_target": display_target,
         "display_target_label": display_target_label if display_target_label != display_target else "",
         "native_firmware": True,
+        "capabilities": copy.deepcopy(capabilities),
+        "ota_migration": copy.deepcopy(ota_migration),
     }
     if not ota_supported:
         item["prebuilt_firmware"]["artifacts"].pop("ota", None)
+        item["prebuilt_firmware"]["artifacts"].pop("ota_bridge", None)
         item["firmware_update_status"] = "This Echo build needs one USB/recovery update to enable OTA."
 
     return {
@@ -2635,6 +2913,8 @@ def _build_device_context(
         "prebuilt_firmware": prebuilt_firmware,
         "ota_supported": ota_supported,
         "native_firmware": True,
+        "capabilities": copy.deepcopy(capabilities),
+        "ota_migration": copy.deepcopy(ota_migration),
         "display_target": display_target,
         "display_target_label": display_target_label if display_target_label != display_target else "",
         "item": item,
@@ -3694,6 +3974,7 @@ def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) ->
         display_name=session.get("display_name"),
         source="native_tater_ota",
     )
+    _clear_ota_migration(session.get("selector"), session.get("template_key"))
     _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
@@ -3720,6 +4001,90 @@ def _complete_native_ota_handoff_locked(session: Dict[str, Any]) -> None:
     _clear_sat1_rpi_self_ota_handoff_locked(session)
 
 
+def _native_ota_stage_progress(session: Dict[str, Any], progress: float) -> float:
+    if int(session.get("ota_stage_count") or 1) < 2:
+        return progress
+    if _lower(session.get("ota_stage")) == "bridge":
+        return progress * 0.49
+    return 50.0 + (progress * 0.49)
+
+
+def _client_capabilities(client_status: Dict[str, Any]) -> Dict[str, Any]:
+    capabilities = client_status.get("capabilities")
+    if isinstance(capabilities, dict):
+        return capabilities
+    metadata = client_status.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("capabilities"), dict):
+        return metadata["capabilities"]
+    return {}
+
+
+def _continue_native_ota_migration_locked(
+    session: Dict[str, Any], client_status: Dict[str, Any]
+) -> bool:
+    if _lower(session.get("ota_stage")) != "bridge":
+        return False
+    migration = session.get("ota_migration") if isinstance(session.get("ota_migration"), dict) else {}
+    final_artifact = (
+        session.get("ota_final_artifact")
+        if isinstance(session.get("ota_final_artifact"), dict)
+        else {}
+    )
+    capability = _text(migration.get("required_capability"))
+    minimum = _as_int(migration.get("minimum_capability_version"), 0, minimum=0)
+    current = _capability_version(_client_capabilities(client_status), capability)
+    if not migration or not final_artifact:
+        _fail_native_ota_locked(session, "The staged OTA completion artifact is missing.")
+        return True
+    if current < minimum:
+        _fail_native_ota_locked(
+            session,
+            f"The bridge restarted without {capability} version {minimum}; the final OTA was not sent.",
+        )
+        return True
+
+    session.update(
+        {
+            "ota_stage": "final",
+            "ota_stage_index": 2,
+            "source_binary": _text(final_artifact.get("source_binary")),
+            "ota_url": _text(final_artifact.get("ota_url")),
+            "artifact_id": _text(final_artifact.get("artifact_id")),
+            "binary_url": _text(final_artifact.get("ota_url")),
+            "binary_name": _text(final_artifact.get("binary_name")),
+            "binary_size": int(final_artifact.get("binary_size") or 0),
+            "binary_sha256": _text(final_artifact.get("sha256")),
+            "progress_percent": 50.0,
+            "progress_bytes": 0,
+            "progress_total_bytes": int(final_artifact.get("binary_size") or 0),
+            "ota_command_sent": False,
+            "ota_reboot_requested": False,
+            "ota_disconnect_seen": False,
+            "ota_reconnect_seen": False,
+            "message": "Bridge verified. Sending the completed firmware bundle now.",
+        }
+    )
+    _set_session_phase_locked(session, "starting")
+    _append_session_entry_locked(
+        session,
+        level="info",
+        message="OTA bridge verified after reboot; continuing immediately with the final bundle.",
+        source="session",
+    )
+    with contextlib.suppress(Exception):
+        _save_ota_migration(
+            session.get("selector"),
+            session.get("template_key"),
+            migration,
+            session.get("firmware_version"),
+            "final",
+        )
+    worker = threading.Thread(target=_native_tater_ota_session_worker, args=(_text(session.get("id")),), daemon=True)
+    session["worker"] = worker
+    worker.start()
+    return True
+
+
 def _apply_native_ota_update_locked(
     session: Dict[str, Any],
     entries: List[Dict[str, Any]],
@@ -3734,7 +4099,10 @@ def _apply_native_ota_update_locked(
     if progress is not None:
         # Reserve 100% for the post-reboot version check. A device can finish
         # writing an image and still roll back to its previous partition.
-        _set_session_progress_locked(session, min(progress, 99.0))
+        _set_session_progress_locked(
+            session,
+            min(_native_ota_stage_progress(session, progress), 99.0),
+        )
 
     terminal_status = _native_ota_terminal_status(entries)
     if terminal_status == "failed":
@@ -3760,6 +4128,8 @@ def _apply_native_ota_update_locked(
                 expected_version = _text(session.get("firmware_version"))
                 actual_version = _text(client_status.get("firmware_version"))
                 if expected_version and actual_version == expected_version:
+                    if _continue_native_ota_migration_locked(session, client_status):
+                        return
                     _complete_native_ota_locked(session, actual_version)
                     return
                 if actual_version:
@@ -3946,6 +4316,9 @@ def _session_payload_locked(session: Dict[str, Any], *, after_seq: int = 0) -> D
         "display_name": _text(session.get("display_name")),
         "host": _text(session.get("host")),
         "operation": _text(session.get("operation")),
+        "ota_stage": _text(session.get("ota_stage")),
+        "ota_stage_index": int(session.get("ota_stage_index") or 1),
+        "ota_stage_count": int(session.get("ota_stage_count") or 1),
         "self_ota_recovery": bool(session.get("self_ota_recovery")),
         "phase": phase,
         "status_text": _text(session.get("status_text")) or _phase_status_text(phase, _text(session.get("display_name"))),
@@ -5209,14 +5582,29 @@ def _start_flash_session(
         raise RuntimeError(
             "This Echo build cannot receive OTA yet. Install an OTA-capable build over USB/recovery once."
         )
-    prebuilt_upload = _prebuilt_artifact_available(context, "ota")
+    ota_migration = context.get("ota_migration") if isinstance(context.get("ota_migration"), dict) else {}
+    ota_stage = _lower(ota_migration.get("stage")) if ota_migration else "final"
+    initial_artifact_kind = (
+        _lower(ota_migration.get("bridge_artifact"))
+        if ota_stage == "bridge"
+        else _lower(ota_migration.get("final_artifact")) or "ota"
+    )
+    prebuilt_upload = _prebuilt_artifact_available(context, initial_artifact_kind)
     if not prebuilt_upload:
-        raise RuntimeError("No prebuilt OTA image is available for this firmware target.")
+        raise RuntimeError(f"No prebuilt {initial_artifact_kind} image is available for this firmware target.")
     native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
     if not host and not native_firmware:
         raise RuntimeError("OTA target host is missing.")
-    prebuilt_binary = _download_prebuilt_firmware_binary(context, "ota")
+    prebuilt_binary = _download_prebuilt_firmware_binary(context, initial_artifact_kind)
     ota_artifact = _create_native_ota_artifact(context, Path(prebuilt_binary["path"])) if native_firmware else {}
+    final_ota_artifact: Dict[str, Any] = {}
+    final_prebuilt_binary: Dict[str, Any] = {}
+    if native_firmware and ota_stage == "bridge":
+        final_kind = _lower(ota_migration.get("final_artifact")) or "ota"
+        final_prebuilt_binary = _download_prebuilt_firmware_binary(context, final_kind)
+        final_ota_artifact = _create_native_ota_artifact(
+            context, Path(final_prebuilt_binary["path"])
+        )
     command = (
         ["native_tater_ota", selector, _text(ota_artifact.get("ota_url"))]
         if native_firmware
@@ -5243,6 +5631,11 @@ def _start_flash_session(
         "host": host,
         "operation": operation,
         "self_ota_recovery": self_ota_recovery,
+        "ota_migration": copy.deepcopy(ota_migration),
+        "ota_stage": ota_stage,
+        "ota_stage_index": 1 if ota_stage == "bridge" else (2 if ota_migration else 1),
+        "ota_stage_count": 2 if ota_migration else 1,
+        "ota_final_artifact": final_ota_artifact,
         "context": context,
         "command": command,
         "source_binary": str(prebuilt_binary.get("path") or ""),
@@ -5305,6 +5698,17 @@ def _start_flash_session(
                     message=f"Device download URL: {_text(ota_artifact.get('ota_url'))}",
                     source="session",
                 )
+            if final_prebuilt_binary:
+                final_cached_text = "cached" if bool(final_prebuilt_binary.get("cached")) else "downloaded"
+                _append_session_entry_locked(
+                    session,
+                    level="info",
+                    message=(
+                        f"Final OTA image {final_cached_text}: "
+                        f"{Path(final_prebuilt_binary['path']).name}."
+                    ),
+                    source="session",
+                )
         _append_session_entry_locked(
             session,
             level="debug",
@@ -5319,6 +5723,15 @@ def _start_flash_session(
                 raise RuntimeError(
                     f"Could not prepare Tater Embedded restart recovery: {_text(exc) or exc.__class__.__name__}."
                 ) from exc
+        if ota_stage == "bridge":
+            with contextlib.suppress(Exception):
+                _save_ota_migration(
+                    selector,
+                    context.get("template_key"),
+                    ota_migration,
+                    context.get("firmware_version"),
+                    "bridge",
+                )
 
     worker_target = _native_tater_ota_session_worker if native_firmware else _prebuilt_ota_session_worker
     worker = threading.Thread(target=worker_target, args=(session_id,), daemon=True)

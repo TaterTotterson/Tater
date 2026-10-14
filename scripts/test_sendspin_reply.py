@@ -104,6 +104,17 @@ class SendspinReplyPcmTests(unittest.TestCase):
         self.assertEqual(struct.unpack(">q", packet[1:9])[0], 1_234_567)
         self.assertEqual(packet[9:], b"pcm")
 
+    def test_modern_audio_packet_includes_send_ahead_before_payload(self) -> None:
+        packet = sendspin_playback._audio_packet(
+            1_234_567,
+            b"flac",
+            send_ahead_us=2_000_000,
+        )
+        self.assertEqual(packet[0], 4)
+        self.assertEqual(struct.unpack(">q", packet[1:9])[0], 1_234_567)
+        self.assertEqual(struct.unpack(">I", packet[9:13])[0], 2_000_000)
+        self.assertEqual(packet[13:], b"flac")
+
     def test_live_airplay_pcm_is_resampled_scaled_and_delayed(self) -> None:
         source = _little_endian_pcm([1000, -1000] * 441)
         converter = sendspin_playback._StreamingPcmResampler(44_100)

@@ -762,6 +762,115 @@ def build_home_snapshot(
     }
 
 
+def build_satellite_climate_snapshot(
+    registry: Dict[str, Any],
+    *,
+    room_sensor_refs: Iterable[Any] = (),
+    preferred_room: Any = "",
+    maximum_rooms: int = 6,
+) -> Dict[str, Any]:
+    """Build the small integration-neutral climate payload used by screen satellites.
+
+    The thermostat is selected from Tater's normalized integration registry, with a
+    thermostat in the satellite's room preferred when one exists. Room temperature
+    rows are deliberately opt-in and retain the order chosen in Satellite Settings.
+    """
+    devices = [dict(row) for row in (registry.get("devices") or []) if isinstance(row, dict)]
+    preferred = _token(preferred_room)
+    thermostats = [
+        row
+        for row in devices
+        if "climate" in _category_ids(row)
+        and _actions(row).intersection(CONTROL_ACTIONS["climate"])
+    ]
+    thermostats.sort(
+        key=lambda row: (
+            0 if preferred and preferred in {_room_identity(row)[0], _token(_room_identity(row)[1])} else 1,
+            _room_identity(row)[1].casefold(),
+            _text(row.get("name") or row.get("display_name") or row.get("id")).casefold(),
+        )
+    )
+    thermostat = thermostats[0] if thermostats else None
+    thermostat_unit = _temperature_unit(thermostat) if thermostat else "F"
+    room_id, room_name = _room_identity(thermostat) if thermostat else ("", "")
+    actions = _actions(thermostat) if thermostat else set()
+
+    def device_ref(device: Dict[str, Any]) -> str:
+        integration_id = _text(device.get("integration_id"))
+        device_id = _text(device.get("id") or device.get("ref"))
+        return f"{integration_id}::{device_id}" if integration_id and device_id else ""
+
+    devices_by_ref = {device_ref(row): row for row in devices if device_ref(row)}
+    room_temperatures: List[Dict[str, Any]] = []
+    seen_refs: set[str] = set()
+    for raw_ref in room_sensor_refs:
+        ref = _text(raw_ref)
+        if not ref or ref in seen_refs:
+            continue
+        seen_refs.add(ref)
+        sensor = devices_by_ref.get(ref)
+        if not sensor or not {"temperature", "climate"}.intersection(_category_ids(sensor)):
+            continue
+        value = _temperature_in_unit(sensor, thermostat_unit)
+        if value is None:
+            continue
+        sensor_room_id, sensor_room_name = _room_identity(sensor)
+        room_temperatures.append(
+            {
+                "room_id": sensor_room_id,
+                "room_name": sensor_room_name,
+                "temperature": round(value, 1),
+                "temperature_unit": thermostat_unit,
+            }
+        )
+        if len(room_temperatures) >= max(0, min(6, int(maximum_rooms or 0))):
+            break
+
+    current_temperature = _temperature_value(thermostat) if thermostat else None
+    target_temperature = _temperature_value(thermostat, target=True) if thermostat else None
+    humidity = (
+        _number(_lookup(thermostat, "current_humidity", "humidity", "relative_humidity"))
+        if thermostat
+        else None
+    )
+    hvac_mode = _climate_mode(thermostat) if thermostat else ""
+    hvac_action = (
+        _token(_lookup(thermostat, "hvac_action", "current_hvac_action", "current_hvac_state"))
+        if thermostat
+        else ""
+    )
+    return {
+        "available": thermostat is not None,
+        "room_id": room_id,
+        "room_name": room_name,
+        "current_temperature": round(current_temperature, 1) if current_temperature is not None else None,
+        "target_temperature": round(target_temperature, 1) if target_temperature is not None else None,
+        "temperature_unit": thermostat_unit,
+        "current_humidity": round(humidity, 1) if humidity is not None else None,
+        "hvac_mode": hvac_mode,
+        "hvac_action": hvac_action,
+        "available_hvac_modes": _climate_modes(thermostat, actions) if thermostat else [],
+        "can_set_temperature": "set_temperature" in actions,
+        "can_set_mode": "set_hvac_mode" in actions,
+        "minimum_temperature": (
+            _number(_lookup(thermostat, "minimum_temperature", "min_temperature", "min_temp"))
+            if thermostat
+            else None
+        ) or (7.0 if thermostat_unit == "C" else 45.0),
+        "maximum_temperature": (
+            _number(_lookup(thermostat, "maximum_temperature", "max_temperature", "max_temp"))
+            if thermostat
+            else None
+        ) or (32.0 if thermostat_unit == "C" else 90.0),
+        "temperature_step": (
+            _number(_lookup(thermostat, "temperature_step", "target_temperature_step", "step"))
+            if thermostat
+            else None
+        ) or (0.5 if thermostat_unit == "C" else 1.0),
+        "room_temperatures": room_temperatures,
+    }
+
+
 def resolve_home_camera_target(
     registry: Dict[str, Any],
     *,

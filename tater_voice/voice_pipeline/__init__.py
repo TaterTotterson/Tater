@@ -6689,6 +6689,15 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
                 "speaker_id_enrollment": True,
             }
 
+    from .. import display_cameras
+
+    if display_cameras.is_talkback_wake_word(session.wake_word):
+        return await display_cameras.handle_talkback_voice_turn(
+            wake_word=session.wake_word,
+            audio_bytes=bytes(session.audio_buffer),
+            audio_format=dict(session.audio_format or {}),
+        )
+
     if bool(getattr(session, "no_speech_recovered_transcript", False)) and _text(session.stt_transcript):
         transcript = _text(session.stt_transcript)
     else:

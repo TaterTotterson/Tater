@@ -8,6 +8,7 @@ aiohomekit
 zeroconf
 PyChromecast==14.0.10
 imageio-ffmpeg==0.6.0
+av==17.1.0
 beautifulsoup4
 bencodepy
 cryptography

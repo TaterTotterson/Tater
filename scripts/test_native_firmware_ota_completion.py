@@ -276,6 +276,87 @@ class NativeFirmwareOtaCompletionTests(unittest.TestCase):
         self.assertEqual(0, session["returncode"])
         save_version.assert_called_once()
 
+    def test_bridge_reconnect_dispatches_final_bundle_without_waiting(self) -> None:
+        session = _session()
+        session.update(
+            {
+                "id": "fw_staged_echo",
+                "template_key": "checkers",
+                "firmware_version": "v2.5.6",
+                "ota_stage": "bridge",
+                "ota_stage_index": 1,
+                "ota_stage_count": 2,
+                "ota_migration": {
+                    "id": "linux-app-components-v1",
+                    "required_capability": "ota_bundle_components_version",
+                    "minimum_capability_version": 1,
+                },
+                "ota_final_artifact": {
+                    "source_binary": "/tmp/final.tar.gz",
+                    "ota_url": "http://tater.test/final/firmware.bin",
+                    "artifact_id": "final",
+                    "binary_name": "firmware.bin",
+                    "binary_size": 4096,
+                    "sha256": "b" * 64,
+                },
+            }
+        )
+        worker = mock.Mock()
+        with (
+            mock.patch.object(firmware.threading, "Thread", return_value=worker),
+            mock.patch.object(firmware, "_save_ota_migration") as save_migration,
+            mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version,
+        ):
+            firmware._apply_native_ota_update_locked(
+                session,
+                [],
+                {
+                    "connected": True,
+                    "connected_ts": 200.0,
+                    "firmware_version": "v2.5.6",
+                    "capabilities": {"ota_bundle_components_version": 1},
+                },
+            )
+
+        self.assertTrue(session["active"])
+        self.assertEqual("final", session["ota_stage"])
+        self.assertEqual(2, session["ota_stage_index"])
+        self.assertEqual("http://tater.test/final/firmware.bin", session["ota_url"])
+        self.assertEqual(50.0, session["progress_percent"])
+        worker.start.assert_called_once_with()
+        save_migration.assert_called_once()
+        save_version.assert_not_called()
+
+    def test_bridge_missing_new_capability_does_not_send_final_bundle(self) -> None:
+        session = _session()
+        session.update(
+            {
+                "id": "fw_staged_echo_missing_capability",
+                "firmware_version": "v2.5.6",
+                "ota_stage": "bridge",
+                "ota_stage_count": 2,
+                "ota_migration": {
+                    "id": "linux-app-components-v1",
+                    "required_capability": "ota_bundle_components_version",
+                    "minimum_capability_version": 1,
+                },
+                "ota_final_artifact": {"ota_url": "http://tater.test/final/firmware.bin"},
+            }
+        )
+        firmware._apply_native_ota_update_locked(
+            session,
+            [],
+            {
+                "connected": True,
+                "connected_ts": 200.0,
+                "firmware_version": "v2.5.6",
+                "capabilities": {},
+            },
+        )
+        self.assertFalse(session["active"])
+        self.assertEqual("failed", session["phase"])
+        self.assertIn("ota_bundle_components_version", session["error"])
+
     def test_old_version_reconnect_reports_rollback_instead_of_hanging(self) -> None:
         session = _session()
 

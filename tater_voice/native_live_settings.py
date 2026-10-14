@@ -89,6 +89,8 @@ DEFAULTS: Dict[str, Any] = {
     "screen_night_start": "22:00",
     "screen_night_end": "07:00",
     "display_theme": "tater",
+    "display_wallpaper_interval_minutes": 1440,
+    "display_edge_glow": True,
     "led_brightness": 80,
     "led_color": "#ff5a1f",
     "led_listening_animation": "directional",
@@ -132,6 +134,8 @@ FIRMWARE_SETTING_KEYS = (
     "screen_night_start",
     "screen_night_end",
     "display_theme",
+    "display_wallpaper_interval_minutes",
+    "display_edge_glow",
     "led_brightness",
     "led_color",
     "led_listening_animation",
@@ -180,6 +184,17 @@ DISPLAY_THEMES = (
     },
 )
 DISPLAY_THEME_VALUES = {str(row["value"]) for row in DISPLAY_THEMES}
+DISPLAY_WALLPAPER_INTERVALS = (
+    {"value": 0, "label": "Fixed (first photo)"},
+    {"value": 60, "label": "Every hour"},
+    {"value": 360, "label": "Every 6 hours"},
+    {"value": 720, "label": "Every 12 hours"},
+    {"value": 1440, "label": "Once a day"},
+)
+DISPLAY_WALLPAPER_INTERVAL_VALUES = {
+    int(row["value"])
+    for row in DISPLAY_WALLPAPER_INTERVALS
+}
 GLOBAL_SATELLITE_CONTROL_KEYS = (
     "wake_engine",
     "wake_mww_enabled",
@@ -1232,11 +1247,13 @@ _SCREEN_SETTING_KEYS = {
 
 _SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
 
-_DISPLAY_THEME_SETTING_KEYS = {"display_theme"}
+_DISPLAY_THEME_SETTING_KEYS = {"display_theme", "display_wallpaper_interval_minutes"}
 _DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
     "display_theme_section",
     "display_theme_preview",
 }
+_DISPLAY_EDGE_SETTING_KEYS = {"display_edge_glow"}
+_DISPLAY_EDGE_FIELD_KEYS = _DISPLAY_EDGE_SETTING_KEYS
 
 _AUDIO_OUTPUT_SETTING_KEYS = {"audio_output_mode"}
 _AUDIO_OUTPUT_FIELD_KEYS = _AUDIO_OUTPUT_SETTING_KEYS | {"audio_output_section"}
@@ -1323,9 +1340,45 @@ def _board_supports_display_theme(board: Any = "") -> bool:
     }
 
 
+def _board_supports_display_photos(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {
+        "checkers",
+        "echo-show-5",
+        "echo-show-5-1st-gen",
+        "crown",
+        "echo-show-8",
+        "echo-show-8-1st-gen",
+        "rook",
+        "echo-spot",
+    } or compact in {
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "crown",
+        "echoshow8",
+        "echoshow81stgen",
+        "rook",
+        "echospot",
+    }
+
+
 def _display_theme_value(value: Any) -> str:
     token = _lower(value).replace("-", "_")
     return token if token in DISPLAY_THEME_VALUES else str(DEFAULTS["display_theme"])
+
+
+def _display_wallpaper_interval_value(value: Any) -> int:
+    minutes = _as_int(
+        value,
+        int(DEFAULTS["display_wallpaper_interval_minutes"]),
+        minimum=0,
+        maximum=1440,
+    )
+    if minutes not in DISPLAY_WALLPAPER_INTERVAL_VALUES:
+        return int(DEFAULTS["display_wallpaper_interval_minutes"])
+    return minutes
 
 
 def _board_supports_led_settings(board: Any = "") -> bool:
@@ -1359,6 +1412,26 @@ def _is_echo_ring_board(board: Any = "") -> bool:
         "echo2",
         "echo22017",
         "echo2ndgen",
+    }
+
+
+def _board_supports_music_led_animation(board: Any = "") -> bool:
+    if _is_echo_ring_board(board):
+        return True
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {
+        "voice-pe",
+        "satellite1",
+        "satellite-1",
+        "sat1",
+        "sat-1",
+        "respeaker-xvf3800",
+    } or compact in {
+        "voicepe",
+        "satellite1",
+        "sat1",
+        "respeakerxvf3800",
     }
 
 
@@ -1670,6 +1743,10 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
             str(DEFAULTS["screen_night_end"]),
         ),
         "display_theme": _display_theme_value(source.get("display_theme")),
+        "display_wallpaper_interval_minutes": _display_wallpaper_interval_value(
+            source.get("display_wallpaper_interval_minutes")
+        ),
+        "display_edge_glow": _as_bool(source.get("display_edge_glow"), bool(DEFAULTS["display_edge_glow"])),
         "led_brightness": _as_int(source.get("led_brightness"), int(DEFAULTS["led_brightness"]), minimum=0, maximum=100),
         "led_color": _led_color_value(source.get("led_color")),
         "led_listening_animation": _led_animation_value(source.get("led_listening_animation"), "led_listening_animation"),
@@ -1780,10 +1857,13 @@ def firmware_settings_snapshot(
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
             output.pop(key, None)
-    if not _is_echo_ring_board(board):
+    if not _board_supports_music_led_animation(board):
         output.pop("led_music_animation", None)
     if not _board_supports_display_theme(board):
         for key in _DISPLAY_THEME_SETTING_KEYS:
+            output.pop(key, None)
+    if not _board_supports_display_photos(board):
+        for key in _DISPLAY_EDGE_SETTING_KEYS:
             output.pop(key, None)
     if not _is_sat1_board(board):
         for key in _AUDIO_OUTPUT_SETTING_KEYS:
@@ -2426,9 +2506,9 @@ def settings_fields(
         },
         {
             "key": "display_theme_section",
-            "label": "Display Theme",
+            "label": "Display & Theme",
             "type": "section",
-            "description": "Choose the color personality used by this satellite's screen and voice-state glow.",
+            "description": "Choose this satellite's color personality, photo rotation, and voice-state edge effects. Checkers, Crown, and Rook uploads are managed below.",
         },
         {
             "key": "display_theme",
@@ -2440,7 +2520,24 @@ def settings_fields(
                 {"value": row["value"], "label": row["label"]}
                 for row in DISPLAY_THEMES
             ],
-            "description": "Changes the screen accents live. Reply glow follows the selected theme's primary color.",
+            "description": "Changes the screen accents live. Listening, thinking, working, and reply states follow the selected theme.",
+        },
+        {
+            "key": "display_wallpaper_interval_minutes",
+            "label": "Photo Rotation",
+            "type": "select",
+            "value": current["display_wallpaper_interval_minutes"],
+            "default": DEFAULTS["display_wallpaper_interval_minutes"],
+            "options": [dict(row) for row in DISPLAY_WALLPAPER_INTERVALS],
+            "description": "Choose how often this satellite advances to the next bundled or uploaded photo. A single uploaded photo always remains fixed.",
+        },
+        {
+            "key": "display_edge_glow",
+            "label": "Voice State Edge Glow",
+            "type": "checkbox",
+            "value": current["display_edge_glow"],
+            "default": DEFAULTS["display_edge_glow"],
+            "description": "Show the selected theme's state colors while the assistant listens, thinks, works, and replies. Reply glow reacts to the assistant's voice.",
         },
         {
             "key": "display_theme_preview",
@@ -2516,7 +2613,7 @@ def settings_fields(
             "value": current["led_music_animation"],
             "default": DEFAULTS["led_music_animation"],
             "options": [{"value": value, "label": label} for value, label in LED_MUSIC_ANIMATIONS],
-            "description": "Audio-reactive Echo ring animation for music playback, including Sendspin. Choose No Animation to keep the ring dark.",
+            "description": "Audio-reactive ring animation for music playback, including Sendspin. Track colors are used when the player provides them. Choose No Animation to keep the ring dark.",
         },
         {
             "key": "led_preview",
@@ -2597,7 +2694,7 @@ def settings_fields(
                     {"label": "Thinking", "animation_key": "led_thinking_animation"},
                     {"label": "Replying", "animation_key": "led_replying_animation"},
                 ]
-    if not (_selector_token(selector) and _is_echo_ring_board(board)):
+    if not (_selector_token(selector) and _board_supports_music_led_animation(board)):
         fields = [field for field in fields if _text(field.get("key")) != "led_music_animation"]
         for field in fields:
             if _text(field.get("key")) == "led_preview":
@@ -2610,6 +2707,8 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_theme(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
+    if not (_selector_token(selector) and _board_supports_display_photos(board)):
+        fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_EDGE_FIELD_KEYS]
     if not (_selector_token(selector) and _is_sat1_board(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
     if not (_selector_token(selector) and _supports_output_chain(capabilities)):

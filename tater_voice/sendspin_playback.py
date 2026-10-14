@@ -1,8 +1,8 @@
 """Small Sendspin v1 source for Tater replies, Music Core, and live input.
 
 The native satellites expose the WebSocket player implemented by
-``sendspin-cpp`` 0.8.x.  Tater only needs a deliberately small server surface
-for handshake, clock replies, timestamped PCM streaming, and clean stream
+``sendspin-cpp`` 0.9.x.  Tater only needs a deliberately small server surface
+for handshake, clock replies, timestamped audio streaming, and clean stream
 teardown. Finite replies and music plus open-ended AirPlay input share the
 same wire path without keeping the retired ``media.session`` protocol alive.
 """
@@ -10,6 +10,7 @@ same wire path without keeping the retired ``media.session`` protocol alive.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import io
@@ -56,6 +57,7 @@ SENDSPIN_VISUALIZER_PEAK_MESSAGE = 20
 SENDSPIN_CHUNK_FRAMES = 960  # 20 ms at 48 kHz
 SENDSPIN_START_LEAD_US = 1_000_000
 SENDSPIN_BUFFER_AHEAD_US = 800_000
+SENDSPIN_BUFFER_MARGIN_US = 500_000
 SENDSPIN_HANDSHAKE_TIMEOUT_S = 20.0
 SENDSPIN_END_MARGIN_S = 0.35
 SENDSPIN_LIVE_INPUT_RATE = 44_100
@@ -219,8 +221,87 @@ def _prepare_pcm_sync(
     )
 
 
-def _audio_packet(timestamp_us: int, pcm: bytes) -> bytes:
-    return bytes((SENDSPIN_AUDIO_MESSAGE,)) + struct.pack(">q", int(timestamp_us)) + bytes(pcm)
+def _audio_packet(
+    timestamp_us: int,
+    audio: bytes,
+    *,
+    send_ahead_us: Optional[int] = None,
+) -> bytes:
+    if send_ahead_us is None:
+        # Compatibility with clients from before Sendspin spec PR #177.
+        return (
+            bytes((SENDSPIN_AUDIO_MESSAGE,))
+            + struct.pack(">q", int(timestamp_us))
+            + bytes(audio)
+        )
+    saturated_ahead = max(0, min(int(send_ahead_us), 0xFFFFFFFF))
+    return struct.pack(
+        ">BqI",
+        SENDSPIN_AUDIO_MESSAGE,
+        int(timestamp_us),
+        saturated_ahead,
+    ) + bytes(audio)
+
+
+class _FlacStreamEncoder:
+    """Small low-complexity FLAC encoder for native Sendspin music streams."""
+
+    def __init__(self) -> None:
+        try:
+            import av
+        except Exception as exc:
+            raise SendspinPlaybackError(
+                "FLAC Sendspin playback requires the PyAV package."
+            ) from exc
+
+        self._av = av
+        self._encoder = av.AudioCodecContext.create("flac", "w")
+        self._encoder.sample_rate = SENDSPIN_SAMPLE_RATE
+        self._encoder.layout = "stereo"
+        self._encoder.format = "s16"
+        # Level 0 is still lossless, but FFmpeg selects 24 ms frames instead of
+        # 96 ms frames. The shorter decode units avoid audible hard resyncs on
+        # ESP32 players while remaining far smaller on the wire than raw PCM.
+        self._encoder.options = {"compression_level": "0"}
+        self._encoder.open()
+        self.frame_samples = int(self._encoder.frame_size or SENDSPIN_CHUNK_FRAMES)
+        self.frame_bytes = self.frame_samples * SENDSPIN_CHANNELS * (
+            SENDSPIN_BIT_DEPTH // 8
+        )
+        header = bytes(self._encoder.extradata or b"")
+        if not header:
+            raise SendspinPlaybackError("The FLAC encoder did not provide STREAMINFO.")
+        self.codec_header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header
+        self._buffer = bytearray()
+
+    def _encode_frame(self, pcm: bytes) -> list[bytes]:
+        frame = self._av.AudioFrame(
+            format="s16",
+            layout="stereo",
+            samples=self.frame_samples,
+        )
+        frame.sample_rate = SENDSPIN_SAMPLE_RATE
+        frame.planes[0].update(pcm)
+        return [bytes(packet) for packet in self._encoder.encode(frame) if packet]
+
+    def process(self, pcm: bytes) -> list[bytes]:
+        self._buffer.extend(pcm)
+        output: list[bytes] = []
+        while len(self._buffer) >= self.frame_bytes:
+            frame = bytes(memoryview(self._buffer)[: self.frame_bytes])
+            del self._buffer[: self.frame_bytes]
+            output.extend(self._encode_frame(frame))
+        return output
+
+    def flush(self) -> list[bytes]:
+        output: list[bytes] = []
+        if self._buffer:
+            self._buffer.extend(bytes(self.frame_bytes - len(self._buffer)))
+            frame = bytes(self._buffer)
+            self._buffer.clear()
+            output.extend(self._encode_frame(frame))
+        output.extend(bytes(packet) for packet in self._encoder.encode(None) if packet)
+        return output
 
 
 def _timed_binary_packet(message_id: int, timestamp_us: int, payload: bytes) -> bytes:
@@ -562,6 +643,7 @@ class _SendspinPeer:
         self.state_event = asyncio.Event()
         self.time_event = asyncio.Event()
         self.client_hello: Dict[str, Any] = {}
+        self.client_player_state: Dict[str, Any] = {}
         self.client_state = ""
         self.time_responses = 0
         self.error = ""
@@ -689,6 +771,9 @@ class _SendspinPeer:
             return
         if message_type == "client/state":
             self.client_state = _text(payload.get("state")).lower()
+            player_state = payload.get("player")
+            if isinstance(player_state, dict):
+                self.client_player_state = dict(player_state)
             if payload.get("available") is True:
                 self.client_state = "synchronized"
             if self.client_state == "synchronized":
@@ -755,6 +840,48 @@ class _SendspinPeer:
         return _text(role) in {
             _text(value) for value in list(self.client_hello.get("supported_roles") or [])
         }
+
+    def supports_audio_format(self, codec: str) -> bool:
+        support = self.client_hello.get("player@v1_support")
+        support = support if isinstance(support, dict) else {}
+        formats = support.get("supported_formats")
+        formats = formats if isinstance(formats, list) else []
+        return any(
+            isinstance(row, dict)
+            and _text(row.get("codec")).lower() == _text(codec).lower()
+            and _as_int(row.get("channels"), 0, 0, 255) == SENDSPIN_CHANNELS
+            and _as_int(row.get("sample_rate"), 0, 0, 384_000)
+            == SENDSPIN_SAMPLE_RATE
+            and _as_int(row.get("bit_depth"), 0, 0, 64) == SENDSPIN_BIT_DEPTH
+            for row in formats
+        )
+
+    def requested_buffer_ahead_us(self) -> int:
+        minimum_ms = _as_int(
+            self.client_player_state.get("min_buffer_ms"),
+            0,
+            0,
+            60_000,
+        )
+        required_lead_ms = _as_int(
+            self.client_player_state.get("required_lead_time_ms"),
+            0,
+            0,
+            60_000,
+        )
+        return max(
+            required_lead_ms * 1_000,
+            minimum_ms * 1_000 + SENDSPIN_BUFFER_MARGIN_US,
+        )
+
+    def uses_legacy_player_audio_wire(self) -> bool:
+        support = self.client_hello.get("player@v1_support")
+        support = support if isinstance(support, dict) else {}
+        return (
+            self.noise_transport is None
+            or "trust_level" in self.client_hello
+            or "supported_commands" in support
+        )
 
     def visualizer_config(self) -> Dict[str, Any]:
         if not self.supports_role("visualizer@v1"):
@@ -854,13 +981,20 @@ class _SendspinPeer:
             else:
                 await self.ws.send_str(payload)
 
-    async def send_audio(self, timestamp_us: int, pcm: bytes) -> None:
+    async def send_audio(self, timestamp_us: int, audio: bytes) -> None:
         if self.ws is None or self.ws.closed:
             raise SendspinPlaybackError(
                 f"{self.selector or self.host} Sendspin connection is closed."
             )
-        packet = _audio_packet(timestamp_us, pcm)
         async with self.send_lock:
+            send_ahead_us = None
+            if not self.uses_legacy_player_audio_wire():
+                send_ahead_us = timestamp_us - _monotonic_us()
+            packet = _audio_packet(
+                timestamp_us,
+                audio,
+                send_ahead_us=send_ahead_us,
+            )
             if self.noise_transport is not None:
                 await self.noise_transport.send_bytes(packet)
             else:
@@ -1325,6 +1459,9 @@ async def _stream_live_pcm(
         )
     timeout = aiohttp.ClientTimeout(total=None, connect=6.0, sock_connect=6.0, sock_read=None)
     peers: list[_SendspinPeer] = []
+    native_codec = "pcm"
+    flac_encoders: Dict[_SendspinPeer, _FlacStreamEncoder] = {}
+    flac_frames_sent: Dict[_SendspinPeer, int] = {}
     stream_started = False
     airplay_commit_task: Optional[asyncio.Task[Dict[str, Any]]] = None
     airplay_commit_result: Dict[str, Any] = {}
@@ -1337,6 +1474,20 @@ async def _stream_live_pcm(
                 )
                 await asyncio.gather(*(peer.wait_ready() for peer in peers))
                 await asyncio.sleep(0.1)
+                if all(peer.supports_audio_format("flac") for peer in peers):
+                    try:
+                        flac_encoders = {
+                            peer: _FlacStreamEncoder()
+                            for peer in peers
+                        }
+                    except SendspinPlaybackError as exc:
+                        logger.warning(
+                            "[sendspin] FLAC transport unavailable; using PCM: %s",
+                            exc,
+                        )
+                    else:
+                        native_codec = "flac"
+                        flac_frames_sent = {peer: 0 for peer in peers}
                 await _broadcast_json(
                     peers,
                     {
@@ -1356,12 +1507,16 @@ async def _stream_live_pcm(
                 for peer in peers:
                     stream_payload: Dict[str, Any] = {
                         "player": {
-                            "codec": "pcm",
+                            "codec": native_codec,
                             "sample_rate": SENDSPIN_SAMPLE_RATE,
                             "channels": SENDSPIN_CHANNELS,
                             "bit_depth": SENDSPIN_BIT_DEPTH,
                         }
                     }
+                    if native_codec == "flac":
+                        stream_payload["player"]["codec_header"] = base64.b64encode(
+                            flac_encoders[peer].codec_header
+                        ).decode("ascii")
                     if (
                         presentation.artwork
                         and "artwork@v1" in peer.active_roles
@@ -1429,6 +1584,15 @@ async def _stream_live_pcm(
             }
             frames_sent = 0
             source_finished = False
+
+            native_buffer_ahead_us = max(
+                [SENDSPIN_BUFFER_AHEAD_US]
+                + [peer.requested_buffer_ahead_us() for peer in peers]
+            )
+            buffer_ahead_us = max(
+                native_buffer_ahead_us,
+                2_000_000 if airplay_group_id else 0,
+            )
 
             async def next_chunk() -> Optional[bytes]:
                 nonlocal source_finished
@@ -1505,7 +1669,12 @@ async def _stream_live_pcm(
             monotonic_now_us = _monotonic_us()
             unix_now_us = time.time_ns() // 1_000
             requested_start_unix_ms = (
-                unix_now_us + max(250_000, int(start_lead_us))
+                unix_now_us
+                + max(
+                    250_000,
+                    int(start_lead_us),
+                    buffer_ahead_us + 250_000,
+                )
             ) // 1_000
             requested_start_unix_ms = max(
                 requested_start_unix_ms,
@@ -1554,12 +1723,6 @@ async def _stream_live_pcm(
                     name=f"sendspin-airplay-commit-{state.stream_id}",
                 )
 
-            buffer_ahead_us = (
-                max(SENDSPIN_BUFFER_AHEAD_US, 2_000_000)
-                if airplay_group_id
-                else SENDSPIN_BUFFER_AHEAD_US
-            )
-
             async def publish_chunk(chunk: bytes, *, airplay_already_written: bool) -> None:
                 nonlocal frames_sent
                 timestamp_us = start_us + round(
@@ -1581,17 +1744,26 @@ async def _stream_live_pcm(
                             or "An AirPlay bridge rejected Sendspin audio."
                         )
                 if peers:
-                    deliveries = await asyncio.gather(
-                        *(
-                            peer.send_audio(
-                                timestamp_us,
-                                _scale_pcm_s16le(
-                                    delay_lines[peer.selector].apply(chunk),
-                                    state.volume_percent.get(peer.selector, 100),
-                                ),
+                    async def send_native_chunk(peer: _SendspinPeer) -> None:
+                        routed_pcm = _scale_pcm_s16le(
+                            delay_lines[peer.selector].apply(chunk),
+                            state.volume_percent.get(peer.selector, 100),
+                        )
+                        encoder = flac_encoders.get(peer)
+                        if encoder is None:
+                            await peer.send_audio(timestamp_us, routed_pcm)
+                            return
+                        for packet in encoder.process(routed_pcm):
+                            packet_timestamp_us = start_us + round(
+                                flac_frames_sent[peer]
+                                * 1_000_000
+                                / SENDSPIN_SAMPLE_RATE
                             )
-                            for peer in peers
-                        ),
+                            await peer.send_audio(packet_timestamp_us, packet)
+                            flac_frames_sent[peer] += encoder.frame_samples
+
+                    deliveries = await asyncio.gather(
+                        *(send_native_chunk(peer) for peer in peers),
                         return_exceptions=True,
                     )
                     failed = [
@@ -1646,6 +1818,34 @@ async def _stream_live_pcm(
                     state.airplay_commit_result = dict(airplay_commit_result)
                     state.started_event.set()
 
+            if flac_encoders:
+                async def flush_native_audio(peer: _SendspinPeer) -> None:
+                    encoder = flac_encoders[peer]
+                    for packet in encoder.flush():
+                        packet_timestamp_us = start_us + round(
+                            flac_frames_sent[peer]
+                            * 1_000_000
+                            / SENDSPIN_SAMPLE_RATE
+                        )
+                        await peer.send_audio(packet_timestamp_us, packet)
+                        flac_frames_sent[peer] += encoder.frame_samples
+
+                flush_results = await asyncio.gather(
+                    *(flush_native_audio(peer) for peer in peers),
+                    return_exceptions=True,
+                )
+                failed_flushes = [
+                    (peer, result)
+                    for peer, result in zip(peers, flush_results)
+                    if isinstance(result, BaseException)
+                ]
+                if failed_flushes:
+                    peer, failure = failed_flushes[0]
+                    raise SendspinPlaybackError(
+                        f"{peer.selector or peer.host}: "
+                        f"{_text(failure) or failure.__class__.__name__}"
+                    ) from failure
+
             if airplay_commit_task is not None:
                 airplay_commit_result = await airplay_commit_task
                 if not airplay_commit_result.get("ok"):
@@ -1655,8 +1855,12 @@ async def _stream_live_pcm(
                     )
                 state.airplay_commit_result = dict(airplay_commit_result)
                 state.started_event.set()
+            audible_frames = max(
+                frames_sent,
+                max(flac_frames_sent.values(), default=0),
+            )
             audible_end_us = start_us + round(
-                frames_sent * 1_000_000 / SENDSPIN_SAMPLE_RATE
+                audible_frames * 1_000_000 / SENDSPIN_SAMPLE_RATE
             )
             remaining_s = (audible_end_us - _monotonic_us()) / 1_000_000.0
             if remaining_s > 0:
@@ -1675,6 +1879,7 @@ async def _stream_live_pcm(
                 "duration_s": round(frames_sent / float(SENDSPIN_SAMPLE_RATE), 3),
                 "sample_rate_hz": SENDSPIN_SAMPLE_RATE,
                 "channels": SENDSPIN_CHANNELS,
+                "native_codec": native_codec,
             }
             if airplay_group_id:
                 result.update(
@@ -2040,7 +2245,7 @@ async def start_media_url_stream(
     duration_seconds: float = 0.0,
     on_finished: Optional[Callable[[str, str], Any]] = None,
 ) -> Dict[str, Any]:
-    """Decode one finite media URL and publish it as a Sendspin PCM timeline."""
+    """Decode one finite media URL and publish one Sendspin audio timeline."""
     start_position = max(0.0, float(start_position_seconds or 0.0))
     requested_duration = max(0.0, float(duration_seconds or 0.0))
     reader = await asyncio.to_thread(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -60,7 +61,19 @@ def _echo_manifest() -> dict[str, object]:
                         "sha256": "d" * 64,
                         "size": 6144,
                     },
+                    "ota_bridge": {
+                        "name": "tater-echo-checkers-v0.4.0-ota-bridge.zip",
+                        "sha256": "0" * 64,
+                        "size": 5120,
+                    },
                 },
+                "ota_migrations": [{
+                    "id": "linux-app-components-v1",
+                    "required_capability": "ota_bundle_components_version",
+                    "minimum_capability_version": 1,
+                    "bridge_artifact": "ota_bridge",
+                    "final_artifact": "ota",
+                }],
             },
             "crown": {
                 "display_name": "Amazon Echo Show 8 1st Generation (2019)",
@@ -156,6 +169,130 @@ class EchoFirmwareOtaTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "artifact metadata is invalid"),
         ):
             firmware._load_native_firmware_manifest(template_key="biscuit")
+
+    def test_echo_manifest_adapts_reusable_staged_ota_migration(self) -> None:
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            manifest = firmware._load_native_firmware_manifest(template_key="checkers")
+
+        device = manifest["devices_by_key"]["checkers"]
+        self.assertEqual("tater_native_ota", device["artifacts"]["ota_bridge"]["flash_transport"])
+        self.assertEqual(device["ota_migrations"], [{
+            "id": "linux-app-components-v1",
+            "required_capability": "ota_bundle_components_version",
+            "minimum_capability_version": 1,
+            "bridge_artifact": "ota_bridge",
+            "final_artifact": "ota",
+        }])
+
+    def test_echo_manifest_rejects_migration_with_missing_bridge(self) -> None:
+        payload = _echo_manifest()
+        del payload["targets"]["checkers"]["artifacts"]["ota_bridge"]
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=payload),
+            self.assertRaisesRegex(RuntimeError, "OTA migration is invalid"),
+        ):
+            firmware._load_native_firmware_manifest(template_key="checkers")
+
+    def test_staged_migration_selects_bridge_then_resumable_final(self) -> None:
+        prebuilt = {
+            "version": "v0.4.0",
+            "device": _echo_manifest()["targets"]["checkers"],
+        }
+        bridge = firmware._required_ota_migration(prebuilt, {"ota": True}, {})
+        self.assertEqual("bridge", bridge["stage"])
+
+        current = firmware._required_ota_migration(
+            prebuilt,
+            {"ota_bundle_components_version": 1},
+            {
+                "migration_id": "linux-app-components-v1",
+                "version": "v0.4.0",
+                "stage": "final",
+            },
+        )
+        self.assertEqual("final", current["stage"])
+        self.assertEqual(
+            {},
+            firmware._required_ota_migration(
+                prebuilt, {"ota_bundle_components_version": 1}, {}
+            ),
+        )
+
+    def test_staged_session_precaches_both_artifacts_and_starts_with_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            bridge_path = root / "bridge.tar.gz"
+            final_path = root / "final.tar.gz"
+            bridge_path.write_bytes(b"bridge")
+            final_path.write_bytes(b"final")
+            context = {
+                "selector": "native:show-staged-test",
+                "host": "10.4.20.26",
+                "display_base_url": "http://10.4.20.10:8501",
+                "display_name": "Kitchen Show",
+                "template_key": "checkers",
+                "template_label": "Echo Show 5",
+                "firmware_version": "v0.4.0",
+                "native_firmware": True,
+                "ota_supported": True,
+                "prebuilt_firmware": {
+                    "native": True,
+                    "artifacts": {
+                        "ota_bridge": {"path": "bridge.tar.gz"},
+                        "ota": {"path": "final.tar.gz"},
+                    },
+                },
+                "ota_migration": {
+                    "id": "linux-app-components-v1",
+                    "stage": "bridge",
+                    "bridge_artifact": "ota_bridge",
+                    "final_artifact": "ota",
+                    "required_capability": "ota_bundle_components_version",
+                    "minimum_capability_version": 1,
+                },
+            }
+
+            def download(_context, kind):
+                path = bridge_path if kind == "ota_bridge" else final_path
+                return {"path": path, "cached": False}
+
+            def serve(_context, path):
+                kind = "bridge" if path == bridge_path else "final"
+                return {
+                    "artifact_id": kind,
+                    "ota_url": f"http://tater.test/{kind}/firmware.bin",
+                    "binary_name": "firmware.bin",
+                    "binary_size": path.stat().st_size,
+                    "sha256": kind[0] * 64,
+                    "source_binary": str(path),
+                }
+
+            worker = mock.Mock()
+            with (
+                mock.patch.object(firmware, "_download_prebuilt_firmware_binary", side_effect=download) as downloads,
+                mock.patch.object(firmware, "_create_native_ota_artifact", side_effect=serve),
+                mock.patch.object(firmware.threading, "Thread", return_value=worker),
+                mock.patch.object(firmware, "_save_ota_migration") as save_migration,
+            ):
+                result = firmware._start_flash_session(context)
+            try:
+                self.assertEqual("bridge", result["ota_stage"])
+                self.assertEqual(1, result["ota_stage_index"])
+                self.assertEqual(2, result["ota_stage_count"])
+                self.assertEqual(
+                    [mock.call(context, "ota_bridge"), mock.call(context, "ota")],
+                    downloads.call_args_list,
+                )
+                session = firmware._FIRMWARE_SESSIONS[result["session_id"]]
+                self.assertEqual("http://tater.test/bridge/firmware.bin", session["ota_url"])
+                self.assertEqual(
+                    "http://tater.test/final/firmware.bin",
+                    session["ota_final_artifact"]["ota_url"],
+                )
+                save_migration.assert_called_once()
+                worker.start.assert_called_once_with()
+            finally:
+                firmware._FIRMWARE_SESSIONS.pop(result["session_id"], None)
 
     def test_biscuit_identity_selects_echo_firmware_and_art(self) -> None:
         row = {

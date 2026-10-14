@@ -400,6 +400,53 @@ async def native_satellite_status(x_tater_token: Optional[str] = Header(None)) -
     return await native_satellite.status()
 
 
+@router.get("/api/tater/satellite/v1/sat-chat")
+async def native_sat_chat_status(
+    viewer: str = "",
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import sat_chat
+
+    return await sat_chat.participants(viewer=viewer)
+
+
+@router.post("/api/tater/satellite/v1/sat-chat")
+async def native_sat_chat_action(
+    payload: Dict[str, Any],
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_configured_api_auth(x_tater_token)
+    from .. import sat_chat
+
+    body = payload if isinstance(payload, dict) else {}
+    action = vp._text(body.get("action")).lower()
+    try:
+        if action == "start":
+            return await sat_chat.start(
+                vp._text(body.get("caller")),
+                vp._text(body.get("target")),
+                mode=vp._text(body.get("mode")) or "audio",
+                caller_name=vp._text(body.get("caller_name")),
+            )
+        if action == "end":
+            return await sat_chat.end(
+                call_id=vp._text(body.get("call_id")),
+                actor=vp._text(body.get("actor")),
+            )
+        raise ValueError("Sat Chat action must be start or end.")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/api/tater/satellite/v1/presence")
 @router.get("/api/tater/satellite/v1/ble", include_in_schema=False)
 async def native_satellite_ble(
@@ -626,6 +673,24 @@ async def native_satellite_settings(selector: str = "", x_tater_token: Optional[
     from .. import native_satellite
 
     return await native_satellite.live_settings(selector=selector)
+
+
+@router.get("/api/tater/satellite/v1/display-photo/{photo_id}")
+async def native_satellite_display_photo(photo_id: str) -> FileResponse:
+    # The opaque, random URL is sent directly to the paired satellite. It must
+    # remain readable without browser-session auth because the screen process
+    # fetches it over the LAN after receiving an authenticated settings frame.
+    from .. import display_photos
+
+    try:
+        path = display_photos.resolve_photo(photo_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Display photo not found") from exc
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @router.post("/api/tater/satellite/v1/settings")

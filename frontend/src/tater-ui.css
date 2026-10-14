@@ -2230,6 +2230,17 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tvoice-settings-sections .tm-field-sections > .tm-form-card > header p { max-width: 760px; font-size: .61rem; }
 .tvoice-settings-sections .tm-field { padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--tv-border) 82%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--tv-surface) 74%, transparent); }
 .tvoice-settings-sections .tm-toggle-field { min-height: 58px; align-items: center; }
+.tvoice-display-photo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.tvoice-display-photo-grid article { position: relative; overflow: hidden; min-height: 104px; border: 1px solid var(--tv-border); border-radius: 11px; background: var(--tv-surface-strong); }
+.tvoice-display-photo-grid img { display: block; width: 100%; height: 104px; object-fit: cover; }
+.tvoice-display-photo-grid button { position: absolute; right: 7px; bottom: 7px; min-height: 25px; padding: 4px 8px; border: 1px solid rgb(255 255 255 / 25%); border-radius: 8px; color: #fff; background: rgb(10 12 16 / 78%); font: inherit; font-size: .56rem; font-weight: 780; cursor: pointer; backdrop-filter: blur(8px); }
+.tvoice-display-photo-grid button:hover { background: rgb(191 53 53 / 88%); }
+.tvoice-display-photo-default { display: grid; gap: 4px; padding: 14px; border: 1px dashed color-mix(in srgb, var(--tv-accent) 34%, var(--tv-border)); border-radius: 11px; background: var(--tv-accent-soft); }
+.tvoice-display-photo-default strong { font-size: .7rem; }
+.tvoice-display-photo-default span, .tvoice-display-photos > small { color: var(--tv-muted); font-size: .59rem; line-height: 1.45; }
+.tvoice-display-photo-upload { position: relative; width: fit-content; overflow: hidden; cursor: pointer; }
+.tvoice-display-photo-upload.disabled { cursor: not-allowed; opacity: .55; }
+.tvoice-display-photo-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .tm-equalizer { gap: 10px; }
 .tm-equalizer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .tm-equalizer-head .tm-field-label { display: inline-flex; align-items: center; gap: 7px; }
@@ -3055,6 +3066,7 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
   .tvoice-settings-overview { align-items: stretch; flex-direction: column; }
   .tvoice-settings-overview > .tv-live-pill { align-self: flex-start; }
   .tvoice-settings-overview dl { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tvoice-display-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tvoice-settings-modal > footer { align-items: stretch; flex-direction: column; margin-inline: -12px; margin-bottom: -14px; padding: 11px 12px 14px; }
   .tvoice-settings-modal > footer .tv-button { width: 100%; }
   .runtime-summary.runtime-summary-vue-host { width: 100%; max-width: 100%; }

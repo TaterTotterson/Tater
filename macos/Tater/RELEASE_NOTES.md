@@ -1,58 +1,66 @@
-# Tater v1.5.4
+# Tater v1.6.0
 
-Tater v1.5.4 adds complete Echo Show 8 (1st Gen) management, gives every
-satellite one shared wake profile, and improves native screen context and voice
-turn reliability.
+Tater v1.6.0 introduces Sat Chat across Echo and Little Spud devices, a new
+photo-first Echo display experience, integration-backed climate and camera
+controls, and a safer staged updater for the expanded Echo firmware.
 
 ## What's New
 
-### Echo Show 8 (1st Gen)
+### Sat Chat
 
-- Recognizes Crown hardware as the Echo Show 8 1st Generation throughout the
-  satellite list, settings, display profiles, artwork, and firmware panel.
-- Offers Crown only its matching checksum-verified factory and OTA artifacts;
-  capability and base-OS checks prevent an incompatible update from being
-  offered or installed.
-- Includes Crown in display themes, weather sensor selection, automatic audio
-  settings, and the Echo output-chain controls.
+- Adds instant, no-ringing Sat Chat between connected satellites. Echo Show 5,
+  Echo Show 8, and Echo Spot devices can start and end audio/video chats, while
+  Echo Dot 2 and Echo 2 devices join as audio-only participants.
+- Adds the same Sat Chat directory and audio/video calling support to Little
+  Spud on iPhone and Android, including capability-aware participant status.
+- Prioritizes call audio and control messages while retaining only the newest
+  pending video frame. Receiver-specific video profiles keep calls responsive
+  across phones and the different Echo screen classes.
 
-### Native Screen Context
+### New Echo Screen Experience
 
-- Retains the newest matching Awareness event after its popup expires and sends
-  it again when a capable screen reconnects, allowing Crown's Last Event card
-  to remain useful without keeping a notification over the rest of the UI.
-- Adds daylight information to the compact weather feed, preferring provider
-  day/night state or sunrise and sunset data and using local time as a safe
-  fallback. Native screens can therefore show night artwork instead of a bright
-  sun after dark.
-- Keeps each screen's selected indoor and outdoor sensor profile intact while
-  adding Crown as a first-class target.
+- Adds photo-first home screens for Checkers, Crown, and Rook with seven
+  bundled landscapes, static day/night weather art, selected environmental
+  readings, assistant status, and theme-aware listening, thinking, tool, and
+  reply glows.
+- Adds per-satellite photo uploads and simple rotation presets. Once a user
+  uploads a photo, that satellite rotates only the user's collection; a single
+  uploaded photo remains fixed. Rook automatically receives a centered round
+  crop while Checkers and Crown use their native wide layouts.
+- Adds a touch-first action menu for Sat Chat, Climate, and Cameras while
+  preserving hold-anywhere intercom broadcasts. Full-screen Awareness and
+  music views provide larger imagery, clearer text, reliable progress, and
+  tap-to-dismiss behavior.
 
-### One Wake Profile
+### Climate and Cameras
 
-- Replaces separate ESP and Echo wake-model forms with one wake phrase for the
-  whole satellite fleet. microWakeWord runs everywhere; Dual Wake adds the
-  matching openWakeWord confirmation on capable Echo firmware.
-- Projects the microWakeWord half of a validated custom dual bundle to
-  MWW-only satellites while sending both models to compatible Echos, so rooms
-  cannot silently listen for different phrases.
-- Migrates existing custom selections without discarding them and makes wake
-  verification use the same shared profile that produced the device wake.
+- Discovers thermostats and room-temperature sensors from Tater integrations
+  instead of requiring a particular core. Users can select six room readings
+  for Checkers or Crown and three for Rook, then adjust the thermostat target
+  and supported heat, cool, auto, and off modes directly from the satellite.
+- Adds an integration-neutral camera and doorbell directory with live views,
+  stable private camera identifiers, and optional push-to-talk audio on
+  integrations that support it.
 
-### Voice Reliability
+### Echo Updates and Playback
 
-- Stops discarding short but legitimate command transcripts based on a
-  completeness heuristic. Low-signal filtering remains, while valid clipped or
-  concise requests now continue through normal speaker matching and response
-  handling.
+- Adds resumable two-stage Echo OTA migrations for releases that introduce new
+  application-slot components. Tater persists the migration through reconnects
+  or restarts, continues as soon as the bridge firmware reports ready, verifies
+  the final version, and reports rollback, timeout, or device errors clearly.
+- Streams firmware downloads in bounded chunks and removes partial artifacts
+  after failures, reducing memory use and leaving each device ready to retry.
+- Updates Sendspin playback for the current protocol, shared timelines, client
+  buffer requests, longer AirPlay lead time, and optional low-complexity FLAC
+  transport for compatible players.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.5.4 through
+- macOS users already running v1.0.1 or later can install v1.6.0 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.5.4` or `latest` for the CPU image and
-  `v1.5.4-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.6.0` or `latest` for the CPU image and
+  `v1.6.0-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

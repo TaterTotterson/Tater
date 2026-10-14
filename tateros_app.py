@@ -16379,6 +16379,133 @@ def spud_link_forget_pairing(request: Request) -> Dict[str, Any]:
     }
 
 
+def _require_little_spud_node(request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Sat Chat requires a paired Little Spud client.")
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return node
+
+
+def _little_spud_sat_chat_id(node: Dict[str, Any]) -> str:
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        raise HTTPException(status_code=409, detail="The Little Spud link has no device identity.")
+    return f"spudlink:{node_id}"
+
+
+@app.get("/api/spudlink/v1/sat-chat")
+def spud_link_sat_chat_status(request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_node(request)
+    from tater_voice import sat_chat
+
+    try:
+        return native_satellite_module.run_on_runtime_loop(
+            sat_chat.participants(viewer=_little_spud_sat_chat_id(node))
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc) or "Sat Chat is unavailable.") from exc
+
+
+@app.post("/api/spudlink/v1/sat-chat")
+def spud_link_sat_chat_action(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_node(request)
+    from tater_voice import sat_chat
+
+    body = payload if isinstance(payload, dict) else {}
+    action = str(body.get("action") or "").strip().lower()
+    actor = _little_spud_sat_chat_id(node)
+    try:
+        if action == "start":
+            awaitable = sat_chat.start(
+                actor,
+                str(body.get("target") or "").strip(),
+                mode=str(body.get("mode") or "audio").strip(),
+                caller_name=str(node.get("name") or node.get("node_name") or "Little Spud").strip(),
+            )
+        elif action == "end":
+            awaitable = sat_chat.end(
+                call_id=str(body.get("call_id") or "").strip(),
+                actor=actor,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Little Spud Sat Chat action must be start or end.")
+        return native_satellite_module.run_on_runtime_loop(awaitable)
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.websocket("/api/spudlink/v1/sat-chat/media")
+async def spud_link_sat_chat_media(websocket: WebSocket) -> None:
+    await websocket.accept()
+    from tater_voice import sat_chat
+
+    try:
+        _require_spud_link_server_enabled()
+        node = _find_spud_link_node_by_token(_extract_spud_link_token(websocket))  # type: ignore[arg-type]
+        role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+        if role != SPUD_LINK_MODE_LITTLE_SPUD:
+            raise HTTPException(status_code=403, detail="Sat Chat media requires a paired Little Spud client.")
+        endpoint = _little_spud_sat_chat_id(node)
+        send_lock = asyncio.Lock()
+
+        async def send_audio(data: bytes) -> None:
+            async with send_lock:
+                await websocket.send_bytes(data)
+
+        async def send_event(payload: Dict[str, Any]) -> None:
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        try:
+            input_rate = int(str(websocket.query_params.get("rate") or "16000"))
+        except Exception:
+            input_rate = 16000
+        registration = await sat_chat.register_external_media(
+            endpoint,
+            send_audio,
+            event_sender=send_event,
+            input_rate=input_rate,
+        )
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        await websocket.send_json({"ok": False, "type": "error", "error": str(detail or "Sat Chat media unavailable.")})
+        await websocket.close(code=1008)
+        return
+
+    await websocket.send_json({
+        "ok": True,
+        "type": "sat_chat.started",
+        "call": registration.get("call"),
+        "audio_format": {"rate": 16000, "width": 2, "channels": 1},
+        "video_format": {"encoding": "jpeg", "prefix": "TSCV1", "max_bytes": sat_chat.MAX_VIDEO_FRAME_BYTES},
+    })
+    try:
+        while True:
+            message = await websocket.receive()
+            if str(message.get("type") or "") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data:
+                await sat_chat.route_audio(endpoint, bytes(data))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        owned_media = await sat_chat.unregister_external_media(endpoint, send_audio)
+        if owned_media:
+            await sat_chat.end(actor=endpoint, reason="media_disconnected", force=True)
+
+
 @app.get("/api/spudlink/v1/home")
 def spud_link_home(request: Request, refresh: bool = False) -> Dict[str, Any]:
     _settings, node = _require_spud_link_node_request(request)

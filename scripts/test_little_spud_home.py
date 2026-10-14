@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from little_spud_home import (  # noqa: E402
     build_home_snapshot,
+    build_satellite_climate_snapshot,
     home_action_payload,
     resolve_home_action_targets,
     resolve_home_camera_target,
@@ -89,6 +90,41 @@ def sample_registry():
 
 
 class LittleSpudHomeTests(unittest.TestCase):
+    def test_satellite_climate_uses_selected_room_sensors_in_order(self):
+        snapshot = build_satellite_climate_snapshot(
+            sample_registry(),
+            room_sensor_refs=[
+                "sensor_provider::sensor:climate",
+                "ecobee_homekit::thermostat:office",
+            ],
+            preferred_room="Office",
+            maximum_rooms=3,
+        )
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["room_name"], "Office")
+        self.assertEqual(snapshot["current_temperature"], 71)
+        self.assertEqual(snapshot["target_temperature"], 69)
+        self.assertEqual(snapshot["current_humidity"], 41)
+        self.assertEqual(snapshot["hvac_mode"], "heat")
+        self.assertEqual(
+            [row["room_name"] for row in snapshot["room_temperatures"]],
+            ["Office", "Office"],
+        )
+        self.assertEqual(
+            [row["temperature"] for row in snapshot["room_temperatures"]],
+            [72.5, 71],
+        )
+
+    def test_satellite_climate_is_explicitly_unavailable_without_thermostat(self):
+        registry = sample_registry()
+        registry["devices"] = [
+            row for row in registry["devices"] if "climate" not in row.get("category_ids", [])
+        ]
+        snapshot = build_satellite_climate_snapshot(registry)
+        self.assertFalse(snapshot["available"])
+        self.assertFalse(snapshot["can_set_temperature"])
+        self.assertFalse(snapshot["can_set_mode"])
+
     def test_snapshot_groups_rooms_without_exposing_devices(self):
         snapshot = build_home_snapshot(sample_registry())
         self.assertTrue(snapshot["ok"])

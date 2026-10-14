@@ -47,6 +47,7 @@ const pairingProgress = computed(() => pairingDuration.value > 0 ? Math.max(0, M
 const pairingStatusLabel = computed(() => pairingState.value === "paired" ? "Satellite connected" : pairingState.value === "expired" ? "Code expired" : "Waiting for satellite");
 
 function id(item: JsonRow) { return String(item.id || ""); }
+function displayPhotos(item: JsonRow): JsonRow[] { return Array.isArray(item.display_photos) ? item.display_photos as JsonRow[] : []; }
 function section(label: string, fields: JsonRow[]): JsonRow[] { return [{ label, fields }]; }
 function hasSafeRunAction(item: JsonRow): boolean {
   const action = String(item.run_action || "");
@@ -177,6 +178,54 @@ async function saveAndCloseSettings(item: JsonRow) {
   closeSettings();
 }
 
+function fileBase64(file: File): Promise<string> {
+  return file.arrayBuffer().then((buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.length, offset + chunkSize)));
+    }
+    return window.btoa(binary);
+  });
+}
+
+async function uploadDisplayPhotos(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const item = settingsItem.value;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!item || !files.length || busy.value) return;
+  const remaining = Math.max(0, Number(item.display_photo_limit || 12) - displayPhotos(item).length);
+  if (remaining <= 0) {
+    error.value = `This satellite already has ${item.display_photo_limit || 12} display photos.`;
+    return;
+  }
+  let uploaded = 0;
+  for (const file of files.slice(0, remaining)) {
+    const dataBase64 = await fileBase64(file);
+    const result = await act(
+      String(item.display_photo_upload_action || "voice_native_display_photo_upload"),
+      { id: id(item), selector: id(item), filename: file.name, content_type: file.type, data_base64: dataBase64 },
+      `${id(item)}:photo-upload`,
+      "Display photo uploaded.",
+      false,
+    );
+    if (!result) break;
+    uploaded += 1;
+  }
+  if (uploaded) emit("refresh");
+}
+
+async function removeDisplayPhoto(item: JsonRow, photo: JsonRow) {
+  await act(
+    String(item.display_photo_remove_action || "voice_native_display_photo_remove"),
+    { id: id(item), selector: id(item), photo_id: String(photo.id || "") },
+    `${id(item)}:photo-remove`,
+    "Display photo removed.",
+  );
+}
+
 async function saveVolume(item: JsonRow) {
   const token = id(item);
   const previous = Number((item.volume_control as JsonRow | undefined)?.value ?? 80);
@@ -290,7 +339,7 @@ onBeforeUnmount(stopPairing);
 
       <div class="tm-inline-actions tvoice-item-actions">
         <button v-if="item.save_action" class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="saveSatellite(item)">{{ busy === `${id(item)}:save` ? "Saving…" : item.save_label || "Save" }}</button>
-        <button v-if="(Array.isArray(item.popup_fields) && item.popup_fields.length) || profileFor(item)" class="tv-button tvoice-settings-trigger" type="button" :disabled="Boolean(busy)" @click="openSettings(item)">{{ item.settings_label || "Satellite Settings" }}<span v-if="settingsDirty[id(item)] || displayDirty[id(item)]" class="tvoice-unsaved-dot" aria-label="Unsaved changes" /></button>
+        <button v-if="(Array.isArray(item.popup_fields) && item.popup_fields.length) || profileFor(item) || item.display_photos_supported" class="tv-button tvoice-settings-trigger" type="button" :disabled="Boolean(busy)" @click="openSettings(item)">{{ item.settings_label || "Satellite Settings" }}<span v-if="settingsDirty[id(item)] || displayDirty[id(item)]" class="tvoice-unsaved-dot" aria-label="Unsaved changes" /></button>
         <button v-if="item.identify_action" class="tv-button" type="button" :disabled="Boolean(busy) || !item.connected" @click="identify(item)">{{ item.identify_label || "Identify" }}</button>
         <button v-if="hasSafeRunAction(item)" class="tv-button" type="button" :disabled="Boolean(busy)" @click="run(item)">{{ busy === `${id(item)}:run` ? "Working…" : item.run_label || "Run" }}</button>
         <button v-if="item.remove_action" class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="remove(item)">{{ item.remove_label || "Forget" }}</button>
@@ -305,7 +354,7 @@ onBeforeUnmount(stopPairing);
         <header class="tvoice-settings-modal-head">
           <div class="tvoice-settings-device">
             <img v-if="settingsItem.hero_image_src" :src="String(settingsItem.hero_image_src)" :alt="String(settingsItem.hero_image_alt || settingsItem.title)" />
-            <div><span class="tv-eyebrow">Tater satellite controls</span><h2 id="tvoice-settings-title">{{ settingsItem.title || settingsItem.settings_title || "Satellite Settings" }}</h2><p>Fine-tune device behavior, lighting, and display sensors in one place.</p></div>
+            <div><span class="tv-eyebrow">Tater satellite controls</span><h2 id="tvoice-settings-title">{{ settingsItem.title || settingsItem.settings_title || "Satellite Settings" }}</h2><p>Fine-tune device behavior, lighting, weather, and room-temperature displays in one place.</p></div>
           </div>
           <button class="tv-button tvoice-settings-close" type="button" @click="closeSettings">Close</button>
         </header>
@@ -315,7 +364,8 @@ onBeforeUnmount(stopPairing);
         </div>
         <div class="tvoice-settings-sections">
           <section v-if="settingsGroups.length" class="tvoice-settings-block"><header><span class="tvoice-section-mark">SAT</span><div><h3>Satellite behavior</h3><p>Each group applies only to this device. LED previews update as you choose an animation.</p></div></header><ModelFields class="tvoice-settings-groups" :sections="settingsGroups" :values="settingsDrafts[id(settingsItem)] || {}" :disabled="Boolean(busy)" @change="updateActiveSettings" /></section>
-          <section v-if="settingsDisplayProfile"><header><span class="tvoice-section-mark">DSP</span><div><h3>Display sensors</h3><p>{{ settingsDisplayProfile.detail || "Choose which Environment Core readings this display shows." }}</p></div></header><ModelFields :sections="section('Sensor slots', Array.isArray(settingsDisplayProfile.fields) ? settingsDisplayProfile.fields : [])" :values="displayDrafts[id(settingsItem)] || {}" :disabled="Boolean(busy) || !displayReady" @change="updateActiveDisplay" /><div v-if="!displayReady" class="tv-notice warning">{{ (payload.display_sensors as JsonRow | undefined)?.message || "Environment Core readings are not available yet." }}</div></section>
+          <section v-if="settingsItem.display_photos_supported" class="tvoice-settings-block tvoice-display-photos"><header><span class="tvoice-section-mark">PIC</span><div><h3>Home screen photos</h3><p>With no uploads, Tater rotates seven built-in landscapes using the Photo Rotation setting above. After you add a photo, this satellite rotates only your photos; a single photo stays fixed.</p></div></header><div v-if="displayPhotos(settingsItem).length" class="tvoice-display-photo-grid"><article v-for="photo in displayPhotos(settingsItem)" :key="String(photo.id)"><img :src="String(photo.url)" alt="Uploaded satellite background" /><button type="button" :disabled="Boolean(busy)" aria-label="Remove display photo" @click="removeDisplayPhoto(settingsItem, photo)">Remove</button></article></div><div v-else class="tvoice-display-photo-default"><strong>Seven Tater scenery photos are active</strong><span>Mountains, forest, ocean, desert, meadow, waterfall, and night sky follow this satellite's rotation schedule.</span></div><label class="tv-button tvoice-display-photo-upload" :class="{ disabled: Boolean(busy) || displayPhotos(settingsItem).length >= Number(settingsItem.display_photo_limit || 12) }"><input type="file" multiple accept="image/jpeg,image/png,image/webp" :disabled="Boolean(busy) || displayPhotos(settingsItem).length >= Number(settingsItem.display_photo_limit || 12)" @change="uploadDisplayPhotos" />{{ busy === `${id(settingsItem)}:photo-upload` ? "Uploading…" : "Add photos" }}</label><small>{{ displayPhotos(settingsItem).length }} / {{ settingsItem.display_photo_limit || 12 }} custom photos</small></section>
+          <section v-if="settingsDisplayProfile"><header><span class="tvoice-section-mark">DSP</span><div><h3>Weather &amp; room temperatures</h3><p>{{ settingsDisplayProfile.detail || "Choose the weather readings and integrated room-temperature sensors shown by this satellite." }}</p></div></header><ModelFields :sections="section('Display slots', Array.isArray(settingsDisplayProfile.fields) ? settingsDisplayProfile.fields : [])" :values="displayDrafts[id(settingsItem)] || {}" :disabled="Boolean(busy) || !displayReady" @change="updateActiveDisplay" /><div v-if="!displayReady" class="tv-notice warning">{{ (payload.display_sensors as JsonRow | undefined)?.message || "No compatible display sensors are available yet." }}</div></section>
         </div>
         <footer class="tvoice-settings-footer"><span class="tvoice-settings-sync" :class="{ dirty: settingsDirty[id(settingsItem)] || displayDirty[id(settingsItem)] }"><i />{{ settingsDirty[id(settingsItem)] || displayDirty[id(settingsItem)] ? "Unsaved changes" : "Satellite settings are synchronized" }}</span><button class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="saveAndCloseSettings(settingsItem)">{{ busy ? "Saving…" : "Save Satellite Settings" }}</button></footer>
       </section>

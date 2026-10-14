@@ -497,7 +497,7 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("width: clamp(142px, 16vw, 210px)", styles)
         self.assertIn("filter: drop-shadow", styles)
         self.assertIn("settingsDisplayProfile", satellites)
-        self.assertIn("Display sensors", satellites)
+        self.assertIn("Weather &amp; room temperatures", satellites)
         self.assertIn("groupSettingsFields", satellites)
         self.assertIn("tvoice-settings-overview", satellites)
         self.assertIn("hasSafeRunAction", satellites)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,7 @@ from fastapi import HTTPException
 
 from . import runtime as esphome_runtime
 from . import airplay_input
+from . import display_photos
 from . import firmware as esphome_firmware
 from . import native_live_settings
 from . import native_satellite
@@ -935,11 +937,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         )
     board_token = esphome_runtime.lower(board).replace("_", "-").replace(" ", "-")
     compact_board = board_token.replace("-", "")
-    is_biscuit = board_token in {"biscuit", "echo-dot-2", "echo-dot-2nd-gen"} or compact_board in {
-        "biscuit",
-        "echodot2",
-        "echodot2ndgen",
-    }
+    has_music_led_animation = native_live_settings._board_supports_music_led_animation(board)
     settings_rows = [
         _native_detail_row("native_wake_word", "Wake Word", live_settings.get("wake_profile_name") or live_settings.get("wake_word")),
         _native_detail_row("native_wake_tuning_label", "Wake Tuning", wake_tuning_label),
@@ -960,7 +958,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
                     esphome_runtime.text(live_settings.get("led_tool_call_animation")) or "ping_pong",
                     esphome_runtime.text(live_settings.get("led_replying_animation")) or "audio_glow",
                 ]
-                + ([esphome_runtime.text(live_settings.get("led_music_animation")) or "audio_glow"] if is_biscuit else [])
+                + ([esphome_runtime.text(live_settings.get("led_music_animation")) or "music_bars"] if has_music_led_animation else [])
             ),
         ),
         _native_detail_row("native_continued_chat", "Continued Chat", "On" if bool(live_settings.get("continued_chat", True)) else "Off"),
@@ -1771,6 +1769,57 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             **removed,
             "push": push,
             "message": "Stereo pair deleted." if removed.get("removed") else "Stereo pair was already removed.",
+        }
+
+    if action_name == "voice_native_display_photo_upload":
+        selector = esphome_runtime.payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        encoded = esphome_runtime.text(body.get("data_base64"))
+        if "," in encoded and encoded.lower().startswith("data:image/"):
+            encoded = encoded.split(",", 1)[1]
+        try:
+            contents = base64.b64decode(encoded, validate=True)
+        except Exception as exc:
+            raise ValueError("Tater could not read that uploaded photo.") from exc
+        photo = display_photos.save_photo(
+            selector,
+            contents,
+            filename=esphome_runtime.text(body.get("filename")),
+            content_type=esphome_runtime.text(body.get("content_type")),
+        )
+        push = native_satellite.run_on_runtime_loop(
+            native_satellite.push_live_settings(selector),
+            timeout=5.0,
+        )
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "photo": photo,
+            "photos": display_photos.list_photos(selector),
+            "push": push,
+            "message": "Display photo uploaded. The satellite now rotates only your uploaded photos.",
+        }
+
+    if action_name == "voice_native_display_photo_remove":
+        selector = esphome_runtime.payload_selector(body)
+        if not selector:
+            raise ValueError("selector is required")
+        removed = display_photos.remove_photo(selector, esphome_runtime.text(body.get("photo_id")))
+        photos = display_photos.list_photos(selector)
+        push = native_satellite.run_on_runtime_loop(
+            native_satellite.push_live_settings(selector),
+            timeout=5.0,
+        )
+        return {
+            "ok": True,
+            "action": action_name,
+            "selector": selector,
+            "removed": removed,
+            "photos": photos,
+            "push": push,
+            "message": "Display photo removed." if photos else "Display photo removed. The seven built-in scenes are active again.",
         }
 
     if action_name == "voice_native_satellite_settings_save":

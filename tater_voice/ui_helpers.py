@@ -4,6 +4,7 @@ import contextlib
 import time
 from typing import Any, Dict, List
 
+from . import display_photos
 from . import native_live_settings
 from . import reply_playback
 from . import runtime as esphome_runtime
@@ -784,6 +785,10 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "description": "Optional. Leave this on This device speaker to keep normal sat1 and VoicePE reply playback. Use Silent / display only when a device should act as a mic and screen.",
             },
         ]
+        display_photos_supported = bool(
+            native_device and native_live_settings._board_supports_display_photos(board)
+        )
+        display_photo_rows = display_photos.list_photos(selector) if display_photos_supported else []
 
         items.append(
             {
@@ -815,6 +820,11 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "info_label": info_label,
                 "save_action": "voice_satellite_save",
                 "settings_save_action": settings_save_action,
+                "display_photos_supported": display_photos_supported,
+                "display_photos": display_photo_rows,
+                "display_photo_upload_action": "voice_native_display_photo_upload" if display_photos_supported else "",
+                "display_photo_remove_action": "voice_native_display_photo_remove" if display_photos_supported else "",
+                "display_photo_limit": display_photos.MAX_PHOTOS,
                 "volume_control": volume_control,
                 "save_label": "Save",
                 "identify_action": "voice_satellite_identify",

@@ -33,6 +33,7 @@ NATIVE_WEBSOCKET_BRIDGE_CLOSE_TIMEOUT_S = 3.0
 NATIVE_WEBSOCKET_DISCONNECT_TIMEOUT_S = 1.0
 NATIVE_MEDIA_DISCONNECT_GRACE_S = 6.0
 NATIVE_SCREEN_WEATHER_REFRESH_S = 60.0
+NATIVE_SCREEN_CLIMATE_REFRESH_S = 15.0
 
 VOICE_EVENT_STATE = {
     "RUN_START": "listening",
@@ -476,6 +477,96 @@ def _screen_weather_supported(payload: Dict[str, Any]) -> bool:
     return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_weather"), False)
 
 
+def _screen_climate_supported(payload: Dict[str, Any]) -> bool:
+    capabilities = payload.get("capabilities")
+    return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_climate"), False)
+
+
+def _screen_cameras_supported(payload: Dict[str, Any]) -> bool:
+    capabilities = payload.get("capabilities")
+    return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_cameras"), False)
+
+
+CAMERA_FRAME_PREFIX = b"TCAM1"
+_screen_camera_tasks: Dict[str, asyncio.Task] = {}
+
+
+def _screen_camera_payload(*, selected_id: str = "", loading: bool = False, error: str = "") -> Dict[str, Any]:
+    from . import display_cameras
+
+    try:
+        payload = dict(display_cameras.build_camera_directory())
+    except Exception:
+        _vp().logger.warning("[native-satellite] screen camera directory refresh failed", exc_info=True)
+        payload = {"available": False, "cameras": []}
+        error = error or "Camera directory is unavailable."
+    selected = next(
+        (row for row in list(payload.get("cameras") or []) if _text((row or {}).get("id")) == _text(selected_id)),
+        {},
+    )
+    payload.update(
+        {
+            "selected_id": _text(selected.get("id")),
+            "selected_name": _text(selected.get("name")),
+            "selected_room": _text(selected.get("room")),
+            "selected_talkback": _as_bool(selected.get("talkback"), False),
+            "loading": bool(loading and selected),
+            "error": _text(error),
+        }
+    )
+    return payload
+
+
+async def _stop_screen_camera_stream(selector: str) -> None:
+    task = _screen_camera_tasks.pop(_canonical_selector(selector), None)
+    if isinstance(task, asyncio.Task) and task is not asyncio.current_task():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+async def _run_screen_camera_stream(selector: str, camera_id: str) -> None:
+    from . import display_cameras
+
+    token = _canonical_selector(selector)
+    failures = 0
+    try:
+        while True:
+            started = time.monotonic()
+            try:
+                image, content_type, _row = await asyncio.to_thread(display_cameras.capture_frame, camera_id)
+                if not _text(content_type).lower().startswith("image/"):
+                    raise RuntimeError("The camera returned an unsupported frame.")
+                await send_binary(token, CAMERA_FRAME_PREFIX + image)
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                if failures == 1 or failures % 5 == 0:
+                    _vp().logger.warning(
+                        "[native-satellite] camera frame failed selector=%s camera=%s: %s",
+                        token,
+                        camera_id,
+                        exc,
+                    )
+                await send_command(
+                    token,
+                    "display.cameras",
+                    await asyncio.to_thread(
+                        _screen_camera_payload,
+                        selected_id=camera_id,
+                        error=_text(exc) or "Camera frame failed.",
+                    ),
+                )
+                await asyncio.sleep(min(5.0, 0.75 * failures))
+                continue
+            await asyncio.sleep(max(0.05, 0.35 - (time.monotonic() - started)))
+    finally:
+        if _screen_camera_tasks.get(token) is asyncio.current_task():
+            _screen_camera_tasks.pop(token, None)
+
+
 def _screen_notifications_supported(payload: Dict[str, Any]) -> bool:
     capabilities = payload.get("capabilities")
     return isinstance(capabilities, dict) and _as_bool(capabilities.get("screen_notifications"), False)
@@ -496,6 +587,21 @@ def _screen_weather_payload(selector: str = "") -> Dict[str, Any]:
         weather = {"available": False}
     weather["assistant_name"] = display_feed._assistant_first_name()
     return weather
+
+
+def _screen_climate_payload(selector: str = "", preferred_room: str = "") -> Dict[str, Any]:
+    from . import display_climate
+
+    try:
+        return dict(
+            display_climate.build_climate_summary(
+                selector=selector,
+                preferred_room=preferred_room,
+            )
+        )
+    except Exception:
+        _vp().logger.warning("[native-satellite] screen climate refresh failed", exc_info=True)
+        return {"available": False, "room_temperatures": []}
 
 
 def _native_display_targets(selector: str, hello_payload: Dict[str, Any]) -> set[str]:
@@ -1032,6 +1138,21 @@ def _firmware_settings_payload(
         capabilities=capabilities,
     )
     settings["output_channel_mode"] = _sendspin_output_channel_mode(selector)
+    if native_live_settings._board_supports_display_photos(board):
+        settings["display_wallpaper_urls"] = []
+        try:
+            from . import display_photos
+
+            row = _clients.get(_canonical_selector(selector))
+            peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
+            service_url = _vp()._service_base_url_for_peer(peer_host)
+            settings["display_wallpaper_urls"] = display_photos.firmware_urls(selector, service_url)
+        except (OSError, RuntimeError, ValueError) as exc:
+            _vp().logger.warning(
+                "[native-satellite] could not prepare display photos selector=%s: %s",
+                selector or "-",
+                exc,
+            )
     family = native_live_settings.wake_family_for(capabilities=capabilities, board=board)
     if family != "echo":
         # A shared Dual Wake bundle still supplies the model for MWW-only
@@ -1704,6 +1825,9 @@ async def status() -> Dict[str, Any]:
     for selector in disconnected_selectors:
         _schedule_media_disconnect_abort(selector, reason="stale heartbeat")
         _notify_state_change("disconnected", selector)
+        from . import sat_chat
+
+        await sat_chat.disconnected(selector)
     return {"ok": True, "protocol": PROTOCOL_VERSION, "clients": clients, "count": len(clients)}
 
 
@@ -1872,6 +1996,25 @@ async def send_command(selector: str, message_type: str, payload: Optional[Dict[
     if setup_reset_requested:
         _notify_state_change("disconnected", token)
     return {"ok": True, "selector": token, "message": message}
+
+
+async def send_binary(selector: str, data: bytes) -> Dict[str, Any]:
+    """Send one live PCM frame to a connected native satellite."""
+    token = _canonical_selector(selector)
+    payload = bytes(data or b"")
+    if not token:
+        raise ValueError("selector is required")
+    if not payload:
+        return {"ok": True, "selector": token, "bytes": 0}
+    async with _clients_lock:
+        row = _clients.get(token)
+        if not isinstance(row, dict) or not bool(row.get("connected")):
+            raise RuntimeError(f"Native satellite is not connected: {token}")
+        sender = row.get("send_binary")
+    if not callable(sender):
+        raise RuntimeError(f"Native satellite binary sender unavailable: {token}")
+    await sender(payload)
+    return {"ok": True, "selector": token, "bytes": len(payload)}
 
 
 async def send_request(
@@ -4542,7 +4685,14 @@ async def save_live_settings(
     return result
 
 
-async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, Any], auth: Optional[Dict[str, Any]] = None) -> asyncio.Queue:
+async def _record_client(
+    selector: str,
+    websocket: WebSocket,
+    hello: Dict[str, Any],
+    auth: Optional[Dict[str, Any]] = None,
+    *,
+    send_binary: Optional[Callable[[bytes], Any]] = None,
+) -> asyncio.Queue:
     _cancel_media_disconnect_abort(selector)
     payload = _message_payload(hello)
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -4554,6 +4704,7 @@ async def _record_client(selector: str, websocket: WebSocket, hello: Dict[str, A
         "name": _device_name_from_hello(payload, selector),
         "client_host": _text(client_host),
         "websocket": websocket,
+        "send_binary": send_binary,
         "queue": queue,
         "voice_bridge": voice_bridge,
         "hello": hello,
@@ -4877,6 +5028,63 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             result,
             message_id=_text(message.get("id")),
         )
+    if msg_type == "display.climate.action":
+        from . import display_climate
+
+        result = await asyncio.to_thread(display_climate.run_climate_action, payload)
+        preferred_room = ""
+        async with _clients_lock:
+            client = _clients.get(selector)
+            hello = client.get("hello") if isinstance(client, dict) and isinstance(client.get("hello"), dict) else {}
+            preferred_room = _text(_message_payload(hello).get("room"))
+        climate = await asyncio.to_thread(_screen_climate_payload, selector, preferred_room)
+        climate = display_climate.apply_action_to_summary(climate, payload)
+        await send_command(selector, "display.climate", climate)
+        return _envelope(
+            "display.climate.action.ack",
+            result,
+            message_id=_text(message.get("id")),
+        )
+    if msg_type == "display.cameras.open":
+        directory = await asyncio.to_thread(_screen_camera_payload)
+        await send_command(selector, "display.cameras", directory)
+        return _envelope(
+            "display.cameras.open.ack",
+            {"ok": True},
+            message_id=_text(message.get("id")),
+        )
+    if msg_type == "display.camera.select":
+        camera_id = _text(payload.get("camera_id") or payload.get("id"))
+        directory = await asyncio.to_thread(_screen_camera_payload, selected_id=camera_id, loading=True)
+        if not _text(directory.get("selected_id")):
+            raise KeyError("Camera is unavailable or no longer configured.")
+        await _stop_screen_camera_stream(selector)
+        await send_command(selector, "display.cameras", directory)
+        task = asyncio.create_task(_run_screen_camera_stream(selector, camera_id))
+        _screen_camera_tasks[_canonical_selector(selector)] = task
+        return _envelope(
+            "display.camera.select.ack",
+            {"ok": True, "camera_id": camera_id},
+            message_id=_text(message.get("id")),
+        )
+    if msg_type == "display.camera.close":
+        await _stop_screen_camera_stream(selector)
+        await send_command(selector, "display.cameras", await asyncio.to_thread(_screen_camera_payload))
+        return _envelope(
+            "display.camera.close.ack",
+            {"ok": True},
+            message_id=_text(message.get("id")),
+        )
+    if msg_type.startswith("sat_chat."):
+        from . import sat_chat
+
+        result = await sat_chat.handle_device_message(selector, msg_type, payload)
+        if result is not None:
+            return _envelope(
+                f"{msg_type}.ack",
+                result,
+                message_id=_text(message.get("id")),
+            )
     if msg_type in {"voice.start", "audio.start"}:
         from . import reachy_ambient
         from . import reachy_music
@@ -4936,6 +5144,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
     selector = ""
     command_sender: Optional[asyncio.Task] = None
     screen_weather_sender: Optional[asyncio.Task] = None
+    screen_climate_sender: Optional[asyncio.Task] = None
     screen_notification_sender: Optional[asyncio.Task] = None
     wake_verifier_tasks: set[asyncio.Task] = set()
     client_row: Optional[Dict[str, Any]] = None
@@ -4945,6 +5154,10 @@ async def handle_websocket(websocket: WebSocket) -> None:
     async def send_json(message: Dict[str, Any]) -> None:
         async with send_lock:
             await websocket.send_json(message)
+
+    async def send_binary_frame(data: bytes) -> None:
+        async with send_lock:
+            await websocket.send_bytes(data)
 
     try:
         first = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
@@ -4988,6 +5201,8 @@ async def handle_websocket(websocket: WebSocket) -> None:
             "pcm_binary": True,
             "timers": True,
             "ota": True,
+            "sat_chat": True,
+            "sat_chat_audio": True,
         }
         # Echo a device's output_chain claim in the acknowledgement so speaker
         # processing ownership remains explicit in both directions. Native
@@ -5013,7 +5228,13 @@ async def handle_websocket(websocket: WebSocket) -> None:
             )
         )
 
-        queue = await _record_client(selector, websocket, hello, auth)
+        queue = await _record_client(
+            selector,
+            websocket,
+            hello,
+            auth,
+            send_binary=send_binary_frame,
+        )
         async with _clients_lock:
             row = _clients.get(selector)
             client_row = row if isinstance(row, dict) and row.get("websocket") is websocket else None
@@ -5042,6 +5263,10 @@ async def handle_websocket(websocket: WebSocket) -> None:
             )
         )
 
+        from . import sat_chat
+
+        asyncio.create_task(sat_chat.refresh_directories())
+
         if _screen_weather_supported(payload):
             first_weather = await asyncio.to_thread(_screen_weather_payload, selector)
             await send_json(_envelope("display.weather", first_weather))
@@ -5058,6 +5283,27 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     previous = encoded
 
             screen_weather_sender = asyncio.create_task(send_screen_weather())
+
+        if _screen_climate_supported(payload):
+            preferred_room = _text(payload.get("room") or payload.get("room_name") or payload.get("area_name"))
+            first_climate = await asyncio.to_thread(_screen_climate_payload, selector, preferred_room)
+            await send_json(_envelope("display.climate", first_climate))
+
+            async def send_screen_climate() -> None:
+                previous = json.dumps(first_climate, sort_keys=True, separators=(",", ":"))
+                while True:
+                    await asyncio.sleep(NATIVE_SCREEN_CLIMATE_REFRESH_S)
+                    climate = await asyncio.to_thread(_screen_climate_payload, selector, preferred_room)
+                    encoded = json.dumps(climate, sort_keys=True, separators=(",", ":"))
+                    if encoded == previous:
+                        continue
+                    await send_json(_envelope("display.climate", climate))
+                    previous = encoded
+
+            screen_climate_sender = asyncio.create_task(send_screen_climate())
+
+        if _screen_cameras_supported(payload):
+            await send_json(_envelope("display.cameras", await asyncio.to_thread(_screen_camera_payload)))
 
         if _screen_notifications_supported(payload):
             from . import display_bus
@@ -5154,8 +5400,11 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     client_row["binary_bytes"] = int(client_row.get("binary_bytes") or 0) + len(data)
                     client_row["last_seen_ts"] = _now()
                     client_row["last_message_type"] = "binary"
+                from . import sat_chat
                 from . import wake_verifier
 
+                if await sat_chat.route_audio(selector, data):
+                    continue
                 if wake_verifier.is_wake_verifier_packet(data):
                     task = asyncio.create_task(
                         _handle_wake_verifier_packet(selector, data, queue, websocket)
@@ -5185,6 +5434,8 @@ async def handle_websocket(websocket: WebSocket) -> None:
         with contextlib.suppress(Exception):
             await send_json(_envelope("error", {"ok": False, "error": str(exc) or type(exc).__name__}))
     finally:
+        if selector:
+            await _stop_screen_camera_stream(selector)
         await _cancel_websocket_tasks(
             wake_verifier_tasks,
             selector=selector,
@@ -5201,6 +5452,12 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 (screen_weather_sender,),
                 selector=selector,
                 label="screen weather sender",
+            )
+        if screen_climate_sender is not None:
+            await _cancel_websocket_tasks(
+                (screen_climate_sender,),
+                selector=selector,
+                label="screen climate sender",
             )
         if screen_notification_sender is not None:
             await _cancel_websocket_tasks(
@@ -5249,4 +5506,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     selector,
                 )
             if disconnected:
+                from . import sat_chat
+
+                await sat_chat.disconnected(selector)
                 _vp().logger.info("[native-satellite] disconnected selector=%s", selector)

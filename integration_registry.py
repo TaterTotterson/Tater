@@ -2164,6 +2164,9 @@ def _update_cached_device_after_action(
     action = _normalize_token(action_id)
     action_payload = dict(payload or {})
     brightness: Optional[float] = None
+    target_temperature: Optional[float] = None
+    temperature_unit = "C" if _text(action_payload.get("temperature_unit")).upper() == "C" else "F"
+    hvac_mode = ""
     if action == "set_brightness":
         for key in ("brightness_pct", "brightness", "level", "percent"):
             try:
@@ -2173,7 +2176,16 @@ def _update_cached_device_after_action(
             brightness = max(0.0, min(100.0, candidate))
             state = "on" if brightness > 0 else "off"
             break
-    if not state and brightness is None:
+    elif action == "set_temperature":
+        for key in ("temperature", "target_temperature"):
+            try:
+                target_temperature = float(action_payload.get(key))
+            except (TypeError, ValueError):
+                continue
+            break
+    elif action == "set_hvac_mode":
+        hvac_mode = _normalize_token(action_payload.get("mode") or action_payload.get("hvac_mode"))
+    if not state and brightness is None and target_temperature is None and not hvac_mode:
         return
     redis_obj = _cache_client(client)
     if not redis_obj:
@@ -2197,12 +2209,12 @@ def _update_cached_device_after_action(
             row["last_action"] = _normalize_token(action_id)
             row["last_action_at"] = now
             row["last_action_result"] = result_payload
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            runtime_state = row.get("runtime_state") if isinstance(row.get("runtime_state"), dict) else {}
+            runtime_payload = runtime_state.get("payload") if isinstance(runtime_state.get("payload"), dict) else {}
             if brightness is not None:
                 row["brightness"] = brightness
-                details = row.get("details") if isinstance(row.get("details"), dict) else {}
                 row["details"] = {**details, "brightness": brightness, "brightness_pct": brightness}
-                runtime_state = row.get("runtime_state") if isinstance(row.get("runtime_state"), dict) else {}
-                runtime_payload = runtime_state.get("payload") if isinstance(runtime_state.get("payload"), dict) else {}
                 row["runtime_state"] = {
                     **runtime_state,
                     "payload": {
@@ -2210,6 +2222,40 @@ def _update_cached_device_after_action(
                         "state": state,
                         "brightness": brightness,
                         "brightness_pct": brightness,
+                    },
+                }
+            if target_temperature is not None:
+                unit_key = "target_temperature_c" if temperature_unit == "C" else "target_temperature_f"
+                row["target_temperature"] = target_temperature
+                row["temperature_unit"] = temperature_unit
+                row["details"] = {
+                    **details,
+                    "target_temperature": target_temperature,
+                    unit_key: target_temperature,
+                    "temperature_unit": temperature_unit,
+                }
+                row["runtime_state"] = {
+                    **runtime_state,
+                    "payload": {
+                        **runtime_payload,
+                        "target_temperature": target_temperature,
+                        unit_key: target_temperature,
+                        "temperature_unit": temperature_unit,
+                    },
+                }
+            if hvac_mode:
+                row["hvac_mode"] = hvac_mode
+                row["details"] = {
+                    **details,
+                    "target_hvac_mode": hvac_mode,
+                    "hvac_mode": hvac_mode,
+                }
+                row["runtime_state"] = {
+                    **runtime_state,
+                    "payload": {
+                        **runtime_payload,
+                        "target_hvac_mode": hvac_mode,
+                        "hvac_mode": hvac_mode,
                     },
                 }
             online = _online_from_state_text(state)
