@@ -1264,19 +1264,53 @@ async def native_satellite_play_group(
             detail=detail or "The synchronized group has no available satellite members",
         )
 
-    member_status = await native_satellite.media_group_member_status(
-        [vp._text(row.get("selector")) for row in member_rows]
-    )
-    ready_members = {
-        vp._text(selector)
-        for selector in list(member_status.get("ready_selectors") or [])
-        if vp._text(selector)
-    }
-    unavailable_by_selector = {
-        vp._text(row.get("selector")): vp._text(row.get("reason")) or "unavailable"
-        for row in list(member_status.get("unavailable") or [])
-        if isinstance(row, dict) and vp._text(row.get("selector"))
-    }
+    sendspin_targets_by_member: Dict[str, Dict[str, Any]] = {}
+    if audio_scene:
+        # A rendered announcement is one ordinary audio stream. Sendspin only
+        # supplies synchronized delivery; satellites never mix or duck it.
+        ready_members: set[str] = set()
+        unavailable_by_selector: Dict[str, str] = {}
+        for destination_selector, members in destination_members.items():
+            if not members:
+                continue
+            try:
+                sendspin_targets = await native_satellite.sendspin_targets_for_selectors(
+                    [destination_selector]
+                )
+            except Exception as exc:
+                reason = vp._text(exc) or "Sendspin playback is unavailable"
+                unavailable_by_selector.update({member: reason for member in members})
+                continue
+            targets_by_selector = {
+                vp._text(row.get("selector")): dict(row)
+                for row in list(sendspin_targets or [])
+                if isinstance(row, dict) and vp._text(row.get("selector"))
+            }
+            missing_members = [
+                member for member in members if member not in targets_by_selector
+            ]
+            if missing_members:
+                reason = "Sendspin target was not resolved"
+                unavailable_by_selector.update(
+                    {member: reason for member in missing_members}
+                )
+                continue
+            ready_members.update(members)
+            sendspin_targets_by_member.update(targets_by_selector)
+    else:
+        member_status = await native_satellite.media_group_member_status(
+            [vp._text(row.get("selector")) for row in member_rows]
+        )
+        ready_members = {
+            vp._text(selector)
+            for selector in list(member_status.get("ready_selectors") or [])
+            if vp._text(selector)
+        }
+        unavailable_by_selector = {
+            vp._text(row.get("selector")): vp._text(row.get("reason")) or "unavailable"
+            for row in list(member_status.get("unavailable") or [])
+            if isinstance(row, dict) and vp._text(row.get("selector"))
+        }
     skipped_selector_ids = {
         vp._text(row.get("selector"))
         for row in skipped_destinations
@@ -1319,14 +1353,19 @@ async def native_satellite_play_group(
     played_selectors = [
         selector for selector in requested_selectors if selector not in skipped_selector_ids
     ]
-    playback_members = [
-        {
+    playback_members = []
+    for row in member_rows:
+        member = {
             key: value
             for key, value in row.items()
             if key != "destination_selector"
         }
-        for row in member_rows
-    ]
+        if audio_scene:
+            member = {
+                **sendspin_targets_by_member[vp._text(row.get("selector"))],
+                **member,
+            }
+        playback_members.append(member)
 
     passthrough_url = (
         ""
@@ -1415,24 +1454,41 @@ async def native_satellite_play_group(
 
     group_id = f"multi-{playback_id[:12]}"
     try:
-        result = await native_satellite.prepare_group_media_session(
-            playback_members,
-            group_id=group_id,
-            group_selector=f"group:{group_id}",
-            session_id=session_id,
-            media_url=playback_url,
-            start_position_ms=media_start_position_ms,
-            loop=media_loop,
-            content_type=media_content_type,
-            title=title,
-            artist=artist,
-            album=album,
-            channel_mode="mixed" if any(row.get("channel") != "mono" for row in playback_members) else "mono",
-            start_lead_ms=start_lead_ms,
-            compatibility_checked=True,
-            wait_for_completion=wait_for_completion,
-            completion_timeout_s=completion_timeout_s,
-        )
+        if rendered_audio_scene_started:
+            from .. import sendspin_playback
+
+            result = await sendspin_playback.start_media_url_stream(
+                group_id,
+                playback_members,
+                playback_url,
+                group_name=title or "Tater Announcement",
+                start_lead_ms=start_lead_ms,
+                title=title or "Announcement",
+                artist=artist or "Tater",
+                album=album,
+                duration_seconds=scene_duration_s,
+                wait_for_completion=wait_for_completion,
+                completion_timeout_s=completion_timeout_s,
+            )
+        else:
+            result = await native_satellite.prepare_group_media_session(
+                playback_members,
+                group_id=group_id,
+                group_selector=f"group:{group_id}",
+                session_id=session_id,
+                media_url=playback_url,
+                start_position_ms=media_start_position_ms,
+                loop=media_loop,
+                content_type=media_content_type,
+                title=title,
+                artist=artist,
+                album=album,
+                channel_mode="mixed" if any(row.get("channel") != "mono" for row in playback_members) else "mono",
+                start_lead_ms=start_lead_ms,
+                compatibility_checked=True,
+                wait_for_completion=wait_for_completion,
+                completion_timeout_s=completion_timeout_s,
+            )
     except Exception as exc:
         raise HTTPException(status_code=409, detail=f"Failed to queue synchronized playback: {exc}") from exc
     response = {
@@ -1447,8 +1503,12 @@ async def native_satellite_play_group(
         "media_content_type": media_content_type,
         "start_position_ms": media_start_position_ms,
         "start_lead_ms": start_lead_ms,
-        "playback_mode": "synchronized_group",
-        "media_session_started": True,
+        "playback_mode": (
+            "sendspin_synchronized_group"
+            if rendered_audio_scene_started
+            else "synchronized_group"
+        ),
+        "media_session_started": not rendered_audio_scene_started,
         "audio_scene_started": rendered_audio_scene_started,
         "rendered_audio_scene_started": rendered_audio_scene_started,
         "audio_overlay_started": False,
@@ -1601,14 +1661,14 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
             "playback_mode": "reply_playback_external",
             "reply_playback_target": reply_playback_target,
             "audio_scene_started": False,
-            "audio_scene_fallback_reason": "External reply playback does not support satellite audio scenes."
+            "audio_scene_fallback_reason": "External reply playback does not support rendered background audio."
             if audio_scene
             else "",
             **result,
         }
 
     sendspin_transient_pair = bool(stereo_pair and not persistent_media_requested)
-    if not passthrough_url and not sendspin_transient_pair:
+    if not passthrough_url and not sendspin_transient_pair and not audio_scene:
         prepared_asset = await vp._prepare_native_media_asset(
             media_bytes,
             media_type=media_type,
@@ -1620,14 +1680,16 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         filename = vp._text(prepared_asset.get("filename")) or filename
 
     playback_id = uuid.uuid4().hex
-    playback_url = passthrough_url or vp._store_media_url(
-        selector,
-        playback_id,
-        media_bytes,
-        media_type=media_type,
-        filename=filename,
-    )
-    if not playback_url:
+    playback_url = ""
+    if not audio_scene:
+        playback_url = passthrough_url or vp._store_media_url(
+            selector,
+            playback_id,
+            media_bytes,
+            media_type=media_type,
+            filename=filename,
+        )
+    if not audio_scene and not playback_url:
         raise HTTPException(status_code=500, detail="Failed to store media for playback")
 
     audio_scene_started = False
@@ -1691,13 +1753,21 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
 
             if audio_scene:
                 scene = await _render_audio_scene()
+                playback_url = vp._text(scene.get("url"))
                 scene_asset = scene.get("asset") if isinstance(scene.get("asset"), dict) else {}
-                targets = await native_satellite.sendspin_stereo_pair_targets(stereo_pair)
-                scene_result = await sendspin_playback.play_stereo_pair_audio(
-                    stereo_pair,
+                targets = await native_satellite.sendspin_targets_for_selectors([selector])
+                scene_result = await sendspin_playback.start_media_url_stream(
+                    f"stereo-{playback_id[:12]}",
                     targets,
-                    bytes(scene_asset.get("bytes") or b""),
-                    preserve_stereo=True,
+                    playback_url,
+                    group_name=vp._text(stereo_pair.get("name")) or "Tater Announcement",
+                    title=title or "Announcement",
+                    artist=artist or "Tater",
+                    album=album,
+                    duration_seconds=max(
+                        0.0,
+                        vp._as_float(scene_asset.get("duration_s"), 0.0),
+                    ),
                     wait_for_completion=wait_for_completion,
                     completion_timeout_s=_scene_completion_timeout(scene),
                 )
@@ -1741,45 +1811,22 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
         try:
             from .. import native_satellite
 
-            scene_supported = bool(audio_scene) and await native_satellite.client_has_capability(
-                selector,
-                "audio_scenes",
-            )
-            rendered_scene_supported = bool(audio_scene)
-            for capability in (
-                "persistent_media_sessions",
-                "synchronized_media_sessions",
-                "media_playhead_telemetry",
-                "media_drift_correction",
-            ):
-                if rendered_scene_supported and not await native_satellite.client_has_capability(
-                    selector,
-                    capability,
-                ):
-                    rendered_scene_supported = False
-
-            if audio_scene and rendered_scene_supported:
+            if audio_scene:
                 try:
                     scene = await _render_audio_scene()
-                    group_id = f"single-{playback_id[:12]}"
-                    scene_result = await native_satellite.prepare_group_media_session(
-                        [
-                            {
-                                "selector": selector,
-                                "channel": "mono",
-                                "delay_ms": 0,
-                                "volume_percent": 100,
-                            }
-                        ],
-                        group_id=group_id,
-                        group_selector=selector,
-                        session_id=vp._text(scene.get("session_id")),
-                        media_url=vp._text(scene.get("url")),
-                        loop=False,
-                        content_type="announcement",
-                        channel_mode="mono",
-                        wait_for_completion=wait_for_completion,
-                        completion_timeout_s=_scene_completion_timeout(scene),
+                    playback_url = vp._text(scene.get("url"))
+                    command_payload = {
+                        "url": playback_url,
+                        "tts_kind": tts_kind or "announcement",
+                    }
+                    if continue_conversation:
+                        command_payload["continue_conversation"] = True
+                    if conversation_id:
+                        command_payload["conversation_id"] = conversation_id
+                    scene_result = await native_satellite.send_command(
+                        selector,
+                        "play.url",
+                        command_payload,
                     )
                     result = {
                         **scene_result,
@@ -1789,79 +1836,14 @@ async def native_satellite_play(payload: Dict[str, Any], x_tater_token: Optional
                         "audio_scene_render": dict(scene.get("summary") or {}),
                     }
                     audio_scene_started = True
-                    media_session_started = True
                     rendered_audio_scene_started = True
                 except Exception as exc:
-                    with contextlib.suppress(Exception):
-                        await native_satellite.send_command(
-                            selector,
-                            "media.session.stop",
-                            {
-                                "session_id": f"{playback_id}-scene",
-                                "reason": "rendered_audio_scene_failed",
-                            },
-                        )
                     vp.logger.warning(
                         "[voice_core] rendered audio scene failed selector=%s error=%s",
                         selector,
                         exc,
                     )
                     raise RuntimeError(f"Rendered audio scene failed: {exc}") from exc
-
-            if audio_scene and not audio_scene_started and scene_supported:
-                try:
-                    background = audio_scene.get("background") if isinstance(audio_scene.get("background"), dict) else {}
-                    background_source_url = vp._text(background.get("url"))
-                    background_bytes, background_media_type = await vp._download_media_source(background_source_url)
-                    background_asset = await vp._prepare_native_media_asset(
-                        background_bytes,
-                        media_type=background_media_type or "application/octet-stream",
-                        filename="background-audio",
-                        playback_kind="background",
-                    )
-                    background_url = vp._store_media_url(
-                        selector,
-                        playback_id,
-                        bytes(background_asset.get("bytes") or b""),
-                        media_type=vp._text(background_asset.get("media_type")) or "application/octet-stream",
-                        filename=vp._text(background_asset.get("filename")) or "background-audio.mp3",
-                    )
-                    if not background_url:
-                        raise RuntimeError("Failed to store background audio for playback")
-
-                    command_payload = {
-                        "scene_id": vp._text(audio_scene.get("scene_id")) or playback_id,
-                        "foreground": {
-                            "url": playback_url,
-                            "kind": tts_kind or "tts",
-                            "volume_percent": int((audio_scene.get("foreground") or {}).get("volume_percent", 100)),
-                            "start_delay_ms": int(
-                                (audio_scene.get("foreground") or {}).get("start_delay_ms", 0)
-                            ),
-                        },
-                        "background": {
-                            "url": background_url,
-                            "loop": bool(background.get("loop", True)),
-                            "volume_percent": int(background.get("volume_percent", 60)),
-                        },
-                        "ducking": dict(audio_scene.get("ducking") or {}),
-                        "finish": dict(audio_scene.get("finish") or {}),
-                    }
-                    result = await native_satellite.send_command(
-                        selector,
-                        "audio.scene.start",
-                        command_payload,
-                    )
-                    audio_scene_started = True
-                except Exception as exc:
-                    audio_scene_fallback_reason = f"Background audio unavailable; played TTS only: {exc}"
-                    vp.logger.warning(
-                        "[voice_core] audio scene fallback selector=%s error=%s",
-                        selector,
-                        exc,
-                    )
-            elif audio_scene and not audio_scene_started:
-                audio_scene_fallback_reason = "Satellite firmware does not advertise audio scene support."
 
             media_session_supported = (
                 persistent_media_requested

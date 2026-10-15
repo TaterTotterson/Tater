@@ -1,42 +1,47 @@
-# Tater v1.6.1
+# Tater v1.6.2
 
-Tater v1.6.1 completes the Little Spud Fitness connection, links each mobile
-app to a person in Tater, and keeps Awareness notifications synchronized with
-their authoritative event history.
+Tater v1.6.2 simplifies music-backed announcements into one fully rendered
+audio file, improves synchronized Sendspin delivery, and fixes Echo thermostat
+control for the Ecobee HomeKit integration.
 
 ## What's New
 
-### Little Spud Fitness
+### Music-Backed Announcements
 
-- Adds the private SpudLink bridge used by Fitness Core to receive approved
-  daily health aggregates from Little Spud on iPhone and Android.
-- Supports activity, sleep, heart, vital, and body measurements; generated
-  wellness summaries; and opt-in activity challenges between people in Tater.
-- Keeps Fitness optional. When Fitness Core is not installed or running,
-  Little Spud receives a clear unavailable response and performs no health-data
-  upload.
+- Renders announcement music and speech into one finished MP3 before playback.
+  The file now contains the requested speech offset, ducking attack, speech,
+  release, and final fade, so satellites only need to play it.
+- Sends the rendered file directly with `play.url` for a single satellite and
+  uses Sendspin only when synchronized delivery is needed for satellite groups
+  or stereo pairs.
+- Applies each Sendspin destination's saved volume and synchronization offset,
+  skips unavailable group destinations cleanly, and can wait for finite media
+  playback to complete when the caller requests it.
+- Removes the retired `audio.scene.start` playback path and its finished-event
+  acknowledgment. Normal TTS, assistant replies, media sessions, broadcasts,
+  and TTS overlays keep their existing playback routes.
 
-### People and Device Identity
+### Echo Climate Controls
 
-- Lets a Little Spud installation link directly to a person already configured
-  in Tater People, and reuses that identity for Fitness, challenges, and chat.
-- Adds stable paired-app aliases so the same person remains associated with the
-  same phone across reconnects and app sessions.
+- Fixes temperature and HVAC commands for thermostats provided by the Ecobee
+  HomeKit integration. Echo temperature changes now reach HomeKit instead of
+  moving temporarily on screen and reverting at the next state refresh.
+- Preserves the integration's Ecobee device identity and cached thermostat
+  state while routing device actions through the installed HomeKit module.
 
-### Notification Reliability
+### Little Spud Cleanup
 
-- Reconciles the Little Spud notification inbox against Awareness Core so
-  events removed from Tater are also removed from the mobile apps.
-- Includes attachment expiry information with notification media, preventing
-  expired Awareness snapshots or videos from remaining as broken items.
+- Removes the unfinished Little Spud Fitness bridge endpoints and request
+  models. Existing linked-person identity, chat, home controls, music, TTS, and
+  Awareness notification behavior remain available.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.6.1 through
+- macOS users already running v1.0.1 or later can install v1.6.2 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.6.1` or `latest` for the CPU image and
-  `v1.6.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.6.2` or `latest` for the CPU image and
+  `v1.6.2-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

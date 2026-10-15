@@ -499,6 +499,31 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
                 )
                 notify.assert_called_once_with("settings", selector)
 
+    async def test_retired_audio_scene_finished_event_is_ignored(self) -> None:
+        selector = "native:sat1-2e88e8"
+        native_satellite._clients[selector] = {
+            "selector": selector,
+            "connected": True,
+            "pending_requests": {},
+        }
+
+        with mock.patch.object(
+            native_satellite,
+            "_voice_bridge",
+            new_callable=mock.AsyncMock,
+        ) as voice_bridge:
+            response = await native_satellite._handle_text_message(
+                selector,
+                {
+                    "id": "retired-scene-event",
+                    "type": "audio.scene.finished",
+                    "payload": {"ok": True},
+                },
+            )
+
+        self.assertIsNone(response)
+        voice_bridge.assert_not_awaited()
+
     async def test_settings_apply_failure_is_retained_and_exposed_in_diagnostics(self) -> None:
         selector = "native:echo-test"
         native_satellite._clients[selector] = {

@@ -35,6 +35,54 @@ def _pcm_samples(payload: bytes) -> list[int]:
 
 
 class SendspinReplyPcmTests(unittest.TestCase):
+    def test_finite_media_url_can_wait_for_sendspin_completion(self) -> None:
+        reader = mock.Mock()
+        reader.read = mock.Mock()
+        reader.close = mock.Mock()
+
+        async def start_stream(stream_id, targets, _read_pcm, **kwargs):
+            callback = kwargs.get("on_finished")
+            if callable(callback):
+                callback(stream_id, "")
+            return {
+                "ok": True,
+                "stream_id": stream_id,
+                "members": [target["selector"] for target in targets],
+                "duration_s": 0.0,
+                "playback_completed": False,
+            }
+
+        async def outcomes(_stream_ids):
+            return {
+                "ok": True,
+                "outcomes": {
+                    "scene-test": {
+                        "status": "completed",
+                        "duration_s": 1.25,
+                    }
+                },
+            }
+
+        async def run():
+            with (
+                mock.patch.object(sendspin_playback, "_FfmpegPcmReader", return_value=reader),
+                mock.patch.object(sendspin_playback, "start_live_pcm_stream", side_effect=start_stream),
+                mock.patch.object(sendspin_playback, "stream_outcomes", side_effect=outcomes),
+            ):
+                return await sendspin_playback.start_media_url_stream(
+                    "scene-test",
+                    [{"selector": "native:kitchen", "host": "192.0.2.10"}],
+                    "http://voice-core/media/scene",
+                    wait_for_completion=True,
+                    completion_timeout_s=5.0,
+                )
+
+        result = asyncio.run(run())
+
+        self.assertTrue(result["playback_completed"])
+        self.assertEqual(result["duration_s"], 1.25)
+        reader.close.assert_not_called()
+
     def test_finite_media_reader_decodes_url_with_seek_to_sendspin_pcm(self) -> None:
         process = mock.Mock()
         process.stdout = io.BytesIO(b"pcm")

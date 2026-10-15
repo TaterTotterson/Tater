@@ -2244,17 +2244,32 @@ async def start_media_url_stream(
     artwork_content_type: str = "",
     duration_seconds: float = 0.0,
     on_finished: Optional[Callable[[str, str], Any]] = None,
+    wait_for_completion: bool = False,
+    completion_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
     """Decode one finite media URL and publish one Sendspin audio timeline."""
     start_position = max(0.0, float(start_position_seconds or 0.0))
     requested_duration = max(0.0, float(duration_seconds or 0.0))
+    completion_future: Optional[asyncio.Future[str]] = None
+    finished_callback = on_finished
+    if wait_for_completion:
+        completion_future = asyncio.get_running_loop().create_future()
+
+        def _completed(completed_stream_id: str, error: str) -> Any:
+            if completion_future is not None and not completion_future.done():
+                completion_future.set_result(_text(error))
+            if callable(on_finished):
+                return on_finished(completed_stream_id, error)
+            return None
+
+        finished_callback = _completed
     reader = await asyncio.to_thread(
         _FfmpegPcmReader,
         source_url,
         start_position_seconds=start_position,
     )
     try:
-        return await start_live_pcm_stream(
+        result = await start_live_pcm_stream(
             stream_id,
             targets,
             reader.read,
@@ -2277,9 +2292,31 @@ async def start_media_url_stream(
                 if requested_duration > 0
                 else 0.0
             ),
-            on_finished=on_finished,
+            on_finished=finished_callback,
             close_pcm=reader.close,
         )
+        if completion_future is None:
+            return result
+        timeout_s = max(5.0, min(900.0, float(completion_timeout_s or 180.0)))
+        try:
+            playback_error = await asyncio.wait_for(
+                asyncio.shield(completion_future),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            await stop_live_stream(stream_id, reason="completion_timeout")
+            raise SendspinPlaybackError(
+                f"Timed out waiting for Sendspin playback after {timeout_s:.1f} seconds."
+            ) from exc
+        if playback_error:
+            raise SendspinPlaybackError(playback_error)
+        outcome_result = await stream_outcomes([stream_id])
+        outcome = dict((outcome_result.get("outcomes") or {}).get(stream_id) or {})
+        return {
+            **result,
+            "playback_completed": outcome.get("status") == "completed",
+            "duration_s": float(outcome.get("duration_s") or result.get("duration_s") or 0.0),
+        }
     except Exception:
         await asyncio.to_thread(reader.close)
         raise

@@ -5111,15 +5111,12 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
         "announcement.finished",
         "playback.finished",
         "tts.finished",
-        "audio.scene.finished",
         "audio.overlay.finished",
     }:
         bridge = await _voice_bridge(selector)
         if bridge is not None:
             await bridge.announcement_finished()
-        if msg_type == "audio.scene.finished":
-            ack_type = "audio.scene.finished.ack"
-        elif msg_type == "audio.overlay.finished":
+        if msg_type == "audio.overlay.finished":
             ack_type = "audio.overlay.finished.ack"
         else:
             ack_type = "announcement.finished.ack"

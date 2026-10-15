@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -56,6 +57,48 @@ class IntegrationRegistryClimateActionTests(unittest.TestCase):
 
         self.assertEqual(self.thermostat["hvac_mode"], "cool")
         self.assertEqual(self.thermostat["details"]["target_hvac_mode"], "cool")
+
+    def test_ecobee_homekit_action_uses_homekit_module(self) -> None:
+        payload = {
+            "temperature": 72.0,
+            "target_temperature": 72.0,
+            "temperature_unit": "F",
+        }
+        runner = mock.Mock(return_value={"ok": True})
+        module = SimpleNamespace(
+            INTEGRATION={"id": "ecobee_homekit"},
+            run_integration_device_action=runner,
+        )
+
+        with (
+            mock.patch.object(
+                integration_registry.integration_store_module,
+                "integration_module",
+                return_value=module,
+            ) as load_module,
+            mock.patch.object(integration_registry, "_update_cached_device_after_action") as update_cache,
+        ):
+            result = integration_registry.run_integration_device_action(
+                "ecobee_homekit",
+                "set_temperature",
+                "ecobee:1:16",
+                payload,
+            )
+
+        self.assertEqual(result, {"ok": True})
+        load_module.assert_called_once_with(
+            "homekit",
+            auto_restore=False,
+            require_enabled=True,
+        )
+        runner.assert_called_once_with("set_temperature", "ecobee:1:16", payload)
+        update_cache.assert_called_once_with(
+            "ecobee_homekit",
+            "set_temperature",
+            "ecobee:1:16",
+            {"ok": True},
+            payload=payload,
+        )
 
 
 if __name__ == "__main__":

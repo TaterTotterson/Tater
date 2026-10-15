@@ -26,6 +26,12 @@ INTEGRATION_ROOM_OVERRIDES_KEY = "tater:integration_runtime:room_overrides"
 INTEGRATION_RUNTIME_STATES_KEY = "tater:integration_runtime:states"
 _DEVICE_REGISTRY_CACHE_VERSION = 4
 _DEVICE_REGISTRY_GENERATION_LOCK = threading.RLock()
+_INTEGRATION_MODULE_ALIASES = {
+    # The HomeKit integration publishes Ecobee thermostat devices under this
+    # provider id so their runtime state remains distinct from other HomeKit
+    # accessories. Device actions still belong to the HomeKit module.
+    "ecobee_homekit": "homekit",
+}
 _DEVICE_REGISTRY_VOLATILE_FIELDS = {
     "age_seconds",
     "duration_ms",
@@ -1152,16 +1158,18 @@ def _integration_modules() -> List[Any]:
 
 
 def _module_for_integration(integration_id: str) -> Any:
-    target = _text(integration_id)
+    target = _text(integration_id).lower()
     if not target:
         raise KeyError("Integration id is required.")
+    module_target = _INTEGRATION_MODULE_ALIASES.get(target, target)
     module = integration_store_module.integration_module(
-        target,
+        module_target,
         auto_restore=False,
         require_enabled=True,
     )
     definition = getattr(module, "INTEGRATION", None) if module is not None else None
-    if isinstance(definition, dict) and _text(definition.get("id")) == target:
+    definition_id = _text(definition.get("id")).lower() if isinstance(definition, dict) else ""
+    if definition_id in {target, module_target}:
         return module
     raise KeyError(f"Unknown integration: {target}")
 

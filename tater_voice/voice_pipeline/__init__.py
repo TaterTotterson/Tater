@@ -5185,38 +5185,38 @@ def _render_native_audio_scene_asset_sync(
 
         speech_start_s = delay_s
         speech_end_s = speech_start_s + foreground_duration_s
-        fade_start_s = speech_end_s + release_s
+        duck_start_s = max(0.0, speech_start_s - attack_s)
+        effective_attack_s = speech_start_s - duck_start_s
+        release_end_s = speech_end_s + release_s
+        fade_start_s = release_end_s
         total_duration_s = max(0.05, fade_start_s + fade_s)
         tail_s = release_s + fade_s
 
-        if attack_s > 0.0:
-            attack_expression = (
-                f"if(lt(t,{speech_start_s:.6f}),1,"
-                f"if(lt(t,{speech_start_s + attack_s:.6f}),"
-                f"1-(1-{ducked_fraction:.6f})*(t-{speech_start_s:.6f})/{attack_s:.6f},"
-            )
-            attack_closers = 1
-        else:
-            attack_expression = f"if(lt(t,{speech_start_s:.6f}),1,"
-            attack_closers = 0
-
         if release_s > 0.0:
-            release_expression = (
-                f"if(lt(t,{speech_end_s:.6f}),{ducked_fraction:.6f},"
-                f"if(lt(t,{fade_start_s:.6f}),"
+            after_speech_expression = (
+                f"if(lt(t,{release_end_s:.6f}),"
                 f"{ducked_fraction:.6f}+(1-{ducked_fraction:.6f})"
-                f"*(t-{speech_end_s:.6f})/{release_s:.6f},1))"
+                f"*(t-{speech_end_s:.6f})/{release_s:.6f},1)"
             )
         else:
-            release_expression = (
-                f"if(lt(t,{speech_end_s:.6f}),{ducked_fraction:.6f},1)"
-            )
-        duck_expression = (
-            attack_expression
-            + release_expression
-            + (")" * attack_closers)
-            + ")"
+            after_speech_expression = "1"
+        speech_and_release_expression = (
+            f"if(lt(t,{speech_end_s:.6f}),{ducked_fraction:.6f},"
+            f"{after_speech_expression})"
         )
+        if effective_attack_s > 0.0:
+            duck_expression = (
+                f"if(lt(t,{duck_start_s:.6f}),1,"
+                f"if(lt(t,{speech_start_s:.6f}),"
+                f"1-(1-{ducked_fraction:.6f})"
+                f"*(t-{duck_start_s:.6f})/{effective_attack_s:.6f},"
+                f"{speech_and_release_expression}))"
+            )
+        else:
+            duck_expression = (
+                f"if(lt(t,{speech_start_s:.6f}),1,"
+                f"{speech_and_release_expression})"
+            )
 
         background_filter = (
             f"[0:a:0]aresample={NATIVE_SATELLITE_MP3_SAMPLE_RATE_HZ},"
@@ -5314,6 +5314,11 @@ def _render_native_audio_scene_asset_sync(
         "foreground_duration_s": foreground_duration_s,
         "duration_s": total_duration_s,
         "start_delay_ms": int(round(delay_s * 1000.0)),
+        "speech_start_ms": int(round(speech_start_s * 1000.0)),
+        "speech_end_ms": int(round(speech_end_s * 1000.0)),
+        "duck_start_ms": int(round(duck_start_s * 1000.0)),
+        "release_end_ms": int(round(release_end_s * 1000.0)),
+        "fade_start_ms": int(round(fade_start_s * 1000.0)),
         "bitrate_kbps": NATIVE_SATELLITE_AUDIO_SCENE_MP3_BITRATE_KBPS,
         "elapsed_ms": elapsed_ms,
     }
