@@ -6963,6 +6963,10 @@ def _spud_link_media_bytes_response(
 
 def _little_spud_notification_attachments(item_id: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
+    try:
+        refs_ttl = int(redis_client.ttl(media_refs_key(str(item_id or "").strip())))
+    except Exception:
+        refs_ttl = -1
     for item in load_queue_attachments(redis_client, item_id):
         if not isinstance(item, dict):
             continue
@@ -6977,6 +6981,12 @@ def _little_spud_notification_attachments(item_id: Any) -> List[Dict[str, Any]]:
             size = int(item.get("size") or 0)
         except Exception:
             size = 0
+        try:
+            blob_ttl = int(redis_blob_client.ttl(blob_key))
+        except Exception:
+            blob_ttl = -1
+        positive_ttls = [ttl for ttl in (refs_ttl, blob_ttl) if ttl >= 0]
+        expires_at = int(time.time()) + min(positive_ttls) if positive_ttls else None
         out.append(
             {
                 "id": str(item.get("id") or blob_key.rsplit(":", 1)[-1] or "").strip(),
@@ -6986,6 +6996,7 @@ def _little_spud_notification_attachments(item_id: Any) -> List[Dict[str, Any]]:
                 "size": size,
                 "url": url,
                 "preview_url": url,
+                "expires_at": expires_at,
             }
         )
     return out
@@ -7009,6 +7020,160 @@ def _little_spud_notification_payload(item: Dict[str, Any]) -> Dict[str, Any]:
         "origin": origin,
         "meta": meta,
         "attachments": _little_spud_notification_attachments(item.get("id")),
+    }
+
+
+def _little_spud_awareness_event_ids(
+    event_ids: List[Any],
+    legacy_notifications: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    requested: List[str] = []
+    seen: set[str] = set()
+    for value in event_ids or []:
+        event_id = str(value or "").strip()
+        if not event_id or event_id in seen:
+            continue
+        seen.add(event_id)
+        requested.append(event_id)
+        if len(requested) >= 200:
+            break
+
+    legacy_rows: List[Dict[str, Any]] = []
+    for value in legacy_notifications or []:
+        if not isinstance(value, dict):
+            continue
+        notification_id = str(value.get("id") or "").strip()
+        title = str(value.get("title") or "").strip()
+        message = str(value.get("message") or "").strip()
+        try:
+            created_at = float(value.get("created_at") or value.get("createdAt") or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if notification_id and (title or message):
+            legacy_rows.append(
+                {
+                    "id": notification_id,
+                    "title": title,
+                    "message": message,
+                    "created_at": created_at,
+                    "request_index": len(legacy_rows),
+                }
+            )
+        if len(legacy_rows) >= 200:
+            break
+
+    empty_result = {
+        "authoritative": False,
+        "active_event_ids": [],
+        "missing_event_ids": [],
+        "missing_notification_ids": [],
+    }
+    if not requested and not legacy_rows:
+        return {**empty_result, "authoritative": True}
+
+    try:
+        module = core_runtime._import_module("awareness_core", reload_module=False)
+    except Exception:
+        logger.debug("[spud-link] awareness notification reconciliation is unavailable", exc_info=True)
+        return empty_result
+
+    discover_fn = getattr(module, "_discover_event_sources", None)
+    event_key_fn = getattr(module, "_event_key", None)
+    if not callable(discover_fn) or not callable(event_key_fn):
+        return empty_result
+
+    try:
+        sources = discover_fn(redis_client) or []
+    except Exception:
+        logger.debug("[spud-link] failed discovering awareness event sources", exc_info=True)
+        return empty_result
+
+    wanted = set(requested)
+    active: set[str] = set()
+    awareness_labels: set[str] = set()
+    current_message_counts: Dict[str, int] = {}
+
+    def normalized(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    load_monitors_fn = getattr(module, "_load_monitors", None)
+    if callable(load_monitors_fn):
+        try:
+            monitors = load_monitors_fn(redis_client) or {}
+        except Exception:
+            monitors = {}
+        monitor_rows = monitors.values() if isinstance(monitors, dict) else monitors
+        for monitor in monitor_rows or []:
+            if not isinstance(monitor, dict):
+                continue
+            for field in ("name", "area", "linked_camera_name"):
+                label = normalized(monitor.get(field))
+                if not label:
+                    continue
+                awareness_labels.add(label)
+                if str(monitor.get("kind") or "").strip().lower() == "camera":
+                    awareness_labels.add(f"{label} camera")
+
+    try:
+        for source in sources:
+            rows = redis_client.lrange(event_key_fn(source), 0, -1) or []
+            for raw in rows:
+                try:
+                    event = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_id = str(event.get("id") or "").strip()
+                if event_id in wanted:
+                    active.add(event_id)
+                event_title = normalized(event.get("title"))
+                event_message = normalized(event.get("message"))
+                if event_title:
+                    awareness_labels.add(event_title)
+                if event_message:
+                    current_message_counts[event_message] = current_message_counts.get(event_message, 0) + 1
+            if active == wanted and not legacy_rows:
+                break
+    except Exception:
+        logger.debug("[spud-link] failed reading awareness event history", exc_info=True)
+        return empty_result
+
+    missing_notification_ids: set[str] = set()
+    classified_rows: List[tuple[Dict[str, Any], str]] = []
+    for item in legacy_rows:
+        title = normalized(item.get("title"))
+        if title not in awareness_labels:
+            continue
+        message_lines = [
+            line
+            for line in str(item.get("message") or "").splitlines()
+            if not line.strip().casefold().startswith("face id:")
+        ]
+        message = normalized("\n".join(message_lines))
+        classified_rows.append((item, message))
+
+    # Notifications created before source/event IDs were added can contain many
+    # copies of the same Awareness event. Reconcile them one-for-one against the
+    # authoritative event history, retaining the newest matching local card(s).
+    classified_rows.sort(
+        key=lambda row: (float(row[0].get("created_at") or 0), int(row[0].get("request_index") or 0)),
+        reverse=True,
+    )
+    available_messages = dict(current_message_counts)
+    for item, message in classified_rows:
+        if message and available_messages.get(message, 0) > 0:
+            available_messages[message] -= 1
+            continue
+        missing_notification_ids.add(str(item["id"]))
+
+    return {
+        "authoritative": True,
+        "active_event_ids": [event_id for event_id in requested if event_id in active],
+        "missing_event_ids": [event_id for event_id in requested if event_id not in active],
+        "missing_notification_ids": [
+            item["id"] for item in legacy_rows if item["id"] in missing_notification_ids
+        ],
     }
 
 
@@ -9805,6 +9970,11 @@ class SpudLinkPushRegistrationRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SpudLinkNotificationReconcileRequest(BaseModel):
+    event_ids: List[str] = Field(default_factory=list)
+    notifications: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class SpudLinkHomeActionRequest(BaseModel):
     room_id: str = Field(min_length=1, max_length=160)
     category_id: str = Field(min_length=1, max_length=80)
@@ -9828,6 +9998,26 @@ class SpudLinkMusicActionRequest(BaseModel):
     shuffle: Optional[bool] = None
     volume_percent: Optional[int] = Field(default=None, ge=0, le=100)
     position_seconds: Optional[float] = Field(default=None, ge=0)
+
+
+class SpudLinkPersonRequest(BaseModel):
+    person_id: str = Field(min_length=1, max_length=160)
+
+
+class SpudLinkFitnessSyncRequest(BaseModel):
+    platform: Optional[str] = Field(default=None, max_length=24)
+    time_zone: Optional[str] = Field(default=None, max_length=80)
+    permissions: List[str] = Field(default_factory=list)
+    days: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class SpudLinkFitnessChallengeRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=32)
+    person_id: Optional[str] = Field(default=None, max_length=160)
+    challenge_id: Optional[str] = Field(default=None, max_length=120)
+    duration: Optional[str] = Field(default="day", max_length=20)
+    metric: Optional[str] = Field(default="steps", max_length=40)
+    value: Optional[float] = Field(default=None, ge=0, le=1000000000)
 
 
 class SpudLinkTtsRequest(BaseModel):
@@ -16383,10 +16573,95 @@ def _require_little_spud_node(request: Request) -> Dict[str, Any]:
     _settings, node = _require_spud_link_node_request(request)
     role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
     if role != SPUD_LINK_MODE_LITTLE_SPUD:
-        raise HTTPException(status_code=403, detail="Sat Chat requires a paired Little Spud client.")
+        raise HTTPException(status_code=403, detail="This endpoint requires a paired Little Spud client.")
     _spud_link_touch_node_from_request(node, request)
     _spud_link_store_node(node)
     return node
+
+
+def _little_spud_people_options() -> List[Dict[str, str]]:
+    return [
+        {
+            "id": str(row.get("value") or "").strip(),
+            "name": str(row.get("label") or "").strip(),
+        }
+        for row in _dashboard_people_options()
+        if str(row.get("value") or "").strip()
+    ]
+
+
+def _little_spud_linked_person(node: Dict[str, Any]) -> Dict[str, str]:
+    options = _little_spud_people_options()
+    people_by_id = {str(row.get("id") or ""): row for row in options}
+    linked_id = str(node.get("linked_person_id") or "").strip()
+    if linked_id in people_by_id:
+        return dict(people_by_id[linked_id])
+
+    identity = _spud_link_identity_from_node(node)
+    resolved = people_module.resolve_person(
+        platform="little_spud",
+        origin={
+            "platform": "little_spud",
+            "node_id": str(node.get("id") or "").strip(),
+            "node_name": str(node.get("name") or "").strip(),
+            "user": identity.get("user_name"),
+            "user_name": identity.get("user_name"),
+            "device_name": identity.get("device_name"),
+            "user_id": identity.get("alias_id"),
+        },
+        redis_client=redis_client,
+    )
+    resolved_id = str(resolved.get("person_id") or resolved.get("master_user_id") or "").strip()
+    return dict(people_by_id.get(resolved_id) or {})
+
+
+def _little_spud_person_payload(node: Dict[str, Any]) -> Dict[str, Any]:
+    linked = _little_spud_linked_person(node)
+    return {
+        "linked_person_id": str(linked.get("id") or ""),
+        "linked_person_name": str(linked.get("name") or ""),
+        "people": _little_spud_people_options(),
+    }
+
+
+@app.get("/api/spudlink/v1/person")
+def spud_link_person(request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_node(request)
+    return {"ok": True, **_little_spud_person_payload(node)}
+
+
+@app.post("/api/spudlink/v1/person")
+def spud_link_person_save(payload: SpudLinkPersonRequest, request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_node(request)
+    person_id = str(payload.person_id or "").strip()
+    option = next(
+        (row for row in _little_spud_people_options() if str(row.get("id") or "") == person_id),
+        None,
+    )
+    if not option:
+        raise HTTPException(status_code=404, detail="That person is no longer available in Tater People.")
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        raise HTTPException(status_code=409, detail="This Little Spud pairing has no device identity.")
+    try:
+        people_module.attach_alias(
+            person_id=person_id,
+            platform="little_spud",
+            external_id=f"spud_link:{node_id}",
+            label=str(node.get("name") or "Little Spud").strip() or "Little Spud",
+            kind="paired_app",
+            redis_client=redis_client,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="That person is no longer available in Tater People.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    node["linked_person_id"] = person_id
+    node["linked_person_name"] = str(option.get("name") or "").strip()
+    node["linked_person_at"] = time.time()
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return {"ok": True, **_little_spud_person_payload(node)}
 
 
 def _little_spud_sat_chat_id(node: Dict[str, Any]) -> str:
@@ -16685,6 +16960,119 @@ def spud_link_home_action(payload: SpudLinkHomeActionRequest, request: Request) 
         "warning": failures[0] if failures else "",
     }
     return snapshot
+
+
+def _spud_link_fitness_module() -> Any:
+    enabled = _as_bool_flag(redis_client.get("fitness_core_running"), default=False)
+    if not enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Install and start Fitness Core from Tater Shop to use Little Spud Fitness.",
+        )
+    try:
+        module = core_runtime._import_module("fitness_core", reload_module=False)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Fitness Core is not installed. Install it from Tater Shop first.",
+        ) from exc
+    required = (
+        "get_client_fitness_state",
+        "sync_client_fitness",
+        "run_client_fitness_challenge_action",
+    )
+    if any(not callable(getattr(module, name, None)) for name in required):
+        raise HTTPException(
+            status_code=409,
+            detail="Update Fitness Core to a version that supports Little Spud Fitness.",
+        )
+    return module
+
+
+def _require_little_spud_fitness_request(request: Request) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Fitness requires a paired Little Spud client.")
+    return node
+
+
+def _spud_link_fitness_call(
+    request: Request,
+    callback: Any,
+    node: Dict[str, Any],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    linked_person = _little_spud_linked_person(node)
+    if not linked_person:
+        raise HTTPException(
+            status_code=409,
+            detail="Link Little Spud to a person in Settings before using Fitness.",
+        )
+    try:
+        result = callback(
+            node_id=str(node.get("id") or "").strip(),
+            node_name=str(node.get("name") or request.headers.get("x-spudlink-device") or "Little Spud").strip(),
+            person_id=str(linked_person.get("id") or "").strip(),
+            person_name=str(linked_person.get("name") or "").strip(),
+            people=_little_spud_people_options(),
+            client=redis_client,
+            **kwargs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Fitness Core could not complete that request.") from exc
+    _spud_link_touch_node_from_request(node, request)
+    node["activity"] = _spud_link_sanitize_activity(
+        {
+            "last_call_at": time.time(),
+            "last_call_mode": "fitness",
+            "last_device": request.headers.get("x-spudlink-device"),
+            "role": SPUD_LINK_MODE_LITTLE_SPUD,
+        },
+        allow_previews=False,
+    )
+    _spud_link_store_node(node)
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.get("/api/spudlink/v1/fitness")
+def spud_link_fitness(request: Request, refresh: bool = False) -> Dict[str, Any]:
+    node = _require_little_spud_fitness_request(request)
+    module = _spud_link_fitness_module()
+    return _spud_link_fitness_call(
+        request,
+        module.get_client_fitness_state,
+        node,
+        refresh=bool(refresh),
+    )
+
+
+@app.post("/api/spudlink/v1/fitness/sync")
+def spud_link_fitness_sync(payload: SpudLinkFitnessSyncRequest, request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_fitness_request(request)
+    module = _spud_link_fitness_module()
+    return _spud_link_fitness_call(
+        request,
+        module.sync_client_fitness,
+        node,
+        payload=payload.dict(),
+    )
+
+
+@app.post("/api/spudlink/v1/fitness/challenges")
+def spud_link_fitness_challenge(payload: SpudLinkFitnessChallengeRequest, request: Request) -> Dict[str, Any]:
+    node = _require_little_spud_fitness_request(request)
+    module = _spud_link_fitness_module()
+    values = payload.dict()
+    return _spud_link_fitness_call(
+        request,
+        module.run_client_fitness_challenge_action,
+        node,
+        action=payload.action,
+        payload=values,
+    )
 
 
 def _spud_link_music_module() -> Any:
@@ -17098,6 +17486,26 @@ def spud_link_notification_next(
     }
 
 
+@app.post("/api/spudlink/v1/notifications/reconcile")
+def spud_link_notification_reconcile(
+    payload: SpudLinkNotificationReconcileRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    _settings, node = _require_spud_link_node_request(request)
+    role = _normalize_spud_link_mode(node.get("role"), default=SPUD_LINK_MODE_SPUDLET)
+    if role != SPUD_LINK_MODE_LITTLE_SPUD:
+        raise HTTPException(status_code=403, detail="Little Spud notifications require a paired Little Spud client.")
+    result = _little_spud_awareness_event_ids(payload.event_ids, payload.notifications)
+    _spud_link_touch_node_from_request(node, request)
+    _spud_link_store_node(node)
+    return {
+        "ok": True,
+        "source": "awareness_core",
+        **result,
+        "server_time": time.time(),
+    }
+
+
 @app.post("/api/spudlink/v1/notifications/{event_id}/ack")
 def spud_link_notification_ack(event_id: str, request: Request) -> Dict[str, Any]:
     _settings, node = _require_spud_link_node_request(request)
@@ -17190,6 +17598,13 @@ async def spud_link_tater_chat(
     messages = _normalize_spud_link_tater_chat_messages(payload)
     user_text, _history_messages = _openai_user_text_and_history(messages)
     little_spud_identity = _spud_link_identity_from_request(payload, request, node)
+    linked_person = _little_spud_linked_person(node)
+    if linked_person:
+        little_spud_identity["user_name"] = str(linked_person.get("name") or little_spud_identity.get("user_name") or "User")
+        little_spud_identity["display_name"] = little_spud_identity["user_name"]
+        little_spud_identity["alias_id"] = f"person:{linked_person.get('id')}"
+        little_spud_identity["scope"] = f"person:{linked_person.get('id')}"
+        little_spud_identity["history_key"] = _spud_link_history_key(little_spud_identity)
     tools_enabled = bool(settings.get("little_spud_tools_enabled"))
 
     _spud_link_touch_node_from_request(node, request)
@@ -17229,6 +17644,9 @@ async def spud_link_tater_chat(
         "spud_link_role": role,
         "server_mode": server_mode,
         "session_id": little_spud_identity.get("scope"),
+        "person_id": linked_person.get("id") if linked_person else "",
+        "master_user_id": linked_person.get("id") if linked_person else "",
+        "person_name": linked_person.get("name") if linked_person else "",
     }
     context_extra = {
         "little_spud_user": little_spud_identity.get("user_name"),

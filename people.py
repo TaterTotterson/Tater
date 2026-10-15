@@ -391,6 +391,14 @@ def alias_candidates_from_origin(platform: str, origin: Optional[Dict[str, Any]]
         add("voice_core", speaker_id, source.get("speaker_name") or speaker_id, "speaker_id")
 
     if normalized_platform == "little_spud":
+        node_id = _text(source.get("node_id"))
+        if node_id:
+            add(
+                "little_spud",
+                f"spud_link:{node_id}",
+                source.get("device_name") or source.get("node_name") or node_id,
+                "paired_app",
+            )
         little_spud_alias = _little_spud_alias_from_origin(source)
         if little_spud_alias:
             add(
