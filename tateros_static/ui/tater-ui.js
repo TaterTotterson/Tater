@@ -15846,7 +15846,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 	key: 0,
 	class: "tm-wake-source-panel"
 }, BM = { class: "tm-speech-section-heading compact" }, VM = {
-	class: "tm-choice-grid tm-wake-source-grid tm-wake-source-grid-two",
+	class: "tm-choice-grid tm-wake-source-grid",
 	role: "group",
 	"aria-label": "Wake detection mode"
 }, HM = ["disabled", "onClick"], UM = {
@@ -15866,9 +15866,9 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 	key: 1,
 	class: "tm-wake-model-block"
 }, $M = { class: "tm-speech-section-heading compact" }, eN = {
-	class: "tm-choice-grid tm-wake-source-grid tm-wake-source-grid-two",
+	class: "tm-choice-grid tm-wake-source-grid",
 	role: "group",
-	"aria-label": "paired wake bundle source"
+	"aria-label": "matched wake bundle source"
 }, tN = ["disabled", "onClick"], nN = {
 	key: 0,
 	class: "tm-field tm-field-wide"
@@ -15909,7 +15909,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 	},
 	emits: ["notify", "dirty"],
 	setup(e, { expose: t, emit: n }) {
-		let r = e, i = n, a = /* @__PURE__ */ U(!1), o = /* @__PURE__ */ U(""), s = /* @__PURE__ */ U(""), c = /* @__PURE__ */ U({}), l = /* @__PURE__ */ U(null), u = /* @__PURE__ */ U(null), d = /* @__PURE__ */ U(null), f = /* @__PURE__ */ U(null), p = /* @__PURE__ */ Et({}), m = /* @__PURE__ */ Et({}), h = /* @__PURE__ */ Et({}), g = /* @__PURE__ */ U(null), _ = /* @__PURE__ */ U(!1), v = null, y = null, b = Q(() => Array.isArray(c.value.header_stats) ? c.value.header_stats : []), x = Q(() => le(l.value)), S = Q(() => le(u.value)), C = Q(() => le(d.value)), w = Q(() => String(p.wake_engine || "micro_wake_word")), T = Q(() => String(p.wake_word || "hey_tater")), E = Q(() => String(p.wake_detector_mode || "dual")), D = Q(() => E.value === "dual"), O = Q(() => String(p.oww_wake_word || "hey_tater")), k = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "select") || {}), A = Q(() => String(k.value.key || "wake_verifier_mode")), j = Q(() => String(h[A.value] || "off")), M = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "table") || {}), N = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("summary"))?.value || "No checks recorded yet")), P = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("stt_engine"))?.value || me("STT Backend") || "Unavailable")), F = Q(() => me("Connected") || "0"), ee = Q(() => w.value === "micro_wake_word" ? E.value === "dual" ? "Dual Wake Word" : "microWakeWord Only" : B(ue(x.value.wake_engine).find((e) => z(e) === w.value)) || "Wake disabled"), te = Q(() => B(ue(x.value.wake_word).find((e) => z(e) === T.value)) || "Built-in Hey Tater"), ne = Q(() => de(ue(x.value.oww_wake_word).find((e) => z(e) === O.value)) || "Built-in Hey Tater"), re = Q(() => String(g.value?.display_code || g.value?.pairing_code || g.value?.code || "").trim()), I = Q(() => String(g.value?.state || g.value?.status || "waiting").trim().toLowerCase()), L = Q(() => Math.max(0, Math.floor(Number(g.value?.expires_in_s || 0)))), ie = {
+		let r = e, i = n, a = /* @__PURE__ */ U(!1), o = /* @__PURE__ */ U(""), s = /* @__PURE__ */ U(""), c = /* @__PURE__ */ U({}), l = /* @__PURE__ */ U(null), u = /* @__PURE__ */ U(null), d = /* @__PURE__ */ U(null), f = /* @__PURE__ */ U(null), p = /* @__PURE__ */ Et({}), m = /* @__PURE__ */ Et({}), h = /* @__PURE__ */ Et({}), g = /* @__PURE__ */ U(null), _ = /* @__PURE__ */ U(!1), v = null, y = null, b = Q(() => Array.isArray(c.value.header_stats) ? c.value.header_stats : []), x = Q(() => le(l.value)), S = Q(() => le(u.value)), C = Q(() => le(d.value)), w = Q(() => String(p.wake_engine || "micro_wake_word")), T = Q(() => String(p.wake_word || "hey_tater")), E = Q(() => String(p.wake_detector_mode || "dual")), D = Q(() => E.value === "oww" || E.value === "dual"), O = Q(() => String(p.oww_wake_word || "hey_tater")), k = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "select") || {}), A = Q(() => String(k.value.key || "wake_verifier_mode")), j = Q(() => String(h[A.value] || "off")), M = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "table") || {}), N = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("summary"))?.value || "No checks recorded yet")), P = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("stt_engine"))?.value || me("STT Backend") || "Unavailable")), F = Q(() => me("Connected") || "0"), ee = Q(() => w.value === "micro_wake_word" ? E.value === "dual" ? "Dual Wake Word" : E.value === "oww" ? "OWW Where Supported" : "microWakeWord Only" : B(ue(x.value.wake_engine).find((e) => z(e) === w.value)) || "Wake disabled"), te = Q(() => B(ue(x.value.wake_word).find((e) => z(e) === T.value)) || "Built-in Hey Tater"), ne = Q(() => de(ue(x.value.oww_wake_word).find((e) => z(e) === O.value)) || "Built-in Hey Tater"), re = Q(() => String(g.value?.display_code || g.value?.pairing_code || g.value?.code || "").trim()), I = Q(() => String(g.value?.state || g.value?.status || "waiting").trim().toLowerCase()), L = Q(() => Math.max(0, Math.floor(Number(g.value?.expires_in_s || 0)))), ie = {
 			micro_wake_word: {
 				mark: "MW",
 				short: "Private, fast wake detection directly on each satellite."
@@ -15944,9 +15944,13 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 				mark: "MW",
 				short: "Use the same microWakeWord model on every satellite."
 			},
+			oww: {
+				mark: "OW",
+				short: "Use openWakeWord on capable satellites and microWakeWord on MWW-only devices."
+			},
 			dual: {
 				mark: "2X",
-				short: "Use microWakeWord everywhere and require matching openWakeWord confirmation on compatible Echo satellites."
+				short: "Require matching microWakeWord and openWakeWord detection on capable satellites."
 			}
 		}, se = {
 			off: {
@@ -15982,7 +15986,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 		}
 		function de(e) {
 			let t = z(e);
-			return t === "catalog" ? "Dual Wake Word Catalog" : t === "custom_url" ? "Custom Matched Bundle" : B(e);
+			return t === "catalog" ? "Matched Wake Bundle Catalog" : t === "custom_url" ? "Custom Matched Bundle" : B(e);
 		}
 		function fe(e) {
 			let t = z(e);
@@ -16165,7 +16169,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 			Y("article", NM, [t[15] ||= Y("div", { class: "tm-model-area-hero-copy" }, [
 				Y("span", { class: "tv-eyebrow" }, "Wake pipeline"),
 				Y("h3", null, "One phrase. Every room."),
-				Y("p", null, "Choose one microWakeWord profile for every satellite, with optional matching openWakeWord confirmation on compatible Echo devices.")
+				Y("p", null, "Choose one matched wake profile, then decide whether OWW-capable satellites use openWakeWord alone or as dual confirmation.")
 			], -1), Y("div", PM, [
 				Y("span", null, [t[14] ||= Y("i", { class: "ready" }, null, -1), X(V(F.value) + " connected", 1)]),
 				Y("span", null, V(ee.value), 1),
@@ -16175,7 +16179,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 				Y("header", null, [t[16] ||= Y("div", null, [
 					Y("span", { class: "tv-eyebrow" }, "Step 1 · All satellites"),
 					Y("h3", null, "How should satellites wake?"),
-					Y("p", null, "Every satellite uses the same wake phrase. Dual Wake adds a second detector only where the hardware supports it.")
+					Y("p", null, "Every satellite uses the same wake phrase. Choose MWW everywhere, OWW where supported, or dual detection on capable hardware.")
 				], -1), Y("span", IM, V(ee.value), 1)]),
 				Y("div", LM, [(q(!0), J(K, null, G(ue(x.value.wake_engine), (e) => (q(), J("button", {
 					key: z(e),
@@ -16189,7 +16193,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 					t[17] ||= Y("b", null, "✓", -1)
 				], 10, RM))), 128))]),
 				w.value === "micro_wake_word" ? (q(), J("section", zM, [
-					Y("div", BM, [t[18] ||= Y("div", null, [Y("h3", null, "Wake detection mode"), Y("p", null, "Use microWakeWord everywhere, or add matching openWakeWord confirmation on compatible Echo satellites.")], -1), Y("span", null, V(ee.value), 1)]),
+					Y("div", BM, [t[18] ||= Y("div", null, [Y("h3", null, "Wake detection mode"), Y("p", null, "Choose the detector policy once; each satellite receives the best supported projection.")], -1), Y("span", null, V(ee.value), 1)]),
 					Y("div", VM, [(q(!0), J(K, null, G(ue(x.value.wake_detector_mode), (e) => (q(), J("button", {
 						key: z(e),
 						type: "button",
@@ -16239,7 +16243,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 						])) : Z("", !0)
 					])),
 					D.value ? (q(), J("div", QM, [
-						Y("div", $M, [t[24] ||= Y("div", null, [Y("h3", null, "Paired wake bundle"), Y("p", null, "One bundle supplies both matching models. ESP satellites load its microWakeWord half; compatible Echo satellites load both.")], -1), Y("span", null, V(ne.value), 1)]),
+						Y("div", $M, [Y("div", null, [t[24] ||= Y("h3", null, "Matched wake bundle", -1), Y("p", null, "One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord half; OWW-capable satellites " + V(E.value === "dual" ? "load both matching models" : "load openWakeWord only") + ".", 1)]), Y("span", null, V(ne.value), 1)]),
 						Y("div", eN, [(q(!0), J(K, null, G(ue(x.value.oww_wake_word), (e) => (q(), J("button", {
 							key: z(e),
 							type: "button",
@@ -16252,7 +16256,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 							t[25] ||= Y("b", null, "✓", -1)
 						], 10, tN))), 128))]),
 						O.value === "catalog" ? (q(), J("label", nN, [
-							t[26] ||= Y("span", { class: "tm-field-label" }, "Dual Wake Word Catalog", -1),
+							t[26] ||= Y("span", { class: "tm-field-label" }, "Matched Wake Bundle Catalog", -1),
 							W(Y("select", {
 								"onUpdate:modelValue": t[4] ||= (e) => p.oww_wake_word_catalog_url = e,
 								disabled: !!o.value || !ue(x.value.oww_wake_word_catalog_url).length,
@@ -16274,7 +16278,7 @@ var zc = ["checked", "disabled"], Bc = { key: 0 }, Vc = {
 							}, null, 40, cN), [[$, p.oww_wake_word_url]]),
 							Y("small", null, V(x.value.oww_wake_word_url?.description), 1)
 						])) : Z("", !0),
-						O.value === "hey_tater" ? (q(), J("div", lN, "The built-in selection keeps both Hey Tater detectors paired while ESP satellites use the same microWakeWord model.")) : Z("", !0)
+						O.value === "hey_tater" ? (q(), J("div", lN, "The built-in selection keeps both Hey Tater models matched. MWW-only satellites use microWakeWord while capable satellites follow the selected OWW policy.")) : Z("", !0)
 					])) : Z("", !0)
 				])) : (q(), J("div", uN, [Y("strong", null, V(ee.value) + " selected", 1), Y("span", null, V(ie[w.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
 			])) : Z("", !0),

@@ -1,47 +1,37 @@
-# Tater v1.6.2
+# Tater v1.6.3
 
-Tater v1.6.2 simplifies music-backed announcements into one fully rendered
-audio file, improves synchronized Sendspin delivery, and fixes Echo thermostat
-control for the Ecobee HomeKit integration.
+Tater v1.6.3 adds a capability-aware openWakeWord mode so users can run OWW on
+satellites that support it while keeping the matching microWakeWord fallback on
+ESP32 and other MWW-only satellites.
 
 ## What's New
 
-### Music-Backed Announcements
+### OWW Where Supported
 
-- Renders announcement music and speech into one finished MP3 before playback.
-  The file now contains the requested speech offset, ducking attack, speech,
-  release, and final fade, so satellites only need to play it.
-- Sends the rendered file directly with `play.url` for a single satellite and
-  uses Sendspin only when synchronized delivery is needed for satellite groups
-  or stereo pairs.
-- Applies each Sendspin destination's saved volume and synchronization offset,
-  skips unavailable group destinations cleanly, and can wait for finite media
-  playback to complete when the caller requests it.
-- Removes the retired `audio.scene.start` playback path and its finished-event
-  acknowledgment. Normal TTS, assistant replies, media sessions, broadcasts,
-  and TTS overlays keep their existing playback routes.
+- Adds a third Wake Detection Mode alongside microWakeWord Only and Dual Wake
+  Word. OWW Where Supported enables only openWakeWord on satellites that
+  advertise OWW detector selection.
+- Keeps microWakeWord active on ESP32 and any other satellite that does not
+  advertise OWW support. Those devices receive no unsupported OWW settings.
+- Uses one matched wake bundle for custom wake words. OWW-capable satellites
+  receive its openWakeWord model while MWW-only satellites receive the matching
+  microWakeWord half, keeping the spoken phrase consistent in every room.
 
-### Echo Climate Controls
+### Wake Word Settings
 
-- Fixes temperature and HVAC commands for thermostats provided by the Ecobee
-  HomeKit integration. Echo temperature changes now reach HomeKit instead of
-  moving temporarily on screen and reverting at the next state refresh.
-- Preserves the integration's Ecobee device identity and cached thermostat
-  state while routing device actions through the installed HomeKit module.
-
-### Little Spud Cleanup
-
-- Removes the unfinished Little Spud Fitness bridge endpoints and request
-  models. Existing linked-person identity, chat, home controls, music, TTS, and
-  Awareness notification behavior remain available.
+- Updates the Wake Word page with a clear three-choice detector selector and
+  descriptions of how each choice maps to capable and MWW-only satellites.
+- Preserves existing microWakeWord-only and Dual Wake behavior. Echo and
+  ThirdReality satellites continue to opt into OWW through their advertised
+  capabilities, while older or MWW-only firmware remains on the safe fallback.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.6.2 through
+- macOS users already running v1.0.1 or later can install v1.6.3 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.6.2` or `latest` for the CPU image and
-  `v1.6.2-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.6.3` or `latest` for the CPU image and
+  `v1.6.3-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

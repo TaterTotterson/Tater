@@ -53,13 +53,13 @@ class WakePackageProxyTests(unittest.TestCase):
             output = native_satellite._firmware_settings_payload("native:s3", board="s3-box")
         self.assertEqual({**settings, "output_channel_mode": "stereo"}, output)
 
-    def test_mww_only_satellite_gets_the_mww_half_of_shared_dual_bundle(self) -> None:
+    def test_mww_only_satellite_gets_the_mww_half_of_shared_oww_bundle(self) -> None:
         selector = "native:esp-test"
         source_url = "https://trainer.example/jarvis.wake-bundle.json"
         native_satellite._clients[selector] = {"client_host": "10.4.20.239"}
         settings = {"wake_word": "custom_url", "wake_word_url": "https://models.example/jarvis.json"}
         shared = {
-            "wake_detector_mode": "dual",
+            "wake_detector_mode": "oww",
             "oww_wake_word": "custom_url",
             "oww_wake_word_url": source_url,
         }
@@ -122,6 +122,36 @@ class WakePackageProxyTests(unittest.TestCase):
         self.assertEqual(manifest_parts[-2], bundle_parts[-2])
         self.assertEqual(output["oww_wake_word"], "paired_bundle")
         self.assertTrue(output["wake_word_url"].endswith("/manifest.json"))
+        self.assertTrue(output["oww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
+
+    def test_oww_where_supported_uses_bundle_and_disables_mww_on_capable_satellite(self) -> None:
+        selector = "native:thirdreality-test"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.240"}
+        settings = {
+            "wake_detector_mode": "oww",
+            "wake_mww_enabled": False,
+            "wake_oww_enabled": True,
+            "wake_word": "custom_url",
+            "wake_word_url": "https://models.example/jojo.json",
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": "https://trainer.example/jojo.wake-bundle.json",
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(
+                selector,
+                board="s420",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(output["wake_detector_mode"], "oww")
+        self.assertFalse(output["wake_mww_enabled"])
+        self.assertTrue(output["wake_oww_enabled"])
+        self.assertEqual(output["oww_wake_word"], "paired_bundle")
         self.assertTrue(output["oww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
 
     def test_explicit_mww_mode_ignores_stale_dual_flags_and_bundle(self) -> None:

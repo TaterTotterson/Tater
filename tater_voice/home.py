@@ -198,7 +198,7 @@ def _shared_wake_model_settings_item_form(native_status: Dict[str, Any]) -> Dict
         "title": "Wake Word",
         "subtitle": (
             "One wake phrase for every satellite. ESP and other MWW-only devices use the microWakeWord model; "
-            "compatible Echo devices can add the matching openWakeWord model in Dual Wake mode. "
+            "OWW-capable devices can use the matching openWakeWord model alone or in Dual Wake mode. "
             f"Changes apply immediately to {connected} connected satellite(s)."
         ),
         "sections": native_live_settings.shared_wake_model_settings_sections(),

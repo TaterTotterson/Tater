@@ -1155,16 +1155,16 @@ def _firmware_settings_payload(
             )
     family = native_live_settings.wake_family_for(capabilities=capabilities, board=board)
     if family != "echo":
-        # A shared Dual Wake bundle still supplies the model for MWW-only
+        # A shared matched wake bundle still supplies the model for MWW-only
         # satellites. Resolve its manifest through Tater's package proxy, but
         # never send any OWW setting to firmware that cannot consume it.
         shared = native_live_settings.shared_wake_settings_snapshot()
-        dual_custom_bundle = (
-            _lower(shared.get("wake_detector_mode")) == "dual"
+        paired_custom_bundle = (
+            _lower(shared.get("wake_detector_mode")) in {"oww", "dual"}
             and _lower(shared.get("oww_wake_word")) == "custom_url"
             and bool(_text(shared.get("oww_wake_word_url")))
         )
-        if dual_custom_bundle:
+        if paired_custom_bundle:
             row = _clients.get(_canonical_selector(selector))
             peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
             try:
@@ -1185,22 +1185,22 @@ def _firmware_settings_payload(
                 )
         return settings
     mode = _lower(settings.get("wake_detector_mode"))
-    if mode not in {"mww", "dual"}:
+    if mode not in {"mww", "oww", "dual"}:
         flags_present = "wake_mww_enabled" in settings or "wake_oww_enabled" in settings
         mww_enabled = _as_bool(settings.get("wake_mww_enabled"), False)
         oww_enabled = _as_bool(settings.get("wake_oww_enabled"), False)
         if flags_present:
-            mode = "dual" if mww_enabled and oww_enabled else "mww"
+            mode = "dual" if mww_enabled and oww_enabled else ("oww" if oww_enabled else "mww")
         else:
             mode = "dual" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
     settings["wake_detector_mode"] = mode
-    settings["wake_mww_enabled"] = True
-    settings["wake_oww_enabled"] = mode == "dual"
+    settings["wake_mww_enabled"] = mode in {"mww", "dual"}
+    settings["wake_oww_enabled"] = mode in {"oww", "dual"}
     if mode == "mww":
         for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
             settings.pop(key, None)
-    dual_custom_bundle = (
-        mode == "dual"
+    paired_custom_bundle = (
+        mode in {"oww", "dual"}
         and _lower(settings.get("oww_wake_word")) == "custom_url"
         and bool(_text(settings.get("oww_wake_word_url")))
     )
@@ -1214,7 +1214,7 @@ def _firmware_settings_payload(
         from . import wake_package_proxy
 
         service_url = _vp()._service_base_url_for_peer(peer_host)
-        if dual_custom_bundle:
+        if paired_custom_bundle:
             manifest_url, bundle_url = wake_package_proxy.register_dual_bundle(service_url, oww_source_url)
             settings["wake_word"] = "custom_url"
             settings["wake_word_url"] = manifest_url
@@ -1222,7 +1222,7 @@ def _firmware_settings_payload(
             settings["oww_wake_word_url"] = bundle_url
         elif mww_source_url:
             settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, mww_source_url)
-        if oww_source_url and not dual_custom_bundle:
+        if oww_source_url and not paired_custom_bundle:
             settings["oww_wake_word_url"] = wake_package_proxy.register_bundle(service_url, oww_source_url)
     except (ValueError, RuntimeError) as exc:
         _vp().logger.warning(
