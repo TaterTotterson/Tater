@@ -1037,6 +1037,168 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
 
 class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_model_thinking_is_opt_in_by_default(self):
+        self.assertFalse(helpers.DEFAULT_HYDRA_LLM_THINKING_ENABLED)
+        with mock.patch.object(helpers, "_safe_redis_text_get", return_value=""), mock.patch.dict(
+            os.environ,
+            {
+                "TATER_HYDRA_LLM_THINKING_ENABLED": "",
+                "TATER_LLM_THINKING_ENABLED": "",
+            },
+        ):
+            self.assertFalse(helpers.hydra_llm_thinking_enabled())
+
+    def test_hydra_reasoning_debug_builds_a_compact_preview(self):
+        debug = {}
+        hydra_runtime._populate_llm_reasoning_debug(
+            debug,
+            response={"message": {"content": "Visible", "reasoning_content": "  compare   the options carefully  "}},
+        )
+
+        self.assertEqual(debug["reasoning_content"], "compare   the options carefully")
+        self.assertEqual(debug["reasoning_summary"], "compare the options carefully")
+        self.assertEqual(debug["reasoning_chars"], 31)
+
+    def test_thinking_setting_controls_local_templates_and_inline_reasoning(self):
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=True):
+            self.assertEqual(
+                helpers._local_no_thinking_template_variants(False)[0],
+                {"enable_thinking": True},
+            )
+            message = helpers._normalized_assistant_message(
+                content="<think>check the facts</think>Visible answer",
+            )
+
+        self.assertEqual(message["content"], "Visible answer")
+        self.assertEqual(message["reasoning_content"], "check the facts")
+
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=False):
+            disabled_message = helpers._normalized_assistant_message(
+                content="<think>private work</think>Visible answer",
+            )
+
+        self.assertEqual(disabled_message, {"role": "assistant", "content": "Visible answer"})
+
+    def test_sanitized_tool_history_preserves_separate_reasoning(self):
+        messages = helpers._sanitize_chat_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "choose the lookup tool",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(messages[0]["reasoning_content"], "choose the lookup tool")
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["name"], "lookup")
+
+    async def test_openai_compatible_enables_and_preserves_structured_reasoning(self):
+        class Completions:
+            async def create(self, **kwargs):
+                self.kwargs = dict(kwargs)
+                return SimpleNamespace(
+                    model="test-model",
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            message=SimpleNamespace(
+                                role="assistant",
+                                content="Visible answer",
+                                reasoning_content="private work",
+                            ),
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=2, completion_tokens=3, total_tokens=5),
+                )
+
+        completions = Completions()
+        wrapper = helpers.LLMClientWrapper(host="http://127.0.0.1:1234", model="test-model")
+        wrapper.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=True):
+            result = await wrapper.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(completions.kwargs["reasoning_effort"], "medium")
+        self.assertEqual(result["message"]["content"], "Visible answer")
+        self.assertEqual(result["message"]["reasoning_content"], "private work")
+
+    async def test_openai_stream_keeps_reasoning_out_of_visible_callback(self):
+        class Stream:
+            def __aiter__(self):
+                async def events():
+                    yield SimpleNamespace(
+                        model="test-model",
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason=None,
+                                delta=SimpleNamespace(content=None, reasoning_content="private work"),
+                            )
+                        ],
+                        usage=None,
+                    )
+                    yield SimpleNamespace(
+                        model="test-model",
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason="stop",
+                                delta=SimpleNamespace(content="Visible answer", reasoning_content=None),
+                            )
+                        ],
+                        usage=None,
+                    )
+
+                return events()
+
+        class Completions:
+            async def create(self, **kwargs):
+                self.kwargs = dict(kwargs)
+                return Stream()
+
+        completions = Completions()
+        wrapper = helpers.LLMClientWrapper(host="http://127.0.0.1:1234", model="test-model")
+        wrapper.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        visible_chunks = []
+
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=True):
+            result = await wrapper.chat(
+                [{"role": "user", "content": "hello"}],
+                stream_callback=visible_chunks.append,
+            )
+
+        self.assertEqual(visible_chunks, ["Visible answer"])
+        self.assertEqual(result["message"]["reasoning_content"], "private work")
+
+    def test_remote_llama_chat_payload_uses_supported_reasoning_controls(self):
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=True):
+            payload = helpers._llama_cpp_oai_chat_payload(
+                model_token="test-model",
+                messages=[{"role": "user", "content": "hello"}],
+                chat_kwargs={"tools": []},
+            )
+
+        self.assertEqual(payload["reasoning_effort"], "medium")
+        self.assertEqual(payload["reasoning_format"], "deepseek")
+        self.assertTrue(payload["chat_template_kwargs"]["enable_thinking"])
+
+        with mock.patch.object(helpers, "hydra_llm_thinking_enabled", return_value=False):
+            disabled_payload = helpers._llama_cpp_oai_chat_payload(
+                model_token="test-model",
+                messages=[{"role": "user", "content": "hello"}],
+                chat_kwargs={"tools": []},
+            )
+
+        self.assertEqual(disabled_payload["reasoning_effort"], "none")
+        self.assertEqual(disabled_payload["reasoning_format"], "none")
+        self.assertFalse(disabled_payload["chat_template_kwargs"]["enable_thinking"])
+
     async def test_openai_compatible_accumulates_streamed_native_tool_call(self):
         tool = hydra_tool_index.native_function_tool(
             tool_id="read_file",
@@ -2064,6 +2226,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                     "message": {
                         "role": "assistant",
                         "content": "",
+                        "reasoning_content": "choose the file tool",
                         "tool_calls": [
                             {
                                 "id": "call_read",
@@ -2121,6 +2284,28 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             choice["message"]["tool_calls"][0]["function"]["arguments"],
             '{"path":"/tmp/a.txt"}',
         )
+        self.assertEqual(choice["message"]["reasoning_content"], "choose the file tool")
+
+    async def test_tater_api_stream_keeps_reasoning_structured(self):
+        import tateros_app
+
+        completion = tateros_app._openai_chat_completion_response(
+            content="Visible answer",
+            reasoning_content="private work",
+            model="test-model",
+        )
+        events = []
+        async for event in tateros_app._stream_openai_chat_completion(completion):
+            if event.startswith("data: {"):
+                events.append(json.loads(event[6:].strip()))
+
+        deltas = [event["choices"][0]["delta"] for event in events]
+        self.assertIn({"reasoning_content": "private work"}, deltas)
+        self.assertIn({"content": "Visible answer"}, deltas)
+        self.assertFalse(
+            any("private work" in str(delta.get("content") or "") for delta in deltas)
+        )
+        self.assertEqual(events[-1]["choices"][0]["finish_reason"], "stop")
 
     async def test_spud_link_endpoint_sets_node_queue_identity(self):
         import tateros_app
@@ -2640,13 +2825,21 @@ class TelemetryTests(unittest.TestCase):
             state_update_deterministic_count=3,
             state_update_llm_count=1,
             tool_ms=300,
+            reasoning_traces=[
+                {
+                    "role": "hermes_chat",
+                    "label": "Hermes conversation",
+                    "summary": "Checked the available context.",
+                    "content": "I should compare the available context before answering.",
+                }
+            ],
             compact_tool_ref_fn=lambda _value: None,
             validation_status_for_ledger_fn=lambda **_kwargs: {},
             short_text_fn=lambda value, limit=0: str(value or "")[:limit or None],
             compact_agent_state_json_fn=lambda *_args, **_kwargs: "{}",
             agent_state_hash_fn=lambda *_args, **_kwargs: "",
             configured_max_ledger_items_fn=lambda _redis: 10,
-            schema_version="2",
+            schema_version="3",
             agent_state_ledger_max_chars=100,
             allowed_planner_kinds=("answer",),
         )
@@ -2657,6 +2850,62 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(row["state_update_ms"], 40)
         self.assertEqual(row["state_update_deterministic_count"], 3)
         self.assertEqual(row["state_update_llm_count"], 1)
+        self.assertEqual(row["reasoning_summary"], "Checked the available context.")
+        self.assertEqual(row["reasoning_traces"][0]["role"], "hermes_chat")
+        self.assertIn("compare the available context", row["reasoning_traces"][0]["content"])
+
+
+class HuggingFaceDownloadProgressTests(unittest.TestCase):
+    def test_worker_heartbeat_does_not_reset_measured_download_progress(self):
+        import tateros_app
+
+        callback = tateros_app._hf_llm_warmup_progress_callback("llama_cpp", "owner/model::model.gguf")
+        with (
+            mock.patch.object(tateros_app, "_hf_llm_warmup_cancel_requested", return_value=False),
+            mock.patch.object(
+                tateros_app,
+                "_hf_llm_warmup_download_bar_updates",
+                return_value={
+                    "progress": 40.0,
+                    "download_progress": 50.0,
+                    "download_bytes": 50,
+                    "download_total_bytes": 100,
+                },
+            ),
+            mock.patch.object(tateros_app, "_hf_llm_warmup_update_item") as update_item,
+        ):
+            callback(
+                {
+                    "event": "update",
+                    "stage": "download",
+                    "id": "cache-monitor:model",
+                    "source": "cache_monitor",
+                    "description": "model.gguf",
+                    "unit": "B",
+                    "completed": 50,
+                    "total": 100,
+                    "progress": 50,
+                }
+            )
+            callback(
+                {
+                    "event": "heartbeat",
+                    "stage": "download",
+                    "id": "worker:model",
+                    "source": "worker",
+                    "description": "Downloading model.gguf",
+                    "progress": 0,
+                }
+            )
+
+        measured = update_item.call_args_list[0].args[2]
+        heartbeat = update_item.call_args_list[1].args[2]
+        self.assertEqual(measured["progress"], 40.0)
+        self.assertEqual(measured["download_progress"], 50.0)
+        self.assertEqual(heartbeat["status"], "downloading")
+        self.assertEqual(heartbeat["stage"], "download")
+        self.assertNotIn("progress", heartbeat)
+        self.assertNotIn("message", heartbeat)
 
 
 class SpudLinkStreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -2742,6 +2991,11 @@ class ChatRuntimeReuseTests(unittest.TestCase):
                 "responses": ["hello"],
                 "agent": True,
                 "task_name": "test",
+                "reasoning_content": "checked the request",
+                "reasoning_summary": "Checked the request.",
+                "reasoning_traces": [
+                    {"role": "hermes_chat", "label": "Hermes conversation", "content": "checked the request"}
+                ],
             }
 
         try:
@@ -2751,7 +3005,7 @@ class ChatRuntimeReuseTests(unittest.TestCase):
                     "_process_message",
                     side_effect=fake_process_message,
                 ),
-                mock.patch.object(tateros_app, "_save_chat_message"),
+                mock.patch.object(tateros_app, "_save_chat_message") as save_message,
             ):
                 job_ids = []
                 for index in range(2):
@@ -2776,6 +3030,16 @@ class ChatRuntimeReuseTests(unittest.TestCase):
             self.assertEqual(len(set(loop_ids)), 1)
             self.assertIn("response_chunk", event_types)
             self.assertIn("done", event_types)
+            self.assertTrue(
+                any(
+                    call.kwargs.get("reasoning_content") == "checked the request"
+                    and call.kwargs.get("reasoning_summary") == "Checked the request."
+                    for call in save_message.call_args_list
+                )
+            )
+            snapshot = manager.get_snapshot(job_ids[-1]) or {}
+            self.assertEqual(snapshot.get("reasoning_content"), "checked the request")
+            self.assertEqual(snapshot.get("reasoning_traces", [])[0]["role"], "hermes_chat")
         finally:
             manager.shutdown(timeout=2)
 

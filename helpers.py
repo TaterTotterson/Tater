@@ -574,6 +574,7 @@ HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
 HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
+HYDRA_LLM_THINKING_ENABLED_KEY = "tater:hydra:llm:thinking_enabled"
 SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
 SPUD_LINK_MODE_SPUDLET = "spudlet"
 HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY = "tater:hydra:llm:hf_transformers_context_tokens"
@@ -634,6 +635,7 @@ DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE = 2048
 MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE = 4096
 FAST_MLX_ENGINE_PREFILL_STEP_SIZE = 8192
 MAX_MLX_ENGINE_PREFILL_STEP_SIZE = 32768
+DEFAULT_HYDRA_LLM_THINKING_ENABLED = False
 HYDRA_LLM_SETUP_ERROR = (
     "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
@@ -1236,6 +1238,7 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
 
         raw_content = m.get("content", None)
         raw_tool_calls = m.get("tool_calls") if role == "assistant" else None
+        reasoning_content = _reasoning_content_from_message(m) if role == "assistant" else ""
 
         # Convert any non-string (list/dict/etc) to text for maximum compatibility
         content_text = _coerce_content_to_text(raw_content).strip()
@@ -1245,7 +1248,7 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         # Also drop empty assistant/tool turns (optional but generally helpful)
-        if role in ("assistant", "tool") and content_text == "" and not raw_tool_calls:
+        if role in ("assistant", "tool") and content_text == "" and not raw_tool_calls and not reasoning_content:
             continue
 
         # System messages should not be empty either
@@ -1253,6 +1256,12 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         cleaned_message: Dict[str, Any] = {"role": role, "content": content_text}
+        if reasoning_content:
+            # llama.cpp and several other local OpenAI-compatible servers accept
+            # the opaque/structured reasoning trace on the assistant message so
+            # the model can continue cleanly after a tool result. It is kept out
+            # of content, which also keeps it out of Tater chat and speech.
+            cleaned_message["reasoning_content"] = reasoning_content
         if raw_tool_calls:
             preserved_calls: List[Dict[str, Any]] = []
             for raw_call in raw_tool_calls if isinstance(raw_tool_calls, list) else [raw_tool_calls]:
@@ -1345,6 +1354,27 @@ def _mapping_from_object(value: Any) -> Dict[str, Any]:
             if not str(key).startswith("_")
         }
     return {}
+
+
+def _reasoning_content_from_message(message: Any) -> str:
+    """Return a provider's separated reasoning text without mixing it into content."""
+    mapped = _mapping_from_object(message)
+    for key in ("reasoning_content", "thinking"):
+        value = mapped.get(key)
+        text = _coerce_content_to_text(value).strip()
+        if text:
+            return text
+        if value is not None and not isinstance(value, (str, bytes, bytearray)):
+            text = str(value).strip()
+            if text:
+                return text
+    reasoning = mapped.get("reasoning")
+    if isinstance(reasoning, dict):
+        for key in ("content", "text", "thinking", "reasoning_content"):
+            text = _coerce_content_to_text(reasoning.get(key)).strip()
+            if text:
+                return text
+    return ""
 
 
 def _native_tool_arguments(value: Any) -> Dict[str, Any]:
@@ -3978,12 +4008,29 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
     return diagnostics
 
 
+def hydra_llm_thinking_enabled() -> bool:
+    stored = _safe_redis_text_get(HYDRA_LLM_THINKING_ENABLED_KEY)
+    if stored:
+        return _boolish(stored, default=DEFAULT_HYDRA_LLM_THINKING_ENABLED)
+    configured = os.getenv("TATER_HYDRA_LLM_THINKING_ENABLED")
+    if configured is None:
+        configured = os.getenv("TATER_LLM_THINKING_ENABLED")
+    return _boolish(configured, default=DEFAULT_HYDRA_LLM_THINKING_ENABLED)
+
+
+def _provider_disable_thinking_enabled(env_key: str) -> bool:
+    legacy_override = os.getenv(env_key)
+    if legacy_override is not None and str(legacy_override).strip() != "":
+        return _boolish(legacy_override, default=False)
+    return not hydra_llm_thinking_enabled()
+
+
 def _llama_cpp_disable_thinking_enabled() -> bool:
-    return _boolish(os.getenv("TATER_LLAMA_CPP_DISABLE_THINKING"), default=True)
+    return _provider_disable_thinking_enabled("TATER_LLAMA_CPP_DISABLE_THINKING")
 
 
 def _hf_transformers_disable_thinking_enabled() -> bool:
-    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_DISABLE_THINKING"), default=True)
+    return _provider_disable_thinking_enabled("TATER_HF_TRANSFORMERS_DISABLE_THINKING")
 
 
 def _llama_cpp_preferred_quants() -> List[str]:
@@ -4010,12 +4057,15 @@ def _mlx_lm_lazy_load() -> bool:
 
 
 def _mlx_lm_disable_thinking_enabled() -> bool:
-    return _boolish(os.getenv("TATER_MLX_LM_DISABLE_THINKING"), default=True)
+    return _provider_disable_thinking_enabled("TATER_MLX_LM_DISABLE_THINKING")
 
 
 def _local_no_thinking_template_variants(enabled: bool = True) -> Tuple[Dict[str, Any], ...]:
     if not enabled:
-        return ({},)
+        return (
+            {"enable_thinking": True},
+            {},
+        )
     return (
         {"enable_thinking": False, "reasoning_budget": 0},
         {"enable_thinking": False},
@@ -6954,6 +7004,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_mtp_spec_type(),
         _llama_cpp_mtp_draft_model(),
         _llama_cpp_chat_template_cache_token(model_id),
+        hydra_llm_thinking_enabled(),
     )
 
 
@@ -7514,8 +7565,8 @@ def _llama_cpp_native_message_text_and_media(content: Any) -> Tuple[str, List[st
     return _coerce_content_to_text(content).strip(), media
 
 
-def _llama_cpp_native_prepare_messages(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], List[str]]:
-    out: List[Dict[str, str]] = []
+def _llama_cpp_native_prepare_messages(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    out: List[Dict[str, Any]] = []
     media: List[str] = []
     for item in messages if isinstance(messages, list) else []:
         if not isinstance(item, dict):
@@ -7523,7 +7574,22 @@ def _llama_cpp_native_prepare_messages(messages: List[Dict[str, Any]]) -> Tuple[
         role = str(item.get("role") or "user").strip() or "user"
         content, item_media = _llama_cpp_native_message_text_and_media(item.get("content"))
         media.extend(item_media)
-        out.append({"role": role, "content": content})
+        prepared: Dict[str, Any] = {"role": role, "content": content}
+        if role == "assistant":
+            reasoning_content = _reasoning_content_from_message(item)
+            if reasoning_content:
+                prepared["reasoning_content"] = reasoning_content
+            tool_calls = item.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                prepared["tool_calls"] = [dict(call) for call in tool_calls if isinstance(call, dict)]
+        elif role == "tool":
+            tool_call_id = str(item.get("tool_call_id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if tool_call_id:
+                prepared["tool_call_id"] = tool_call_id
+            if name:
+                prepared["name"] = name
+        out.append(prepared)
     return out, media
 
 
@@ -7531,6 +7597,8 @@ def _llama_cpp_native_chat_template_kwargs(chat_kwargs: Dict[str, Any]) -> Dict[
     merged: Dict[str, Any] = {}
     if _llama_cpp_disable_thinking_enabled():
         merged.update({"enable_thinking": False, "reasoning_budget": 0})
+    else:
+        merged.update({"enable_thinking": True})
     supplied = (chat_kwargs or {}).get("chat_template_kwargs")
     if isinstance(supplied, dict):
         merged.update(supplied)
@@ -7614,6 +7682,12 @@ def _llama_cpp_oai_chat_payload(
         payload["tool_choice"] = chat_kwargs.get("tool_choice")
     if chat_kwargs.get("parallel_tool_calls") is not None:
         payload["parallel_tool_calls"] = bool(chat_kwargs.get("parallel_tool_calls"))
+    thinking_enabled = not _llama_cpp_disable_thinking_enabled()
+    payload["reasoning_effort"] = "medium" if thinking_enabled else "none"
+    payload["reasoning_format"] = "deepseek" if thinking_enabled else "none"
+    template_kwargs = _llama_cpp_native_chat_template_kwargs(chat_kwargs)
+    if template_kwargs:
+        payload["chat_template_kwargs"] = template_kwargs
     return payload
 
 
@@ -7626,12 +7700,12 @@ def _llama_cpp_oai_chat_result(
     choices = response.get("choices") if isinstance(response.get("choices"), list) else []
     choice = choices[0] if choices and isinstance(choices[0], dict) else {}
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-    content = _strip_local_thinking_blocks(message.get("content")).strip()
+    normalized_message = _normalized_assistant_message(
+        content=message.get("content"),
+        source_message=message,
+        role=message.get("role") or "assistant",
+    )
     tool_calls = _normalize_native_tool_calls(message.get("tool_calls"))
-    normalized_message: Dict[str, Any] = {
-        "role": str(message.get("role") or "assistant"),
-        "content": content,
-    }
     if tool_calls:
         normalized_message["tool_calls"] = tool_calls
     usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
@@ -7665,7 +7739,10 @@ def _llama_cpp_native_completion_result(
     response: Dict[str, Any],
     generation_elapsed: float,
 ) -> Dict[str, Any]:
-    content = _strip_local_thinking_blocks(response.get("content")).strip()
+    normalized_message = _normalized_assistant_message(
+        content=response.get("content"),
+        source_message=response,
+    )
     timings = response.get("timings") if isinstance(response.get("timings"), dict) else {}
     prompt_tokens = int(response.get("tokens_evaluated") or timings.get("prompt_n") or 0)
     completion_tokens = int(timings.get("predicted_n") or 0)
@@ -7702,7 +7779,7 @@ def _llama_cpp_native_completion_result(
         limit_reason = "context" if requested_tokens < 0 else "max_tokens"
     return {
         "model": str(model_token or "").strip(),
-        "message": {"role": "assistant", "content": content},
+        "message": normalized_message,
         "_usage": {
             "prompt_tokens": max(0, prompt_tokens),
             "completion_tokens": max(0, completion_tokens),
@@ -8027,6 +8104,7 @@ def _llama_cpp_native_server_command(
     draft_n_gpu_layers = _llama_cpp_draft_n_gpu_layers()
     configured_slot_count = _llama_cpp_slot_count()
     mtp_requested = _llama_cpp_mtp_enabled()
+    thinking_enabled = hydra_llm_thinking_enabled()
     speculative_method = _llama_cpp_mtp_spec_type()
     model_identity = " ".join(
         (
@@ -8080,17 +8158,18 @@ def _llama_cpp_native_server_command(
         "--no-ui",
         "--jinja",
         "--reasoning",
-        "off",
+        "on" if thinking_enabled else "off",
         "--reasoning-budget",
-        "0",
+        "-1" if thinking_enabled else "0",
         "--reasoning-format",
-        "none",
+        "deepseek" if thinking_enabled else "none",
         # Keep n_predict=-1 context-bounded. Context shifting would otherwise
         # turn a missing EOS into effectively infinite generation.
         "--no-context-shift",
         "--chat-template-kwargs",
         json.dumps(_llama_cpp_native_chat_template_kwargs({}), separators=(",", ":")),
     ]
+    cmd.append("--reasoning-preserve" if thinking_enabled else "--no-reasoning-preserve")
     if slot_count > 1:
         cmd.extend(["--parallel", str(int(slot_count))])
     if gemma4_vulkan["no_warmup"]:
@@ -8188,6 +8267,7 @@ def _llama_cpp_native_server_command(
         "chat_template_override": bool(chat_template),
         "chat_template_handler": "llama-server --chat-template-file" if chat_template else "",
         "chat_template_warning": "",
+        "thinking_enabled": bool(thinking_enabled),
     }
     return cmd, metadata
 
@@ -10924,6 +11004,23 @@ def _llama_cpp_count_text_tokens(model: Any, text: Any) -> int:
     return 0
 
 
+def _apply_openai_compatible_reasoning_control(kwargs: Dict[str, Any]) -> bool:
+    if "reasoning_effort" in kwargs or "reasoning" in kwargs:
+        return False
+    kwargs["reasoning_effort"] = "medium" if hydra_llm_thinking_enabled() else "none"
+    return True
+
+
+def _reasoning_control_was_rejected(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code not in (None, 400, 404, 422):
+        return False
+    message = str(exc or "").strip().lower()
+    if isinstance(exc, TypeError):
+        return "reasoning" in message or "unexpected keyword" in message
+    return "reasoning_effort" in message or "reasoning effort" in message or "unknown field" in message
+
+
 class LLMClientWrapper:
     def __init__(self, host, model=None, **kwargs):
         explicit_api_key = str(kwargs.pop("api_key", "") or "").strip()
@@ -11022,6 +11119,20 @@ class LLMClientWrapper:
             self._llm_total_tokens = 0
         return out
 
+    async def _create_chat_completion(self, *, reasoning_control_injected: bool, **kwargs) -> Any:
+        try:
+            return await self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not reasoning_control_injected or not _reasoning_control_was_rejected(exc):
+                raise
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("reasoning_effort", None)
+            logger.debug(
+                "OpenAI-compatible server rejected reasoning controls; retrying with its model default",
+                exc_info=True,
+            )
+            return await self.client.chat.completions.create(**fallback_kwargs)
+
     async def chat(self, messages, **kwargs):
         """
         Thin wrapper around OpenAI-compatible /v1/chat/completions.
@@ -11050,6 +11161,7 @@ class LLMClientWrapper:
             kwargs.pop("max_tokens", None)
         if "temperature" not in kwargs:
             kwargs["temperature"] = self.temperature
+        reasoning_control_injected = _apply_openai_compatible_reasoning_control(kwargs)
 
         # sanitize messages (prevents empty-user poison + normalizes non-string content)
         try:
@@ -11083,7 +11195,8 @@ class LLMClientWrapper:
             started_at = asyncio.get_running_loop().time()
             if callable(stream_callback):
                 try:
-                    response = await self.client.chat.completions.create(
+                    response = await self._create_chat_completion(
+                        reasoning_control_injected=reasoning_control_injected,
                         model=model,
                         messages=messages,
                         stream=True,
@@ -11095,7 +11208,8 @@ class LLMClientWrapper:
                         "OpenAI-compatible streaming was rejected; retrying non-streaming",
                         exc_info=True,
                     )
-                    response = await self.client.chat.completions.create(
+                    response = await self._create_chat_completion(
+                        reasoning_control_injected=reasoning_control_injected,
                         model=model,
                         messages=messages,
                         stream=False,
@@ -11104,7 +11218,8 @@ class LLMClientWrapper:
                     )
                     effective_stream = False
             else:
-                response = await self.client.chat.completions.create(
+                response = await self._create_chat_completion(
+                    reasoning_control_injected=reasoning_control_injected,
                     model=model,
                     messages=messages,
                     stream=effective_stream,
@@ -11113,6 +11228,7 @@ class LLMClientWrapper:
                 )
             if callable(stream_callback) and effective_stream:
                 content_parts: List[str] = []
+                reasoning_parts: List[str] = []
                 streamed_tool_calls: Dict[int, Dict[str, Any]] = {}
                 response_model = str(model or "").strip()
                 usage = None
@@ -11139,6 +11255,9 @@ class LLMClientWrapper:
                     if chunk_text:
                         content_parts.append(chunk_text)
                         await _dispatch_llm_stream_callback(stream_callback, chunk_text)
+                    reasoning_chunk = _reasoning_content_from_message(delta)
+                    if reasoning_chunk:
+                        reasoning_parts.append(reasoning_chunk)
                     delta_tool_calls = getattr(delta, "tool_calls", None) if delta is not None else None
                     for fallback_index, raw_call in enumerate(delta_tool_calls or []):
                         call_map = _mapping_from_object(raw_call)
@@ -11181,10 +11300,10 @@ class LLMClientWrapper:
                 self._llm_total_tokens += max(0, total_tokens)
                 self._llm_model_last = response_model or str(model or "")
                 final_model = self._llm_model_last
-                message_result: Dict[str, Any] = {
-                    "role": "assistant",
-                    "content": _strip_local_thinking_blocks("".join(content_parts)).strip(),
-                }
+                message_result = _normalized_assistant_message(
+                    content="".join(content_parts),
+                    source_message={"reasoning_content": "".join(reasoning_parts)},
+                )
                 normalized_streamed_calls = _normalize_native_tool_calls(
                     [streamed_tool_calls[key] for key in sorted(streamed_tool_calls)]
                 )
@@ -11270,17 +11389,18 @@ class LLMClientWrapper:
 
             choice = response.choices[0].message or {}
             raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
-            content_text = _strip_local_thinking_blocks(raw_content).strip()
             raw_tool_calls = (
                 choice.get("tool_calls")
                 if isinstance(choice, dict)
                 else getattr(choice, "tool_calls", None)
             )
             normalized_tool_calls = _normalize_native_tool_calls(raw_tool_calls)
-            message_result: Dict[str, Any] = {
-                "role": getattr(choice, "role", "assistant"),
-                "content": content_text,
-            }
+            message_result = _normalized_assistant_message(
+                content=raw_content,
+                source_message=choice,
+                role=getattr(choice, "role", "assistant"),
+            )
+            content_text = str(message_result.get("content") or "")
             if normalized_tool_calls:
                 message_result["tool_calls"] = normalized_tool_calls
             first_choice = response.choices[0]
@@ -11499,12 +11619,13 @@ class SpudLinkLLMClientWrapper:
             self._llm_total_tokens += max(0, total_tokens)
 
             message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
-            content_text = _strip_local_thinking_blocks(str(message.get("content") or "")).strip()
+            message_result = _normalized_assistant_message(
+                content=message.get("content"),
+                source_message=message,
+                role=message.get("role") or "assistant",
+            )
+            content_text = str(message_result.get("content") or "")
             tool_calls = _normalize_native_tool_calls(message.get("tool_calls"))
-            message_result: Dict[str, Any] = {
-                "role": str(message.get("role") or "assistant"),
-                "content": content_text,
-            }
             if tool_calls:
                 message_result["tool_calls"] = tool_calls
             result = {
@@ -11998,8 +12119,10 @@ class TransformersLLMClientWrapper:
 
         input_ids = encoded["input_ids"]
         completion_ids = output_ids[0] if is_encoder_decoder else output_ids[0][int(input_ids.shape[-1]):]
-        content = self._decode_completion(bundle, completion_ids)
-        content = self._apply_stop_sequences(_coerce_content_to_text(content).strip(), stop).strip()
+        raw_content = self._decode_completion(bundle, completion_ids)
+        raw_content = self._apply_stop_sequences(_coerce_content_to_text(raw_content).strip(), stop).strip()
+        message_result = _normalized_assistant_message(content=raw_content)
+        content = str(message_result.get("content") or "")
         completion_tokens = int(getattr(completion_ids, "shape", [0])[-1] or 0)
         total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
         completion_limit = max(1, int(generation_kwargs.get("max_new_tokens") or 1))
@@ -12009,7 +12132,6 @@ class TransformersLLMClientWrapper:
         tool_calls = _native_tool_calls_from_parser(content, tools, parser)
         if not tool_calls:
             tool_calls = _native_tool_calls_from_text(content, tools)
-        message_result: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message_result["tool_calls"] = tool_calls
         return {
@@ -12135,19 +12257,78 @@ class TransformersLLMClientWrapper:
             )
 
 
-def _strip_local_thinking_blocks(text: Any) -> str:
+def _split_local_thinking_blocks(text: Any) -> Tuple[str, str]:
+    """Separate common local-model thinking wrappers from the visible answer."""
     content = _coerce_content_to_text(text)
     if not content:
+        return "", ""
+
+    reasoning_parts: List[str] = []
+
+    def _capture_think(match: re.Match[str]) -> str:
+        reasoning = str(match.group(1) or "").strip()
+        if reasoning:
+            reasoning_parts.append(reasoning)
         return ""
-    content = re.sub(r"(?is)<think>.*?</think>", "", content).strip()
+
+    content = re.sub(r"(?is)<think>(.*?)</think>", _capture_think, content).strip()
     if re.search(r"(?is)</think>", content) and not re.search(r"(?is)<think>", content):
-        content = re.sub(r"(?is)^.*?</think>", "", content).strip()
-    content = re.sub(r"(?is)^<think>.*", "", content).strip()
-    content = re.sub(r"(?is)<\|channel\>thought\s*.*?<channel\|>", "", content).strip()
+        leading, content = re.split(r"(?is)</think>", content, maxsplit=1)
+        if leading.strip():
+            reasoning_parts.append(leading.strip())
+        content = content.strip()
+    dangling = re.match(r"(?is)^<think>(.*)$", content)
+    if dangling:
+        if str(dangling.group(1) or "").strip():
+            reasoning_parts.append(str(dangling.group(1) or "").strip())
+        content = ""
+
+    def _capture_channel(match: re.Match[str]) -> str:
+        reasoning = str(match.group(1) or "").strip()
+        if reasoning:
+            reasoning_parts.append(reasoning)
+        return ""
+
+    content = re.sub(
+        r"(?is)<\|channel\>thought\s*(.*?)<channel\|>",
+        _capture_channel,
+        content,
+    ).strip()
     if re.search(r"(?is)<channel\|>", content) and not re.search(r"(?is)<\|channel\>thought", content):
-        content = re.sub(r"(?is)^.*?<channel\|>", "", content).strip()
-    content = re.sub(r"(?is)^<\|channel\>thought\s*.*", "", content).strip()
-    return content
+        leading, content = re.split(r"(?is)<channel\|>", content, maxsplit=1)
+        if leading.strip():
+            reasoning_parts.append(leading.strip())
+        content = content.strip()
+    dangling_channel = re.match(r"(?is)^<\|channel\>thought\s*(.*)$", content)
+    if dangling_channel:
+        if str(dangling_channel.group(1) or "").strip():
+            reasoning_parts.append(str(dangling_channel.group(1) or "").strip())
+        content = ""
+
+    reasoning = "\n\n".join(part for part in reasoning_parts if part).strip()
+    return content.strip(), reasoning
+
+
+def _strip_local_thinking_blocks(text: Any) -> str:
+    return _split_local_thinking_blocks(text)[0]
+
+
+def _normalized_assistant_message(
+    *,
+    content: Any,
+    source_message: Any = None,
+    role: Any = "assistant",
+) -> Dict[str, Any]:
+    visible_content, inline_reasoning = _split_local_thinking_blocks(content)
+    structured_reasoning = _reasoning_content_from_message(source_message)
+    message: Dict[str, Any] = {
+        "role": str(role or "assistant"),
+        "content": visible_content,
+    }
+    reasoning_content = structured_reasoning or inline_reasoning
+    if reasoning_content and hydra_llm_thinking_enabled():
+        message["reasoning_content"] = reasoning_content
+    return message
 
 
 def _llama_cpp_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -12223,6 +12404,11 @@ class LlamaCppLLMClientWrapper:
                 chat_template_kwargs,
             )
             chat_kwargs["reasoning_budget"] = 0
+        else:
+            chat_template_kwargs = _merge_template_kwargs(
+                {"enable_thinking": True},
+                chat_template_kwargs,
+            )
         if chat_template_kwargs:
             chat_kwargs["chat_template_kwargs"] = chat_template_kwargs
         max_tokens = kwargs.pop("max_tokens", None)
@@ -12888,7 +13074,12 @@ class MlxLmLLMClientWrapper:
             stop=stop,
             extra_kwargs=self._build_engine_generation_kwargs(kwargs),
         )
-        content = str(output.get("content") or "").strip()
+        raw_content = str(output.get("content") or "").strip()
+        message_result = _normalized_assistant_message(
+            content=raw_content,
+            source_message=output,
+        )
+        content = str(message_result.get("content") or "")
         prompt_tokens = max(0, int(output.get("prompt_tokens") or 0))
         completion_tokens = max(0, int(output.get("completion_tokens") or 0))
         total_tokens = prompt_tokens + completion_tokens
@@ -12897,7 +13088,6 @@ class MlxLmLLMClientWrapper:
         tool_calls = _native_tool_calls_from_parser(content, tools, tokenizer)
         if not tool_calls:
             tool_calls = _native_tool_calls_from_text(content, tools)
-        message_result: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message_result["tool_calls"] = tool_calls
         return {

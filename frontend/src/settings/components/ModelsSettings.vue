@@ -101,6 +101,9 @@ function sync(settings: ModelsSettingsPayload, preserveDirty = false) {
   const dirtySnapshot = { ...dirty };
   Object.keys(draft).forEach((key) => delete draft[key]);
   Object.assign(draft, clone(settings || {}));
+  if (!Object.prototype.hasOwnProperty.call(draft, "hydra_llm_thinking_enabled")) {
+    draft.hydra_llm_thinking_enabled = false;
+  }
   if (!Array.isArray(draft.hydra_base_servers) || !draft.hydra_base_servers.length) {
     draft.hydra_base_servers = [{
       provider: draft.hydra_llm_provider || "openai_compatible",
@@ -168,6 +171,7 @@ function llmPayload(): JsonRow {
   }));
   const primary = servers[0] || {};
   const keys = [
+    "hydra_llm_thinking_enabled",
     "hydra_hf_transformers_context_tokens", "hydra_hf_transformers_device", "hydra_hf_transformers_dtype", "hydra_hf_transformers_device_map", "hydra_hf_transformers_attn_implementation", "hydra_hf_transformers_trust_remote_code",
     "hydra_llama_cpp_context_tokens", "hydra_llama_cpp_mtp_enabled", "hydra_llama_cpp_speculative_method", "hydra_llama_cpp_mtp_draft_tokens", "hydra_llama_cpp_mtp_draft_model", "hydra_llama_cpp_n_batch", "hydra_llama_cpp_n_ubatch", "hydra_llama_cpp_flash_attn", "hydra_llama_cpp_offload_kqv", "hydra_llama_cpp_slot_count",
     "hydra_mlx_lm_context_tokens", "hydra_mlx_lm_trust_remote_code", "hydra_mlx_lm_lazy_load", "hydra_mlx_engine_prefill_step_size", "hydra_mlx_engine_kv_bits", "hydra_mlx_engine_kv_group_size", "hydra_mlx_engine_quantized_kv_start",

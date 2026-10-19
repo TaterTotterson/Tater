@@ -5,6 +5,9 @@ export interface ChatMessage {
   username?: string;
   content?: ChatContent;
   id?: string;
+  reasoning_content?: string;
+  reasoning_summary?: string;
+  reasoning_traces?: Array<Record<string, any>>;
 }
 
 export interface ChatProfile {

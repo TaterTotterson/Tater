@@ -140,6 +140,17 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn('@app.post("/api/settings/hydra")', backend)
         self.assertIn("return _hydra_settings_payload()", backend)
         self.assertIn(".thydra-tabs", styles)
+        self.assertIn("Reasoning traces", hydra)
+        self.assertIn("row.reasoning_traces", hydra)
+        self.assertIn('"reasoning_traces"', backend)
+        self.assertIn(".thydra-reasoning", styles)
+
+        huggingface = (
+            REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "HuggingFaceModels.vue"
+        ).read_text(encoding="utf-8")
+        self.assertIn('function downloadProgress(item: JsonRow)', huggingface)
+        self.assertIn('["download_progress", "current_progress", "files_progress", "progress"]', huggingface)
+        self.assertIn(':value="downloadProgress(activeDownload)"', huggingface)
 
     def test_system_tasks_have_a_settings_tab_and_live_controls(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
@@ -326,6 +337,10 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("normal Base calls rotate through the pool", llm)
         self.assertIn("Hydra roles stay assigned to a consistent pool member", llm)
         self.assertIn("Add round-robin route", llm)
+        self.assertIn("Model thinking", llm)
+        self.assertIn('v-model="draft.hydra_llm_thinking_enabled"', llm)
+        self.assertIn('"hydra_llm_thinking_enabled"', models)
+        self.assertIn('draft.hydra_llm_thinking_enabled = false', models)
         for retired_label in ("Add fallback route", "Primary route", "Backup model route", "First choice"):
             self.assertNotIn(retired_label, llm)
 

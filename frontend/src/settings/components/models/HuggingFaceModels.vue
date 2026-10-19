@@ -246,6 +246,19 @@ function downloadState(item: JsonRow): string {
   return item.active ? "Downloading" : status.charAt(0).toUpperCase() + status.slice(1);
 }
 
+function downloadProgress(item: JsonRow): number {
+  const stage = String(item.stage || "").trim().toLowerCase();
+  const candidates = stage === "download"
+    ? ["download_progress", "current_progress", "files_progress", "progress"]
+    : ["progress"];
+  for (const key of candidates) {
+    if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+    const value = Number(item[key]);
+    if (Number.isFinite(value)) return Math.max(0, Math.min(100, value));
+  }
+  return 0;
+}
+
 function downloadTone(item: JsonRow): string {
   const status = String(item.status || "").toLowerCase();
   if (["downloaded", "loaded"].includes(status)) return "success";
@@ -521,10 +534,10 @@ onBeforeUnmount(() => {
       </header>
       <section v-if="selectedCount" class="tm-hf-waiting"><header><div><strong>Up next</strong><span>Starts automatically when the current file finishes.</span></div><b>{{ selectedCount }} waiting</b></header><div class="tm-hf-queue-list"><div v-for="item in downloadList" :key="item.key" class="tm-hf-queue-item"><div><strong>{{ item.repoId }}</strong><span>{{ item.providerLabel }}<template v-if="item.filename"> · {{ item.filename }}</template><template v-if="item.sizeLabel"> · {{ item.sizeLabel }}</template></span></div><button type="button" aria-label="Remove from download queue" @click="removeChoice(item.key)">×</button></div></div></section>
       <section v-if="warmup.running || warmupItems.length" class="tm-hf-activity">
-        <div v-if="warmup.running && activeDownload" class="tm-hf-current-progress"><div><span>Current file</span><strong>{{ downloadState(activeDownload) }}</strong><b>{{ Math.round(Number(activeDownload.progress || 0)) }}%</b></div><progress class="tm-batch-progress" :value="Number(activeDownload.progress || 0)" max="100" /></div>
+        <div v-if="warmup.running && activeDownload" class="tm-hf-current-progress"><div><span>Current file</span><strong>{{ downloadState(activeDownload) }}</strong><b>{{ Math.round(downloadProgress(activeDownload)) }}%</b></div><progress class="tm-batch-progress" :value="downloadProgress(activeDownload)" max="100" /></div>
         <details class="tm-download-details" :open="Boolean(warmup.running)">
           <summary><span>Download activity</span><small>{{ warmupItems.length }} item{{ warmupItems.length === 1 ? '' : 's' }} · {{ completedCount }} complete</small></summary>
-          <div class="tm-progress-list"><div v-for="item in warmupItems" :key="String(item.key || item.model)" class="tm-progress-row" :class="downloadTone(item)"><div class="tm-progress-copy"><div><strong>{{ item.model }}</strong><span class="tm-download-state">{{ downloadState(item) }}</span></div><span>{{ item.provider_label || item.provider }} · {{ downloadMeta(item) }}</span></div><progress :value="Number(item.progress || 0)" max="100" /><button v-if="item.cancelable" class="tv-button" type="button" @click="cancelWarmup(item)">Cancel</button></div></div>
+          <div class="tm-progress-list"><div v-for="item in warmupItems" :key="String(item.key || item.model)" class="tm-progress-row" :class="downloadTone(item)"><div class="tm-progress-copy"><div><strong>{{ item.model }}</strong><span class="tm-download-state">{{ downloadState(item) }}</span></div><span>{{ item.provider_label || item.provider }} · {{ downloadMeta(item) }}</span></div><progress :value="downloadProgress(item)" max="100" /><button v-if="item.cancelable" class="tv-button" type="button" @click="cancelWarmup(item)">Cancel</button></div></div>
         </details>
       </section>
     </article>

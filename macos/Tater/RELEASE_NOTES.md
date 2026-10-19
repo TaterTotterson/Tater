@@ -1,41 +1,43 @@
-# Tater v1.7.0
+# Tater v1.7.1
 
-Tater v1.7.0 adds provider-aware structured tool calling across Hydra while
-preserving Tater's natural-language tool protocol as a compatibility fallback.
-Local and hosted models can now use the tool-call format their runtime exposes
-instead of having to imitate one prompt-only syntax.
+Tater v1.7.1 adds opt-in model thinking with separated reasoning visibility
+across Hydra and chat, and fixes Hugging Face download progress so it reflects
+the active transfer instead of being reset by worker heartbeats.
 
 ## What's New
 
-### Native Tool Calling
+### Model Thinking and Reasoning
 
-- Adds shared tool schemas, response normalization, validation, and execution
-  support for internal llama.cpp, MLX, and Transformers models plus external
-  OpenAI-compatible and llama.cpp APIs.
-- Lets capable models return native structured tool calls while preserving the
-  existing natural-language format for providers or models without reliable
-  tool support.
-- Keeps tool results and follow-up turns consistent across providers so Hydra
-  can continue multi-step work without provider-specific behavior leaking into
-  cores and Verba packages.
+- Adds one Model Thinking setting for internal llama.cpp, MLX, and Transformers
+  runtimes plus external OpenAI-compatible and llama.cpp APIs.
+- Keeps thinking off by default so users explicitly opt in for models and
+  runtimes that support it.
+- Preserves provider reasoning separately from visible responses, tool calls,
+  and speech instead of mixing private work into the assistant's answer.
 
-### Hydra and Tater Shop Prompts
+### Reasoning Visibility
 
-- Updates Hydra's checker, doer, tool-selection, and validation prompts to
-  prefer the structured tools supplied by the runtime.
-- Updates affected Tater Shop cores and Verba packages so their internal model
-  calls use the same provider-aware path, including web research, device
-  control, media, support, and administration workflows.
-- Retains explicit natural-language fallback instructions where compatibility
-  with older or prompt-only models is still required.
+- Records compact reasoning summaries and role-specific traces in the Hydra
+  Ledger for diagnostics when thinking is enabled.
+- Adds a collapsed thinking row to Tater chat with a short summary and an
+  expandable view of the full separated reasoning trace.
+- Carries structured reasoning through streaming and multi-step tool calls while
+  keeping the normal chat response clean.
+
+### Hugging Face Downloads
+
+- Prevents downloader heartbeat events from overwriting measured file progress
+  with the download phase's four-percent floor.
+- Shows the active file's true transfer percentage in both the current-download
+  card and model progress list.
 
 ## Updating
 
-- macOS users already running v1.0.1 or later can install v1.7.0 through
+- macOS users already running v1.0.1 or later can install v1.7.1 through
   Tater's normal updater after its signed macOS package is published.
 - macOS users still running v100 or earlier must perform the one-time manual
   app replacement described with v1.0.1 because those builds treat the new
   semantic version as older than `100`.
-- Docker users can pull `v1.7.0` or `latest` for the CPU image and
-  `v1.7.0-nvidia` or `nvidia` for the NVIDIA image after the release tag is
+- Docker users can pull `v1.7.1` or `latest` for the CPU image and
+  `v1.7.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
   published.

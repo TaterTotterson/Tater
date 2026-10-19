@@ -125,6 +125,7 @@ from helpers import (
     DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
     DEFAULT_HF_TRANSFORMERS_DTYPE,
     DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
+    DEFAULT_HYDRA_LLM_THINKING_ENABLED,
     DEFAULT_LLAMA_CPP_FLASH_ATTN,
     DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
     DEFAULT_LLAMA_CPP_MTP_DRAFT_MODEL,
@@ -145,6 +146,7 @@ from helpers import (
     HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
     HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
     HYDRA_LLM_BASE_SERVERS_KEY,
+    HYDRA_LLM_THINKING_ENABLED_KEY,
     HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_KEY,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
@@ -1667,16 +1669,20 @@ def _hf_llm_warmup_progress_callback(provider: str, model: str):
             "updated_ts": time.time(),
         }
         if stage == "download":
-            base_progress = 4.0
-            scaled_progress = base_progress + (max(0.0, min(100.0, event_progress)) * 0.72)
-            updates.update(
-                {
-                    "status": "downloading",
-                    "stage": "download",
-                    "message": desc or "Downloading model files",
-                    "progress": max(4.0, min(78.0, scaled_progress)),
-                }
-            )
+            updates.update({"status": "downloading", "stage": "download"})
+            # Worker heartbeats only prove that the subprocess is alive. They
+            # intentionally carry no byte total and a zero progress value, so
+            # applying them as measurements would repeatedly overwrite the
+            # real cache/tqdm progress with the download phase floor (4%).
+            if event_name != "heartbeat" or total > 0:
+                base_progress = 4.0
+                scaled_progress = base_progress + (max(0.0, min(100.0, event_progress)) * 0.72)
+                updates.update(
+                    {
+                        "message": desc or "Downloading model files",
+                        "progress": max(4.0, min(78.0, scaled_progress)),
+                    }
+                )
             if total > 0:
                 aggregate_updates = _hf_llm_warmup_download_bar_updates(
                     provider_token,
@@ -7441,6 +7447,23 @@ def _openai_content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _openai_reasoning_content(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    for key in ("reasoning_content", "thinking"):
+        value = message.get(key)
+        text = _openai_content_to_text(value).strip()
+        if text:
+            return text
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, dict):
+        for key in ("content", "text", "thinking", "reasoning_content"):
+            text = _openai_content_to_text(reasoning.get(key)).strip()
+            if text:
+                return text
+    return ""
+
+
 def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, Any]]:
     if not isinstance(messages, list):
         return []
@@ -7453,9 +7476,12 @@ def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, Any]]:
             role = "user"
         content = _openai_content_to_text(raw_message.get("content")).strip()
         tool_calls = raw_message.get("tool_calls") if role == "assistant" else None
-        if not content and not tool_calls:
+        reasoning_content = _openai_reasoning_content(raw_message) if role == "assistant" else ""
+        if not content and not tool_calls and not reasoning_content:
             continue
         message: Dict[str, Any] = {"role": role, "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         if isinstance(tool_calls, list) and tool_calls:
             message["tool_calls"] = [dict(item) for item in tool_calls if isinstance(item, dict)]
         if role == "tool":
@@ -7540,9 +7566,12 @@ def _openai_chat_completion_response(
     completion_id: str = "",
     spud_link: Optional[Dict[str, Any]] = None,
     tool_calls: Optional[List[Dict[str, Any]]] = None,
+    reasoning_content: str = "",
     finish_reason: str = "",
 ) -> Dict[str, Any]:
     message: Dict[str, Any] = {"role": "assistant", "content": str(content or "")}
+    if str(reasoning_content or "").strip():
+        message["reasoning_content"] = str(reasoning_content).strip()
     normalized_tool_calls: List[Dict[str, Any]] = []
     for item in tool_calls or []:
         if not isinstance(item, dict):
@@ -7628,9 +7657,11 @@ async def _run_tater_api_direct_completion(
 
     response_message = result.get("message") if isinstance(result, dict) else {}
     content = ""
+    reasoning_content = ""
     tool_calls: List[Dict[str, Any]] = []
     if isinstance(response_message, dict):
         content = str(response_message.get("content") or "")
+        reasoning_content = _openai_reasoning_content(response_message)
         if isinstance(response_message.get("tool_calls"), list):
             tool_calls = [dict(item) for item in response_message.get("tool_calls") if isinstance(item, dict)]
     model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
@@ -7639,6 +7670,7 @@ async def _run_tater_api_direct_completion(
         model=model,
         usage=_openai_usage_from_perf(perf),
         tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
         finish_reason=str((result or {}).get("finish_reason") or "") if isinstance(result, dict) else "",
     )
 
@@ -7727,11 +7759,13 @@ async def _run_tater_api_hydra_completion(
             logger.exception("[tater-api] failed saving Hydra LLM speed stats")
 
     content = ""
+    reasoning_content = ""
     spud_link_payload: Dict[str, Any] = {}
     if isinstance(result, dict):
         text = result.get("text")
         if isinstance(text, str):
             content = text
+        reasoning_content = str(result.get("reasoning_content") or "").strip()
         artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
         response_artifacts: List[Dict[str, Any]] = []
         for item in artifacts:
@@ -7774,6 +7808,7 @@ async def _run_tater_api_hydra_completion(
         model="tater/hydra",
         usage=_openai_usage_from_perf(perf),
         spud_link=spud_link_payload,
+        reasoning_content=reasoning_content,
     )
 
 
@@ -7823,15 +7858,19 @@ async def _run_spud_link_native_llm_completion(
 
     response_message = result.get("message") if isinstance(result, dict) else {}
     content = ""
+    reasoning_content = ""
     role = "assistant"
     tool_calls: List[Dict[str, Any]] = []
     if isinstance(response_message, dict):
         content = str(response_message.get("content") or "")
+        reasoning_content = _openai_reasoning_content(response_message)
         role = str(response_message.get("role") or "assistant").strip() or "assistant"
         if isinstance(response_message.get("tool_calls"), list):
             tool_calls = [dict(item) for item in response_message.get("tool_calls") if isinstance(item, dict)]
     model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
     message_payload: Dict[str, Any] = {"role": role, "content": content}
+    if reasoning_content:
+        message_payload["reasoning_content"] = reasoning_content
     if tool_calls:
         message_payload["tool_calls"] = tool_calls
     return {
@@ -8057,8 +8096,12 @@ async def _stream_openai_chat_completion(completion: Dict[str, Any], *, include_
     created = int(completion.get("created") or time.time())
     model = str(completion.get("model") or "tater/base")
     choices = completion.get("choices") if isinstance(completion.get("choices"), list) else []
-    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
     content = str((message or {}).get("content") or "")
+    reasoning_content = _openai_reasoning_content(message)
+    tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    finish_reason = str(choice.get("finish_reason") or ("tool_calls" if tool_calls else "stop"))
     first = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -8067,6 +8110,21 @@ async def _stream_openai_chat_completion(completion: Dict[str, Any], *, include_
         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
     }
     yield f"data: {json.dumps(first, separators=(',', ':'))}\n\n"
+    if reasoning_content:
+        reasoning_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": reasoning_content},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(reasoning_chunk, separators=(',', ':'))}\n\n"
     if content:
         chunk = {
             "id": completion_id,
@@ -8076,12 +8134,21 @@ async def _stream_openai_chat_completion(completion: Dict[str, Any], *, include_
             "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
         }
         yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+    if tool_calls:
+        tool_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"tool_calls": tool_calls}, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(tool_chunk, separators=(',', ':'))}\n\n"
     final = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
     }
     yield f"data: {json.dumps(final, separators=(',', ':'))}\n\n"
     if include_done:
@@ -8181,12 +8248,30 @@ def _spud_link_mode_label(mode: Any) -> str:
     return "Disabled"
 
 
-def _save_chat_message(role: str, username: str, content: Any) -> None:
+def _save_chat_message(
+    role: str,
+    username: str,
+    content: Any,
+    *,
+    reasoning_content: str = "",
+    reasoning_summary: str = "",
+    reasoning_traces: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     payload = {
         "role": str(role or "assistant"),
         "username": str(username or "User"),
         "content": content,
     }
+    if str(role or "").strip().lower() == "assistant":
+        reasoning_text = str(reasoning_content or "").strip()
+        summary_text = str(reasoning_summary or "").strip()
+        traces = [dict(item) for item in (reasoning_traces or []) if isinstance(item, dict)]
+        if reasoning_text:
+            payload["reasoning_content"] = reasoning_text
+        if summary_text:
+            payload["reasoning_summary"] = summary_text
+        if traces:
+            payload["reasoning_traces"] = traces
     redis_client.rpush(CHAT_HISTORY_KEY, json.dumps(payload))
 
     max_store = _read_non_negative_int("tater:max_store", DEFAULT_MAX_STORE)
@@ -8370,9 +8455,26 @@ async def _process_message(
         responses.append(_normalize_plugin_response_item(item))
 
     task_name = ""
+    reasoning_content = ""
+    reasoning_summary = ""
+    reasoning_traces: List[Dict[str, Any]] = []
     if isinstance(result, dict):
         task_name = str(result.get("task_name") or "").strip()
-    return {"responses": responses, "agent": True, "task_name": task_name}
+        reasoning_content = str(result.get("reasoning_content") or "").strip()
+        reasoning_summary = str(result.get("reasoning_summary") or "").strip()
+        reasoning_traces = [
+            dict(item)
+            for item in (result.get("reasoning_traces") or [])
+            if isinstance(item, dict)
+        ]
+    return {
+        "responses": responses,
+        "agent": True,
+        "task_name": task_name,
+        "reasoning_content": reasoning_content,
+        "reasoning_summary": reasoning_summary,
+        "reasoning_traces": reasoning_traces,
+    }
 
 
 class ChatJobManager:
@@ -8593,9 +8695,26 @@ class ChatJobManager:
                 if isinstance(payload, dict)
                 else ""
             )
+            reasoning_content = str(payload.get("reasoning_content") or "").strip() if isinstance(payload, dict) else ""
+            reasoning_summary = str(payload.get("reasoning_summary") or "").strip() if isinstance(payload, dict) else ""
+            reasoning_traces = (
+                [dict(item) for item in (payload.get("reasoning_traces") or []) if isinstance(item, dict)]
+                if isinstance(payload, dict)
+                else []
+            )
 
+            reasoning_saved = False
             for item in responses:
-                _save_chat_message("assistant", "assistant", item)
+                attach_reasoning = not reasoning_saved and isinstance(item, str) and bool(str(item).strip())
+                _save_chat_message(
+                    "assistant",
+                    "assistant",
+                    item,
+                    reasoning_content=reasoning_content if attach_reasoning else "",
+                    reasoning_summary=reasoning_summary if attach_reasoning else "",
+                    reasoning_traces=reasoning_traces if attach_reasoning else None,
+                )
+                reasoning_saved = reasoning_saved or attach_reasoning
 
             with self.lock:
                 job = self.jobs.get(job_id)
@@ -8605,6 +8724,9 @@ class ChatJobManager:
                 if task_name:
                     job["task_name"] = task_name
                 job["responses"] = responses
+                job["reasoning_content"] = reasoning_content
+                job["reasoning_summary"] = reasoning_summary
+                job["reasoning_traces"] = reasoning_traces
                 job["completed_at"] = time.time()
                 self._emit(
                     job,
@@ -8612,6 +8734,9 @@ class ChatJobManager:
                         "type": "done",
                         "status": "done",
                         "responses": responses,
+                        "reasoning_content": reasoning_content,
+                        "reasoning_summary": reasoning_summary,
+                        "reasoning_traces": reasoning_traces,
                         "job_id": job_id,
                         "task_name": str(job.get("task_name") or "").strip(),
                     },
@@ -8657,6 +8782,9 @@ class ChatJobManager:
                 "status": "queued",
                 "current_tool": "",
                 "responses": [],
+                "reasoning_content": "",
+                "reasoning_summary": "",
+                "reasoning_traces": [],
                 "error": "",
                 "stream_text": "",
                 "stream_pending": "",
@@ -8714,6 +8842,9 @@ class ChatJobManager:
                 "task_name": str(job.get("task_name") or "").strip(),
                 "current_tool": str(job.get("current_tool") or ""),
                 "responses": list(job.get("responses") or []),
+                "reasoning_content": str(job.get("reasoning_content") or ""),
+                "reasoning_summary": str(job.get("reasoning_summary") or ""),
+                "reasoning_traces": list(job.get("reasoning_traces") or []),
                 "error": str(job.get("error") or ""),
                 "created_at": float(job.get("created_at") or 0.0),
                 "completed_at": float(job.get("completed_at") or 0.0),
@@ -10317,6 +10448,7 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_model: Optional[str] = None
     hydra_llm_api_key: Optional[str] = None
     hydra_llm_provider: Optional[str] = None
+    hydra_llm_thinking_enabled: Optional[bool] = None
     hydra_hf_transformers_context_tokens: Optional[Any] = None
     hydra_hf_transformers_device: Optional[str] = None
     hydra_hf_transformers_dtype: Optional[str] = None
@@ -18782,12 +18914,32 @@ async def chat_send(payload: ChatRequest) -> Dict[str, Any]:
     )
 
     responses = list(result.get("responses") or [])
+    reasoning_content = str(result.get("reasoning_content") or "").strip()
+    reasoning_summary = str(result.get("reasoning_summary") or "").strip()
+    reasoning_traces = [
+        dict(item)
+        for item in (result.get("reasoning_traces") or [])
+        if isinstance(item, dict)
+    ]
+    reasoning_saved = False
     for item in responses:
-        _save_chat_message("assistant", "assistant", item)
+        attach_reasoning = not reasoning_saved and isinstance(item, str) and bool(str(item).strip())
+        _save_chat_message(
+            "assistant",
+            "assistant",
+            item,
+            reasoning_content=reasoning_content if attach_reasoning else "",
+            reasoning_summary=reasoning_summary if attach_reasoning else "",
+            reasoning_traces=reasoning_traces if attach_reasoning else None,
+        )
+        reasoning_saved = reasoning_saved or attach_reasoning
 
     return {
         "session_id": session_id,
         "responses": responses,
+        "reasoning_content": reasoning_content,
+        "reasoning_summary": reasoning_summary,
+        "reasoning_traces": reasoning_traces,
     }
 
 
@@ -20574,6 +20726,12 @@ def get_hydra_metrics(
                 "hermes_chat_ms": int(row.get("hermes_chat_ms") or 0),
                 "hermes_final_ms": int(row.get("hermes_final_ms") or 0),
                 "total_ms": int(row.get("total_ms") or 0),
+                "reasoning_summary": str(row.get("reasoning_summary") or ""),
+                "reasoning_traces": (
+                    list(row.get("reasoning_traces") or [])
+                    if isinstance(row.get("reasoning_traces"), list)
+                    else []
+                ),
                 "raw": row,
             }
         )
@@ -21030,6 +21188,7 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_port": "",
         "hydra_llm_model": "",
         "hydra_llm_api_key": "",
+        "hydra_llm_thinking_enabled": bool(DEFAULT_HYDRA_LLM_THINKING_ENABLED),
         "hydra_hf_transformers_context_tokens": str(DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS),
         "hydra_hf_transformers_device": DEFAULT_HF_TRANSFORMERS_DEVICE,
         "hydra_hf_transformers_dtype": DEFAULT_HF_TRANSFORMERS_DTYPE,
@@ -21239,6 +21398,11 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_port": hydra_llm_port,
         "hydra_llm_model": hydra_llm_model,
         "hydra_llm_api_key": hydra_llm_api_key,
+        "hydra_llm_thinking_enabled": _read_bool_setting(
+            HYDRA_LLM_THINKING_ENABLED_KEY,
+            ("TATER_HYDRA_LLM_THINKING_ENABLED", "TATER_LLM_THINKING_ENABLED"),
+            DEFAULT_HYDRA_LLM_THINKING_ENABLED,
+        ),
         "hydra_hf_transformers_context_tokens": _read_local_llm_context_setting(
             HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
             ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
@@ -22927,6 +23091,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llm_model",
         "hydra_llm_api_key",
         "hydra_llm_provider",
+        "hydra_llm_thinking_enabled",
         "hydra_base_servers",
         "hydra_hf_transformers_context_tokens",
         "hydra_hf_transformers_device",
@@ -23066,6 +23231,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     _save_local_llm_context_setting(
         "hydra_hf_transformers_context_tokens",
         HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
+    )
+    _save_bool_setting(
+        "hydra_llm_thinking_enabled",
+        HYDRA_LLM_THINKING_ENABLED_KEY,
+        default=DEFAULT_HYDRA_LLM_THINKING_ENABLED,
     )
     _save_text_choice_setting(
         "hydra_hf_transformers_device",

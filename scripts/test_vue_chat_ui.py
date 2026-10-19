@@ -69,6 +69,18 @@ class VueChatTests(unittest.TestCase):
         self.assertIn("@keyframes chatStreamMessageIn", styles)
         self.assertIn("@keyframes chatStreamTextIn", styles)
 
+    def test_assistant_reasoning_is_collapsed_with_a_single_line_preview(self) -> None:
+        source = (REPO_ROOT / "frontend" / "src" / "chat" / "components" / "ChatMessage.vue").read_text(encoding="utf-8")
+        types = (REPO_ROOT / "frontend" / "src" / "chat" / "types.ts").read_text(encoding="utf-8")
+        styles = (REPO_ROOT / "frontend" / "src" / "base.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="chat-thinking"', source)
+        self.assertIn('class="chat-thinking-trace"', source)
+        self.assertIn("reasoningSummary", source)
+        self.assertIn("reasoning_content?: string", types)
+        self.assertIn(".chat-thinking summary span", styles)
+        self.assertIn("text-overflow: ellipsis", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

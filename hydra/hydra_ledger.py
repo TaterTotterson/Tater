@@ -207,6 +207,7 @@ def write_hydra_ledger(
     agent_state: Optional[Dict[str, Any]] = None,
     origin_preview: Optional[Dict[str, Any]] = None,
     attempted_tool: str = "",
+    reasoning_traces: Optional[Sequence[Dict[str, Any]]] = None,
     compact_tool_ref_fn: Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]],
     validation_status_for_ledger_fn: Callable[..., Dict[str, Any]],
     short_text_fn: Callable[..., str],
@@ -306,6 +307,27 @@ def write_hydra_ledger(
         if state_payload:
             entry["state_snapshot"] = state_payload
             entry["state_hash"] = agent_state_hash_fn(agent_state, fallback_goal=str(user_message or ""))
+    compact_reasoning: list[Dict[str, Any]] = []
+    for raw_trace in reasoning_traces or []:
+        if not isinstance(raw_trace, dict):
+            continue
+        content = str(raw_trace.get("content") or "").strip()
+        if not content:
+            continue
+        trace: Dict[str, Any] = {
+            "role": short_text_fn(raw_trace.get("role"), limit=32),
+            "label": short_text_fn(raw_trace.get("label"), limit=64),
+            "summary": short_text_fn(raw_trace.get("summary"), limit=220),
+            "content": content[:24000],
+        }
+        if bool(raw_trace.get("truncated")) or len(content) > 24000:
+            trace["truncated"] = True
+        compact_reasoning.append(trace)
+        if len(compact_reasoning) >= 6:
+            break
+    if compact_reasoning:
+        entry["reasoning_traces"] = compact_reasoning
+        entry["reasoning_summary"] = str(compact_reasoning[-1].get("summary") or "")
     if isinstance(tool_result, dict):
         result_ok = bool(tool_result.get("ok"))
         summary = short_text_fn(tool_result.get("summary_for_user"), limit=320)

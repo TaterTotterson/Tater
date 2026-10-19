@@ -3638,6 +3638,79 @@ textarea {
   display: none;
 }
 
+.chat-thinking {
+  margin: 1px 0 9px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--accent-soft-rgb) / 0.2);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.chat-thinking summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 9px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.72rem;
+  list-style-position: inside;
+}
+
+.chat-thinking summary strong {
+  color: var(--accent-soft);
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.chat-thinking summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-thinking pre {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px 10px;
+  border-top: 1px solid rgb(var(--accent-soft-rgb) / 0.16);
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.18);
+  font: 0.7rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-thinking-traces {
+  display: grid;
+  max-height: 420px;
+  overflow: auto;
+  border-top: 1px solid rgb(var(--accent-soft-rgb) / 0.16);
+}
+
+.chat-thinking-trace + .chat-thinking-trace {
+  border-top: 1px solid rgb(var(--accent-soft-rgb) / 0.12);
+}
+
+.chat-thinking-trace small {
+  display: block;
+  padding: 8px 10px 0;
+  color: var(--accent-soft);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.chat-thinking-trace pre {
+  max-height: none;
+  border-top: 0;
+}
+
 .chat-row.user .bubble-body {
   color: #fff7f0;
 }
@@ -3792,6 +3865,12 @@ textarea {
 :root[data-theme="tater-light"] .chat-avatar-fallback,
 :root[data-theme="tater-light"] .app-log-empty {
   background: rgb(255 255 255 / 58%);
+}
+
+:root[data-theme="tater-light"] .chat-thinking,
+:root[data-theme="tater-light"] .chat-thinking pre {
+  border-color: rgb(var(--accent-rgb) / 18%);
+  background: rgb(255 255 255 / 44%);
 }
 
 :root[data-theme="tater-light"] .settings-dropdown,

@@ -212,7 +212,12 @@ async function refreshStats() {
   }
 }
 
-async function finalizeJob(jobId: string, message: string, responses: unknown[] = []) {
+async function finalizeJob(
+  jobId: string,
+  message: string,
+  responses: unknown[] = [],
+  reasoning: Record<string, any> = {},
+) {
   if (!activeJobs.value[jobId]) return;
   closeSource(jobId);
   clearPoll(jobId);
@@ -221,9 +226,21 @@ async function finalizeJob(jobId: string, message: string, responses: unknown[] 
     await refreshHistory();
   } catch (error) {
     if (responses.length) {
+      let reasoningAttached = false;
       props.state.messages = [
         ...props.state.messages,
-        ...responses.map((content) => ({ role: "assistant", username: "assistant", content: content as ChatMessage["content"] })),
+        ...responses.map((content) => {
+          const attachReasoning = !reasoningAttached && typeof content === "string" && Boolean(content.trim());
+          reasoningAttached = reasoningAttached || attachReasoning;
+          return {
+            role: "assistant",
+            username: "assistant",
+            content: content as ChatMessage["content"],
+            reasoning_content: attachReasoning ? String(reasoning.reasoning_content || "") : "",
+            reasoning_summary: attachReasoning ? String(reasoning.reasoning_summary || "") : "",
+            reasoning_traces: attachReasoning && Array.isArray(reasoning.reasoning_traces) ? reasoning.reasoning_traces : [],
+          };
+        }),
       ];
     } else {
       reportError(error, "Chat history refresh failed.");
@@ -243,7 +260,7 @@ async function finalizeJob(jobId: string, message: string, responses: unknown[] 
 function handleSnapshot(jobId: string, snapshot: Record<string, any>) {
   const state = String(snapshot.status || "running").trim().toLowerCase();
   if (state === "done") {
-    void finalizeJob(jobId, "Complete.", Array.isArray(snapshot.responses) ? snapshot.responses : []);
+    void finalizeJob(jobId, "Complete.", Array.isArray(snapshot.responses) ? snapshot.responses : [], snapshot);
     return;
   }
   if (state === "error") {
@@ -307,7 +324,7 @@ function attachJob(jobId: string, initial: ChatJobState = {}) {
   });
   source.addEventListener("done", (event) => {
     const payload = parseEvent(event);
-    void finalizeJob(jobId, "Complete.", Array.isArray(payload.responses) ? payload.responses : []);
+    void finalizeJob(jobId, "Complete.", Array.isArray(payload.responses) ? payload.responses : [], payload);
   });
   source.addEventListener("job_error", (event) => {
     void finalizeJob(jobId, `Job failed: ${String(parseEvent(event).error || "unknown error")}`);

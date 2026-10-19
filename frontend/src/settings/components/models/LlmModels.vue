@@ -305,6 +305,12 @@ onMounted(() => { void refreshContextEstimate(); });
     <div v-if="remoteError" class="tv-notice error">{{ remoteError }}</div>
 
     <template v-if="area === 'base'">
+      <label class="tm-llm-switch tm-llm-thinking-switch">
+        <input v-model="draft.hydra_llm_thinking_enabled" type="checkbox" @change="changed" />
+        <span><strong>Model thinking</strong><small>Allow thinking-capable models to reason before answering or calling tools. Applies to internal runtimes, external local APIs, Terminal, Tater Open WebUI, and Hydra roles. Reasoning stays separate from the visible reply and speech.</small></span>
+        <b>{{ draft.hydra_llm_thinking_enabled ? "On" : "Off" }}</b>
+      </label>
+
       <article class="tm-llm-route-note tm-llm-pool-note">
         <i>↻</i>
         <div><strong>Base routes share requests</strong><span>With multiple routes, normal Base calls rotate through the pool. Hydra roles stay assigned to a consistent pool member to keep their prompt caches warm. These routes are peers, not fallback-only backups.</span></div>

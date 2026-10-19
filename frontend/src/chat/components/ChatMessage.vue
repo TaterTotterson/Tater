@@ -64,6 +64,23 @@ const mediaUrl = computed(() => {
   return `${props.filesEndpoint}/${encodeURIComponent(fileId)}?mimetype=${encodeURIComponent(mimeType.value)}`;
 });
 const plainContent = computed(() => typeof props.message.content === "string" ? props.message.content : "");
+const reasoningContent = computed(() => String(props.message.reasoning_content || "").trim());
+const reasoningTraces = computed(() => (
+  Array.isArray(props.message.reasoning_traces)
+    ? props.message.reasoning_traces
+      .filter((trace) => trace && typeof trace === "object" && String(trace.content || "").trim())
+      .map((trace) => ({
+        label: String(trace.label || trace.role || "Thinking").trim() || "Thinking",
+        content: String(trace.content || "").trim(),
+      }))
+    : []
+));
+const reasoningSummary = computed(() => {
+  const provided = String(props.message.reasoning_summary || "").replace(/\s+/g, " ").trim();
+  if (provided) return provided;
+  const compact = reasoningContent.value.replace(/\s+/g, " ").trim();
+  return compact.length > 180 ? `${compact.slice(0, 179).trimEnd()}…` : compact;
+});
 const waitText = computed(() => String(contentObject.value?.content || "Working on it…"));
 const jsonText = computed(() => {
   try { return JSON.stringify(contentObject.value, null, 2); }
@@ -79,6 +96,16 @@ const jsonText = computed(() => {
     </div>
     <div class="bubble" :class="role">
       <div class="role">{{ displayName }}</div>
+      <details v-if="!isUser && marker !== 'typing' && (reasoningContent || reasoningTraces.length)" class="chat-thinking">
+        <summary><strong>Thinking</strong><span>{{ reasoningSummary || "Reasoning available" }}</span></summary>
+        <div v-if="reasoningTraces.length" class="chat-thinking-traces">
+          <section v-for="(trace, index) in reasoningTraces" :key="`${trace.label}-${index}`" class="chat-thinking-trace">
+            <small>{{ trace.label }}</small>
+            <pre>{{ trace.content }}</pre>
+          </section>
+        </div>
+        <pre v-else>{{ reasoningContent }}</pre>
+      </details>
       <div v-if="marker === 'typing'" class="bubble-body chat-typing-body" :aria-label="`${displayName} is typing`">
         <span class="chat-typing-label">{{ displayName }} is typing</span>
         <span class="chat-typing-dots" aria-hidden="true"><span /><span /><span /></span>

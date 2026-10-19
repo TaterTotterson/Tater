@@ -322,6 +322,13 @@ onMounted(() => {
             <details v-for="(row, index) in ledgerRows" :key="`${row.time}-${index}`">
               <summary><span>{{ row.time || "Recent turn" }}</span><strong>{{ row.outcome || "unknown" }}</strong><span>{{ row.platform || "" }}</span><span>{{ row.planned_tool || "No tool" }}</span><span>{{ row.total_ms || 0 }} ms</span></summary>
               <dl><dt>Scope</dt><dd>{{ row.scope || "—" }}</dd><dt>Planner</dt><dd>{{ row.planner_kind || "—" }}</dd><dt>Validation</dt><dd>{{ row.validation_status || "—" }} {{ row.validation_reason || "" }}</dd><dt>Result</dt><dd>{{ row.tool_result_summary || row.outcome_reason || "—" }}</dd></dl>
+              <section v-if="rows(row.reasoning_traces).length" class="thydra-reasoning">
+                <h3>Reasoning traces</h3>
+                <details v-for="(trace, traceIndex) in rows(row.reasoning_traces)" :key="`${trace.role || 'reasoning'}-${traceIndex}`">
+                  <summary><strong>{{ trace.label || metricLabel(trace.role || "reasoning") }}</strong><span>{{ trace.summary || "Thinking trace" }}</span></summary>
+                  <pre>{{ trace.content || "" }}</pre>
+                </details>
+              </section>
               <pre>{{ JSON.stringify(row.raw || row, null, 2) }}</pre>
             </details>
           </div>

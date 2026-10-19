@@ -200,10 +200,12 @@ HYDRA_RESULT_MEMORY_MAX_SETS_KEY = "tater:hydra:result_memory_max_sets"
 HYDRA_RESULT_MEMORY_MAX_ITEMS_KEY = "tater:hydra:result_memory_max_items"
 AGENT_STATE_PROMPT_MAX_CHARS = 800
 AGENT_STATE_LEDGER_MAX_CHARS = 900
+HYDRA_REASONING_LEDGER_MAX_CHARS = 24000
+HYDRA_REASONING_SUMMARY_MAX_CHARS = 180
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
 ASTRAEUS_PLAN_REVIEW_ENABLED = DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED
-HYDRA_LEDGER_SCHEMA_VERSION = "2"
+HYDRA_LEDGER_SCHEMA_VERSION = "3"
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -2751,6 +2753,7 @@ async def _run_astraeus_plan(
         before=perf_before,
         after=_llm_perf_snapshot(llm_client),
     )
+    _populate_llm_reasoning_debug(debug_out, response=resp)
     raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
     if isinstance(debug_out, dict):
         debug_out["completion_chars"] = int(max(0, len(raw)))
@@ -2974,6 +2977,7 @@ async def _run_thanatos_step(
                 ),
             )
         text = _coerce_text((thanatos_resp.get("message", {}) or {}).get("content", "")).strip()
+        _populate_llm_reasoning_debug(debug_out, response=thanatos_resp)
         raw_tool_calls = (thanatos_resp.get("message", {}) or {}).get("tool_calls")
         if isinstance(raw_tool_calls, list) and raw_tool_calls:
             raw_call = raw_tool_calls[0]
@@ -3047,6 +3051,94 @@ def _llm_perf_delta(before: Dict[str, Any], after: Dict[str, Any], key: str) -> 
         return float((after or {}).get(key) or 0) - float((before or {}).get(key) or 0)
     except Exception:
         return 0.0
+
+
+def _llm_response_reasoning(response: Any) -> str:
+    if not isinstance(response, dict):
+        return ""
+    message = response.get("message") if isinstance(response.get("message"), dict) else {}
+    for key in ("reasoning_content", "thinking"):
+        text = _coerce_text(message.get(key)).strip()
+        if text:
+            return text
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, dict):
+        for key in ("content", "text", "thinking", "reasoning_content"):
+            text = _coerce_text(reasoning.get(key)).strip()
+            if text:
+                return text
+    return ""
+
+
+def _reasoning_summary(text: Any, *, limit: int = HYDRA_REASONING_SUMMARY_MAX_CHARS) -> str:
+    compact = " ".join(_coerce_text(text).split()).strip()
+    if not compact:
+        return ""
+    max_chars = max(24, int(limit or HYDRA_REASONING_SUMMARY_MAX_CHARS))
+    if len(compact) <= max_chars:
+        return compact
+    clipped = compact[: max(1, max_chars - 1)].rstrip(" ,;:-")
+    return f"{clipped}…"
+
+
+def _populate_llm_reasoning_debug(
+    debug_out: Optional[Dict[str, Any]],
+    *,
+    response: Any,
+) -> None:
+    if not isinstance(debug_out, dict):
+        return
+    raw = _llm_response_reasoning(response)
+    if not raw:
+        return
+    truncated = len(raw) > HYDRA_REASONING_LEDGER_MAX_CHARS
+    content = raw[:HYDRA_REASONING_LEDGER_MAX_CHARS].strip()
+    if not content:
+        return
+    debug_out["reasoning_content"] = content
+    debug_out["reasoning_summary"] = _reasoning_summary(content)
+    debug_out["reasoning_chars"] = len(raw)
+    if truncated:
+        debug_out["reasoning_truncated"] = True
+
+
+def _hydra_reasoning_traces(
+    *,
+    astraeus_debug: Dict[str, Any],
+    thanatos_debug: Dict[str, Any],
+    hermes_chat_debug: Dict[str, Any],
+    hermes_final_debug: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    traces: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for role, label, debug in (
+        ("astraeus", "Astraeus planning", astraeus_debug),
+        ("thanatos", "Thanatos tool selection", thanatos_debug),
+        ("hermes_chat", "Hermes conversation", hermes_chat_debug),
+        ("hermes_final", "Hermes final response", hermes_final_debug),
+    ):
+        if not isinstance(debug, dict):
+            continue
+        content = str(debug.get("reasoning_content") or "").strip()
+        if not content or content in seen:
+            continue
+        seen.add(content)
+        trace: Dict[str, Any] = {
+            "role": role,
+            "label": label,
+            "summary": str(debug.get("reasoning_summary") or _reasoning_summary(content)).strip(),
+            "content": content,
+        }
+        if bool(debug.get("reasoning_truncated")):
+            trace["truncated"] = True
+        traces.append(trace)
+    return traces
+
+
+def _debug_without_reasoning_content(debug: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(debug) if isinstance(debug, dict) else {}
+    out.pop("reasoning_content", None)
+    return out
 
 
 def _populate_llm_prompt_debug(
@@ -3428,6 +3520,7 @@ async def _run_chat_fallback_reply(
                 "and restart Tater after changing dependencies."
             )
         return ""
+    _populate_llm_reasoning_debug(debug_out, response=resp)
     return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
 
 
@@ -4166,6 +4259,7 @@ async def _run_hermes_final_render(
     except Exception:
         return str(base_text or "").strip()
 
+    _populate_llm_reasoning_debug(debug_out, response=resp)
     text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
     if not text:
         return str(base_text or "").strip()
@@ -5095,6 +5189,7 @@ def _write_hydra_ledger(
     agent_state: Optional[Dict[str, Any]] = None,
     origin_preview: Optional[Dict[str, Any]] = None,
     attempted_tool: str = "",
+    reasoning_traces: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     return ledger.write_hydra_ledger(
         redis_client=redis_client,
@@ -5137,6 +5232,7 @@ def _write_hydra_ledger(
         agent_state=agent_state,
         origin_preview=origin_preview,
         attempted_tool=attempted_tool,
+        reasoning_traces=reasoning_traces,
         compact_tool_ref_fn=_compact_tool_ref,
         validation_status_for_ledger_fn=_validation_status_for_ledger,
         short_text_fn=_short_text,
@@ -5659,6 +5755,13 @@ async def _run_hydra_turn_impl(
         final_text = _sanitize_user_text(final_text_raw, platform=platform, tool_used=tool_used)
         outcome_value, outcome_reason_value = _normalize_outcome(final_status, final_checker_reason)
         total_ms = int(max(0.0, (time.perf_counter() - turn_started_at) * 1000.0))
+        reasoning_traces = _hydra_reasoning_traces(
+            astraeus_debug=astraeus_debug,
+            thanatos_debug=thanatos_debug,
+            hermes_chat_debug=hermes_chat_debug,
+            hermes_final_debug=hermes_final_debug,
+        )
+        primary_reasoning = reasoning_traces[-1] if reasoning_traces else {}
 
         _save_persistent_agent_state(
             redis_client=r,
@@ -5703,16 +5806,17 @@ async def _run_hydra_turn_impl(
             hermes_final_ms=int(max(0.0, hermes_final_ms_total)),
             total_ms=total_ms,
             hermes_llm=hermes_llm_label,
-            astraeus_debug=astraeus_debug,
-            thanatos_debug=thanatos_debug,
-            hermes_chat_debug=hermes_chat_debug,
-            hermes_final_debug=hermes_final_debug,
+            astraeus_debug=_debug_without_reasoning_content(astraeus_debug),
+            thanatos_debug=_debug_without_reasoning_content(thanatos_debug),
+            hermes_chat_debug=_debug_without_reasoning_content(hermes_chat_debug),
+            hermes_final_debug=_debug_without_reasoning_content(hermes_final_debug),
             retry_tool=retry_tool,
             rounds_used=rounds_used,
             tool_calls_used=tool_calls_used,
             agent_state=agent_state,
             origin_preview=origin_preview,
             attempted_tool=attempted_tool_override if attempted_tool_override is not None else attempted_tool_for_ledger,
+            reasoning_traces=reasoning_traces,
         )
         _write_hydra_metrics(
             redis_client=r,
@@ -5733,6 +5837,9 @@ async def _run_hydra_turn_impl(
             "raw_tool_payload": raw_tool_payload_out,
             "normalized_minos_result": normalized_checker_result_out,
             "normalized_checker_result": normalized_checker_result_out,
+            "reasoning_content": str(primary_reasoning.get("content") or ""),
+            "reasoning_summary": str(primary_reasoning.get("summary") or ""),
+            "reasoning_traces": reasoning_traces,
         }
 
     if not structured_plan_queue:
