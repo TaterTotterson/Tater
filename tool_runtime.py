@@ -29,7 +29,7 @@ from kernel_tools import (
 from verba_result import action_failure, action_success, normalize_verba_result
 from verba_supersession import is_verba_superseded
 from web_research import research_web
-from helpers import redis_client as default_redis
+from helpers import llm_structured_chat, redis_client as default_redis
 from admin_gate import (
     admin_denial_message,
     admin_gate_enabled,
@@ -438,25 +438,38 @@ async def _rewrite_text_source_from_origin_with_llm(
     if not recent_results:
         return ""
 
-    system_prompt = (
+    native_system_prompt = (
         "You extract source text for a rewrite step.\n"
         "Select the single best text snippet from prior tool results that should be rewritten now.\n"
+        "Do not rewrite the content or add explanation. Use an empty source_text when no valid source exists.\n"
+    )
+    system_prompt = (
+        f"{native_system_prompt}"
         "Return exactly one strict JSON object: {\"source_text\":\"...\"}\n"
-        "Rules:\n"
-        "- Do not rewrite content.\n"
-        "- Do not add explanation.\n"
-        "- If no valid source text exists, return {\"source_text\":\"\"}.\n"
     )
     extraction_payload = {
         "instruction": _first_text(instruction),
         "tool_results_full": recent_results,
     }
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(extraction_payload, ensure_ascii=False, default=str)},
             ],
+            native_messages=[
+                {"role": "system", "content": native_system_prompt},
+                {"role": "user", "content": json.dumps(extraction_payload, ensure_ascii=False, default=str)},
+            ],
+            schema={
+                "type": "object",
+                "properties": {"source_text": {"type": "string"}},
+                "required": ["source_text"],
+                "additionalProperties": False,
+            },
+            function_name="submit_rewrite_source",
+            description="Submit the source text selected from prior tool results.",
             temperature=0.0,
         )
     except Exception:

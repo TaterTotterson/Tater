@@ -7441,10 +7441,10 @@ def _openai_content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, str]]:
+def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, Any]]:
     if not isinstance(messages, list):
         return []
-    normalized: List[Dict[str, str]] = []
+    normalized: List[Dict[str, Any]] = []
     for raw_message in messages:
         if not isinstance(raw_message, dict):
             continue
@@ -7452,9 +7452,20 @@ def _normalize_openai_chat_messages(messages: Any) -> List[Dict[str, str]]:
         if role not in {"system", "user", "assistant", "tool"}:
             role = "user"
         content = _openai_content_to_text(raw_message.get("content")).strip()
-        if not content:
+        tool_calls = raw_message.get("tool_calls") if role == "assistant" else None
+        if not content and not tool_calls:
             continue
-        normalized.append({"role": role, "content": content})
+        message: Dict[str, Any] = {"role": role, "content": content}
+        if isinstance(tool_calls, list) and tool_calls:
+            message["tool_calls"] = [dict(item) for item in tool_calls if isinstance(item, dict)]
+        if role == "tool":
+            tool_call_id = str(raw_message.get("tool_call_id") or "").strip()
+            name = str(raw_message.get("name") or "").strip()
+            if tool_call_id:
+                message["tool_call_id"] = tool_call_id
+            if name:
+                message["name"] = name
+        normalized.append(message)
     return normalized
 
 
@@ -7528,7 +7539,29 @@ def _openai_chat_completion_response(
     usage: Optional[Dict[str, int]] = None,
     completion_id: str = "",
     spud_link: Optional[Dict[str, Any]] = None,
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+    finish_reason: str = "",
 ) -> Dict[str, Any]:
+    message: Dict[str, Any] = {"role": "assistant", "content": str(content or "")}
+    normalized_tool_calls: List[Dict[str, Any]] = []
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+        call = dict(item)
+        function = call.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                function["arguments"] = json.dumps(
+                    arguments if isinstance(arguments, dict) else {},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            call["function"] = function
+        normalized_tool_calls.append(call)
+    if normalized_tool_calls:
+        message["tool_calls"] = normalized_tool_calls
     payload = {
         "id": completion_id or f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -7537,8 +7570,10 @@ def _openai_chat_completion_response(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": str(content or "")},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": str(
+                    finish_reason or ("tool_calls" if normalized_tool_calls else "stop")
+                ),
             }
         ],
         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
@@ -7571,6 +7606,12 @@ async def _run_tater_api_direct_completion(
         generation_kwargs["top_p"] = payload.top_p
     if payload.stop is not None:
         generation_kwargs["stop"] = payload.stop
+    if isinstance(payload.tools, list) and payload.tools:
+        generation_kwargs["tools"] = [dict(item) for item in payload.tools if isinstance(item, dict)]
+    if payload.tool_choice is not None:
+        generation_kwargs["tool_choice"] = payload.tool_choice
+    if payload.parallel_tool_calls is not None:
+        generation_kwargs["parallel_tool_calls"] = bool(payload.parallel_tool_calls)
 
     perf: Dict[str, Any] = {}
     client_kwargs = dict(llm_client_kwargs or {})
@@ -7587,13 +7628,18 @@ async def _run_tater_api_direct_completion(
 
     response_message = result.get("message") if isinstance(result, dict) else {}
     content = ""
+    tool_calls: List[Dict[str, Any]] = []
     if isinstance(response_message, dict):
         content = str(response_message.get("content") or "")
+        if isinstance(response_message.get("tool_calls"), list):
+            tool_calls = [dict(item) for item in response_message.get("tool_calls") if isinstance(item, dict)]
     model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
     return _openai_chat_completion_response(
         content=content,
         model=model,
         usage=_openai_usage_from_perf(perf),
+        tool_calls=tool_calls,
+        finish_reason=str((result or {}).get("finish_reason") or "") if isinstance(result, dict) else "",
     )
 
 
@@ -7757,6 +7803,12 @@ async def _run_spud_link_native_llm_completion(
         generation_kwargs["top_p"] = payload.top_p
     if payload.stop is not None:
         generation_kwargs["stop"] = payload.stop
+    if isinstance(payload.tools, list) and payload.tools:
+        generation_kwargs["tools"] = [dict(item) for item in payload.tools if isinstance(item, dict)]
+    if payload.tool_choice is not None:
+        generation_kwargs["tool_choice"] = payload.tool_choice
+    if payload.parallel_tool_calls is not None:
+        generation_kwargs["parallel_tool_calls"] = bool(payload.parallel_tool_calls)
 
     perf: Dict[str, Any] = {}
     async with get_llm_client_from_env(redis_conn=redis_client) as llm_client:
@@ -7772,14 +7824,21 @@ async def _run_spud_link_native_llm_completion(
     response_message = result.get("message") if isinstance(result, dict) else {}
     content = ""
     role = "assistant"
+    tool_calls: List[Dict[str, Any]] = []
     if isinstance(response_message, dict):
         content = str(response_message.get("content") or "")
         role = str(response_message.get("role") or "assistant").strip() or "assistant"
+        if isinstance(response_message.get("tool_calls"), list):
+            tool_calls = [dict(item) for item in response_message.get("tool_calls") if isinstance(item, dict)]
     model = str((result or {}).get("model") or _tater_api_primary_model_id()) if isinstance(result, dict) else _tater_api_primary_model_id()
+    message_payload: Dict[str, Any] = {"role": role, "content": content}
+    if tool_calls:
+        message_payload["tool_calls"] = tool_calls
     return {
         "ok": True,
         "model": model,
-        "message": {"role": role, "content": content},
+        "message": message_payload,
+        "finish_reason": str((result or {}).get("finish_reason") or ("tool_calls" if tool_calls else "stop")),
         "usage": _openai_usage_from_perf(perf),
         "stats": perf if isinstance(perf, dict) else {},
     }
@@ -9907,6 +9966,9 @@ class OpenAIChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     stop: Optional[Any] = None
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
     stream: Optional[bool] = None
     user: Optional[str] = None
     user_name: Optional[str] = None

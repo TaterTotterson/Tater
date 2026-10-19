@@ -1,6 +1,8 @@
 import json
 from typing import Any, Callable, Dict, Optional
 
+from helpers import llm_structured_chat
+
 
 def normalize_minos_decision(label: str) -> str:
     import re
@@ -273,7 +275,40 @@ async def run_minos_validation(
             "activity": "execution",
             "cache_namespace": "hydra:checker",
         }
-        response = await llm_client.chat(**chat_kwargs)
+        response = await llm_structured_chat(
+            llm_client,
+            messages=chat_kwargs.pop("messages"),
+            native_system_prompt=(
+                "Review the supplied Hydra execution state and decide whether to continue to the next planned step, fail "
+                "or retry the current work, ask the user for genuinely required information, or finalize. Base the decision "
+                "only on the current goal, step, tool result, draft response, and supplied context. Give concise evidence in "
+                "reason and populate only the next-action, repair, question, final text, or tool-call fields relevant to the decision."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["CONTINUE", "FAIL", "ASK_USER", "FINAL"]},
+                    "reason": {"type": "string"},
+                    "next_action": {"type": "string"},
+                    "repair": {"type": "string"},
+                    "question": {"type": "string"},
+                    "text": {"type": "string"},
+                    "tool_call": {
+                        "type": "object",
+                        "properties": {
+                            "function": {"type": "string"},
+                            "arguments": {"type": "object", "additionalProperties": True},
+                        },
+                        "required": ["function", "arguments"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["decision"],
+                "additionalProperties": False,
+            },
+            function_name="submit_hydra_check",
+            **chat_kwargs,
+        )
         text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
         return parse_minos_decision_fn(text)
     except Exception:

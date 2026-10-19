@@ -125,6 +125,21 @@ def astraeus_system_prompt(*, platform: str) -> str:
     ).strip()
 
 
+def astraeus_native_system_prompt(*, platform: str) -> str:
+    legacy_contract = (
+        "Return exactly one strict JSON object with this schema:\n"
+        '{"mode":"chat|execute","goal":"clear goal","steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
+    )
+    return (
+        astraeus_system_prompt(platform=platform)
+        .replace(legacy_contract, "")
+        .replace(
+            "- Do not include explanations, markdown, or extra keys.",
+            "- Do not include explanations or markdown in the structured fields.",
+        )
+    ).strip()
+
+
 def chat_fallback_system_prompt(
     *,
     platform: str,
@@ -218,6 +233,42 @@ def thanatos_system_prompt(
     ).strip()
 
 
+def thanatos_native_tools_system_prompt(
+    *,
+    platform: str,
+    now_text: str,
+    ascii_only_platforms: Iterable[str],
+) -> str:
+    plain_text_rule = (
+        "For blocker text, use plain ASCII text only.\n"
+        if platform in set(ascii_only_platforms or [])
+        else ""
+    )
+    return (
+        f"Current platform: {platform}\n"
+        "Execution role: Thanatos.\n"
+        "Execute exactly ONE locked atomic step from Astraeus.\n"
+        "The single native function supplied with this request is the authoritative execution tool contract.\n"
+        "Call that function when the step is executable. If required information is missing, return only a short blocker explanation.\n"
+        "Rules:\n"
+        "- Read the Current agent state JSON.\n"
+        "- Execute only this turn's planned objective; do not revive stale prior objectives.\n"
+        "- If state.plan has items, execute only state.next_step or the first remaining step.\n"
+        "- Treat the Execution step lock system message as authoritative.\n"
+        "- Do not decompose, replan, reprioritize, broaden scope, or select a different tool.\n"
+        "- Do not repeat a successfully completed step unless the user explicitly asks to retry or repeat it.\n"
+        "- Never claim completion without a successful tool result this turn.\n"
+        "- Never invent identifiers, artifact references, paths, URLs, destinations, or missing details.\n"
+        "- Use available artifacts, previous-step payloads, and remembered result sets only when they directly resolve this step.\n"
+        "- For natural-language-first tools, pass one concise rewritten action phrase for this step.\n"
+        "- Use destination mapping only to fill targets; never override an explicitly requested platform.\n"
+        "- Do not emit a textual JSON imitation of a tool call; use the provided native function interface.\n"
+        "- Never mention internal orchestration roles or codenames.\n"
+        f"{plain_text_rule}"
+        f"Current Date and Time: {now_text}\n"
+    ).strip()
+
+
 def hermes_synthesis_system_prompt() -> str:
     return (
         "You are composing the final user-facing answer from tool findings.\n"
@@ -291,6 +342,18 @@ def astraeus_plan_review_system_prompt(*, platform: str) -> str:
         "- Use only tool ids from payload.available_tool_ids.\n"
         "- Preserve user-requested order where possible.\n"
         "- Output JSON only.\n"
+    ).strip()
+
+
+def astraeus_plan_review_native_system_prompt(*, platform: str) -> str:
+    legacy_contract = (
+        "Return exactly one strict JSON object with schema:\n"
+        '{"goal":"clear goal","steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
+    )
+    return (
+        astraeus_plan_review_system_prompt(platform=platform)
+        .replace(legacy_contract, "")
+        .replace("- Output JSON only.\n", "")
     ).strip()
 
 

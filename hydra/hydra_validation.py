@@ -1,6 +1,8 @@
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+from helpers import llm_structured_chat
+
 
 def _coerce_text(value: Any) -> str:
     if value is None:
@@ -156,8 +158,47 @@ async def repair_tool_call_text(
             "activity": "execution",
             "cache_namespace": "hydra:thanatos:repair",
         }
-        response = await llm_client.chat(**chat_kwargs)
-        return coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
+        response = await llm_structured_chat(
+            llm_client,
+            messages=chat_kwargs.pop("messages"),
+            native_system_prompt=(
+                "Repair the invalid Hydra execution output into exactly one executable next tool call, using only an "
+                "enabled tool ID and its documented argument keys. The latest user message is the only authorization; "
+                "history and prior output are context only. Choose one atomic action, rewrite natural-language arguments "
+                "concisely, never invent opaque identifiers, and prefer an available camera or snapshot tool for scene "
+                "questions. Choose no_tool when there is no authorized executable action."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["tool_call", "no_tool"]},
+                    "function": {"type": "string"},
+                    "arguments": {"type": "object", "additionalProperties": True},
+                },
+                "required": ["decision", "function", "arguments"],
+                "additionalProperties": False,
+            },
+            function_name="submit_repaired_tool_call",
+            description="Submit one repaired Hydra tool call.",
+            **chat_kwargs,
+        )
+        result_text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
+        try:
+            result_payload = json.loads(result_text)
+        except Exception:
+            result_payload = None
+        if isinstance(result_payload, dict) and result_payload.get("decision") == "no_tool":
+            return "NO_TOOL"
+        if isinstance(result_payload, dict) and result_payload.get("decision") == "tool_call":
+            function_name = str(result_payload.get("function") or "").strip()
+            arguments = result_payload.get("arguments")
+            if function_name and isinstance(arguments, dict):
+                return json.dumps(
+                    {"function": function_name, "arguments": arguments},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        return result_text
     except Exception:
         return ""
 

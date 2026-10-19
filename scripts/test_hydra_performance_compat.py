@@ -11,6 +11,7 @@ from unittest import mock
 
 import helpers
 import hydra as hydra_runtime
+from hydra import hydra_tool_index
 from hydra import hydra_prompts
 from hydra import hydra_ledger
 from hydra import hydra_doer_state
@@ -31,6 +32,140 @@ def _local_result(text: str = "ok"):
             "speed_basis": "test",
         },
     }
+
+
+class StructuredChatCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_tool_arguments_are_returned_as_legacy_json_content(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.calls.append((messages, kwargs))
+                name = kwargs["tools"][0]["function"]["name"]
+                return {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": name, "arguments": {"choice": "alpha"}},
+                            }
+                        ],
+                    }
+                }
+
+        client = Client()
+        response = await helpers.llm_structured_chat(
+            client,
+            messages=[{"role": "system", "content": "Choose alpha or beta and return JSON."}],
+            schema={
+                "type": "object",
+                "properties": {"choice": {"type": "string", "enum": ["alpha", "beta"]}},
+                "required": ["choice"],
+            },
+            function_name="submit_choice",
+        )
+
+        self.assertEqual(json.loads(response["message"]["content"]), {"choice": "alpha"})
+        self.assertEqual(response["_structured_output_mode"], "native_tool")
+        self.assertEqual(len(client.calls), 1)
+        self.assertIn("Native structured-output mode", client.calls[0][0][0]["content"])
+
+    async def test_provider_tool_rejection_retries_unchanged_legacy_prompt(self):
+        original = [{"role": "system", "content": "Return JSON: {\"ok\":true}"}]
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, *, messages, **kwargs):
+                self.calls.append((messages, kwargs))
+                if "tools" in kwargs:
+                    raise TypeError("tools unsupported")
+                return {"message": {"role": "assistant", "content": '{"ok":true}'}}
+
+        client = Client()
+        response = await helpers.llm_structured_chat(
+            client,
+            messages=original,
+            native_system_prompt="Decide whether the operation succeeded.",
+            schema={
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+        )
+
+        self.assertEqual(response["_structured_output_mode"], "prompt_fallback")
+        self.assertIn("Decide whether the operation succeeded.", client.calls[0][0][0]["content"])
+        self.assertNotIn("Return JSON", client.calls[0][0][0]["content"])
+        self.assertEqual(client.calls[1][0], original)
+        self.assertNotIn("tools", client.calls[1][1])
+
+    async def test_native_attempt_accepts_valid_text_json_without_retry(self):
+        class Client:
+            def __init__(self):
+                self.call_count = 0
+
+            async def chat(self, **_kwargs):
+                self.call_count += 1
+                return {"message": {"role": "assistant", "content": 'Result: {"value":7}'}}
+
+        client = Client()
+        response = await helpers.llm_structured_chat(client, messages=[])
+
+        self.assertEqual(json.loads(response["message"]["content"]), {"value": 7})
+        self.assertEqual(client.call_count, 1)
+
+    async def test_schema_mismatch_uses_prompt_fallback(self):
+        class Client:
+            def __init__(self):
+                self.call_count = 0
+
+            async def chat(self, **kwargs):
+                self.call_count += 1
+                if "tools" in kwargs:
+                    return {"message": {"role": "assistant", "content": '{"count":"wrong"}'}}
+                return {"message": {"role": "assistant", "content": '{"count":2}'}}
+
+        client = Client()
+        response = await helpers.llm_structured_chat(
+            client,
+            messages=[],
+            schema={
+                "type": "object",
+                "properties": {"count": {"type": "integer"}},
+                "required": ["count"],
+            },
+        )
+
+        self.assertEqual(json.loads(response["message"]["content"]), {"count": 2})
+        self.assertEqual(response["_structured_output_mode"], "prompt_fallback")
+        self.assertEqual(client.call_count, 2)
+
+    def test_schema_validator_supports_nullable_and_any_of_types(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": ["integer", "null"]},
+                "preference": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["artist", "track"]},
+                        {"type": "null"},
+                    ]
+                },
+            },
+            "required": ["seconds", "preference"],
+            "additionalProperties": False,
+        }
+        self.assertTrue(helpers._structured_output_matches_schema({"seconds": None, "preference": "artist"}, schema))
+        self.assertTrue(helpers._structured_output_matches_schema({"seconds": 90, "preference": None}, schema))
+        self.assertFalse(helpers._structured_output_matches_schema({"seconds": "90", "preference": None}, schema))
+        self.assertFalse(helpers._structured_output_matches_schema({"seconds": 90, "preference": "album"}, schema))
 
 
 class LocalLlmSchedulerTests(unittest.TestCase):
@@ -902,6 +1037,412 @@ class LlamaCppPerformanceTests(unittest.TestCase):
 
 
 class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_compatible_accumulates_streamed_native_tool_call(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Stream:
+            def __aiter__(self):
+                async def events():
+                    yield SimpleNamespace(
+                        model="test-model",
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason=None,
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_read",
+                                            function=SimpleNamespace(
+                                                name="read_file",
+                                                arguments='{"path":"/tmp/',
+                                            ),
+                                        )
+                                    ],
+                                ),
+                            )
+                        ],
+                        usage=None,
+                    )
+                    yield SimpleNamespace(
+                        model="test-model",
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason="tool_calls",
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id=None,
+                                            function=SimpleNamespace(
+                                                name=None,
+                                                arguments='a.txt"}',
+                                            ),
+                                        )
+                                    ],
+                                ),
+                            )
+                        ],
+                        usage=None,
+                    )
+
+                return events()
+
+        class Completions:
+            async def create(self, **kwargs):
+                self.kwargs = dict(kwargs)
+                return Stream()
+
+        completions = Completions()
+        wrapper = helpers.LLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+        )
+        wrapper.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)
+        )
+
+        result = await wrapper.chat(
+            [{"role": "user", "content": "read the file"}],
+            tools=[tool],
+            stream_callback=lambda _chunk: None,
+        )
+
+        self.assertTrue(completions.kwargs["stream"])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+        self.assertEqual(
+            result["message"]["tool_calls"][0]["function"]["arguments"],
+            {"path": "/tmp/a.txt"},
+        )
+
+    async def test_openai_compatible_forwards_and_preserves_native_tool_calls(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Completions:
+            async def create(self, **kwargs):
+                self.kwargs = dict(kwargs)
+                return SimpleNamespace(
+                    model="test-model",
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="tool_calls",
+                            message=SimpleNamespace(
+                                role="assistant",
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_read",
+                                        type="function",
+                                        function=SimpleNamespace(
+                                            name="read_file",
+                                            arguments='{"path":"/tmp/a.txt"}',
+                                        ),
+                                    )
+                                ],
+                            ),
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=3,
+                        completion_tokens=2,
+                        total_tokens=5,
+                    ),
+                )
+
+        completions = Completions()
+        wrapper = helpers.LLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+        )
+        wrapper.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)
+        )
+
+        result = await wrapper.chat(
+            [{"role": "user", "content": "read the file"}],
+            tools=[tool],
+        )
+
+        self.assertEqual(completions.kwargs["tools"], [tool])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+        self.assertEqual(
+            result["message"]["tool_calls"][0]["function"],
+            {"name": "read_file", "arguments": {"path": "/tmp/a.txt"}},
+        )
+
+    def test_remote_llama_uses_chat_completions_for_native_tools(self):
+        client = helpers.LlamaCppRemoteLLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+        )
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+        captured = {}
+
+        def fake_post(_host, path, payload, **_kwargs):
+            captured["path"] = path
+            captured["payload"] = dict(payload)
+            return {
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_read",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": '{"path":"/tmp/a.txt"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            }
+
+        with mock.patch.object(
+            helpers, "_llama_cpp_native_json_post", side_effect=fake_post
+        ):
+            result = client._chat_sync(
+                [{"role": "user", "content": "read the file"}],
+                tools=[tool],
+            )
+
+        self.assertEqual(captured["path"], "/v1/chat/completions")
+        self.assertEqual(captured["payload"]["tools"], [tool])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+        self.assertEqual(
+            result["message"]["tool_calls"][0]["function"]["arguments"],
+            {"path": "/tmp/a.txt"},
+        )
+
+    def test_internal_llama_worker_uses_chat_completions_for_native_tools(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+        captured = {}
+
+        def fake_post(_host, path, payload, **_kwargs):
+            captured["path"] = path
+            captured["payload"] = dict(payload)
+            return {
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_read",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": '{"path":"/tmp/a.txt"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {},
+            }
+
+        with (
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_worker_load",
+                return_value={"slot_count": 1},
+            ),
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_json_post",
+                side_effect=fake_post,
+            ),
+        ):
+            result = helpers._llama_cpp_native_worker_chat(
+                {"base_url": "http://127.0.0.1:1234"},
+                "test-model",
+                [{"role": "user", "content": "read the file"}],
+                {"tools": [tool]},
+                vision=False,
+                timeout=30.0,
+            )
+
+        self.assertEqual(captured["path"], "/v1/chat/completions")
+        self.assertEqual(captured["payload"]["tools"], [tool])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+
+    def test_transformers_chat_template_receives_native_tools(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Formatter:
+            def apply_chat_template(self, messages, **kwargs):
+                self.messages = list(messages)
+                self.kwargs = dict(kwargs)
+                return "prompt"
+
+        formatter = Formatter()
+        client = helpers.TransformersLLMClientWrapper(model="test-model")
+        prompt = client._chat_template_inputs(
+            formatter,
+            [{"role": "user", "content": "read the file"}],
+            tokenize=False,
+            tools=[tool],
+        )
+
+        self.assertEqual(prompt, "prompt")
+        self.assertEqual(formatter.kwargs["tools"], [tool])
+
+    def test_mlx_chat_template_receives_native_tools(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Tokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                self.messages = list(messages)
+                self.kwargs = dict(kwargs)
+                return "prompt"
+
+        tokenizer = Tokenizer()
+        client = helpers.MlxLmLLMClientWrapper(model="test-model")
+        prompt = client._chat_template_prompt(
+            tokenizer,
+            [{"role": "user", "content": "read the file"}],
+            tools=[tool],
+        )
+
+        self.assertEqual(prompt, "prompt")
+        self.assertEqual(tokenizer.kwargs["tools"], [tool])
+
+    async def test_thanatos_retries_legacy_contract_when_native_tools_are_rejected(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                if kwargs.get("tools"):
+                    raise RuntimeError("tools unsupported")
+                return _local_result(
+                    '{"function":"read_file","arguments":{"path":"/tmp/a.txt"}}'
+                )
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        client = Client()
+        text, _elapsed, native_call, used_fallback = await hydra_runtime._run_thanatos_step(
+            llm_client=client,
+            thanatos_messages=[{"role": "system", "content": "native"}],
+            fallback_messages=[{"role": "system", "content": "legacy"}],
+            max_tokens=128,
+            native_tools=[tool],
+        )
+
+        self.assertTrue(used_fallback)
+        self.assertIsNone(native_call)
+        self.assertIn('"function":"read_file"', text)
+        self.assertEqual(client.calls[0]["tools"], [tool])
+        self.assertNotIn("tools", client.calls[1])
+
+    async def test_spud_link_forwards_and_preserves_native_tool_calls(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "model": "test-model",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": {"path": "/tmp/a.txt"},
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                    "usage": {},
+                }
+
+        class Client:
+            async def post(self, _url, *, json, headers, timeout):
+                self.body = dict(json)
+                return Response()
+
+        client = helpers.SpudLinkLLMClientWrapper(
+            host="http://127.0.0.1:1234",
+            model="test-model",
+            api_key="secret",
+        )
+        fake_http = Client()
+        client._client = fake_http
+        client._owns_http_client = False
+
+        result = await client.chat(
+            [{"role": "user", "content": "read the file"}],
+            tools=[tool],
+        )
+
+        self.assertEqual(fake_http.body["tools"], [tool])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+        self.assertEqual(
+            result["message"]["tool_calls"][0]["function"]["name"],
+            "read_file",
+        )
+
     async def test_omitted_max_tokens_reaches_context_bounded_local_builders(self):
         for client in (
             helpers.TransformersLLMClientWrapper(model="test-model"),
@@ -1432,6 +1973,155 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_tokens", client.calls[1])
         self.assertIsNone(client.calls[1]["max_tokens"])
 
+    async def test_spud_link_hub_forwards_and_returns_native_tool_calls(self):
+        import tateros_app
+
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class LLMClient:
+            async def chat(self, _messages, **kwargs):
+                self.kwargs = dict(kwargs)
+                return {
+                    "model": "test-model",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": {"path": "/tmp/a.txt"},
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        class ClientContext:
+            def __init__(self, client):
+                self.client = client
+
+            async def __aenter__(self):
+                return self.client
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        client = LLMClient()
+        payload = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "read the file"}],
+            tools=[tool],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        )
+
+        with (
+            mock.patch.object(
+                tateros_app,
+                "get_llm_client_from_env",
+                return_value=ClientContext(client),
+            ),
+            mock.patch.object(tateros_app, "_save_last_llm_stats"),
+        ):
+            result = await tateros_app._run_spud_link_native_llm_completion(
+                payload,
+                payload.messages,
+            )
+
+        self.assertEqual(client.kwargs["tools"], [tool])
+        self.assertEqual(client.kwargs["tool_choice"], "auto")
+        self.assertFalse(client.kwargs["parallel_tool_calls"])
+        self.assertEqual(result["finish_reason"], "tool_calls")
+        self.assertEqual(
+            result["message"]["tool_calls"][0]["function"]["name"],
+            "read_file",
+        )
+
+    async def test_openai_direct_endpoint_returns_native_tool_calls(self):
+        import tateros_app
+
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class LLMClient:
+            async def chat(self, _messages, **kwargs):
+                self.kwargs = dict(kwargs)
+                return {
+                    "model": "test-model",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_read",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": {"path": "/tmp/a.txt"},
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        class ClientContext:
+            def __init__(self, client):
+                self.client = client
+
+            async def __aenter__(self):
+                return self.client
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        client = LLMClient()
+        payload = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "read the file"}],
+            tools=[tool],
+        )
+
+        with (
+            mock.patch.object(
+                tateros_app,
+                "get_llm_client_from_env",
+                return_value=ClientContext(client),
+            ),
+            mock.patch.object(tateros_app, "_save_last_llm_stats"),
+        ):
+            result = await tateros_app._run_tater_api_direct_completion(
+                payload,
+                payload.messages,
+            )
+
+        self.assertEqual(client.kwargs["tools"], [tool])
+        choice = result["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual(
+            choice["message"]["tool_calls"][0]["function"]["name"],
+            "read_file",
+        )
+        self.assertEqual(
+            choice["message"]["tool_calls"][0]["function"]["arguments"],
+            '{"path":"/tmp/a.txt"}',
+        )
+
     async def test_spud_link_endpoint_sets_node_queue_identity(self):
         import tateros_app
 
@@ -1504,6 +2194,200 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PromptCacheLayoutTests(unittest.TestCase):
+    def test_native_tool_schema_is_inferred_from_legacy_usage(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="send_message",
+            description="Send one message.",
+            usage=(
+                '{"function":"send_message","arguments":'
+                '{"message":"<text>","platform":"discord|telegram",'
+                '"thread":"<optional thread>"}}'
+            ),
+        )
+
+        parameters = tool["function"]["parameters"]
+        self.assertEqual(tool["function"]["name"], "send_message")
+        self.assertEqual(parameters["properties"]["platform"]["enum"], ["discord", "telegram"])
+        self.assertEqual(parameters["required"], ["message", "platform"])
+
+    def test_common_local_tool_wrapper_is_normalized(self):
+        tools = [
+            hydra_tool_index.native_function_tool(
+                tool_id="read_file",
+                description="Read one file.",
+                usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+            )
+        ]
+
+        calls = helpers._native_tool_calls_from_text(
+            '<tool_call>{"name":"read_file","arguments":{"path":"/tmp/a.txt"}}</tool_call>',
+            tools,
+        )
+
+        self.assertEqual(calls[0]["function"]["name"], "read_file")
+        self.assertEqual(calls[0]["function"]["arguments"], {"path": "/tmp/a.txt"})
+
+    def test_gemma_control_token_tool_wrappers_are_normalized(self):
+        tools = [
+            hydra_tool_index.native_function_tool(
+                tool_id="read_file",
+                description="Read one file.",
+                usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+            )
+        ]
+
+        function_gemma = helpers._native_tool_calls_from_text(
+            "<start_function_call>call:read_file{path:<escape>/tmp/a.txt<escape>}<end_function_call>",
+            tools,
+        )
+        gemma_four = helpers._native_tool_calls_from_text(
+            '<|tool_call>call:read_file{path:<|"|>/tmp/b.txt<|"|>}<tool_call|>',
+            tools,
+        )
+
+        self.assertEqual(
+            function_gemma[0]["function"]["arguments"],
+            {"path": "/tmp/a.txt"},
+        )
+        self.assertEqual(
+            gemma_four[0]["function"]["arguments"],
+            {"path": "/tmp/b.txt"},
+        )
+
+    def test_processor_native_response_parser_is_used_when_available(self):
+        tools = [
+            hydra_tool_index.native_function_tool(
+                tool_id="read_file",
+                description="Read one file.",
+                usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+            )
+        ]
+
+        class Parser:
+            def parse_response(self, _text):
+                return {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "read_file",
+                                "arguments": {"path": "/tmp/a.txt"},
+                            }
+                        }
+                    ],
+                }
+
+        calls = helpers._native_tool_calls_from_parser("model-specific output", tools, Parser())
+
+        self.assertEqual(calls[0]["function"]["name"], "read_file")
+        self.assertEqual(calls[0]["function"]["arguments"], {"path": "/tmp/a.txt"})
+
+    def test_native_thanatos_prompt_uses_provider_interface(self):
+        prompt = hydra_prompts.thanatos_native_tools_system_prompt(
+            platform="webui",
+            now_text="Friday, July 17, 2026 at 10:30 PM",
+            ascii_only_platforms=(),
+        )
+
+        self.assertIn("native function supplied", prompt)
+        self.assertIn("Do not emit a textual JSON imitation", prompt)
+        self.assertNotIn('{"function":"tool_id"', prompt)
+
+    def test_native_astraeus_prompts_leave_json_formatting_to_schema(self):
+        planner = hydra_prompts.astraeus_native_system_prompt(platform="webui")
+        reviewer = hydra_prompts.astraeus_plan_review_native_system_prompt(platform="webui")
+
+        self.assertIn("decide whether this turn is conversational chat or executable work", planner)
+        self.assertNotIn("strict JSON", planner)
+        self.assertNotIn('{"mode":"chat|execute"', planner)
+        self.assertIn("execution-plan quality review", reviewer)
+        self.assertNotIn("strict JSON", reviewer)
+        self.assertNotIn('{"goal":"clear goal"', reviewer)
+
+    def test_astraeus_uses_semantic_native_prompt_then_unchanged_legacy_fallback(self):
+        legacy_result = {
+            "mode": "execute",
+            "goal": "Research the topic",
+            "steps": [
+                {
+                    "step_id": 1,
+                    "intent": "Research the topic",
+                    "nl": "Research the topic",
+                    "tool_hint": "websearch",
+                }
+            ],
+        }
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                if kwargs.get("tools"):
+                    raise TypeError("tools unsupported")
+                return _local_result(json.dumps(legacy_result))
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        client = Client()
+        result = asyncio.run(
+            hydra_runtime._run_astraeus_plan(
+                llm_client=client,
+                platform="webui",
+                current_user_text="Research the topic",
+                turn_request_text="Research the topic",
+                topic_seed="",
+                topic_shift_seed=False,
+                history=[],
+                prior_state=None,
+                memory_context=None,
+                capability_catalog="websearch: research the web",
+                available_tool_ids={"websearch"},
+                platform_preamble="",
+                max_tokens=320,
+            )
+        )
+
+        self.assertEqual(result["mode"], "execute")
+        self.assertEqual(result["steps"][0]["tool_hint"], "websearch")
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("tools", client.calls[0])
+        self.assertNotIn("strict JSON", client.calls[0]["messages"][0]["content"])
+        self.assertNotIn("tools", client.calls[1])
+        self.assertIn("strict JSON", client.calls[1]["messages"][0]["content"])
+
+    def test_provider_message_sanitizer_preserves_standard_tool_arguments(self):
+        arguments = '{"path":"/tmp/a.txt"}'
+        messages = helpers._sanitize_chat_messages(
+            [
+                {"role": "system", "content": "Use tools."},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": arguments,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_read",
+                    "content": "file contents",
+                },
+            ]
+        )
+
+        self.assertEqual(messages[1]["tool_calls"][0]["function"]["arguments"], arguments)
+        self.assertEqual(messages[2]["tool_call_id"], "call_read")
+
     def test_volatile_time_is_after_stable_chat_instructions(self):
         marker = "Friday, July 17, 2026 at 10:30 PM"
         prompt = hydra_prompts.chat_fallback_system_prompt(

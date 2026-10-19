@@ -1,3 +1,6 @@
+import copy
+import json
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -60,6 +63,116 @@ def _usage_text(value: Any, fallback_tool_id: str) -> str:
     if not tool_id:
         return '{"function":"","arguments":{}}'
     return f'{{"function":"{tool_id}","arguments":{{}}}}'
+
+
+def _usage_arguments(value: Any) -> Dict[str, Any]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    start = text.find("{")
+    if start < 0:
+        return {}
+    decoder = json.JSONDecoder()
+    try:
+        parsed, _end = decoder.raw_decode(text[start:])
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    arguments = parsed.get("arguments")
+    return dict(arguments) if isinstance(arguments, dict) else {}
+
+
+def _schema_type_for_example(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    text = str(value or "").strip().lower()
+    if any(token in text for token in ("true/false", "boolean", "<bool")):
+        return "boolean"
+    if any(token in text for token in ("<integer", "<int", "number", "percent")):
+        return "integer"
+    return "string"
+
+
+def _schema_property_for_example(value: Any) -> Dict[str, Any]:
+    item: Dict[str, Any] = {"type": _schema_type_for_example(value)}
+    if isinstance(value, list):
+        example = value[0] if value else ""
+        item["items"] = {"type": _schema_type_for_example(example)}
+    elif isinstance(value, dict):
+        properties = {
+            str(key): _schema_property_for_example(child)
+            for key, child in value.items()
+            if str(key).strip()
+        }
+        item["properties"] = properties
+    elif isinstance(value, str):
+        description = value.strip().strip("<>").strip()
+        if description:
+            item["description"] = description
+        if "|" in description:
+            enum_values = []
+            for chunk in description.split("|"):
+                match = re.match(r"^[A-Za-z0-9_.:-]+", chunk.strip())
+                token = match.group(0) if match else ""
+                if token and token.lower() not in {"optional", "required"} and token not in enum_values:
+                    enum_values.append(token)
+            if len(enum_values) >= 2:
+                item["enum"] = enum_values
+    return item
+
+
+def tool_parameters_schema(*, plugin: Any = None, usage: Any = "") -> Dict[str, Any]:
+    """Return the canonical JSON Schema used by native tool-capable providers."""
+    explicit = getattr(plugin, "argument_schema", None) if plugin is not None else None
+    if isinstance(explicit, dict):
+        schema = copy.deepcopy(explicit)
+        schema.setdefault("type", "object")
+        schema.setdefault("properties", {})
+        schema.setdefault("required", [])
+        return schema
+
+    arguments = _usage_arguments(usage)
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
+    for raw_key, value in arguments.items():
+        key = str(raw_key or "").strip()
+        if not key or key == "origin":
+            continue
+        properties[key] = _schema_property_for_example(value)
+        if not (isinstance(value, str) and "optional" in value.lower()):
+            required.append(key)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
+
+
+def native_function_tool(
+    *,
+    tool_id: str,
+    description: str,
+    usage: Any = "",
+    plugin: Any = None,
+) -> Dict[str, Any]:
+    """Build an OpenAI-compatible function definition shared by all adapters."""
+    return {
+        "type": "function",
+        "function": {
+            "name": str(tool_id or "").strip(),
+            "description": " ".join(str(description or "").split()).strip() or "Execute this tool.",
+            "parameters": tool_parameters_schema(plugin=plugin, usage=usage),
+        },
+    }
 
 
 def enabled_tool_mini_index(

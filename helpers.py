@@ -1235,6 +1235,7 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         raw_content = m.get("content", None)
+        raw_tool_calls = m.get("tool_calls") if role == "assistant" else None
 
         # Convert any non-string (list/dict/etc) to text for maximum compatibility
         content_text = _coerce_content_to_text(raw_content).strip()
@@ -1244,14 +1245,33 @@ def _sanitize_chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         # Also drop empty assistant/tool turns (optional but generally helpful)
-        if role in ("assistant", "tool") and content_text == "":
+        if role in ("assistant", "tool") and content_text == "" and not raw_tool_calls:
             continue
 
         # System messages should not be empty either
         if role == "system" and content_text == "":
             continue
 
-        cleaned.append({"role": role, "content": content_text})
+        cleaned_message: Dict[str, Any] = {"role": role, "content": content_text}
+        if raw_tool_calls:
+            preserved_calls: List[Dict[str, Any]] = []
+            for raw_call in raw_tool_calls if isinstance(raw_tool_calls, list) else [raw_tool_calls]:
+                if isinstance(raw_call, dict):
+                    preserved_calls.append(dict(raw_call))
+                    continue
+                mapped_call = _mapping_from_object(raw_call)
+                if mapped_call:
+                    preserved_calls.append(mapped_call)
+            if preserved_calls:
+                cleaned_message["tool_calls"] = preserved_calls
+        if role == "tool":
+            tool_call_id = str(m.get("tool_call_id") or "").strip()
+            name = str(m.get("name") or "").strip()
+            if tool_call_id:
+                cleaned_message["tool_call_id"] = tool_call_id
+            if name:
+                cleaned_message["name"] = name
+        cleaned.append(cleaned_message)
 
     system_parts = [str(m.get("content") or "").strip() for m in cleaned if m.get("role") == "system"]
     if not system_parts:
@@ -1296,6 +1316,450 @@ def _coerce_content_to_text(content) -> str:
         return "\n".join(s for s in parts if s).strip()
 
     return "" if content is None else str(content)
+
+
+def _mapping_from_object(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                return dict(dumped)
+        except Exception:
+            pass
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):
+        try:
+            dumped = dict_method()
+            if isinstance(dumped, dict):
+                return dict(dumped)
+        except Exception:
+            pass
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict):
+        return {
+            str(key): item
+            for key, item in attributes.items()
+            if not str(key).startswith("_")
+        }
+    return {}
+
+
+def _native_tool_arguments(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None:
+        return {}
+    text = str(value).strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _normalize_native_tool_call(value: Any, *, index: int = 0) -> Optional[Dict[str, Any]]:
+    call = _mapping_from_object(value)
+    if not call and value is not None:
+        function_obj = getattr(value, "function", None)
+        call = {
+            "id": getattr(value, "id", ""),
+            "type": getattr(value, "type", "function"),
+            "function": _mapping_from_object(function_obj),
+        }
+    function = call.get("function")
+    function_map = _mapping_from_object(function)
+    name = str(
+        function_map.get("name")
+        or call.get("name")
+        or call.get("tool")
+        or call.get("function_name")
+        or ""
+    ).strip()
+    if not name and isinstance(function, str):
+        name = function.strip()
+    if not name:
+        return None
+    arguments = _native_tool_arguments(
+        function_map.get("arguments")
+        if "arguments" in function_map
+        else call.get("arguments", call.get("parameters", call.get("input")))
+    )
+    call_id = str(call.get("id") or call.get("call_id") or f"call_{index + 1}").strip()
+    return {
+        "id": call_id or f"call_{index + 1}",
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
+
+
+def _normalize_native_tool_calls(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    rows = value if isinstance(value, list) else [value]
+    out: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        normalized = _normalize_native_tool_call(row, index=index)
+        if normalized is not None:
+            out.append(normalized)
+    return out
+
+
+def _native_tool_names(tools: Any) -> set[str]:
+    names: set[str] = set()
+    for raw in tools if isinstance(tools, list) else []:
+        item = _mapping_from_object(raw)
+        function = _mapping_from_object(item.get("function"))
+        name = str(function.get("name") or item.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _json_values_from_text(text: Any) -> List[Any]:
+    source = str(text or "")
+    if not source:
+        return []
+    decoder = json.JSONDecoder()
+    out: List[Any] = []
+    index = 0
+    while index < len(source):
+        starts = [pos for pos in (source.find("{", index), source.find("[", index)) if pos >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            value, consumed = decoder.raw_decode(source[start:])
+            out.append(value)
+            index = start + max(1, consumed)
+        except Exception:
+            index = start + 1
+    return out
+
+
+def _native_tool_scalar(value: Any, *, quoted: bool = False) -> Any:
+    text = str(value or "").strip()
+    if quoted:
+        return text
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except Exception:
+        return text.strip("'\"")
+
+
+def _gemma_native_tool_calls_from_text(text: Any) -> List[Dict[str, Any]]:
+    """Parse the control-token call formats used by FunctionGemma and Gemma 4."""
+    source = str(text or "")
+    if not source:
+        return []
+    call_pattern = re.compile(
+        r"(?:<start_function_call>|<\|tool_call>)\s*call:"
+        r"([A-Za-z_][A-Za-z0-9_.:-]*)\s*\{(.*?)\}\s*"
+        r"(?:<end_function_call>|<tool_call\|>)",
+        re.DOTALL,
+    )
+    argument_pattern = re.compile(
+        r"([A-Za-z_][A-Za-z0-9_.:-]*)\s*:\s*"
+        r"(?:<escape>(.*?)<escape>|<\|\"\|>(.*?)<\|\"\|>|([^,}]*))",
+        re.DOTALL,
+    )
+    calls: List[Dict[str, Any]] = []
+    for call_index, (name, body) in enumerate(call_pattern.findall(source)):
+        arguments: Dict[str, Any] = {}
+        for key, escaped_value, quoted_value, bare_value in argument_pattern.findall(body):
+            if escaped_value:
+                arguments[key] = _native_tool_scalar(escaped_value, quoted=True)
+            elif quoted_value:
+                arguments[key] = _native_tool_scalar(quoted_value, quoted=True)
+            else:
+                arguments[key] = _native_tool_scalar(bare_value)
+        calls.append(
+            {
+                "id": f"call_{call_index + 1}",
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        )
+    return calls
+
+
+def _native_tool_calls_from_parser(text: Any, tools: Any, parser: Any) -> List[Dict[str, Any]]:
+    parse_response = getattr(parser, "parse_response", None)
+    if not callable(parse_response):
+        return []
+    try:
+        parsed = parse_response(str(text or ""))
+    except Exception:
+        return []
+    parsed_map = _mapping_from_object(parsed)
+    raw_calls = parsed_map.get("tool_calls") or parsed_map.get("function_calls")
+    normalized = _normalize_native_tool_calls(raw_calls)
+    allowed = _native_tool_names(tools)
+    return [
+        call
+        for call in normalized
+        if str((call.get("function") or {}).get("name") or "") in allowed
+    ]
+
+
+def _native_tool_calls_from_text(text: Any, tools: Any) -> List[Dict[str, Any]]:
+    """Normalize common local-model tool wrappers without model-specific branches."""
+    allowed = _native_tool_names(tools)
+    if not allowed:
+        return []
+    candidates: List[Any] = []
+    for value in _json_values_from_text(text):
+        if isinstance(value, list):
+            candidates.extend(value)
+        elif isinstance(value, dict) and isinstance(value.get("tool_calls"), list):
+            candidates.extend(value.get("tool_calls") or [])
+        else:
+            candidates.append(value)
+    candidates.extend(_gemma_native_tool_calls_from_text(text))
+    out: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        item = _mapping_from_object(candidate)
+        if "function" in item and isinstance(item.get("function"), str):
+            item = {
+                "name": item.get("function"),
+                "arguments": item.get("arguments", {}),
+                "id": item.get("id"),
+            }
+        normalized = _normalize_native_tool_call(item, index=len(out))
+        if normalized is None:
+            continue
+        if str(normalized["function"]["name"]) not in allowed:
+            continue
+        out.append(normalized)
+    return out
+
+
+def _structured_output_matches_schema(value: Any, schema: Any) -> bool:
+    """Apply the small JSON Schema subset used by Tater's structured calls."""
+    if not isinstance(schema, dict):
+        return isinstance(value, dict)
+    for union_key in ("anyOf", "oneOf"):
+        branches = schema.get(union_key)
+        if isinstance(branches, list) and branches:
+            matches = sum(
+                1
+                for branch in branches
+                if isinstance(branch, dict) and _structured_output_matches_schema(value, branch)
+            )
+            if (union_key == "anyOf" and matches < 1) or (union_key == "oneOf" and matches != 1):
+                return False
+    expected_type = schema.get("type")
+    type_checks = {
+        "object": dict,
+        "array": list,
+        "string": str,
+        "number": (int, float),
+        "integer": int,
+        "boolean": bool,
+        "null": type(None),
+    }
+    expected_types = (
+        [expected_type]
+        if isinstance(expected_type, str)
+        else [item for item in expected_type if isinstance(item, str)]
+        if isinstance(expected_type, list)
+        else []
+    )
+    if expected_types:
+        def matches_type(type_name: str) -> bool:
+            expected = type_checks.get(type_name)
+            if expected is None or not isinstance(value, expected):
+                return False
+            return not (type_name in {"number", "integer"} and isinstance(value, bool))
+
+        if not any(matches_type(type_name) for type_name in expected_types):
+            return False
+    if "enum" in schema and value not in schema.get("enum", []):
+        return False
+    if isinstance(value, dict):
+        if any(key not in value for key in schema.get("required", [])):
+            return False
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, item in value.items():
+                if key in properties and not _structured_output_matches_schema(item, properties[key]):
+                    return False
+                if key not in properties and schema.get("additionalProperties") is False:
+                    return False
+                if key not in properties and isinstance(schema.get("additionalProperties"), dict):
+                    if not _structured_output_matches_schema(item, schema["additionalProperties"]):
+                        return False
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        if not all(_structured_output_matches_schema(item, schema["items"]) for item in value):
+            return False
+    if isinstance(value, list):
+        if isinstance(schema.get("minItems"), int) and len(value) < schema["minItems"]:
+            return False
+        if isinstance(schema.get("maxItems"), int) and len(value) > schema["maxItems"]:
+            return False
+    if isinstance(value, str) and isinstance(schema.get("maxLength"), int):
+        if len(value) > schema["maxLength"]:
+            return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
+            return False
+        if isinstance(schema.get("maximum"), (int, float)) and value > schema["maximum"]:
+            return False
+    return True
+
+
+def _structured_output_from_response(
+    response: Any,
+    *,
+    function_name: str,
+    schema: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    response_map = _mapping_from_object(response)
+    message = _mapping_from_object(response_map.get("message"))
+    for call in _normalize_native_tool_calls(message.get("tool_calls")):
+        function = _mapping_from_object(call.get("function"))
+        if str(function.get("name") or "") != function_name:
+            continue
+        arguments = _native_tool_arguments(function.get("arguments"))
+        if _structured_output_matches_schema(arguments, schema):
+            return arguments
+    content = message.get("content")
+    for value in _json_values_from_text(content):
+        if isinstance(value, dict) and _structured_output_matches_schema(value, schema):
+            return dict(value)
+    return None
+
+
+def _structured_chat_response(response: Any, value: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    response_map = _mapping_from_object(response)
+    message = _mapping_from_object(response_map.get("message"))
+    message.update(
+        {
+            "role": str(message.get("role") or "assistant"),
+            "content": json.dumps(value, ensure_ascii=False),
+        }
+    )
+    response_map["message"] = message
+    response_map["_structured_output_mode"] = mode
+    return response_map
+
+
+async def llm_structured_chat(
+    llm_client: Any,
+    *,
+    messages: List[Dict[str, Any]],
+    native_messages: Optional[List[Dict[str, Any]]] = None,
+    native_system_prompt: Optional[str] = None,
+    schema: Optional[Dict[str, Any]] = None,
+    function_name: str = "submit_structured_output",
+    description: str = "Submit the requested structured result.",
+    **chat_kwargs: Any,
+) -> Dict[str, Any]:
+    """Use native tool calling for JSON-shaped LLM work, then retry the legacy prompt.
+
+    The returned shape deliberately matches ``LLMClient.chat`` and places the
+    selected object in ``message.content``. Existing kernel tools, cores, and
+    Verbas can therefore keep their current JSON parsing and validation logic.
+    ``native_messages`` or ``native_system_prompt`` may remove legacy JSON-format
+    instructions from the native attempt; ``messages`` is always retained
+    unchanged for a provider that rejects native tools.
+    """
+    output_schema: Dict[str, Any] = dict(
+        schema
+        or {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        }
+    )
+    if output_schema.get("type") != "object":
+        raise ValueError("llm_structured_chat requires an object JSON schema")
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(function_name or "")).strip("_")
+    safe_name = (safe_name or "submit_structured_output")[:64]
+    tool = {
+        "type": "function",
+        "function": {
+            "name": safe_name,
+            "description": str(description or "Submit the requested structured result."),
+            "parameters": output_schema,
+        },
+    }
+
+    original_messages = [dict(item) for item in messages]
+    native_request_messages = [
+        dict(item)
+        for item in (native_messages if native_messages is not None else original_messages)
+    ]
+    if native_messages is not None and native_system_prompt is not None:
+        raise ValueError("Use native_messages or native_system_prompt, not both")
+    if native_system_prompt is not None:
+        native_system_index = next(
+            (
+                index
+                for index, item in enumerate(native_request_messages)
+                if item.get("role") == "system"
+            ),
+            None,
+        )
+        semantic_prompt = str(native_system_prompt or "").strip()
+        if native_system_index is None:
+            native_request_messages.insert(0, {"role": "system", "content": semantic_prompt})
+        else:
+            native_request_messages[native_system_index]["content"] = semantic_prompt
+    native_instruction = (
+        "Native structured-output mode is enabled for this request. Use the supplied "
+        f"{safe_name} function exactly once with the requested result. Do not print the "
+        "JSON object or add explanatory prose. Any earlier request to return, print, or "
+        "format JSON describes the function arguments and remains the fallback behavior."
+    )
+    system_index = next(
+        (index for index, item in enumerate(native_request_messages) if item.get("role") == "system"),
+        None,
+    )
+    if system_index is None:
+        native_request_messages.insert(0, {"role": "system", "content": native_instruction})
+    else:
+        prior = _coerce_content_to_text(native_request_messages[system_index].get("content"))
+        native_request_messages[system_index]["content"] = f"{prior}\n\n{native_instruction}".strip()
+
+    fallback_kwargs = dict(chat_kwargs)
+    for key in ("tools", "tool_choice", "parallel_tool_calls"):
+        fallback_kwargs.pop(key, None)
+    native_kwargs = dict(fallback_kwargs)
+    native_kwargs["tools"] = [tool]
+    try:
+        native_response = await llm_client.chat(messages=native_request_messages, **native_kwargs)
+        native_value = _structured_output_from_response(
+            native_response,
+            function_name=safe_name,
+            schema=output_schema,
+        )
+        if native_value is not None:
+            return _structured_chat_response(native_response, native_value, "native_tool")
+    except Exception as exc:
+        logger.debug("Native structured output was unavailable; using prompt fallback: %s", exc)
+
+    fallback_response = await llm_client.chat(messages=original_messages, **fallback_kwargs)
+    fallback_value = _structured_output_from_response(
+        fallback_response,
+        function_name=safe_name,
+        schema=output_schema,
+    )
+    if fallback_value is not None:
+        return _structured_chat_response(fallback_response, fallback_value, "prompt_fallback")
+    fallback_map = _mapping_from_object(fallback_response)
+    fallback_map["_structured_output_mode"] = "prompt_fallback_unparsed"
+    return fallback_map
 
 
 def _image_data_url(image_bytes: bytes, filename: str = "") -> str:
@@ -7117,6 +7581,84 @@ def _llama_cpp_native_completion_payload(
     return payload
 
 
+def _llama_cpp_oai_chat_payload(
+    *,
+    model_token: str,
+    messages: List[Dict[str, Any]],
+    chat_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": str(model_token or "tater-llama").strip() or "tater-llama",
+        "messages": messages,
+        "stream": False,
+        "tools": list(chat_kwargs.get("tools") or []),
+    }
+    key_map = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty",
+        "stop": "stop",
+        "seed": "seed",
+    }
+    for source, target in key_map.items():
+        if chat_kwargs.get(source) is not None:
+            payload[target] = chat_kwargs.get(source)
+    max_tokens = chat_kwargs.get("max_tokens")
+    try:
+        if max_tokens is not None and int(max_tokens) >= 0:
+            payload["max_tokens"] = max(1, int(max_tokens))
+    except Exception:
+        pass
+    if chat_kwargs.get("tool_choice") is not None:
+        payload["tool_choice"] = chat_kwargs.get("tool_choice")
+    if chat_kwargs.get("parallel_tool_calls") is not None:
+        payload["parallel_tool_calls"] = bool(chat_kwargs.get("parallel_tool_calls"))
+    return payload
+
+
+def _llama_cpp_oai_chat_result(
+    *,
+    model_token: str,
+    response: Dict[str, Any],
+    generation_elapsed: float,
+) -> Dict[str, Any]:
+    choices = response.get("choices") if isinstance(response.get("choices"), list) else []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    content = _strip_local_thinking_blocks(message.get("content")).strip()
+    tool_calls = _normalize_native_tool_calls(message.get("tool_calls"))
+    normalized_message: Dict[str, Any] = {
+        "role": str(message.get("role") or "assistant"),
+        "content": content,
+    }
+    if tool_calls:
+        normalized_message["tool_calls"] = tool_calls
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+    finish_reason = str(choice.get("finish_reason") or ("tool_calls" if tool_calls else "stop"))
+    return {
+        "model": str(response.get("model") or model_token or "").strip(),
+        "message": normalized_message,
+        "finish_reason": finish_reason,
+        "_usage": {
+            "prompt_tokens": max(0, prompt_tokens),
+            "completion_tokens": max(0, completion_tokens),
+            "total_tokens": max(0, total_tokens),
+        },
+        "_timing": {
+            "prompt_elapsed": 0.0,
+            "completion_elapsed": _perf_nonnegative_float(generation_elapsed),
+            "total_elapsed": _perf_nonnegative_float(generation_elapsed),
+            "speed_basis": "llama_server_chat_completions",
+        },
+        "_finish_reason": finish_reason,
+        "_limit_reason": "max_tokens" if finish_reason == "length" else "",
+    }
+
+
 def _llama_cpp_native_completion_result(
     *,
     model_token: str,
@@ -7803,6 +8345,23 @@ def _llama_cpp_native_worker_chat(
         label = "images" if requested_media_kind == "vision" else requested_media_kind
         raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
     base_url = str(state.get("base_url") or "").strip()
+    if isinstance(chat_kwargs.get("tools"), list) and chat_kwargs.get("tools"):
+        native_started = time.perf_counter()
+        native_response = _llama_cpp_native_json_post(
+            base_url,
+            "/v1/chat/completions",
+            _llama_cpp_oai_chat_payload(
+                model_token="tater-llama",
+                messages=messages,
+                chat_kwargs=chat_kwargs,
+            ),
+            timeout=max(30.0, timeout or 600.0),
+        )
+        return _llama_cpp_oai_chat_result(
+            model_token=model_token,
+            response=native_response,
+            generation_elapsed=max(0.0, time.perf_counter() - native_started),
+        )
     prepared_messages, media = _llama_cpp_native_prepare_messages(messages)
     template_payload = {
         "messages": prepared_messages,
@@ -10554,8 +11113,10 @@ class LLMClientWrapper:
                 )
             if callable(stream_callback) and effective_stream:
                 content_parts: List[str] = []
+                streamed_tool_calls: Dict[int, Dict[str, Any]] = {}
                 response_model = str(model or "").strip()
                 usage = None
+                finish_reason = ""
                 async for event in response:
                     event_model = getattr(event, "model", None)
                     if event_model:
@@ -10566,6 +11127,9 @@ class LLMClientWrapper:
                     choices = getattr(event, "choices", None)
                     first_choice = choices[0] if choices else None
                     delta = getattr(first_choice, "delta", None) if first_choice is not None else None
+                    event_finish_reason = getattr(first_choice, "finish_reason", None) if first_choice is not None else None
+                    if event_finish_reason:
+                        finish_reason = str(event_finish_reason)
                     chunk = (
                         getattr(delta, "content", "")
                         if delta is not None
@@ -10575,6 +11139,24 @@ class LLMClientWrapper:
                     if chunk_text:
                         content_parts.append(chunk_text)
                         await _dispatch_llm_stream_callback(stream_callback, chunk_text)
+                    delta_tool_calls = getattr(delta, "tool_calls", None) if delta is not None else None
+                    for fallback_index, raw_call in enumerate(delta_tool_calls or []):
+                        call_map = _mapping_from_object(raw_call)
+                        try:
+                            call_index = int(call_map.get("index", fallback_index))
+                        except Exception:
+                            call_index = fallback_index
+                        accumulated = streamed_tool_calls.setdefault(
+                            call_index,
+                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if call_map.get("id"):
+                            accumulated["id"] = str(call_map.get("id"))
+                        function_map = _mapping_from_object(call_map.get("function"))
+                        if function_map.get("name"):
+                            accumulated["function"]["name"] += str(function_map.get("name"))
+                        if function_map.get("arguments") is not None:
+                            accumulated["function"]["arguments"] += str(function_map.get("arguments") or "")
                 elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
                 prompt_tokens = 0
                 completion_tokens = 0
@@ -10599,14 +11181,19 @@ class LLMClientWrapper:
                 self._llm_total_tokens += max(0, total_tokens)
                 self._llm_model_last = response_model or str(model or "")
                 final_model = self._llm_model_last
+                message_result: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": _strip_local_thinking_blocks("".join(content_parts)).strip(),
+                }
+                normalized_streamed_calls = _normalize_native_tool_calls(
+                    [streamed_tool_calls[key] for key in sorted(streamed_tool_calls)]
+                )
+                if normalized_streamed_calls:
+                    message_result["tool_calls"] = normalized_streamed_calls
                 result = {
                     "model": final_model,
-                    "message": {
-                        "role": "assistant",
-                        "content": _strip_local_thinking_blocks(
-                            "".join(content_parts)
-                        ).strip(),
-                    },
+                    "message": message_result,
+                    "finish_reason": finish_reason or ("tool_calls" if normalized_streamed_calls else "stop"),
                 }
                 _append_llm_debug_result(
                     call_id=call_id,
@@ -10684,10 +11271,25 @@ class LLMClientWrapper:
             choice = response.choices[0].message or {}
             raw_content = getattr(choice, "content", "") if hasattr(choice, "content") else choice.get("content", "")
             content_text = _strip_local_thinking_blocks(raw_content).strip()
+            raw_tool_calls = (
+                choice.get("tool_calls")
+                if isinstance(choice, dict)
+                else getattr(choice, "tool_calls", None)
+            )
+            normalized_tool_calls = _normalize_native_tool_calls(raw_tool_calls)
+            message_result: Dict[str, Any] = {
+                "role": getattr(choice, "role", "assistant"),
+                "content": content_text,
+            }
+            if normalized_tool_calls:
+                message_result["tool_calls"] = normalized_tool_calls
+            first_choice = response.choices[0]
+            finish_reason = getattr(first_choice, "finish_reason", None)
 
             result = {
                 "model": getattr(response, "model", model),
-                "message": {"role": getattr(choice, "role", "assistant"), "content": content_text},
+                "message": message_result,
+                "finish_reason": str(finish_reason or ("tool_calls" if normalized_tool_calls else "stop")),
             }
             _append_llm_debug_result(
                 call_id=call_id,
@@ -10838,7 +11440,15 @@ class SpudLinkLLMClientWrapper:
                 "messages": messages,
                 "stream": False,
             }
-            for key in ("max_tokens", "temperature", "top_p", "stop"):
+            for key in (
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stop",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+            ):
                 if key in kwargs:
                     body[key] = kwargs[key]
 
@@ -10890,12 +11500,17 @@ class SpudLinkLLMClientWrapper:
 
             message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
             content_text = _strip_local_thinking_blocks(str(message.get("content") or "")).strip()
+            tool_calls = _normalize_native_tool_calls(message.get("tool_calls"))
+            message_result: Dict[str, Any] = {
+                "role": str(message.get("role") or "assistant"),
+                "content": content_text,
+            }
+            if tool_calls:
+                message_result["tool_calls"] = tool_calls
             result = {
                 "model": response_model or model,
-                "message": {
-                    "role": str(message.get("role") or "assistant"),
-                    "content": content_text,
-                },
+                "message": message_result,
+                "finish_reason": str(payload.get("finish_reason") or ("tool_calls" if tool_calls else "stop")),
             }
             _append_llm_debug_result(
                 call_id=call_id,
@@ -11032,6 +11647,7 @@ class TransformersLLMClientWrapper:
         *,
         tokenize: bool,
         return_dict: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Any:
         base_kwargs: Dict[str, Any] = {
             "add_generation_prompt": True,
@@ -11041,6 +11657,8 @@ class TransformersLLMClientWrapper:
             base_kwargs.update({"return_tensors": "pt"})
         if return_dict:
             base_kwargs["return_dict"] = True
+        if tools:
+            base_kwargs["tools"] = tools
         variants = [messages]
         block_messages = self._messages_with_text_blocks(messages)
         if block_messages != messages:
@@ -11061,7 +11679,13 @@ class TransformersLLMClientWrapper:
             raise last_exc
         return formatter.apply_chat_template(messages, **base_kwargs)
 
-    def _encode_messages(self, bundle: Dict[str, Any], messages: List[Dict[str, Any]]) -> Tuple[Any, int]:
+    def _encode_messages(
+        self,
+        bundle: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[Any, int]:
         tokenizer = bundle["tokenizer"]
         processor = bundle.get("processor")
         formatter = processor if processor is not None and hasattr(processor, "apply_chat_template") else tokenizer
@@ -11080,8 +11704,11 @@ class TransformersLLMClientWrapper:
                     vision_messages,
                     tokenize=False,
                     return_dict=False,
+                    tools=tools,
                 )
             except Exception:
+                if tools:
+                    raise RuntimeError("This Transformers vision model's chat template does not support native tools.")
                 prompt_text = self._format_messages_without_template(messages)
             prompt_text = _coerce_content_to_text(prompt_text).strip()
             if not prompt_text:
@@ -11116,32 +11743,62 @@ class TransformersLLMClientWrapper:
         attention_mask = None
         encoded_fields: Dict[str, Any] = {}
         try:
-            input_ids = self._chat_template_inputs(formatter, messages, tokenize=True, return_dict=True)
+            input_ids = self._chat_template_inputs(
+                formatter,
+                messages,
+                tokenize=True,
+                return_dict=True,
+                tools=tools,
+            )
         except Exception:
             input_ids = None
 
         if input_ids is None:
             try:
-                input_ids = self._chat_template_inputs(formatter, messages, tokenize=True, return_dict=False)
+                input_ids = self._chat_template_inputs(
+                    formatter,
+                    messages,
+                    tokenize=True,
+                    return_dict=False,
+                    tools=tools,
+                )
             except Exception:
                 input_ids = None
 
         if input_ids is None and formatter is not tokenizer:
             try:
-                input_ids = self._chat_template_inputs(tokenizer, messages, tokenize=True, return_dict=False)
+                input_ids = self._chat_template_inputs(
+                    tokenizer,
+                    messages,
+                    tokenize=True,
+                    return_dict=False,
+                    tools=tools,
+                )
             except Exception:
                 input_ids = None
 
         if input_ids is None:
             try:
-                prompt_text = self._chat_template_inputs(formatter, messages, tokenize=False, return_dict=False)
+                prompt_text = self._chat_template_inputs(
+                    formatter,
+                    messages,
+                    tokenize=False,
+                    return_dict=False,
+                    tools=tools,
+                )
                 input_ids = input_builder(text=prompt_text, return_tensors="pt")
             except Exception:
                 input_ids = None
 
         if input_ids is None and formatter is not tokenizer:
             try:
-                prompt_text = self._chat_template_inputs(tokenizer, messages, tokenize=False, return_dict=False)
+                prompt_text = self._chat_template_inputs(
+                    tokenizer,
+                    messages,
+                    tokenize=False,
+                    return_dict=False,
+                    tools=tools,
+                )
                 input_ids = tokenizer(prompt_text, return_tensors="pt")
             except Exception:
                 input_ids = None
@@ -11190,6 +11847,8 @@ class TransformersLLMClientWrapper:
             except Exception:
                 pass
 
+        if tools:
+            raise RuntimeError("This Transformers model's chat template does not support native tools.")
         prompt = self._format_messages_without_template(messages)
         try:
             encoded = input_builder(
@@ -11310,6 +11969,11 @@ class TransformersLLMClientWrapper:
 
     def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
         stop = kwargs.pop("stop", None)
+        tools = kwargs.pop("tools", None)
+        if not isinstance(tools, list):
+            tools = None
+        kwargs.pop("tool_choice", None)
+        kwargs.pop("parallel_tool_calls", None)
         context_bounded = kwargs.get("max_tokens") is None
         bundle = _load_hf_llm_bundle(self.model)
         model = bundle["model"]
@@ -11317,7 +11981,7 @@ class TransformersLLMClientWrapper:
         torch = bundle["torch"]
         generation_lock = bundle["lock"]
 
-        encoded, prompt_tokens = self._encode_messages(bundle, messages)
+        encoded, prompt_tokens = self._encode_messages(bundle, messages, tools=tools)
         is_encoder_decoder = bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
         generation_kwargs = self._build_generation_kwargs(
             tokenizer,
@@ -11341,9 +12005,16 @@ class TransformersLLMClientWrapper:
         completion_limit = max(1, int(generation_kwargs.get("max_new_tokens") or 1))
         hit_limit = completion_tokens >= completion_limit
 
+        parser = bundle.get("processor") or tokenizer
+        tool_calls = _native_tool_calls_from_parser(content, tools, parser)
+        if not tool_calls:
+            tool_calls = _native_tool_calls_from_text(content, tools)
+        message_result: Dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            message_result["tool_calls"] = tool_calls
         return {
             "model": self.model,
-            "message": {"role": "assistant", "content": content},
+            "message": message_result,
             "_usage": {
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
@@ -11353,7 +12024,7 @@ class TransformersLLMClientWrapper:
                 "completion_elapsed": generation_elapsed,
                 "speed_basis": "local_generate",
             },
-            "_finish_reason": "length" if hit_limit else "stop",
+            "_finish_reason": "tool_calls" if tool_calls else "length" if hit_limit else "stop",
             "_limit_reason": (
                 "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
             ),
@@ -11583,6 +12254,12 @@ class LlamaCppLLMClientWrapper:
             "stop",
             "seed",
         ):
+            if key in kwargs and kwargs.get(key) is not None:
+                chat_kwargs[key] = kwargs.pop(key)
+        tools = kwargs.pop("tools", None)
+        if isinstance(tools, list) and tools:
+            chat_kwargs["tools"] = list(tools)
+        for key in ("tool_choice", "parallel_tool_calls"):
             if key in kwargs and kwargs.get(key) is not None:
                 chat_kwargs[key] = kwargs.pop(key)
         chat_kwargs["stream"] = False
@@ -11847,6 +12524,24 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
         stream_callback = kwargs.pop("_stream_callback", None)
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
+        if isinstance(chat_kwargs.get("tools"), list) and chat_kwargs.get("tools"):
+            native_started = time.perf_counter()
+            native_response = _llama_cpp_native_json_post(
+                self.host,
+                "/v1/chat/completions",
+                _llama_cpp_oai_chat_payload(
+                    model_token=self.model,
+                    messages=local_messages,
+                    chat_kwargs=chat_kwargs,
+                ),
+                timeout=max(30.0, timeout or 600.0),
+                api_key=self.api_key,
+            )
+            return _llama_cpp_oai_chat_result(
+                model_token=self.model,
+                response=native_response,
+                generation_elapsed=max(0.0, time.perf_counter() - native_started),
+            )
         prepared_messages, media = _llama_cpp_native_prepare_messages(local_messages)
         remote_mode = self._ensure_remote_mode()
         template_payload: Dict[str, Any] = {
@@ -12029,7 +12724,13 @@ class MlxLmLLMClientWrapper:
         parts.append("Assistant:")
         return "\n\n".join(parts).strip()
 
-    def _chat_template_prompt(self, tokenizer: Any, messages: List[Dict[str, Any]]) -> str:
+    def _chat_template_prompt(
+        self,
+        tokenizer: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
         local_messages = _mlx_lm_disable_thinking_messages(messages)
         template = getattr(tokenizer, "apply_chat_template", None)
         if callable(template):
@@ -12037,7 +12738,15 @@ class MlxLmLLMClientWrapper:
             thinking_variants = _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
             for extra in thinking_variants:
                 try:
-                    prompt = template(local_messages, tokenize=False, add_generation_prompt=True, **extra)
+                    template_kwargs = dict(extra)
+                    if tools:
+                        template_kwargs["tools"] = tools
+                    prompt = template(
+                        local_messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        **template_kwargs,
+                    )
                     return _coerce_content_to_text(prompt)
                 except TypeError as exc:
                     last_exc = exc
@@ -12046,7 +12755,11 @@ class MlxLmLLMClientWrapper:
                     last_exc = exc
                     break
             if last_exc is not None:
+                if tools:
+                    raise RuntimeError("This MLX model's chat template does not support native tools.") from last_exc
                 logger.debug("MLX LM chat template failed; using plain prompt: %s", last_exc)
+        if tools:
+            raise RuntimeError("This MLX model does not provide a native tool chat template.")
         return self._format_messages_without_template(local_messages)
 
     def _estimate_tokens(self, tokenizer: Any, text: str) -> int:
@@ -12142,7 +12855,12 @@ class MlxLmLLMClientWrapper:
         **kwargs,
     ) -> Dict[str, Any]:
         tokenizer = bundle.get("tokenizer") or bundle.get("processor")
-        prompt = self._chat_template_prompt(tokenizer, messages)
+        tools = kwargs.pop("tools", None)
+        if not isinstance(tools, list):
+            tools = None
+        kwargs.pop("tool_choice", None)
+        kwargs.pop("parallel_tool_calls", None)
+        prompt = self._chat_template_prompt(tokenizer, messages, tools=tools)
         max_tokens = kwargs.pop("max_tokens", None)
         context_bounded = max_tokens is None
         remaining_context = max(
@@ -12176,9 +12894,15 @@ class MlxLmLLMClientWrapper:
         total_tokens = prompt_tokens + completion_tokens
         generation_elapsed = _perf_nonnegative_float(output.get("elapsed"))
         hit_limit = completion_tokens >= max_tokens_i
+        tool_calls = _native_tool_calls_from_parser(content, tools, tokenizer)
+        if not tool_calls:
+            tool_calls = _native_tool_calls_from_text(content, tools)
+        message_result: Dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            message_result["tool_calls"] = tool_calls
         return {
             "model": self.model,
-            "message": {"role": "assistant", "content": content},
+            "message": message_result,
             "_usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -12189,7 +12913,7 @@ class MlxLmLLMClientWrapper:
                 "completion_elapsed": generation_elapsed,
                 "speed_basis": "mlx_engine",
             },
-            "_finish_reason": "length" if hit_limit else "stop",
+            "_finish_reason": "tool_calls" if tool_calls else "length" if hit_limit else "stop",
             "_limit_reason": (
                 "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
             ),

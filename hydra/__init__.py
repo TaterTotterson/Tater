@@ -32,6 +32,7 @@ from helpers import (
     get_llm_client_from_env,
     get_tater_name,
     get_tater_personality,
+    llm_structured_chat,
     looks_like_tool_markup,
     parse_function_json,
     redis_client as default_redis,
@@ -118,6 +119,47 @@ _KERNEL_TOOL_USAGE_HINTS = {
 }
 
 ASCII_ONLY_PLATFORMS = {"irc", "homeassistant", "homekit", "xbmc"}
+
+
+def _hydra_plan_step_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "integer"},
+            "intent": {"type": "string"},
+            "nl": {"type": "string"},
+            "tool_hint": {"type": "string"},
+        },
+        "required": ["step_id", "intent", "nl", "tool_hint"],
+        "additionalProperties": False,
+    }
+
+
+def _hydra_astraeus_plan_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["chat", "execute"]},
+            "topic": {"type": "string"},
+            "topic_shift": {"type": "boolean"},
+            "goal": {"type": "string"},
+            "steps": {"type": "array", "maxItems": 12, "items": _hydra_plan_step_schema()},
+        },
+        "required": ["mode", "goal", "steps"],
+        "additionalProperties": False,
+    }
+
+
+def _hydra_plan_review_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string"},
+            "steps": {"type": "array", "maxItems": 12, "items": _hydra_plan_step_schema()},
+        },
+        "required": ["goal", "steps"],
+        "additionalProperties": False,
+    }
 DEFAULT_CLARIFICATION = "Could you clarify exactly what you want me to do next?"
 DEFAULT_MAX_ROUNDS = 0
 DEFAULT_MAX_TOOL_CALLS = 0
@@ -877,8 +919,26 @@ async def _llm_resolve_delivery_intent(
     ]
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=messages,
+            native_system_prompt=(
+                "Resolve delivery routing for the supplied send_message or attach_file request. Use a destination platform "
+                "or room only when the user clearly specifies it, prefer known destination targets, and never invent opaque "
+                "IDs. For send_message, separate the content to deliver from routing words; for attach_file, include a message "
+                "only when a caption or note is clearly requested. Leave platform and targets empty when destination is unclear."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string"},
+                    "targets": {"type": "object", "additionalProperties": True},
+                    "message": {"type": "string"},
+                },
+                "required": ["platform", "targets", "message"],
+                "additionalProperties": False,
+            },
+            function_name="submit_delivery_routing",
             temperature=0.0,
             activity="execution",
             cache_namespace="hydra:thanatos:delivery",
@@ -1569,6 +1629,42 @@ def _tool_contract_row(
     )
 
 
+def _native_tool_for_step(
+    *,
+    current_plan_step: Optional[Dict[str, Any]],
+    platform: str,
+    registry: Dict[str, Any],
+    enabled_predicate: Optional[Callable[[str], bool]],
+    origin: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    step = current_plan_step if isinstance(current_plan_step, dict) else {}
+    hinted_tool = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
+    if not hinted_tool:
+        return None
+    kernel_tool_ids = {
+        _canonical_tool_name(item)
+        for item in _ordered_kernel_tool_ids(platform=platform, origin=origin)
+    }
+    if hinted_tool in kernel_tool_ids:
+        return tool_index_helpers.native_function_tool(
+            tool_id=hinted_tool,
+            description=_kernel_tool_purpose(hinted_tool, platform=platform),
+            usage=_kernel_tool_usage(hinted_tool, platform=platform),
+        )
+    plugin = registry.get(hinted_tool)
+    if plugin is None:
+        return None
+    enabled_check = enabled_predicate or (lambda _name: True)
+    if not enabled_check(hinted_tool) or not verba_supports_platform(plugin, platform):
+        return None
+    return tool_index_helpers.native_function_tool(
+        tool_id=hinted_tool,
+        description=_tool_purpose(plugin),
+        usage=_plugin_usage_text(plugin),
+        plugin=plugin,
+    )
+
+
 def _thanatos_execution_tool_contract_prompt(
     *,
     current_plan_step: Optional[Dict[str, Any]],
@@ -1798,6 +1894,14 @@ def _thanatos_execution_step_prompt(
 
 def _thanatos_system_prompt(platform: str) -> str:
     return prompts.thanatos_system_prompt(
+        platform=platform,
+        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
+        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
+    ).strip()
+
+
+def _thanatos_native_tools_system_prompt(platform: str) -> str:
+    return prompts.thanatos_native_tools_system_prompt(
         platform=platform,
         now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
@@ -2612,8 +2716,13 @@ async def _run_astraeus_plan(
             static_payload=static_payload,
         )
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=messages,
+            native_system_prompt=prompts.astraeus_native_system_prompt(platform=platform),
+            schema=_hydra_astraeus_plan_schema(),
+            function_name="submit_hydra_plan",
+            description="Submit whether the turn is chat or execution and its ordered atomic plan.",
             temperature=0.1,
             activity="planning",
             cache_namespace="hydra:astraeus",
@@ -2763,8 +2872,13 @@ async def _review_execution_plan_for_completeness(
     ]
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=messages,
+            native_system_prompt=prompts.astraeus_plan_review_native_system_prompt(platform=platform),
+            schema=_hydra_plan_review_schema(),
+            function_name="submit_reviewed_hydra_plan",
+            description="Submit the reviewed executable plan.",
             temperature=0.0,
             activity="planning",
             cache_namespace="hydra:astraeus:review",
@@ -2817,38 +2931,89 @@ async def _run_thanatos_step(
     llm_client: Any,
     thanatos_messages: List[Dict[str, Any]],
     max_tokens: Optional[int],
+    native_tools: Optional[List[Dict[str, Any]]] = None,
+    fallback_messages: Optional[List[Dict[str, Any]]] = None,
     debug_out: Optional[Dict[str, Any]] = None,
-) -> tuple[str, float]:
+) -> tuple[str, float, Optional[Dict[str, Any]], bool]:
     started = time.perf_counter()
     text = ""
+    native_tool_call: Optional[Dict[str, Any]] = None
+    used_legacy_fallback = False
     perf_before = _llm_perf_snapshot(llm_client)
     if isinstance(debug_out, dict):
         _populate_llm_prompt_debug(debug_out, messages=thanatos_messages)
     try:
-        thanatos_resp = await llm_client.chat(
-            messages=thanatos_messages,
-            temperature=0.2,
-            activity="execution",
-            cache_namespace="hydra:thanatos",
+        chat_kwargs = {
+            "messages": thanatos_messages,
+            "temperature": 0.2,
+            "activity": "execution",
+            "cache_namespace": "hydra:thanatos",
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
                 minimum=1,
                 fallback=1,
             ),
-        )
+        }
+        if native_tools:
+            chat_kwargs["tools"] = native_tools
+        try:
+            thanatos_resp = await llm_client.chat(**chat_kwargs)
+        except Exception:
+            if not native_tools or not fallback_messages:
+                raise
+            used_legacy_fallback = True
+            thanatos_resp = await llm_client.chat(
+                messages=fallback_messages,
+                temperature=0.2,
+                activity="execution",
+                cache_namespace="hydra:thanatos:legacy",
+                **_chat_with_optional_max_tokens_kwargs(
+                    max_tokens=max_tokens,
+                    minimum=1,
+                    fallback=1,
+                ),
+            )
         text = _coerce_text((thanatos_resp.get("message", {}) or {}).get("content", "")).strip()
+        raw_tool_calls = (thanatos_resp.get("message", {}) or {}).get("tool_calls")
+        if isinstance(raw_tool_calls, list) and raw_tool_calls:
+            raw_call = raw_tool_calls[0]
+            if isinstance(raw_call, dict):
+                function = raw_call.get("function")
+                function_map = function if isinstance(function, dict) else {}
+                function_name = str(
+                    function_map.get("name")
+                    or raw_call.get("name")
+                    or (function if isinstance(function, str) else "")
+                    or ""
+                ).strip()
+                raw_arguments = function_map.get("arguments", raw_call.get("arguments", {}))
+                if isinstance(raw_arguments, str):
+                    try:
+                        parsed_arguments = json.loads(raw_arguments)
+                    except Exception:
+                        parsed_arguments = {}
+                else:
+                    parsed_arguments = raw_arguments
+                if function_name and isinstance(parsed_arguments, dict):
+                    native_tool_call = {
+                        "function": function_name,
+                        "arguments": dict(parsed_arguments),
+                    }
     except Exception:
         text = ""
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if isinstance(debug_out, dict):
         debug_out["completion_chars"] = int(max(0, len(text)))
         debug_out["wall_ms"] = int(max(0.0, elapsed_ms))
+        debug_out["native_tools_requested"] = bool(native_tools)
+        debug_out["native_tool_call"] = bool(native_tool_call)
+        debug_out["legacy_fallback_used"] = bool(used_legacy_fallback)
     _populate_llm_perf_debug(
         debug_out,
         before=perf_before,
         after=_llm_perf_snapshot(llm_client),
     )
-    return text, elapsed_ms
+    return text, elapsed_ms, native_tool_call, used_legacy_fallback
 
 
 def _estimate_text_tokens_approx(text: Any) -> int:
@@ -3669,8 +3834,22 @@ async def _should_auto_continue_head_response(
         },
     ]
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=messages,
+            native_system_prompt=(
+                "Classify whether Tater should continue internally after the supplied final response. Continue only when "
+                "the assistant clearly stopped before doing work it promised to do next. Do not continue when it asks the "
+                "user a question, invites a spoken or chat response, reports completed work, gives a final answer, cannot "
+                "proceed, or needs user input. Voice-platform follow-up questions must remain false so reply flow can reopen."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"auto_continue": {"type": "boolean"}},
+                "required": ["auto_continue"],
+                "additionalProperties": False,
+            },
+            function_name="submit_auto_continue_decision",
             temperature=0,
             max_tokens=40,
             activity="chat",
@@ -5628,6 +5807,13 @@ async def _run_hydra_turn_impl(
             agent_state,
             fallback_goal=astraeus_goal or turn_request_text or user_text,
         )
+        native_tool = _native_tool_for_step(
+            current_plan_step=current_plan_step,
+            platform=platform,
+            registry=registry,
+            enabled_predicate=enabled_predicate,
+            origin=origin_payload,
+        )
         thanatos_messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _thanatos_system_prompt(platform)},
         ]
@@ -5681,28 +5867,55 @@ async def _run_hydra_turn_impl(
             )
             if tool_contract_prompt:
                 thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
-        thanatos_messages = _with_platform_preamble(
-            thanatos_messages,
+        legacy_thanatos_messages = _with_platform_preamble(
+            [dict(item) for item in thanatos_messages],
             platform_preamble=tool_platform_preamble,
         )
-        thanatos_messages.extend(history)
-        thanatos_messages.append({"role": "user", "content": round_request_text})
+        legacy_thanatos_messages.extend(history)
+        legacy_thanatos_messages.append({"role": "user", "content": round_request_text})
+        if native_tool:
+            native_messages: List[Dict[str, Any]] = []
+            for index, item in enumerate(thanatos_messages):
+                content = str(item.get("content") or "") if isinstance(item, dict) else ""
+                if content.startswith("Execution tool contract for this step:"):
+                    continue
+                copied = dict(item)
+                if index == 0:
+                    copied["content"] = _thanatos_native_tools_system_prompt(platform)
+                native_messages.append(copied)
+            thanatos_messages = _with_platform_preamble(
+                native_messages,
+                platform_preamble=tool_platform_preamble,
+            )
+            thanatos_messages.extend(history)
+            thanatos_messages.append({"role": "user", "content": round_request_text})
+        else:
+            thanatos_messages = legacy_thanatos_messages
 
         current_thanatos_debug: Dict[str, Any] = {
             "round": int(rounds_used + 1),
             "step_id": str(current_step_id or ""),
         }
-        thanatos_text, thanatos_ms = await _run_thanatos_step(
+        thanatos_text, thanatos_ms, native_tool_call, used_legacy_fallback = await _run_thanatos_step(
             llm_client=llm_client_thanatos,
             thanatos_messages=thanatos_messages,
             max_tokens=None,
+            native_tools=[native_tool] if native_tool else None,
+            fallback_messages=legacy_thanatos_messages if native_tool else None,
             debug_out=current_thanatos_debug,
         )
         thanatos_debug = dict(current_thanatos_debug)
         thanatos_ms_total += thanatos_ms
 
+        if native_tool_call:
+            thanatos_text = json.dumps(native_tool_call, ensure_ascii=False, separators=(",", ":"))
+            round_thanatos_kind = "native_tool"
+        elif used_legacy_fallback:
+            round_thanatos_kind = "legacy_fallback"
+
         if _is_tool_candidate(thanatos_text):
-            round_thanatos_kind = "tool"
+            if round_thanatos_kind not in {"native_tool", "legacy_fallback"}:
+                round_thanatos_kind = "tool"
         else:
             round_thanatos_kind = "answer"
         planner_text_is_tool_candidate = _is_tool_candidate(thanatos_text)
@@ -5791,7 +6004,7 @@ async def _run_hydra_turn_impl(
             repairs_used_count += 1
         if bool(tool_eval.get("repair_used")):
             round_thanatos_kind = "repaired_tool"
-        else:
+        elif round_thanatos_kind not in {"native_tool", "legacy_fallback"}:
             round_thanatos_kind = "tool"
 
         if not bool(tool_eval.get("ok")):

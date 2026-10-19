@@ -1,6 +1,7 @@
 import json
 from typing import Any, Dict, List
 
+from helpers import llm_structured_chat
 from kernel_tools import inspect_webpage, search_web
 from verba_result import action_failure, action_success
 
@@ -105,16 +106,18 @@ async def research_web(
     enough = False
     reason = ""
     missing = ""
-    system_prompt = (
+    native_system_prompt = (
         "You evaluate web research for Tater.\n"
         "Given the user's question and inspected pages so far, decide if there is enough information to answer.\n"
+        "Prefer factual answers grounded in inspected page content.\n"
+        "If the page content is thin, blocked, irrelevant, or only a search snippet, mark it insufficient.\n"
+        "Include the source URLs used in the answer when useful.\n"
+    )
+    system_prompt = (
+        f"{native_system_prompt}"
         "Return exactly one strict JSON object:\n"
         "{\"enough\":true,\"answer\":\"...\",\"reason\":\"...\"}\n"
         "{\"enough\":false,\"reason\":\"...\",\"missing\":\"...\"}\n"
-        "Rules:\n"
-        "- Prefer factual answers grounded in inspected page content.\n"
-        "- If the page content is thin, blocked, irrelevant, or only a search snippet, set enough=false.\n"
-        "- Include the source URLs used in the answer text when useful.\n"
     )
 
     for result in results[:page_limit]:
@@ -144,11 +147,29 @@ async def research_web(
             "inspected_pages": inspected,
         }
         try:
-            resp = await llm_client.chat(
+            resp = await llm_structured_chat(
+                llm_client,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
                 ],
+                native_messages=[
+                    {"role": "system", "content": native_system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "enough": {"type": "boolean"},
+                        "answer": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "missing": {"type": "string"},
+                    },
+                    "required": ["enough", "reason"],
+                    "additionalProperties": False,
+                },
+                function_name="submit_web_research_evaluation",
+                description="Submit whether the inspected web pages can answer the question.",
                 temperature=0.0,
             )
         except Exception as exc:

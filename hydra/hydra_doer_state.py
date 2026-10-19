@@ -1,6 +1,8 @@
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+from helpers import llm_structured_chat
+
 
 def state_add_line(
     state_list: List[str],
@@ -211,7 +213,32 @@ async def run_thanatos_state_update(
                 "activity": "execution",
                 "cache_namespace": "hydra:thanatos:state",
             }
-            response = await llm_client.chat(**chat_kwargs)
+            response = await llm_structured_chat(
+                llm_client,
+                messages=chat_kwargs.pop("messages"),
+                native_system_prompt=(
+                    "Update only the Hydra agent state from the supplied prior state, requested action, tool call, and tool "
+                    "result. Preserve successful facts and tool history; keep one remaining checklist item per unfinished "
+                    "explicit action; remove an item only when its tool result directly proves completion; and keep genuine "
+                    "blockers in open_questions. Never invent facts or close an information request from a generic success "
+                    "message. Keep each field concise and set next_step to the next unfinished action or an empty string."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string"},
+                        "plan": {"type": "array", "items": {"type": "string"}},
+                        "facts": {"type": "array", "items": {"type": "string"}},
+                        "open_questions": {"type": "array", "items": {"type": "string"}},
+                        "next_step": {"type": "string"},
+                        "tool_history": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                function_name="submit_hydra_agent_state",
+                **chat_kwargs,
+            )
             text = coerce_text_fn((response.get("message", {}) or {}).get("content", "")).strip()
             patch_state = first_json_object_fn(text)
             if isinstance(patch_state, dict):
