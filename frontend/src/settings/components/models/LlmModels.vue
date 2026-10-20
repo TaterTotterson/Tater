@@ -70,6 +70,18 @@ const selectedRuntimeProviders = computed(() => {
   });
   return providerOptions.filter((option) => option.local && selected.has(option.value));
 });
+const llamaConfigured = computed(() => {
+  if (servers.value.some((row) => llama(row.provider))) return true;
+  if (llama(props.draft.tater_open_webui_llm_provider)) return true;
+  if (llama(props.draft.spudex_llm_provider)) return true;
+  return Boolean(props.draft.hydra_beast_mode_enabled) && roles.some((role) => (
+    llama(props.draft[roleKey(role.id, "provider")])
+  ));
+});
+const beastLlamaRoles = computed(() => roles.filter((role) => (
+  Boolean(props.draft.hydra_beast_mode_enabled)
+  && llama(props.draft[roleKey(role.id, "provider")])
+)));
 const activeRuntimeOption = computed(() => providerOptions.find((option) => option.value === runtimeProvider.value));
 const activeContextConfig = computed(() => contextConfigs[runtimeProvider.value] || contextConfigs.llama_cpp);
 const selectedRuntimeModel = computed(() => {
@@ -141,6 +153,11 @@ function remote(providerValue: unknown): boolean { return String(providerValue |
 function apiProvider(providerValue: unknown): boolean { return ["openai_compatible", "llama_cpp_remote"].includes(String(providerValue || "")); }
 function llama(providerValue: unknown): boolean { return ["llama_cpp", "llama_cpp_remote"].includes(String(providerValue || "")); }
 function roleKey(role: string, suffix: string) { return `hydra_llm_${role}_${suffix}`; }
+function automaticRoleSlot(role: string): number {
+  const offsets: Record<string, number> = { astraeus: 0, hermes: 1, thanatos: 2 };
+  const count = Math.max(1, Math.min(32, Math.round(Number(props.draft.hydra_llama_cpp_slot_count || 1)) || 1));
+  return (offsets[role] || 0) % count;
+}
 
 function rawModelsFor(providerValue: unknown): JsonRow[] {
   return installed.value.filter((model) => String(model.provider || "") === String(providerValue || ""));
@@ -304,6 +321,17 @@ onMounted(() => { void refreshContextEstimate(); });
     </nav>
     <div v-if="remoteError" class="tv-notice error">{{ remoteError }}</div>
 
+    <article v-if="llamaConfigured" class="tm-form-card tm-llm-slot-capacity-card">
+      <header><div><span class="tv-eyebrow">Shared llama.cpp routing</span><h3>Prompt-cache slot capacity</h3><p>Tell Tater how many concurrent slots each configured llama.cpp server exposes.</p></div><span class="tm-llm-section-chip">llama.cpp</span></header>
+      <div class="tm-field-grid">
+        <label class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>For Tater's internal runtime this controls concurrency. For Remote llama.cpp, match the server's <code>--parallel</code> value.</small></label>
+        <div class="tm-llm-route-note"><i>↔</i><div><strong>Blank route slots use automatic assignment</strong><span>Tater keeps each Hydra role on a stable slot. Roles only share when fewer slots are available, and slot numbers are independent when roles use different servers.</span></div></div>
+      </div>
+      <div v-if="beastLlamaRoles.length" class="tm-llm-context-facts tm-llm-auto-slot-map">
+        <span v-for="role in beastLlamaRoles" :key="role.id">{{ role.label }} <b>Auto → {{ automaticRoleSlot(role.id) }}</b></span>
+      </div>
+    </article>
+
     <template v-if="area === 'base'">
       <label class="tm-llm-switch tm-llm-thinking-switch">
         <input v-model="draft.hydra_llm_thinking_enabled" type="checkbox" @change="changed" />
@@ -368,7 +396,6 @@ onMounted(() => { void refreshContextEstimate(); });
 
         <template v-else-if="runtimeProvider === 'llama_cpp'">
           <section class="tm-llm-settings-section"><header><div><h4>Performance</h4><p>Start with the defaults, then tune only when you need more throughput or concurrent slots.</p></div><span class="tm-llm-section-chip">GGUF</span></header><div class="tm-field-grid">
-            <label class="tm-field"><span class="tm-field-label">Concurrent slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>How many llama.cpp requests can run at once.</small></label>
             <label class="tm-field"><span class="tm-field-label">Evaluation batch</span><input v-model="draft.hydra_llama_cpp_n_batch" type="number" min="32" max="8192" step="32" @input="changed" /><small>Higher can speed prompt processing when memory allows.</small></label>
             <label class="tm-field"><span class="tm-field-label">Micro-batch</span><input v-model="draft.hydra_llama_cpp_n_ubatch" type="number" min="0" max="8192" step="32" placeholder="Auto" @input="changed" /><small>0 lets llama.cpp choose, usually matching the evaluation batch.</small></label>
           </div><div class="tm-llm-switch-grid">
