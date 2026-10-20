@@ -9,6 +9,18 @@ export async function responseJson<T>(response: Response): Promise<T> {
       detail = body.detail;
     } else if (typeof body.message === "string") {
       detail = body.message;
+    } else if (Array.isArray(body.detail)) {
+      const validationMessages = body.detail.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const row = item as { loc?: unknown; msg?: unknown };
+        const message = typeof row.msg === "string" ? row.msg.trim() : "";
+        if (!message) return [];
+        const location = Array.isArray(row.loc)
+          ? row.loc.map(String).filter((part) => part !== "body").join(".")
+          : "";
+        return [location ? `${location}: ${message}` : message];
+      });
+      if (validationMessages.length) detail = validationMessages.join("; ");
     } else if (body.detail && typeof body.detail === "object") {
       const nested = body.detail as { message?: string; detail?: string };
       detail = nested.message || nested.detail || detail;

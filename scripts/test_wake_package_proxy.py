@@ -17,6 +17,7 @@ from tater_voice import native_live_settings, native_satellite, wake_package_pro
 class WakePackageProxyTests(unittest.TestCase):
     def setUp(self) -> None:
         wake_package_proxy._PACKAGES.clear()
+        wake_package_proxy._PACKAGE_FETCH_LOCKS.clear()
 
     def test_echo_firmware_settings_use_tater_lan_proxy(self) -> None:
         selector = "native:echo-test"
@@ -124,7 +125,7 @@ class WakePackageProxyTests(unittest.TestCase):
         self.assertTrue(output["wake_word_url"].endswith("/manifest.json"))
         self.assertTrue(output["oww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
 
-    def test_oww_where_supported_uses_bundle_and_disables_mww_on_capable_satellite(self) -> None:
+    def test_oww_where_supported_uses_standalone_bundle_and_omits_mww_model(self) -> None:
         selector = "native:thirdreality-test"
         native_satellite._clients[selector] = {"client_host": "10.4.20.240"}
         settings = {
@@ -151,7 +152,9 @@ class WakePackageProxyTests(unittest.TestCase):
         self.assertEqual(output["wake_detector_mode"], "oww")
         self.assertFalse(output["wake_mww_enabled"])
         self.assertTrue(output["wake_oww_enabled"])
-        self.assertEqual(output["oww_wake_word"], "paired_bundle")
+        self.assertNotIn("wake_word", output)
+        self.assertNotIn("wake_word_url", output)
+        self.assertEqual(output["oww_wake_word"], "custom_url")
         self.assertTrue(output["oww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
 
     def test_explicit_mww_mode_ignores_stale_dual_flags_and_bundle(self) -> None:
@@ -242,10 +245,16 @@ class WakePackageProxyTests(unittest.TestCase):
                 (metadata, "https://models.example/wakes/jojo.oww.json"),
                 (model, "https://models.example/wakes/jojo.oww.onnx"),
             ],
-        ):
+        ) as download:
             proxied = json.loads(wake_package_proxy.bundle_bytes(package_id))
             self.assertEqual(wake_package_proxy.oww_metadata_bytes(package_id), metadata)
             self.assertEqual(wake_package_proxy.oww_model_bytes(package_id), model)
+            repeated_url = wake_package_proxy.register_bundle("http://10.4.20.210:8501", source_url)
+            self.assertEqual(repeated_url, local_url)
+            self.assertEqual(json.loads(wake_package_proxy.bundle_bytes(package_id)), proxied)
+            self.assertEqual(wake_package_proxy.oww_metadata_bytes(package_id), metadata)
+            self.assertEqual(wake_package_proxy.oww_model_bytes(package_id), model)
+            self.assertEqual(download.call_count, 4)
         self.assertEqual(proxied["open_wake_word"]["metadata"], "oww-metadata.json")
         self.assertEqual(proxied["open_wake_word"]["artifacts"]["onnx"]["file"], "oww-model.onnx")
         self.assertEqual(proxied["open_wake_word"]["recommended_threshold"], 0.95)
@@ -260,6 +269,103 @@ class WakePackageProxyTests(unittest.TestCase):
             proxied["micro_wake_word"]["manifest_sha256"],
             hashlib.sha256(proxied_manifest).hexdigest(),
         )
+
+    def test_schema_three_nww_models_are_rewritten_and_verified(self) -> None:
+        source_url = "https://trainer.example/wakes/hey_tater.wake-bundle.json"
+        local_url = wake_package_proxy.register_bundle("http://10.4.20.210:8501", source_url)
+        package_id = urlsplit(local_url).path.split("/")[-2]
+        tflite = b"\x1c\x00\x00\x00TFL3nano-fallback"
+        cnn = b"\x08\x07cnn-onnx-model"
+        gru = b"\x08\x07gru-onnx-model"
+        bundle = {
+            "schema_version": 3,
+            "type": "tater_wake_word_bundle",
+            "wake_word": "Hey Tater",
+            "key": "hey_tater",
+            "micro_wake_word": {
+                "type": "micro",
+                "wake_word": "Hey Tater",
+                "model": "hey_tater.tflite",
+                "model_sha256": hashlib.sha256(tflite).hexdigest(),
+                "model_size_bytes": len(tflite),
+                "version": 2,
+                "micro": {"probability_cutoff": 0.82, "sliding_window_size": 4},
+            },
+            "nano_wake_word": {
+                "default_architecture": "cnn",
+                "variants": {
+                    "cnn": {
+                        "architecture": "cnn",
+                        "model": "hey_tater.nww.cnn.onnx",
+                        "model_sha256": hashlib.sha256(cnn).hexdigest(),
+                        "model_size_bytes": len(cnn),
+                        "recommended_threshold": 0.72,
+                        "recommended_patience": 2,
+                    },
+                    "gru": {
+                        "architecture": "gru",
+                        "model": "hey_tater.nww.gru.onnx",
+                        "model_sha256": hashlib.sha256(gru).hexdigest(),
+                        "model_size_bytes": len(gru),
+                        "recommended_threshold": 0.76,
+                        "recommended_patience": 3,
+                    },
+                },
+            },
+        }
+        with mock.patch.object(
+            wake_package_proxy,
+            "_download",
+            side_effect=[
+                (json.dumps(bundle).encode(), source_url),
+                (cnn, "https://trainer.example/wakes/hey_tater.nww.cnn.onnx"),
+                (gru, "https://trainer.example/wakes/hey_tater.nww.gru.onnx"),
+            ],
+        ):
+            proxied = json.loads(wake_package_proxy.bundle_bytes(package_id))
+            self.assertEqual(wake_package_proxy.nww_model_bytes(package_id, "cnn"), cnn)
+            self.assertEqual(wake_package_proxy.nww_model_bytes(package_id, "gru"), gru)
+
+        variants = proxied["nano_wake_word"]["variants"]
+        self.assertEqual(variants["cnn"]["model"], "nww-cnn-model.onnx")
+        self.assertEqual(variants["gru"]["model"], "nww-gru-model.onnx")
+        manifest = json.loads(wake_package_proxy.manifest_bytes(package_id))
+        self.assertEqual(manifest["model"], "model.tflite")
+        self.assertEqual(manifest["micro"]["probability_cutoff"], 0.82)
+
+    def test_mww_nww_mode_uses_one_proxied_bundle_for_both_models(self) -> None:
+        selector = "native:echo-test"
+        source_url = "https://trainer.example/hey_tater.wake-bundle.json"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.238"}
+        settings = {
+            "wake_detector_mode": "mww_nww",
+            "wake_mww_enabled": True,
+            "wake_oww_enabled": False,
+            "wake_nww_enabled": True,
+            "wake_word": "custom_url",
+            "wake_word_url": source_url,
+            "nww_wake_word": "custom_url",
+            "nww_wake_word_url": source_url,
+            "nww_architecture": "gru",
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(
+                selector,
+                board="biscuit",
+                capabilities={"nanowakeword": True, "wake_detector_selection": True},
+            )
+
+        manifest_parts = urlsplit(output["wake_word_url"]).path.split("/")
+        bundle_parts = urlsplit(output["nww_wake_word_url"]).path.split("/")
+        self.assertEqual(manifest_parts[-2], bundle_parts[-2])
+        self.assertTrue(output["wake_word_url"].endswith("/manifest.json"))
+        self.assertTrue(output["nww_wake_word_url"].endswith("/bundle.wake-bundle.json"))
+        self.assertEqual(output["nww_architecture"], "gru")
 
     def test_manifest_and_model_are_exposed_as_valid_local_bundle(self) -> None:
         source_url = "https://models.example/wakes/jojo.json"

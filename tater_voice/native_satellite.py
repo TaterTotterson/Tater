@@ -1160,7 +1160,7 @@ def _firmware_settings_payload(
         # never send any OWW setting to firmware that cannot consume it.
         shared = native_live_settings.shared_wake_settings_snapshot()
         paired_custom_bundle = (
-            _lower(shared.get("wake_detector_mode")) in {"oww", "dual"}
+            _lower(shared.get("wake_detector_mode")) in {"oww", "nww", "mww_oww", "mww_nww", "dual"}
             and _lower(shared.get("oww_wake_word")) == "custom_url"
             and bool(_text(shared.get("oww_wake_word_url")))
         )
@@ -1185,28 +1185,44 @@ def _firmware_settings_payload(
                 )
         return settings
     mode = _lower(settings.get("wake_detector_mode"))
-    if mode not in {"mww", "oww", "dual"}:
-        flags_present = "wake_mww_enabled" in settings or "wake_oww_enabled" in settings
+    if mode == "dual":
+        mode = "mww_oww"
+    if mode not in {"mww", "oww", "nww", "mww_oww", "mww_nww"}:
+        flags_present = any(key in settings for key in ("wake_mww_enabled", "wake_oww_enabled", "wake_nww_enabled"))
         mww_enabled = _as_bool(settings.get("wake_mww_enabled"), False)
         oww_enabled = _as_bool(settings.get("wake_oww_enabled"), False)
+        nww_enabled = _as_bool(settings.get("wake_nww_enabled"), False)
         if flags_present:
-            mode = "dual" if mww_enabled and oww_enabled else ("oww" if oww_enabled else "mww")
+            mode = (
+                "mww_nww" if mww_enabled and nww_enabled
+                else "mww_oww" if mww_enabled and oww_enabled
+                else "nww" if nww_enabled
+                else "oww" if oww_enabled
+                else "mww"
+            )
         else:
-            mode = "dual" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
+            mode = "mww_oww" if _text(settings.get("oww_wake_word") or settings.get("oww_wake_word_url")) else "mww"
     settings["wake_detector_mode"] = mode
-    settings["wake_mww_enabled"] = mode in {"mww", "dual"}
-    settings["wake_oww_enabled"] = mode in {"oww", "dual"}
+    settings["wake_mww_enabled"] = mode in {"mww", "mww_oww", "mww_nww"}
+    settings["wake_oww_enabled"] = mode in {"oww", "mww_oww"}
+    settings["wake_nww_enabled"] = mode in {"nww", "mww_nww"}
     if mode == "mww":
-        for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
+        for key in (
+            "oww_wake_word", "oww_wake_word_url", "oww_model_revision",
+            "nww_wake_word", "nww_wake_word_url", "nww_model_revision", "nww_architecture",
+        ):
+            settings.pop(key, None)
+    elif mode in {"oww", "nww"}:
+        for key in ("wake_word", "wake_word_url", "wake_model_revision"):
             settings.pop(key, None)
     paired_custom_bundle = (
-        mode in {"oww", "dual"}
-        and _lower(settings.get("oww_wake_word")) == "custom_url"
-        and bool(_text(settings.get("oww_wake_word_url")))
+        mode in {"mww_oww", "mww_nww"}
+        and bool(_text(settings.get("oww_wake_word_url") or settings.get("nww_wake_word_url")))
     )
     mww_source_url = _text(settings.get("wake_word_url")) if _lower(settings.get("wake_word")) == "custom_url" else ""
     oww_source_url = _text(settings.get("oww_wake_word_url")) if _lower(settings.get("oww_wake_word")) == "custom_url" else ""
-    if not mww_source_url and not oww_source_url:
+    nww_source_url = _text(settings.get("nww_wake_word_url")) if _lower(settings.get("nww_wake_word")) == "custom_url" else ""
+    if not mww_source_url and not oww_source_url and not nww_source_url:
         return settings
     row = _clients.get(_canonical_selector(selector))
     peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
@@ -1215,15 +1231,22 @@ def _firmware_settings_payload(
 
         service_url = _vp()._service_base_url_for_peer(peer_host)
         if paired_custom_bundle:
-            manifest_url, bundle_url = wake_package_proxy.register_dual_bundle(service_url, oww_source_url)
+            bundle_source_url = nww_source_url if mode == "mww_nww" else oww_source_url
+            manifest_url, bundle_url = wake_package_proxy.register_dual_bundle(service_url, bundle_source_url)
             settings["wake_word"] = "custom_url"
             settings["wake_word_url"] = manifest_url
-            settings["oww_wake_word"] = "paired_bundle"
-            settings["oww_wake_word_url"] = bundle_url
+            if mode == "mww_nww":
+                settings["nww_wake_word"] = "custom_url"
+                settings["nww_wake_word_url"] = bundle_url
+            else:
+                settings["oww_wake_word"] = "paired_bundle"
+                settings["oww_wake_word_url"] = bundle_url
         elif mww_source_url:
             settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, mww_source_url)
         if oww_source_url and not paired_custom_bundle:
             settings["oww_wake_word_url"] = wake_package_proxy.register_bundle(service_url, oww_source_url)
+        if nww_source_url and not paired_custom_bundle:
+            settings["nww_wake_word_url"] = wake_package_proxy.register_bundle(service_url, nww_source_url)
     except (ValueError, RuntimeError) as exc:
         _vp().logger.warning(
             "[native-satellite] could not prepare local wake package selector=%s: %s",

@@ -15,6 +15,7 @@ from hydra import hydra_tool_index
 from hydra import hydra_prompts
 from hydra import hydra_ledger
 from hydra import hydra_doer_state
+from hydra import hydra_pending_interaction
 
 
 def _local_result(text: str = "ok"):
@@ -166,6 +167,116 @@ class StructuredChatCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(helpers._structured_output_matches_schema({"seconds": 90, "preference": None}, schema))
         self.assertFalse(helpers._structured_output_matches_schema({"seconds": "90", "preference": None}, schema))
         self.assertFalse(helpers._structured_output_matches_schema({"seconds": 90, "preference": "album"}, schema))
+
+
+class PendingInteractionStateTests(unittest.TestCase):
+    class Redis:
+        def __init__(self):
+            self.values = {}
+            self.ttls = {}
+
+        def set(self, key, value, *, ex=None):
+            self.values[key] = value
+            self.ttls[key] = ex
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def delete(self, key):
+            self.values.pop(key, None)
+
+    @staticmethod
+    def interaction():
+        return {
+            "kind": "clarification",
+            "goal": "Play music for the user",
+            "tool_hint": "play_music",
+            "known_details": ["music playback requested"],
+            "missing_details": ["artist"],
+            "choices": ["Stick Figure", "Martin O'Donnell"],
+            "question": "Which artist would you like?",
+        }
+
+    def test_pending_interaction_is_scoped_persisted_and_cleared(self):
+        redis = self.Redis()
+        saved = hydra_pending_interaction.save_pending_interaction(
+            redis,
+            platform="voice_core",
+            scope="session:one",
+            interaction=self.interaction(),
+            available_tool_ids={"play_music"},
+            source_turn_id="turn-1",
+        )
+
+        self.assertEqual(saved["source_turn_id"], "turn-1")
+        loaded = hydra_pending_interaction.load_pending_interaction(
+            redis,
+            platform="voice_core",
+            scope="session:one",
+            available_tool_ids={"play_music"},
+        )
+        self.assertEqual(loaded["missing_details"], ["artist"])
+        self.assertGreaterEqual(next(iter(redis.ttls.values())), 60)
+
+        hydra_pending_interaction.clear_pending_interaction(
+            redis,
+            platform="voice_core",
+            scope="session:one",
+        )
+        self.assertIsNone(
+            hydra_pending_interaction.load_pending_interaction(
+                redis,
+                platform="voice_core",
+                scope="session:one",
+                available_tool_ids={"play_music"},
+            )
+        )
+
+    def test_branch_resolution_uses_structured_relation_and_execution_state(self):
+        pending = self.interaction()
+        branch, interaction = hydra_pending_interaction.resolve_turn_branch(
+            planned_mode="chat",
+            relation="confirm",
+            has_executable_steps=False,
+            current_interaction=pending,
+            next_interaction=None,
+        )
+        self.assertEqual(branch, "clarify")
+        self.assertEqual(interaction, pending)
+
+        branch, interaction = hydra_pending_interaction.resolve_turn_branch(
+            planned_mode="execute",
+            relation="provide_details",
+            has_executable_steps=True,
+            current_interaction=pending,
+            next_interaction=None,
+        )
+        self.assertEqual(branch, "execute")
+        self.assertIsNone(interaction)
+
+        branch, interaction = hydra_pending_interaction.resolve_turn_branch(
+            planned_mode="chat",
+            relation="reject",
+            has_executable_steps=False,
+            current_interaction=pending,
+            next_interaction=None,
+        )
+        self.assertEqual(branch, "reject")
+        self.assertIsNone(interaction)
+
+    def test_clarification_is_rendered_from_structured_fields(self):
+        self.assertEqual(
+            hydra_pending_interaction.clarification_text(self.interaction()),
+            "Which artist would you like: Stick Figure or Martin O'Donnell?",
+        )
+
+    def test_pending_interaction_rejects_unavailable_tool(self):
+        self.assertIsNone(
+            hydra_pending_interaction.normalize_pending_interaction(
+                self.interaction(),
+                available_tool_ids=set(),
+            )
+        )
 
 
 class LocalLlmSchedulerTests(unittest.TestCase):
@@ -2481,18 +2592,41 @@ class PromptCacheLayoutTests(unittest.TestCase):
     def test_native_astraeus_prompts_leave_json_formatting_to_schema(self):
         planner = hydra_prompts.astraeus_native_system_prompt(platform="webui")
         reviewer = hydra_prompts.astraeus_plan_review_native_system_prompt(platform="webui")
+        chat = hydra_prompts.chat_response_envelope_native_system_prompt(
+            platform="webui",
+            platform_label="Web UI",
+            now_text="Friday, July 17, 2026 at 10:30 PM",
+            first_name="Tater",
+            last_name="Totterson",
+            personality="friendly",
+            ascii_only_platforms=(),
+        )
 
-        self.assertIn("decide whether this turn is conversational chat or executable work", planner)
+        self.assertIn("resolve this turn against any structured pending interaction", planner)
         self.assertNotIn("strict JSON", planner)
         self.assertNotIn('{"mode":"chat|execute"', planner)
         self.assertIn("execution-plan quality review", reviewer)
         self.assertNotIn("strict JSON", reviewer)
         self.assertNotIn('{"goal":"clear goal"', reviewer)
+        self.assertIn("Structured dialogue-state rules", chat)
+        self.assertNotIn("strict JSON", chat)
+        self.assertNotIn('{"response":"natural user-facing reply"', chat)
 
     def test_astraeus_uses_semantic_native_prompt_then_unchanged_legacy_fallback(self):
         legacy_result = {
             "mode": "execute",
+            "relation": "standalone",
             "goal": "Research the topic",
+            "question": "",
+            "pending_interaction": {
+                "kind": "none",
+                "goal": "",
+                "tool_hint": "",
+                "known_details": [],
+                "missing_details": [],
+                "choices": [],
+                "question": "",
+            },
             "steps": [
                 {
                     "step_id": 1,
@@ -2527,6 +2661,7 @@ class PromptCacheLayoutTests(unittest.TestCase):
                 topic_shift_seed=False,
                 history=[],
                 prior_state=None,
+                pending_interaction=None,
                 memory_context=None,
                 capability_catalog="websearch: research the web",
                 available_tool_ids={"websearch"},
@@ -2542,6 +2677,113 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertNotIn("strict JSON", client.calls[0]["messages"][0]["content"])
         self.assertNotIn("tools", client.calls[1])
         self.assertIn("strict JSON", client.calls[1]["messages"][0]["content"])
+
+    def test_astraeus_semantically_resolves_structured_pending_interaction(self):
+        pending = {
+            "kind": "clarification",
+            "goal": "Play music for the user",
+            "tool_hint": "play_music",
+            "known_details": ["music playback was requested"],
+            "missing_details": ["artist"],
+            "choices": ["Stick Figure", "Martin O'Donnell"],
+            "question": "Which artist would you like?",
+        }
+        decision = {
+            "mode": "clarify",
+            "relation": "confirm",
+            "goal": "Play music for the user",
+            "question": "Which artist would you like: Stick Figure or Martin O'Donnell?",
+            "pending_interaction": pending,
+            "steps": [],
+        }
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return _local_result(json.dumps(decision))
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        client = Client()
+        result = asyncio.run(
+            hydra_runtime._run_astraeus_plan(
+                llm_client=client,
+                platform="voice_core",
+                current_user_text="Sounds good, you're the best.",
+                turn_request_text="Sounds good, you're the best.",
+                topic_seed="",
+                topic_shift_seed=False,
+                history=[{"role": "assistant", "content": "Want me to put on some music?"}],
+                prior_state=None,
+                pending_interaction=pending,
+                memory_context=None,
+                capability_catalog="play_music: play requested music",
+                available_tool_ids={"play_music"},
+                platform_preamble="",
+                max_tokens=320,
+            )
+        )
+
+        self.assertEqual(result["mode"], "clarify")
+        self.assertEqual(result["relation"], "confirm")
+        self.assertEqual(result["pending_interaction"]["tool_hint"], "play_music")
+        payload = json.loads(client.calls[0]["messages"][-1]["content"])
+        self.assertEqual(payload["pending_interaction"]["missing_details"], ["artist"])
+
+    def test_chat_response_carries_pending_interaction_in_structured_envelope(self):
+        pending = {
+            "kind": "action_offer",
+            "goal": "Play music for the user",
+            "tool_hint": "play_music",
+            "known_details": ["genre can be reggae or score music"],
+            "missing_details": ["music choice"],
+            "choices": ["reggae", "score music"],
+            "question": "Would you like reggae or score music?",
+        }
+        decision = {
+            "response": "Want me to put on some reggae or score music?",
+            "pending_interaction": pending,
+        }
+
+        class Client:
+            def __init__(self):
+                self.call_count = 0
+
+            async def chat(self, **_kwargs):
+                self.call_count += 1
+                return _local_result(json.dumps(decision))
+
+        streamed = []
+        client = Client()
+        result = asyncio.run(
+            hydra_runtime._run_chat_fallback_reply(
+                llm_client=client,
+                platform="voice_core",
+                user_text="I'm relaxing.",
+                history=[],
+                registry={},
+                enabled_predicate=None,
+                redis_client=None,
+                memory_context_message="",
+                capability_catalog="play_music: play requested music",
+                available_tool_ids={"play_music"},
+                platform_preamble="",
+                max_history_items=6,
+                max_tokens=360,
+                stream_callback=streamed.append,
+            )
+        )
+
+        self.assertEqual(result["text"], "Want me to put on some reggae or score music?")
+        self.assertEqual(result["pending_interaction"]["kind"], "action_offer")
+        self.assertEqual(result["pending_interaction"]["tool_hint"], "play_music")
+        self.assertEqual(result["pending_interaction"]["choices"], ["reggae", "score music"])
+        self.assertEqual(streamed, ["Want me to put on some reggae or score music?"])
+        self.assertEqual(client.call_count, 1)
 
     def test_provider_message_sanitizer_preserves_standard_tool_arguments(self):
         arguments = '{"path":"/tmp/a.txt"}'
@@ -2842,6 +3084,13 @@ class TelemetryTests(unittest.TestCase):
             schema_version="3",
             agent_state_ledger_max_chars=100,
             allowed_planner_kinds=("answer",),
+            turn_branch="clarify",
+            pending_interaction={
+                "kind": "clarification",
+                "goal": "Play music",
+                "tool_hint": "play_music",
+                "missing_details": ["artist"],
+            },
         )
         row = json.loads(redis.rows[0])
         self.assertEqual(row["planner_ms"], 100)
@@ -2850,6 +3099,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(row["state_update_ms"], 40)
         self.assertEqual(row["state_update_deterministic_count"], 3)
         self.assertEqual(row["state_update_llm_count"], 1)
+        self.assertEqual(row["turn_branch"], "clarify")
+        self.assertEqual(row["pending_interaction"]["missing_details"], ["artist"])
         self.assertEqual(row["reasoning_summary"], "Checked the available context.")
         self.assertEqual(row["reasoning_traces"][0]["role"], "hermes_chat")
         self.assertIn("compare the available context", row["reasoning_traces"][0]["content"])

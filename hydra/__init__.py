@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import mimetypes
 import re
@@ -15,6 +16,7 @@ from . import hydra_common_helpers as common_helpers
 from . import hydra_ledger as ledger
 from . import hydra_limits as limits_helpers
 from . import hydra_origin_attach as origin_attach_helpers
+from . import hydra_pending_interaction as pending_interaction_helpers
 from . import hydra_preamble_utils as preamble_utils
 from . import hydra_prompts as prompts
 from . import hydra_retry_helpers as retry_helpers
@@ -135,17 +137,72 @@ def _hydra_plan_step_schema() -> Dict[str, Any]:
     }
 
 
+def _hydra_pending_interaction_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["none", "action_offer", "clarification"]},
+            "goal": {"type": "string", "maxLength": 240},
+            "tool_hint": {"type": "string", "maxLength": 80},
+            "known_details": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string", "maxLength": 180},
+            },
+            "missing_details": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {"type": "string", "maxLength": 120},
+            },
+            "choices": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string", "maxLength": 120},
+            },
+            "question": {"type": "string", "maxLength": 320},
+        },
+        "required": [
+            "kind",
+            "goal",
+            "tool_hint",
+            "known_details",
+            "missing_details",
+            "choices",
+            "question",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def _hydra_astraeus_plan_schema() -> Dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "mode": {"type": "string", "enum": ["chat", "execute"]},
+            "mode": {"type": "string", "enum": ["chat", "execute", "clarify", "reject"]},
+            "relation": {
+                "type": "string",
+                "enum": ["standalone", "confirm", "reject", "provide_details", "modify", "chat"],
+            },
             "topic": {"type": "string"},
             "topic_shift": {"type": "boolean"},
             "goal": {"type": "string"},
+            "question": {"type": "string", "maxLength": 320},
+            "pending_interaction": _hydra_pending_interaction_schema(),
             "steps": {"type": "array", "maxItems": 12, "items": _hydra_plan_step_schema()},
         },
-        "required": ["mode", "goal", "steps"],
+        "required": ["mode", "relation", "goal", "question", "pending_interaction", "steps"],
+        "additionalProperties": False,
+    }
+
+
+def _hydra_chat_response_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "response": {"type": "string"},
+            "pending_interaction": _hydra_pending_interaction_schema(),
+        },
+        "required": ["response", "pending_interaction"],
         "additionalProperties": False,
     }
 
@@ -205,7 +262,7 @@ HYDRA_REASONING_SUMMARY_MAX_CHARS = 180
 RESULT_MEMORY_MAX_SETS = DEFAULT_RESULT_MEMORY_MAX_SETS
 RESULT_MEMORY_MAX_ITEMS = DEFAULT_RESULT_MEMORY_MAX_ITEMS
 ASTRAEUS_PLAN_REVIEW_ENABLED = DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED
-HYDRA_LEDGER_SCHEMA_VERSION = "3"
+HYDRA_LEDGER_SCHEMA_VERSION = "4"
 
 _PLATFORM_DISPLAY = {
     "webui": "WebUI",
@@ -1927,6 +1984,24 @@ def _chat_fallback_system_prompt(platform: str) -> str:
     ).strip()
 
 
+def _chat_response_envelope_system_prompt(platform: str, *, native: bool = False) -> str:
+    first, last = get_tater_name()
+    prompt_fn = (
+        prompts.chat_response_envelope_native_system_prompt
+        if native
+        else prompts.chat_response_envelope_system_prompt
+    )
+    return prompt_fn(
+        platform=platform,
+        platform_label=_platform_label(platform),
+        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
+        first_name=first,
+        last_name=last,
+        personality=(get_tater_personality() or "").strip(),
+        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
+    ).strip()
+
+
 def _status_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return bool(default)
@@ -2623,6 +2698,7 @@ async def _run_astraeus_plan(
     topic_shift_seed: bool,
     history: List[Dict[str, Any]],
     prior_state: Optional[Dict[str, Any]],
+    pending_interaction: Optional[Dict[str, Any]],
     memory_context: Optional[Dict[str, Any]],
     capability_catalog: str,
     available_tool_ids: set[str],
@@ -2650,6 +2726,8 @@ async def _run_astraeus_plan(
         "current_user_message": str(current_user_text or ""),
         "recent_history": recent_history,
     }
+    if isinstance(pending_interaction, dict) and pending_interaction:
+        dynamic_payload["pending_interaction"] = dict(pending_interaction)
     if isinstance(prior_state, dict) and prior_state:
         normalized_prior = _normalize_agent_state(
             prior_state,
@@ -2724,7 +2802,7 @@ async def _run_astraeus_plan(
             native_system_prompt=prompts.astraeus_native_system_prompt(platform=platform),
             schema=_hydra_astraeus_plan_schema(),
             function_name="submit_hydra_plan",
-            description="Submit whether the turn is chat or execution and its ordered atomic plan.",
+            description="Submit the semantic turn relation, response branch, pending interaction state, and executable plan.",
             temperature=0.1,
             activity="planning",
             cache_namespace="hydra:astraeus",
@@ -2743,9 +2821,12 @@ async def _run_astraeus_plan(
         )
         return {
             "mode": "unknown",
+            "relation": "standalone",
             "topic": topic_value,
             "topic_shift": topic_shift_value,
             "goal": fallback_goal,
+            "question": "",
+            "pending_interaction": None,
             "steps": [],
         }
     _populate_llm_perf_debug(
@@ -2761,22 +2842,68 @@ async def _run_astraeus_plan(
     if not isinstance(obj, dict):
         return {
             "mode": "unknown",
+            "relation": "standalone",
             "topic": topic_value,
             "topic_shift": topic_shift_value,
             "goal": fallback_goal,
+            "question": "",
+            "pending_interaction": None,
             "steps": [],
         }
     mode = str(obj.get("mode") or "").strip().lower()
+    relation = str(obj.get("relation") or "standalone").strip().lower()
+    if relation not in {"standalone", "confirm", "reject", "provide_details", "modify", "chat"}:
+        relation = "standalone"
     topic = topic_value or _short_text(obj.get("topic"), limit=90)
     goal = _short_text(obj.get("goal"), limit=220) or fallback_goal
+    question = _short_text(obj.get("question"), limit=320)
+    pending_candidate = obj.get("pending_interaction")
+    if isinstance(pending_candidate, dict):
+        pending_candidate = dict(pending_candidate)
+        pending_candidate["tool_hint"] = _canonical_tool_name(
+            str(pending_candidate.get("tool_hint") or "").strip()
+        )
+    normalized_pending = pending_interaction_helpers.normalize_pending_interaction(
+        pending_candidate,
+        available_tool_ids=available_tool_ids,
+    )
+    normalized_current_pending = pending_interaction_helpers.normalize_pending_interaction(
+        pending_interaction,
+        available_tool_ids=available_tool_ids,
+    )
     topic_shift = topic_shift_value
     raw_steps = obj.get("steps")
     if mode == "chat":
         return {
             "mode": "chat",
+            "relation": relation,
             "topic": topic,
             "topic_shift": topic_shift,
             "goal": goal,
+            "question": "",
+            "pending_interaction": None,
+            "steps": [],
+        }
+    if mode == "reject":
+        return {
+            "mode": "reject",
+            "relation": "reject",
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "question": "",
+            "pending_interaction": None,
+            "steps": [],
+        }
+    if mode == "clarify":
+        return {
+            "mode": "clarify",
+            "relation": relation,
+            "topic": topic,
+            "topic_shift": topic_shift,
+            "goal": goal,
+            "question": question,
+            "pending_interaction": normalized_pending or normalized_current_pending,
             "steps": [],
         }
     if raw_steps is None:
@@ -2784,9 +2911,12 @@ async def _run_astraeus_plan(
     if not isinstance(raw_steps, list):
         return {
             "mode": "unknown",
+            "relation": relation,
             "topic": topic,
             "topic_shift": topic_shift,
             "goal": goal,
+            "question": question,
+            "pending_interaction": normalized_pending,
             "steps": [],
         }
     out: List[Dict[str, str]] = []
@@ -2812,31 +2942,43 @@ async def _run_astraeus_plan(
         if out:
             return {
                 "mode": "execute",
+                "relation": relation,
                 "topic": topic,
                 "topic_shift": topic_shift,
                 "goal": goal,
+                "question": "",
+                "pending_interaction": None,
                 "steps": out,
             }
         return {
             "mode": "unknown",
+            "relation": relation,
             "topic": topic,
             "topic_shift": topic_shift,
             "goal": goal,
+            "question": question,
+            "pending_interaction": normalized_pending or normalized_current_pending,
             "steps": [],
         }
     if out:
         return {
             "mode": "execute",
+            "relation": relation,
             "topic": topic,
             "topic_shift": topic_shift,
             "goal": goal,
+            "question": "",
+            "pending_interaction": None,
             "steps": out,
         }
     return {
         "mode": "chat",
+        "relation": relation,
         "topic": topic,
         "topic_shift": topic_shift,
         "goal": goal,
+        "question": "",
+        "pending_interaction": None,
         "steps": [],
     }
 
@@ -3347,7 +3489,7 @@ def estimate_hydra_chat_context_window(
         user_text=user_text,
         request_text=user_text,
     )
-    chat_system_prompt = _chat_fallback_system_prompt(normalized_platform)
+    chat_system_prompt = _chat_response_envelope_system_prompt(normalized_platform)
     status_prompt = ""
     clean_preamble = _sanitize_platform_preamble(normalized_platform, platform_preamble)
     seeded_user_text, seed_source = _seed_user_text_for_context_estimate(
@@ -3469,17 +3611,37 @@ async def _run_chat_fallback_reply(
     enabled_predicate: Optional[Callable[[str], bool]],
     redis_client: Any,
     memory_context_message: str,
+    capability_catalog: str,
+    available_tool_ids: set[str],
     platform_preamble: str,
     max_history_items: int,
     max_tokens: Optional[int],
     debug_out: Optional[Dict[str, Any]] = None,
     stream_callback: Optional[Callable[[str], Any]] = None,
-) -> str:
+) -> Dict[str, Any]:
     del registry, enabled_predicate, redis_client
     chat_history = _chat_history_window(history, max_items=max_history_items)
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _chat_fallback_system_prompt(platform)},
+        {"role": "system", "content": _chat_response_envelope_system_prompt(platform)},
     ]
+    if capability_catalog or available_tool_ids:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Available execution catalog for structured action offers:\n"
+                + json.dumps(
+                    {
+                        "available_capabilities": str(capability_catalog or ""),
+                        "available_tool_ids": sorted(
+                            str(item) for item in available_tool_ids if str(item).strip()
+                        )[:200],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            }
+        )
     if memory_context_message:
         messages.append({"role": "system", "content": memory_context_message})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
@@ -3495,16 +3657,21 @@ async def _run_chat_fallback_reply(
             }
         )
     try:
-        resp = await llm_client.chat(
+        resp = await llm_structured_chat(
+            llm_client,
             messages=messages,
+            native_system_prompt=_chat_response_envelope_system_prompt(platform, native=True),
+            schema=_hydra_chat_response_schema(),
+            function_name="submit_chat_response",
+            description="Submit the natural chat response and any structured pending executable interaction created by it.",
             temperature=0.4,
             activity="chat",
             cache_namespace="hydra:hermes:chat",
-            stream_callback=stream_callback,
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
-                minimum=64,
-                fallback=220,
+                minimum=160,
+                fallback=360,
+                maximum=600,
             ),
         )
     except Exception as exc:
@@ -3514,14 +3681,47 @@ async def _run_chat_fallback_reply(
             detail = _short_text(str(exc) or type(exc).__name__, limit=420)
             if not detail:
                 detail = type(exc).__name__
-            return (
+            response_text = (
                 "Local model failed to load or run: "
                 f"{detail}. Check the model ID/path, install/update the local model dependencies, "
                 "and restart Tater after changing dependencies."
             )
-        return ""
+        else:
+            response_text = ""
+        if callable(stream_callback) and response_text:
+            try:
+                callback_result = stream_callback(response_text)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except Exception:
+                pass
+        return {"text": response_text, "pending_interaction": None}
     _populate_llm_reasoning_debug(debug_out, response=resp)
-    return _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    parsed = _first_json_object(raw)
+    if isinstance(parsed, dict):
+        response_text = _coerce_text(parsed.get("response")).strip()
+        pending_candidate = parsed.get("pending_interaction")
+    else:
+        response_text = raw
+        pending_candidate = None
+    if isinstance(pending_candidate, dict):
+        pending_candidate = dict(pending_candidate)
+        pending_candidate["tool_hint"] = _canonical_tool_name(
+            str(pending_candidate.get("tool_hint") or "").strip()
+        )
+    normalized_pending = pending_interaction_helpers.normalize_pending_interaction(
+        pending_candidate,
+        available_tool_ids=available_tool_ids,
+    )
+    if callable(stream_callback) and response_text:
+        try:
+            callback_result = stream_callback(response_text)
+            if inspect.isawaitable(callback_result):
+                await callback_result
+        except Exception:
+            pass
+    return {"text": response_text, "pending_interaction": normalized_pending}
 
 
 def _turn_goal_for_state(*, current_user_text: str, turn_request_text: str) -> str:
@@ -5190,6 +5390,8 @@ def _write_hydra_ledger(
     origin_preview: Optional[Dict[str, Any]] = None,
     attempted_tool: str = "",
     reasoning_traces: Optional[List[Dict[str, Any]]] = None,
+    turn_branch: str = "",
+    pending_interaction: Optional[Dict[str, Any]] = None,
 ) -> None:
     return ledger.write_hydra_ledger(
         redis_client=redis_client,
@@ -5233,6 +5435,8 @@ def _write_hydra_ledger(
         origin_preview=origin_preview,
         attempted_tool=attempted_tool,
         reasoning_traces=reasoning_traces,
+        turn_branch=turn_branch,
+        pending_interaction=pending_interaction,
         compact_tool_ref_fn=_compact_tool_ref,
         validation_status_for_ledger_fn=_validation_status_for_ledger,
         short_text_fn=_short_text,
@@ -5241,7 +5445,7 @@ def _write_hydra_ledger(
         configured_max_ledger_items_fn=_configured_max_ledger_items,
         schema_version=HYDRA_LEDGER_SCHEMA_VERSION,
         agent_state_ledger_max_chars=AGENT_STATE_LEDGER_MAX_CHARS,
-        allowed_planner_kinds=("tool", "answer", "repaired_tool", "repaired_answer"),
+        allowed_planner_kinds=("tool", "answer", "clarify", "reject", "repaired_tool", "repaired_answer"),
     )
 
 
@@ -5387,6 +5591,7 @@ async def _run_hydra_turn_impl(
     draft_response = ""
     tool_used = False
     planner_kind = "answer"
+    turn_branch = "chat"
     planner_text_is_tool_candidate = False
     attempted_tool_for_ledger = ""
     task_name = _task_name_from_text(user_text, fallback="Hydra task")
@@ -5415,6 +5620,12 @@ async def _run_hydra_turn_impl(
         registry=registry,
         enabled_predicate=enabled_predicate,
         origin=origin_payload,
+    )
+    pending_interaction = pending_interaction_helpers.load_pending_interaction(
+        r,
+        platform=platform,
+        scope=scope,
+        available_tool_ids=available_execution_tool_ids,
     )
     prior_state = None
     memory_context_payload = _memory_context_payload(
@@ -5450,6 +5661,9 @@ async def _run_hydra_turn_impl(
     structured_plan_queue: List[Dict[str, str]] = []
     structured_plan_total_steps = 0
     astraeus_mode = "unknown"
+    astraeus_relation = "standalone"
+    astraeus_question = ""
+    next_pending_interaction: Optional[Dict[str, Any]] = None
     astraeus_topic = _short_text(turn_request_text or current_user_turn_text, limit=90) or "request"
     astraeus_goal = _short_text(turn_request_text or current_user_turn_text, limit=220) or "Fulfill the user request."
     astraeus_topic_shift = False
@@ -5465,6 +5679,7 @@ async def _run_hydra_turn_impl(
             topic_shift_seed=astraeus_topic_shift,
             history=history,
             prior_state=prior_state,
+            pending_interaction=pending_interaction,
             memory_context=tool_memory_context_payload,
             capability_catalog=astraeus_capability_catalog,
             available_tool_ids=available_execution_tool_ids,
@@ -5479,14 +5694,23 @@ async def _run_hydra_turn_impl(
     except Exception:
         astraeus_result = {
             "mode": "unknown",
+            "relation": "standalone",
             "topic_shift": False,
             "goal": astraeus_goal,
+            "question": "",
+            "pending_interaction": None,
             "steps": [],
         }
     if isinstance(astraeus_result, dict):
         astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
+        astraeus_relation = str(astraeus_result.get("relation") or "standalone").strip().lower() or "standalone"
         astraeus_topic = _short_text(astraeus_result.get("topic"), limit=90) or astraeus_topic
         astraeus_goal = _short_text(astraeus_result.get("goal"), limit=220) or astraeus_goal
+        astraeus_question = _short_text(astraeus_result.get("question"), limit=320)
+        next_pending_interaction = pending_interaction_helpers.normalize_pending_interaction(
+            astraeus_result.get("pending_interaction"),
+            available_tool_ids=available_execution_tool_ids,
+        )
         task_name = _task_name_from_text(astraeus_topic or astraeus_goal, fallback=task_name)
         _set_active_chat_job_task_name(active_job_id, task_name)
         raw_steps = astraeus_result.get("steps")
@@ -5516,6 +5740,40 @@ async def _run_hydra_turn_impl(
                 reviewed_queue = [step for step in reviewed_steps if isinstance(step, dict)]
                 if reviewed_queue:
                     structured_plan_queue = reviewed_queue
+
+    turn_branch, next_pending_interaction = pending_interaction_helpers.resolve_turn_branch(
+        planned_mode=astraeus_mode,
+        relation=astraeus_relation,
+        has_executable_steps=bool(structured_plan_queue),
+        current_interaction=pending_interaction,
+        next_interaction=next_pending_interaction,
+    )
+    if turn_branch == "execute":
+        astraeus_mode = "execute"
+        pending_interaction_helpers.clear_pending_interaction(r, platform=platform, scope=scope)
+    elif turn_branch == "clarify" and isinstance(next_pending_interaction, dict):
+        astraeus_mode = "clarify"
+        next_pending_interaction = pending_interaction_helpers.save_pending_interaction(
+            r,
+            platform=platform,
+            scope=scope,
+            interaction=next_pending_interaction,
+            available_tool_ids=available_execution_tool_ids,
+            source_turn_id=turn_id,
+        )
+    elif turn_branch == "reject":
+        astraeus_mode = "reject"
+        pending_interaction_helpers.clear_pending_interaction(r, platform=platform, scope=scope)
+        next_pending_interaction = None
+    elif turn_branch == "blocked":
+        pending_interaction_helpers.clear_pending_interaction(r, platform=platform, scope=scope)
+        next_pending_interaction = None
+    else:
+        turn_branch = "chat"
+        if isinstance(pending_interaction, dict):
+            pending_interaction_helpers.clear_pending_interaction(r, platform=platform, scope=scope)
+        next_pending_interaction = None
+
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
         current_user_text=current_user_turn_text,
@@ -5523,6 +5781,13 @@ async def _run_hydra_turn_impl(
         topic_shift_new_topic=astraeus_topic_shift,
     )
     agent_state["goal"] = astraeus_goal
+    if turn_branch == "clarify":
+        clarification_text = pending_interaction_helpers.clarification_text(
+            next_pending_interaction,
+            preferred=astraeus_question,
+        )
+        agent_state["open_questions"] = [clarification_text]
+        agent_state["next_step"] = clarification_text
     if not structured_plan_queue:
         agent_state = _clear_state_plan_for_new_turn(
             agent_state=agent_state,
@@ -5817,6 +6082,8 @@ async def _run_hydra_turn_impl(
             origin_preview=origin_preview,
             attempted_tool=attempted_tool_override if attempted_tool_override is not None else attempted_tool_for_ledger,
             reasoning_traces=reasoning_traces,
+            turn_branch=turn_branch,
+            pending_interaction=next_pending_interaction,
         )
         _write_hydra_metrics(
             redis_client=r,
@@ -5831,6 +6098,8 @@ async def _run_hydra_turn_impl(
             "status": final_status,
             "task_id": task_id,
             "task_name": task_name,
+            "turn_branch": turn_branch,
+            "pending_interaction": dict(next_pending_interaction) if isinstance(next_pending_interaction, dict) else None,
             "auto_continue_requested": bool(auto_continue_requested and final_status == "done"),
             "auto_continue_head": auto_continue_head if final_status == "done" else "",
             "artifacts": artifacts_out,
@@ -5842,13 +6111,39 @@ async def _run_hydra_turn_impl(
             "reasoning_traces": reasoning_traces,
         }
 
+    if turn_branch == "clarify" and not structured_plan_queue:
+        planner_kind = "clarify"
+        checker_reason = "needs_user_input"
+        clarification_text = pending_interaction_helpers.clarification_text(
+            next_pending_interaction,
+            preferred=astraeus_question,
+        )
+        return _finish(
+            text=clarification_text,
+            status="blocked",
+            checker_action_value="NEED_USER_INFO",
+            checker_reason_value=checker_reason,
+            planner_kind_value=planner_kind,
+        )
+
+    if turn_branch == "reject" and not structured_plan_queue:
+        planner_kind = "reject"
+        checker_reason = "declined"
+        return _finish(
+            text="Okay.",
+            status="done",
+            checker_action_value="FINAL_ANSWER",
+            checker_reason_value=checker_reason,
+            planner_kind_value=planner_kind,
+        )
+
     if not structured_plan_queue:
         # If planning returns no executable steps and mode is unknown,
         # prefer conversational fallback over a hard block.
         if astraeus_mode in {"chat", "unknown"}:
             chat_started = time.perf_counter()
             current_chat_debug: Dict[str, Any] = {}
-            chat_text = await _run_chat_fallback_reply(
+            chat_result = await _run_chat_fallback_reply(
                 llm_client=llm_client_chat,
                 platform=platform,
                 user_text=current_user_turn_text,
@@ -5857,12 +6152,15 @@ async def _run_hydra_turn_impl(
                 enabled_predicate=enabled_predicate,
                 redis_client=r,
                 memory_context_message=chat_context_message,
+                capability_catalog=astraeus_capability_catalog,
+                available_tool_ids=available_execution_tool_ids,
                 platform_preamble=platform_preamble,
                 max_history_items=chat_history_max_items,
                 max_tokens=None,
                 debug_out=current_chat_debug,
                 stream_callback=response_callback,
             )
+            chat_text = _coerce_text(chat_result.get("text")) if isinstance(chat_result, dict) else ""
             chat_elapsed_ms = (time.perf_counter() - chat_started) * 1000.0
             hermes_chat_ms_total += chat_elapsed_ms
             current_chat_debug["wall_ms"] = int(max(0.0, chat_elapsed_ms))
@@ -5871,6 +6169,23 @@ async def _run_hydra_turn_impl(
             planner_text_is_tool_candidate = False
             checker_reason = "complete"
             chat_final_text = chat_text or _generic_chat_fallback_text(current_user_turn_text)
+            pending_from_chat = (
+                chat_result.get("pending_interaction")
+                if isinstance(chat_result, dict)
+                else None
+            )
+            if isinstance(pending_from_chat, dict):
+                next_pending_interaction = pending_interaction_helpers.save_pending_interaction(
+                    r,
+                    platform=platform,
+                    scope=scope,
+                    interaction=pending_from_chat,
+                    available_tool_ids=available_execution_tool_ids,
+                    source_turn_id=turn_id,
+                )
+                if isinstance(next_pending_interaction, dict):
+                    pending_question = pending_interaction_helpers.clarification_text(next_pending_interaction)
+                    agent_state["open_questions"] = [pending_question]
             await _mark_auto_continue_from_head(
                 head="hermes",
                 final_text=chat_final_text,

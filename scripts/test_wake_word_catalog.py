@@ -31,6 +31,14 @@ V7_BUNDLE_URL = (
     "https://raw.githubusercontent.com/TaterTotterson/"
     "Tater-Wake-Words/main/microWakeWordsV7/hey_tater.wake-bundle.json"
 )
+V6_BUNDLE_URL = (
+    "https://raw.githubusercontent.com/TaterTotterson/"
+    "Tater-Wake-Words/main/microWakeWordsV6/hey_tater.wake-bundle.json"
+)
+V8_BUNDLE_URL = (
+    "https://raw.githubusercontent.com/TaterTotterson/"
+    "Tater-Wake-Words/main/microWakeWordsV8/hey_tater.wake-bundle.json"
+)
 
 
 class WakeWordCatalogTests(unittest.TestCase):
@@ -40,9 +48,9 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertTrue(settings["wake_oww_enabled"])
         self.assertEqual(settings["wake_word"], "hey_tater")
         self.assertEqual(settings["oww_wake_word"], "hey_tater")
-        self.assertEqual(settings["wake_threshold"], 0.98)
-        self.assertEqual(settings["close_miss_threshold"], 0.81)
-        self.assertEqual(settings["oww_profile_confirmation_threshold"], 0.92)
+        self.assertEqual(settings["wake_threshold"], 0.99)
+        self.assertEqual(settings["close_miss_threshold"], 0.82)
+        self.assertEqual(settings["oww_profile_confirmation_threshold"], 0.96)
 
     def test_explicit_detector_choice_survives_the_new_default(self) -> None:
         settings = native_live_settings.normalize_settings(
@@ -124,9 +132,71 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertEqual(settings["oww_profile_patience"], 4)
         self.assertEqual(settings["oww_profile_confirmation_threshold"], 0.86)
         self.assertEqual(settings["oww_profile_confirmation_patience"], 2)
-        firmware = {key: settings[key] for key in native_live_settings.FIRMWARE_SETTING_KEYS}
+        firmware = {
+            key: settings[key]
+            for key in native_live_settings.FIRMWARE_SETTING_KEYS
+            if key in settings
+        }
         self.assertEqual(firmware["oww_wake_word_url"], "https://example.test/jojo.wake-bundle.json")
         self.assertTrue(firmware["oww_model_revision"])
+
+    def test_schema_three_bundle_exposes_embedded_mww_and_nww_architectures(self) -> None:
+        bundle = {
+            "schema_version": 3,
+            "type": "tater_wake_word_bundle",
+            "wake_word": "Hey Tater",
+            "micro_wake_word": {
+                "type": "micro",
+                "wake_word": "Hey Tater",
+                "model": "hey_tater.tflite",
+                "model_sha256": "a" * 64,
+                "model_size_bytes": 100,
+                "micro": {"probability_cutoff": 0.84, "sliding_window_size": 4},
+                "tater_native": {"close_miss_threshold": 0.69},
+            },
+            "nano_wake_word": {
+                "default_architecture": "cnn",
+                "variants": {
+                    "cnn": {
+                        "model": "hey_tater.nww.cnn.onnx",
+                        "model_sha256": "b" * 64,
+                        "model_size_bytes": 200,
+                    },
+                    "gru": {
+                        "artifacts": {
+                            "onnx": {
+                                "file": "hey_tater.nww.gru.onnx",
+                                "sha256": "c" * 64,
+                                "size_bytes": 300,
+                            }
+                        }
+                    },
+                },
+            },
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(bundle).encode()
+
+        with mock.patch.object(native_live_settings, "urlopen", return_value=FakeResponse()):
+            profile = native_live_settings._fetch_oww_profile_json(
+                "https://example.test/hey_tater.wake-bundle.json"
+            )
+
+        self.assertEqual(profile["nww_available_architectures"], "cnn,gru")
+        self.assertTrue(profile["bundle_has_mww"])
+        self.assertFalse(profile["bundle_has_oww"])
+        self.assertTrue(profile["wake_bundle_embedded_micro"])
+        self.assertEqual(profile["wake_profile_threshold"], 0.84)
+        self.assertEqual(profile["wake_profile_sliding_window"], 4)
+        self.assertEqual(profile["wake_profile_close_miss_threshold"], 0.69)
 
     def test_dual_profile_uses_mww_manifest_named_by_the_bundle(self) -> None:
         manifest = json.dumps({"wake_word": "Jojo", "model": "jojo.tflite"}).encode()
@@ -278,6 +348,88 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertEqual(oww["catalog_type"], "oww")
         self.assertEqual(dual["catalog_type"], "dual")
 
+    def test_nww_catalog_only_exposes_verified_v8_or_newer_bundles(self) -> None:
+        entries = wake_word_catalog.entries_from_manifest(
+            {
+                "schema_version": 3,
+                "entries": [
+                    {
+                        "source": "microWakeWordsV7",
+                        "slug": "legacy_word",
+                        "label": "Legacy Word",
+                        "url": V7_URL,
+                        "dual_model": True,
+                        "bundle_url": V7_BUNDLE_URL,
+                    },
+                    {
+                        "source": "microWakeWordsV8",
+                        "slug": "hey_tater",
+                        "label": "Hey Tater",
+                        "url": V8_BUNDLE_URL,
+                        "dual_model": True,
+                        "nano_model": True,
+                        "bundle_url": V8_BUNDLE_URL,
+                        "nanowakeword_architectures": ["cnn", "gru"],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(len(entries), 2)
+        v8_entry = next(entry for entry in entries if entry["version"] == 8)
+        self.assertEqual(v8_entry["url"], V8_BUNDLE_URL)
+        self.assertTrue(v8_entry["nano_model"])
+        self.assertEqual(v8_entry["nanowakeword_architectures"], ["cnn", "gru"])
+
+        with mock.patch.object(
+            wake_word_catalog,
+            "load_catalog",
+            return_value={"entries": entries, "warning": ""},
+        ):
+            nww = wake_word_catalog.field_payload(model_type="nww")
+
+        self.assertEqual(
+            nww["options"],
+            [{"value": V8_BUNDLE_URL, "label": "Hey Tater [V8]"}],
+        )
+        self.assertEqual(nww["catalog_type"], "nww")
+        self.assertIn("NanoWakeWord packages", nww["description"])
+        self.assertIn("start with V8", nww["description"])
+
+    def test_oww_catalog_requires_v7_or_newer_bundles(self) -> None:
+        self.assertFalse(
+            wake_word_catalog.is_catalog_url(V6_BUNDLE_URL, model_type="oww")
+        )
+        self.assertFalse(
+            wake_word_catalog.is_catalog_url(V6_BUNDLE_URL, model_type="dual")
+        )
+        self.assertTrue(
+            wake_word_catalog.is_catalog_url(V7_BUNDLE_URL, model_type="oww")
+        )
+
+    def test_nww_settings_picker_requests_the_v8_catalog_view(self) -> None:
+        current = native_live_settings.normalize_settings(
+            {
+                "wake_detector_mode": "nww",
+                "wake_mww_enabled": False,
+                "wake_oww_enabled": False,
+                "wake_nww_enabled": True,
+            }
+        )
+        with (
+            mock.patch.object(native_live_settings, "settings_snapshot", return_value=current),
+            mock.patch.object(
+                native_live_settings.wake_word_catalog,
+                "field_payload",
+                return_value={"options": [], "selected_url": "", "description": ""},
+            ) as field_payload,
+        ):
+            native_live_settings.settings_fields()
+
+        self.assertTrue(
+            any(call.kwargs.get("model_type") == "nww" for call in field_payload.call_args_list)
+        )
+
     def test_empty_oww_catalog_is_ready_for_future_v7_models(self) -> None:
         with mock.patch.object(
             wake_word_catalog,
@@ -398,6 +550,39 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertEqual(resolved["oww_wake_word"], "custom_url")
         self.assertEqual(resolved["oww_wake_word_url"], V7_BUNDLE_URL)
         self.assertNotIn("oww_wake_word_catalog_url", resolved)
+
+    def test_nww_catalog_selection_requires_a_v8_or_newer_bundle(self) -> None:
+        resolved = native_live_settings.resolve_wake_word_source_values(
+            {
+                "wake_detector_mode": "nww",
+                "oww_wake_word": "catalog",
+                "oww_wake_word_catalog_url": V8_BUNDLE_URL,
+            }
+        )
+
+        self.assertEqual(resolved["oww_wake_word"], "custom_url")
+        self.assertEqual(resolved["oww_wake_word_url"], V8_BUNDLE_URL)
+
+        with self.assertRaisesRegex(ValueError, "NanoWakeWord Bundle Catalog"):
+            native_live_settings.resolve_wake_word_source_values(
+                {
+                    "wake_detector_mode": "mww_nww",
+                    "oww_wake_word": "catalog",
+                    "oww_wake_word_catalog_url": V7_BUNDLE_URL,
+                }
+            )
+
+    def test_explicit_oww_mode_ignores_a_stale_nww_flag(self) -> None:
+        resolved = native_live_settings.resolve_wake_word_source_values(
+            {
+                "wake_detector_mode": "oww",
+                "wake_nww_enabled": True,
+                "oww_wake_word": "catalog",
+                "oww_wake_word_catalog_url": V7_BUNDLE_URL,
+            }
+        )
+
+        self.assertEqual(resolved["oww_wake_word_url"], V7_BUNDLE_URL)
 
     def test_dual_catalog_rejects_a_mww_manifest_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "Dual Wake Word Catalog"):

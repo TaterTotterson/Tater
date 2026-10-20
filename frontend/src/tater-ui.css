@@ -1730,6 +1730,8 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tm-wake-source-panel, .tm-media-section, .tm-identity-section, .tm-face-model-section { display: grid; min-width: 0; gap: 10px; padding: 12px; border: 1px solid var(--tv-border); border-radius: 12px; background: color-mix(in srgb, var(--tv-surface) 84%, transparent); }
 .tm-wake-source-grid, .tm-wake-verifier-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .tm-wake-source-grid-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tm-wake-mode-row { display: grid; min-width: 0; gap: 6px; }
+.tm-wake-mode-row > span { color: var(--tv-muted); font-size: .56rem; font-weight: 820; letter-spacing: .08em; text-transform: uppercase; }
 .tm-wake-model-block { display: grid; min-width: 0; gap: 9px; padding-top: 11px; border-top: 1px solid var(--tv-border); }
 .tm-wake-model-note { padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--tv-accent) 24%, var(--tv-border)); border-radius: 10px; color: var(--tv-muted); background: var(--tv-accent-soft); font-size: .58rem; line-height: 1.45; }
 .tm-wake-model-note.warning { border-color: rgb(239 178 75 / 32%); color: #efb24b; background: rgb(239 178 75 / 8%); }

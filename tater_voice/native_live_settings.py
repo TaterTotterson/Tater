@@ -28,6 +28,7 @@ DEFAULTS: Dict[str, Any] = {
     "wake_engine": "micro_wake_word",
     "wake_mww_enabled": True,
     "wake_oww_enabled": True,
+    "wake_nww_enabled": False,
     "wake_word": "hey_tater",
     "wake_word_url": "",
     "wake_model_revision": "",
@@ -48,6 +49,9 @@ DEFAULTS: Dict[str, Any] = {
     "oww_profile_confirmation_threshold": 0.92,
     "oww_profile_confirmation_patience": 3,
     "oww_profile_error": "",
+    "nww_architecture": "cnn",
+    "nww_model_revision": "",
+    "nww_available_architectures": "",
     "wake_sensitivity": "normal",
     "wake_environment": "balanced",
     "wake_tuning_override_enabled": False,
@@ -104,12 +108,17 @@ FIRMWARE_SETTING_KEYS = (
     "wake_engine",
     "wake_mww_enabled",
     "wake_oww_enabled",
+    "wake_nww_enabled",
     "wake_word",
     "wake_word_url",
     "wake_model_revision",
     "oww_wake_word",
     "oww_wake_word_url",
     "oww_model_revision",
+    "nww_wake_word",
+    "nww_wake_word_url",
+    "nww_model_revision",
+    "nww_architecture",
     "wake_sensitivity",
     "wake_environment",
     "wake_threshold",
@@ -147,7 +156,7 @@ FIRMWARE_SETTING_KEYS = (
 )
 
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
-WAKE_DETECTOR_MODES = {"mww", "oww", "dual"}
+WAKE_DETECTOR_MODES = {"mww", "oww", "nww", "mww_oww", "mww_nww"}
 WAKE_FAMILIES = {"mww", "echo"}
 WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
@@ -199,6 +208,7 @@ GLOBAL_SATELLITE_CONTROL_KEYS = (
     "wake_engine",
     "wake_mww_enabled",
     "wake_oww_enabled",
+    "wake_nww_enabled",
     "wake_word",
     "wake_word_url",
     "oww_wake_word",
@@ -223,6 +233,12 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "wake_profile_error",
     "wake_model_revision",
     "oww_model_revision",
+    "nww_model_revision",
+    "nww_architecture",
+    "nww_available_architectures",
+    "bundle_has_mww",
+    "bundle_has_oww",
+    "wake_bundle_embedded_micro",
     "oww_profile_name",
     "oww_profile_threshold",
     "oww_profile_patience",
@@ -236,10 +252,12 @@ WAKE_FAMILY_PERSISTED_KEYS = {
     "wake_detector_mode",
     "wake_mww_enabled",
     "wake_oww_enabled",
+    "wake_nww_enabled",
     "wake_word",
     "wake_word_url",
     "oww_wake_word",
     "oww_wake_word_url",
+    "nww_architecture",
 } | set(GLOBAL_WAKE_PROFILE_KEYS)
 SHARED_SATELLITE_CONTROL_KEYS = {
     "capture_wake_audio",
@@ -325,21 +343,26 @@ BUILTIN_WAKE_PROFILES: Dict[str, Dict[str, Any]] = {
         "wake_profile_name": "Hey Tater",
         "wake_profile_source_url": "",
         "wake_profile_model_url": "",
-        "wake_profile_threshold": 0.98,
+        "wake_profile_threshold": 0.99,
         "wake_profile_sliding_window": 5,
-        "wake_profile_close_miss_threshold": 0.81,
+        "wake_profile_close_miss_threshold": 0.82,
         "wake_profile_error": "",
     }
 }
 BUILTIN_OWW_PROFILES: Dict[str, Dict[str, Any]] = {
     "hey_tater": {
         "oww_profile_name": "Hey Tater",
-        "oww_profile_threshold": 0.99,
+        "oww_profile_threshold": 0.74,
         "oww_profile_patience": 3,
-        "oww_profile_confirmation_threshold": 0.92,
+        "oww_profile_confirmation_threshold": 0.96,
         "oww_profile_confirmation_patience": 3,
         "oww_profile_error": "",
         "oww_model_revision": "",
+        "nww_model_revision": "",
+        "nww_available_architectures": "cnn,gru",
+        "bundle_has_mww": True,
+        "bundle_has_oww": True,
+        "wake_bundle_embedded_micro": True,
     }
 }
 WAKE_WORDS = {row[0]: {"label": row[1]} for row in WAKE_WORD_ROWS}
@@ -721,6 +744,11 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
             ),
             "oww_profile_error": _text(source.get("oww_profile_error")),
             "oww_model_revision": _text(source.get("oww_model_revision")),
+            "nww_model_revision": _text(source.get("nww_model_revision")),
+            "nww_available_architectures": _text(source.get("nww_available_architectures")),
+            "bundle_has_mww": _as_bool(source.get("bundle_has_mww"), False),
+            "bundle_has_oww": _as_bool(source.get("bundle_has_oww"), False),
+            "wake_bundle_embedded_micro": _as_bool(source.get("wake_bundle_embedded_micro"), False),
         }
     return {
         "oww_profile_name": "Custom Wake Word" if wake_word == "custom_url" else "Hey Tater",
@@ -730,6 +758,11 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
         "oww_profile_confirmation_patience": int(DEFAULTS["oww_profile_confirmation_patience"]),
         "oww_profile_error": "",
         "oww_model_revision": "",
+        "nww_model_revision": "",
+        "nww_available_architectures": "",
+        "bundle_has_mww": wake_word == "hey_tater",
+        "bundle_has_oww": wake_word == "hey_tater",
+        "wake_bundle_embedded_micro": False,
     }
 
 
@@ -742,18 +775,23 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         "oww_profile_confirmation_threshold": float(DEFAULTS["oww_profile_confirmation_threshold"]),
         "oww_profile_confirmation_patience": int(DEFAULTS["oww_profile_confirmation_patience"]),
         "oww_model_revision": "",
+        "nww_model_revision": "",
+        "nww_available_architectures": "",
+        "bundle_has_mww": False,
+        "bundle_has_oww": False,
+        "wake_bundle_embedded_micro": False,
     }
     if not _is_url(url):
-        return {**fallback, "oww_profile_error": "openWakeWord bundle URL is missing or invalid."}
+        return {**fallback, "oww_profile_error": "Wake bundle URL is missing or invalid."}
     try:
         request = Request(url, headers={"User-Agent": "Tater-Native-Satellite/0.1"})
         with urlopen(request, timeout=WAKE_PROFILE_FETCH_TIMEOUT_S) as response:
-            raw = response.read(128 * 1024)
+            raw = response.read(512 * 1024)
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
-        return {**fallback, "oww_profile_error": f"Could not read openWakeWord bundle: {exc}"}
+        return {**fallback, "oww_profile_error": f"Could not read wake bundle: {exc}"}
     if not isinstance(payload, dict):
-        return {**fallback, "oww_profile_error": "openWakeWord bundle did not contain an object."}
+        return {**fallback, "oww_profile_error": "Wake bundle did not contain an object."}
     micro = payload.get("micro_wake_word") if isinstance(payload.get("micro_wake_word"), dict) else {}
     oww = payload.get("open_wake_word") if isinstance(payload.get("open_wake_word"), dict) else {}
     artifacts = oww.get("artifacts") if isinstance(oww.get("artifacts"), dict) else {}
@@ -790,34 +828,108 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         maximum=20,
     )
     bundle_type = _text(payload.get("type"))
+    schema_version = _as_int(payload.get("schema_version"), 0, minimum=0, maximum=99)
     manifest_ref = _text(micro.get("manifest"))
     mww_model_ref = _text(micro.get("model"))
     manifest_sha = _text(micro.get("manifest_sha256")).lower()
     mww_model_sha = _text(micro.get("model_sha256")).lower()
     metadata_sha = _text(oww.get("metadata_sha256")).lower()
-    digest_values = (manifest_sha, mww_model_sha, metadata_sha, onnx_sha)
+
+    def valid_digest(value: str) -> bool:
+        return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+    embedded_micro = schema_version >= 2 and not manifest_ref
     has_micro = (
-        manifest_ref.lower().endswith(".json")
-        and mww_model_ref.lower().endswith(".tflite")
-        and all(len(value) == 64 and all(character in "0123456789abcdef" for character in value) for value in digest_values)
+        mww_model_ref.lower().endswith(".tflite")
+        and valid_digest(mww_model_sha)
+        and (
+            embedded_micro
+            or (manifest_ref.lower().endswith(".json") and valid_digest(manifest_sha))
+        )
+    )
+    has_oww = has_onnx and valid_digest(onnx_sha) and (
+        not _text(oww.get("metadata")) or valid_digest(metadata_sha)
+    )
+    nano = payload.get("nano_wake_word") if isinstance(payload.get("nano_wake_word"), dict) else {}
+    variants = nano.get("variants") if isinstance(nano.get("variants"), dict) else {}
+    nano_architectures: List[str] = []
+    for architecture in ("cnn", "gru"):
+        variant = variants.get(architecture)
+        if not isinstance(variant, dict):
+            continue
+        model_ref = _text(variant.get("model"))
+        model_sha = _text(variant.get("model_sha256")).lower()
+        size_value = variant.get("model_size_bytes")
+        if not model_ref:
+            variant_artifacts = variant.get("artifacts") if isinstance(variant.get("artifacts"), dict) else {}
+            variant_model = variant_artifacts.get("onnx")
+            if isinstance(variant_model, dict):
+                model_ref = _text(variant_model.get("file"))
+                model_sha = _text(variant_model.get("sha256")).lower()
+                size_value = variant_model.get("size_bytes")
+        size = _as_int(size_value, 0, minimum=0, maximum=16 * 1024 * 1024)
+        if model_ref.lower().endswith(".onnx") and valid_digest(model_sha) and size > 0:
+            nano_architectures.append(architecture)
+
+    native = micro.get("tater_native") if isinstance(micro.get("tater_native"), dict) else {}
+    micro_settings = micro.get("micro") if isinstance(micro.get("micro"), dict) else {}
+    profile_threshold = round(
+        _as_float(
+            native.get("wake_threshold", micro_settings.get("probability_cutoff")),
+            float(DEFAULTS["wake_profile_threshold"]),
+            minimum=0.01,
+            maximum=0.99,
+        ),
+        3,
+    )
+    profile_window = _as_int(
+        native.get("wake_sliding_window", micro_settings.get("sliding_window_size")),
+        int(DEFAULTS["wake_profile_sliding_window"]),
+        minimum=1,
+        maximum=10,
+    )
+    profile_close_miss = round(
+        _as_float(
+            native.get("close_miss_threshold"),
+            float(DEFAULTS["wake_profile_close_miss_threshold"]),
+            minimum=0.01,
+            maximum=0.99,
+        ),
+        3,
     )
     error = ""
-    if payload.get("schema_version") != 1 or bundle_type != "tater_wake_word_bundle" or not has_micro or not has_onnx:
-        error = "URL is not a complete Tater dual-model bundle with matching MWW TFLite and OWW ONNX artifacts."
+    if schema_version not in {1, 2, 3} or bundle_type != "tater_wake_word_bundle" or not has_micro:
+        error = "URL is not a complete Tater wake bundle with a verified microWakeWord fallback."
+    revision = hashlib.sha256(raw).hexdigest()
+    profile_name = _text(payload.get("wake_word") or payload.get("label") or payload.get("key")) or "Custom Wake Word"
     return {
-        "oww_profile_name": _text(payload.get("wake_word") or payload.get("label") or payload.get("key")) or "Custom Wake Word",
+        "oww_profile_name": profile_name,
         "oww_profile_threshold": threshold,
         "oww_profile_patience": patience,
         "oww_profile_confirmation_threshold": confirmation_threshold,
         "oww_profile_confirmation_patience": confirmation_patience,
         "oww_profile_error": error,
-        "oww_model_revision": hashlib.sha256(raw).hexdigest(),
+        "oww_model_revision": revision,
+        "nww_model_revision": revision,
+        "nww_available_architectures": ",".join(nano_architectures),
+        "bundle_has_mww": has_micro,
+        "bundle_has_oww": has_oww,
+        "wake_bundle_embedded_micro": embedded_micro,
         "wake_bundle_url": url,
         "wake_bundle_manifest_url": urljoin(url, manifest_ref) if manifest_ref else "",
         "wake_bundle_model_url": urljoin(url, mww_model_ref) if mww_model_ref else "",
         "wake_bundle_phrase": _text(payload.get("wake_word")),
         "wake_bundle_manifest_sha256": manifest_sha,
         "wake_bundle_model_sha256": mww_model_sha,
+        "wake_profile_key": _wake_profile_key("custom_url", url),
+        "wake_profile_name": profile_name,
+        "wake_profile_source_url": urljoin(url, manifest_ref) if manifest_ref else url,
+        "wake_profile_model_url": urljoin(url, mww_model_ref) if mww_model_ref else "",
+        "wake_profile_threshold": profile_threshold,
+        "wake_profile_sliding_window": profile_window,
+        "wake_profile_close_miss_threshold": profile_close_miss,
+        "wake_profile_error": error,
+        "wake_model_revision": revision,
     }
 
 
@@ -976,24 +1088,40 @@ def _raw_wake_family_settings(family: Any) -> Dict[str, Any]:
 
 
 def _wake_detector_mode(value: Any, source: Dict[str, Any] | None = None) -> str:
-    token = _lower(value)
+    token = _lower(value).replace("+", "_").replace("-", "_")
+    if token == "dual":
+        token = "mww_oww"
     if token in WAKE_DETECTOR_MODES:
         return token
     row = source or {}
     mww_enabled = _as_bool(row.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
     oww_enabled = _as_bool(row.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
+    nww_enabled = _as_bool(row.get("wake_nww_enabled"), bool(DEFAULTS["wake_nww_enabled"]))
+    if mww_enabled and nww_enabled:
+        return "mww_nww"
     if mww_enabled and oww_enabled:
-        return "dual"
+        return "mww_oww"
+    if nww_enabled:
+        return "nww"
     if oww_enabled:
         return "oww"
     return "mww"
+
+
+def _wake_detector_flags(mode: Any) -> tuple[bool, bool, bool]:
+    token = _wake_detector_mode(mode)
+    return (
+        token in {"mww", "mww_oww", "mww_nww"},
+        token in {"oww", "mww_oww"},
+        token in {"nww", "mww_nww"},
+    )
 
 
 def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = "") -> str:
     caps = capabilities if isinstance(capabilities, dict) else {}
     if any(
         _as_bool(caps.get(key), False)
-        for key in ("openwakeword", "wake_detector_selection", "dual_wake_confirmation")
+        for key in ("openwakeword", "nanowakeword", "wake_detector_selection", "dual_wake_confirmation")
     ):
         return "echo"
     # Board fallback keeps settings correct while an older Echo build is connecting
@@ -1091,8 +1219,10 @@ def _ensure_wake_family_settings() -> None:
             "wake_detector_mode": "mww",
             "wake_mww_enabled": True,
             "wake_oww_enabled": False,
+            "wake_nww_enabled": False,
         }
     )
+    legacy_mww, legacy_oww, legacy_nww = _wake_detector_flags(legacy_mode)
     echo_values = {
         key: legacy.get(key)
         for key in WAKE_FAMILY_PERSISTED_KEYS
@@ -1101,8 +1231,9 @@ def _ensure_wake_family_settings() -> None:
     echo_values.update(
         {
             "wake_detector_mode": legacy_mode,
-            "wake_mww_enabled": legacy_mode in {"mww", "dual"},
-            "wake_oww_enabled": legacy_mode in {"oww", "dual"},
+            "wake_mww_enabled": legacy_mww,
+            "wake_oww_enabled": legacy_oww,
+            "wake_nww_enabled": legacy_nww,
         }
     )
     try:
@@ -1477,6 +1608,10 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         wake_verifier_mode = str(DEFAULTS["wake_verifier_mode"])
     wake_mww_enabled = _as_bool(source.get("wake_mww_enabled"), bool(DEFAULTS["wake_mww_enabled"]))
     wake_oww_enabled = _as_bool(source.get("wake_oww_enabled"), bool(DEFAULTS["wake_oww_enabled"]))
+    wake_nww_enabled = _as_bool(source.get("wake_nww_enabled"), bool(DEFAULTS["wake_nww_enabled"]))
+    nww_architecture = _lower(source.get("nww_architecture"))
+    if nww_architecture not in {"cnn", "gru"}:
+        nww_architecture = str(DEFAULTS["nww_architecture"])
     wake_word = _wake_word_value(source.get("wake_word"))
     wake_word_url = _text(source.get("wake_word_url"))
     if wake_word == "custom_url" and not wake_word_url and _is_url(source.get("wake_word")):
@@ -1582,6 +1717,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "wake_engine": wake_engine,
         "wake_mww_enabled": wake_mww_enabled,
         "wake_oww_enabled": wake_oww_enabled,
+        "wake_nww_enabled": wake_nww_enabled,
         "wake_word": wake_word,
         "wake_word_url": wake_word_url,
         "wake_model_revision": _text(profile.get("wake_model_revision")),
@@ -1596,6 +1732,9 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "oww_wake_word": oww_wake_word,
         "oww_wake_word_url": oww_wake_word_url,
         "oww_model_revision": _text(oww_profile.get("oww_model_revision")),
+        "nww_model_revision": _text(oww_profile.get("nww_model_revision")),
+        "nww_architecture": nww_architecture,
+        "nww_available_architectures": _text(oww_profile.get("nww_available_architectures")),
         "oww_profile_name": _text(oww_profile.get("oww_profile_name")) or str(DEFAULTS["oww_profile_name"]),
         "oww_profile_threshold": round(
             _as_float(oww_profile.get("oww_profile_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
@@ -1794,9 +1933,11 @@ def shared_wake_settings_snapshot() -> Dict[str, Any]:
         # same validated phrase, so carry that identity into the unified view.
         current["wake_profile_name"] = _text(current.get("oww_profile_name"))
     mode = _wake_detector_mode(raw.get("wake_detector_mode"), current)
+    mww_enabled, oww_enabled, nww_enabled = _wake_detector_flags(mode)
     current["wake_detector_mode"] = mode
-    current["wake_mww_enabled"] = mode in {"mww", "dual"}
-    current["wake_oww_enabled"] = mode in {"oww", "dual"}
+    current["wake_mww_enabled"] = mww_enabled
+    current["wake_oww_enabled"] = oww_enabled
+    current["wake_nww_enabled"] = nww_enabled
     return current
 
 
@@ -1813,6 +1954,7 @@ def wake_family_settings_snapshot(family: Any) -> Dict[str, Any]:
         current["wake_detector_mode"] = "mww"
         current["wake_mww_enabled"] = True
         current["wake_oww_enabled"] = False
+        current["wake_nww_enabled"] = False
     return current
 
 
@@ -1833,18 +1975,53 @@ def firmware_settings_snapshot(
         },
         base=current,
     )
-    output = {key: current[key] for key in FIRMWARE_SETTING_KEYS}
+    # Some firmware fields (notably the projected NWW model source) are
+    # derived below rather than persisted in the shared settings document.
+    output = {key: current[key] for key in FIRMWARE_SETTING_KEYS if key in current}
     if family == "mww":
         output["wake_mww_enabled"] = True
         output["wake_oww_enabled"] = False
-        for key in ("wake_oww_enabled", "oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
+        output["wake_nww_enabled"] = False
+        for key in (
+            "wake_oww_enabled", "wake_nww_enabled", "oww_wake_word", "oww_wake_word_url",
+            "oww_model_revision", "nww_wake_word", "nww_wake_word_url", "nww_model_revision",
+            "nww_architecture",
+        ):
             output.pop(key, None)
     else:
         mode = _wake_detector_mode(family_settings.get("wake_detector_mode"), family_settings)
+        if mode in {"nww", "mww_nww"} and not _as_bool((capabilities or {}).get("nanowakeword"), False):
+            # Older Echo/ThirdReality builds do not understand the NWW flags.
+            # Keep them safely on the shared bundle's MWW fallback until their
+            # firmware advertises NanoWakeWord support.
+            mode = "mww"
+        mww_enabled, oww_enabled, nww_enabled = _wake_detector_flags(mode)
         output["wake_detector_mode"] = mode
-        output["wake_mww_enabled"] = mode in {"mww", "dual"}
-        output["wake_oww_enabled"] = mode in {"oww", "dual"}
+        output["wake_mww_enabled"] = mww_enabled
+        output["wake_oww_enabled"] = oww_enabled
+        output["wake_nww_enabled"] = nww_enabled
         if mode == "mww":
+            for key in (
+                "oww_wake_word", "oww_wake_word_url", "oww_model_revision",
+                "nww_wake_word", "nww_wake_word_url", "nww_model_revision", "nww_architecture",
+            ):
+                output.pop(key, None)
+        elif mode in {"oww", "nww"}:
+            # Echo firmware installs every model source named in a settings
+            # frame, even when that detector is disabled. Do not make an
+            # OWW-only selection download or validate the MWW half of a
+            # matched catalog bundle.
+            for key in ("wake_word", "wake_word_url", "wake_model_revision"):
+                output.pop(key, None)
+        if nww_enabled:
+            if _wake_word_value(family_settings.get("oww_wake_word")) == "custom_url":
+                output["nww_wake_word"] = "custom_url"
+                output["nww_wake_word_url"] = output.get("oww_wake_word_url", "")
+                output["nww_model_revision"] = output.get("nww_model_revision") or output.get("oww_model_revision", "")
+            else:
+                output["nww_wake_word"] = "hey_tater"
+                output.pop("nww_wake_word_url", None)
+                output.pop("nww_model_revision", None)
             for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
                 output.pop(key, None)
     if not _board_supports_led_settings(board):
@@ -1885,6 +2062,10 @@ def _profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Di
         wake_word_url = _text(source.get("wake_word"))
     if wake_word != "custom_url":
         return dict(BUILTIN_WAKE_PROFILES.get(wake_word) or BUILTIN_WAKE_PROFILES["hey_tater"])
+    if wake_word_url.lower().split("?", 1)[0].endswith(".wake-bundle.json"):
+        bundled = _fetch_oww_profile_json(wake_word_url)
+        if _as_bool(bundled.get("bundle_has_mww"), False) and not _text(bundled.get("wake_profile_error")):
+            return bundled
     fetched = _fetch_wake_profile_json(wake_word_url)
     fetch_error = _text(fetched.get("wake_profile_error"))
     if not fetch_error:
@@ -1927,15 +2108,30 @@ def _wake_phrase_identity(value: Any) -> str:
     return "".join(character for character in _lower(value) if character.isalnum())
 
 
-def _dual_profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) -> Dict[str, Any]:
+def _dual_profile_for_save(
+    values: Dict[str, Any],
+    current_raw: Dict[str, Any],
+    *,
+    required_engine: str = "oww",
+    nww_architecture: str = "cnn",
+) -> Dict[str, Any]:
     source = {**DEFAULTS, **(current_raw or {}), **(values or {})}
     bundle_source = _wake_word_value(source.get("oww_wake_word"))
     bundle_url = _text(source.get("oww_wake_word_url"))
     if bundle_source != "custom_url":
-        return {
+        builtin = {
             **dict(BUILTIN_WAKE_PROFILES["hey_tater"]),
             **dict(BUILTIN_OWW_PROFILES["hey_tater"]),
         }
+        if required_engine == "nww" and nww_architecture not in {
+            item.strip().lower()
+            for item in _text(builtin.get("nww_available_architectures")).split(",")
+            if item.strip()
+        }:
+            raise ValueError(
+                f"The built-in wake package does not contain a NanoWakeWord {nww_architecture.upper()} model."
+            )
+        return builtin
 
     fetched = _fetch_oww_profile_json(bundle_url)
     bundle_error = _text(fetched.get("oww_profile_error"))
@@ -1948,6 +2144,22 @@ def _dual_profile_for_save(values: Dict[str, Any], current_raw: Dict[str, Any]) 
                 "oww_profile_error": bundle_error,
             }
         raise ValueError(bundle_error)
+
+    if required_engine == "oww" and not _as_bool(fetched.get("bundle_has_oww"), False):
+        raise ValueError("The selected wake bundle does not contain an openWakeWord model.")
+    if required_engine == "nww":
+        architectures = {
+            item.strip().lower()
+            for item in _text(fetched.get("nww_available_architectures")).split(",")
+            if item.strip()
+        }
+        if nww_architecture not in architectures:
+            raise ValueError(
+                f"The selected wake bundle does not contain a NanoWakeWord {nww_architecture.upper()} model."
+            )
+
+    if _as_bool(fetched.get("wake_bundle_embedded_micro"), False):
+        return fetched
 
     manifest_url = _text(fetched.get("wake_bundle_manifest_url"))
     mww_profile = _fetch_wake_profile_json(manifest_url)
@@ -1993,7 +2205,8 @@ def settings_fields(
         else {"options": [], "selected_url": "", "description": ""}
     )
     wake_word_source = "catalog" if catalog_selected else current["wake_word"]
-    oww_catalog_type = "dual"
+    detector_mode = _wake_detector_mode(current.get("wake_detector_mode"), current)
+    oww_catalog_type = "nww" if detector_mode in {"nww", "mww_nww"} else "dual"
     oww_catalog_selected = (
         current["oww_wake_word"] == "custom_url"
         and wake_word_catalog.is_catalog_url(
@@ -2011,17 +2224,17 @@ def settings_fields(
         else {"options": [], "selected_url": "", "description": ""}
     )
     oww_wake_word_source = "catalog" if oww_catalog_selected else current["oww_wake_word"]
-    oww_custom_source_label = "Custom Matched Bundle"
-    oww_catalog_source_label = "Matched Wake Bundle Catalog"
+    oww_custom_source_label = "Custom Wake Bundle"
+    oww_catalog_source_label = "Wake Bundle Catalog"
     oww_source_description = (
-        "Choose the bundled Hey Tater pair or a trainer-produced matched wake bundle. "
-        "MWW-only satellites use its microWakeWord model; OWW-capable satellites use "
-        "openWakeWord alone or both detectors, according to the selected mode."
+        "Choose the bundled Hey Tater models or one trainer-produced wake bundle. "
+        "MWW-only satellites use its microWakeWord model; capable satellites use the "
+        "selected MWW, OWW, or NWW policy."
     )
-    oww_url_label = "Matched Wake Bundle URL"
+    oww_url_label = "Wake Bundle URL"
     oww_url_description = (
-        "Use the matched .wake-bundle.json from a Tater trainer. Tater validates both models, "
-        "sends microWakeWord to MWW-only satellites, and sends the requested detector mode to OWW-capable firmware."
+        "Use the .wake-bundle.json from a Tater trainer. Tater validates the selected models, "
+        "sends microWakeWord to MWW-only satellites, and sends the requested detector mode to capable firmware."
     )
     fields = [
         {
@@ -2047,16 +2260,18 @@ def settings_fields(
             "key": "wake_detector_mode",
             "label": "Wake Detection Mode",
             "type": "select",
-            "value": current.get("wake_detector_mode", "dual"),
-            "default": "dual",
+            "value": current.get("wake_detector_mode", "mww_oww"),
+            "default": "mww_oww",
             "options": [
-                {"value": "mww", "label": "microWakeWord Only"},
-                {"value": "oww", "label": "OWW Where Supported"},
-                {"value": "dual", "label": "Dual Wake Word"},
+                {"value": "mww", "label": "MWW", "group": "single"},
+                {"value": "oww", "label": "OWW", "group": "single"},
+                {"value": "nww", "label": "NWW", "group": "single"},
+                {"value": "mww_oww", "label": "MWW + OWW", "group": "dual"},
+                {"value": "mww_nww", "label": "MWW + NWW", "group": "dual"},
             ],
             "description": (
-                "Use microWakeWord everywhere; use openWakeWord alone on capable satellites with "
-                "microWakeWord fallback on ESP32 and other MWW-only devices; or require both in Dual mode."
+                "Single modes use one detector on capable satellites. Dual modes require MWW plus the selected "
+                "companion. ESP32 and other MWW-only devices always keep the bundle's MWW fallback."
             ),
         },
         {
@@ -2074,6 +2289,14 @@ def settings_fields(
             "value": current["wake_oww_enabled"],
             "default": DEFAULTS["wake_oww_enabled"],
             "description": "Use openWakeWord as a second opinion, or as the primary detector when microWakeWord is disabled.",
+        },
+        {
+            "key": "wake_nww_enabled",
+            "label": "Enable NanoWakeWord",
+            "type": "checkbox",
+            "value": current["wake_nww_enabled"],
+            "default": DEFAULTS["wake_nww_enabled"],
+            "description": "Use a NanoWakeWord CNN or GRU model alone, or alongside microWakeWord.",
         },
         {
             "key": "wake_word",
@@ -2096,13 +2319,16 @@ def settings_fields(
         },
         {
             "key": "wake_word_url",
-            "label": "Wake Word JSON URL",
+            "label": "Wake Bundle or MWW JSON URL",
             "type": "text",
             "value": current["wake_word_url"] if current["wake_word"] == "custom_url" else "",
             "default": DEFAULTS["wake_word_url"],
-            "placeholder": "https://example.local/wake_word.json",
+            "placeholder": "https://example.local/wake_word.wake-bundle.json",
             "show_when": {"source_key": "wake_word", "equals": "custom_url"},
-            "description": "Tater reads tuning from this JSON, and the satellite downloads the JSON/model to swap on-device.",
+            "description": (
+                "Use the trainer's .wake-bundle.json so the same package can serve every detector mode, "
+                "or provide a simple ESPHome microWakeWord JSON package."
+            ),
         },
         {
             "key": "wake_profile_name",
@@ -2113,7 +2339,7 @@ def settings_fields(
         },
         {
             "key": "oww_wake_word",
-            "label": "openWakeWord Model",
+            "label": "Wake Word Bundle",
             "type": "select",
             "value": oww_wake_word_source,
             "default": DEFAULTS["oww_wake_word"],
@@ -2150,7 +2376,7 @@ def settings_fields(
         },
         {
             "key": "oww_profile_name",
-            "label": "Loaded openWakeWord Profile",
+            "label": "Loaded Wake Bundle",
             "type": "readonly",
             "value": current["oww_profile_name"],
             "description": current["oww_profile_error"] or (
@@ -2162,6 +2388,26 @@ def settings_fields(
                 if current["wake_mww_enabled"] and current["wake_oww_enabled"]
                 else f"Threshold {current['oww_profile_threshold']} · {current['oww_profile_patience']} consecutive frames."
             ),
+        },
+        {
+            "key": "nww_architecture",
+            "label": "NanoWakeWord Architecture",
+            "type": "select",
+            "value": current["nww_architecture"],
+            "default": DEFAULTS["nww_architecture"],
+            "options": [
+                {
+                    "value": architecture,
+                    "label": architecture.upper(),
+                    "disabled": architecture not in {
+                        item.strip().lower()
+                        for item in _text(current.get("nww_available_architectures")).split(",")
+                        if item.strip()
+                    },
+                }
+                for architecture in ("cnn", "gru")
+            ],
+            "description": "Only architectures present in the selected wake bundle are available.",
         },
         {
             "key": "wake_tuning_section",
@@ -2753,15 +2999,14 @@ def shared_wake_model_settings_sections() -> List[Dict[str, Any]]:
             (
                 "All Satellites",
                 (
-                    "Choose one wake phrase for every satellite. microWakeWord runs everywhere; "
-                    "OWW Where Supported uses openWakeWord on capable firmware with an MWW fallback, "
-                    "while Dual Wake requires both detectors where supported."
+                    "Choose one wake phrase for every satellite. Use MWW, OWW, or NWW alone on capable "
+                    "firmware, or require MWW plus OWW/NWW. MWW-only satellites keep the bundle fallback."
                 ),
                 (
                     "wake_engine", "wake_detector_mode",
                     "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
                     "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
-                    "oww_profile_name",
+                    "oww_profile_name", "nww_architecture",
                 ),
             ),
         ],
@@ -2774,12 +3019,12 @@ def echo_model_settings_sections() -> List[Dict[str, Any]]:
         [
             (
                 "Echo Satellites",
-                "Choose microWakeWord, openWakeWord, or Dual Wake Word mode for OWW-capable Echo firmware.",
+                "Choose MWW, OWW, NWW, MWW + OWW, or MWW + NWW for capable Echo firmware.",
                 (
                     "wake_engine", "wake_detector_mode",
                     "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
                     "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
-                    "oww_profile_name",
+                    "oww_profile_name", "nww_architecture",
                 ),
             ),
         ],
@@ -2806,10 +3051,10 @@ def global_model_settings_sections() -> List[Dict[str, Any]]:
                 "Wake Word",
                 "",
                 (
-                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled",
+                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled", "wake_nww_enabled",
                     "wake_word", "wake_word_catalog_url", "wake_word_url",
                     "wake_profile_name", "oww_wake_word", "oww_wake_word_catalog_url",
-                    "oww_wake_word_url", "oww_profile_name",
+                    "oww_wake_word_url", "oww_profile_name", "nww_architecture",
                 ),
             ),
             (
@@ -2841,10 +3086,10 @@ def global_settings_sections() -> List[Dict[str, Any]]:
                 "Wake Word",
                 "",
                 (
-                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled",
+                    "wake_engine", "wake_mww_enabled", "wake_oww_enabled", "wake_nww_enabled",
                     "wake_word", "wake_word_catalog_url", "wake_word_url",
                     "wake_profile_name", "oww_wake_word", "oww_wake_word_catalog_url",
-                    "oww_wake_word_url", "oww_profile_name",
+                    "oww_wake_word_url", "oww_profile_name", "nww_architecture",
                 ),
             ),
             (
@@ -2871,10 +3116,24 @@ def resolve_wake_word_source_values(values: Dict[str, Any]) -> Dict[str, Any]:
         )
     oww_source = _lower(resolved.get("oww_wake_word"))
     if oww_source == "catalog":
+        detector_mode = _lower(resolved.get("wake_detector_mode"))
+        if detector_mode == "dual":
+            detector_mode = "mww_oww"
+        nww_catalog_requested = detector_mode in {"nww", "mww_nww"}
+        if not detector_mode:
+            nww_catalog_requested = _as_bool(
+                resolved.get("wake_nww_enabled"),
+                False,
+            )
+        catalog_type = (
+            "nww"
+            if nww_catalog_requested
+            else "dual"
+        )
         resolved["oww_wake_word"] = "custom_url"
         resolved["oww_wake_word_url"] = wake_word_catalog.require_catalog_url(
             resolved.get("oww_wake_word_catalog_url"),
-            model_type="dual",
+            model_type=catalog_type,
         )
     resolved.pop("wake_word_catalog_url", None)
     resolved.pop("oww_wake_word_catalog_url", None)
@@ -2901,17 +3160,28 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
         mode = "mww"
     else:
         mode = _wake_detector_mode(incoming.get("wake_detector_mode"), {**current, **incoming})
+    mww_enabled, oww_enabled, nww_enabled = _wake_detector_flags(mode)
     incoming.update(
         {
             "wake_detector_mode": mode,
-            "wake_mww_enabled": mode in {"mww", "dual"},
-            "wake_oww_enabled": mode in {"oww", "dual"},
+            "wake_mww_enabled": mww_enabled,
+            "wake_oww_enabled": oww_enabled,
+            "wake_nww_enabled": nww_enabled,
         }
     )
 
     combined_source = {**DEFAULTS, **current_raw, **incoming}
-    if mode in {"oww", "dual"}:
-        dual_profile = _dual_profile_for_save(incoming, current_raw)
+    if oww_enabled or nww_enabled:
+        nww_architecture = _lower(combined_source.get("nww_architecture"))
+        if nww_architecture not in {"cnn", "gru"}:
+            nww_architecture = str(DEFAULTS["nww_architecture"])
+        incoming["nww_architecture"] = nww_architecture
+        dual_profile = _dual_profile_for_save(
+            incoming,
+            current_raw,
+            required_engine="nww" if nww_enabled else "oww",
+            nww_architecture=nww_architecture,
+        )
         profile = dual_profile
         oww_profile = dual_profile
         if _wake_word_value(combined_source.get("oww_wake_word")) == "custom_url":
@@ -2938,8 +3208,9 @@ def save_wake_family_settings(family: Any, values: Dict[str, Any]) -> Dict[str, 
         )
     normalized = normalize_settings(incoming, base={**current, **profile, **oww_profile})
     normalized["wake_detector_mode"] = mode
-    normalized["wake_mww_enabled"] = mode in {"mww", "dual"}
-    normalized["wake_oww_enabled"] = mode in {"oww", "dual"}
+    normalized["wake_mww_enabled"] = mww_enabled
+    normalized["wake_oww_enabled"] = oww_enabled
+    normalized["wake_nww_enabled"] = nww_enabled
     changed = [
         key
         for key in WAKE_FAMILY_PERSISTED_KEYS
@@ -2985,6 +3256,7 @@ def save_shared_wake_settings(values: Dict[str, Any]) -> Dict[str, Any]:
             "wake_detector_mode": "mww",
             "wake_mww_enabled": True,
             "wake_oww_enabled": False,
+            "wake_nww_enabled": False,
         }
     )
     try:
@@ -3039,7 +3311,7 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
         global_oww_url = _text(global_raw.get("oww_wake_word_url"))
         oww_profile = _oww_profile_from_source(global_raw, global_oww_word, global_oww_url)
     elif dual_enabled:
-        dual_profile = _dual_profile_for_save(incoming, current_raw)
+        dual_profile = _dual_profile_for_save(incoming, current_raw, required_engine="oww")
         profile = dual_profile
         oww_profile = dual_profile
         selected_bundle = _wake_word_value(combined_source.get("oww_wake_word"))

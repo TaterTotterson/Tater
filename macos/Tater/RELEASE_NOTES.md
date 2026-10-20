@@ -1,43 +1,58 @@
-# Tater v1.7.1
+# Tater v1.8.0
 
-Tater v1.7.1 adds opt-in model thinking with separated reasoning visibility
-across Hydra and chat, and fixes Hugging Face download progress so it reflects
-the active transfer instead of being reset by worker heartbeats.
+Tater v1.8.0 adds NanoWakeWord throughout the wake-word stack, introduces one
+portable wake bundle for every supported detector, and makes Hydra follow-up
+actions and clarifying conversations more reliable.
 
 ## What's New
 
-### Model Thinking and Reasoning
+### MWW, OWW, and NWW Wake Modes
 
-- Adds one Model Thinking setting for internal llama.cpp, MLX, and Transformers
-  runtimes plus external OpenAI-compatible and llama.cpp APIs.
-- Keeps thinking off by default so users explicitly opt in for models and
-  runtimes that support it.
-- Preserves provider reasoning separately from visible responses, tool calls,
-  and speech instead of mixing private work into the assistant's answer.
+- Reorganizes Wake Detection Mode into clear single-engine MWW, OWW, and NWW
+  choices plus MWW + OWW and MWW + NWW confirmation modes.
+- Adds NanoWakeWord CNN and GRU selection, enabling only architectures that
+  are actually included in the selected package.
+- Keeps ESP32 and older satellites safely on the bundle's MWW model when they
+  do not advertise support for the selected companion engine.
+- Restricts OWW catalog packages to V7 or newer and NWW catalog packages to
+  verified V8-or-newer bundles.
 
-### Reasoning Visibility
+### One Wake Bundle Everywhere
 
-- Records compact reasoning summaries and role-specific traces in the Hydra
-  Ledger for diagnostics when thinking is enabled.
-- Adds a collapsed thinking row to Tater chat with a short summary and an
-  expandable view of the full separated reasoning trace.
-- Carries structured reasoning through streaming and multi-step tool calls while
-  keeping the normal chat response clean.
+- Supports the trainer's schema-v3 wake bundle as the canonical source for
+  MWW, OWW, NWW-CNN, and NWW-GRU models, tuning, revisions, and integrity
+  metadata while retaining the simple ESPHome MWW JSON.
+- Validates the models required by the selected wake policy before applying it
+  and securely proxies embedded MWW and NWW artifacts to satellites.
+- Updates the built-in Hey Tater package so capable satellites can use MWW,
+  OWW, NWW-CNN, NWW-GRU, or either supported dual-engine policy from one
+  matched model family.
 
-### Hugging Face Downloads
+### Satellite and Trainer Compatibility
 
-- Prevents downloader heartbeat events from overwriting measured file progress
-  with the download phase's four-percent floor.
-- Shows the active file's true transfer percentage in both the current-download
-  card and model progress list.
+- Tater Echo Firmware v2.7.0 and ThirdReality S420 firmware 0.2.24 add native
+  NWW-CNN and NWW-GRU inference, custom wake-bundle loading, architecture
+  selection, and MWW + NWW confirmation.
+- The Apple Silicon and NVIDIA Wake Word Trainers can train MWW, OWW, NWW-CNN,
+  and NWW-GRU individually or together using the shared TTS corpus plus user
+  positive and negative samples.
+- Trainer output now publishes one canonical Tater wake bundle, keeps the
+  ESPHome MWW package separate, and supports V8 catalog publishing for models
+  that include NanoWakeWord.
 
-## Updating
+### Smarter Hydra Follow-ups
 
-- macOS users already running v1.0.1 or later can install v1.7.1 through
-  Tater's normal updater after its signed macOS package is published.
-- macOS users still running v100 or earlier must perform the one-time manual
-  app replacement described with v1.0.1 because those builds treat the new
-  semantic version as older than `100`.
-- Docker users can pull `v1.7.1` or `latest` for the CPU image and
-  `v1.7.1-nvidia` or `nvidia` for the NVIDIA image after the release tag is
-  published.
+- Adds short-lived, scope-aware pending interaction state so Hydra can
+  distinguish confirmations, rejections, supplied details, modifications,
+  unrelated chat, and genuine clarification requests.
+- Uses the current user message as the only authority for continuing a pending
+  action and clears stale offers instead of turning casual conversation into
+  work the user did not request.
+- Records the selected turn branch in Hydra diagnostics and improves direct
+  clarification wording when an executable action still needs information.
+
+### Settings Reliability
+
+- Normalizes LLM port values across Hydra roles and Tater Open WebUI settings.
+- Shows useful field-level API validation messages instead of a generic save
+  error when settings contain invalid values.

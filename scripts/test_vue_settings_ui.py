@@ -142,7 +142,9 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn(".thydra-tabs", styles)
         self.assertIn("Reasoning traces", hydra)
         self.assertIn("row.reasoning_traces", hydra)
+        self.assertIn("row.turn_branch", hydra)
         self.assertIn('"reasoning_traces"', backend)
+        self.assertIn('"turn_branch"', backend)
         self.assertIn(".thydra-reasoning", styles)
 
         huggingface = (
@@ -341,8 +343,30 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn('v-model="draft.hydra_llm_thinking_enabled"', llm)
         self.assertIn('"hydra_llm_thinking_enabled"', models)
         self.assertIn('draft.hydra_llm_thinking_enabled = false', models)
+        self.assertIn("function normalizedPort(value: unknown): string", models)
+        self.assertIn("payload.tater_open_webui_llm_port = normalizedPort", models)
+        self.assertIn('suffix === "port" ? normalizedPort(value) : value', models)
         for retired_label in ("Add fallback route", "Primary route", "Backup model route", "First choice"):
             self.assertNotIn(retired_label, llm)
+
+    def test_llm_settings_accept_numeric_vue_ports_and_explain_validation_errors(self) -> None:
+        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        api = (REPO_ROOT / "frontend" / "src" / "shared" / "api.ts").read_text(encoding="utf-8")
+
+        self.assertIn("@field_validator(", backend)
+        for field in (
+            "hydra_llm_port",
+            "tater_open_webui_llm_port",
+            "hydra_llm_astraeus_port",
+            "hydra_llm_thanatos_port",
+            "hydra_llm_hermes_port",
+        ):
+            self.assertIn(f'"{field}",', backend)
+        self.assertIn("def _coerce_llm_port_to_text", backend)
+        self.assertIn("return str(value).strip()", backend)
+        self.assertIn("Array.isArray(body.detail)", api)
+        self.assertIn('filter((part) => part !== "body")', api)
+        self.assertIn('validationMessages.join("; ")', api)
 
     def test_local_model_saves_show_live_vue_apply_progress(self) -> None:
         models = (

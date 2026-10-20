@@ -165,6 +165,10 @@ function dedupeTargets(targets: Array<JsonRow | null>): JsonRow[] {
   return [...rows.values()];
 }
 
+function normalizedPort(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
 function llmPayload(): JsonRow {
   const servers = (Array.isArray(draft.hydra_base_servers) ? draft.hydra_base_servers as JsonRow[] : []).map((row) => ({
     provider: String(row.provider || "openai_compatible"), host: String(row.host || "").trim(), port: String(row.port || "").trim(), model: String(row.model || "").trim(), api_key: String(row.api_key || "").trim(), llama_cpp_slot: String(row.llama_cpp_slot || "").trim(),
@@ -180,6 +184,7 @@ function llmPayload(): JsonRow {
     "hydra_beast_mode_enabled",
   ];
   const payload: JsonRow = Object.fromEntries(keys.map((key) => [key, draft[key]]));
+  payload.tater_open_webui_llm_port = normalizedPort(draft.tater_open_webui_llm_port);
   Object.assign(payload, {
     hydra_llm_provider: primary.provider || "openai_compatible", hydra_llm_host: primary.host || "", hydra_llm_port: primary.port || "", hydra_llm_model: primary.model || "", hydra_llm_api_key: primary.api_key || "", hydra_llama_cpp_base_slot: primary.llama_cpp_slot || "", hydra_base_servers: servers,
   });
@@ -187,7 +192,10 @@ function llmPayload(): JsonRow {
   if (draft.tater_open_webui_llm_provider) targets.push(loadTarget(draft.tater_open_webui_llm_provider, draft.tater_open_webui_llm_model, { roles: ["Tater Open WebUI"] }));
   if (draft.spudex_llm_provider) targets.push(loadTarget(draft.spudex_llm_provider, draft.spudex_llm_model));
   ["astraeus", "thanatos", "hermes"].forEach((role) => {
-    ["provider", "host", "port", "model", "api_key", "llama_cpp_slot"].forEach((suffix) => { payload[`hydra_llm_${role}_${suffix}`] = draft[`hydra_llm_${role}_${suffix}`] ?? ""; });
+    ["provider", "host", "port", "model", "api_key", "llama_cpp_slot"].forEach((suffix) => {
+      const value = draft[`hydra_llm_${role}_${suffix}`] ?? "";
+      payload[`hydra_llm_${role}_${suffix}`] = suffix === "port" ? normalizedPort(value) : value;
+    });
     targets.push(loadTarget(draft[`hydra_llm_${role}_provider`], draft[`hydra_llm_${role}_model`], { roles: [role] }));
   });
   payload.hydra_local_model_load_targets = dedupeTargets(targets);

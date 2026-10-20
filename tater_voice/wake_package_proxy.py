@@ -10,13 +10,14 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 
-MAX_MANIFEST_BYTES = 128 * 1024
+MAX_MANIFEST_BYTES = 512 * 1024
 MAX_MODEL_BYTES = 16 * 1024 * 1024
 DOWNLOAD_TIMEOUT_S = 20.0
 
 _SECRET = secrets.token_bytes(32)
 _PACKAGES_LOCK = threading.RLock()
-_PACKAGES: Dict[str, Dict[str, str]] = {}
+_PACKAGES: Dict[str, Dict[str, Any]] = {}
+_PACKAGE_FETCH_LOCKS: Dict[str, threading.RLock] = {}
 
 
 class WakePackageProxyError(RuntimeError):
@@ -35,23 +36,61 @@ def _package_id(source_url: str) -> str:
     return hmac.new(_SECRET, source_url.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
+def _fetch_lock(package_id: str) -> threading.RLock:
+    with _PACKAGES_LOCK:
+        return _PACKAGE_FETCH_LOCKS.setdefault(package_id, threading.RLock())
+
+
+def _register_package(package_id: str, values: Dict[str, str]) -> None:
+    """Register source URLs without discarding already fetched artifacts."""
+    with _PACKAGES_LOCK:
+        row = _PACKAGES.setdefault(package_id, {})
+        for key, value in values.items():
+            if value or key not in row:
+                row[key] = value
+
+
+def _artifact_bytes(package_id: str, field: str, loader: Any) -> bytes:
+    # One slow upstream fetch populates the package for every satellite that
+    # reconnects at once. The per-package RLock also permits bundle loading to
+    # resolve its nested manifest without deadlocking.
+    with _fetch_lock(package_id):
+        row = _package(package_id)
+        cached = row.get(field)
+        if isinstance(cached, bytes):
+            return cached
+        body = loader()
+        with _PACKAGES_LOCK:
+            current = _PACKAGES.get(package_id)
+            if isinstance(current, dict):
+                current[field] = body
+        return body
+
+
 def register_manifest(base_url: Any, source_url: Any) -> str:
     source = _validated_http_url(source_url, label="Wake package URL")
     base = str(base_url or "").strip().rstrip("/")
     if not base:
         raise ValueError("Tater service URL is unavailable")
+    if urlsplit(source).path.lower().endswith(".wake-bundle.json"):
+        bundle_url = register_bundle(base, source)
+        package_id = urlsplit(bundle_url).path.rstrip("/").split("/")[-2]
+        return f"{base}/api/tater/satellite/v1/wake-package/{package_id}/manifest.json"
     package_id = _package_id(source)
     parsed = urlsplit(source)
     bundle_path = parsed.path.rsplit(".", 1)[0] + ".wake-bundle.json"
     bundle_source = parsed._replace(path=bundle_path, query="", fragment="").geturl()
-    with _PACKAGES_LOCK:
-        _PACKAGES[package_id] = {
+    _register_package(
+        package_id,
+        {
             "manifest_url": source,
             "model_url": "",
             "bundle_url": bundle_source,
             "oww_metadata_url": "",
             "oww_model_url": "",
-        }
+            "nww_model_urls": {},
+        },
+    )
     return f"{base}/api/tater/satellite/v1/wake-package/{package_id}/manifest.json"
 
 
@@ -61,14 +100,17 @@ def register_bundle(base_url: Any, source_url: Any) -> str:
     if not base:
         raise ValueError("Tater service URL is unavailable")
     package_id = _package_id(source)
-    with _PACKAGES_LOCK:
-        _PACKAGES[package_id] = {
+    _register_package(
+        package_id,
+        {
             "manifest_url": "",
             "model_url": "",
             "bundle_url": source,
             "oww_metadata_url": "",
             "oww_model_url": "",
-        }
+            "nww_model_urls": {},
+        },
+    )
     return f"{base}/api/tater/satellite/v1/wake-package/{package_id}/bundle.wake-bundle.json"
 
 
@@ -80,7 +122,7 @@ def register_dual_bundle(base_url: Any, source_url: Any) -> Tuple[str, str]:
     return manifest_url, bundle_url
 
 
-def _package(package_id: Any) -> Dict[str, str]:
+def _package(package_id: Any) -> Dict[str, Any]:
     token = str(package_id or "").strip().lower()
     if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
         raise KeyError("Unknown wake package")
@@ -116,12 +158,39 @@ def _download(raw_url: str, limit: int) -> Tuple[bytes, str]:
 
 def manifest_bytes(package_id: Any) -> bytes:
     token = str(package_id or "").strip().lower()
+    return _artifact_bytes(token, "manifest_body", lambda: _manifest_bytes_uncached(token))
+
+
+def _manifest_bytes_uncached(token: str) -> bytes:
     row = _package(token)
     manifest_url = str(row.get("manifest_url") or "").strip()
+    embedded = row.get("mww_manifest_payload")
+    if not manifest_url and isinstance(embedded, dict):
+        payload = dict(embedded)
+        payload["model"] = "model.tflite"
+        for key in ("manifest", "manifest_sha256", "model_sha256", "model_size_bytes"):
+            payload.pop(key, None)
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_MANIFEST_BYTES:
+            raise WakePackageProxyError(f"Wake package manifest exceeds {MAX_MANIFEST_BYTES} bytes")
+        return encoded
     if not manifest_url and row.get("bundle_url"):
         bundle_bytes(token)
         row = _package(token)
+        cached = row.get("manifest_body")
+        if isinstance(cached, bytes):
+            return cached
         manifest_url = str(row.get("manifest_url") or "").strip()
+        embedded = row.get("mww_manifest_payload")
+    if not manifest_url and isinstance(embedded, dict):
+        payload = dict(embedded)
+        payload["model"] = "model.tflite"
+        for key in ("manifest", "manifest_sha256", "model_sha256", "model_size_bytes"):
+            payload.pop(key, None)
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_MANIFEST_BYTES:
+            raise WakePackageProxyError(f"Wake package manifest exceeds {MAX_MANIFEST_BYTES} bytes")
+        return encoded
     if not manifest_url:
         raise WakePackageProxyError("Wake package manifest URL is unavailable")
     raw, final_manifest_url = _download(manifest_url, MAX_MANIFEST_BYTES)
@@ -158,6 +227,10 @@ def manifest_bytes(package_id: Any) -> bytes:
 
 def model_bytes(package_id: Any) -> bytes:
     token = str(package_id or "").strip().lower()
+    return _artifact_bytes(token, "model_body", lambda: _model_bytes_uncached(token))
+
+
+def _model_bytes_uncached(token: str) -> bytes:
     row = _package(token)
     model_url = str(row.get("model_url") or "").strip()
     if not model_url:
@@ -175,39 +248,48 @@ def model_bytes(package_id: Any) -> bytes:
 
 def bundle_bytes(package_id: Any) -> bytes:
     token = str(package_id or "").strip().lower()
+    return _artifact_bytes(token, "bundle_body", lambda: _bundle_bytes_uncached(token))
+
+
+def _bundle_bytes_uncached(token: str) -> bytes:
     row = _package(token)
     bundle_url = str(row.get("bundle_url") or "").strip()
     if not bundle_url:
-        raise WakePackageProxyError("openWakeWord bundle URL is unavailable")
+        raise WakePackageProxyError("Wake bundle URL is unavailable")
     raw, final_bundle_url = _download(bundle_url, MAX_MANIFEST_BYTES)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise WakePackageProxyError(f"openWakeWord bundle is not valid JSON: {exc}") from exc
+        raise WakePackageProxyError(f"Wake bundle is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
-        raise WakePackageProxyError("openWakeWord bundle must contain a JSON object")
-    if payload.get("schema_version") != 1 or payload.get("type") != "tater_wake_word_bundle":
+        raise WakePackageProxyError("Wake bundle must contain a JSON object")
+    if payload.get("schema_version") not in {1, 2, 3} or payload.get("type") != "tater_wake_word_bundle":
         raise WakePackageProxyError("Wake bundle schema is unsupported")
     micro = payload.get("micro_wake_word")
     oww = payload.get("open_wake_word")
-    if not isinstance(micro, dict) or not isinstance(oww, dict):
-        raise WakePackageProxyError("Wake bundle must contain matching micro_wake_word and open_wake_word models")
+    nano = payload.get("nano_wake_word")
+    if not isinstance(micro, dict):
+        raise WakePackageProxyError("Wake bundle must contain a micro_wake_word fallback")
+    oww = dict(oww) if isinstance(oww, dict) else {}
+    nano = dict(nano) if isinstance(nano, dict) else {}
+
+    def valid_digest(value: str) -> bool:
+        return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
     manifest_ref = str(micro.get("manifest") or "").strip()
     mww_model_ref = str(micro.get("model") or "").strip()
     manifest_sha = str(micro.get("manifest_sha256") or "").strip().lower()
     mww_model_sha = str(micro.get("model_sha256") or "").strip().lower()
+    if (
+        not mww_model_ref.lower().endswith(".tflite")
+        or not valid_digest(mww_model_sha)
+        or (manifest_ref and (not manifest_ref.lower().endswith(".json") or not valid_digest(manifest_sha)))
+    ):
+        raise WakePackageProxyError("Wake bundle does not contain a verified microWakeWord fallback")
+
     metadata_ref = str(oww.get("metadata") or "").strip()
     metadata_sha = str(oww.get("metadata_sha256") or "").strip().lower()
-    artifacts = oww.get("artifacts")
-    digests = (manifest_sha, mww_model_sha, metadata_sha)
-    if (
-        not manifest_ref
-        or not mww_model_ref
-        or not metadata_ref
-        or not isinstance(artifacts, dict)
-        or any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in digests)
-    ):
-        raise WakePackageProxyError("Wake bundle does not contain complete, verified dual-model artifacts")
+    artifacts = oww.get("artifacts") if isinstance(oww.get("artifacts"), dict) else {}
     classifier_key = ""
     classifier = artifacts.get("onnx")
     if isinstance(classifier, dict):
@@ -219,20 +301,71 @@ def bundle_bytes(package_id: Any) -> bytes:
                     raise WakePackageProxyError("Wake bundle contains multiple ONNX classifiers")
                 classifier_key = str(key)
                 classifier = candidate
-    if not classifier_key or not isinstance(classifier, dict):
-        raise WakePackageProxyError("Wake bundle does not contain an ONNX classifier")
-    classifier_ref = str(classifier.get("file") or "").strip()
-    classifier_sha = str(classifier.get("sha256") or "").strip().lower()
-    if len(classifier_sha) != 64 or any(character not in "0123456789abcdef" for character in classifier_sha):
+    classifier_ref = str(classifier.get("file") or "").strip() if isinstance(classifier, dict) else ""
+    classifier_sha = str(classifier.get("sha256") or "").strip().lower() if isinstance(classifier, dict) else ""
+    if classifier_ref and not valid_digest(classifier_sha):
         raise WakePackageProxyError("Wake bundle openWakeWord classifier digest is invalid")
-    manifest_url = _validated_http_url(urljoin(final_bundle_url, manifest_ref), label="microWakeWord manifest URL")
+    if metadata_ref and not valid_digest(metadata_sha):
+        raise WakePackageProxyError("Wake bundle openWakeWord metadata digest is invalid")
+
+    manifest_url = (
+        _validated_http_url(urljoin(final_bundle_url, manifest_ref), label="microWakeWord manifest URL")
+        if manifest_ref else ""
+    )
     mww_model_url = _validated_http_url(urljoin(final_bundle_url, mww_model_ref), label="microWakeWord model URL")
-    metadata_url = _validated_http_url(urljoin(final_bundle_url, metadata_ref), label="openWakeWord metadata URL")
-    model_url = _validated_http_url(urljoin(final_bundle_url, classifier_ref), label="openWakeWord model URL")
+    metadata_url = (
+        _validated_http_url(urljoin(final_bundle_url, metadata_ref), label="openWakeWord metadata URL")
+        if metadata_ref else ""
+    )
+    model_url = (
+        _validated_http_url(urljoin(final_bundle_url, classifier_ref), label="openWakeWord model URL")
+        if classifier_ref else ""
+    )
+
+    variants = nano.get("variants") if isinstance(nano.get("variants"), dict) else {}
+    rewritten_variants: Dict[str, Any] = {}
+    nww_model_urls: Dict[str, str] = {}
+    nww_model_sha256: Dict[str, str] = {}
+    nww_model_sizes: Dict[str, int] = {}
+    for architecture in ("cnn", "gru"):
+        variant = variants.get(architecture)
+        if not isinstance(variant, dict):
+            continue
+        model_ref = str(variant.get("model") or "").strip()
+        model_sha = str(variant.get("model_sha256") or "").strip().lower()
+        model_size_value = variant.get("model_size_bytes")
+        if not model_ref:
+            variant_artifacts = variant.get("artifacts") if isinstance(variant.get("artifacts"), dict) else {}
+            variant_model = variant_artifacts.get("onnx")
+            if isinstance(variant_model, dict):
+                model_ref = str(variant_model.get("file") or "").strip()
+                model_sha = str(variant_model.get("sha256") or "").strip().lower()
+                model_size_value = variant_model.get("size_bytes")
+        try:
+            model_size = int(model_size_value or 0)
+        except (TypeError, ValueError):
+            model_size = 0
+        if not model_ref.lower().endswith(".onnx") or not valid_digest(model_sha) or not (0 < model_size <= MAX_MODEL_BYTES):
+            raise WakePackageProxyError(f"Wake bundle NanoWakeWord {architecture.upper()} model is invalid")
+        nww_model_urls[architecture] = _validated_http_url(
+            urljoin(final_bundle_url, model_ref),
+            label=f"NanoWakeWord {architecture.upper()} model URL",
+        )
+        nww_model_sha256[architecture] = model_sha
+        nww_model_sizes[architecture] = model_size
+        rewritten = dict(variant)
+        rewritten["model"] = f"nww-{architecture}-model.onnx"
+        rewritten["model_sha256"] = model_sha
+        rewritten["model_size_bytes"] = model_size
+        rewritten.pop("artifacts", None)
+        rewritten_variants[architecture] = rewritten
+
     with _PACKAGES_LOCK:
         current = _PACKAGES.get(token)
         if isinstance(current, dict):
             current["manifest_url"] = manifest_url
+            current["mww_manifest_payload"] = dict(micro) if not manifest_url else None
+            current["model_url"] = mww_model_url
             current["mww_model_url"] = mww_model_url
             current["mww_manifest_sha256"] = manifest_sha
             current["mww_model_sha256"] = mww_model_sha
@@ -240,6 +373,9 @@ def bundle_bytes(package_id: Any) -> bytes:
             current["oww_model_url"] = model_url
             current["oww_metadata_sha256"] = metadata_sha
             current["oww_model_sha256"] = classifier_sha
+            current["nww_model_urls"] = nww_model_urls
+            current["nww_model_sha256"] = nww_model_sha256
+            current["nww_model_sizes"] = nww_model_sizes
     micro = dict(micro)
     micro["manifest"] = "manifest.json"
     micro["model"] = "model.tflite"
@@ -249,14 +385,20 @@ def bundle_bytes(package_id: Any) -> bytes:
     # themselves are unchanged and retain the trainer's digest.
     proxied_manifest = manifest_bytes(token)
     micro["manifest_sha256"] = hashlib.sha256(proxied_manifest).hexdigest()
-    oww = dict(oww)
-    oww["metadata"] = "oww-metadata.json"
-    rewritten = dict(classifier)
-    rewritten["file"] = "oww-model.onnx"
-    oww["artifacts"] = {"onnx": rewritten}
+    if metadata_ref:
+        oww["metadata"] = "oww-metadata.json"
+    if classifier_ref and isinstance(classifier, dict):
+        rewritten = dict(classifier)
+        rewritten["file"] = "oww-model.onnx"
+        oww["artifacts"] = {"onnx": rewritten}
+    if rewritten_variants:
+        nano["variants"] = rewritten_variants
     payload = dict(payload)
     payload["micro_wake_word"] = micro
-    payload["open_wake_word"] = oww
+    if oww:
+        payload["open_wake_word"] = oww
+    if nano:
+        payload["nano_wake_word"] = nano
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise WakePackageProxyError(f"Wake bundle exceeds {MAX_MANIFEST_BYTES} bytes")
@@ -265,6 +407,10 @@ def bundle_bytes(package_id: Any) -> bytes:
 
 def oww_metadata_bytes(package_id: Any) -> bytes:
     token = str(package_id or "").strip().lower()
+    return _artifact_bytes(token, "oww_metadata_body", lambda: _oww_metadata_bytes_uncached(token))
+
+
+def _oww_metadata_bytes_uncached(token: str) -> bytes:
     row = _package(token)
     metadata_url = str(row.get("oww_metadata_url") or "").strip()
     if not metadata_url:
@@ -280,6 +426,10 @@ def oww_metadata_bytes(package_id: Any) -> bytes:
 
 def oww_model_bytes(package_id: Any) -> bytes:
     token = str(package_id or "").strip().lower()
+    return _artifact_bytes(token, "oww_model_body", lambda: _oww_model_bytes_uncached(token))
+
+
+def _oww_model_bytes_uncached(token: str) -> bytes:
     row = _package(token)
     model_url = str(row.get("oww_model_url") or "").strip()
     if not model_url:
@@ -294,4 +444,44 @@ def oww_model_bytes(package_id: Any) -> bytes:
     expected_sha = str(row.get("oww_model_sha256") or "").strip().lower()
     if expected_sha and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), expected_sha):
         raise WakePackageProxyError("openWakeWord model does not match the selected dual-model bundle")
+    return body
+
+
+def nww_model_bytes(package_id: Any, architecture: Any) -> bytes:
+    token = str(package_id or "").strip().lower()
+    model_type = str(architecture or "").strip().lower()
+    if model_type not in {"cnn", "gru"}:
+        raise WakePackageProxyError("Unsupported NanoWakeWord architecture")
+    return _artifact_bytes(
+        token,
+        f"nww_{model_type}_model_body",
+        lambda: _nww_model_bytes_uncached(token, model_type),
+    )
+
+
+def _nww_model_bytes_uncached(token: str, architecture: str) -> bytes:
+    row = _package(token)
+    urls = row.get("nww_model_urls") if isinstance(row.get("nww_model_urls"), dict) else {}
+    model_url = str(urls.get(architecture) or "").strip()
+    if not model_url:
+        bundle_bytes(token)
+        row = _package(token)
+        urls = row.get("nww_model_urls") if isinstance(row.get("nww_model_urls"), dict) else {}
+        model_url = str(urls.get(architecture) or "").strip()
+    if not model_url:
+        raise WakePackageProxyError(f"NanoWakeWord {architecture.upper()} model is unavailable")
+    body, _ = _download(model_url, MAX_MODEL_BYTES)
+    if len(body) < 2 or body[0] != 0x08:
+        raise WakePackageProxyError("NanoWakeWord model is not an ONNX ModelProto")
+    hashes = row.get("nww_model_sha256") if isinstance(row.get("nww_model_sha256"), dict) else {}
+    expected_sha = str(hashes.get(architecture) or "").strip().lower()
+    sizes = row.get("nww_model_sizes") if isinstance(row.get("nww_model_sizes"), dict) else {}
+    try:
+        expected_size = int(sizes.get(architecture) or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size and len(body) != expected_size:
+        raise WakePackageProxyError("NanoWakeWord model size does not match the selected wake bundle")
+    if expected_sha and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), expected_sha):
+        raise WakePackageProxyError("NanoWakeWord model does not match the selected wake bundle")
     return body

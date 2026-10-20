@@ -217,6 +217,8 @@ def write_hydra_ledger(
     schema_version: str,
     agent_state_ledger_max_chars: int,
     allowed_planner_kinds: Sequence[str],
+    turn_branch: str = "",
+    pending_interaction: Optional[Dict[str, Any]] = None,
 ) -> None:
     if redis_client is None:
         return
@@ -243,6 +245,7 @@ def write_hydra_ledger(
         "tool_result": None,
         "checker_action": str(checker_action or ""),
         "planner_kind": planner_kind_value,
+        "turn_branch": short_text_fn(turn_branch, limit=24) or "chat",
         "planner_text_is_tool_candidate": bool(planner_text_is_tool_candidate)
         if planner_text_is_tool_candidate is not None
         else bool(compact_planned_tool),
@@ -265,6 +268,22 @@ def write_hydra_ledger(
         "rounds_used": max(0, int(rounds_used or 0)),
         "tool_calls_used": max(0, int(tool_calls_used or 0)),
     }
+    if isinstance(pending_interaction, dict) and pending_interaction:
+        compact_pending: Dict[str, Any] = {}
+        for key in ("kind", "goal", "tool_hint", "question", "source_turn_id"):
+            value = short_text_fn(pending_interaction.get(key), limit=320 if key == "question" else 240)
+            if value:
+                compact_pending[key] = value
+        for key in ("known_details", "missing_details", "choices"):
+            raw_items = pending_interaction.get(key)
+            if not isinstance(raw_items, list):
+                continue
+            items = [short_text_fn(item, limit=180) for item in raw_items]
+            items = [item for item in items if item][:12]
+            if items:
+                compact_pending[key] = items
+        if compact_pending:
+            entry["pending_interaction"] = compact_pending
     if compact_planned_tool and compact_planned_tool.get("args_hash"):
         entry["tool_args_hash"] = compact_planned_tool.get("args_hash")
     checker_reason_text = short_text_fn(checker_reason, limit=72)

@@ -35,8 +35,12 @@ const trainerSettingsFields = computed(() => fieldMap(trainerSettingsForm.value)
 const verifierFields = computed(() => fieldMap(verifierForm.value));
 const wakeEngine = computed(() => String(wakeValues.wake_engine || "micro_wake_word"));
 const wakeSource = computed(() => String(wakeValues.wake_word || "hey_tater"));
-const detectorMode = computed(() => String(wakeValues.wake_detector_mode || "dual"));
-const owwEnabled = computed(() => detectorMode.value === "oww" || detectorMode.value === "dual");
+const detectorMode = computed(() => String(wakeValues.wake_detector_mode || "mww_oww"));
+const owwEnabled = computed(() => detectorMode.value !== "mww");
+const nwwEnabled = computed(() => detectorMode.value === "nww" || detectorMode.value === "mww_nww");
+const nwwArchitecture = computed(() => String(wakeValues.nww_architecture || "cnn"));
+const singleDetectorModes = computed(() => optionsFor(wakeFields.value.wake_detector_mode).filter((option) => String(option.group || "") === "single"));
+const dualDetectorModes = computed(() => optionsFor(wakeFields.value.wake_detector_mode).filter((option) => String(option.group || "") === "dual"));
 const owwSource = computed(() => String(wakeValues.oww_wake_word || "hey_tater"));
 const verifierModeField = computed<JsonRow>(() => Object.values(verifierFields.value).find((field) => String(field.type || "") === "select") || {});
 const verifierModeKey = computed(() => String(verifierModeField.value.key || "wake_verifier_mode"));
@@ -47,9 +51,7 @@ const verifierStt = computed(() => String(Object.values(verifierFields.value).fi
 const connected = computed(() => stat("Connected") || "0");
 const activeWakeLabel = computed(() => {
   if (wakeEngine.value !== "micro_wake_word") return optionLabel(optionsFor(wakeFields.value.wake_engine).find((option) => optionValue(option) === wakeEngine.value)) || "Wake disabled";
-  if (detectorMode.value === "dual") return "Dual Wake Word";
-  if (detectorMode.value === "oww") return "OWW Where Supported";
-  return "microWakeWord Only";
+  return optionLabel(optionsFor(wakeFields.value.wake_detector_mode).find((option) => optionValue(option) === detectorMode.value)) || "MWW";
 });
 const activeWakeSourceLabel = computed(() => optionLabel(optionsFor(wakeFields.value.wake_word).find((option) => optionValue(option) === wakeSource.value)) || "Built-in Hey Tater");
 const activeOwwSourceLabel = computed(() => owwSourceOptionLabel(optionsFor(wakeFields.value.oww_wake_word).find((option) => optionValue(option) === owwSource.value)) || "Built-in Hey Tater");
@@ -67,13 +69,15 @@ const wakeEngineDetails: Record<string, { mark: string; short: string }> = {
 const wakeSourceDetails: Record<string, { mark: string; short: string }> = {
   hey_tater: { mark: "T", short: "Tater's bundled, ready-to-use wake model." },
   catalog: { mark: "CAT", short: "Choose a versioned model from the official catalog." },
-  custom_url: { mark: "URL", short: "Load a compatible microWakeWord JSON package by URL." },
+  custom_url: { mark: "URL", short: "Load a trainer wake bundle or compatible microWakeWord JSON by URL." },
 };
 
 const detectorModeDetails: Record<string, { mark: string; short: string }> = {
   mww: { mark: "MW", short: "Use the same microWakeWord model on every satellite." },
   oww: { mark: "OW", short: "Use openWakeWord on capable satellites and microWakeWord on MWW-only devices." },
-  dual: { mark: "2X", short: "Require matching microWakeWord and openWakeWord detection on capable satellites." },
+  nww: { mark: "NW", short: "Use NanoWakeWord on capable satellites and microWakeWord on MWW-only devices." },
+  mww_oww: { mark: "M+O", short: "Require matching microWakeWord and openWakeWord detection on capable satellites." },
+  mww_nww: { mark: "M+N", short: "Require matching microWakeWord and NanoWakeWord detection on capable satellites." },
 };
 
 const verifierDetails: Record<string, { label: string; mark: string; short: string }> = {
@@ -104,16 +108,20 @@ function optionLabel(option: unknown): string {
 
 function owwSourceOptionLabel(option: unknown): string {
   const value = optionValue(option);
-  if (value === "catalog") return "Matched Wake Bundle Catalog";
-  if (value === "custom_url") return "Custom Matched Bundle";
+  if (value === "catalog") return "Wake Bundle Catalog";
+  if (value === "custom_url") return "Custom Wake Bundle";
   return optionLabel(option);
 }
 
 function owwSourceOptionDescription(option: unknown): string {
   const value = optionValue(option);
-  if (value === "hey_tater") return "Use the matching built-in Hey Tater MWW + OWW pair.";
-  if (value === "catalog") return "Choose a verified matching pair from the official catalog.";
-  return "Load both matching models from one trainer-produced bundle.";
+  if (value === "hey_tater") return "Use the built-in Hey Tater models where available.";
+  if (value === "catalog") return "Choose a verified model bundle from the official catalog.";
+  return "Load the selected models from one trainer-produced wake bundle.";
+}
+
+function optionDisabled(option: unknown): boolean {
+  return Boolean(option && typeof option === "object" && (option as JsonRow).disabled);
 }
 
 function formatPairingTime(value: number): string {
@@ -313,21 +321,24 @@ defineExpose({ apply, refresh });
     <div v-if="error" class="tv-notice error">{{ error }}</div>
 
     <article class="tm-form-card tm-model-area-hero tm-wake-hero">
-      <div class="tm-model-area-hero-copy"><span class="tv-eyebrow">Wake pipeline</span><h3>One phrase. Every room.</h3><p>Choose one matched wake profile, then decide whether OWW-capable satellites use openWakeWord alone or as dual confirmation.</p></div>
+      <div class="tm-model-area-hero-copy"><span class="tv-eyebrow">Wake pipeline</span><h3>One phrase. Every room.</h3><p>Choose one wake bundle, then run MWW, OWW, NWW, or one of the two supported dual-detector policies.</p></div>
       <div class="tm-model-area-status"><span><i class="ready" />{{ connected }} connected</span><span>{{ activeWakeLabel }}</span><span>{{ verifierDetails[verifierMode]?.label || "Disabled" }} verification</span></div>
     </article>
 
     <article v-if="wakeForm" class="tm-form-card tm-wake-engine-card">
-      <header><div><span class="tv-eyebrow">Step 1 · All satellites</span><h3>How should satellites wake?</h3><p>Every satellite uses the same wake phrase. Choose MWW everywhere, OWW where supported, or dual detection on capable hardware.</p></div><span class="tm-speech-status-chip">{{ activeWakeLabel }}</span></header>
+      <header><div><span class="tv-eyebrow">Step 1 · All satellites</span><h3>How should satellites wake?</h3><p>Every satellite uses the same wake phrase. Capable devices follow this policy; MWW-only satellites keep the bundle's MWW fallback.</p></div><span class="tm-speech-status-chip">{{ activeWakeLabel }}</span></header>
       <div class="tm-choice-grid tm-wake-choice-grid" role="group" aria-label="Wake engine">
         <button v-for="option in optionsFor(wakeFields.wake_engine)" :key="optionValue(option)" type="button" :class="{ active: wakeEngine === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseWakeEngine(optionValue(option))"><i>{{ wakeEngineDetails[optionValue(option)]?.mark || "WAKE" }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ wakeEngineDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
       </div>
 
       <section v-if="wakeEngine === 'micro_wake_word'" class="tm-wake-source-panel">
         <div class="tm-speech-section-heading compact"><div><h3>Wake detection mode</h3><p>Choose the detector policy once; each satellite receives the best supported projection.</p></div><span>{{ activeWakeLabel }}</span></div>
-        <div class="tm-choice-grid tm-wake-source-grid" role="group" aria-label="Wake detection mode">
-          <button v-for="option in optionsFor(wakeFields.wake_detector_mode)" :key="optionValue(option)" type="button" :class="{ active: detectorMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseDetectorMode(optionValue(option))"><i>{{ detectorModeDetails[optionValue(option)]?.mark || 'WAKE' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ detectorModeDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
-        </div>
+        <div class="tm-wake-mode-row"><span>Single wake engine</span><div class="tm-choice-grid tm-wake-source-grid" role="group" aria-label="Single wake engine">
+          <button v-for="option in singleDetectorModes" :key="optionValue(option)" type="button" :class="{ active: detectorMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseDetectorMode(optionValue(option))"><i>{{ detectorModeDetails[optionValue(option)]?.mark || 'WAKE' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ detectorModeDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
+        </div></div>
+        <div class="tm-wake-mode-row"><span>Dual wake engines</span><div class="tm-choice-grid tm-wake-source-grid-two" role="group" aria-label="Dual wake engines">
+          <button v-for="option in dualDetectorModes" :key="optionValue(option)" type="button" :class="{ active: detectorMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseDetectorMode(optionValue(option))"><i>{{ detectorModeDetails[optionValue(option)]?.mark || 'WAKE' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ detectorModeDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
+        </div></div>
 
         <div v-if="!owwEnabled" class="tm-wake-model-block">
           <div class="tm-speech-section-heading compact"><div><h3>microWakeWord model</h3><p>Choose Tater's model, a catalog release, or your own package.</p></div><span>{{ activeWakeSourceLabel }}</span></div>
@@ -335,17 +346,19 @@ defineExpose({ apply, refresh });
             <button v-for="option in optionsFor(wakeFields.wake_word)" :key="optionValue(option)" type="button" :class="{ active: wakeSource === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseWakeSource(optionValue(option))"><i>{{ wakeSourceDetails[optionValue(option)]?.mark || "SRC" }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ wakeSourceDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
           </div>
           <label v-if="wakeSource === 'catalog'" class="tm-field tm-field-wide"><span class="tm-field-label">Wake Word Catalog</span><select v-model="wakeValues.wake_word_catalog_url" :disabled="Boolean(busy)" @change="update(wakeValues, 'wake_word_catalog_url', wakeValues.wake_word_catalog_url)"><option v-for="option in optionsFor(wakeFields.wake_word_catalog_url)" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><small>{{ wakeFields.wake_word_catalog_url?.description }}</small></label>
-          <label v-if="wakeSource === 'custom_url'" class="tm-field tm-field-wide"><span class="tm-field-label">microWakeWord JSON URL</span><input v-model="wakeValues.wake_word_url" type="url" :placeholder="String(wakeFields.wake_word_url?.placeholder || 'https://example.local/wake_word.json')" :disabled="Boolean(busy)" @input="update(wakeValues, 'wake_word_url', wakeValues.wake_word_url)" /><small>{{ wakeFields.wake_word_url?.description }}</small></label>
+          <label v-if="wakeSource === 'custom_url'" class="tm-field tm-field-wide"><span class="tm-field-label">{{ wakeFields.wake_word_url?.label }}</span><input v-model="wakeValues.wake_word_url" type="url" :placeholder="String(wakeFields.wake_word_url?.placeholder || 'https://example.local/wake_word.wake-bundle.json')" :disabled="Boolean(busy)" @input="update(wakeValues, 'wake_word_url', wakeValues.wake_word_url)" /><small>{{ wakeFields.wake_word_url?.description }}</small></label>
         </div>
 
         <div v-if="owwEnabled" class="tm-wake-model-block">
-          <div class="tm-speech-section-heading compact"><div><h3>Matched wake bundle</h3><p>One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord half; OWW-capable satellites {{ detectorMode === 'dual' ? 'load both matching models' : 'load openWakeWord only' }}.</p></div><span>{{ activeOwwSourceLabel }}</span></div>
+          <div class="tm-speech-section-heading compact"><div><h3>Wake word bundle</h3><p>One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord model; capable satellites load {{ detectorMode === 'mww_oww' ? 'MWW + OWW' : (detectorMode === 'mww_nww' ? `MWW + NWW ${nwwArchitecture.toUpperCase()}` : (detectorMode === 'nww' ? `NWW ${nwwArchitecture.toUpperCase()}` : 'OWW')) }}.</p></div><span>{{ activeOwwSourceLabel }}</span></div>
           <div class="tm-choice-grid tm-wake-source-grid" role="group" aria-label="matched wake bundle source">
             <button v-for="option in optionsFor(wakeFields.oww_wake_word)" :key="optionValue(option)" type="button" :class="{ active: owwSource === optionValue(option) }" :disabled="Boolean(busy) || (optionValue(option) === 'catalog' && !optionsFor(wakeFields.oww_wake_word_catalog_url).length)" @click="chooseOwwSource(optionValue(option))"><i>{{ optionValue(option) === 'hey_tater' ? 'T' : (optionValue(option) === 'catalog' ? 'CAT' : 'URL') }}</i><span><strong>{{ owwSourceOptionLabel(option) }}</strong><small>{{ owwSourceOptionDescription(option) }}</small></span><b>✓</b></button>
           </div>
-          <label v-if="owwSource === 'catalog'" class="tm-field tm-field-wide"><span class="tm-field-label">Matched Wake Bundle Catalog</span><select v-model="wakeValues.oww_wake_word_catalog_url" :disabled="Boolean(busy) || !optionsFor(wakeFields.oww_wake_word_catalog_url).length" @change="update(wakeValues, 'oww_wake_word_catalog_url', wakeValues.oww_wake_word_catalog_url)"><option v-if="!optionsFor(wakeFields.oww_wake_word_catalog_url).length" value="" disabled>Awaiting the first verified V7 wake word</option><option v-for="option in optionsFor(wakeFields.oww_wake_word_catalog_url)" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><small>{{ wakeFields.oww_wake_word_catalog_url?.description }}</small></label>
+          <label v-if="owwSource === 'catalog'" class="tm-field tm-field-wide"><span class="tm-field-label">Wake Bundle Catalog</span><select v-model="wakeValues.oww_wake_word_catalog_url" :disabled="Boolean(busy) || !optionsFor(wakeFields.oww_wake_word_catalog_url).length" @change="update(wakeValues, 'oww_wake_word_catalog_url', wakeValues.oww_wake_word_catalog_url)"><option v-if="!optionsFor(wakeFields.oww_wake_word_catalog_url).length" value="" disabled>Awaiting the first verified wake bundle</option><option v-for="option in optionsFor(wakeFields.oww_wake_word_catalog_url)" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><small>{{ wakeFields.oww_wake_word_catalog_url?.description }}</small></label>
           <label v-if="owwSource === 'custom_url'" class="tm-field tm-field-wide"><span class="tm-field-label">{{ wakeFields.oww_wake_word_url?.label }}</span><input v-model="wakeValues.oww_wake_word_url" type="url" :placeholder="String(wakeFields.oww_wake_word_url?.placeholder || 'https://example.local/hey_tater.wake-bundle.json')" :disabled="Boolean(busy)" @input="update(wakeValues, 'oww_wake_word_url', wakeValues.oww_wake_word_url)" /><small>{{ wakeFields.oww_wake_word_url?.description }}</small></label>
-          <div v-if="owwSource === 'hey_tater'" class="tm-wake-model-note">The built-in selection keeps both Hey Tater models matched. MWW-only satellites use microWakeWord while capable satellites follow the selected OWW policy.</div>
+          <div v-if="nwwEnabled" class="tm-wake-mode-row"><span>NanoWakeWord architecture</span><div class="tm-choice-grid tm-wake-source-grid-two" role="group" aria-label="NanoWakeWord architecture"><button v-for="option in optionsFor(wakeFields.nww_architecture)" :key="optionValue(option)" type="button" :class="{ active: nwwArchitecture === optionValue(option) }" :disabled="Boolean(busy) || optionDisabled(option)" @click="update(wakeValues, 'nww_architecture', optionValue(option))"><i>{{ optionValue(option).toUpperCase() }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ optionDisabled(option) ? 'Not included in this bundle' : 'Available in this bundle' }}</small></span><b>✓</b></button></div></div>
+          <div v-if="owwSource === 'hey_tater' && !nwwEnabled" class="tm-wake-model-note">The built-in selection keeps the Hey Tater MWW and OWW models matched.</div>
+          <div v-if="owwSource === 'hey_tater' && nwwEnabled" class="tm-wake-model-note">The built-in Hey Tater bundle includes matched MWW, NWW CNN, and NWW GRU models.</div>
         </div>
       </section>
 

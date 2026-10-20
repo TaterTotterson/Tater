@@ -73,7 +73,7 @@ from tateros import integration_store as integration_store_module
 from fastapi import Cookie, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from redis.exceptions import RedisError
 
 import core_registry as core_registry_module
@@ -10544,6 +10544,20 @@ class AppSettingsRequest(BaseModel):
     webui_password_confirm: Optional[str] = None
     clear_webui_password: Optional[bool] = None
 
+    @field_validator(
+        "hydra_llm_port",
+        "tater_open_webui_llm_port",
+        "hydra_llm_astraeus_port",
+        "hydra_llm_thanatos_port",
+        "hydra_llm_hermes_port",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_llm_port_to_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return str(value).strip()
+
 
 class GeneralSettingsRequest(BaseModel):
     username: Optional[str] = None
@@ -20711,6 +20725,7 @@ def get_hydra_metrics(
                 "platform": str(row.get("platform") or ""),
                 "scope": str(row.get("scope") or ""),
                 "planner_kind": str(row.get("planner_kind") or ""),
+                "turn_branch": str(row.get("turn_branch") or ""),
                 "astraeus_thanatos_kind": str(row.get("planner_kind") or ""),
                 "outcome": str(row.get("outcome") or ""),
                 "outcome_reason": str(row.get("outcome_reason") or ""),

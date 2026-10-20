@@ -156,6 +156,9 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertEqual(capable_firmware["wake_detector_mode"], "oww")
         self.assertFalse(capable_firmware["wake_mww_enabled"])
         self.assertTrue(capable_firmware["wake_oww_enabled"])
+        self.assertNotIn("wake_word", capable_firmware)
+        self.assertNotIn("wake_word_url", capable_firmware)
+        self.assertNotIn("wake_model_revision", capable_firmware)
         self.assertTrue(esp32_firmware["wake_mww_enabled"])
         self.assertNotIn("wake_detector_mode", esp32_firmware)
         self.assertNotIn("wake_oww_enabled", esp32_firmware)
@@ -241,7 +244,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
                 capabilities={"openwakeword": True, "wake_detector_selection": True},
             )
 
-        self.assertEqual(firmware["wake_detector_mode"], "dual")
+        self.assertEqual(firmware["wake_detector_mode"], "mww_oww")
         self.assertTrue(firmware["wake_mww_enabled"])
         self.assertTrue(firmware["wake_oww_enabled"])
         self.assertEqual(firmware["wake_word"], "hey_tater")
@@ -316,7 +319,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertNotIn("oww_wake_word", firmware)
         self.assertNotIn("oww_wake_word_url", firmware)
 
-    def test_ui_uses_one_shared_three_choice_mode_selector(self) -> None:
+    def test_ui_uses_shared_single_and_dual_mode_rows(self) -> None:
         source = (
             REPO_ROOT
             / "frontend"
@@ -327,8 +330,9 @@ class WakeFamilySettingsTests(unittest.TestCase):
             / "WakeWordModels.vue"
         ).read_text(encoding="utf-8")
         self.assertIn('wake_detector_mode', source)
-        self.assertIn('OWW Where Supported', source)
-        self.assertIn('Dual Wake Word', source)
+        self.assertIn('Single wake engine', source)
+        self.assertIn('Dual wake engines', source)
+        self.assertIn('NanoWakeWord architecture', source)
         self.assertIn('Step 1 · All satellites', source)
         self.assertIn('=== "wake_model_settings"', source)
         self.assertNotIn('=== "mww_satellite_model_settings"', source)
@@ -356,7 +360,7 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertIn("wake_tuning_section", popup_keys)
         self.assertIn("wake_sensitivity", popup_keys)
 
-    def test_persisted_oww_only_profile_is_presented_as_oww_where_supported(self) -> None:
+    def test_persisted_oww_only_profile_is_presented_as_single_oww(self) -> None:
         redis = MemoryRedis(
             {
                 native_live_settings.SETTINGS_HASH_KEY: {
@@ -386,21 +390,23 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertEqual(
             fields["wake_detector_mode"]["options"],
             [
-                {"value": "mww", "label": "microWakeWord Only"},
-                {"value": "oww", "label": "OWW Where Supported"},
-                {"value": "dual", "label": "Dual Wake Word"},
+                {"value": "mww", "label": "MWW", "group": "single"},
+                {"value": "oww", "label": "OWW", "group": "single"},
+                {"value": "nww", "label": "NWW", "group": "single"},
+                {"value": "mww_oww", "label": "MWW + OWW", "group": "dual"},
+                {"value": "mww_nww", "label": "MWW + NWW", "group": "dual"},
             ],
         )
-        self.assertEqual(custom_option["label"], "Custom Matched Bundle")
+        self.assertEqual(custom_option["label"], "Custom Wake Bundle")
         self.assertIn(
-            {"value": "catalog", "label": "Matched Wake Bundle Catalog"},
+            {"value": "catalog", "label": "Wake Bundle Catalog"},
             fields["oww_wake_word"]["options"],
         )
-        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Matched Wake Bundle Catalog")
-        self.assertEqual(fields["oww_wake_word_url"]["label"], "Matched Wake Bundle URL")
+        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Wake Bundle Catalog")
+        self.assertEqual(fields["oww_wake_word_url"]["label"], "Wake Bundle URL")
         self.assertIn("sends microWakeWord to MWW-only satellites", fields["oww_wake_word_url"]["description"])
 
-    def test_dual_ui_describes_bundle_as_a_matched_pair(self) -> None:
+    def test_dual_ui_describes_one_generic_wake_bundle(self) -> None:
         redis = MemoryRedis(
             {
                 native_live_settings.SETTINGS_HASH_KEY: {
@@ -426,14 +432,95 @@ class WakeFamilySettingsTests(unittest.TestCase):
             for option in fields["oww_wake_word"]["options"]
             if option["value"] == "custom_url"
         )
-        self.assertEqual(custom_option["label"], "Custom Matched Bundle")
+        self.assertEqual(custom_option["label"], "Custom Wake Bundle")
         self.assertIn(
-            {"value": "catalog", "label": "Matched Wake Bundle Catalog"},
+            {"value": "catalog", "label": "Wake Bundle Catalog"},
             fields["oww_wake_word"]["options"],
         )
-        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Matched Wake Bundle Catalog")
-        self.assertEqual(fields["oww_wake_word_url"]["label"], "Matched Wake Bundle URL")
+        self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Wake Bundle Catalog")
+        self.assertEqual(fields["oww_wake_word_url"]["label"], "Wake Bundle URL")
         self.assertIn("sends microWakeWord to MWW-only satellites", fields["oww_wake_word_url"]["description"])
+
+    def test_nww_mode_projects_to_capable_firmware_and_falls_back_to_mww(self) -> None:
+        bundle_url = "https://trainer.example/hey_tater.wake-bundle.json"
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "nww",
+                    "wake_mww_enabled": "false",
+                    "wake_oww_enabled": "false",
+                    "wake_nww_enabled": "true",
+                    "oww_wake_word": "custom_url",
+                    "oww_wake_word_url": bundle_url,
+                    "nww_architecture": "gru",
+                    "nww_model_revision": "c" * 64,
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            capable = native_live_settings.firmware_settings_snapshot(
+                board="biscuit",
+                capabilities={"nanowakeword": True, "wake_detector_selection": True},
+            )
+            older = native_live_settings.firmware_settings_snapshot(
+                board="biscuit",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(capable["wake_detector_mode"], "nww")
+        self.assertFalse(capable["wake_mww_enabled"])
+        self.assertTrue(capable["wake_nww_enabled"])
+        self.assertEqual(capable["nww_wake_word"], "custom_url")
+        self.assertEqual(capable["nww_wake_word_url"], bundle_url)
+        self.assertEqual(capable["nww_architecture"], "gru")
+        self.assertNotIn("oww_wake_word", capable)
+        self.assertEqual(older["wake_detector_mode"], "mww")
+        self.assertTrue(older["wake_mww_enabled"])
+        self.assertFalse(older["wake_nww_enabled"])
+        self.assertNotIn("nww_wake_word", older)
+
+    def test_builtin_nww_mode_uses_the_on_device_hey_tater_models(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_engine": "micro_wake_word",
+                    "wake_detector_mode": "nww",
+                    "wake_mww_enabled": "false",
+                    "wake_oww_enabled": "false",
+                    "wake_nww_enabled": "true",
+                    "oww_wake_word": "hey_tater",
+                    "nww_architecture": "cnn",
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            saved = native_live_settings.save_wake_family_settings(
+                "echo",
+                {
+                    "wake_detector_mode": "nww",
+                    "oww_wake_word": "hey_tater",
+                    "nww_architecture": "gru",
+                },
+            )
+            firmware = native_live_settings.firmware_settings_snapshot(
+                board="checkers",
+                capabilities={"nanowakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(saved["settings"]["wake_detector_mode"], "nww")
+        self.assertEqual(saved["settings"]["nww_available_architectures"], "cnn,gru")
+        self.assertEqual(firmware["nww_wake_word"], "hey_tater")
+        self.assertEqual(firmware["nww_architecture"], "gru")
+        self.assertNotIn("nww_wake_word_url", firmware)
 
 
 if __name__ == "__main__":

@@ -83,12 +83,21 @@ def thanatos_execution_step_prompt(
 def astraeus_system_prompt(*, platform: str) -> str:
     del platform
     return (
-        "Task: decide whether this turn is conversational chat or executable work; when executable, return an ordered executable plan.\n"
+        "Task: resolve this turn against any structured pending interaction, choose the turn branch, and plan executable work when authorized.\n"
         "Return exactly one strict JSON object with this schema:\n"
-        "{\"mode\":\"chat|execute\",\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
+        "{\"mode\":\"chat|execute|clarify|reject\",\"relation\":\"standalone|confirm|reject|provide_details|modify|chat\",\"goal\":\"clear goal\",\"question\":\"clarification or empty\",\"pending_interaction\":{\"kind\":\"none|action_offer|clarification\",\"goal\":\"pending goal or empty\",\"tool_hint\":\"tool id or empty\",\"known_details\":[],\"missing_details\":[],\"choices\":[],\"question\":\"question or empty\"},\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
         "Rules:\n"
         "- Use payload.current_user_message as highest priority.\n"
         "- Use payload.recent_history only to resolve references and follow-up context.\n"
+        "- payload.pending_interaction is structured dialogue state from the immediately preceding exchange, not execution authorization by itself.\n"
+        "- Classify the current message's semantic relationship to payload.pending_interaction; do not decide from trigger words or exact phrase matching.\n"
+        "- Only the current user message can confirm, reject, answer, or modify a pending action.\n"
+        "- A social aside, thanks, praise, greeting, or other conversational text does not cancel an action, confirmation, answer, or modification expressed in the same message.\n"
+        "- When the current message confirms a complete pending action, return relation=\"confirm\", mode=\"execute\", and executable steps.\n"
+        "- When the current message supplies requested details, merge their meaning with known_details and either execute when complete or clarify what remains.\n"
+        "- When a pending action still lacks required information, return mode=\"clarify\", steps=[], a direct question, and the updated pending_interaction.\n"
+        "- When the user declines the pending interaction, return mode=\"reject\", relation=\"reject\", steps=[], and pending_interaction.kind=\"none\".\n"
+        "- When the current message is unrelated to the pending interaction, treat it as standalone and do not carry the pending action forward.\n"
         "- If the current user message is standalone, do not rewrite intent toward older history.\n"
         "- For short follow-up messages that introduce a new target/scope (for example 'what about the garage'), treat that new target/scope as authoritative for this turn.\n"
         "- For greetings, acknowledgements, reactions, social check-ins, playful banter, or meta conversation, return mode=\"chat\" and steps=[].\n"
@@ -96,7 +105,9 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- Prefer mode=\"chat\" and steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
         "- Plan only for this turn's request text; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
         "- Use mode=\"execute\" only when the user clearly asks to do/check/change/fetch something that depends on tools, files, external pages, live system state, or settings.\n"
-        "- In mode=\"chat\", steps must be []. Never create conversational, acknowledge, greeting, reply, answer, or respond steps.\n"
+        "- In mode=\"chat\", steps must be [], question must be empty, and pending_interaction.kind must be \"none\". Never create conversational, acknowledge, greeting, reply, answer, or respond steps.\n"
+        "- In mode=\"execute\", question must be empty and pending_interaction.kind must be \"none\".\n"
+        "- In mode=\"reject\", question must be empty and pending_interaction.kind must be \"none\".\n"
         "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
         "- Do not include a step when no valid tool_hint exists for that step.\n"
         "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
@@ -128,7 +139,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
 def astraeus_native_system_prompt(*, platform: str) -> str:
     legacy_contract = (
         "Return exactly one strict JSON object with this schema:\n"
-        '{"mode":"chat|execute","goal":"clear goal","steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
+        '{"mode":"chat|execute|clarify|reject","relation":"standalone|confirm|reject|provide_details|modify|chat","goal":"clear goal","question":"clarification or empty","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending goal or empty","tool_hint":"tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question or empty"},"steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
     )
     return (
         astraeus_system_prompt(platform=platform)
@@ -173,6 +184,73 @@ def chat_fallback_system_prompt(
         "Do not list capabilities unless the user explicitly asks.\n"
         f"{plain_text_rule}"
         f"Current Date and Time: {now_text}\n"
+    ).strip()
+
+
+def chat_response_envelope_system_prompt(
+    *,
+    platform: str,
+    platform_label: str,
+    now_text: str,
+    first_name: str,
+    last_name: str,
+    personality: str,
+    ascii_only_platforms: Iterable[str],
+) -> str:
+    return (
+        chat_fallback_system_prompt(
+            platform=platform,
+            platform_label=platform_label,
+            now_text=now_text,
+            first_name=first_name,
+            last_name=last_name,
+            personality=personality,
+            ascii_only_platforms=ascii_only_platforms,
+        )
+        + "\n\n"
+        + "Return exactly one strict JSON object with this schema:\n"
+        + '{"response":"natural user-facing reply","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending executable goal or empty","tool_hint":"exact available tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question awaiting the user or empty"}}\n'
+        + "Structured dialogue-state rules:\n"
+        + "- response is the complete natural reply the user should receive.\n"
+        + "- Set kind=action_offer only when response explicitly offers to perform a concrete available action and awaits authorization.\n"
+        + "- Set kind=clarification only when response asks for information required to perform a concrete available action.\n"
+        + "- Otherwise set kind=none and leave every other pending_interaction field empty.\n"
+        + "- A pending interaction must use one exact id from the supplied available_tool_ids.\n"
+        + "- Record meaning in structured fields; do not derive state from keywords or expose the structured state in response.\n"
+        + "- Do not claim an offered or pending action has already started or completed.\n"
+        + "- Do not include explanations, markdown, or extra keys outside response."
+    ).strip()
+
+
+def chat_response_envelope_native_system_prompt(
+    *,
+    platform: str,
+    platform_label: str,
+    now_text: str,
+    first_name: str,
+    last_name: str,
+    personality: str,
+    ascii_only_platforms: Iterable[str],
+) -> str:
+    legacy_contract = (
+        "Return exactly one strict JSON object with this schema:\n"
+        '{"response":"natural user-facing reply","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending executable goal or empty","tool_hint":"exact available tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question awaiting the user or empty"}}\n'
+    )
+    return (
+        chat_response_envelope_system_prompt(
+            platform=platform,
+            platform_label=platform_label,
+            now_text=now_text,
+            first_name=first_name,
+            last_name=last_name,
+            personality=personality,
+            ascii_only_platforms=ascii_only_platforms,
+        )
+        .replace(legacy_contract, "")
+        .replace(
+            "- Do not include explanations, markdown, or extra keys outside response.",
+            "- Do not include explanations or markdown in the structured fields.",
+        )
     ).strip()
 
 

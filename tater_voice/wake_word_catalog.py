@@ -39,9 +39,24 @@ def _catalog_type(value: Any) -> str:
     token = _text(value).lower().replace("-", "_")
     if token in {"oww", "openwakeword", "open_wake_word"}:
         return "oww"
+    if token in {"nww", "nanowakeword", "nano_wake_word"}:
+        return "nww"
     if token in {"dual", "paired", "dual_wake_word"}:
         return "dual"
     return "mww"
+
+
+def _catalog_url_version(value: Any) -> int:
+    try:
+        parsed = urlparse(_text(value))
+    except ValueError:
+        return 0
+    parts = [part for part in parsed.path.split("/") if part]
+    for part in parts:
+        version, _label = _source_version(part)
+        if version != 999:
+            return version
+    return 0
 
 
 def is_catalog_url(value: Any, *, model_type: Any = "mww") -> bool:
@@ -59,8 +74,13 @@ def is_catalog_url(value: Any, *, model_type: Any = "mww") -> bool:
     ):
         return False
     filename = parsed.path.rsplit("/", 1)[-1].lower()
-    if _catalog_type(model_type) in {"oww", "dual"}:
-        return filename.endswith(".wake-bundle.json")
+    catalog_type = _catalog_type(model_type)
+    if catalog_type == "nww":
+        return filename.endswith(".wake-bundle.json") and _catalog_url_version(token) >= 8
+    if catalog_type in {"oww", "dual"}:
+        return filename.endswith(".wake-bundle.json") and _catalog_url_version(token) >= 7
+    if filename.endswith(".wake-bundle.json"):
+        return _catalog_url_version(token) >= 8
     return not filename.endswith((".esphome.json", ".oww.json", ".wake-bundle.json"))
 
 
@@ -68,9 +88,12 @@ def require_catalog_url(value: Any, *, model_type: Any = "mww") -> str:
     token = _text(value)
     catalog_type = _catalog_type(model_type)
     if not is_catalog_url(token, model_type=catalog_type):
-        label = "Wake Word" if catalog_type == "mww" else (
-            "openWakeWord" if catalog_type == "oww" else "Dual Wake Word"
-        )
+        label = {
+            "mww": "Wake Word",
+            "oww": "openWakeWord",
+            "nww": "NanoWakeWord Bundle",
+            "dual": "Dual Wake Word",
+        }[catalog_type]
         raise ValueError(f"Select a wake word from the official Tater {label} Catalog.")
     return token
 
@@ -110,15 +133,26 @@ def entries_from_manifest(payload: Any) -> List[Dict[str, Any]]:
             continue
         source = _text(row.get("source") or row.get("source_label") or row.get("folder"))
         version, version_label = _source_version(source)
-        path = _text(row.get("path"))
-        url = _text(row.get("url") or row.get("download_url") or row.get("json_url")) or _raw_url(path)
-        if not is_catalog_url(url):
-            continue
         bundle_path = _text(row.get("bundle_path"))
         bundle_url = _text(row.get("bundle_url")) or _raw_url(bundle_path)
+        path = _text(row.get("path"))
+        url = (
+            _text(row.get("url") or row.get("download_url") or row.get("json_url"))
+            or _raw_url(path)
+        )
+        if not is_catalog_url(url):
+            if version >= 8 and is_catalog_url(bundle_url, model_type="nww"):
+                url = bundle_url
+            else:
+                continue
         dual_model = bool(row.get("dual_model")) and is_catalog_url(
             bundle_url,
             model_type="dual",
+        )
+        nano_model = (
+            version >= 8
+            and bool(row.get("nano_model"))
+            and is_catalog_url(bundle_url, model_type="nww")
         )
         slug = _text(row.get("slug") or row.get("name") or row.get("key"))
         label = _text(row.get("label") or row.get("title"))
@@ -140,6 +174,15 @@ def entries_from_manifest(payload: Any) -> List[Dict[str, Any]]:
                     "bundle_url": bundle_url,
                     "openwakeword_metadata_url": _text(row.get("openwakeword_metadata_url")),
                     "openwakeword_model_url": _text(row.get("openwakeword_model_url")),
+                }
+            )
+        if nano_model:
+            entry.update(
+                {
+                    "nano_model": True,
+                    "nanowakeword_architectures": list(
+                        row.get("nanowakeword_architectures") or []
+                    ),
                 }
             )
         entries[url] = entry
@@ -222,7 +265,16 @@ def field_payload(
     )
     catalog = load_catalog()
     entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
-    if catalog_type in {"oww", "dual"}:
+    if catalog_type == "nww":
+        entries = [
+            row
+            for row in entries
+            if int(row.get("version") or 0) >= 8
+            and row.get("nano_model")
+            and _text(row.get("bundle_url"))
+        ]
+        url_key = "bundle_url"
+    elif catalog_type in {"oww", "dual"}:
         entries = [row for row in entries if row.get("dual_model") and _text(row.get("bundle_url"))]
         url_key = "bundle_url"
     else:
@@ -264,6 +316,7 @@ def field_payload(
     catalog_label = {
         "mww": "microWakeWord models",
         "oww": "openWakeWord packages",
+        "nww": "NanoWakeWord packages",
         "dual": "matched dual-model bundles",
     }[catalog_type]
     if official_count:
@@ -275,8 +328,10 @@ def field_payload(
     else:
         description = (
             f"No official {catalog_label} have been published yet. "
-            "This list will populate automatically when verified V7 wake words are added."
+            "This list will populate automatically when verified compatible wake bundles are added."
         )
+    if catalog_type == "nww":
+        description = f"{description} NanoWakeWord catalog packages start with V8."
     warning = _text(catalog.get("warning"))
     if warning:
         description = f"{description} {warning}"
