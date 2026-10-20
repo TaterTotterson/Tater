@@ -7,9 +7,14 @@ for every llama.cpp setup, including remote servers and Beast Mode roles.
 
 ### llama.cpp Slot Settings
 
-- Adds one shared Available Slots control whenever any Tater LLM route uses
-  llama.cpp, not only when the internal llama.cpp runtime is selected.
+- Shows the shared Available Slots control directly inside route settings only
+  when internal or remote llama.cpp is selected.
 - Clarifies that remote llama.cpp users should match the setting to the
   server's `--parallel` value.
 - Shows the automatic stable slot assignment for enabled Beast Mode roles and
   explains when roles share slots or use independent server namespaces.
+
+### Cleaner LLM Settings
+
+- Places Model Thinking inside Base Route 1 instead of leaving the shared
+  control in a separate card above the model routes.

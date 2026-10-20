@@ -70,18 +70,6 @@ const selectedRuntimeProviders = computed(() => {
   });
   return providerOptions.filter((option) => option.local && selected.has(option.value));
 });
-const llamaConfigured = computed(() => {
-  if (servers.value.some((row) => llama(row.provider))) return true;
-  if (llama(props.draft.tater_open_webui_llm_provider)) return true;
-  if (llama(props.draft.spudex_llm_provider)) return true;
-  return Boolean(props.draft.hydra_beast_mode_enabled) && roles.some((role) => (
-    llama(props.draft[roleKey(role.id, "provider")])
-  ));
-});
-const beastLlamaRoles = computed(() => roles.filter((role) => (
-  Boolean(props.draft.hydra_beast_mode_enabled)
-  && llama(props.draft[roleKey(role.id, "provider")])
-)));
 const activeRuntimeOption = computed(() => providerOptions.find((option) => option.value === runtimeProvider.value));
 const activeContextConfig = computed(() => contextConfigs[runtimeProvider.value] || contextConfigs.llama_cpp);
 const selectedRuntimeModel = computed(() => {
@@ -152,6 +140,11 @@ function local(providerValue: unknown): boolean { return ["hf_transformers", "ll
 function remote(providerValue: unknown): boolean { return String(providerValue || "") === "llama_cpp_remote"; }
 function apiProvider(providerValue: unknown): boolean { return ["openai_compatible", "llama_cpp_remote"].includes(String(providerValue || "")); }
 function llama(providerValue: unknown): boolean { return ["llama_cpp", "llama_cpp_remote"].includes(String(providerValue || "")); }
+function slotCapacityHelp(providerValue: unknown): string {
+  return remote(providerValue)
+    ? "Match this shared setting to the remote llama.cpp server's --parallel value."
+    : "Controls how many requests Tater's internal llama.cpp runtime can run concurrently.";
+}
 function roleKey(role: string, suffix: string) { return `hydra_llm_${role}_${suffix}`; }
 function automaticRoleSlot(role: string): number {
   const offsets: Record<string, number> = { astraeus: 0, hermes: 1, thanatos: 2 };
@@ -321,24 +314,7 @@ onMounted(() => { void refreshContextEstimate(); });
     </nav>
     <div v-if="remoteError" class="tv-notice error">{{ remoteError }}</div>
 
-    <article v-if="llamaConfigured" class="tm-form-card tm-llm-slot-capacity-card">
-      <header><div><span class="tv-eyebrow">Shared llama.cpp routing</span><h3>Prompt-cache slot capacity</h3><p>Tell Tater how many concurrent slots each configured llama.cpp server exposes.</p></div><span class="tm-llm-section-chip">llama.cpp</span></header>
-      <div class="tm-field-grid">
-        <label class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>For Tater's internal runtime this controls concurrency. For Remote llama.cpp, match the server's <code>--parallel</code> value.</small></label>
-        <div class="tm-llm-route-note"><i>↔</i><div><strong>Blank route slots use automatic assignment</strong><span>Tater keeps each Hydra role on a stable slot. Roles only share when fewer slots are available, and slot numbers are independent when roles use different servers.</span></div></div>
-      </div>
-      <div v-if="beastLlamaRoles.length" class="tm-llm-context-facts tm-llm-auto-slot-map">
-        <span v-for="role in beastLlamaRoles" :key="role.id">{{ role.label }} <b>Auto → {{ automaticRoleSlot(role.id) }}</b></span>
-      </div>
-    </article>
-
     <template v-if="area === 'base'">
-      <label class="tm-llm-switch tm-llm-thinking-switch">
-        <input v-model="draft.hydra_llm_thinking_enabled" type="checkbox" @change="changed" />
-        <span><strong>Model thinking</strong><small>Allow thinking-capable models to reason before answering or calling tools. Applies to internal runtimes, external local APIs, Terminal, Tater Open WebUI, and Hydra roles. Reasoning stays separate from the visible reply and speech.</small></span>
-        <b>{{ draft.hydra_llm_thinking_enabled ? "On" : "Off" }}</b>
-      </label>
-
       <article class="tm-llm-route-note tm-llm-pool-note">
         <i>↻</i>
         <div><strong>Base routes share requests</strong><span>With multiple routes, normal Base calls rotate through the pool. Hydra roles stay assigned to a consistent pool member to keep their prompt caches warm. These routes are peers, not fallback-only backups.</span></div>
@@ -349,6 +325,12 @@ onMounted(() => { void refreshContextEstimate(); });
           <div><span class="tv-eyebrow">Base route {{ index + 1 }}</span><h3>{{ index === 0 ? "Choose a Base model" : "Additional Base model" }}</h3><p>{{ servers.length > 1 ? "This route shares normal Base requests with every other pool member." : "All normal Base requests use this route until another pool member is added." }}</p></div>
           <div class="tm-inline-actions"><span class="tm-llm-route-state"><i />Pool member {{ index + 1 }}</span><button v-if="index > 0" class="tv-button danger" type="button" @click="removeServer(index)">Remove</button></div>
         </header>
+
+        <label v-if="index === 0" class="tm-llm-switch tm-llm-thinking-switch">
+          <input v-model="draft.hydra_llm_thinking_enabled" type="checkbox" @change="changed" />
+          <span><strong>Model thinking</strong><small>Allow thinking-capable models to reason before answering or calling tools. This shared setting also applies to additional Base routes, Terminal, Tater Open WebUI, and Hydra roles. Reasoning stays separate from the visible reply and speech.</small></span>
+          <b>{{ draft.hydra_llm_thinking_enabled ? "On" : "Off" }}</b>
+        </label>
 
         <section class="tm-llm-provider-section">
           <div class="tm-llm-section-title"><div><strong>Provider</strong><span>Pick where this route runs. Only its matching settings appear below.</span></div><b>{{ providerOption(provider(row)).label }}</b></div>
@@ -366,6 +348,7 @@ onMounted(() => { void refreshContextEstimate(); });
             <label v-if="apiProvider(provider(row))" class="tm-field"><span class="tm-field-label">API key</span><input v-model="row.api_key" type="password" autocomplete="off" placeholder="Optional" @input="changed" /></label>
             <label v-if="local(provider(row))" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="row.model" @change="routeModelChanged(row)"><option value="">Select a downloaded model</option><option v-if="row.model && !modelInstalled(provider(row), row.model)" :value="row.model">Current: {{ row.model }}</option><option v-for="model in modelsFor(provider(row))" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select><small v-if="!modelsFor(provider(row)).length">No matching model is installed yet. Download one from Hugging Face first.</small></label>
             <label v-else class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="row.model" type="text" placeholder="Model id or server alias" @input="changed" /></label>
+            <label v-if="llama(provider(row))" class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>{{ slotCapacityHelp(provider(row)) }}</small></label>
             <label v-if="llama(provider(row))" class="tm-field"><span class="tm-field-label">Prompt cache slot</span><input v-model="row.llama_cpp_slot" type="number" min="0" :max="Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)" placeholder="Auto" @input="changed" /><small>Blank lets Tater assign stable slots automatically. A number pins this route to that exact slot.</small></label>
             <div v-if="remote(provider(row))" class="tm-inline-field tm-llm-discover"><button class="tv-button" type="button" :disabled="remoteBusy === `base-${index}`" @click="discover(`base-${index}`, row)">{{ remoteBusy === `base-${index}` ? "Looking…" : "Discover server models" }}</button><select v-if="remoteModels[`base-${index}`]?.length" v-model="row.model" @change="changed"><option v-for="model in remoteModels[`base-${index}`]" :key="model" :value="model">{{ model }}</option></select></div>
           </div>
@@ -438,6 +421,7 @@ onMounted(() => { void refreshContextEstimate(); });
         <label v-if="apiProvider(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">API key</span><input v-model="draft.tater_open_webui_llm_api_key" type="password" autocomplete="off" placeholder="Optional" @input="changed" /></label>
         <label v-if="local(draft.tater_open_webui_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="draft.tater_open_webui_llm_model" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft.tater_open_webui_llm_model && !modelInstalled(draft.tater_open_webui_llm_provider, draft.tater_open_webui_llm_model)" :value="draft.tater_open_webui_llm_model">Current: {{ draft.tater_open_webui_llm_model }}</option><option v-for="model in modelsFor(draft.tater_open_webui_llm_provider)" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></label>
         <label v-else class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft.tater_open_webui_llm_model" type="text" placeholder="Coding model id or server alias" @input="changed" /></label>
+        <label v-if="llama(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>{{ slotCapacityHelp(draft.tater_open_webui_llm_provider) }}</small></label>
         <label v-if="llama(draft.tater_open_webui_llm_provider)" class="tm-field"><span class="tm-field-label">Prompt cache slot</span><input v-model="draft.tater_open_webui_llm_llama_cpp_slot" type="number" min="0" :max="Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)" placeholder="Auto" @input="changed" /><small>Blank lets Tater assign the slot automatically.</small></label>
       </div></article>
     </template>
@@ -448,6 +432,7 @@ onMounted(() => { void refreshContextEstimate(); });
         <label v-if="apiProvider(draft.spudex_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Host or base URL</span><input v-model="draft.spudex_llm_host" type="text" placeholder="http://127.0.0.1:1234" @input="changed" /></label>
         <label v-if="local(draft.spudex_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="draft.spudex_llm_model" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft.spudex_llm_model && !modelInstalled(draft.spudex_llm_provider, draft.spudex_llm_model)" :value="draft.spudex_llm_model">Current: {{ draft.spudex_llm_model }}</option><option v-for="model in modelsFor(draft.spudex_llm_provider)" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></label>
         <label v-else-if="draft.spudex_llm_provider !== 'spud_link'" class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft.spudex_llm_model" type="text" @input="changed" /></label>
+        <label v-if="llama(draft.spudex_llm_provider)" class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>{{ slotCapacityHelp(draft.spudex_llm_provider) }}</small></label>
       </div></article>
     </template>
 
@@ -459,7 +444,8 @@ onMounted(() => { void refreshContextEstimate(); });
         <label v-if="apiProvider(draft[roleKey(role.id, 'provider')])" class="tm-field"><span class="tm-field-label">API key</span><input v-model="draft[roleKey(role.id, 'api_key')]" type="password" @input="changed" /></label>
         <label v-if="local(draft[roleKey(role.id, 'provider')])" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded model</span><select v-model="draft[roleKey(role.id, 'model')]" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft[roleKey(role.id, 'model')] && !modelInstalled(draft[roleKey(role.id, 'provider')], draft[roleKey(role.id, 'model')])" :value="draft[roleKey(role.id, 'model')]">Current: {{ draft[roleKey(role.id, 'model')] }}</option><option v-for="model in modelsFor(draft[roleKey(role.id, 'provider')])" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></label>
         <label v-else-if="draft[roleKey(role.id, 'provider')] !== 'spud_link'" class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft[roleKey(role.id, 'model')]" type="text" @input="changed" /></label>
-        <label v-if="llama(draft[roleKey(role.id, 'provider')])" class="tm-field"><span class="tm-field-label">Prompt cache slot</span><input v-model="draft[roleKey(role.id, 'llama_cpp_slot')]" type="number" min="0" :max="Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)" placeholder="Auto" @input="changed" /><small>Blank gives this role a stable automatic slot. A number pins it to that exact slot.</small></label>
+        <label v-if="llama(draft[roleKey(role.id, 'provider')])" class="tm-field"><span class="tm-field-label">Available slots</span><input v-model="draft.hydra_llama_cpp_slot_count" type="number" min="1" max="32" @input="changed" /><small>{{ slotCapacityHelp(draft[roleKey(role.id, 'provider')]) }}</small></label>
+        <label v-if="llama(draft[roleKey(role.id, 'provider')])" class="tm-field"><span class="tm-field-label">Prompt cache slot</span><input v-model="draft[roleKey(role.id, 'llama_cpp_slot')]" type="number" min="0" :max="Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)" placeholder="Auto" @input="changed" /><small>Blank gives this role stable automatic slot {{ automaticRoleSlot(role.id) }}. A number pins it to that exact slot.</small></label>
       </div></article>
     </template>
   </section>
