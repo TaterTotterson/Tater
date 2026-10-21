@@ -76,6 +76,29 @@ class DeviceRegistryAliasTests(unittest.TestCase):
         ):
             self.assertEqual(replacement_for_verba(verba_id), "")
 
+    def test_appliance_capability_moves_washer_out_of_other_sensors(self) -> None:
+        registry = _load_integration_registry()
+        row = registry._coerce_device_row(
+            "homeassistant",
+            {
+                "id": "sensor.washer_remaining_time",
+                "name": "Washer Remaining time",
+                "type": "sensor",
+                "capabilities": ["sensor", "appliance", "washer", "remaining_time"],
+                "aliases": ["Washer"],
+                "state": "2026-10-21T02:48:09+00:00",
+                "details": {
+                    "entity_property": "remaining_time",
+                    "parent_device_name": "Washer",
+                },
+            },
+        )
+
+        self.assertIn("appliance", row["category_ids"])
+        self.assertNotIn("sensor", row["category_ids"])
+        self.assertIn("washer", row["capabilities"])
+        self.assertIn("remaining_time", row["capabilities"])
+
     def test_tater_has_no_hidden_category_device_verba(self) -> None:
         self.assertFalse((ROOT / "category_device_control.py").exists())
 

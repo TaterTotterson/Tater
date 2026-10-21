@@ -205,6 +205,14 @@ CAPABILITY_CATEGORIES: List[Dict[str, Any]] = [
         "order": 125,
     },
     {
+        "id": "appliance",
+        "name": "Appliances",
+        "singular": "Appliance",
+        "description": "Washers, dryers, dishwashers, and other connected appliances.",
+        "aliases": ["appliances", "smart_appliance", "smart_appliances", "laundry_appliance"],
+        "order": 128,
+    },
+    {
         "id": "media_player",
         "name": "Speakers & Media",
         "singular": "Speaker",
