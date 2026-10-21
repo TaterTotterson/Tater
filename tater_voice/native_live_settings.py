@@ -52,8 +52,23 @@ DEFAULTS: Dict[str, Any] = {
     "nww_architecture": "cnn",
     "nww_model_revision": "",
     "nww_available_architectures": "",
+    "nww_profile_threshold": 0.99,
+    "nww_profile_patience": 3,
+    "nww_cnn_profile_threshold": 0.99,
+    "nww_cnn_profile_patience": 3,
+    "nww_gru_profile_threshold": 0.99,
+    "nww_gru_profile_patience": 3,
     "wake_sensitivity": "normal",
     "wake_environment": "balanced",
+    "mww_tuning_override_enabled": False,
+    "mww_threshold_override": 0.98,
+    "mww_sliding_window_override": 5,
+    "oww_tuning_override_enabled": False,
+    "oww_threshold_override": 0.74,
+    "oww_patience_override": 3,
+    "nww_tuning_override_enabled": False,
+    "nww_threshold_override": 0.99,
+    "nww_patience_override": 3,
     "wake_tuning_override_enabled": False,
     "wake_threshold_override": 0.98,
     "wake_sliding_window_override": 5,
@@ -123,6 +138,10 @@ FIRMWARE_SETTING_KEYS = (
     "wake_environment",
     "wake_threshold",
     "wake_sliding_window",
+    "oww_threshold",
+    "oww_patience",
+    "nww_threshold",
+    "nww_patience",
     "capture_wake_audio",
     "capture_close_misses",
     "close_miss_threshold",
@@ -236,6 +255,12 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "nww_model_revision",
     "nww_architecture",
     "nww_available_architectures",
+    "nww_profile_threshold",
+    "nww_profile_patience",
+    "nww_cnn_profile_threshold",
+    "nww_cnn_profile_patience",
+    "nww_gru_profile_threshold",
+    "nww_gru_profile_patience",
     "bundle_has_mww",
     "bundle_has_oww",
     "wake_bundle_embedded_micro",
@@ -246,7 +271,30 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "oww_profile_confirmation_patience",
     "oww_profile_error",
 )
-GLOBAL_SATELLITE_PERSISTED_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | set(GLOBAL_WAKE_PROFILE_KEYS)
+GLOBAL_WAKE_TUNING_KEYS = {
+    "mww_tuning_override_enabled",
+    "mww_threshold_override",
+    "mww_sliding_window_override",
+    "oww_tuning_override_enabled",
+    "oww_threshold_override",
+    "oww_patience_override",
+    "nww_tuning_override_enabled",
+    "nww_threshold_override",
+    "nww_patience_override",
+}
+LEGACY_DEVICE_WAKE_OVERRIDE_KEYS = {
+    "wake_tuning_override_enabled",
+    "wake_threshold_override",
+    "wake_sliding_window_override",
+    "wake_close_miss_threshold_override",
+    "wake_tuning_overrides",
+}
+GLOBAL_SATELLITE_PERSISTED_KEYS = (
+    set(GLOBAL_SATELLITE_CONTROL_KEYS)
+    | set(GLOBAL_WAKE_PROFILE_KEYS)
+    | GLOBAL_WAKE_TUNING_KEYS
+    | LEGACY_DEVICE_WAKE_OVERRIDE_KEYS
+)
 WAKE_FAMILY_PERSISTED_KEYS = {
     "wake_engine",
     "wake_detector_mode",
@@ -258,7 +306,7 @@ WAKE_FAMILY_PERSISTED_KEYS = {
     "oww_wake_word",
     "oww_wake_word_url",
     "nww_architecture",
-} | set(GLOBAL_WAKE_PROFILE_KEYS)
+} | set(GLOBAL_WAKE_PROFILE_KEYS) | GLOBAL_WAKE_TUNING_KEYS
 SHARED_SATELLITE_CONTROL_KEYS = {
     "capture_wake_audio",
     "capture_close_misses",
@@ -278,6 +326,9 @@ GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
     "oww_profile_name",
     "training_section",
     "playback_section",
+    "model_override_section",
+    *GLOBAL_WAKE_TUNING_KEYS,
+    *LEGACY_DEVICE_WAKE_OVERRIDE_KEYS,
 }
 WAKE_SENSITIVITY_ROWS = [
     ("conservative", "Conservative"),
@@ -360,6 +411,12 @@ BUILTIN_OWW_PROFILES: Dict[str, Dict[str, Any]] = {
         "oww_model_revision": "",
         "nww_model_revision": "",
         "nww_available_architectures": "cnn,gru",
+        "nww_profile_threshold": 0.99,
+        "nww_profile_patience": 3,
+        "nww_cnn_profile_threshold": 0.99,
+        "nww_cnn_profile_patience": 3,
+        "nww_gru_profile_threshold": 0.99,
+        "nww_gru_profile_patience": 3,
         "bundle_has_mww": True,
         "bundle_has_oww": True,
         "wake_bundle_embedded_micro": True,
@@ -746,6 +803,27 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
             "oww_model_revision": _text(source.get("oww_model_revision")),
             "nww_model_revision": _text(source.get("nww_model_revision")),
             "nww_available_architectures": _text(source.get("nww_available_architectures")),
+            "nww_profile_threshold": round(
+                _as_float(source.get("nww_profile_threshold"), float(DEFAULTS["nww_profile_threshold"]), minimum=0.01, maximum=1.0),
+                3,
+            ),
+            "nww_profile_patience": _as_int(
+                source.get("nww_profile_patience"), int(DEFAULTS["nww_profile_patience"]), minimum=1, maximum=20,
+            ),
+            "nww_cnn_profile_threshold": round(
+                _as_float(source.get("nww_cnn_profile_threshold"), float(DEFAULTS["nww_cnn_profile_threshold"]), minimum=0.01, maximum=1.0),
+                3,
+            ),
+            "nww_cnn_profile_patience": _as_int(
+                source.get("nww_cnn_profile_patience"), int(DEFAULTS["nww_cnn_profile_patience"]), minimum=1, maximum=20,
+            ),
+            "nww_gru_profile_threshold": round(
+                _as_float(source.get("nww_gru_profile_threshold"), float(DEFAULTS["nww_gru_profile_threshold"]), minimum=0.01, maximum=1.0),
+                3,
+            ),
+            "nww_gru_profile_patience": _as_int(
+                source.get("nww_gru_profile_patience"), int(DEFAULTS["nww_gru_profile_patience"]), minimum=1, maximum=20,
+            ),
             "bundle_has_mww": _as_bool(source.get("bundle_has_mww"), False),
             "bundle_has_oww": _as_bool(source.get("bundle_has_oww"), False),
             "wake_bundle_embedded_micro": _as_bool(source.get("wake_bundle_embedded_micro"), False),
@@ -760,6 +838,12 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
         "oww_model_revision": "",
         "nww_model_revision": "",
         "nww_available_architectures": "",
+        "nww_profile_threshold": float(DEFAULTS["nww_profile_threshold"]),
+        "nww_profile_patience": int(DEFAULTS["nww_profile_patience"]),
+        "nww_cnn_profile_threshold": float(DEFAULTS["nww_cnn_profile_threshold"]),
+        "nww_cnn_profile_patience": int(DEFAULTS["nww_cnn_profile_patience"]),
+        "nww_gru_profile_threshold": float(DEFAULTS["nww_gru_profile_threshold"]),
+        "nww_gru_profile_patience": int(DEFAULTS["nww_gru_profile_patience"]),
         "bundle_has_mww": wake_word == "hey_tater",
         "bundle_has_oww": wake_word == "hey_tater",
         "wake_bundle_embedded_micro": False,
@@ -777,6 +861,12 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         "oww_model_revision": "",
         "nww_model_revision": "",
         "nww_available_architectures": "",
+        "nww_profile_threshold": float(DEFAULTS["nww_profile_threshold"]),
+        "nww_profile_patience": int(DEFAULTS["nww_profile_patience"]),
+        "nww_cnn_profile_threshold": float(DEFAULTS["nww_cnn_profile_threshold"]),
+        "nww_cnn_profile_patience": int(DEFAULTS["nww_cnn_profile_patience"]),
+        "nww_gru_profile_threshold": float(DEFAULTS["nww_gru_profile_threshold"]),
+        "nww_gru_profile_patience": int(DEFAULTS["nww_gru_profile_patience"]),
         "bundle_has_mww": False,
         "bundle_has_oww": False,
         "wake_bundle_embedded_micro": False,
@@ -853,6 +943,7 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
     nano = payload.get("nano_wake_word") if isinstance(payload.get("nano_wake_word"), dict) else {}
     variants = nano.get("variants") if isinstance(nano.get("variants"), dict) else {}
     nano_architectures: List[str] = []
+    nano_profiles: Dict[str, tuple[float, int]] = {}
     for architecture in ("cnn", "gru"):
         variant = variants.get(architecture)
         if not isinstance(variant, dict):
@@ -870,6 +961,34 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         size = _as_int(size_value, 0, minimum=0, maximum=16 * 1024 * 1024)
         if model_ref.lower().endswith(".onnx") and valid_digest(model_sha) and size > 0:
             nano_architectures.append(architecture)
+            nano_profiles[architecture] = (
+                round(
+                    _as_float(
+                        variant.get("recommended_threshold"),
+                        float(DEFAULTS[f"nww_{architecture}_profile_threshold"]),
+                        minimum=0.01,
+                        maximum=1.0,
+                    ),
+                    3,
+                ),
+                _as_int(
+                    variant.get("recommended_patience"),
+                    int(DEFAULTS[f"nww_{architecture}_profile_patience"]),
+                    minimum=1,
+                    maximum=20,
+                ),
+            )
+
+    default_nano_architecture = _lower(nano.get("default_architecture"))
+    if default_nano_architecture not in nano_profiles:
+        default_nano_architecture = nano_architectures[0] if nano_architectures else "cnn"
+    default_nano_profile = nano_profiles.get(
+        default_nano_architecture,
+        (
+            float(DEFAULTS["nww_profile_threshold"]),
+            int(DEFAULTS["nww_profile_patience"]),
+        ),
+    )
 
     native = micro.get("tater_native") if isinstance(micro.get("tater_native"), dict) else {}
     micro_settings = micro.get("micro") if isinstance(micro.get("micro"), dict) else {}
@@ -912,6 +1031,12 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         "oww_model_revision": revision,
         "nww_model_revision": revision,
         "nww_available_architectures": ",".join(nano_architectures),
+        "nww_profile_threshold": default_nano_profile[0],
+        "nww_profile_patience": default_nano_profile[1],
+        "nww_cnn_profile_threshold": nano_profiles.get("cnn", (float(DEFAULTS["nww_cnn_profile_threshold"]), 0))[0],
+        "nww_cnn_profile_patience": nano_profiles.get("cnn", (0.0, int(DEFAULTS["nww_cnn_profile_patience"])))[1],
+        "nww_gru_profile_threshold": nano_profiles.get("gru", (float(DEFAULTS["nww_gru_profile_threshold"]), 0))[0],
+        "nww_gru_profile_patience": nano_profiles.get("gru", (0.0, int(DEFAULTS["nww_gru_profile_patience"])))[1],
         "bundle_has_mww": has_micro,
         "bundle_has_oww": has_oww,
         "wake_bundle_embedded_micro": embedded_micro,
@@ -1343,6 +1468,8 @@ def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
         return {
             "wake_sensitivity": "high",
             "wake_environment": "far_field",
+            "mww_tuning_override_enabled": True,
+            "mww_threshold_override": 0.88,
             "wake_tuning_override_enabled": True,
             "wake_threshold_override": 0.88,
         }
@@ -1631,6 +1758,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
     wake_environment = _wake_environment_value(source.get("wake_environment"))
     profile = _wake_profile_from_source(source, wake_word, wake_word_url)
     oww_profile = _oww_profile_from_source(source, oww_wake_word, oww_wake_word_url)
+    detector_mode = _wake_detector_mode(source.get("wake_detector_mode"), source)
     profile_key = _text(profile.get("wake_profile_key")) or _wake_profile_key(wake_word, wake_word_url)
     profile_threshold = round(
         _as_float(profile.get("wake_profile_threshold"), float(DEFAULTS["wake_profile_threshold"]), minimum=0.01, maximum=0.99),
@@ -1653,15 +1781,25 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
     )
     overrides = _wake_overrides(source.get("wake_tuning_overrides"))
     existing_override = overrides.get(profile_key, {})
-    if base is not None and "wake_tuning_override_enabled" in incoming:
+    if base is not None and "mww_tuning_override_enabled" in incoming:
+        override_enabled_source = incoming.get("mww_tuning_override_enabled")
+    elif base is not None and "wake_tuning_override_enabled" in incoming:
         override_enabled_source = incoming.get("wake_tuning_override_enabled")
     else:
-        override_enabled_source = existing_override.get("enabled", source.get("wake_tuning_override_enabled"))
+        override_enabled_source = source.get(
+            "mww_tuning_override_enabled",
+            existing_override.get("enabled", source.get("wake_tuning_override_enabled")),
+        )
     override_enabled = _as_bool(override_enabled_source, False)
-    if base is not None and "wake_threshold_override" in incoming:
+    if base is not None and "mww_threshold_override" in incoming:
+        threshold_override_source = incoming.get("mww_threshold_override")
+    elif base is not None and "wake_threshold_override" in incoming:
         threshold_override_source = incoming.get("wake_threshold_override")
     else:
-        threshold_override_source = existing_override.get("threshold", profile_threshold)
+        threshold_override_source = source.get(
+            "mww_threshold_override",
+            existing_override.get("threshold", profile_threshold),
+        )
     threshold_override = round(
         _as_float(
             threshold_override_source,
@@ -1671,10 +1809,15 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         ),
         3,
     )
-    if base is not None and "wake_sliding_window_override" in incoming:
+    if base is not None and "mww_sliding_window_override" in incoming:
+        window_override_source = incoming.get("mww_sliding_window_override")
+    elif base is not None and "wake_sliding_window_override" in incoming:
         window_override_source = incoming.get("wake_sliding_window_override")
     else:
-        window_override_source = existing_override.get("sliding_window", profile_window)
+        window_override_source = source.get(
+            "mww_sliding_window_override",
+            existing_override.get("sliding_window", profile_window),
+        )
     window_override = _as_int(
         window_override_source,
         profile_window,
@@ -1708,7 +1851,68 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
     sensitivity_threshold = _threshold_for_sensitivity(profile_threshold, wake_sensitivity)
     effective_threshold = threshold_override if override_enabled else sensitivity_threshold
     effective_window = window_override if override_enabled else profile_window
-    effective_close_miss_threshold = close_miss_override if override_enabled else profile_close_miss_threshold
+    # Close-miss capture remains package-owned. The shared model override UI
+    # intentionally exposes only the values that decide a wake; it must not
+    # silently alter trainer-feedback capture behavior.
+    effective_close_miss_threshold = profile_close_miss_threshold
+
+    oww_profile_threshold = round(
+        _as_float(oww_profile.get("oww_profile_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
+        3,
+    )
+    oww_profile_patience = _as_int(
+        oww_profile.get("oww_profile_patience"), int(DEFAULTS["oww_profile_patience"]), minimum=1, maximum=20,
+    )
+    oww_confirmation_threshold = round(
+        _as_float(
+            oww_profile.get("oww_profile_confirmation_threshold"),
+            float(DEFAULTS["oww_profile_confirmation_threshold"]),
+            minimum=0.01,
+            maximum=1.0,
+        ),
+        3,
+    )
+    oww_confirmation_patience = _as_int(
+        oww_profile.get("oww_profile_confirmation_patience"),
+        int(DEFAULTS["oww_profile_confirmation_patience"]),
+        minimum=1,
+        maximum=20,
+    )
+    active_oww_profile_threshold = oww_confirmation_threshold if detector_mode == "mww_oww" else oww_profile_threshold
+    active_oww_profile_patience = oww_confirmation_patience if detector_mode == "mww_oww" else oww_profile_patience
+    oww_override_enabled = _as_bool(source.get("oww_tuning_override_enabled"), False)
+    oww_threshold_override = round(
+        _as_float(source.get("oww_threshold_override"), active_oww_profile_threshold, minimum=0.01, maximum=1.0),
+        3,
+    )
+    oww_patience_override = _as_int(
+        source.get("oww_patience_override"), active_oww_profile_patience, minimum=1, maximum=20,
+    )
+
+    architecture_prefix = "nww_gru" if nww_architecture == "gru" else "nww_cnn"
+    nww_profile_threshold = round(
+        _as_float(
+            oww_profile.get(f"{architecture_prefix}_profile_threshold", oww_profile.get("nww_profile_threshold")),
+            float(DEFAULTS[f"{architecture_prefix}_profile_threshold"]),
+            minimum=0.01,
+            maximum=1.0,
+        ),
+        3,
+    )
+    nww_profile_patience = _as_int(
+        oww_profile.get(f"{architecture_prefix}_profile_patience", oww_profile.get("nww_profile_patience")),
+        int(DEFAULTS[f"{architecture_prefix}_profile_patience"]),
+        minimum=1,
+        maximum=20,
+    )
+    nww_override_enabled = _as_bool(source.get("nww_tuning_override_enabled"), False)
+    nww_threshold_override = round(
+        _as_float(source.get("nww_threshold_override"), nww_profile_threshold, minimum=0.01, maximum=1.0),
+        3,
+    )
+    nww_patience_override = _as_int(
+        source.get("nww_patience_override"), nww_profile_patience, minimum=1, maximum=20,
+    )
     wake_sound = _wake_sound_value(source.get("wake_sound"))
     wake_sound_url = _text(source.get("wake_sound_url"))
     if wake_sound != "custom":
@@ -1736,34 +1940,40 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "nww_architecture": nww_architecture,
         "nww_available_architectures": _text(oww_profile.get("nww_available_architectures")),
         "oww_profile_name": _text(oww_profile.get("oww_profile_name")) or str(DEFAULTS["oww_profile_name"]),
-        "oww_profile_threshold": round(
-            _as_float(oww_profile.get("oww_profile_threshold"), float(DEFAULTS["oww_profile_threshold"]), minimum=0.01, maximum=1.0),
-            3,
-        ),
-        "oww_profile_patience": _as_int(
-            oww_profile.get("oww_profile_patience"),
-            int(DEFAULTS["oww_profile_patience"]),
-            minimum=1,
-            maximum=20,
-        ),
-        "oww_profile_confirmation_threshold": round(
-            _as_float(
-                oww_profile.get("oww_profile_confirmation_threshold"),
-                float(DEFAULTS["oww_profile_confirmation_threshold"]),
-                minimum=0.01,
-                maximum=1.0,
-            ),
-            3,
-        ),
-        "oww_profile_confirmation_patience": _as_int(
-            oww_profile.get("oww_profile_confirmation_patience"),
-            int(DEFAULTS["oww_profile_confirmation_patience"]),
-            minimum=1,
-            maximum=20,
-        ),
+        "oww_profile_threshold": oww_profile_threshold,
+        "oww_profile_patience": oww_profile_patience,
+        "oww_profile_confirmation_threshold": oww_confirmation_threshold,
+        "oww_profile_confirmation_patience": oww_confirmation_patience,
+        "oww_active_profile_threshold": active_oww_profile_threshold,
+        "oww_active_profile_patience": active_oww_profile_patience,
         "oww_profile_error": _text(oww_profile.get("oww_profile_error")),
+        "nww_profile_threshold": nww_profile_threshold,
+        "nww_profile_patience": nww_profile_patience,
+        "nww_cnn_profile_threshold": round(
+            _as_float(oww_profile.get("nww_cnn_profile_threshold"), float(DEFAULTS["nww_cnn_profile_threshold"]), minimum=0.01, maximum=1.0),
+            3,
+        ),
+        "nww_cnn_profile_patience": _as_int(
+            oww_profile.get("nww_cnn_profile_patience"), int(DEFAULTS["nww_cnn_profile_patience"]), minimum=1, maximum=20,
+        ),
+        "nww_gru_profile_threshold": round(
+            _as_float(oww_profile.get("nww_gru_profile_threshold"), float(DEFAULTS["nww_gru_profile_threshold"]), minimum=0.01, maximum=1.0),
+            3,
+        ),
+        "nww_gru_profile_patience": _as_int(
+            oww_profile.get("nww_gru_profile_patience"), int(DEFAULTS["nww_gru_profile_patience"]), minimum=1, maximum=20,
+        ),
         "wake_sensitivity": wake_sensitivity,
         "wake_environment": wake_environment,
+        "mww_tuning_override_enabled": bool(override_enabled),
+        "mww_threshold_override": threshold_override,
+        "mww_sliding_window_override": window_override,
+        "oww_tuning_override_enabled": bool(oww_override_enabled),
+        "oww_threshold_override": oww_threshold_override,
+        "oww_patience_override": oww_patience_override,
+        "nww_tuning_override_enabled": bool(nww_override_enabled),
+        "nww_threshold_override": nww_threshold_override,
+        "nww_patience_override": nww_patience_override,
         "wake_tuning_override_enabled": bool(override_enabled),
         "wake_threshold_override": threshold_override,
         "wake_sliding_window_override": window_override,
@@ -1771,6 +1981,10 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "wake_tuning_overrides": _json_dumps(overrides),
         "wake_threshold": effective_threshold,
         "wake_sliding_window": effective_window,
+        "oww_threshold": oww_threshold_override if oww_override_enabled else active_oww_profile_threshold,
+        "oww_patience": oww_patience_override if oww_override_enabled else active_oww_profile_patience,
+        "nww_threshold": nww_threshold_override if nww_override_enabled else nww_profile_threshold,
+        "nww_patience": nww_patience_override if nww_override_enabled else nww_profile_patience,
         "capture_wake_audio": _as_bool(source.get("capture_wake_audio"), bool(DEFAULTS["capture_wake_audio"])),
         "capture_close_misses": _as_bool(source.get("capture_close_misses"), bool(DEFAULTS["capture_close_misses"])),
         "close_miss_threshold": effective_close_miss_threshold,
@@ -1985,7 +2199,7 @@ def firmware_settings_snapshot(
         for key in (
             "wake_oww_enabled", "wake_nww_enabled", "oww_wake_word", "oww_wake_word_url",
             "oww_model_revision", "nww_wake_word", "nww_wake_word_url", "nww_model_revision",
-            "nww_architecture",
+            "nww_architecture", "oww_threshold", "oww_patience", "nww_threshold", "nww_patience",
         ):
             output.pop(key, None)
     else:
@@ -2004,6 +2218,7 @@ def firmware_settings_snapshot(
             for key in (
                 "oww_wake_word", "oww_wake_word_url", "oww_model_revision",
                 "nww_wake_word", "nww_wake_word_url", "nww_model_revision", "nww_architecture",
+                "oww_threshold", "oww_patience", "nww_threshold", "nww_patience",
             ):
                 output.pop(key, None)
         elif mode in {"oww", "nww"}:
@@ -2024,6 +2239,11 @@ def firmware_settings_snapshot(
                 output.pop("nww_model_revision", None)
             for key in ("oww_wake_word", "oww_wake_word_url", "oww_model_revision"):
                 output.pop(key, None)
+            output.pop("oww_threshold", None)
+            output.pop("oww_patience", None)
+        elif oww_enabled:
+            output.pop("nww_threshold", None)
+            output.pop("nww_patience", None)
     if not _board_supports_led_settings(board):
         for key in _LED_FIELD_KEYS:
             output.pop(key, None)
@@ -2497,6 +2717,110 @@ def settings_fields(
             "step": 0.01,
             "show_when": {"source_key": "wake_tuning_override_enabled", "equals": True},
             "description": f"Effective close-miss threshold now: {current['close_miss_threshold']}. Lower values capture more near misses.",
+        },
+        {
+            "key": "model_override_section",
+            "label": "Model Overrides",
+            "type": "section",
+            "description": "Optional expert overrides for the active wake engines. With overrides off, every model uses the values validated by its wake bundle.",
+        },
+        {
+            "key": "mww_tuning_override_enabled",
+            "label": "Override MWW Bundle Tuning",
+            "type": "checkbox",
+            "value": current["mww_tuning_override_enabled"],
+            "default": DEFAULTS["mww_tuning_override_enabled"],
+            "description": "Replace the selected microWakeWord package threshold and sliding window.",
+        },
+        {
+            "key": "mww_threshold_override",
+            "label": "MWW Threshold",
+            "type": "number",
+            "value": current["mww_threshold_override"],
+            "default": current["wake_profile_threshold"],
+            "min": 0.01,
+            "max": 0.99,
+            "step": 0.01,
+            "description": f"Bundle value: {current['wake_profile_threshold']}. Higher values reduce false wakes.",
+        },
+        {
+            "key": "mww_sliding_window_override",
+            "label": "MWW Sliding Window",
+            "type": "number",
+            "value": current["mww_sliding_window_override"],
+            "default": current["wake_profile_sliding_window"],
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "description": f"Bundle value: {current['wake_profile_sliding_window']}. Larger values require a longer stable detection.",
+        },
+        {
+            "key": "oww_tuning_override_enabled",
+            "label": "Override OWW Bundle Tuning",
+            "type": "checkbox",
+            "value": current["oww_tuning_override_enabled"],
+            "default": DEFAULTS["oww_tuning_override_enabled"],
+            "description": "Replace the active openWakeWord threshold and consecutive-frame patience.",
+        },
+        {
+            "key": "oww_threshold_override",
+            "label": "OWW Threshold",
+            "type": "number",
+            "value": current["oww_threshold_override"],
+            "default": current["oww_active_profile_threshold"],
+            "standalone_default": current["oww_profile_threshold"],
+            "confirmation_default": current["oww_profile_confirmation_threshold"],
+            "min": 0.01,
+            "max": 1.0,
+            "step": 0.01,
+            "description": f"Active bundle value: {current['oww_active_profile_threshold']}.",
+        },
+        {
+            "key": "oww_patience_override",
+            "label": "OWW Patience",
+            "type": "number",
+            "value": current["oww_patience_override"],
+            "default": current["oww_active_profile_patience"],
+            "standalone_default": current["oww_profile_patience"],
+            "confirmation_default": current["oww_profile_confirmation_patience"],
+            "min": 1,
+            "max": 20,
+            "step": 1,
+            "description": f"Active bundle value: {current['oww_active_profile_patience']} consecutive 80 ms scores.",
+        },
+        {
+            "key": "nww_tuning_override_enabled",
+            "label": "Override NWW Bundle Tuning",
+            "type": "checkbox",
+            "value": current["nww_tuning_override_enabled"],
+            "default": DEFAULTS["nww_tuning_override_enabled"],
+            "description": "Replace the selected NanoWakeWord architecture's threshold and consecutive-frame patience.",
+        },
+        {
+            "key": "nww_threshold_override",
+            "label": "NWW Threshold",
+            "type": "number",
+            "value": current["nww_threshold_override"],
+            "default": current["nww_profile_threshold"],
+            "cnn_default": current["nww_cnn_profile_threshold"],
+            "gru_default": current["nww_gru_profile_threshold"],
+            "min": 0.01,
+            "max": 1.0,
+            "step": 0.01,
+            "description": f"{current['nww_architecture'].upper()} bundle value: {current['nww_profile_threshold']}.",
+        },
+        {
+            "key": "nww_patience_override",
+            "label": "NWW Patience",
+            "type": "number",
+            "value": current["nww_patience_override"],
+            "default": current["nww_profile_patience"],
+            "cnn_default": current["nww_cnn_profile_patience"],
+            "gru_default": current["nww_gru_profile_patience"],
+            "min": 1,
+            "max": 20,
+            "step": 1,
+            "description": f"{current['nww_architecture'].upper()} bundle value: {current['nww_profile_patience']} consecutive 80 ms scores.",
         },
         {
             "key": "training_section",
@@ -3007,6 +3331,9 @@ def shared_wake_model_settings_sections() -> List[Dict[str, Any]]:
                     "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
                     "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
                     "oww_profile_name", "nww_architecture",
+                    "mww_tuning_override_enabled", "mww_threshold_override", "mww_sliding_window_override",
+                    "oww_tuning_override_enabled", "oww_threshold_override", "oww_patience_override",
+                    "nww_tuning_override_enabled", "nww_threshold_override", "nww_patience_override",
                 ),
             ),
         ],

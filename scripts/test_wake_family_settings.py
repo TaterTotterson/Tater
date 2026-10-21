@@ -346,19 +346,115 @@ class WakeFamilySettingsTests(unittest.TestCase):
             field["key"]
             for field in native_live_settings.settings_fields(wake_family="echo")
         }
-        popup_keys = {
-            field["key"]
+        popup_fields = {
+            field["key"]: field
             for field in native_live_settings.settings_fields(
                 "native:test-echo",
                 board="biscuit",
                 capabilities={"openwakeword": True},
             )
         }
+        popup_keys = set(popup_fields)
 
         self.assertIn("wake_detector_mode", global_keys)
         self.assertNotIn("wake_detector_mode", popup_keys)
         self.assertIn("wake_tuning_section", popup_keys)
         self.assertIn("wake_sensitivity", popup_keys)
+        self.assertIn("wake_environment", popup_keys)
+        self.assertIn(
+            {"value": "tv_nearby", "label": "TV Nearby"},
+            popup_fields["wake_environment"]["options"],
+        )
+        self.assertNotIn("mww_tuning_override_enabled", popup_keys)
+        self.assertNotIn("oww_tuning_override_enabled", popup_keys)
+        self.assertNotIn("nww_tuning_override_enabled", popup_keys)
+        self.assertNotIn("wake_tuning_override_enabled", popup_keys)
+
+    def test_shared_wake_form_contains_all_model_override_controls(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.UNIFIED_WAKE_SETTINGS_MIGRATION_KEY: "true",
+                }
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            keys = {
+                field["key"]
+                for section in native_live_settings.shared_wake_model_settings_sections()
+                for field in section["fields"]
+            }
+        self.assertTrue(
+            {
+                "mww_tuning_override_enabled",
+                "mww_threshold_override",
+                "mww_sliding_window_override",
+                "oww_tuning_override_enabled",
+                "oww_threshold_override",
+                "oww_patience_override",
+                "nww_tuning_override_enabled",
+                "nww_threshold_override",
+                "nww_patience_override",
+            }.issubset(keys)
+        )
+
+    def test_model_overrides_project_only_the_selected_detector_values(self) -> None:
+        base = {
+            "wake_detector_mode": "mww_nww",
+            "mww_tuning_override_enabled": True,
+            "mww_threshold_override": 0.91,
+            "mww_sliding_window_override": 4,
+            "oww_tuning_override_enabled": True,
+            "oww_threshold_override": 0.79,
+            "oww_patience_override": 2,
+            "nww_tuning_override_enabled": True,
+            "nww_threshold_override": 0.985,
+            "nww_patience_override": 2,
+        }
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.UNIFIED_WAKE_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    key: str(value).lower() if isinstance(value, bool) else str(value)
+                    for key, value in base.items()
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            nww = native_live_settings.firmware_settings_snapshot(
+                board="biscuit",
+                capabilities={"nanowakeword": True, "wake_detector_selection": True},
+            )
+            native_live_settings.save_wake_family_settings(
+                "echo",
+                {
+                    "wake_detector_mode": "oww",
+                    "oww_tuning_override_enabled": True,
+                    "oww_threshold_override": 0.79,
+                    "oww_patience_override": 2,
+                },
+            )
+            oww = native_live_settings.firmware_settings_snapshot(
+                board="biscuit",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(nww["wake_threshold"], 0.91)
+        self.assertEqual(nww["wake_sliding_window"], 4)
+        self.assertEqual(nww["nww_threshold"], 0.985)
+        self.assertEqual(nww["nww_patience"], 2)
+        self.assertNotIn("oww_threshold", nww)
+        self.assertNotIn("oww_patience", nww)
+        self.assertEqual(oww["oww_threshold"], 0.79)
+        self.assertEqual(oww["oww_patience"], 2)
+        self.assertNotIn("nww_threshold", oww)
+        self.assertNotIn("nww_patience", oww)
 
     def test_persisted_oww_only_profile_is_presented_as_single_oww(self) -> None:
         redis = MemoryRedis(

@@ -1,20 +1,29 @@
-# Tater v1.8.1
+# Tater v1.9.0
 
-Tater v1.8.1 makes llama.cpp prompt-cache slot capacity visible and configurable
-for every llama.cpp setup, including remote servers and Beast Mode roles.
+Tater v1.9.0 adds model-aware wake tuning for MWW, OWW, and NWW while keeping
+room-specific sensitivity and environment profiles simple on each satellite.
 
 ## What's New
 
-### llama.cpp Slot Settings
+### Model-Aware Wake Tuning
 
-- Shows the shared Available Slots control directly inside route settings only
-  when internal or remote llama.cpp is selected.
-- Clarifies that remote llama.cpp users should match the setting to the
-  server's `--parallel` value.
-- Shows the automatic stable slot assignment for enabled Beast Mode roles and
-  explains when roles share slots or use independent server namespaces.
+- Adds a polished Wake Model Overrides panel above STT wake verification.
+- Shows only the controls relevant to the selected detector mode: MWW, OWW,
+  NWW, MWW + OWW, or MWW + NWW.
+- Supports MWW threshold and sliding-window overrides plus OWW/NWW threshold
+  and patience overrides.
+- Applies overrides consistently to the built-in wake word, Wake Bundle
+  Catalog models, and custom wake-bundle URLs.
+- Restores each bundle's validated tuning immediately when an override is
+  disabled.
 
-### Cleaner LLM Settings
+### Cleaner Per-Satellite Settings
 
-- Places Model Thinking inside Base Route 1 instead of leaving the shared
-  control in a separate card above the model routes.
+- Removes model-level numeric overrides from each satellite popup.
+- Keeps Wake Sensitivity and Wake Environment as room-specific controls,
+  including the TV Nearby environment profile.
+
+### Better Device Organization
+
+- Adds an Appliances category for washers, dryers, dishwashers, and similar
+  connected devices so their entities no longer fall into generic sensors.

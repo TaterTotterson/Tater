@@ -138,6 +138,8 @@ class WakeWordCatalogTests(unittest.TestCase):
             if key in settings
         }
         self.assertEqual(firmware["oww_wake_word_url"], "https://example.test/jojo.wake-bundle.json")
+        self.assertEqual(firmware["oww_threshold"], 0.86)
+        self.assertEqual(firmware["oww_patience"], 2)
         self.assertTrue(firmware["oww_model_revision"])
 
     def test_schema_three_bundle_exposes_embedded_mww_and_nww_architectures(self) -> None:
@@ -161,8 +163,12 @@ class WakeWordCatalogTests(unittest.TestCase):
                         "model": "hey_tater.nww.cnn.onnx",
                         "model_sha256": "b" * 64,
                         "model_size_bytes": 200,
+                        "recommended_threshold": 0.97,
+                        "recommended_patience": 2,
                     },
                     "gru": {
+                        "recommended_threshold": 0.985,
+                        "recommended_patience": 4,
                         "artifacts": {
                             "onnx": {
                                 "file": "hey_tater.nww.gru.onnx",
@@ -191,6 +197,23 @@ class WakeWordCatalogTests(unittest.TestCase):
             )
 
         self.assertEqual(profile["nww_available_architectures"], "cnn,gru")
+        self.assertEqual(profile["nww_profile_threshold"], 0.97)
+        self.assertEqual(profile["nww_profile_patience"], 2)
+        self.assertEqual(profile["nww_cnn_profile_threshold"], 0.97)
+        self.assertEqual(profile["nww_cnn_profile_patience"], 2)
+        self.assertEqual(profile["nww_gru_profile_threshold"], 0.985)
+        self.assertEqual(profile["nww_gru_profile_patience"], 4)
+        nww_settings = native_live_settings.normalize_settings(
+            {
+                "wake_detector_mode": "nww",
+                "oww_wake_word": "custom_url",
+                "oww_wake_word_url": "https://example.test/hey_tater.wake-bundle.json",
+                "nww_architecture": "gru",
+                **profile,
+            }
+        )
+        self.assertEqual(nww_settings["nww_threshold"], 0.985)
+        self.assertEqual(nww_settings["nww_patience"], 4)
         self.assertTrue(profile["bundle_has_mww"])
         self.assertFalse(profile["bundle_has_oww"])
         self.assertTrue(profile["wake_bundle_embedded_micro"])

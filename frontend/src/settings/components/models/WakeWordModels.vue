@@ -36,9 +36,15 @@ const verifierFields = computed(() => fieldMap(verifierForm.value));
 const wakeEngine = computed(() => String(wakeValues.wake_engine || "micro_wake_word"));
 const wakeSource = computed(() => String(wakeValues.wake_word || "hey_tater"));
 const detectorMode = computed(() => String(wakeValues.wake_detector_mode || "mww_oww"));
-const owwEnabled = computed(() => detectorMode.value !== "mww");
+const mwwEnabled = computed(() => ["mww", "mww_oww", "mww_nww"].includes(detectorMode.value));
+const openWakeWordEnabled = computed(() => ["oww", "mww_oww"].includes(detectorMode.value));
 const nwwEnabled = computed(() => detectorMode.value === "nww" || detectorMode.value === "mww_nww");
+const companionEnabled = computed(() => openWakeWordEnabled.value || nwwEnabled.value);
 const nwwArchitecture = computed(() => String(wakeValues.nww_architecture || "cnn"));
+const owwBundleThreshold = computed(() => detectorMode.value === "mww_oww" ? wakeFields.value.oww_threshold_override?.confirmation_default : wakeFields.value.oww_threshold_override?.standalone_default);
+const owwBundlePatience = computed(() => detectorMode.value === "mww_oww" ? wakeFields.value.oww_patience_override?.confirmation_default : wakeFields.value.oww_patience_override?.standalone_default);
+const nwwBundleThreshold = computed(() => nwwArchitecture.value === "gru" ? wakeFields.value.nww_threshold_override?.gru_default : wakeFields.value.nww_threshold_override?.cnn_default);
+const nwwBundlePatience = computed(() => nwwArchitecture.value === "gru" ? wakeFields.value.nww_patience_override?.gru_default : wakeFields.value.nww_patience_override?.cnn_default);
 const singleDetectorModes = computed(() => optionsFor(wakeFields.value.wake_detector_mode).filter((option) => String(option.group || "") === "single"));
 const dualDetectorModes = computed(() => optionsFor(wakeFields.value.wake_detector_mode).filter((option) => String(option.group || "") === "dual"));
 const owwSource = computed(() => String(wakeValues.oww_wake_word || "hey_tater"));
@@ -340,7 +346,7 @@ defineExpose({ apply, refresh });
           <button v-for="option in dualDetectorModes" :key="optionValue(option)" type="button" :class="{ active: detectorMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseDetectorMode(optionValue(option))"><i>{{ detectorModeDetails[optionValue(option)]?.mark || 'WAKE' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ detectorModeDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
         </div></div>
 
-        <div v-if="!owwEnabled" class="tm-wake-model-block">
+        <div v-if="!companionEnabled" class="tm-wake-model-block">
           <div class="tm-speech-section-heading compact"><div><h3>microWakeWord model</h3><p>Choose Tater's model, a catalog release, or your own package.</p></div><span>{{ activeWakeSourceLabel }}</span></div>
           <div class="tm-choice-grid tm-wake-source-grid" role="group" aria-label="microWakeWord model source">
             <button v-for="option in optionsFor(wakeFields.wake_word)" :key="optionValue(option)" type="button" :class="{ active: wakeSource === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseWakeSource(optionValue(option))"><i>{{ wakeSourceDetails[optionValue(option)]?.mark || "SRC" }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ wakeSourceDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
@@ -349,7 +355,7 @@ defineExpose({ apply, refresh });
           <label v-if="wakeSource === 'custom_url'" class="tm-field tm-field-wide"><span class="tm-field-label">{{ wakeFields.wake_word_url?.label }}</span><input v-model="wakeValues.wake_word_url" type="url" :placeholder="String(wakeFields.wake_word_url?.placeholder || 'https://example.local/wake_word.wake-bundle.json')" :disabled="Boolean(busy)" @input="update(wakeValues, 'wake_word_url', wakeValues.wake_word_url)" /><small>{{ wakeFields.wake_word_url?.description }}</small></label>
         </div>
 
-        <div v-if="owwEnabled" class="tm-wake-model-block">
+        <div v-if="companionEnabled" class="tm-wake-model-block">
           <div class="tm-speech-section-heading compact"><div><h3>Wake word bundle</h3><p>One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord model; capable satellites load {{ detectorMode === 'mww_oww' ? 'MWW + OWW' : (detectorMode === 'mww_nww' ? `MWW + NWW ${nwwArchitecture.toUpperCase()}` : (detectorMode === 'nww' ? `NWW ${nwwArchitecture.toUpperCase()}` : 'OWW')) }}.</p></div><span>{{ activeOwwSourceLabel }}</span></div>
           <div class="tm-choice-grid tm-wake-source-grid" role="group" aria-label="matched wake bundle source">
             <button v-for="option in optionsFor(wakeFields.oww_wake_word)" :key="optionValue(option)" type="button" :class="{ active: owwSource === optionValue(option) }" :disabled="Boolean(busy) || (optionValue(option) === 'catalog' && !optionsFor(wakeFields.oww_wake_word_catalog_url).length)" @click="chooseOwwSource(optionValue(option))"><i>{{ optionValue(option) === 'hey_tater' ? 'T' : (optionValue(option) === 'catalog' ? 'CAT' : 'URL') }}</i><span><strong>{{ owwSourceOptionLabel(option) }}</strong><small>{{ owwSourceOptionDescription(option) }}</small></span><b>✓</b></button>
@@ -378,8 +384,41 @@ defineExpose({ apply, refresh });
       <div v-if="pairing && !trainer?.linked" class="tm-pairing-box" :class="{ expired: pairingState === 'expired' }"><span>Pairing code</span><strong>{{ pairingState === "expired" ? "Expired" : pairingCode || "Creating…" }}</strong><small v-if="pairingState === 'waiting'">Expires in {{ formatPairingTime(pairingRemaining) }}</small><small v-else-if="pairingState === 'expired'">Restart pairing to create a new code.</small><a v-if="pairing.pairing_url || pairing.url" :href="String(pairing.pairing_url || pairing.url)" target="_blank" rel="noreferrer">Open trainer pairing</a></div>
     </article>
 
+    <article v-if="wakeForm && wakeEngine === 'micro_wake_word'" class="tm-form-card tm-wake-tuning-card">
+      <header><div><span class="tv-eyebrow">Step 3 · Tune</span><h3>Wake model overrides</h3><p>Each active engine starts with the values validated by its selected bundle. Enable an override only when you want to trade sensitivity, false wakes, or response time.</p></div><span class="tm-speech-status-chip">{{ activeWakeLabel }}</span></header>
+      <div class="tm-wake-tuning-grid">
+        <section v-if="mwwEnabled" class="tm-wake-tuning-model" :class="{ active: Boolean(wakeValues.mww_tuning_override_enabled) }">
+          <header><i>MW</i><div><strong>microWakeWord</strong><small>Bundle: threshold {{ wakeFields.mww_threshold_override?.default }} · window {{ wakeFields.mww_sliding_window_override?.default }}</small></div></header>
+          <label class="tm-wake-tuning-switch"><span><strong>Override bundle values</strong><small>Applies to the MWW half of built-in, catalog, and custom bundles.</small></span><input v-model="wakeValues.mww_tuning_override_enabled" type="checkbox" :disabled="Boolean(busy)" @change="update(wakeValues, 'mww_tuning_override_enabled', wakeValues.mww_tuning_override_enabled)" /></label>
+          <div v-if="wakeValues.mww_tuning_override_enabled" class="tm-wake-tuning-inputs">
+            <label><span>Threshold</span><input v-model.number="wakeValues.mww_threshold_override" type="number" :min="wakeFields.mww_threshold_override?.min ?? 0.01" :max="wakeFields.mww_threshold_override?.max ?? 0.99" :step="wakeFields.mww_threshold_override?.step ?? 0.01" :disabled="Boolean(busy)" @input="update(wakeValues, 'mww_threshold_override', wakeValues.mww_threshold_override)" /><small>Higher reduces false wakes.</small></label>
+            <label><span>Sliding window</span><input v-model.number="wakeValues.mww_sliding_window_override" type="number" :min="wakeFields.mww_sliding_window_override?.min ?? 1" :max="wakeFields.mww_sliding_window_override?.max ?? 10" :step="1" :disabled="Boolean(busy)" @input="update(wakeValues, 'mww_sliding_window_override', wakeValues.mww_sliding_window_override)" /><small>Larger is more conservative.</small></label>
+          </div>
+        </section>
+
+        <section v-if="openWakeWordEnabled" class="tm-wake-tuning-model" :class="{ active: Boolean(wakeValues.oww_tuning_override_enabled) }">
+          <header><i>OW</i><div><strong>openWakeWord{{ detectorMode === 'mww_oww' ? ' confirmation' : '' }}</strong><small>Bundle: threshold {{ owwBundleThreshold }} · patience {{ owwBundlePatience }}</small></div></header>
+          <label class="tm-wake-tuning-switch"><span><strong>Override bundle values</strong><small>Applies to the OWW model from any supported wake-bundle source.</small></span><input v-model="wakeValues.oww_tuning_override_enabled" type="checkbox" :disabled="Boolean(busy)" @change="update(wakeValues, 'oww_tuning_override_enabled', wakeValues.oww_tuning_override_enabled)" /></label>
+          <div v-if="wakeValues.oww_tuning_override_enabled" class="tm-wake-tuning-inputs">
+            <label><span>Threshold</span><input v-model.number="wakeValues.oww_threshold_override" type="number" :min="wakeFields.oww_threshold_override?.min ?? 0.01" :max="wakeFields.oww_threshold_override?.max ?? 1" :step="wakeFields.oww_threshold_override?.step ?? 0.01" :disabled="Boolean(busy)" @input="update(wakeValues, 'oww_threshold_override', wakeValues.oww_threshold_override)" /><small>Higher reduces false wakes.</small></label>
+            <label><span>Patience</span><input v-model.number="wakeValues.oww_patience_override" type="number" :min="wakeFields.oww_patience_override?.min ?? 1" :max="wakeFields.oww_patience_override?.max ?? 20" :step="1" :disabled="Boolean(busy)" @input="update(wakeValues, 'oww_patience_override', wakeValues.oww_patience_override)" /><small>Consecutive 80 ms scores.</small></label>
+          </div>
+        </section>
+
+        <section v-if="nwwEnabled" class="tm-wake-tuning-model" :class="{ active: Boolean(wakeValues.nww_tuning_override_enabled) }">
+          <header><i>NW</i><div><strong>NanoWakeWord {{ nwwArchitecture.toUpperCase() }}</strong><small>Bundle: threshold {{ nwwBundleThreshold }} · patience {{ nwwBundlePatience }}</small></div></header>
+          <label class="tm-wake-tuning-switch"><span><strong>Override bundle values</strong><small>Applies to the selected CNN or GRU model from any supported bundle source.</small></span><input v-model="wakeValues.nww_tuning_override_enabled" type="checkbox" :disabled="Boolean(busy)" @change="update(wakeValues, 'nww_tuning_override_enabled', wakeValues.nww_tuning_override_enabled)" /></label>
+          <div v-if="wakeValues.nww_tuning_override_enabled" class="tm-wake-tuning-inputs">
+            <label><span>Threshold</span><input v-model.number="wakeValues.nww_threshold_override" type="number" :min="wakeFields.nww_threshold_override?.min ?? 0.01" :max="wakeFields.nww_threshold_override?.max ?? 1" :step="wakeFields.nww_threshold_override?.step ?? 0.01" :disabled="Boolean(busy)" @input="update(wakeValues, 'nww_threshold_override', wakeValues.nww_threshold_override)" /><small>Higher reduces false wakes.</small></label>
+            <label><span>Patience</span><input v-model.number="wakeValues.nww_patience_override" type="number" :min="wakeFields.nww_patience_override?.min ?? 1" :max="wakeFields.nww_patience_override?.max ?? 20" :step="1" :disabled="Boolean(busy)" @input="update(wakeValues, 'nww_patience_override', wakeValues.nww_patience_override)" /><small>Lower responds sooner but may false wake.</small></label>
+          </div>
+        </section>
+      </div>
+      <div class="tm-wake-model-note">Overrides follow the selected model source, so they work with the built-in word, Wake Bundle Catalog, and custom bundle URLs. Turning an override off immediately restores the bundle’s validated values.</div>
+    </article>
+
     <article v-if="verifierForm" class="tm-form-card tm-wake-verifier-card">
-      <header><div><span class="tv-eyebrow">Step 3 · Verify</span><h3>STT wake verification</h3><p>Use the selected Speech STT engine for a fast second opinion after an on-device wake.</p></div><span class="tm-speech-status-chip">{{ verifierStt }}</span></header>
+      <header><div><span class="tv-eyebrow">Step 4 · Verify</span><h3>STT wake verification</h3><p>Use the selected Speech STT engine for a fast second opinion after an on-device wake.</p></div><span class="tm-speech-status-chip">{{ verifierStt }}</span></header>
       <div class="tm-choice-grid tm-wake-verifier-grid" role="group" aria-label="Wake verification mode">
         <button v-for="option in optionsFor(verifierModeField)" :key="optionValue(option)" type="button" :class="{ active: verifierMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseVerifierMode(optionValue(option))"><i>{{ verifierDetails[optionValue(option)]?.mark }}</i><span><strong>{{ verifierDetails[optionValue(option)]?.label || optionLabel(option) }}</strong><small>{{ verifierDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
       </div>
