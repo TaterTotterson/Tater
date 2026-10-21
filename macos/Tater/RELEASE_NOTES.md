@@ -1,6 +1,6 @@
-# Tater v1.9.0
+# Tater v1.8.2
 
-Tater v1.9.0 adds model-aware wake tuning for MWW, OWW, and NWW while keeping
+Tater v1.8.2 adds model-aware wake tuning for MWW, OWW, and NWW while keeping
 room-specific sensitivity and environment profiles simple on each satellite.
 
 ## What's New
