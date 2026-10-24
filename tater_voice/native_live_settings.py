@@ -103,10 +103,13 @@ DEFAULTS: Dict[str, Any] = {
     "limiter_release_ms": 150.0,
     "audio_output_mode": "auto",
     "screen_brightness": 80,
+    "screen_auto_brightness_enabled": False,
+    "screen_auto_brightness_minimum": 12,
     "screen_night_mode_enabled": False,
     "screen_night_brightness": 10,
     "screen_night_start": "22:00",
     "screen_night_end": "07:00",
+    "screen_night_display": "red_clock",
     "display_theme": "tater",
     "display_wallpaper_interval_minutes": 1440,
     "display_edge_glow": True,
@@ -157,10 +160,13 @@ FIRMWARE_SETTING_KEYS = (
     "volume_percent",
     "audio_output_mode",
     "screen_brightness",
+    "screen_auto_brightness_enabled",
+    "screen_auto_brightness_minimum",
     "screen_night_mode_enabled",
     "screen_night_brightness",
     "screen_night_start",
     "screen_night_end",
+    "screen_night_display",
     "display_theme",
     "display_wallpaper_interval_minutes",
     "display_edge_glow",
@@ -1251,7 +1257,7 @@ def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = 
         return "echo"
     # Board fallback keeps settings correct while an older Echo build is connecting
     # before it has advertised the newer detector capability flags.
-    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "crown", "rook"}:
+    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "crown", "athena", "rook"}:
         return "echo"
     return "mww"
 
@@ -1490,10 +1496,24 @@ _LED_FIELD_KEYS = {
 
 _SCREEN_SETTING_KEYS = {
     "screen_brightness",
+    "screen_auto_brightness_enabled",
+    "screen_auto_brightness_minimum",
     "screen_night_mode_enabled",
     "screen_night_brightness",
     "screen_night_start",
     "screen_night_end",
+    "screen_night_display",
+}
+
+_ECHO_SCREEN_DEFAULTS = {
+    "screen_brightness": 35,
+    "screen_auto_brightness_enabled": False,
+    "screen_auto_brightness_minimum": 12,
+    "screen_night_mode_enabled": False,
+    "screen_night_brightness": 3,
+    "screen_night_start": "22:00",
+    "screen_night_end": "07:00",
+    "screen_night_display": "red_clock",
 }
 
 _SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
@@ -1577,6 +1597,8 @@ def _board_supports_display_theme(board: Any = "") -> bool:
         "crown",
         "echo-show-8",
         "echo-show-8-1st-gen",
+        "athena",
+        "echo-show-8-2nd-gen",
         "rook",
         "echo-spot",
     } or compact in {
@@ -1586,6 +1608,8 @@ def _board_supports_display_theme(board: Any = "") -> bool:
         "crown",
         "echoshow8",
         "echoshow81stgen",
+        "athena",
+        "echoshow82ndgen",
         "rook",
         "echospot",
     }
@@ -1601,6 +1625,8 @@ def _board_supports_display_photos(board: Any = "") -> bool:
         "crown",
         "echo-show-8",
         "echo-show-8-1st-gen",
+        "athena",
+        "echo-show-8-2nd-gen",
         "rook",
         "echo-spot",
     } or compact in {
@@ -1610,6 +1636,8 @@ def _board_supports_display_photos(board: Any = "") -> bool:
         "crown",
         "echoshow8",
         "echoshow81stgen",
+        "athena",
+        "echoshow82ndgen",
         "rook",
         "echospot",
     }
@@ -1713,12 +1741,57 @@ def _s420_led_animation(value: Any, default_key: str) -> str:
 def _board_supports_screen_settings(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
-    return token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact in {
+    return token in {
+        "s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3",
+        "checkers", "echo-show-5", "echo-show-5-1st-gen",
+        "crown", "echo-show-8", "echo-show-8-1st-gen",
+        "athena", "echo-show-8-2nd-gen",
+        "rook", "echo-spot",
+    } or compact in {
         "s3box",
         "s3box3",
         "esp32s3box",
         "esp32s3box3",
+        "checkers",
+        "echoshow5",
+        "echoshow51stgen",
+        "crown",
+        "echoshow8",
+        "echoshow81stgen",
+        "athena",
+        "echoshow82ndgen",
+        "rook",
+        "echospot",
     }
+
+
+def _board_is_s3_screen(board: Any = "") -> bool:
+    token = _lower(board).replace("_", "-").replace(" ", "-")
+    compact = token.replace("-", "")
+    return token in {"s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3"} or compact in {
+        "s3box", "s3box3", "esp32s3box", "esp32s3box3",
+    }
+
+
+def _board_is_echo_screen(board: Any = "") -> bool:
+    return _board_supports_screen_settings(board) and not _board_is_s3_screen(board)
+
+
+def _supports_screen_power_management(
+    board: Any = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> bool:
+    if _board_is_s3_screen(board):
+        return True
+    values = capabilities if isinstance(capabilities, dict) else {}
+    return _as_int(values.get("screen_power_management_version"), 0, minimum=0, maximum=100) >= 1
+
+
+def _screen_night_display_value(value: Any) -> str:
+    token = _lower(value).replace("-", "_").replace(" ", "_")
+    aliases = {"clock": "red_clock", "red": "red_clock", "screen_off": "off"}
+    token = aliases.get(token, token)
+    return token if token in {"dim", "red_clock", "off"} else str(DEFAULTS["screen_night_display"])
 
 
 def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -2070,6 +2143,16 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
             minimum=0,
             maximum=100,
         ),
+        "screen_auto_brightness_enabled": _as_bool(
+            source.get("screen_auto_brightness_enabled"),
+            bool(DEFAULTS["screen_auto_brightness_enabled"]),
+        ),
+        "screen_auto_brightness_minimum": _as_int(
+            source.get("screen_auto_brightness_minimum"),
+            int(DEFAULTS["screen_auto_brightness_minimum"]),
+            minimum=1,
+            maximum=50,
+        ),
         "screen_night_mode_enabled": _as_bool(
             source.get("screen_night_mode_enabled"),
             bool(DEFAULTS["screen_night_mode_enabled"]),
@@ -2088,6 +2171,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
             source.get("screen_night_end"),
             str(DEFAULTS["screen_night_end"]),
         ),
+        "screen_night_display": _screen_night_display_value(source.get("screen_night_display")),
         "display_theme": _display_theme_value(source.get("display_theme")),
         "display_wallpaper_interval_minutes": _display_wallpaper_interval_value(
             source.get("display_wallpaper_interval_minutes")
@@ -2119,6 +2203,10 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
             if key not in GLOBAL_SATELLITE_PERSISTED_KEYS
         }
         current = normalize_settings(device_raw, base=global_settings)
+        if _board_is_echo_screen(board):
+            for key, value in _ECHO_SCREEN_DEFAULTS.items():
+                if key not in device_raw:
+                    current[key] = value
     current["wake_verifier_mode"] = _global_wake_verifier_mode()
     if _is_s420_board(board):
         for key in S420_LED_DEFAULTS:
@@ -2309,9 +2397,16 @@ def firmware_settings_snapshot(
                 for setting_key, wire_key in _OUTPUT_CHAIN_WIRE_KEYS.items()
             }
         )
-    if _board_supports_screen_settings(board):
-        now = datetime.now().astimezone()
-        output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
+    if _board_supports_screen_settings(board) and _supports_screen_power_management(board, capabilities):
+        if _board_is_s3_screen(board):
+            now = datetime.now().astimezone()
+            output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
+            for key in (
+                "screen_auto_brightness_enabled",
+                "screen_auto_brightness_minimum",
+                "screen_night_display",
+            ):
+                output.pop(key, None)
     else:
         for key in _SCREEN_SETTING_KEYS:
             output.pop(key, None)
@@ -2457,6 +2552,7 @@ def settings_fields(
         if family in WAKE_FAMILIES
         else settings_snapshot(selector, board=board)
     )
+    screen_defaults = _ECHO_SCREEN_DEFAULTS if _board_is_echo_screen(board) else DEFAULTS
     catalog_selected = current["wake_word"] == "custom_url" and wake_word_catalog.is_catalog_url(
         current["wake_word_url"]
     )
@@ -3061,35 +3157,55 @@ def settings_fields(
         },
         {
             "key": "screen_section",
-            "label": "S3 Box Display",
+            "label": "Display & Night",
             "type": "section",
-            "description": "Set this S3 Box screen brightness and optionally dim it on a daily schedule.",
+            "description": "Control this satellite's screen, automatic room-light response, and overnight behavior.",
         },
         {
             "key": "screen_brightness",
             "label": "Screen Brightness (%)",
             "type": "number",
             "value": current["screen_brightness"],
-            "default": DEFAULTS["screen_brightness"],
+            "default": screen_defaults["screen_brightness"],
             "min": 0,
             "max": 100,
             "step": 1,
             "description": "Normal display brightness. Setting this to 0 turns the backlight off.",
         },
         {
+            "key": "screen_auto_brightness_enabled",
+            "label": "Automatic Brightness",
+            "type": "checkbox",
+            "value": current["screen_auto_brightness_enabled"],
+            "default": screen_defaults["screen_auto_brightness_enabled"],
+            "description": "Follow the room's ambient-light sensor smoothly. Screen Brightness remains the maximum.",
+        },
+        {
+            "key": "screen_auto_brightness_minimum",
+            "label": "Dimmest Automatic Level (%)",
+            "type": "number",
+            "value": current["screen_auto_brightness_minimum"],
+            "default": screen_defaults["screen_auto_brightness_minimum"],
+            "min": 1,
+            "max": 50,
+            "step": 1,
+            "show_when": {"source_key": "screen_auto_brightness_enabled", "equals": True},
+            "description": "Lowest fraction of the selected brightness used in a dark room.",
+        },
+        {
             "key": "screen_night_mode_enabled",
-            "label": "Scheduled Night Dimming",
+            "label": "Scheduled Night Mode",
             "type": "checkbox",
             "value": current["screen_night_mode_enabled"],
-            "default": DEFAULTS["screen_night_mode_enabled"],
-            "description": "Automatically use a lower display brightness during the selected local-time window.",
+            "default": screen_defaults["screen_night_mode_enabled"],
+            "description": "Use a dim display, red bedside clock, or turn the screen off during a daily local-time window.",
         },
         {
             "key": "screen_night_start",
             "label": "Dim At",
             "type": "time",
             "value": current["screen_night_start"],
-            "default": DEFAULTS["screen_night_start"],
+            "default": screen_defaults["screen_night_start"],
             "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
         },
         {
@@ -3097,27 +3213,41 @@ def settings_fields(
             "label": "Restore At",
             "type": "time",
             "value": current["screen_night_end"],
-            "default": DEFAULTS["screen_night_end"],
+            "default": screen_defaults["screen_night_end"],
             "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
             "description": "The normal brightness returns at this local time. Overnight schedules are supported.",
+        },
+        {
+            "key": "screen_night_display",
+            "label": "Night Display",
+            "type": "select",
+            "value": current["screen_night_display"],
+            "default": screen_defaults["screen_night_display"],
+            "options": [
+                {"value": "red_clock", "label": "Dim Red Clock"},
+                {"value": "dim", "label": "Dim Current Display"},
+                {"value": "off", "label": "Screen Off"},
+            ],
+            "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
+            "description": "The red clock appears only while the satellite is idle; calls, timers, and voice activity remain visible at night brightness.",
         },
         {
             "key": "screen_night_brightness",
             "label": "Night Brightness (%)",
             "type": "number",
             "value": current["screen_night_brightness"],
-            "default": DEFAULTS["screen_night_brightness"],
+            "default": screen_defaults["screen_night_brightness"],
             "min": 0,
             "max": 100,
             "step": 1,
             "show_when": {"source_key": "screen_night_mode_enabled", "equals": True},
-            "description": "Brightness used between Dim At and Restore At. Setting this to 0 turns the screen off overnight.",
+            "description": "Brightness used between Dim At and Restore At. Zero turns the backlight off regardless of the selected night display.",
         },
         {
             "key": "display_theme_section",
-            "label": "Display & Theme",
+            "label": "Appearance & Photos",
             "type": "section",
-            "description": "Choose this satellite's color personality, photo rotation, and voice-state edge effects. Checkers, Crown, and Rook uploads are managed below.",
+            "description": "Choose this satellite's color personality, photo rotation, and voice-state edge effects. Screen-satellite uploads are managed below.",
         },
         {
             "key": "display_theme",
@@ -3312,8 +3442,21 @@ def settings_fields(
                     for state in field.get("states", [])
                     if _text(state.get("animation_key")) != "led_music_animation"
                 ]
-    if not (_selector_token(selector) and _board_supports_screen_settings(board)):
+    if not (
+        _selector_token(selector)
+        and _board_supports_screen_settings(board)
+        and _supports_screen_power_management(board, capabilities)
+    ):
         fields = [field for field in fields if _text(field.get("key")) not in _SCREEN_FIELD_KEYS]
+    elif _board_is_s3_screen(board):
+        # Preserve the established S3 Box wire contract until its firmware
+        # advertises the Echo-style ambient-light and night-display features.
+        echo_only = {
+            "screen_auto_brightness_enabled",
+            "screen_auto_brightness_minimum",
+            "screen_night_display",
+        }
+        fields = [field for field in fields if _text(field.get("key")) not in echo_only]
     if not (_selector_token(selector) and _board_supports_display_theme(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_photos(board)):

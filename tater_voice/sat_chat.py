@@ -36,7 +36,7 @@ def _truthy(value: Any) -> bool:
 
 def _video_receive_profile(participant: Optional[Dict[str, Any]]) -> str:
     board = _text((participant or {}).get("board")).lower().replace("_", "-")
-    if board in {"checkers", "crown", "rook"}:
+    if board in {"checkers", "crown", "athena", "rook"}:
         # Echo displays favor the low-latency 320x180 stream. Crown presents
         # video in a smaller 16:9 panel, so the extra 640x360 pixels no longer
         # justify their decode and draw cost.

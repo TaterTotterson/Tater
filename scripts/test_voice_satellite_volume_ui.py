@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 fake_native_live_settings = types.ModuleType("tater_voice.native_live_settings")
 fake_native_live_settings.settings_fields = lambda *_args, **_kwargs: []
+fake_native_live_settings._board_supports_display_photos = lambda *_args, **_kwargs: False
 fake_reply_playback = types.ModuleType("tater_voice.reply_playback")
 fake_reply_playback.REPLY_PLAYBACK_DEVICE = "device"
 fake_reply_playback.resolve_reply_playback_target = lambda *_args, **_kwargs: "device"

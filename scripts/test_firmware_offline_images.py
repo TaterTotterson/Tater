@@ -18,6 +18,7 @@ class FirmwareOfflineImageTests(unittest.TestCase):
         "biscuit": ("biscuit", "echo-dot-2.png"),
         "checkers": ("checkers", "echo-show-5.png"),
         "crown": ("crown", "echo-show-5.png"),
+        "athena": ("athena", "echo-show-5.png"),
         "radar": ("radar", "echo-2-radar.png"),
         "rook": ("rook", "echo-spot-rook.png"),
         "thirdreality-s420": ("thirdreality_s420", "thirdreality-s420.png"),

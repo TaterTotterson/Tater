@@ -363,6 +363,7 @@ def _default_name_for_board(board: Any) -> str:
         "radar": "Tater Echo 2",
         "checkers": "Tater Echo Show 5",
         "crown": "Tater Crown",
+        "athena": "Tater Athena",
         "rook": "Tater Echo Spot",
     }.get(token, "Tater Voice PE" if token == "voice-pe" else "")
 

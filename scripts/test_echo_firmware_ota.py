@@ -96,6 +96,40 @@ def _echo_manifest() -> dict[str, object]:
                     },
                 },
             },
+            "athena": {
+                "display_name": "Amazon Echo Show 8 2nd Generation (2021)",
+                "amazon_codename": "athena",
+                "model_number": "A8H3N2",
+                "cpu": "armv7a-on-arm64-kernel",
+                "unlock": "saiyaku-athena",
+                "factory_install": True,
+                "ota": True,
+                "status": "experimental-hardware-validation-required",
+                "artifacts": {
+                    "factory": {
+                        "name": "tater-echo-athena-v0.4.0-factory.tar.gz",
+                        "sha256": "5" * 64,
+                        "size": 10240,
+                    },
+                    "ota": {
+                        "name": "tater-echo-athena-v0.4.0-ota.tar.gz",
+                        "sha256": "6" * 64,
+                        "size": 8192,
+                    },
+                    "ota_bridge": {
+                        "name": "tater-echo-athena-v0.4.0-ota-bridge.tar.gz",
+                        "sha256": "7" * 64,
+                        "size": 7168,
+                    },
+                },
+                "ota_migrations": [{
+                    "id": "linux-app-components-v1",
+                    "required_capability": "ota_bundle_components_version",
+                    "minimum_capability_version": 1,
+                    "bridge_artifact": "ota_bridge",
+                    "final_artifact": "ota",
+                }],
+            },
             "radar": {
                 "display_name": "Amazon Echo 2nd Generation (2017)",
                 "amazon_codename": "radar",
@@ -368,6 +402,41 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-crown-v0.4.0-ota.tar.gz"))
         self.assertIn("factory/crown-linux/README.md", info["artifacts"]["factory"]["instructions_url"])
 
+    def test_athena_identity_selects_its_own_verified_ota_and_show_art(self) -> None:
+        row = {
+            "connected": True,
+            "firmware_target": "athena",
+            "board": "athena",
+            "firmware_version": "v0.3.0",
+            "device_info": {"model": "A8H3N2"},
+            "capabilities": {
+                "ota": True,
+                "ota_bundle_components_version": 1,
+                "screen": True,
+            },
+        }
+        spec = firmware._match_template_spec("native:athena-test", row)
+        self.assertEqual("athena", spec["key"])
+        self.assertFalse(spec["usb_recovery"])
+        friendly_name_spec = firmware._match_template_spec(
+            "native:unnamed",
+            {"connected": True, "device_info": {"friendly_name": "Tater Echo Show 8 (2nd Gen)"}},
+        )
+        self.assertEqual("athena", friendly_name_spec["key"])
+        self.assertEqual("Tater Athena", native_satellite._default_name_for_board("athena"))
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+            ui_helpers.device_image_src("athena", "Tater Athena", "A8H3N2"),
+        )
+        source = firmware._firmware_manifest_source("athena")
+        self.assertEqual("echo_targets", source["format"])
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            info = firmware._native_firmware_info("athena")
+        self.assertTrue(info["available"])
+        self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
+        self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-athena-v0.4.0-ota.tar.gz"))
+        self.assertIn("factory/athena-linux/README.md", info["artifacts"]["factory"]["instructions_url"])
+
     def test_rook_identity_selects_its_own_ota_and_art(self) -> None:
         row = {
             "connected": True,
@@ -627,6 +696,84 @@ class EchoFirmwareOtaTests(unittest.TestCase):
                 "tater-echo-crown-v0.4.0-ota.tar.gz"
             )
         )
+
+    def test_athena_update_is_reported_in_firmware_panel(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "athena",
+            "board": "athena",
+            "device_info": {
+                "name": "athena-test",
+                "friendly_name": "Kitchen Athena",
+                "manufacturer": "Tater",
+                "model": "A8H3N2",
+                "project_name": "tater.echo",
+                "project_version": "v0.3.0",
+            },
+            "metadata": {
+                "firmware_target": "athena",
+                "board": "athena",
+            },
+            "capabilities": {
+                "ota": True,
+                "ota_bundle_components_version": 1,
+                "screen": True,
+            },
+        }
+        athena_spec = firmware._template_spec_by_key("athena")
+        self.assertIsNotNone(athena_spec)
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[athena_spec]),
+            mock.patch.object(
+                firmware,
+                "_prebuilt_firmware_panel_summary",
+                return_value={"available": True, "device_count": 6, "version": "v0.4.0"},
+            ),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:athena-test": row}})
+
+        self.assertEqual(1, panel["firmware_update_count"])
+        update = panel["firmware_updates"][0]
+        self.assertEqual("native:athena-test", update["selector"])
+        self.assertEqual("athena", update["template_key"])
+        self.assertEqual("v0.3.0", update["installed"])
+        self.assertEqual("v0.4.0", update["latest"])
+        self.assertTrue(update["prebuilt_firmware_ota_available"])
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+            panel["variants"]["athena"]["native:athena-test"]["hero_image_src"],
+        )
+        self.assertTrue(
+            update["prebuilt_firmware"]["artifacts"]["ota"]["path"].endswith(
+                "tater-echo-athena-v0.4.0-ota.tar.gz"
+            )
+        )
+
+    def test_athena_without_ota_capability_is_not_offered_an_update(self) -> None:
+        row = {
+            "connected": True,
+            "selected": True,
+            "source": "tater_native",
+            "firmware_target": "athena",
+            "board": "athena",
+            "device_info": {"model": "A8H3N2", "project_version": "v0.3.0"},
+            "capabilities": {"ota": False, "screen": True},
+        }
+        athena_spec = firmware._template_spec_by_key("athena")
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()),
+            mock.patch.object(firmware, "_native_template_specs", return_value=[athena_spec]),
+            mock.patch.object(firmware, "_prebuilt_firmware_panel_summary", return_value={"available": True}),
+            mock.patch.object(firmware, "_load_recorded_firmware_version", return_value={}),
+        ):
+            panel = firmware.firmware_panel_payload({"clients": {"native:athena-test": row}})
+        self.assertEqual([], panel["firmware_updates"])
+        self.assertEqual([], panel["firmware_flash_targets"])
+        self.assertFalse(panel["variants"]["athena"]["native:athena-test"]["ota_supported"])
 
     def test_crown_without_ota_capability_is_not_offered_an_update(self) -> None:
         row = {

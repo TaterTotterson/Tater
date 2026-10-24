@@ -15,9 +15,9 @@ from tater_voice import sat_chat
 def _client(name: str, board: str, **capability_overrides):
     capabilities = {
         "sat_chat_audio": True,
-        "sat_chat_can_initiate": board in {"checkers", "crown", "rook"},
-        "sat_chat_can_end": board in {"checkers", "crown", "rook"},
-        "sat_chat_ui": board in {"checkers", "crown", "rook"},
+        "sat_chat_can_initiate": board in {"checkers", "crown", "athena", "rook"},
+        "sat_chat_can_end": board in {"checkers", "crown", "athena", "rook"},
+        "sat_chat_ui": board in {"checkers", "crown", "athena", "rook"},
         **capability_overrides,
     }
     return {
@@ -35,6 +35,7 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
         self.clients = {
             "native:kitchen": _client("Kitchen Crown", "crown"),
             "native:office": _client("Office Checkers", "checkers"),
+            "native:den": _client("Den Athena", "athena"),
             "native:bedroom": _client("Bedroom Biscuit", "biscuit"),
         }
 
@@ -55,6 +56,15 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.await_args_list[1].args[2]["video_send_profile"], "echo-low")
         self.assertNotIn("sat_chat.invite", message_types)
         self.assertNotIn("sat_chat.ringing", message_types)
+
+    async def test_athena_uses_echo_low_video_receive_profile(self) -> None:
+        sent = AsyncMock()
+        with patch.object(sat_chat, "_native_clients", new=AsyncMock(return_value=self.clients)), patch.object(
+            sat_chat, "_send", new=sent
+        ), patch.object(sat_chat, "refresh_directories", new=AsyncMock()):
+            await sat_chat.start("native:den", "native:office")
+
+        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-low")
 
     async def test_audio_only_satellite_cannot_initiate_or_end(self) -> None:
         with patch.object(sat_chat, "_native_clients", new=AsyncMock(return_value=self.clients)), patch.object(

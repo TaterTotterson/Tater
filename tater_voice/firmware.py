@@ -230,6 +230,7 @@ _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
     "checkers",
     "crown",
+    "athena",
     "radar",
     "rook",
     "satellite1_rpi_satellite",
@@ -251,9 +252,12 @@ _ECHO_FACTORY_GUIDE_DIRECTORIES = {
     "biscuit": "biscuit",
     "checkers": "checkers-linux",
     "crown": "crown-linux",
+    "athena": "athena-linux",
     "radar": "radar",
     "rook": "rook-linux",
 }
+_ECHO_FIRMWARE_TARGETS = {"biscuit", "checkers", "crown", "athena", "radar", "rook"}
+_NATIVE_SCREEN_TARGETS = {"checkers", "crown", "athena", "rook"}
 
 _S3BOX_SENSOR_FIELD_LABELS: Dict[str, str] = {
     "sensor_temp_out": "Outdoor Temperature",
@@ -353,19 +357,21 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "echo dot 2nd generation",
             "echo dot gen 2",
             "amazon echo dot 2",
-            "tater echo",
+            "tater echo dot",
         },
     },
     {
-        "key": "checkers",
-        "label": "Tater Echo Show 5",
+        "key": "athena",
+        "label": "Tater Echo Show 8 (2nd Gen)",
         "usb_recovery": False,
         "match_tokens": {
-            "checkers",
-            "echo show 5",
-            "echo show 5 1st generation",
-            "amazon echo show 5",
-            "tater echo show",
+            "athena",
+            "a8h3n2",
+            "echo show 8 2nd gen",
+            "echo show 8 2nd generation",
+            "echo show 8 2021",
+            "amazon echo show 8 2nd generation",
+            "tater athena",
         },
     },
     {
@@ -379,6 +385,18 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "amazon echo show 8",
             "tater crown",
             "tater echo show 8",
+        },
+    },
+    {
+        "key": "checkers",
+        "label": "Tater Echo Show 5",
+        "usb_recovery": False,
+        "match_tokens": {
+            "checkers",
+            "echo show 5",
+            "echo show 5 1st generation",
+            "amazon echo show 5",
+            "tater echo show",
         },
     },
     {
@@ -1207,7 +1225,7 @@ def _local_json(path: Path) -> Any:
 
 def _firmware_manifest_source(template_key: Any = "") -> Dict[str, Any]:
     key = _lower(template_key)
-    if key in {"biscuit", "checkers", "crown", "radar", "rook"}:
+    if key in _ECHO_FIRMWARE_TARGETS:
         return {
             "latest_url": _ECHO_FIRMWARE_MANIFEST_URL,
             "manifest_url": _ECHO_FIRMWARE_MANIFEST_URL,
@@ -2201,7 +2219,7 @@ def _display_sensor_profile_from_context(
     saved_slots = saved_profile.get("slots") if isinstance(saved_profile.get("slots"), dict) else {}
     room_aliases = (
         _display_room_temperature_aliases(screen_target)
-        if profile_kind == "native_screen" and screen_target in {"checkers", "crown", "rook"}
+        if profile_kind == "native_screen" and screen_target in _NATIVE_SCREEN_TARGETS
         else ()
     )
     room_slots = {alias: _text(saved_slots.get(alias)) for alias in room_aliases}
@@ -2272,7 +2290,7 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
         saved_template = _text(saved_profile.get("template")) or "s3box_display"
         room_aliases = (
             _display_room_temperature_aliases(screen_target)
-            if saved_template == "native_screen" and screen_target in {"checkers", "crown", "rook"}
+            if saved_template == "native_screen" and screen_target in _NATIVE_SCREEN_TARGETS
             else ()
         )
         profiles_by_target[target] = {
@@ -2476,7 +2494,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
         profile_kind = "native_screen" if selector.startswith("native:") else "s3box_display"
     values["display_profile_kind"] = profile_kind
     screen_target = _lower(body.get("screen_target"))
-    if screen_target in {"checkers", "crown", "rook"}:
+    if screen_target in _NATIVE_SCREEN_TARGETS:
         values["display_screen_target"] = screen_target
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
@@ -2589,6 +2607,22 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         "taterechoshow",
     }:
         return "checkers"
+    if token in {
+        "athena",
+        "a8h3n2",
+        "echo-show-8-2nd-gen",
+        "echo-show-8-2nd-generation",
+        "echo-show-8-2021",
+    } or compact in {
+        "athena",
+        "a8h3n2",
+        "echoshow82ndgen",
+        "echoshow82ndgeneration",
+        "echoshow82021",
+        "amazonechoshow82ndgeneration",
+        "taterathena",
+    }:
+        return "athena"
     if token in {"crown", "echo-show-8", "echo-show-8-1st-gen"} or compact in {
         "crown",
         "echoshow8",
@@ -2783,7 +2817,7 @@ def _build_device_context(
     if not capabilities and isinstance(metadata.get("capabilities"), dict):
         capabilities = metadata["capabilities"]
     ota_supported = not (
-        template_key in {"biscuit", "checkers", "crown", "radar", "rook"}
+        template_key in _ECHO_FIRMWARE_TARGETS
         and capabilities.get("ota") is False
     )
     latest_firmware_version = (
@@ -3013,14 +3047,16 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 if _text(value)
             )
             native_screen = _as_bool(capabilities.get("screen_weather"), False) or any(
-                target in hardware_tokens for target in ("checkers", "crown", "rook")
+                target in hardware_tokens for target in _NATIVE_SCREEN_TARGETS
             )
             if not native_screen:
                 continue
-            screen_target = template_key if template_key in {"checkers", "crown", "rook"} else ""
+            screen_target = template_key if template_key in _NATIVE_SCREEN_TARGETS else ""
             if not screen_target:
                 if "rook" in hardware_tokens:
                     screen_target = "rook"
+                elif "athena" in hardware_tokens:
+                    screen_target = "athena"
                 elif "crown" in hardware_tokens:
                     screen_target = "crown"
                 elif "checkers" in hardware_tokens:
