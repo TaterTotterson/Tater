@@ -1,9 +1,12 @@
+# check=skip=SecretsUsedInArgOrEnv
+# The native satellite credentials environment value below is a file path,
+# not credential material.
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
 ARG LLAMA_CPP_REF=master
 ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
 ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04
-ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
+ARG PYTHON_BASE_IMAGE=docker.io/library/python:3.11-slim
 
 FROM ${LLAMA_CPP_CUDA_BUILDER_IMAGE} AS llama_cpp_builder
 

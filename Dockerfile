@@ -1,6 +1,9 @@
-# Use the official Python runtime through Amazon's public mirror so release
-# builds do not depend on Docker Hub's anonymous pull limits.
-ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
+# check=skip=SecretsUsedInArgOrEnv
+# The native satellite credentials environment value below is a file path,
+# not credential material.
+# Use the official Python runtime directly because the prior public ECR mirror
+# exhausted its shared data allowance during the v1.9.0 release.
+ARG PYTHON_BASE_IMAGE=docker.io/library/python:3.11-slim
 FROM ${PYTHON_BASE_IMAGE}
 
 # Prevent some pip noise & keep Python stdout unbuffered
