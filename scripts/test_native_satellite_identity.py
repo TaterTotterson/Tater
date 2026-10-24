@@ -591,6 +591,166 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(native_satellite._clients[selector]["last_settings_result"]["ok"])
 
+    def test_thirdreality_nww_details_use_the_active_nested_model(self) -> None:
+        runtime = home._native_client_to_runtime_row(
+            "native:thirdreality-test",
+            {
+                "connected": True,
+                "device_id": "thirdreality-test",
+                "device_name": "Tater ThirdReality Office",
+                "board": "thirdreality_s420",
+                "firmware_version": "tater-thirdreality-0.2.25",
+                "capabilities": {"nanowakeword": True, "speaker": True},
+                "last_status": {
+                    "state": "idle",
+                    "wake_engine": {
+                        "ready": True,
+                        "name": "nano_wake_word",
+                        "mode": "nww",
+                        # Compatibility value left by a previous MWW model.
+                        "active_wake_word": "tater_custom_fd0c18aeff119145",
+                        "source": "embedded",
+                        "nanowakeword": {
+                            "ready": True,
+                            "enabled": True,
+                            "model": "hey tater",
+                            "architecture": "gru",
+                            "source": "embedded",
+                            "runtime": "onnxruntime",
+                            "runtime_version": "1.22.0",
+                            "threshold": 0.98,
+                            "patience": 2,
+                            "worker_cpu": 3,
+                            "processed": 120,
+                            "detections": 4,
+                            "dropped": 0,
+                            "errors": 0,
+                        },
+                    },
+                },
+                "live_settings": {
+                    "wake_detector_mode": "nww",
+                    "wake_mww_enabled": False,
+                    "wake_oww_enabled": False,
+                    "wake_nww_enabled": True,
+                    "wake_profile_name": "Hey Tater",
+                    "oww_profile_name": "Hey Tater",
+                    "nww_architecture": "gru",
+                    "nww_threshold": 0.98,
+                    "nww_patience": 2,
+                    "wake_sensitivity": "normal",
+                    "wake_environment": "balanced",
+                },
+            },
+        )
+        sections = {
+            section["title"]: {item["label"]: item["value"] for item in section["rows"]}
+            for section in runtime["native_detail_sections"]
+        }
+
+        self.assertEqual(sections["Device Info"]["Firmware Target"], "thirdreality_s420")
+        self.assertEqual(sections["Diagnostics"]["Wake Mode"], "NWW only")
+        self.assertEqual(sections["Diagnostics"]["Wake Engine"], "NanoWakeWord · Ready")
+        self.assertEqual(sections["Diagnostics"]["Active Wake Model"], "Hey Tater")
+        self.assertNotIn("tater_custom", sections["Diagnostics"]["Active Wake Model"])
+        self.assertEqual(sections["Wake Model"]["Architecture"], "GRU")
+        self.assertEqual(sections["Wake Model"]["Threshold"], "0.98")
+        self.assertEqual(sections["Wake Model"]["Patience"], "2")
+        self.assertEqual(sections["Wake Model"]["Runtime"], "onnxruntime 1.22.0")
+        self.assertEqual(sections["Wake Model"]["Processor"], "CPU 3")
+        self.assertEqual(sections["Settings"]["Configured Wake Mode"], "NWW only")
+        self.assertEqual(sections["Settings"]["Configured Model Tuning"], "NWW 0.98 / patience 2")
+
+    def test_echo_dual_nww_details_report_both_loaded_lanes(self) -> None:
+        runtime = home._native_client_to_runtime_row(
+            "native:echo-test",
+            {
+                "connected": True,
+                "device_id": "echo-test",
+                "device_name": "Tater Biscuit Office",
+                "board": "biscuit",
+                "firmware_target": "biscuit",
+                "firmware_version": "v3.0.6",
+                "capabilities": {"nanowakeword": True, "speaker": True},
+                "last_status": {
+                    "state": "idle",
+                    "wake_engine": {
+                        "ready": True,
+                        "model": "hey_tater",
+                        "active_wake_label": "hey tater",
+                        "active_model_source": "embedded",
+                        "mww_enabled": True,
+                        "oww_enabled": False,
+                        "nww_enabled": True,
+                        "threshold": 0.99,
+                        "sliding_window": 5,
+                        "close_miss_threshold": 0.82,
+                        "confirmation": {
+                            "name": "nano_wake_word",
+                            "mode": "nww_only",
+                            "ready": True,
+                            "model": "hey_tater",
+                            "architecture": "cnn",
+                            "threshold": 0.99,
+                            "patience": 2,
+                            "scorer_stats": {
+                                "totalChunks": 42,
+                                "crossings": 1,
+                                "totalDrops": 0,
+                                "totalErrors": 0,
+                                "maxInferMs": 18,
+                                "lanes": [{"affinityCpu": 1}],
+                            },
+                        },
+                    },
+                },
+                "live_settings": {
+                    "wake_detector_mode": "mww_nww",
+                    "wake_mww_enabled": True,
+                    "wake_oww_enabled": False,
+                    "wake_nww_enabled": True,
+                    "wake_profile_name": "Hey Tater",
+                    "oww_profile_name": "Hey Tater",
+                    "wake_threshold": 0.99,
+                    "wake_sliding_window": 5,
+                    "close_miss_threshold": 0.82,
+                    "nww_architecture": "cnn",
+                    "nww_threshold": 0.99,
+                    "nww_patience": 2,
+                    "wake_sensitivity": "normal",
+                    "wake_environment": "balanced",
+                },
+            },
+        )
+        sections = {
+            section["title"]: {item["label"]: item["value"] for item in section["rows"]}
+            for section in runtime["native_detail_sections"]
+        }
+
+        self.assertEqual(sections["Diagnostics"]["Wake Mode"], "MWW + NWW")
+        self.assertEqual(sections["Diagnostics"]["Wake Engine"], "microWakeWord + NanoWakeWord · Ready")
+        self.assertEqual(sections["Diagnostics"]["Active Wake Model"], "MWW: Hey Tater · NWW: Hey Tater")
+        self.assertEqual(sections["Wake Model"]["MWW Threshold"], "0.99")
+        self.assertEqual(sections["Wake Model"]["MWW Sliding Window"], "5")
+        self.assertEqual(sections["Wake Model"]["MWW Close-Miss Threshold"], "0.82")
+        self.assertEqual(sections["Wake Model"]["NWW Architecture"], "CNN")
+        self.assertEqual(sections["Wake Model"]["NWW Patience"], "2")
+        self.assertIn("42 processed", sections["Wake Model"]["NWW Health"])
+
+    def test_wake_mode_normalizer_covers_every_supported_detector_choice(self) -> None:
+        cases = [
+            ({"mode": "mww"}, {}, "mww"),
+            ({"mode": "oww"}, {}, "oww"),
+            ({"mode": "nww"}, {}, "nww"),
+            ({"mww_enabled": True, "oww_enabled": True}, {}, "mww_oww"),
+            ({"mww_enabled": True, "nww_enabled": True}, {}, "mww_nww"),
+            ({"timer_stop_mode_active": True}, {}, "timer_stop"),
+            ({}, {"wake_engine": "button"}, "disabled"),
+        ]
+        for wake_engine, live_settings, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(home._native_wake_mode(wake_engine, live_settings), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

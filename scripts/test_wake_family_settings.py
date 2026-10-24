@@ -614,9 +614,65 @@ class WakeFamilySettingsTests(unittest.TestCase):
 
         self.assertEqual(saved["settings"]["wake_detector_mode"], "nww")
         self.assertEqual(saved["settings"]["nww_available_architectures"], "cnn,gru")
+        self.assertEqual(saved["settings"]["nww_gru_profile_threshold"], 0.98)
+        self.assertEqual(saved["settings"]["nww_gru_profile_patience"], 2)
         self.assertEqual(firmware["nww_wake_word"], "hey_tater")
         self.assertEqual(firmware["nww_architecture"], "gru")
+        self.assertEqual(firmware["nww_threshold"], 0.98)
+        self.assertEqual(firmware["nww_patience"], 2)
         self.assertNotIn("nww_wake_word_url", firmware)
+
+    def test_builtin_nww_profiles_match_the_embedded_wake_bundle(self) -> None:
+        profile = native_live_settings.BUILTIN_OWW_PROFILES["hey_tater"]
+
+        self.assertEqual(profile["nww_profile_threshold"], 0.99)
+        self.assertEqual(profile["nww_profile_patience"], 2)
+        self.assertEqual(profile["nww_cnn_profile_threshold"], 0.99)
+        self.assertEqual(profile["nww_cnn_profile_patience"], 2)
+        self.assertEqual(profile["nww_gru_profile_threshold"], 0.98)
+        self.assertEqual(profile["nww_gru_profile_patience"], 2)
+
+    def test_effective_status_settings_include_the_shared_wake_family(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_detector_mode": "nww",
+                    "wake_mww_enabled": "false",
+                    "wake_oww_enabled": "false",
+                    "wake_nww_enabled": "true",
+                    "oww_wake_word": "hey_tater",
+                    "nww_architecture": "gru",
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            shared = native_live_settings.effective_settings_snapshot()
+            capable = native_live_settings.effective_settings_snapshot(
+                "native:thirdreality-test",
+                board="thirdreality_s420",
+                capabilities={"nanowakeword": True, "wake_detector_selection": True},
+            )
+            older = native_live_settings.effective_settings_snapshot(
+                "native:old-echo",
+                board="biscuit",
+                capabilities={"openwakeword": True, "wake_detector_selection": True},
+            )
+
+        self.assertEqual(shared["wake_detector_mode"], "nww")
+        self.assertEqual(shared["nww_architecture"], "gru")
+        self.assertEqual(capable["wake_detector_mode"], "nww")
+        self.assertFalse(capable["wake_mww_enabled"])
+        self.assertTrue(capable["wake_nww_enabled"])
+        self.assertEqual(capable["nww_architecture"], "gru")
+        self.assertEqual(capable["nww_threshold"], 0.98)
+        self.assertEqual(capable["nww_patience"], 2)
+        self.assertEqual(older["wake_detector_mode"], "mww")
+        self.assertTrue(older["wake_mww_enabled"])
+        self.assertFalse(older["wake_nww_enabled"])
 
 
 if __name__ == "__main__":

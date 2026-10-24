@@ -1104,10 +1104,19 @@ def _satellite_ducking_payload() -> Dict[str, int]:
     }
 
 
-def _live_settings_payload(selector: str = "", *, board: str = "") -> Dict[str, Any]:
+def _live_settings_payload(
+    selector: str = "",
+    *,
+    board: str = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     from . import native_live_settings
 
-    return native_live_settings.settings_snapshot(selector, board=board)
+    return native_live_settings.effective_settings_snapshot(
+        selector,
+        board=board,
+        capabilities=capabilities,
+    )
 
 
 def _sendspin_output_channel_mode(selector: str = "") -> str:
@@ -1799,7 +1808,11 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(row.get("audio_overlay"), dict)
             else {"active": False}
         ),
-        "live_settings": _live_settings_payload(selector, board=_text(payload.get("board"))),
+        "live_settings": _live_settings_payload(
+            selector,
+            board=_text(payload.get("board")),
+            capabilities=_capabilities(payload),
+        ),
         "auth": {
             "mode": _text(auth.get("mode")) or "open",
             "paired": _text(auth.get("mode")) in {"paired", "device_token"},
@@ -4642,7 +4655,11 @@ async def push_live_settings(selector: str = "") -> Dict[str, Any]:
             )
             _queue_command(queue, queued)
             pushed.append(str(target_selector))
-    settings = _live_settings_payload(token, board=response_board)
+    settings = _live_settings_payload(
+        token,
+        board=response_board,
+        capabilities=response_capabilities or None,
+    )
     firmware_settings = _firmware_settings_payload(
         token,
         board=response_board,

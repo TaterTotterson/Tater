@@ -1,29 +1,36 @@
-# Tater v1.8.2
+# Tater v1.8.3
 
-Tater v1.8.2 adds model-aware wake tuning for MWW, OWW, and NWW while keeping
-room-specific sensitivity and environment profiles simple on each satellite.
+Tater v1.8.3 makes satellite wake diagnostics accurate across every supported
+detector mode and improves the built-in NanoWakeWord response tuning.
 
 ## What's New
 
-### Model-Aware Wake Tuning
+### Accurate Wake Model Diagnostics
 
-- Adds a polished Wake Model Overrides panel above STT wake verification.
-- Shows only the controls relevant to the selected detector mode: MWW, OWW,
-  NWW, MWW + OWW, or MWW + NWW.
-- Supports MWW threshold and sliding-window overrides plus OWW/NWW threshold
-  and patience overrides.
-- Applies overrides consistently to the built-in wake word, Wake Bundle
-  Catalog models, and custom wake-bundle URLs.
-- Restores each bundle's validated tuning immediately when an override is
-  disabled.
+- Shows the detector mode and model that each satellite is actually running,
+  including MWW, OWW, NWW, both dual modes, timer-stop mode, and disabled mode.
+- Reports each dual-mode lane independently instead of combining stale model
+  names with the active companion detector.
+- Adds loaded threshold, sliding window or patience, close-miss threshold,
+  architecture, runtime, model revision, source, CPU assignment, inference
+  time, detections, drops, and errors to View All Device Info.
+- Correctly reads the nested NanoWakeWord status reported by ThirdReality
+  satellites instead of their legacy microWakeWord compatibility field.
 
-### Cleaner Per-Satellite Settings
+### Consistent Wake Settings
 
-- Removes model-level numeric overrides from each satellite popup.
-- Keeps Wake Sensitivity and Wake Environment as room-specific controls,
-  including the TV Nearby environment profile.
+- Uses the same effective shared wake-family settings in satellite status that
+  Tater sends to the firmware, so the displayed mode, architecture, and JSON
+  tuning stay in sync.
+- Keeps older firmware on its safe MWW projection while showing NWW settings
+  only on satellites that advertise NanoWakeWord support.
+- Updates the built-in NWW tuning to two consecutive scores: CNN uses a 0.99
+  threshold and GRU uses a 0.98 threshold for a faster validated response.
 
-### Better Device Organization
+### Clearer Runtime Information
 
-- Adds an Appliances category for washers, dryers, dishwashers, and similar
-  connected devices so their entities no longer fall into generic sensors.
+- Renames transport counters to Voice Session Frames, Voice Session Bytes, and
+  Buffered Logs so idle or muted satellites no longer look like their wake
+  engine has stopped processing audio.
+- Uses the board name as the firmware target when older satellite firmware does
+  not report a separate target value.

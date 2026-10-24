@@ -761,6 +761,360 @@ def _native_ms_label(value: Any) -> Optional[str]:
     return f"{value} ms"
 
 
+def _native_first_value(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _native_number_label(value: Any) -> str:
+    if value is None:
+        return "Unavailable"
+    try:
+        number = float(value)
+    except Exception:
+        return esphome_runtime.text(value) or "Unavailable"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.3f}".rstrip("0").rstrip(".")
+
+
+def _native_positive_value(value: Any) -> Any:
+    try:
+        return value if float(value) > 0 else None
+    except Exception:
+        return None
+
+
+def _native_model_label(value: Any) -> str:
+    token = esphome_runtime.text(value)
+    if not token:
+        return "Unavailable"
+    if token.lower() in {"hey_tater", "hey tater"}:
+        return "Hey Tater"
+    return token
+
+
+def _native_wake_mode(wake_engine: Dict[str, Any], live_settings: Dict[str, Any]) -> str:
+    if esphome_runtime.as_bool(wake_engine.get("timer_stop_mode_active"), False) or esphome_runtime.as_bool(
+        wake_engine.get("timer_stop_mode_requested"),
+        False,
+    ):
+        return "timer_stop"
+    if esphome_runtime.lower(live_settings.get("wake_engine")) in {"off", "button", "disabled"}:
+        return "disabled"
+
+    raw_mode = esphome_runtime.lower(wake_engine.get("mode")).replace("+", "_").replace("-", "_")
+    aliases = {
+        "micro_wake_word": "mww",
+        "microwakeword": "mww",
+        "mww_only": "mww",
+        "open_wake_word": "oww",
+        "openwakeword": "oww",
+        "oww_only": "oww",
+        "nano_wake_word": "nww",
+        "nanowakeword": "nww",
+        "nww_only": "nww",
+        "dual": "mww_oww",
+        "dual_oww": "mww_oww",
+        "dual_nww": "mww_nww",
+    }
+    raw_mode = aliases.get(raw_mode, raw_mode)
+    if raw_mode in {"mww", "oww", "nww", "mww_oww", "mww_nww", "disabled", "off"}:
+        return "disabled" if raw_mode == "off" else raw_mode
+
+    confirmation = wake_engine.get("confirmation") if isinstance(wake_engine.get("confirmation"), dict) else {}
+    openwakeword = wake_engine.get("openwakeword") if isinstance(wake_engine.get("openwakeword"), dict) else {}
+    nanowakeword = wake_engine.get("nanowakeword") if isinstance(wake_engine.get("nanowakeword"), dict) else {}
+    has_runtime_flags = any(
+        key in wake_engine for key in ("mww_enabled", "oww_enabled", "nww_enabled")
+    ) or any("enabled" in item for item in (openwakeword, nanowakeword))
+    if has_runtime_flags:
+        mww_enabled = esphome_runtime.as_bool(wake_engine.get("mww_enabled"), False)
+        oww_enabled = esphome_runtime.as_bool(
+            _native_first_value(openwakeword.get("enabled"), wake_engine.get("oww_enabled")),
+            False,
+        )
+        nww_enabled = esphome_runtime.as_bool(
+            _native_first_value(nanowakeword.get("enabled"), wake_engine.get("nww_enabled")),
+            False,
+        )
+        if mww_enabled and nww_enabled:
+            return "mww_nww"
+        if mww_enabled and oww_enabled:
+            return "mww_oww"
+        if nww_enabled:
+            return "nww"
+        if oww_enabled:
+            return "oww"
+        if mww_enabled:
+            return "mww"
+
+    confirmation_mode = aliases.get(
+        esphome_runtime.lower(confirmation.get("mode")).replace("+", "_").replace("-", "_"),
+        "",
+    )
+    if confirmation_mode in {"oww", "nww", "mww_oww", "mww_nww"}:
+        return confirmation_mode
+
+    configured = esphome_runtime.lower(live_settings.get("wake_detector_mode")).replace("+", "_").replace("-", "_")
+    configured = aliases.get(configured, configured)
+    if configured in {"mww", "oww", "nww", "mww_oww", "mww_nww"}:
+        return configured
+    if esphome_runtime.as_bool(live_settings.get("wake_nww_enabled"), False):
+        return "mww_nww" if esphome_runtime.as_bool(live_settings.get("wake_mww_enabled"), False) else "nww"
+    if esphome_runtime.as_bool(live_settings.get("wake_oww_enabled"), False):
+        return "mww_oww" if esphome_runtime.as_bool(live_settings.get("wake_mww_enabled"), False) else "oww"
+    return "mww"
+
+
+def _native_wake_mode_label(mode: str) -> str:
+    return {
+        "mww": "MWW only",
+        "oww": "OWW only",
+        "nww": "NWW only",
+        "mww_oww": "MWW + OWW",
+        "mww_nww": "MWW + NWW",
+        "timer_stop": "Timer Stop",
+        "disabled": "Disabled",
+    }.get(mode, "Unavailable")
+
+
+def _native_detector_label(mode: str) -> str:
+    return {
+        "mww": "microWakeWord",
+        "oww": "openWakeWord",
+        "nww": "NanoWakeWord",
+        "mww_oww": "microWakeWord + openWakeWord",
+        "mww_nww": "microWakeWord + NanoWakeWord",
+        "timer_stop": "Timer Stop wake word",
+        "disabled": "Disabled",
+    }.get(mode, "Wake detector")
+
+
+def _native_configured_source(live_settings: Dict[str, Any], lane: str) -> str:
+    if lane == "mww":
+        if esphome_runtime.text(live_settings.get("wake_word_url")):
+            return "custom URL"
+        if esphome_runtime.text(live_settings.get("wake_profile_source_url")):
+            return "wake bundle"
+    else:
+        if esphome_runtime.text(live_settings.get("oww_wake_word_url")):
+            return "custom URL"
+        if esphome_runtime.text(live_settings.get("wake_profile_source_url")):
+            return "wake bundle"
+    return "embedded"
+
+
+def _native_wake_model_rows(
+    wake_engine: Dict[str, Any],
+    live_settings: Dict[str, Any],
+    mode: str,
+) -> tuple[List[Dict[str, str]], str, str]:
+    confirmation = wake_engine.get("confirmation") if isinstance(wake_engine.get("confirmation"), dict) else {}
+    openwakeword = wake_engine.get("openwakeword") if isinstance(wake_engine.get("openwakeword"), dict) else {}
+    nanowakeword = wake_engine.get("nanowakeword") if isinstance(wake_engine.get("nanowakeword"), dict) else {}
+    dual = mode in {"mww_oww", "mww_nww"}
+    rows = [_native_detail_row("native_detector_mode", "Detector Mode", _native_wake_mode_label(mode))]
+    summaries: List[str] = []
+    sources: List[str] = []
+
+    def append_lane(lane: str, runtime: Dict[str, Any], *, main: bool = False) -> None:
+        prefix = lane.upper() if dual else ""
+        key_prefix = f"native_{lane}"
+        detector = {"mww": "microWakeWord", "oww": "openWakeWord", "nww": "NanoWakeWord"}[lane]
+        if main:
+            model = _native_first_value(
+                wake_engine.get("model"),
+                wake_engine.get("active_wake_label"),
+                wake_engine.get("active_wake_word"),
+                live_settings.get("wake_profile_name"),
+                live_settings.get("wake_word"),
+            )
+            source = _native_first_value(
+                wake_engine.get("active_model_source"),
+                wake_engine.get("source"),
+                _native_configured_source(live_settings, lane),
+            )
+            threshold = _native_first_value(
+                _native_positive_value(wake_engine.get("threshold")),
+                live_settings.get("wake_threshold"),
+            )
+            window = _native_first_value(
+                _native_positive_value(wake_engine.get("sliding_window")),
+                live_settings.get("wake_sliding_window"),
+            )
+            close_miss = _native_first_value(
+                _native_positive_value(wake_engine.get("close_miss_threshold")),
+                live_settings.get("close_miss_threshold"),
+                live_settings.get("wake_profile_close_miss_threshold"),
+            )
+            ready_value = wake_engine.get("ready")
+            architecture = ""
+            patience = None
+        else:
+            model = _native_first_value(
+                runtime.get("model"),
+                wake_engine.get(f"{lane}_model"),
+                wake_engine.get("active_wake_label"),
+                live_settings.get("oww_profile_name"),
+            )
+            source = _native_first_value(runtime.get("source"), _native_configured_source(live_settings, lane))
+            threshold = _native_first_value(runtime.get("threshold"), live_settings.get(f"{lane}_threshold"))
+            window = None
+            close_miss = None
+            patience = _native_first_value(runtime.get("patience"), live_settings.get(f"{lane}_patience"))
+            ready_value = runtime.get("ready")
+            architecture = esphome_runtime.text(
+                _native_first_value(runtime.get("architecture"), live_settings.get("nww_architecture") if lane == "nww" else None)
+            )
+
+        enabled_value = runtime.get("enabled") if not main else True
+        downloading = esphome_runtime.as_bool(
+            _native_first_value(runtime.get("downloading"), wake_engine.get("custom_download_running")),
+            False,
+        )
+        last_error = esphome_runtime.text(_native_first_value(runtime.get("last_error"), wake_engine.get("last_error")))
+        if downloading:
+            status_label = "Downloading"
+        elif last_error:
+            status_label = f"Error: {last_error}"
+        elif enabled_value is not None and not esphome_runtime.as_bool(enabled_value, True):
+            status_label = "Disabled"
+        elif ready_value is None:
+            status_label = "Unavailable"
+        else:
+            status_label = "Ready" if esphome_runtime.as_bool(ready_value, False) else "Not Ready"
+
+        model_label = _native_model_label(model)
+        source_label = esphome_runtime.text(source) or "Unavailable"
+        summaries.append(f"{prefix + ': ' if prefix else ''}{model_label}")
+        if source_label not in sources:
+            sources.append(source_label)
+        label = lambda name: f"{prefix} {name}" if prefix else name
+        rows.extend(
+            [
+                _native_detail_row(f"{key_prefix}_detector", label("Detector"), detector),
+                _native_detail_row(f"{key_prefix}_status", label("Status"), status_label),
+                _native_detail_row(f"{key_prefix}_model", label("Model"), model_label),
+                _native_detail_row(f"{key_prefix}_source", label("Source"), source_label),
+            ]
+        )
+        if architecture:
+            rows.append(_native_detail_row(f"{key_prefix}_architecture", label("Architecture"), architecture.upper()))
+        runtime_name = esphome_runtime.text(runtime.get("runtime"))
+        runtime_version = esphome_runtime.text(runtime.get("runtime_version"))
+        if runtime_name or runtime_version:
+            runtime_label = " ".join(bit for bit in (runtime_name, runtime_version) if bit)
+            rows.append(_native_detail_row(f"{key_prefix}_runtime", label("Runtime"), runtime_label))
+        rows.append(_native_detail_row(f"{key_prefix}_threshold", label("Threshold"), _native_number_label(threshold)))
+        if window is not None:
+            rows.append(_native_detail_row(f"{key_prefix}_window", label("Sliding Window"), _native_number_label(window)))
+        if patience is not None:
+            rows.append(_native_detail_row(f"{key_prefix}_patience", label("Patience"), _native_number_label(patience)))
+        if close_miss is not None:
+            rows.append(
+                _native_detail_row(
+                    f"{key_prefix}_close_miss",
+                    label("Close-Miss Threshold"),
+                    _native_number_label(close_miss),
+                )
+            )
+        revision = esphome_runtime.text(
+            live_settings.get(
+                {"mww": "wake_model_revision", "oww": "oww_model_revision", "nww": "nww_model_revision"}[lane]
+            )
+        )
+        if revision:
+            revision_label = revision if len(revision) <= 16 else f"{revision[:12]}…"
+            rows.append(_native_detail_row(f"{key_prefix}_revision", label("Revision"), revision_label))
+        override_enabled = esphome_runtime.as_bool(
+            live_settings.get({"mww": "mww_tuning_override_enabled", "oww": "oww_tuning_override_enabled", "nww": "nww_tuning_override_enabled"}[lane]),
+            False,
+        )
+        rows.append(
+            _native_detail_row(
+                f"{key_prefix}_tuning_source",
+                label("Tuning Source"),
+                "Tater override" if override_enabled else "wake JSON / built-in profile",
+            )
+        )
+
+        stats = (
+            wake_engine
+            if main
+            else runtime.get("scorer_stats") if isinstance(runtime.get("scorer_stats"), dict) else runtime
+        )
+        processed = _native_first_value(
+            stats.get("processed"),
+            stats.get("inferences"),
+            stats.get("totalChunks"),
+            stats.get("chunks"),
+        )
+        detections = _native_first_value(stats.get("detections"), stats.get("crossings"))
+        drops = _native_first_value(stats.get("dropped"), stats.get("totalDrops"), stats.get("drops"))
+        errors = _native_first_value(stats.get("errors"), stats.get("totalErrors"))
+        health_bits = []
+        if processed is not None:
+            health_bits.append(f"{processed} processed")
+        if detections is not None:
+            health_bits.append(f"{detections} detections")
+        if drops is not None:
+            health_bits.append(f"{drops} drops")
+        if errors is not None:
+            health_bits.append(f"{errors} errors")
+        if health_bits:
+            rows.append(_native_detail_row(f"{key_prefix}_health", label("Health"), " · ".join(health_bits)))
+        last_score = _native_first_value(runtime.get("last_score"), stats.get("last_score"), stats.get("last_probability"))
+        if last_score is not None:
+            rows.append(
+                _native_detail_row(
+                    f"{key_prefix}_last_score",
+                    label("Last Score"),
+                    _native_number_label(last_score),
+                )
+            )
+        inference_ms = _native_first_value(runtime.get("last_inference_ms"), stats.get("maxInferMs"))
+        if inference_ms is not None:
+            rows.append(
+                _native_detail_row(
+                    f"{key_prefix}_inference",
+                    label("Inference Time"),
+                    f"{_native_number_label(inference_ms)} ms",
+                )
+            )
+        worker_cpu = _native_first_value(runtime.get("worker_cpu"), stats.get("affinityCpu"))
+        lanes = stats.get("lanes") if isinstance(stats.get("lanes"), list) else []
+        if worker_cpu is None and lanes and isinstance(lanes[0], dict):
+            worker_cpu = lanes[0].get("affinityCpu")
+        if worker_cpu is not None:
+            rows.append(_native_detail_row(f"{key_prefix}_processor", label("Processor"), f"CPU {worker_cpu}"))
+        agreement_window_ms = runtime.get("agreement_window_ms")
+        if dual and agreement_window_ms is not None:
+            rows.append(
+                _native_detail_row(
+                    f"{key_prefix}_agreement_window",
+                    label("Agreement Window"),
+                    f"{agreement_window_ms} ms",
+                )
+            )
+
+    if mode in {"mww", "mww_oww", "mww_nww", "timer_stop"}:
+        append_lane("mww", {}, main=True)
+    if mode in {"oww", "mww_oww"}:
+        runtime = openwakeword or (confirmation if esphome_runtime.lower(confirmation.get("name")) in {"open_wake_word", "openwakeword"} else {})
+        append_lane("oww", runtime)
+    if mode in {"nww", "mww_nww"}:
+        runtime = nanowakeword or (confirmation if esphome_runtime.lower(confirmation.get("name")) in {"nano_wake_word", "nanowakeword"} else {})
+        append_lane("nww", runtime)
+
+    return rows, " · ".join(summaries) or "Unavailable", " + ".join(sources) or "Unavailable"
+
+
 def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
     status = row.get("last_status") if isinstance(row.get("last_status"), dict) else {}
     capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
@@ -776,19 +1130,37 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     state = esphome_runtime.text(status.get("state")) or esphome_runtime.text(voice.get("state")) or "idle"
     room = esphome_runtime.text(row.get("room"))
     board = esphome_runtime.text(row.get("board")) or "native satellite"
-    firmware_target = esphome_runtime.text(row.get("firmware_target"))
+    firmware_target = esphome_runtime.text(row.get("firmware_target")) or board
     firmware_version = esphome_runtime.text(row.get("firmware_version"))
     name = esphome_runtime.text(row.get("device_name")) or esphome_runtime.text(row.get("device_id")) or selector
 
-    wake_ready = "Ready" if bool(wake_engine.get("ready")) else "Not Ready"
-    active_wake_model = (
-        esphome_runtime.text(wake_engine.get("active_wake_label"))
-        or esphome_runtime.text(wake_engine.get("active_wake_word"))
-        or esphome_runtime.text(live_settings.get("wake_profile_name"))
-        or esphome_runtime.text(live_settings.get("wake_word"))
+    wake_mode = _native_wake_mode(wake_engine, live_settings)
+    wake_mode_label = _native_wake_mode_label(wake_mode)
+    wake_model_rows, active_wake_model, wake_source = _native_wake_model_rows(
+        wake_engine,
+        live_settings,
+        wake_mode,
     )
-    wake_source = esphome_runtime.text(wake_engine.get("active_model_source")) or "embedded"
-    wake_tuning = f"{live_settings.get('wake_threshold', 0.97)} / {live_settings.get('wake_sliding_window', 5)}"
+    configured_wake_mode = _native_wake_mode({}, live_settings)
+    configured_wake_mode_label = _native_wake_mode_label(configured_wake_mode)
+    wake_ready = "Ready" if esphome_runtime.as_bool(wake_engine.get("ready"), False) else "Not Ready"
+    wake_engine_status = "Disabled" if wake_mode == "disabled" else f"{_native_detector_label(wake_mode)} · {wake_ready}"
+    if configured_wake_mode in {"oww", "mww_oww"}:
+        configured_tuning = f"OWW {_native_number_label(live_settings.get('oww_threshold'))} / patience {_native_number_label(live_settings.get('oww_patience'))}"
+    elif configured_wake_mode in {"nww", "mww_nww"}:
+        configured_tuning = f"NWW {_native_number_label(live_settings.get('nww_threshold'))} / patience {_native_number_label(live_settings.get('nww_patience'))}"
+    else:
+        configured_tuning = f"MWW {_native_number_label(live_settings.get('wake_threshold'))} / window {_native_number_label(live_settings.get('wake_sliding_window'))}"
+    if configured_wake_mode in {"mww_oww", "mww_nww"}:
+        configured_tuning = (
+            f"MWW {_native_number_label(live_settings.get('wake_threshold'))} / window {_native_number_label(live_settings.get('wake_sliding_window'))} · "
+            f"{configured_tuning}"
+        )
+    configured_wake_word = (
+        live_settings.get("oww_profile_name")
+        if configured_wake_mode in {"oww", "nww"}
+        else live_settings.get("wake_profile_name")
+    ) or live_settings.get("wake_profile_name") or live_settings.get("oww_profile_name") or live_settings.get("wake_word")
     wake_sensitivity = native_live_settings.wake_sensitivity_label(live_settings.get("wake_sensitivity"))
     wake_environment = native_live_settings.wake_environment_label(live_settings.get("wake_environment"))
     wake_tuning_label = f"{wake_sensitivity} / {wake_environment}"
@@ -808,12 +1180,13 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_last_message", "Last Message", row.get("last_message_type")),
     ]
     diagnostic_rows = [
-        _native_detail_row("native_wake_engine", "Wake Engine", wake_ready),
+        _native_detail_row("native_wake_mode", "Wake Mode", wake_mode_label),
+        _native_detail_row("native_wake_engine", "Wake Engine", wake_engine_status),
         _native_detail_row("native_active_wake_model", "Active Wake Model", active_wake_model),
         _native_detail_row("native_wake_source", "Wake Source", wake_source),
-        _native_detail_row("native_audio_frames", "Audio Frames", row.get("binary_frames")),
-        _native_detail_row("native_audio_bytes", "Audio Bytes", row.get("binary_bytes")),
-        _native_detail_row("native_logs", "Logs", row.get("log_count")),
+        _native_detail_row("native_audio_frames", "Voice Session Frames", row.get("binary_frames")),
+        _native_detail_row("native_audio_bytes", "Voice Session Bytes", row.get("binary_bytes")),
+        _native_detail_row("native_logs", "Buffered Logs", row.get("log_count")),
         _native_detail_row("native_queued_commands", "Queued Commands", row.get("queued_commands")),
     ]
     if settings_result:
@@ -939,11 +1312,12 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     compact_board = board_token.replace("-", "")
     has_music_led_animation = native_live_settings._board_supports_music_led_animation(board)
     settings_rows = [
-        _native_detail_row("native_wake_word", "Wake Word", live_settings.get("wake_profile_name") or live_settings.get("wake_word")),
+        _native_detail_row("native_configured_wake_mode", "Configured Wake Mode", configured_wake_mode_label),
+        _native_detail_row("native_wake_word", "Configured Wake Word", configured_wake_word),
         _native_detail_row("native_wake_tuning_label", "Wake Tuning", wake_tuning_label),
         _native_detail_row("native_wake_sensitivity", "Wake Sensitivity", wake_sensitivity),
         _native_detail_row("native_wake_environment", "Wake Environment", wake_environment),
-        _native_detail_row("native_wake_tuning", "Wake Threshold / Window", wake_tuning),
+        _native_detail_row("native_wake_tuning", "Configured Model Tuning", configured_tuning),
         _native_detail_row("native_wake_sound", "Wake Sound", live_settings.get("wake_sound") or "no_sound"),
         _native_detail_row("native_volume", "Volume", f"{live_settings.get('volume_percent', 80)}%"),
         _native_detail_row("native_led_brightness", "LED Brightness", f"{live_settings.get('led_brightness', 80)}%"),
@@ -1080,6 +1454,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         "native_detail_sections": [
             {"title": "Device Info", "rows": device_info_rows},
             {"title": "Diagnostics", "rows": diagnostic_rows},
+            {"title": "Wake Model", "rows": wake_model_rows},
             *([{"title": "Transport", "rows": transport_rows}] if transport_rows else []),
             {"title": "Settings", "rows": settings_rows},
         ],

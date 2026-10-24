@@ -53,11 +53,11 @@ DEFAULTS: Dict[str, Any] = {
     "nww_model_revision": "",
     "nww_available_architectures": "",
     "nww_profile_threshold": 0.99,
-    "nww_profile_patience": 3,
+    "nww_profile_patience": 2,
     "nww_cnn_profile_threshold": 0.99,
-    "nww_cnn_profile_patience": 3,
-    "nww_gru_profile_threshold": 0.99,
-    "nww_gru_profile_patience": 3,
+    "nww_cnn_profile_patience": 2,
+    "nww_gru_profile_threshold": 0.98,
+    "nww_gru_profile_patience": 2,
     "wake_sensitivity": "normal",
     "wake_environment": "balanced",
     "mww_tuning_override_enabled": False,
@@ -68,7 +68,7 @@ DEFAULTS: Dict[str, Any] = {
     "oww_patience_override": 3,
     "nww_tuning_override_enabled": False,
     "nww_threshold_override": 0.99,
-    "nww_patience_override": 3,
+    "nww_patience_override": 2,
     "wake_tuning_override_enabled": False,
     "wake_threshold_override": 0.98,
     "wake_sliding_window_override": 5,
@@ -412,11 +412,11 @@ BUILTIN_OWW_PROFILES: Dict[str, Dict[str, Any]] = {
         "nww_model_revision": "",
         "nww_available_architectures": "cnn,gru",
         "nww_profile_threshold": 0.99,
-        "nww_profile_patience": 3,
+        "nww_profile_patience": 2,
         "nww_cnn_profile_threshold": 0.99,
-        "nww_cnn_profile_patience": 3,
-        "nww_gru_profile_threshold": 0.99,
-        "nww_gru_profile_patience": 3,
+        "nww_cnn_profile_patience": 2,
+        "nww_gru_profile_threshold": 0.98,
+        "nww_gru_profile_patience": 2,
         "bundle_has_mww": True,
         "bundle_has_oww": True,
         "wake_bundle_embedded_micro": True,
@@ -2169,6 +2169,50 @@ def wake_family_settings_snapshot(family: Any) -> Dict[str, Any]:
         current["wake_mww_enabled"] = True
         current["wake_oww_enabled"] = False
         current["wake_nww_enabled"] = False
+    return current
+
+
+def effective_settings_snapshot(
+    selector: Any = "",
+    *,
+    board: Any = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Return the effective settings Tater projects to this satellite family.
+
+    ``settings_snapshot`` contains room/device controls, while the selected wake
+    profile is shared across compatible satellite families.  Status and UI
+    callers need the same merged view as the firmware payload builder or they
+    can display stale detector flags and model tuning.
+    """
+    current = settings_snapshot(selector, board=board)
+    # An untargeted snapshot represents the shared wake-word form itself.
+    # Targeted snapshots are projected to the receiving satellite family.
+    untargeted = not _selector_token(selector) and not _text(board) and capabilities is None
+    family = "echo" if untargeted else wake_family_for(capabilities=capabilities, board=board)
+    family_settings = wake_family_settings_snapshot(family)
+    current = normalize_settings(
+        {
+            key: family_settings.get(key)
+            for key in WAKE_FAMILY_PERSISTED_KEYS
+            if key in family_settings
+        },
+        base=current,
+    )
+    mode = "mww" if family == "mww" else _wake_detector_mode(
+        family_settings.get("wake_detector_mode"),
+        family_settings,
+    )
+    if mode in {"nww", "mww_nww"} and capabilities is not None and not _as_bool(
+        (capabilities or {}).get("nanowakeword"),
+        False,
+    ):
+        mode = "mww"
+    mww_enabled, oww_enabled, nww_enabled = _wake_detector_flags(mode)
+    current["wake_detector_mode"] = mode
+    current["wake_mww_enabled"] = mww_enabled
+    current["wake_oww_enabled"] = oww_enabled
+    current["wake_nww_enabled"] = nww_enabled
     return current
 
 
