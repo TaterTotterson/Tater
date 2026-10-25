@@ -6563,6 +6563,14 @@ def _voice_turn_has_low_speech_evidence(session: VoiceSessionRuntime, transcript
         return False
     if max_prob >= 0.50:
         return False
+    # A short sentence can be fully transcribed even when VAD only catches the
+    # leading edge of it. Once VAD has confirmed enough speech to qualify for a
+    # continued-chat retry, a multi-word transcript is stronger evidence than
+    # the duration/loudness heuristics below. Without this, valid
+    # phrases such as "turn on the tv" and "what time is it" are replaced by a
+    # retry prompt, then silently discarded when the one allowed retry is used.
+    if speech_s >= 0.12 and len(words) >= 3:
+        return False
     if speech_s < 0.12 and max_prob < 0.25 and not is_brief_command:
         return True
     if len(words) >= 7 and vad_peak >= -36.0:
