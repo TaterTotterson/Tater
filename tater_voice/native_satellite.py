@@ -1559,7 +1559,7 @@ class _NativeVoicePipelineBridge:
 
     async def wake_preroll_boundary(self) -> None:
         # This marker shares the audio worker queue so every saved wake frame
-        # is buffered for STT before command audio is allowed to drive VAD.
+        # is classified before command audio is allowed into STT or VAD.
         self._ensure_audio_task()
         await self._audio_queue.put(_NATIVE_WAKE_PREROLL_BOUNDARY)
 

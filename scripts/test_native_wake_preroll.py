@@ -37,7 +37,11 @@ def _load_pipeline_boundary_helpers():
         encoding="utf-8"
     )
     tree = ast.parse(source)
-    wanted = {"_native_wake_preroll_pending", "_native_mark_wake_preroll_complete"}
+    wanted = {
+        "_native_wake_preroll_pending",
+        "_native_discard_wake_preroll",
+        "_native_mark_wake_preroll_complete",
+    }
     functions = [
         node
         for node in tree.body
@@ -164,6 +168,22 @@ class NativeWakePrerollTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.wake_preroll_boundary_received)
         self.assertFalse(boundary_pending(session, 100.1))
         self.assertEqual(0.0, session.vad_startup_ignore_until_ts)
+
+    def test_pre_boundary_audio_is_accounted_but_not_added_to_stt(self) -> None:
+        session = _VoiceSessionRuntime(
+            last_audio_ts=0.0,
+            wake_preroll_chunks=0,
+            wake_preroll_bytes=0,
+            audio_buffer=bytearray(b"existing-command"),
+        )
+        discard = PIPELINE_HELPERS["_native_discard_wake_preroll"]
+
+        discard(session, b"wake-word-audio", 123.5)
+
+        self.assertEqual(123.5, session.last_audio_ts)
+        self.assertEqual(1, session.wake_preroll_chunks)
+        self.assertEqual(len(b"wake-word-audio"), session.wake_preroll_bytes)
+        self.assertEqual(bytearray(b"existing-command"), session.audio_buffer)
 
     def test_session_runtime_carries_boundary_state(self) -> None:
         source = (

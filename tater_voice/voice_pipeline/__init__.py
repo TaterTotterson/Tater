@@ -6622,6 +6622,19 @@ def _native_wake_preroll_pending(session: VoiceSessionRuntime, now_ts: float) ->
     return deadline <= 0.0 or float(now_ts) < deadline
 
 
+def _native_discard_wake_preroll(
+    session: VoiceSessionRuntime,
+    audio_bytes: bytes,
+    now_ts: float,
+) -> None:
+    """Account for wake audio that must not enter VAD or speech recognition."""
+    if not isinstance(session, VoiceSessionRuntime):
+        return
+    session.last_audio_ts = float(now_ts)
+    session.wake_preroll_chunks += 1
+    session.wake_preroll_bytes += len(audio_bytes or b"")
+
+
 async def _native_mark_wake_preroll_complete(selector: str) -> bool:
     """Open command VAD after the native satellite's ordered wake pre-roll."""
     token = _text(selector)
@@ -6639,15 +6652,15 @@ async def _native_mark_wake_preroll_complete(selector: str) -> bool:
             return True
         session.wake_preroll_boundary_received = True
         session.vad_startup_ignore_until_ts = 0.0
-        buffered_chunks = int(session.wake_preroll_chunks or 0)
-        buffered_bytes = int(session.wake_preroll_bytes or 0)
+        excluded_chunks = int(session.wake_preroll_chunks or 0)
+        excluded_bytes = int(session.wake_preroll_bytes or 0)
         session_id = _text(session.session_id)
     logger.info(
-        "[native-voice] wake pre-roll complete selector=%s session_id=%s chunks=%s bytes=%s — command VAD live",
+        "[native-voice] wake pre-roll complete selector=%s session_id=%s chunks=%s bytes=%s — command STT/VAD live",
         token,
         session_id,
-        buffered_chunks,
-        buffered_bytes,
+        excluded_chunks,
+        excluded_bytes,
     )
     return True
 
@@ -7753,9 +7766,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
         if wake_preroll_boundary_expected:
             # New native firmware sends its saved wake audio first and then an
-            # ordered boundary marker. Those frames remain in STT, while VAD
-            # begins with the first true post-wake command frame instead of a
-            # fixed wall-clock delay.
+            # ordered boundary marker. Those frames stay out of STT and VAD;
+            # both begin with the first true post-wake command frame instead
+            # of relying on a fixed wall-clock delay.
             vad_startup_ignore_s = 0.0
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
         if capture_reopen_profile:
@@ -8096,6 +8109,25 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             if isinstance(session_for_arbitration, VoiceSessionRuntime) and session_for_arbitration.session_id == sid:
                 _record_wake_arbitration_audio(session_for_arbitration, audio_bytes, audio_format)
 
+        if wake_boundary_pending:
+            # The firmware marker is authoritative: audio through the local
+            # wake detector's crossing belongs to the wake phrase. Keep it for
+            # room arbitration/diagnostics, but never append it to an STT
+            # buffer or stream it to a remote recognizer.
+            async with lock:
+                active_session = runtime.get("session")
+                if (
+                    isinstance(active_session, VoiceSessionRuntime)
+                    and active_session.session_id == sid
+                ):
+                    _native_discard_wake_preroll(active_session, audio_bytes, now_ts)
+                    if active_session.wake_preroll_chunks == 1:
+                        _native_debug(
+                            f"native wake pre-roll excluded from STT selector={token} "
+                            f"session_id={sid}"
+                        )
+            return
+
         if now_ts < gate_ts:
             async with lock:
                 s = runtime.get("session")
@@ -8266,9 +8298,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             session.last_audio_ts = now_ts
             if vad_startup_ignored:
                 session.vad_startup_ignored_chunks += 1
-                if wake_boundary_pending:
-                    session.wake_preroll_chunks += 1
-                    session.wake_preroll_bytes += len(audio_bytes)
                 if session.vad_startup_ignored_chunks == 1:
                     _native_debug(
                         f"esphome startup vad ignore selector={token} session_id={sid} "
