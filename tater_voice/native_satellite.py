@@ -34,6 +34,7 @@ NATIVE_WEBSOCKET_DISCONNECT_TIMEOUT_S = 1.0
 NATIVE_MEDIA_DISCONNECT_GRACE_S = 6.0
 NATIVE_SCREEN_WEATHER_REFRESH_S = 60.0
 NATIVE_SCREEN_CLIMATE_REFRESH_S = 15.0
+_NATIVE_WAKE_PREROLL_BOUNDARY = object()
 
 VOICE_EVENT_STATE = {
     "RUN_START": "listening",
@@ -1427,7 +1428,7 @@ class _NativeVoicePipelineBridge:
         self.client = _NativeVoiceAssistantClient(selector, queue, self._mark_inactive)
         self.module = _NativeVoiceAssistantModule()
         self.unsubscribe: Optional[Callable[[], None]] = None
-        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=NATIVE_AUDIO_QUEUE_MAX_CHUNKS)
+        self._audio_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=NATIVE_AUDIO_QUEUE_MAX_CHUNKS)
         self._audio_task: Optional[asyncio.Task] = None
         self._audio_drops = 0
         self._audio_drain_timeouts = 0
@@ -1444,9 +1445,12 @@ class _NativeVoicePipelineBridge:
 
     async def _audio_worker(self) -> None:
         while True:
-            data = await self._audio_queue.get()
+            item = await self._audio_queue.get()
             try:
-                await self._process_audio(data)
+                if item is _NATIVE_WAKE_PREROLL_BOUNDARY:
+                    await _vp()._native_mark_wake_preroll_complete(self.selector)
+                else:
+                    await self._process_audio(bytes(item or b""))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1553,6 +1557,12 @@ class _NativeVoicePipelineBridge:
                     self._audio_drops,
                 )
 
+    async def wake_preroll_boundary(self) -> None:
+        # This marker shares the audio worker queue so every saved wake frame
+        # is buffered for STT before command audio is allowed to drive VAD.
+        self._ensure_audio_task()
+        await self._audio_queue.put(_NATIVE_WAKE_PREROLL_BOUNDARY)
+
     def audio_stats(self) -> Dict[str, Any]:
         return {
             "queue_depth": self._audio_queue.qsize(),
@@ -1612,6 +1622,7 @@ def _audio_settings_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sample_width_bytes",
         "channels",
         "num_channels",
+        "wake_preroll_boundary",
     )
     for key in aliases:
         if key in body and body.get(key) is not None:
@@ -5141,6 +5152,15 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             {"ok": result is not None, "result": result},
             message_id=_text(message.get("id")),
         )
+
+    if msg_type == "voice.audio_boundary":
+        kind = _lower(payload.get("kind"))
+        version = _as_int(payload.get("version"), 0)
+        if kind == "wake_preroll_end" and version >= 1:
+            bridge = await _voice_bridge(selector)
+            if bridge is not None:
+                await bridge.wake_preroll_boundary()
+        return None
 
     if msg_type in {"voice.stop", "audio.stop"}:
         bridge = await _voice_bridge(selector)

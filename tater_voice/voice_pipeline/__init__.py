@@ -427,6 +427,7 @@ DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S = 1.5
 DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
+DEFAULT_WAKE_PREROLL_BOUNDARY_TIMEOUT_S = 2.0
 DEFAULT_TTS_URL_TTL_S = 180
 DEFAULT_TTS_ANNOUNCEMENT_TIMEOUT_MAX_S = 170.0
 DEFAULT_TTS_DEVICE_FETCH_BYTES_PER_S = 25000.0
@@ -6610,6 +6611,47 @@ def _apply_startup_preroll(session: VoiceSessionRuntime) -> int:
     return applied
 
 
+def _native_wake_preroll_pending(session: VoiceSessionRuntime, now_ts: float) -> bool:
+    if not isinstance(session, VoiceSessionRuntime):
+        return False
+    if not bool(session.wake_preroll_boundary_expected):
+        return False
+    if bool(session.wake_preroll_boundary_received):
+        return False
+    deadline = float(session.wake_preroll_boundary_deadline_ts or 0.0)
+    return deadline <= 0.0 or float(now_ts) < deadline
+
+
+async def _native_mark_wake_preroll_complete(selector: str) -> bool:
+    """Open command VAD after the native satellite's ordered wake pre-roll."""
+    token = _text(selector)
+    runtime = _selector_runtime(token)
+    lock = runtime.get("lock")
+    if lock is None:
+        return False
+    async with lock:
+        session = runtime.get("session")
+        if not isinstance(session, VoiceSessionRuntime):
+            return False
+        if not bool(session.wake_preroll_boundary_expected):
+            return False
+        if bool(session.wake_preroll_boundary_received):
+            return True
+        session.wake_preroll_boundary_received = True
+        session.vad_startup_ignore_until_ts = 0.0
+        buffered_chunks = int(session.wake_preroll_chunks or 0)
+        buffered_bytes = int(session.wake_preroll_bytes or 0)
+        session_id = _text(session.session_id)
+    logger.info(
+        "[native-voice] wake pre-roll complete selector=%s session_id=%s chunks=%s bytes=%s — command VAD live",
+        token,
+        session_id,
+        buffered_chunks,
+        buffered_bytes,
+    )
+    return True
+
+
 def _mark_stt_stream_unhealthy(session: VoiceSessionRuntime, reason: str) -> None:
     reason_token = _text(reason) or "stream_unhealthy"
     if not bool(session.stt_stream_unhealthy):
@@ -7629,6 +7671,17 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         wake_word_session = bool(wake_phrase)
         capture_reopen_profile = bool(continued_chat_reopen or wake_word_session)
+        wake_preroll_boundary_version = 0
+        if isinstance(audio_settings, dict):
+            wake_preroll_boundary_version = _as_int(
+                audio_settings.get("wake_preroll_boundary"),
+                0,
+                minimum=0,
+                maximum=16,
+            )
+        wake_preroll_boundary_expected = bool(
+            wake_word_session and wake_preroll_boundary_version >= 1
+        )
 
         try:
             eou_engine = _build_eou_engine(
@@ -7698,6 +7751,12 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     maximum=2.0,
                 ),
             )
+        if wake_preroll_boundary_expected:
+            # New native firmware sends its saved wake audio first and then an
+            # ordered boundary marker. Those frames remain in STT, while VAD
+            # begins with the first true post-wake command frame instead of a
+            # fixed wall-clock delay.
+            vad_startup_ignore_s = 0.0
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
         if capture_reopen_profile:
             startup_preroll_s = _as_float(
@@ -7812,6 +7871,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             startup_gate_s=startup_gate_s,
             vad_startup_ignore_s=vad_startup_ignore_s,
             vad_startup_ignore_until_ts=start_ts + max(0.0, vad_startup_ignore_s),
+            wake_preroll_boundary_expected=wake_preroll_boundary_expected,
+            wake_preroll_boundary_received=not wake_preroll_boundary_expected,
+            wake_preroll_boundary_deadline_ts=(
+                start_ts + DEFAULT_WAKE_PREROLL_BOUNDARY_TIMEOUT_S
+                if wake_preroll_boundary_expected
+                else 0.0
+            ),
             startup_preroll_s=startup_preroll_s,
             startup_preroll_max_bytes=startup_preroll_max_bytes,
             audio_stall_timeout_s=audio_stall_timeout_s,
@@ -7980,6 +8046,14 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             eou_engine = session.eou_engine
             gate_ts = float(session.startup_gate_until_ts)
             vad_ignore_ts = float(session.vad_startup_ignore_until_ts or 0.0)
+            wake_boundary_unreceived = bool(
+                session.wake_preroll_boundary_expected
+                and not session.wake_preroll_boundary_received
+            )
+            wake_boundary_pending = _native_wake_preroll_pending(session, _now())
+            wake_boundary_deadline_ts = float(
+                session.wake_preroll_boundary_deadline_ts or 0.0
+            )
             input_gain = float(session.audio_input_gain or DEFAULT_AUDIO_INPUT_GAIN)
 
         width = int(audio_format.get("width") or DEFAULT_VOICE_SAMPLE_WIDTH)
@@ -7996,6 +8070,27 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         )
 
         now_ts = _now()
+        if (
+            wake_boundary_unreceived
+            and wake_boundary_deadline_ts > 0.0
+            and now_ts >= wake_boundary_deadline_ts
+        ):
+            async with lock:
+                active_session = runtime.get("session")
+                if (
+                    isinstance(active_session, VoiceSessionRuntime)
+                    and active_session.session_id == sid
+                    and active_session.wake_preroll_boundary_expected
+                    and not active_session.wake_preroll_boundary_received
+                ):
+                    active_session.wake_preroll_boundary_received = True
+                    active_session.vad_startup_ignore_until_ts = 0.0
+                    wake_boundary_pending = False
+                    logger.warning(
+                        "[native-voice] wake pre-roll boundary timeout selector=%s session_id=%s — command VAD fail-open",
+                        token,
+                        sid,
+                    )
         async with lock:
             session_for_arbitration = runtime.get("session")
             if isinstance(session_for_arbitration, VoiceSessionRuntime) and session_for_arbitration.session_id == sid:
@@ -8022,7 +8117,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         metrics: Dict[str, Any] = {}
         should_finalize = False
-        vad_startup_ignored = vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
+        vad_startup_ignored = wake_boundary_pending or (
+            vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
+        )
         spud_stream = None
         spud_stream_active = False
         spud_speech_seen = False
@@ -8031,7 +8128,11 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             active_session = runtime.get("session")
             if isinstance(active_session, VoiceSessionRuntime) and active_session.session_id == sid:
                 spud_stream = active_session.spud_link_stt_stream
-                spud_stream_active = bool(active_session.spud_link_endpointing_active and spud_stream is not None)
+                spud_stream_active = bool(
+                    active_session.spud_link_endpointing_active
+                    and spud_stream is not None
+                    and not wake_boundary_pending
+                )
                 spud_speech_seen = bool(active_session.spud_link_endpointing_speech_seen)
                 if spud_stream_active and not bool(active_session.spud_link_stream_audio_started):
                     if active_session.startup_preroll_buffer:
@@ -8165,6 +8266,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             session.last_audio_ts = now_ts
             if vad_startup_ignored:
                 session.vad_startup_ignored_chunks += 1
+                if wake_boundary_pending:
+                    session.wake_preroll_chunks += 1
+                    session.wake_preroll_bytes += len(audio_bytes)
                 if session.vad_startup_ignored_chunks == 1:
                     _native_debug(
                         f"esphome startup vad ignore selector={token} session_id={sid} "

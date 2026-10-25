@@ -48,6 +48,11 @@ class VoiceSessionRuntime:
     startup_gate_s: float = 0.0
     vad_startup_ignore_s: float = 0.0
     vad_startup_ignore_until_ts: float = 0.0
+    wake_preroll_boundary_expected: bool = False
+    wake_preroll_boundary_received: bool = False
+    wake_preroll_boundary_deadline_ts: float = 0.0
+    wake_preroll_chunks: int = 0
+    wake_preroll_bytes: int = 0
     startup_preroll_s: float = 0.0
     startup_preroll_max_bytes: int = 0
     startup_preroll_buffer: bytearray = field(default_factory=bytearray)
