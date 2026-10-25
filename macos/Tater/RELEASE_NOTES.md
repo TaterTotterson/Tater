@@ -1,15 +1,19 @@
-# Tater v1.9.1
+# Tater v1.9.2
 
-Tater v1.9.1 improves recognition of short spoken requests from voice
-satellites.
+Tater v1.9.2 lets users speak immediately after the local wake word on native
+Echo satellites while keeping the wake audio out of command recognition.
 
 ## What's Changed
 
-### Short Voice Commands
+### Faster Wake-to-Command Handoff
 
-- Accepts clear multi-word transcripts when voice activity detection catches
-  only the leading edge of a short request.
-- Fixes commands such as "turn on the TV" and "what time is it" being replaced
-  by a retry prompt or silently discarded after the user repeats them.
-- Preserves the stricter no-speech guard for transcripts that do not have the
-  minimum voice activity needed to confirm that someone spoke.
+- Uses the wake pre-roll boundary advertised by Tater Echo Firmware v3.1.1 to
+  start command voice activity detection on the first post-wake audio frame.
+- Keeps marked wake audio available for room arbitration and diagnostics but
+  excludes it from command speech recognition without relying on wake-word
+  spelling or transcript cleanup.
+- Preserves speech captured while the satellite completes wake verification,
+  eliminating the pause previously needed before speaking a command.
+- Leaves end-of-speech detection and silence timeouts unchanged, retains the
+  legacy timing path for older firmware, and fails open safely if an expected
+  boundary is not received.
