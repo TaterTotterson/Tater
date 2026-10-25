@@ -26,14 +26,18 @@ logger = logging.getLogger("managed_tts")
 
 QWEN_TTS_BACKEND = "qwen3_tts"
 OMNIVOICE_TTS_BACKEND = "omnivoice"
-MANAGED_TTS_BACKENDS = {QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND}
+CHATTERBOX_LOCAL_TTS_BACKEND = "chatterbox_local"
+MANAGED_TTS_BACKENDS = {QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND, CHATTERBOX_LOCAL_TTS_BACKEND}
 
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 QWEN_TTS_VOICE_DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
+DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL = "ResembleAI/chatterbox-turbo"
+CHATTERBOX_NANO_TTS_MODEL = "ResembleAI/chatterbox-nano"
 
 _MLX_AUDIO_COMMIT = "223afd602c6d583455bdb9f181b91fc090f4aff9"
 _OMNIVOICE_COMMIT = "28bc0889d92110491d726a9c79f26a895db5a074"
+_CHATTERBOX_COMMIT = "5de7a54aa4e5e2baadb0182dde554908b48b85c2"
 _ENV_STACK_VERSION = "tater-managed-tts-v1"
 _SYNTHESIS_TIMEOUT_SECONDS = 15 * 60.0
 _INSTALL_TIMEOUT_SECONDS = 30 * 60.0
@@ -47,6 +51,14 @@ def normalize_managed_tts_backend(value: Any) -> str:
         return QWEN_TTS_BACKEND
     if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
         return OMNIVOICE_TTS_BACKEND
+    if token in {
+        "chatterbox_builtin",
+        "chatterbox_built_in",
+        "chatterbox_local",
+        "local_chatterbox",
+        "managed_chatterbox",
+    }:
+        return CHATTERBOX_LOCAL_TTS_BACKEND
     return token
 
 
@@ -264,8 +276,10 @@ def _stack_id(backend: str, acceleration: str) -> str:
         stack = f"mlx-audio-{_MLX_AUDIO_COMMIT}"
     elif backend == QWEN_TTS_BACKEND:
         stack = "qwen-tts-0.1.1-torch-2.9.1"
-    else:
+    elif backend == OMNIVOICE_TTS_BACKEND:
         stack = f"omnivoice-{_OMNIVOICE_COMMIT}-torch-2.8.0"
+    else:
+        stack = f"chatterbox-{_CHATTERBOX_COMMIT}-torch-2.6.0"
     return f"{_ENV_STACK_VERSION}:{backend}:{stack}:{acceleration or 'auto'}"
 
 
@@ -294,11 +308,21 @@ def _run_install(command: list[str], *, timeout: float = _INSTALL_TIMEOUT_SECOND
         raise RuntimeError(f"Managed TTS runtime installation failed.\n{tail}".strip())
 
 
-def _torch_index(acceleration: str) -> str:
+def _torch_index(acceleration: str, torch_version: str = "") -> str:
     if acceleration == "cuda":
-        return str(os.getenv("TATER_MANAGED_TTS_TORCH_INDEX") or "https://download.pytorch.org/whl/cu128")
+        default_index = (
+            "https://download.pytorch.org/whl/cu124"
+            if str(torch_version).startswith("2.6.")
+            else "https://download.pytorch.org/whl/cu128"
+        )
+        return str(os.getenv("TATER_MANAGED_TTS_TORCH_INDEX") or default_index)
     if acceleration == "rocm":
-        return str(os.getenv("TATER_MANAGED_TTS_TORCH_INDEX") or "https://download.pytorch.org/whl/rocm6.4")
+        default_index = (
+            "https://download.pytorch.org/whl/rocm6.2.4"
+            if str(torch_version).startswith("2.6.")
+            else "https://download.pytorch.org/whl/rocm6.4"
+        )
+        return str(os.getenv("TATER_MANAGED_TTS_TORCH_INDEX") or default_index)
     if acceleration == "cpu" and sys.platform != "darwin":
         return "https://download.pytorch.org/whl/cpu"
     return ""
@@ -307,6 +331,7 @@ def _torch_index(acceleration: str) -> str:
 _environment_locks: Dict[str, threading.Lock] = {
     QWEN_TTS_BACKEND: threading.Lock(),
     OMNIVOICE_TTS_BACKEND: threading.Lock(),
+    CHATTERBOX_LOCAL_TTS_BACKEND: threading.Lock(),
 }
 
 
@@ -342,7 +367,13 @@ def ensure_managed_tts_environment(backend: Any, acceleration: Any = "auto") -> 
                     ]
                 )
             else:
-                torch_version = "2.9.1" if token == QWEN_TTS_BACKEND else "2.8.0"
+                torch_version = (
+                    "2.9.1"
+                    if token == QWEN_TTS_BACKEND
+                    else "2.8.0"
+                    if token == OMNIVOICE_TTS_BACKEND
+                    else "2.6.0"
+                )
                 torch_command = [
                     str(python_bin),
                     "-m",
@@ -351,15 +382,18 @@ def ensure_managed_tts_environment(backend: Any, acceleration: Any = "auto") -> 
                     f"torch=={torch_version}",
                     f"torchaudio=={torch_version}",
                 ]
-                index = _torch_index(acceleration_token)
+                index = _torch_index(acceleration_token, torch_version)
                 if index:
                     torch_command.extend(["--index-url", index])
                 _run_install(torch_command)
-                package = (
-                    "qwen-tts==0.1.1"
-                    if token == QWEN_TTS_BACKEND
-                    else f"git+https://github.com/k2-fsa/OmniVoice.git@{_OMNIVOICE_COMMIT}"
-                )
+                package = {
+                    QWEN_TTS_BACKEND: "qwen-tts==0.1.1",
+                    OMNIVOICE_TTS_BACKEND: f"git+https://github.com/k2-fsa/OmniVoice.git@{_OMNIVOICE_COMMIT}",
+                    CHATTERBOX_LOCAL_TTS_BACKEND: (
+                        "chatterbox-tts @ "
+                        f"git+https://github.com/resemble-ai/chatterbox.git@{_CHATTERBOX_COMMIT}"
+                    ),
+                }[token]
                 _run_install(
                     [str(python_bin), "-m", "pip", "install", package, "huggingface_hub[hf_xet]", "soundfile"]
                 )
@@ -535,6 +569,7 @@ class _ManagedWorker:
 _workers: Dict[str, _ManagedWorker] = {
     QWEN_TTS_BACKEND: _ManagedWorker(QWEN_TTS_BACKEND),
     OMNIVOICE_TTS_BACKEND: _ManagedWorker(OMNIVOICE_TTS_BACKEND),
+    CHATTERBOX_LOCAL_TTS_BACKEND: _ManagedWorker(CHATTERBOX_LOCAL_TTS_BACKEND),
 }
 _managed_dispatch_lock = threading.RLock()
 
@@ -587,9 +622,11 @@ def warm_managed_tts_model(
     token = normalize_managed_tts_backend(backend)
     if token not in MANAGED_TTS_BACKENDS:
         raise ValueError(f"Unsupported managed TTS backend: {token or backend}")
-    selected_model = str(model or "").strip() or (
-        DEFAULT_QWEN_TTS_MODEL if token == QWEN_TTS_BACKEND else DEFAULT_OMNIVOICE_TTS_MODEL
-    )
+    selected_model = str(model or "").strip() or {
+        QWEN_TTS_BACKEND: DEFAULT_QWEN_TTS_MODEL,
+        OMNIVOICE_TTS_BACKEND: DEFAULT_OMNIVOICE_TTS_MODEL,
+        CHATTERBOX_LOCAL_TTS_BACKEND: DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+    }[token]
     acceleration_token = resolve_managed_tts_acceleration(acceleration)
     with _managed_dispatch_lock:
         _workers[token].request(
@@ -613,6 +650,10 @@ def synthesize_managed_tts_pcm(
     clone_text: Any = "",
     language: Any = "",
     instruct: Any = "",
+    temperature: Any = "",
+    exaggeration: Any = "",
+    cfg_weight: Any = "",
+    seed: Any = "",
     acceleration: Any = "auto",
 ) -> Tuple[bytes, Dict[str, int]]:
     token = normalize_managed_tts_backend(backend)
@@ -623,9 +664,11 @@ def synthesize_managed_tts_pcm(
         return b"", {}
     reference_path = validate_clone_audio_path(token, clone_audio)
     reference_text = str(clone_text or "").strip()
-    selected_model = str(model or "").strip() or (
-        DEFAULT_QWEN_TTS_MODEL if token == QWEN_TTS_BACKEND else DEFAULT_OMNIVOICE_TTS_MODEL
-    )
+    selected_model = str(model or "").strip() or {
+        QWEN_TTS_BACKEND: DEFAULT_QWEN_TTS_MODEL,
+        OMNIVOICE_TTS_BACKEND: DEFAULT_OMNIVOICE_TTS_MODEL,
+        CHATTERBOX_LOCAL_TTS_BACKEND: DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+    }[token]
     if token == QWEN_TTS_BACKEND and selected_model == DEFAULT_QWEN_TTS_MODEL:
         if not reference_path:
             raise RuntimeError("Qwen voice cloning needs a reference audio file. Add one in Settings > Speech.")
@@ -648,6 +691,10 @@ def synthesize_managed_tts_pcm(
                     "clone_text": reference_text,
                     "language": str(language or "").strip(),
                     "instruct": str(instruct or "").strip(),
+                    "temperature": str(temperature or "").strip(),
+                    "exaggeration": str(exaggeration or "").strip(),
+                    "cfg_weight": str(cfg_weight or "").strip(),
+                    "seed": str(seed or "").strip(),
                     "output_path": str(output_path),
                 },
                 acceleration=acceleration_token,

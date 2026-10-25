@@ -8,13 +8,14 @@ import io
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import wave
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
 
@@ -22,6 +23,7 @@ from .conversation import VoiceSessionRuntime
 from runtime_executors import run_stt, run_tts
 from tateros import integration_store as integration_store_module
 from managed_tts import (
+    DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL,
     clear_managed_tts_workers,
@@ -146,6 +148,9 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
     elif backend == "chatterbox":
         model = ""
         voice = voice
+    elif backend == "chatterbox_local":
+        model = model or DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL
+        voice = ""
     elif backend == "piper":
         model = model or vp.DEFAULT_PIPER_MODEL
         voice = ""
@@ -186,6 +191,7 @@ def _tts_selection_from_values(values: Optional[Dict[str, Any]] = None) -> Dict[
         "omnivoice_tts_clone_text": vp._text(merged.get("VOICE_OMNIVOICE_TTS_CLONE_TEXT")),
         "omnivoice_tts_language": vp._text(merged.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "English",
         "omnivoice_tts_instruct": vp._text(merged.get("VOICE_OMNIVOICE_TTS_INSTRUCT")),
+        "chatterbox_local_tts_clone_audio": vp._text(merged.get("VOICE_CHATTERBOX_LOCAL_TTS_CLONE_AUDIO")),
     }
 
 
@@ -227,7 +233,7 @@ def _tts_backend_available(backend: str) -> Tuple[bool, str]:
             vp.PiperVoice is not None and vp.PiperSynthesisConfig is not None and vp.piper_download_voice is not None,
             vp._text(vp.PIPER_IMPORT_ERROR) or "piper dependency unavailable",
         )
-    if token in {"qwen3_tts", "omnivoice"}:
+    if token in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
         return True, ""
     return False, f"unsupported TTS backend: {token}"
 
@@ -1915,18 +1921,18 @@ async def _native_wyoming_synthesize(
     return bytes(audio_out), audio_format
 
 
-def _native_openai_compatible_synthesize_sync(
+def _openai_compatible_tts_request(
     text: str,
     *,
     model: str,
     voice: str,
     base_url: str,
     api_key: str,
-) -> Tuple[bytes, Dict[str, Any]]:
+) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     vp = _vp()
     prompt = vp._text(text)
     if not prompt:
-        return b"", {}
+        return "", {}, {}
 
     endpoint = _openai_compatible_tts_endpoint(base_url)
     if not endpoint:
@@ -1943,6 +1949,26 @@ def _native_openai_compatible_synthesize_sync(
         "voice": vp._text(voice) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
         "response_format": "wav",
     }
+    return endpoint, headers, payload
+
+
+def _native_openai_compatible_synthesize_sync(
+    text: str,
+    *,
+    model: str,
+    voice: str,
+    base_url: str,
+    api_key: str,
+) -> Tuple[bytes, Dict[str, Any]]:
+    endpoint, headers, payload = _openai_compatible_tts_request(
+        text,
+        model=model,
+        voice=voice,
+        base_url=base_url,
+        api_key=api_key,
+    )
+    if not endpoint:
+        return b"", {}
 
     response = requests.post(
         endpoint,
@@ -1956,6 +1982,85 @@ def _native_openai_compatible_synthesize_sync(
     if not wav_bytes:
         raise RuntimeError("OpenAI-compatible TTS returned no audio.")
     return _decode_wav_bytes(wav_bytes)
+
+
+def _open_openai_compatible_tts_stream_response(row: Dict[str, Any]) -> requests.Response:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("OpenAI-compatible streaming TTS request is incomplete.")
+    endpoint, headers, payload = _openai_compatible_tts_request(
+        vp._text((row or {}).get("text")),
+        model=vp._text(selection.get("model")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+        voice=vp._text(selection.get("voice")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+        base_url=vp._text(selection.get("openai_base_url")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+        api_key=vp._text(selection.get("openai_api_key")) or vp.DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+    )
+    if not endpoint:
+        raise RuntimeError("OpenAI-compatible streaming TTS request is empty.")
+    headers = dict(headers)
+    headers["Accept"] = "audio/wav"
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+        stream=True,
+    )
+    if response.status_code >= 400:
+        try:
+            detail = _response_error_text(response)
+        finally:
+            with contextlib.suppress(Exception):
+                response.close()
+        raise RuntimeError(f"OpenAI-compatible streaming TTS request failed: {detail}")
+    return response
+
+
+def _iter_openai_compatible_tts_stream_response(
+    response: requests.Response,
+    row: Dict[str, Any],
+) -> Iterator[bytes]:
+    vp = _vp()
+    total_bytes = 0
+    max_bytes = vp._as_int(
+        (row or {}).get("max_bytes"),
+        getattr(vp, "DEFAULT_NATIVE_TTS_STREAM_MAX_BYTES", 64 * 1024 * 1024),
+        minimum=1024 * 1024,
+        maximum=512 * 1024 * 1024,
+    )
+    stream_id = vp._text((row or {}).get("id"))
+    prefix = bytearray()
+    validated = False
+    try:
+        for chunk in response.iter_content(chunk_size=16 * 1024):
+            if not chunk:
+                continue
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise RuntimeError(f"OpenAI-compatible streaming TTS exceeded {max_bytes} bytes.")
+            if not validated:
+                prefix.extend(chunk)
+                if len(prefix) < 12:
+                    continue
+                if not _looks_like_wav_bytes(bytes(prefix[:12])):
+                    raise RuntimeError("OpenAI-compatible streaming TTS did not return PCM WAV audio.")
+                validated = True
+                yield bytes(prefix)
+                prefix.clear()
+                continue
+            yield bytes(chunk)
+        if not validated:
+            if prefix:
+                raise RuntimeError("OpenAI-compatible streaming TTS returned an incomplete WAV header.")
+            raise RuntimeError("OpenAI-compatible streaming TTS returned no audio.")
+    finally:
+        with contextlib.suppress(Exception):
+            response.close()
+        vp._native_debug(
+            f"openai-compatible streaming tts finished stream_id={stream_id} "
+            f"session_id={vp._text((row or {}).get('session_id'))} bytes={total_bytes}"
+        )
 
 
 def _optional_chatterbox_float(value: Any, label: str, *, minimum: float, maximum: float) -> Optional[float]:
@@ -2139,6 +2244,381 @@ def _iter_chatterbox_tts_stream_response(response: requests.Response, row: Dict[
         vp._native_debug(
             f"chatterbox streaming tts finished stream_id={stream_id} session_id={vp._text((row or {}).get('session_id'))} "
             f"bytes={total_bytes}"
+        )
+
+
+def _native_tts_stream_max_bytes(row: Dict[str, Any]) -> int:
+    vp = _vp()
+    return vp._as_int(
+        (row or {}).get("max_bytes"),
+        getattr(vp, "DEFAULT_NATIVE_TTS_STREAM_MAX_BYTES", 64 * 1024 * 1024),
+        minimum=1024 * 1024,
+        maximum=512 * 1024 * 1024,
+    )
+
+
+def _streaming_pcm_wav_header(audio_format: Dict[str, Any]) -> bytes:
+    vp = _vp()
+    normalized = vp._normalized_audio_format(audio_format)
+    rate = int(normalized.get("rate") or 0)
+    width = int(normalized.get("width") or 0)
+    channels = int(normalized.get("channels") or 0)
+    if width != 2 or channels < 1 or channels > 8 or rate < 8000 or rate > 192000:
+        raise RuntimeError(
+            f"Streaming TTS requires PCM16 WAV audio; got rate={rate} width={width} channels={channels}."
+        )
+    block_align = channels * width
+    byte_rate = rate * block_align
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        0xFFFFFFFF,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        rate,
+        byte_rate,
+        block_align,
+        width * 8,
+        b"data",
+        0xFFFFFFFF,
+    )
+
+
+def _iter_streaming_pcm_wav(
+    pcm_chunks: Iterable[Tuple[bytes, Dict[str, Any]]],
+    row: Dict[str, Any],
+    *,
+    backend: str,
+) -> Iterator[bytes]:
+    vp = _vp()
+    iterator = iter(pcm_chunks)
+    max_bytes = _native_tts_stream_max_bytes(row)
+    stream_id = vp._text((row or {}).get("id"))
+    stream_format: Optional[Dict[str, int]] = None
+    total_bytes = 0
+    try:
+        for raw_pcm, raw_format in iterator:
+            pcm = bytes(raw_pcm or b"")
+            if not pcm:
+                continue
+            normalized = vp._normalized_audio_format(raw_format)
+            block_align = int(normalized.get("width") or 0) * int(normalized.get("channels") or 0)
+            if block_align <= 0 or len(pcm) % block_align:
+                raise RuntimeError(f"{backend} streaming TTS returned a partial PCM frame.")
+            if stream_format is None:
+                stream_format = normalized
+                chunk = _streaming_pcm_wav_header(stream_format) + pcm
+            else:
+                if normalized != stream_format:
+                    raise RuntimeError(
+                        f"{backend} streaming TTS changed audio format from {stream_format} to {normalized}."
+                    )
+                chunk = pcm
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise RuntimeError(f"{backend} streaming TTS exceeded {max_bytes} bytes.")
+            yield chunk
+        if stream_format is None:
+            raise RuntimeError(f"{backend} streaming TTS returned no audio.")
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+        vp._native_debug(
+            f"{backend} streaming tts finished stream_id={stream_id} "
+            f"session_id={vp._text((row or {}).get('session_id'))} bytes={total_bytes}"
+        )
+
+
+def _iter_pocket_tts_pcm_chunks(row: Dict[str, Any]) -> Iterator[Tuple[bytes, Dict[str, Any]]]:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Pocket TTS streaming request is incomplete.")
+    prompt = vp._text((row or {}).get("text"))
+    if not prompt:
+        return
+    model_id = vp._text(selection.get("model")) or vp.DEFAULT_POCKET_TTS_MODEL
+    selected_voice = vp._text(selection.get("voice")) or vp.DEFAULT_POCKET_TTS_VOICE
+    model = _load_pocket_tts_model(model_id)
+    root = vp._ensure_tts_backend_model_root("pocket_tts")
+    hf_root = os.path.join(root, "hf")
+    os.makedirs(hf_root, exist_ok=True)
+    env = huggingface_environment(
+        {
+            "HF_HOME": hf_root,
+            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+        }
+    )
+    audio_format = {
+        "rate": int(getattr(model, "sample_rate", 24000) or 24000),
+        "width": 2,
+        "channels": 1,
+    }
+    gain = _pocket_tts_output_gain()
+    with vp._pocket_tts_runtime_lock:
+        with _temporary_env(env):
+            model_state = _get_pocket_tts_voice_state(model, model_id, selected_voice)
+            stream = getattr(model, "generate_audio_stream", None)
+            stream_iterator = iter(stream(model_state, prompt)) if callable(stream) else None
+        if stream_iterator is not None:
+            for audio_chunk in stream_iterator:
+                tensor = audio_chunk.detach().cpu().squeeze()
+                pcm = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+                if pcm:
+                    yield pcm, audio_format
+            return
+
+        with _temporary_env(env):
+            audio_tensor = model.generate_audio(model_state, prompt)
+        tensor = audio_tensor.detach().cpu().squeeze()
+        pcm = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+        if pcm:
+            yield pcm, audio_format
+
+
+def _iter_piper_tts_pcm_chunks(row: Dict[str, Any]) -> Iterator[Tuple[bytes, Dict[str, Any]]]:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Piper streaming request is incomplete.")
+    prompt = vp._text((row or {}).get("text"))
+    if not prompt:
+        return
+    voice = _load_piper_voice_model(vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    last_format: Optional[Dict[str, Any]] = None
+    with vp._piper_runtime_lock:
+        for segment_text, pause_seconds in segment_plan:
+            syn_config = vp.PiperSynthesisConfig()
+            for chunk in voice.synthesize(segment_text, syn_config=syn_config):
+                audio_format = {
+                    "rate": int(getattr(chunk, "sample_rate", 22050) or 22050),
+                    "width": int(getattr(chunk, "sample_width", 2) or 2),
+                    "channels": int(getattr(chunk, "sample_channels", 1) or 1),
+                }
+                pcm = bytes(getattr(chunk, "audio_int16_bytes", b"") or b"")
+                if pcm:
+                    last_format = audio_format
+                    yield pcm, audio_format
+            if pause_seconds > 0 and last_format is not None:
+                silence = vp._append_pcm_silence(b"", last_format, seconds=pause_seconds)
+                if silence:
+                    yield silence, last_format
+        if last_format is not None:
+            tail = vp._append_pcm_silence(
+                b"",
+                last_format,
+                seconds=vp.DEFAULT_PIPER_TAIL_PAD_SECONDS,
+            )
+            if tail:
+                yield tail, last_format
+
+
+def _iter_kokoro_tts_pcm_chunks(row: Dict[str, Any]) -> Iterator[Tuple[bytes, Dict[str, Any]]]:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Kokoro streaming request is incomplete.")
+    prompt = vp._text((row or {}).get("text"))
+    if not prompt:
+        return
+    model_id = vp._text(selection.get("model")) or vp.DEFAULT_KOKORO_MODEL
+    selected_voice = vp._text(selection.get("voice")) or vp.DEFAULT_KOKORO_VOICE
+    engine = vp._kokoro_engine()
+    pipeline = _load_kokoro_pipeline(model_id, voice=selected_voice)
+    gain = _kokoro_output_gain()
+    with vp._kokoro_runtime_lock:
+        if engine == "torch":
+            env: Dict[str, Any] = {}
+            if vp._kokoro_torch_device() == "mps":
+                env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            with _temporary_env(env):
+                results = iter(
+                    pipeline(
+                        prompt,
+                        voice=selected_voice,
+                        speed=1,
+                        split_pattern=r"\n+|(?<=[.!?])\s+",
+                    )
+                )
+            while True:
+                try:
+                    with _temporary_env(env):
+                        result = next(results)
+                except StopIteration:
+                    break
+                pcm = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=gain)
+                if pcm:
+                    yield pcm, {"rate": 24000, "width": 2, "channels": 1}
+            return
+
+        segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+        for segment_text, _pause_seconds in segment_plan:
+            result = pipeline.run(segment_text, voice=selected_voice)
+            pcm = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=gain)
+            if pcm:
+                yield pcm, {
+                    "rate": int(getattr(result, "sample_rate", 24000) or 24000),
+                    "width": 2,
+                    "channels": 1,
+                }
+
+
+def _iter_chatterbox_local_tts_pcm_chunks(row: Dict[str, Any]) -> Iterator[Tuple[bytes, Dict[str, Any]]]:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Built-in Chatterbox streaming request is incomplete.")
+    prompt = vp._text((row or {}).get("text"))
+    if not prompt:
+        return
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    last_format: Optional[Dict[str, Any]] = None
+    for segment_text, pause_seconds in segment_plan:
+        pcm, audio_format = synthesize_managed_tts_pcm(
+            segment_text,
+            backend="chatterbox_local",
+            model=vp._text(selection.get("model")) or DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+            clone_audio=selection.get("chatterbox_local_tts_clone_audio"),
+            temperature=selection.get("chatterbox_temperature"),
+            seed=selection.get("chatterbox_seed"),
+            acceleration=vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION"),
+        )
+        if pcm:
+            last_format = audio_format
+            yield pcm, audio_format
+        if pause_seconds > 0 and last_format is not None:
+            silence = vp._append_pcm_silence(b"", last_format, seconds=pause_seconds)
+            if silence:
+                yield silence, last_format
+    if last_format is not None:
+        tail = vp._append_pcm_silence(b"", last_format, seconds=vp.DEFAULT_PIPER_TAIL_PAD_SECONDS)
+        if tail:
+            yield tail, last_format
+
+
+def _iter_native_tts_stream_response(row: Dict[str, Any]) -> Iterator[bytes]:
+    vp = _vp()
+    backend = vp._normalize_tts_backend((row or {}).get("backend"))
+    if backend == "pocket_tts":
+        pcm_chunks = _iter_pocket_tts_pcm_chunks(row)
+    elif backend == "piper":
+        pcm_chunks = _iter_piper_tts_pcm_chunks(row)
+    elif backend == "kokoro":
+        pcm_chunks = _iter_kokoro_tts_pcm_chunks(row)
+    elif backend == "chatterbox_local":
+        pcm_chunks = _iter_chatterbox_local_tts_pcm_chunks(row)
+    else:
+        raise RuntimeError(f"Unsupported local streaming TTS backend: {backend or 'unknown'}")
+    yield from _iter_streaming_pcm_wav(pcm_chunks, row, backend=backend)
+
+
+async def _iter_wyoming_tts_stream_response(row: Dict[str, Any]) -> AsyncIterator[bytes]:
+    vp = _vp()
+    selection = (row or {}).get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Wyoming streaming TTS request is incomplete.")
+    if (
+        vp.AsyncTcpClient is None
+        or vp.Synthesize is None
+        or vp.WyomingAudioStart is None
+        or vp.WyomingAudioChunk is None
+        or vp.WyomingAudioStop is None
+        or vp.WyomingError is None
+    ):
+        raise RuntimeError(f"Wyoming client dependency unavailable: {vp.WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    prompt = vp._text((row or {}).get("text"))
+    if not prompt:
+        raise RuntimeError("Wyoming streaming TTS request is empty.")
+    host = vp._text(selection.get("wyoming_host")) or vp.DEFAULT_WYOMING_TTS_HOST
+    port = vp._as_int(
+        selection.get("wyoming_port"),
+        vp.DEFAULT_WYOMING_TTS_PORT,
+        minimum=1,
+        maximum=65535,
+    )
+    selected = vp._voice_selection_from_string(selection.get("wyoming_voice"))
+    synth_event = None
+    if selected and vp.SynthesizeVoice is not None:
+        voice_obj = vp.SynthesizeVoice(
+            name=vp._text(selected.get("name")) or None,
+            language=vp._text(selected.get("language")) or None,
+            speaker=vp._text(selected.get("speaker")) or None,
+        )
+        synth_event = vp.Synthesize(text=prompt, voice=voice_obj).event()
+    elif selected:
+        with contextlib.suppress(Exception):
+            synth_event = vp.Synthesize(text=prompt, voice=selected).event()
+    if synth_event is None:
+        synth_event = vp.Synthesize(text=prompt).event()
+
+    timeout = _wyoming_timeout_s()
+    deadline = time.monotonic() + timeout
+    max_bytes = _native_tts_stream_max_bytes(row)
+    stream_id = vp._text((row or {}).get("id"))
+    audio_format: Optional[Dict[str, Any]] = None
+    pending = bytearray()
+    total_bytes = 0
+    header_sent = False
+    try:
+        async with vp.AsyncTcpClient(host, port) as client:
+            await asyncio.wait_for(client.write_event(synth_event), timeout=timeout)
+            while time.monotonic() < deadline:
+                left = max(0.1, deadline - time.monotonic())
+                event = await asyncio.wait_for(client.read_event(), timeout=left)
+                if event is None:
+                    break
+                if vp.WyomingAudioStart.is_type(event.type):
+                    start = vp.WyomingAudioStart.from_event(event)
+                    audio_format = {
+                        "rate": int(start.rate),
+                        "width": int(start.width),
+                        "channels": int(start.channels),
+                    }
+                    _streaming_pcm_wav_header(audio_format)
+                    continue
+                if vp.WyomingAudioChunk.is_type(event.type):
+                    if audio_format is None:
+                        raise RuntimeError("Wyoming TTS emitted audio before audio-start.")
+                    chunk = vp.WyomingAudioChunk.from_event(event)
+                    pending.extend(bytes(chunk.audio or b""))
+                    block_align = int(audio_format["width"]) * int(audio_format["channels"])
+                    usable = len(pending) - (len(pending) % block_align)
+                    if usable <= 0:
+                        continue
+                    pcm = bytes(pending[:usable])
+                    del pending[:usable]
+                    outgoing = pcm
+                    if not header_sent:
+                        outgoing = _streaming_pcm_wav_header(audio_format) + pcm
+                        header_sent = True
+                    total_bytes += len(outgoing)
+                    if total_bytes > max_bytes:
+                        raise RuntimeError(f"Wyoming streaming TTS exceeded {max_bytes} bytes.")
+                    yield outgoing
+                    continue
+                if vp.WyomingAudioStop.is_type(event.type):
+                    break
+                if vp.WyomingError.is_type(event.type):
+                    err = vp.WyomingError.from_event(event)
+                    raise RuntimeError(f"Wyoming TTS error: {err.text} ({err.code or 'unknown'})")
+        if audio_format is None:
+            raise RuntimeError("Wyoming TTS did not emit audio-start.")
+        if pending:
+            raise RuntimeError("Wyoming streaming TTS returned a partial PCM frame.")
+        if not header_sent:
+            raise RuntimeError("Wyoming streaming TTS returned no audio.")
+    finally:
+        vp._native_debug(
+            f"wyoming streaming tts finished stream_id={stream_id} "
+            f"session_id={vp._text((row or {}).get('session_id'))} bytes={total_bytes}"
         )
 
 
@@ -2373,7 +2853,7 @@ def _load_piper_voice_model(model_id: str) -> Any:
         return voice
 
 
-def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
+def _synthesize_kokoro_unlocked(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
     vp = _vp()
     engine = vp._kokoro_engine()
     pipeline = _load_kokoro_pipeline(model_id, voice=voice)
@@ -2400,6 +2880,11 @@ def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes
     audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain())
     sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
     return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
+
+
+def _synthesize_kokoro_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
+    with _vp()._kokoro_runtime_lock:
+        return _synthesize_kokoro_unlocked(text, model_id, voice)
 
 
 def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str) -> Tuple[bytes, Dict[str, Any]]:
@@ -2545,27 +3030,6 @@ def _build_piper_segment_plan(text: str) -> List[Tuple[str, float]]:
     return plan
 
 
-def _build_experimental_tts_chunks(text: str) -> List[str]:
-    vp = _vp()
-    prompt = vp._sanitize_spoken_response_text(text)
-    if len(prompt) < int(vp.DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS):
-        return []
-    sentence_plan = _build_piper_segment_plan(prompt)
-    sentences = [vp._text(sentence) for sentence, _pause_s in sentence_plan if vp._text(sentence)]
-    if len(sentences) < 2:
-        return []
-    first_chunk = sentences[0]
-    remaining = list(sentences[1:])
-    if len(first_chunk) < int(vp.DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS) and remaining:
-        first_chunk = f"{first_chunk} {remaining.pop(0)}".strip()
-    chunks = [first_chunk]
-    if remaining:
-        remainder = " ".join(part for part in remaining if part).strip()
-        if remainder:
-            chunks.append(remainder)
-    return [chunk for chunk in chunks if vp._text(chunk)]
-
-
 def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict[str, Any]]:
     vp = _vp()
     audio_out = bytearray()
@@ -2581,7 +3045,7 @@ def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict
     return bytes(audio_out), {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
 
 
-def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+def _synthesize_piper_unlocked(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
     vp = _vp()
     prompt = vp._text(text)
     if not prompt:
@@ -2599,6 +3063,11 @@ def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, A
             audio_parts.append(vp._append_pcm_silence(b"", audio_format, seconds=pause_seconds))
     padded = vp._append_pcm_silence(b"".join(audio_parts), audio_format, seconds=vp.DEFAULT_PIPER_TAIL_PAD_SECONDS)
     return padded, audio_format
+
+
+def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+    with _vp()._piper_runtime_lock:
+        return _synthesize_piper_unlocked(text, model_id)
 
 
 async def _native_synthesize_text(
@@ -2666,9 +3135,17 @@ async def _native_synthesize_text(
             vp._native_debug(f"TTS (piper) local model={selection.get('model') or vp.DEFAULT_PIPER_MODEL}")
             audio_bytes, audio_format = await run_tts(_synthesize_piper_sync, prompt, vp._text(selection.get("model")) or vp.DEFAULT_PIPER_MODEL)
             return audio_bytes, audio_format, effective_backend, backend_note
-        if effective_backend in {"qwen3_tts", "omnivoice"}:
-            prefix = "qwen_tts" if effective_backend == "qwen3_tts" else "omnivoice_tts"
-            default_model = DEFAULT_QWEN_TTS_MODEL if effective_backend == "qwen3_tts" else DEFAULT_OMNIVOICE_TTS_MODEL
+        if effective_backend in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
+            prefix = {
+                "qwen3_tts": "qwen_tts",
+                "omnivoice": "omnivoice_tts",
+                "chatterbox_local": "chatterbox_local_tts",
+            }[effective_backend]
+            default_model = {
+                "qwen3_tts": DEFAULT_QWEN_TTS_MODEL,
+                "omnivoice": DEFAULT_OMNIVOICE_TTS_MODEL,
+                "chatterbox_local": DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+            }[effective_backend]
             vp._native_debug(f"TTS ({effective_backend}) managed local model={selection.get('model') or default_model}")
             audio_bytes, audio_format = await run_tts(
                 synthesize_managed_tts_pcm,
@@ -2679,6 +3156,8 @@ async def _native_synthesize_text(
                 clone_text=selection.get(f"{prefix}_clone_text"),
                 language=selection.get(f"{prefix}_language"),
                 instruct=selection.get(f"{prefix}_instruct"),
+                temperature=selection.get("chatterbox_temperature") if effective_backend == "chatterbox_local" else "",
+                seed=selection.get("chatterbox_seed") if effective_backend == "chatterbox_local" else "",
                 acceleration=vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION"),
             )
             return audio_bytes, audio_format, effective_backend, backend_note

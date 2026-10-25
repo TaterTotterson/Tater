@@ -26,7 +26,8 @@ const backendMeta: Record<string, { mark: string; short: string; kind: string }>
   same_as_direct: { mark: "↔", short: "Use the complete Reply Voice profile.", kind: "Shared" },
   wyoming: { mark: "WY", short: "Connect to a Wyoming voice service.", kind: "Network" },
   openai_compatible: { mark: "API", short: "Use an OpenAI-style speech endpoint.", kind: "API" },
-  chatterbox: { mark: "CB", short: "Expressive speech with optional tuning.", kind: "Server" },
+  chatterbox: { mark: "CB", short: "Connect to a separate Chatterbox speech server.", kind: "Server" },
+  chatterbox_local: { mark: "CB", short: "Run Chatterbox locally with an optional cloned voice.", kind: "Built-in clone" },
   kokoro: { mark: "KO", short: "Fast local neural speech synthesis.", kind: "Local" },
   pocket_tts: { mark: "PT", short: "Small local voice model with presets.", kind: "Local" },
   piper: { mark: "PI", short: "Reliable, lightweight offline voices.", kind: "Local" },
@@ -57,8 +58,9 @@ const activeBackendMeta = computed(() => detailsFor(backend.value));
 const directBackendLabel = computed(() => detailsFor(String(props.draft.speech_tts_backend || "wyoming")).label);
 const canDiscover = computed(() => !inheritsDirect.value && ["wyoming", "openai_compatible", "chatterbox"].includes(effectiveBackend.value));
 const needsVoice = computed(() => voiceOptions.value.length > 0 || ["wyoming", "openai_compatible", "chatterbox", "kokoro", "pocket_tts"].includes(effectiveBackend.value));
-const managed = computed(() => ["qwen3_tts", "omnivoice"].includes(effectiveBackend.value));
-const managedToken = computed(() => effectiveBackend.value === "qwen3_tts" ? "qwen_tts" : "omnivoice_tts");
+const managed = computed(() => ["qwen3_tts", "omnivoice", "chatterbox_local"].includes(effectiveBackend.value));
+const managedToken = computed(() => effectiveBackend.value === "qwen3_tts" ? "qwen_tts" : effectiveBackend.value === "omnivoice" ? "omnivoice_tts" : "chatterbox_local_tts");
+const cloneTranscriptSupported = computed(() => effectiveBackend.value !== "chatterbox_local");
 const managedBase = computed(() => `${keyPrefix.value}${managedToken.value}`);
 const cloneInfoKey = computed(() => `${managedBase.value}_clone_audio`);
 const cloneTextKey = computed(() => `${managedBase.value}_clone_text`);
@@ -123,7 +125,7 @@ async function uploadClone(event: Event) {
     props.draft[cloneInfoKey.value] = result.audio || { configured: true, name: file.name, size: file.size };
     if (result.clone_text) props.draft[cloneTextKey.value] = result.clone_text;
     emit("dirty");
-    emit("notify", "Reference audio uploaded and analyzed.", "success");
+    emit("notify", effectiveBackend.value === "chatterbox_local" ? "Reference audio uploaded." : "Reference audio uploaded and analyzed.", "success");
   } catch (uploadError) {
     error.value = uploadError instanceof Error ? uploadError.message : "Reference audio could not be uploaded.";
   } finally {
@@ -205,17 +207,25 @@ async function deleteClone() {
           <label class="tm-field"><span class="tm-field-label">CFG weight</span><input v-model="draft[key('chatterbox_tts_cfg_weight')]" type="number" min="0" step="0.05" @input="emit('dirty')" /></label>
           <label class="tm-field"><span class="tm-field-label">Seed</span><input v-model="draft[key('chatterbox_tts_seed')]" type="number" @input="emit('dirty')" /></label>
           <label class="tm-field"><span class="tm-field-label">Speed</span><input v-model="draft[key('chatterbox_tts_speed_factor')]" type="number" min="0.1" step="0.05" @input="emit('dirty')" /></label>
-          <label v-if="!announcement" class="tm-field tm-toggle-field tm-field-wide"><span><strong>Satellite streaming</strong><small>Start playback while the rest of the reply is still being generated.</small></span><input v-model="draft.speech_chatterbox_tts_streaming_enabled" type="checkbox" @change="emit('dirty')" /></label>
+          <label v-if="!announcement" class="tm-field tm-toggle-field tm-field-wide"><span><strong>Satellite streaming</strong><small>Start playback while the rest of the reply is still being generated. Updated Echo firmware uses true incremental playback; older satellites safely fall back to buffered audio.</small></span><input v-model="draft.speech_chatterbox_tts_streaming_enabled" type="checkbox" @change="emit('dirty')" /></label>
+        </div>
+      </details>
+
+      <details v-if="effectiveBackend === 'chatterbox_local'" class="tm-speech-advanced">
+        <summary><span><strong>Fine-tune built-in Chatterbox</strong><small>Optional generation controls</small></span><b>Advanced</b></summary>
+        <div class="tm-field-grid">
+          <label class="tm-field"><span class="tm-field-label">Temperature</span><input v-model="draft[key('chatterbox_tts_temperature')]" type="number" min="0.05" max="2" step="0.05" placeholder="0.8" @input="emit('dirty')" /></label>
+          <label class="tm-field"><span class="tm-field-label">Seed</span><input v-model="draft[key('chatterbox_tts_seed')]" type="number" placeholder="Random" @input="emit('dirty')" /></label>
         </div>
       </details>
     </article>
 
     <article v-if="managed && !inheritsDirect" class="tm-form-card tm-speech-clone-card">
-      <header><div><span class="tv-eyebrow">Personal voice</span><h3>Reference voice</h3><p>Upload a clean recording and transcript so {{ activeBackendMeta.label }} can reproduce that voice.</p></div><span class="tm-speech-status-chip" :class="{ ready: cloneInfo.configured }">{{ cloneInfo.configured ? "Reference ready" : "Not configured" }}</span></header>
+      <header><div><span class="tv-eyebrow">Personal voice</span><h3>Reference voice</h3><p>{{ cloneTranscriptSupported ? `Upload a clean recording and transcript so ${activeBackendMeta.label} can reproduce that voice.` : "Optional: upload a clean 5–10 second recording to replace Chatterbox's built-in voice." }}</p></div><span class="tm-speech-status-chip" :class="{ ready: cloneInfo.configured }">{{ cloneInfo.configured ? "Reference ready" : effectiveBackend === "chatterbox_local" ? "Built-in voice" : "Not configured" }}</span></header>
       <div class="tm-field-grid">
-        <label class="tm-field tm-field-wide"><span class="tm-field-label">Reference transcript</span><textarea v-model="draft[cloneTextKey]" placeholder="Enter exactly what is spoken in the reference recording." @input="emit('dirty')" /><small>A matching transcript produces a more accurate cloned voice.</small></label>
-        <label class="tm-field"><span class="tm-field-label">Language</span><input v-model="draft[languageKey]" type="text" placeholder="English" @input="emit('dirty')" /></label>
-        <label class="tm-field"><span class="tm-field-label">Voice instruction</span><input v-model="draft[instructKey]" type="text" placeholder="Optional style or delivery guidance" @input="emit('dirty')" /></label>
+        <label v-if="cloneTranscriptSupported" class="tm-field tm-field-wide"><span class="tm-field-label">Reference transcript</span><textarea v-model="draft[cloneTextKey]" placeholder="Enter exactly what is spoken in the reference recording." @input="emit('dirty')" /><small>A matching transcript produces a more accurate cloned voice.</small></label>
+        <label v-if="cloneTranscriptSupported" class="tm-field"><span class="tm-field-label">Language</span><input v-model="draft[languageKey]" type="text" placeholder="English" @input="emit('dirty')" /></label>
+        <label v-if="cloneTranscriptSupported" class="tm-field"><span class="tm-field-label">Voice instruction</span><input v-model="draft[instructKey]" type="text" placeholder="Optional style or delivery guidance" @input="emit('dirty')" /></label>
         <label class="tm-field tm-field-wide tm-speech-file-field"><span class="tm-field-label">Reference audio</span><input type="file" accept="audio/*" :disabled="Boolean(busy)" @change="uploadClone" /><small>{{ cloneInfo.configured ? `${cloneInfo.name} · ${Number(cloneInfo.size || 0).toLocaleString()} bytes` : "Use a short, clear recording with little background noise." }}</small></label>
       </div>
       <div v-if="cloneInfo.configured" class="tm-inline-actions tm-secondary-row"><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="deleteClone">{{ busy === 'delete' ? "Removing…" : "Remove reference audio" }}</button></div>

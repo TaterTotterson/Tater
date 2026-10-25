@@ -25,7 +25,7 @@ from announcement_targets import split_announcement_targets
 from helpers import redis_client
 from runtime_executors import run_background, run_tts
 from tater_paths import agent_lab_path
-from managed_tts import clear_managed_tts_workers, is_managed_tts_backend, synthesize_managed_tts_pcm
+from managed_tts import clear_managed_tts_workers, synthesize_managed_tts_pcm
 from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
 from spud_link_models import request_tts_wav_async as spud_link_request_tts_wav_async
 from spud_link_models import should_use_hub as spud_link_should_use_hub
@@ -511,6 +511,14 @@ def normalize_tts_backend(value: Any) -> str:
         return "openai_compatible"
     if token in {"chatterbox", "chatterbox_tts"}:
         return "chatterbox"
+    if token in {
+        "chatterbox_builtin",
+        "chatterbox_built_in",
+        "chatterbox_local",
+        "local_chatterbox",
+        "managed_chatterbox",
+    }:
+        return "chatterbox_local"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -2470,9 +2478,13 @@ async def synthesize_tts_wav(
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
-    if is_managed_tts_backend(selected_backend):
+    if selected_backend in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
         speech_settings = get_speech_settings()
-        prefix = "qwen_tts" if selected_backend == "qwen3_tts" else "omnivoice_tts"
+        prefix = {
+            "qwen3_tts": "qwen_tts",
+            "omnivoice": "omnivoice_tts",
+            "chatterbox_local": "chatterbox_local_tts",
+        }[selected_backend]
         audio_bytes, audio_format = await run_tts(
             synthesize_managed_tts_pcm,
             prompt,
@@ -2486,6 +2498,18 @@ async def synthesize_tts_wav(
             instruct=(
                 managed_instruct if managed_instruct is not None else speech_settings.get(f"{prefix}_instruct")
             ),
+            temperature=(
+                chatterbox_temperature
+                if chatterbox_temperature is not None
+                else speech_settings.get("chatterbox_tts_temperature")
+            ) if selected_backend == "chatterbox_local" else "",
+            exaggeration="",
+            cfg_weight="",
+            seed=(
+                chatterbox_seed
+                if chatterbox_seed is not None
+                else speech_settings.get("chatterbox_tts_seed")
+            ) if selected_backend == "chatterbox_local" else "",
             acceleration=acceleration if acceleration is not None else speech_settings.get("acceleration"),
         )
         return pcm_to_wav(audio_bytes, audio_format)
@@ -3063,7 +3087,11 @@ async def speak_announcement_targets(
         chatterbox_language = shared_speech.get("chatterbox_tts_language")
         kokoro_output_gain = shared_speech.get("kokoro_output_gain")
         pocket_tts_output_gain = shared_speech.get("pocket_tts_output_gain")
-        profile_prefix = "qwen_tts" if selected_backend == "qwen3_tts" else "omnivoice_tts"
+        profile_prefix = {
+            "qwen3_tts": "qwen_tts",
+            "omnivoice": "omnivoice_tts",
+            "chatterbox_local": "chatterbox_local_tts",
+        }.get(selected_backend, "")
     else:
         model = _text(model) or _text(shared_speech.get("announcement_tts_model"))
         voice = _text(voice) or _text(shared_speech.get("announcement_tts_voice"))
@@ -3083,13 +3111,18 @@ async def speak_announcement_targets(
         chatterbox_language = chatterbox_language if chatterbox_language is not None else shared_speech.get("announcement_chatterbox_tts_language")
         kokoro_output_gain = kokoro_output_gain if kokoro_output_gain is not None else shared_speech.get("announcement_kokoro_output_gain")
         pocket_tts_output_gain = pocket_tts_output_gain if pocket_tts_output_gain is not None else shared_speech.get("announcement_pocket_tts_output_gain")
-        profile_prefix = "announcement_qwen_tts" if selected_backend == "qwen3_tts" else "announcement_omnivoice_tts"
+        profile_prefix = {
+            "qwen3_tts": "announcement_qwen_tts",
+            "omnivoice": "announcement_omnivoice_tts",
+            "chatterbox_local": "announcement_chatterbox_local_tts",
+        }.get(selected_backend, "")
     acceleration = acceleration if acceleration is not None else shared_speech.get("acceleration")
-    if selected_backend in {"qwen3_tts", "omnivoice"}:
+    if selected_backend in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
         clone_audio = clone_audio if clone_audio is not None else shared_speech.get(f"{profile_prefix}_clone_audio")
-        clone_text = clone_text if clone_text is not None else shared_speech.get(f"{profile_prefix}_clone_text")
-        managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
-        managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
+        if selected_backend != "chatterbox_local":
+            clone_text = clone_text if clone_text is not None else shared_speech.get(f"{profile_prefix}_clone_text")
+            managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
+            managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
     warnings: list[str] = []
     sent_count = 0
     result: Dict[str, Any] = {

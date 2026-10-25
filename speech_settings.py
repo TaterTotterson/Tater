@@ -28,7 +28,7 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
 DEFAULT_CHATTERBOX_TTS_BASE_URL = ""
 DEFAULT_CHATTERBOX_TTS_VOICE_MODE = "predefined"
 DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE = 120
-DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED = False
+DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED = True
 DEFAULT_SPEECH_ACCELERATION = "auto"
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
 DEFAULT_KOKORO_VOICE = "af_bella"
@@ -40,6 +40,8 @@ DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 QWEN_TTS_VOICE_DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
+DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL = "ResembleAI/chatterbox-turbo"
+CHATTERBOX_NANO_TTS_MODEL = "ResembleAI/chatterbox-nano"
 DEFAULT_QWEN_TTS_LANGUAGE = "English"
 DEFAULT_OMNIVOICE_TTS_LANGUAGE = "English"
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
@@ -179,6 +181,14 @@ def _normalize_tts_backend(value: Any) -> str:
         return "openai_compatible"
     if token in {"chatterbox", "chatterbox_tts"}:
         return "chatterbox"
+    if token in {
+        "chatterbox_builtin",
+        "chatterbox_built_in",
+        "chatterbox_local",
+        "local_chatterbox",
+        "managed_chatterbox",
+    }:
+        return "chatterbox_local"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -537,6 +547,7 @@ def get_speech_settings() -> Dict[str, Any]:
         "omnivoice_tts_clone_text": _clean(shared.get("omnivoice_tts_clone_text")),
         "omnivoice_tts_language": _clean(shared.get("omnivoice_tts_language")) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
         "omnivoice_tts_instruct": _clean(shared.get("omnivoice_tts_instruct")),
+        "chatterbox_local_tts_clone_audio": _clean(shared.get("chatterbox_local_tts_clone_audio")),
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
         "wyoming_tts_port": _as_int(shared.get("wyoming_tts_port"), DEFAULT_WYOMING_TTS_PORT),
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
@@ -596,6 +607,9 @@ def get_speech_settings() -> Dict[str, Any]:
         ),
         "announcement_omnivoice_tts_instruct": announcement_value(
             "announcement_omnivoice_tts_instruct", "omnivoice_tts_instruct"
+        ),
+        "announcement_chatterbox_local_tts_clone_audio": announcement_value(
+            "announcement_chatterbox_local_tts_clone_audio", "chatterbox_local_tts_clone_audio"
         ),
         "satellite_ducking_target_percent": _as_int(
             shared.get("satellite_ducking_target_percent"),
@@ -725,6 +739,7 @@ def save_speech_settings(
     omnivoice_tts_clone_text: Any = "",
     omnivoice_tts_language: Any = DEFAULT_OMNIVOICE_TTS_LANGUAGE,
     omnivoice_tts_instruct: Any = "",
+    chatterbox_local_tts_clone_audio: Any = "",
     announcement_kokoro_output_gain: Any = None,
     announcement_pocket_tts_output_gain: Any = None,
     announcement_qwen_tts_clone_audio: Any = None,
@@ -735,6 +750,7 @@ def save_speech_settings(
     announcement_omnivoice_tts_clone_text: Any = None,
     announcement_omnivoice_tts_language: Any = None,
     announcement_omnivoice_tts_instruct: Any = None,
+    announcement_chatterbox_local_tts_clone_audio: Any = None,
     announcement_wyoming_tts_host: Any = None,
     announcement_wyoming_tts_port: Any = None,
     announcement_wyoming_tts_voice: Any = None,
@@ -777,6 +793,7 @@ def save_speech_settings(
             "omnivoice_tts_clone_text": _clean(omnivoice_tts_clone_text),
             "omnivoice_tts_language": _clean(omnivoice_tts_language) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
             "omnivoice_tts_instruct": _clean(omnivoice_tts_instruct),
+            "chatterbox_local_tts_clone_audio": _clean(chatterbox_local_tts_clone_audio),
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
             "wyoming_tts_port": str(_as_int(wyoming_tts_port, DEFAULT_WYOMING_TTS_PORT)),
             "wyoming_tts_voice": _clean(wyoming_tts_voice),
@@ -855,6 +872,11 @@ def save_speech_settings(
                 announcement_omnivoice_tts_instruct
                 if announcement_omnivoice_tts_instruct is not None
                 else omnivoice_tts_instruct
+            ),
+            "announcement_chatterbox_local_tts_clone_audio": _clean(
+                announcement_chatterbox_local_tts_clone_audio
+                if announcement_chatterbox_local_tts_clone_audio is not None
+                else chatterbox_local_tts_clone_audio
             ),
             "satellite_ducking_target_percent": str(
                 _as_int(
@@ -964,9 +986,10 @@ def save_managed_tts_clone_audio_path(backend: Any, path: Any, *, profile: Any =
     direct_field = {
         "qwen3_tts": "qwen_tts_clone_audio",
         "omnivoice": "omnivoice_tts_clone_audio",
+        "chatterbox_local": "chatterbox_local_tts_clone_audio",
     }.get(token)
     if not direct_field:
-        raise ValueError("Clone audio is only available for Qwen3-TTS and OmniVoice.")
+        raise ValueError("Clone audio is only available for managed local TTS backends.")
     field = f"announcement_{direct_field}" if _clean(profile).lower() == "announcement" else direct_field
     redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(path))
 
@@ -1012,6 +1035,14 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         current_value=current_tts_model if current_tts_backend == "omnivoice" else "",
         labels={DEFAULT_OMNIVOICE_TTS_MODEL: "OmniVoice"},
     )
+    chatterbox_local_model_rows = _option_rows_from_values(
+        [DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL, CHATTERBOX_NANO_TTS_MODEL],
+        current_value=current_tts_model if current_tts_backend == "chatterbox_local" else "",
+        labels={
+            DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL: "Chatterbox Turbo 350M",
+            CHATTERBOX_NANO_TTS_MODEL: "Chatterbox Nano 110M (CPU-friendly)",
+        },
+    )
 
     voice_options_by_model: Dict[str, List[Dict[str, str]]] = {}
     for row in kokoro_model_rows:
@@ -1054,6 +1085,7 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             {"value": "wyoming", "label": "Wyoming"},
             {"value": "openai_compatible", "label": "OpenAI-Compatible"},
             {"value": "chatterbox", "label": "Chatterbox"},
+            {"value": "chatterbox_local", "label": "Chatterbox (Built-in)"},
             {"value": "kokoro", "label": "Kokoro"},
             {"value": "pocket_tts", "label": "Pocket TTS"},
             {"value": "piper", "label": "Piper"},
@@ -1063,6 +1095,7 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         "tts_model_options_by_backend": {
             "openai_compatible": [],
             "chatterbox": [],
+            "chatterbox_local": chatterbox_local_model_rows,
             "kokoro": kokoro_model_rows,
             "pocket_tts": pocket_model_rows,
             "piper": piper_model_rows,

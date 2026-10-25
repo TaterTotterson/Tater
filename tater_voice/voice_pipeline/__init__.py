@@ -71,6 +71,7 @@ import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
 from speech_settings import (
+    DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL,
     get_speech_settings as get_shared_speech_settings,
@@ -91,11 +92,13 @@ from .conversation import (
     _to_template_msg,
 )
 from .backends import (
-    _build_experimental_tts_chunks,
     clear_stt_model_caches,
     clear_tts_model_caches,
     _chatterbox_tts_request,
     _iter_chatterbox_tts_stream_response,
+    _iter_native_tts_stream_response,
+    _iter_openai_compatible_tts_stream_response,
+    _iter_wyoming_tts_stream_response,
     _load_faster_whisper_model,
     _load_kokoro_pipeline,
     _load_parakeet_onnx_model,
@@ -105,6 +108,7 @@ from .backends import (
     _load_vosk_model,
     _native_local_partial_stt_task,
     _open_chatterbox_tts_stream_response,
+    _open_openai_compatible_tts_stream_response,
     _native_synthesize_text,
     _native_transcribe_local_audio_bytes,
     _native_transcribe_wake_audio_bytes,
@@ -162,10 +166,8 @@ from .satellites import (
     _arm_pending_followup,
     _cancel_announcement_wait,
     _cancel_audio_stall_watch,
-    _cancel_streamed_tts_dispatch,
     _claim_pending_followup,
     _clear_pending_followup,
-    _clear_streamed_tts_state,
     _load_satellite_registry,
     _normalize_satellite_row,
     _remove_satellite,
@@ -412,13 +414,11 @@ DEFAULT_CONTINUED_CHAT_REOPEN_VAD_STARTUP_IGNORE_S = 0.55
 DEFAULT_CONTINUED_CHAT_REOPEN_PREROLL_S = 0.30
 DEFAULT_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
-DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S = 0.50
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.45
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
-DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_CHARS = 90
-DEFAULT_EXPERIMENTAL_TTS_EARLY_START_MIN_FIRST_CHARS = 28
 DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_NATIVE_TTS_STREAM_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_WAKE_ARBITRATION_ENABLED = True
 DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 900
 DEFAULT_WAKE_ARBITRATION_SCOPE = "same_area"
@@ -545,12 +545,14 @@ _vosk_model_lock = threading.Lock()
 _vosk_bootstrap_lock = threading.Lock()
 _kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
+_kokoro_runtime_lock = threading.Lock()
 _pocket_tts_model_cache: Dict[str, Any] = {}
 _pocket_tts_model_lock = threading.Lock()
 _pocket_tts_voice_state_cache: Dict[Tuple[str, str], Any] = {}
 _pocket_tts_runtime_lock = threading.Lock()
 _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
+_piper_runtime_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
 _TRANSCRIPT_COMPLETE_SHORT_COMMANDS = {
     "yes",
@@ -823,16 +825,20 @@ def _experimental_partial_stt_enabled() -> bool:
     )
 
 
-def _experimental_tts_early_start_enabled() -> bool:
-    return _get_bool_setting(
-        "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
-        DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
-    )
-
-
 def _chatterbox_tts_streaming_enabled(selection: Optional[Dict[str, Any]] = None) -> bool:
     row = selection if isinstance(selection, dict) else _tts_selection_from_values()
     return _as_bool(row.get("chatterbox_streaming_enabled"), False)
+
+
+async def _streaming_voice_playback_supported(selector: str) -> bool:
+    try:
+        from .. import native_satellite
+
+        return await native_satellite.client_has_capability(
+            selector, "streaming_voice_playback_version"
+        )
+    except Exception:
+        return False
 
 
 def _continued_chat_followup_cue(response_text: str) -> str:
@@ -2127,6 +2133,7 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_OMNIVOICE_TTS_CLONE_TEXT": shared.get("omnivoice_tts_clone_text"),
         "VOICE_OMNIVOICE_TTS_LANGUAGE": shared.get("omnivoice_tts_language"),
         "VOICE_OMNIVOICE_TTS_INSTRUCT": shared.get("omnivoice_tts_instruct"),
+        "VOICE_CHATTERBOX_LOCAL_TTS_CLONE_AUDIO": shared.get("chatterbox_local_tts_clone_audio"),
         "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
         "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
@@ -2519,6 +2526,14 @@ def _normalize_tts_backend(value: Any) -> str:
         return "openai_compatible"
     if token in {"chatterbox", "chatterbox_tts"}:
         return "chatterbox"
+    if token in {
+        "chatterbox_builtin",
+        "chatterbox_built_in",
+        "chatterbox_local",
+        "local_chatterbox",
+        "managed_chatterbox",
+    }:
+        return "chatterbox_local"
     if token == "kokoro":
         return "kokoro"
     if token in {"pocket_tts", "pockettts", "pocket"}:
@@ -2563,6 +2578,7 @@ def _tts_backend_model_root(backend: str) -> str:
         "piper": "piper",
         "qwen3_tts": "qwen3-tts",
         "omnivoice": "omnivoice",
+        "chatterbox_local": "chatterbox-local",
         "openai_compatible": "openai-compatible",
         "chatterbox": "chatterbox",
         "wyoming": "wyoming",
@@ -2977,6 +2993,8 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                     if tts_backend == "qwen3_tts"
                     else DEFAULT_OMNIVOICE_TTS_MODEL
                     if tts_backend == "omnivoice"
+                    else DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL
+                    if tts_backend == "chatterbox_local"
                     else DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
                     if tts_backend == "openai_compatible"
                     else ""
@@ -3053,6 +3071,11 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 "clone_audio_configured": bool(_text(settings.get("VOICE_OMNIVOICE_TTS_CLONE_AUDIO"))),
                 "language": _text(settings.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "English",
                 "model_root": _tts_backend_model_root("omnivoice"),
+            },
+            "chatterbox_local": {
+                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+                "clone_audio_configured": bool(_text(settings.get("VOICE_CHATTERBOX_LOCAL_TTS_CLONE_AUDIO"))),
+                "model_root": _tts_backend_model_root("chatterbox_local"),
             },
         },
         "wyoming_tts": {
@@ -4470,7 +4493,13 @@ async def _play_live_tool_progress_for_session(
             f"ok={external_ok} completed={playback_completed} session_id={session.session_id} text={spoken!r}"
         )
     else:
-        url = _store_tts_url(selector, session.session_id, audio_bytes, audio_format)
+        url = _store_tts_url(
+            selector,
+            session.session_id,
+            audio_bytes,
+            audio_format,
+            streaming_wav=await _streaming_voice_playback_supported(selector),
+        )
         if not url:
             return
         waiter = asyncio.get_running_loop().create_future()
@@ -4503,100 +4532,6 @@ async def _play_live_tool_progress_for_session(
     session.last_tool_progress_text = spoken
 
 
-async def _start_experimental_streamed_tts_response(
-    selector: str,
-    client: Any,
-    module: Any,
-    *,
-    session: VoiceSessionRuntime,
-    runtime: Dict[str, Any],
-    response_text: str,
-    transcript: str,
-) -> Optional[Dict[str, Any]]:
-    selection = _tts_selection_from_values()
-    if _normalize_tts_backend(_text(session.tts_backend_effective)) == "chatterbox" and _chatterbox_tts_streaming_enabled(selection):
-        return None
-    if not _experimental_tts_early_start_enabled():
-        return None
-    chunks = _build_experimental_tts_chunks(response_text)
-    if len(chunks) < 2:
-        return None
-
-    first_text = _text(chunks[0])
-    remaining_chunks = [chunk for chunk in chunks[1:] if _text(chunk)]
-    if not first_text or not remaining_chunks:
-        return None
-
-    tts_started = time.monotonic()
-    first_audio, first_format, backend_used, backend_note = await _native_synthesize_text(
-        first_text,
-        session=session,
-    )
-    first_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
-    if not first_audio:
-        return None
-
-    first_url = _store_tts_url(selector, session.session_id, first_audio, first_format)
-    if not first_url:
-        return None
-
-    session.tts_latency_ms = first_latency_ms
-    _voice_metrics_record_tts(selector, backend_used or session.tts_backend_effective or session.tts_backend, session.tts_latency_ms)
-
-    prepare_task = asyncio.create_task(
-        _prepare_streamed_tts_segments(
-            selector,
-            session.session_id,
-            session=session,
-            chunk_texts=remaining_chunks,
-        )
-    )
-
-    lock = runtime.get("lock")
-    timeout_s = _run_end_timeout_s(first_audio, first_format)
-    async with lock:
-        _clear_streamed_tts_state(runtime)
-        runtime["streamed_tts"] = {
-            "session_id": _text(session.session_id),
-            "ready_segments": [],
-            "done": False,
-            "error": "",
-            "backend_used": backend_used,
-            "backend_note": backend_note,
-            "prepare_task": prepare_task,
-            "segment_count": len(chunks),
-        }
-        _set_awaiting_announcement_state(
-            runtime,
-            session_id=_text(session.session_id),
-            kind="response_streamed",
-            future=None,
-            timeout_s=timeout_s,
-        )
-        _cancel_announcement_wait(runtime)
-        _schedule_announcement_timeout(selector, client, module, timeout_s)
-
-    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
-    if not bool(session.intent_active):
-        await _ensure_voice_intent_active(client, module, session=session)
-    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": response_text})
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": first_url})
-    _native_debug(
-        f"experimental streamed tts started selector={selector} session_id={session.session_id} "
-        f"segments={len(chunks)} timeout_s={timeout_s:.2f}"
-    )
-    return {
-        "first_url": first_url,
-        "backend_used": backend_used,
-        "backend_note": backend_note,
-        "tts_bytes": len(first_audio),
-        "tts_mode": "segmented_url",
-        "run_end_mode": "announcement_streamed",
-        "segment_count": len(chunks),
-    }
-
-
 async def _start_chatterbox_streamed_tts_response(
     selector: str,
     client: Any,
@@ -4606,7 +4541,10 @@ async def _start_chatterbox_streamed_tts_response(
     runtime: Dict[str, Any],
     response_text: str,
     transcript: str,
+    streaming_voice_playback: bool,
 ) -> Optional[Dict[str, Any]]:
+    if not streaming_voice_playback:
+        return None
     selection = _tts_selection_from_values()
     if not _chatterbox_tts_streaming_enabled(selection):
         return None
@@ -4640,7 +4578,6 @@ async def _start_chatterbox_streamed_tts_response(
     timeout_s = _run_end_timeout_for_text_s(prompt)
     lock = runtime.get("lock")
     async with lock:
-        _clear_streamed_tts_state(runtime)
         _set_awaiting_announcement_state(
             runtime,
             session_id=_text(session.session_id),
@@ -4667,6 +4604,98 @@ async def _start_chatterbox_streamed_tts_response(
         "backend_note": "",
         "tts_bytes": 0,
         "tts_mode": "chatterbox_stream_url",
+        "run_end_mode": "announcement_streamed",
+        "segment_count": 1,
+    }
+
+
+async def _start_native_backend_streamed_tts_response(
+    selector: str,
+    client: Any,
+    module: Any,
+    *,
+    session: VoiceSessionRuntime,
+    runtime: Dict[str, Any],
+    response_text: str,
+    transcript: str,
+    streaming_voice_playback: bool,
+) -> Optional[Dict[str, Any]]:
+    if not streaming_voice_playback:
+        return None
+    effective_backend = _normalize_tts_backend(_text(session.tts_backend_effective))
+    if effective_backend not in {
+        "pocket_tts",
+        "piper",
+        "kokoro",
+        "wyoming",
+        "openai_compatible",
+        "chatterbox_local",
+    }:
+        return None
+    if spud_link_should_use_hub("tts", redis_conn=redis_client):
+        return None
+    prompt = _text(response_text)
+    if not prompt:
+        return None
+
+    selection = _tts_selection_from_values()
+    tts_started = time.monotonic()
+    try:
+        stream_url = _store_native_tts_stream_url(
+            selector,
+            session.session_id,
+            prompt,
+            backend=effective_backend,
+            selection=selection,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[native-voice] %s streaming TTS URL preparation failed selector=%s session_id=%s error=%s",
+            effective_backend,
+            selector,
+            session.session_id,
+            _text(exc),
+        )
+        _native_debug(
+            f"{effective_backend} streaming tts url failed selector={selector} "
+            f"session_id={session.session_id} error={exc}"
+        )
+        return None
+    if not stream_url:
+        return None
+
+    session.tts_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
+    _voice_metrics_record_tts(selector, effective_backend or session.tts_backend, session.tts_latency_ms)
+
+    timeout_s = _run_end_timeout_for_text_s(prompt)
+    lock = runtime.get("lock")
+    async with lock:
+        _set_awaiting_announcement_state(
+            runtime,
+            session_id=_text(session.session_id),
+            kind="response_native_tts_stream",
+            future=None,
+            timeout_s=timeout_s,
+        )
+        _cancel_announcement_wait(runtime)
+        _schedule_announcement_timeout(selector, client, module, timeout_s)
+
+    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
+    if not bool(session.intent_active):
+        await _ensure_voice_intent_active(client, module, session=session)
+    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": prompt})
+    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": stream_url})
+    _native_debug(
+        f"{effective_backend} streaming tts started selector={selector} session_id={session.session_id} "
+        f"timeout_s={timeout_s:.2f} url={stream_url}"
+    )
+    return {
+        "first_url": stream_url,
+        "backend_used": effective_backend,
+        "backend_note": "",
+        "tts_bytes": 0,
+        "tts_mode": f"{effective_backend}_stream_url",
         "run_end_mode": "announcement_streamed",
         "segment_count": 1,
     }
@@ -5361,16 +5390,32 @@ async def _render_native_audio_scene_asset(
     )
 
 
-def _store_tts_url(selector: str, session_id: str, audio_bytes: bytes, audio_format: Dict[str, Any]) -> str:
+def _store_tts_url(
+    selector: str,
+    session_id: str,
+    audio_bytes: bytes,
+    audio_format: Dict[str, Any],
+    *,
+    streaming_wav: bool = False,
+) -> str:
     wav_bytes, normalized_format = _pcm_to_wav(audio_bytes, audio_format)
     if not wav_bytes:
         return ""
 
-    prepared = _prepare_native_media_asset_sync(
-        wav_bytes,
-        media_type="audio/wav",
-        filename="tts.wav",
-        playback_kind="tts",
+    prepared = (
+        {
+            "bytes": wav_bytes,
+            "media_type": "audio/wav",
+            "filename": "tts.wav",
+            "transcoded": False,
+        }
+        if streaming_wav
+        else _prepare_native_media_asset_sync(
+            wav_bytes,
+            media_type="audio/wav",
+            filename="tts.wav",
+            playback_kind="tts",
+        )
     )
     body_bytes = bytes(prepared.get("bytes") or b"")
     if not body_bytes:
@@ -5453,6 +5498,65 @@ def _store_chatterbox_tts_stream_url(
     _native_debug(
         f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
         f"stream_id={stream_id} url={url}"
+    )
+    return url
+
+
+def _store_native_tts_stream_url(
+    selector: str,
+    session_id: str,
+    text: str,
+    *,
+    backend: str,
+    selection: Dict[str, Any],
+) -> str:
+    prompt = _text(text)
+    effective_backend = _normalize_tts_backend(backend)
+    if not prompt or effective_backend not in {
+        "pocket_tts",
+        "piper",
+        "kokoro",
+        "wyoming",
+        "openai_compatible",
+        "chatterbox_local",
+    }:
+        return ""
+
+    selected = selection if isinstance(selection, dict) else {}
+    stream_selection = {
+        "model": _text(selected.get("model")),
+        "voice": _text(selected.get("voice")),
+        "wyoming_host": _text(selected.get("wyoming_host")),
+        "wyoming_port": selected.get("wyoming_port"),
+        "wyoming_voice": selected.get("wyoming_voice"),
+        "openai_base_url": _text(selected.get("openai_base_url")),
+        "openai_api_key": _text(selected.get("openai_api_key")),
+        "chatterbox_local_tts_clone_audio": _text(selected.get("chatterbox_local_tts_clone_audio")),
+        "chatterbox_temperature": selected.get("chatterbox_temperature"),
+        "chatterbox_seed": selected.get("chatterbox_seed"),
+    }
+    stream_id = uuid.uuid4().hex
+    expires_ts = _now() + _tts_url_ttl_s()
+    with _tts_url_store_lock:
+        _tts_url_prune_locked()
+        _tts_url_store[stream_id] = {
+            "id": stream_id,
+            "selector": _text(selector),
+            "session_id": _text(session_id),
+            "created_ts": _now(),
+            "expires_ts": expires_ts,
+            "stream_kind": "native_tts",
+            "backend": effective_backend,
+            "text": prompt,
+            "selection": stream_selection,
+            "max_bytes": DEFAULT_NATIVE_TTS_STREAM_MAX_BYTES,
+        }
+
+    base_url = _service_base_url_for_peer(_selector_host(selector))
+    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.wav"
+    _native_debug(
+        f"{effective_backend} streaming tts url prepared selector={_text(selector)} "
+        f"session_id={_text(session_id)} stream_id={stream_id} url={url}"
     )
     return url
 
@@ -5904,276 +6008,6 @@ async def _send_voice_run_end(
     return ok
 
 
-async def _prepare_streamed_tts_segments(
-    selector: str,
-    session_id: str,
-    *,
-    session: VoiceSessionRuntime,
-    chunk_texts: List[str],
-) -> None:
-    token = _text(selector)
-    runtime = _selector_runtime(token)
-    prepared: List[Dict[str, Any]] = []
-    error = ""
-    backend_used = ""
-    backend_note = ""
-    try:
-        for chunk_text in chunk_texts:
-            if not _text(chunk_text):
-                continue
-            audio_bytes, audio_format, backend_used, backend_note = await _native_synthesize_text(
-                chunk_text,
-                session=session,
-            )
-            if not audio_bytes:
-                continue
-            url = _store_tts_url(token, session_id, audio_bytes, audio_format)
-            if not url:
-                continue
-            prepared.append(
-                {
-                    "text": _text(chunk_text),
-                    "url": url,
-                    "timeout_s": _run_end_timeout_s(audio_bytes, audio_format),
-                    "tts_bytes": len(audio_bytes),
-                    "backend_used": backend_used,
-                    "backend_note": backend_note,
-                }
-            )
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        error = _text(exc) or "segment_prepare_failed"
-
-    lock = runtime.get("lock")
-    if lock is None or not hasattr(lock, "acquire"):
-        return
-    async with lock:
-        state = runtime.get("streamed_tts")
-        if not isinstance(state, dict) or _text(state.get("session_id")) != _text(session_id):
-            return
-        ready_segments = state.get("ready_segments")
-        if not isinstance(ready_segments, list):
-            ready_segments = []
-            state["ready_segments"] = ready_segments
-        ready_segments.extend(prepared)
-        state["done"] = True
-        state["error"] = error
-        if backend_used:
-            state["backend_used"] = backend_used
-        if backend_note:
-            state["backend_note"] = backend_note
-        state["prepare_task"] = None
-
-
-async def _send_streamed_tts_segment(
-    selector: str,
-    client: Any,
-    module: Any,
-    *,
-    session_id: str,
-    segment: Dict[str, Any],
-) -> None:
-    token = _text(selector)
-    runtime = _selector_runtime(token)
-    lock = runtime.get("lock")
-    timeout_s = max(1.0, float(segment.get("timeout_s") or 0.0))
-    await _esphome_send_event(
-        client,
-        module,
-        ("VOICE_ASSISTANT_TTS_START", "TTS_START"),
-        {"text": _text(segment.get("text")) or "Continuing response."},
-    )
-    segment_url = _text(segment.get("url"))
-    direct_queued = False
-    if segment_url.startswith(("http://", "https://")):
-        try:
-            direct_result = await _esphome_play_media_announcement(token, segment_url)
-        except Exception as exc:
-            _native_debug(
-                f"streamed tts media player announcement unavailable selector={token} "
-                f"session_id={session_id} error={_text(exc) or exc.__class__.__name__}"
-            )
-        else:
-            entity_key = _text(direct_result.get("entity_key")) if isinstance(direct_result, dict) else ""
-            if entity_key:
-                async with lock:
-                    _set_awaiting_announcement_state(
-                        runtime,
-                        session_id=_text(session_id),
-                        kind="response_streamed",
-                        future=None,
-                        timeout_s=timeout_s,
-                    )
-                    _cancel_announcement_wait(runtime)
-                    _schedule_media_player_announcement_monitor(
-                        token,
-                        client,
-                        module,
-                        entity_key=entity_key,
-                        timeout_s=timeout_s,
-                    )
-                direct_queued = True
-
-    if not direct_queued:
-        async with lock:
-            _set_awaiting_announcement_state(
-                runtime,
-                session_id=_text(session_id),
-                kind="response_streamed",
-                future=None,
-                timeout_s=timeout_s,
-            )
-            _cancel_announcement_wait(runtime)
-            _schedule_announcement_timeout(token, client, module, timeout_s)
-        await _esphome_send_event(
-            client,
-            module,
-            ("VOICE_ASSISTANT_TTS_END", "TTS_END"),
-            {"url": segment_url},
-        )
-    _native_debug(
-        f"streamed tts segment queued selector={token} session_id={session_id} timeout_s={timeout_s:.2f} "
-        f"mode={'media_player_announcement' if direct_queued else 'voice_event'} url={segment_url}"
-    )
-
-
-async def _await_and_dispatch_streamed_tts_segment(
-    selector: str,
-    client: Any,
-    module: Any,
-    *,
-    session_id: str,
-) -> None:
-    token = _text(selector)
-    runtime = _selector_runtime(token)
-    lock = runtime.get("lock")
-    segment: Optional[Dict[str, Any]] = None
-    should_finalize = False
-    try:
-        while True:
-            await asyncio.sleep(0.05)
-            async with lock:
-                state = runtime.get("streamed_tts")
-                if not isinstance(state, dict) or _text(state.get("session_id")) != _text(session_id):
-                    return
-                if _awaiting_announcement_state(runtime) is not None:
-                    return
-                ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
-                if ready_segments:
-                    segment = dict(ready_segments.pop(0))
-                    break
-                if bool(state.get("done")):
-                    runtime["streamed_tts"] = None
-                    should_finalize = True
-                    break
-        if isinstance(segment, dict):
-            await _send_streamed_tts_segment(
-                token,
-                client,
-                module,
-                session_id=session_id,
-                segment=segment,
-            )
-            return
-        if should_finalize:
-            await _send_voice_run_end(
-                client,
-                module,
-                selector=token,
-                session_id=session_id,
-                reason="streamed_tts_dispatch_done",
-            )
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        _native_debug(f"streamed tts dispatch failed selector={token} session_id={session_id} error={exc}")
-        with contextlib.suppress(Exception):
-            await _send_voice_run_end(
-                client,
-                module,
-                selector=token,
-                session_id=session_id,
-                reason="streamed_tts_dispatch_error",
-            )
-    finally:
-        async with lock:
-            task = runtime.get("streamed_tts_dispatch_task")
-            if task is asyncio.current_task():
-                runtime["streamed_tts_dispatch_task"] = None
-
-
-async def _maybe_continue_streamed_tts(
-    selector: str,
-    client: Any,
-    module: Any,
-    *,
-    reason: str,
-) -> bool:
-    token = _text(selector)
-    if not token:
-        return False
-
-    runtime = _selector_runtime(token)
-    lock = runtime.get("lock")
-    segment: Optional[Dict[str, Any]] = None
-    should_finalize = False
-    session_id = ""
-
-    async with lock:
-        state = runtime.get("streamed_tts")
-        if not isinstance(state, dict):
-            return False
-        session_id = _text(state.get("session_id"))
-        _clear_awaiting_announcement_state(runtime)
-        _cancel_announcement_wait(runtime)
-
-        ready_segments = state.get("ready_segments") if isinstance(state.get("ready_segments"), list) else []
-        if ready_segments:
-            segment = dict(ready_segments.pop(0))
-        elif bool(state.get("done")):
-            runtime["streamed_tts"] = None
-            should_finalize = True
-        else:
-            if not isinstance(runtime.get("streamed_tts_dispatch_task"), asyncio.Task):
-                runtime["streamed_tts_dispatch_task"] = asyncio.create_task(
-                    _await_and_dispatch_streamed_tts_segment(
-                        token,
-                        client,
-                        module,
-                        session_id=session_id,
-                    )
-                )
-            _native_debug(
-                f"streamed tts awaiting next segment selector={token} session_id={session_id} reason={_text(reason) or 'announcement_finished'}"
-            )
-            return True
-
-    if isinstance(segment, dict):
-        await _send_streamed_tts_segment(
-            token,
-            client,
-            module,
-            session_id=session_id,
-            segment=segment,
-        )
-        return True
-
-    if should_finalize:
-        await _send_voice_run_end(
-            client,
-            module,
-            selector=token,
-            session_id=session_id,
-            reason=_text(reason) or "streamed_tts_segment_complete",
-        )
-        _native_debug(
-            f"streamed tts finalize selector={token} session_id={session_id} reason={_text(reason) or 'segment_complete'}"
-        )
-        return True
-    return False
-
-
 async def _finalize_after_announcement(selector: str, client: Any, module: Any, *, reason: str) -> bool:
     token = _text(selector)
     if not token:
@@ -6181,12 +6015,6 @@ async def _finalize_after_announcement(selector: str, client: Any, module: Any, 
 
     runtime = _selector_runtime(token)
     lock = runtime.get("lock")
-    async with lock:
-        state = _awaiting_announcement_state(runtime)
-        kind = _text(state.kind if state is not None else "")
-    if kind == "response_streamed" and await _maybe_continue_streamed_tts(token, client, module, reason=reason):
-        return True
-
     future: Optional[asyncio.Future[Any]] = None
     skip_run_end_for_followup = False
     async with lock:
@@ -6359,7 +6187,6 @@ async def _queue_selector_audio_url(
         active_session = runtime.get("session")
         if isinstance(active_session, VoiceSessionRuntime):
             raise RuntimeError(f"Satellite {token} is busy with an active voice session")
-        _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
 
     if not continue_flag:
@@ -6414,7 +6241,6 @@ async def _queue_selector_audio_url(
         active_session = runtime.get("session")
         if isinstance(active_session, VoiceSessionRuntime):
             raise RuntimeError(f"Satellite {token} is busy with an active voice session")
-        _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
         if continue_flag:
             runtime["pending_followup_conversation_id"] = conversation_token
@@ -7250,6 +7076,10 @@ async def _finalize_session(
         wait_for_announcement = False
         reply_playback_target = _session_reply_playback_target(token, session)
         reply_playback_on_device = reply_playback_target == reply_playback.REPLY_PLAYBACK_DEVICE
+        streaming_voice_playback = (
+            reply_playback_on_device
+            and await _streaming_voice_playback_supported(token)
+        )
 
         pending_followup_until = 0.0
         async with lock:
@@ -7268,7 +7098,7 @@ async def _finalize_session(
 
         streamed_tts = None
         if reply_playback_on_device and not continue_conversation and not bool(session.live_tool_progress_played):
-            streamed_tts = await _start_chatterbox_streamed_tts_response(
+            streamed_tts = await _start_native_backend_streamed_tts_response(
                 token,
                 client,
                 module,
@@ -7276,9 +7106,10 @@ async def _finalize_session(
                 runtime=runtime,
                 response_text=spoken_response_text,
                 transcript=transcript,
+                streaming_voice_playback=streaming_voice_playback,
             )
             if not streamed_tts:
-                streamed_tts = await _start_experimental_streamed_tts_response(
+                streamed_tts = await _start_chatterbox_streamed_tts_response(
                     token,
                     client,
                     module,
@@ -7286,8 +7117,8 @@ async def _finalize_session(
                     runtime=runtime,
                     response_text=spoken_response_text,
                     transcript=transcript,
+                    streaming_voice_playback=streaming_voice_playback,
                 )
-
         if streamed_tts:
             tts_backend_used = _text(streamed_tts.get("backend_used"))
             tts_backend_note = _text(streamed_tts.get("backend_note"))
@@ -7424,7 +7255,13 @@ async def _finalize_session(
                         reason="tts_external" if external_ok else "tts_external_failed",
                     )
             else:
-                tts_url = _store_tts_url(token, session.session_id, tts_audio, tts_format)
+                tts_url = _store_tts_url(
+                    token,
+                    session.session_id,
+                    tts_audio,
+                    tts_format,
+                    streaming_wav=streaming_voice_playback,
+                )
                 if not tts_url:
                     tts_url = "voice-assistant://stream"
 
@@ -7932,7 +7769,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
         async with lock:
             _cancel_announcement_wait(runtime)
             _cancel_audio_stall_watch(runtime)
-            _clear_streamed_tts_state(runtime)
             _clear_awaiting_announcement_state(runtime)
             runtime["session"] = session
 

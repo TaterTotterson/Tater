@@ -7,7 +7,7 @@ import json
 import re
 import sys
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
@@ -17,6 +17,56 @@ from .conversation import VoiceSessionRuntime
 
 def _vp():
     return sys.modules[__package__]
+
+
+def _next_stream_chunk(iterator: Any) -> tuple[bool, bytes]:
+    try:
+        return False, bytes(next(iterator))
+    except StopIteration:
+        return True, b""
+
+
+async def _iter_sync_tts_stream_with_fallback(
+    iterator: Any,
+    row: Dict[str, Any],
+) -> AsyncIterator[bytes]:
+    vp = _vp()
+    emitted = False
+    failure: Optional[Exception] = None
+    try:
+        while True:
+            done, chunk = await asyncio.to_thread(_next_stream_chunk, iterator)
+            if done:
+                break
+            if not chunk:
+                continue
+            emitted = True
+            yield chunk
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        failure = exc
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(close)
+
+    if failure is None:
+        return
+    backend = vp._normalize_tts_backend((row or {}).get("backend"))
+    wyoming_ok, _wyoming_reason = vp._tts_backend_available("wyoming")
+    if emitted or backend == "wyoming" or not wyoming_ok:
+        raise failure
+    vp.logger.warning(
+        "[native-voice] streaming TTS backend fallback effective=%s fallback=wyoming reason=%s",
+        backend,
+        vp._text(failure),
+    )
+    fallback_row = dict(row or {})
+    fallback_row["backend"] = "wyoming"
+    async for chunk in vp._iter_wyoming_tts_stream_response(fallback_row):
+        yield chunk
 
 
 router = APIRouter()
@@ -2036,6 +2086,62 @@ async def native_tts_stream(stream_id: str) -> Response:
             media_type="audio/wav",
             headers=headers,
         )
+
+    if vp._text(row.get("stream_kind")) == "native_tts":
+        backend = vp._normalize_tts_backend(row.get("backend"))
+        vp._native_debug(
+            f"native streaming tts fetch backend={backend} stream_id={vp._text(stream_id)} "
+            f"session_id={vp._text(row.get('session_id'))} selector={vp._text(row.get('selector'))}"
+        )
+        if backend == "openai_compatible":
+            try:
+                upstream_response = await asyncio.to_thread(
+                    vp._open_openai_compatible_tts_stream_response,
+                    row,
+                )
+            except Exception as exc:
+                wyoming_ok, _wyoming_reason = vp._tts_backend_available("wyoming")
+                if not wyoming_ok:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=vp._text(exc) or "OpenAI-compatible TTS stream failed",
+                    ) from exc
+                vp.logger.warning(
+                    "[native-voice] streaming TTS backend fallback effective=openai_compatible "
+                    "fallback=wyoming reason=%s",
+                    vp._text(exc),
+                )
+                fallback_row = dict(row)
+                fallback_row["backend"] = "wyoming"
+                return StreamingResponse(
+                    vp._iter_wyoming_tts_stream_response(fallback_row),
+                    media_type="audio/wav",
+                    headers=headers,
+                )
+            return StreamingResponse(
+                _iter_sync_tts_stream_with_fallback(
+                    vp._iter_openai_compatible_tts_stream_response(upstream_response, row),
+                    row,
+                ),
+                media_type="audio/wav",
+                headers=headers,
+            )
+        if backend == "wyoming":
+            return StreamingResponse(
+                vp._iter_wyoming_tts_stream_response(row),
+                media_type="audio/wav",
+                headers=headers,
+            )
+        if backend in {"pocket_tts", "piper", "kokoro", "chatterbox_local"}:
+            return StreamingResponse(
+                _iter_sync_tts_stream_with_fallback(
+                    vp._iter_native_tts_stream_response(row),
+                    row,
+                ),
+                media_type="audio/wav",
+                headers=headers,
+            )
+        raise HTTPException(status_code=404, detail="Unsupported TTS stream backend")
 
     body_bytes = row.get("body_bytes") if isinstance(row.get("body_bytes"), (bytes, bytearray)) else b""
     if not body_bytes:

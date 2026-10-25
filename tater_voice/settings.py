@@ -517,13 +517,6 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "If enabled, Tater will try to build live partial transcripts during capture for local and Wyoming STT backends. This can improve turn-end decisions, but may use more CPU/GPU.",
         },
         {
-            "key": "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
-            "label": "Early-Start TTS",
-            "type": "checkbox",
-            "default": vp.DEFAULT_EXPERIMENTAL_TTS_EARLY_START_ENABLED,
-            "description": "If enabled, Tater may start speaking long replies sooner by splitting playback into early chunks. This may introduce slightly more audible sentence gaps.",
-        },
-        {
             "key": "VOICE_NATIVE_WYOMING_TIMEOUT_S",
             "label": "Wyoming Timeout (sec)",
             "type": "number",
@@ -675,7 +668,6 @@ def settings_sections() -> List[Dict[str, Any]]:
                 "VOICE_WAKE_ARBITRATION_SCOPE",
                 "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",
                 "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
-                "VOICE_EXPERIMENTAL_TTS_EARLY_START_ENABLED",
             ],
         ),
         (

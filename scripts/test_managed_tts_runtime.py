@@ -4,6 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import wave
+import contextlib
 from pathlib import Path
 from unittest import mock
 import sys
@@ -37,8 +38,14 @@ class ManagedTtsTests(unittest.TestCase):
             ("qwen", "qwen3_tts"),
             ("Qwen3-TTS", "qwen3_tts"),
             ("omni voice", "omnivoice"),
+            ("Chatterbox Built-in", "chatterbox_local"),
         ):
             self.assertEqual(managed_tts.normalize_managed_tts_backend(value), expected)
+
+    def test_chatterbox_runtime_is_pinned_to_an_exact_upstream_commit(self) -> None:
+        stack_id = managed_tts._stack_id(managed_tts.CHATTERBOX_LOCAL_TTS_BACKEND, "cpu")
+        self.assertIn(managed_tts._CHATTERBOX_COMMIT, stack_id)
+        self.assertIn("torch-2.6.0", stack_id)
 
     def test_clone_audio_is_kept_inside_backend_profile(self) -> None:
         path = managed_tts.store_clone_audio(
@@ -297,6 +304,46 @@ class ManagedTtsTests(unittest.TestCase):
 
         self.assertEqual(sample_rate, 24000)
         self.assertIsNone(model.prompt_args["ref_text"])
+
+    def test_chatterbox_local_uses_builtin_voice_and_generation_controls(self) -> None:
+        class FakeChatterboxModel:
+            sr = 24000
+            conds = "builtin-voice"
+
+            def __init__(self) -> None:
+                self.generation = {}
+
+            def generate(self, **kwargs):
+                self.generation = kwargs
+                return b"audio"
+
+        model = FakeChatterboxModel()
+        managed_tts_worker._chatterbox_builtin_conditionals.clear()
+        managed_tts_worker._chatterbox_builtin_conditionals[
+            managed_tts.DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL
+        ] = "builtin-voice"
+        fake_torch = mock.Mock(
+            manual_seed=mock.Mock(),
+            inference_mode=contextlib.nullcontext,
+        )
+        with (
+            mock.patch.object(managed_tts_worker, "_chatterbox_model", return_value=model),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            audio, sample_rate = managed_tts_worker._generate_chatterbox(
+                {
+                    "model": managed_tts.DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+                    "text": "Hello",
+                    "temperature": "0.7",
+                    "seed": "42",
+                }
+            )
+
+        self.assertEqual(audio, b"audio")
+        self.assertEqual(sample_rate, 24000)
+        self.assertEqual(model.conds, "builtin-voice")
+        self.assertEqual(model.generation["temperature"], 0.7)
+        fake_torch.manual_seed.assert_called_once_with(42)
 
 
 if __name__ == "__main__":

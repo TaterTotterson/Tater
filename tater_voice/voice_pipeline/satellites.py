@@ -191,8 +191,6 @@ def _selector_runtime(selector: str) -> Dict[str, Any]:
             "pending_followup_until_ts": 0.0,
             "continued_chat_retry_conversation_id": "",
             "continued_chat_retry_used": False,
-            "streamed_tts": None,
-            "streamed_tts_dispatch_task": None,
             "service_running": False,
         }
         vp._voice_selector_runtime[token] = row
@@ -219,29 +217,6 @@ def _cancel_audio_stall_watch(runtime: Dict[str, Any]) -> None:
             return
         task.cancel()
     runtime["audio_stall_task"] = None
-
-
-def _cancel_streamed_tts_dispatch(runtime: Dict[str, Any]) -> None:
-    task = runtime.get("streamed_tts_dispatch_task")
-    if isinstance(task, asyncio.Task):
-        if task is asyncio.current_task():
-            runtime["streamed_tts_dispatch_task"] = None
-            return
-        task.cancel()
-    runtime["streamed_tts_dispatch_task"] = None
-
-
-def _clear_streamed_tts_state(runtime: Dict[str, Any]) -> None:
-    state = runtime.get("streamed_tts")
-    if isinstance(state, dict):
-        task = state.get("prepare_task")
-        if isinstance(task, asyncio.Task):
-            if task is asyncio.current_task():
-                state["prepare_task"] = None
-            else:
-                task.cancel()
-    runtime["streamed_tts"] = None
-    _cancel_streamed_tts_dispatch(runtime)
 
 
 def _clear_pending_followup(runtime: Dict[str, Any]) -> None:

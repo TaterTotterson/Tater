@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tater_voice import voice_pipeline as vp  # noqa: E402
+from tater_voice import native_satellite  # noqa: E402
 from tater_voice.voice_pipeline import routes as voice_routes  # noqa: E402
 
 
@@ -108,6 +109,13 @@ class NativePublicBaseUrlTests(unittest.TestCase):
                 "hello",
                 {},
             )
+            native_stream_url = vp._store_native_tts_stream_url(
+                "native:test",
+                "session",
+                "hello",
+                backend="piper",
+                selection={"model": "en_US-lessac-medium"},
+            )
             media_url = vp._store_media_url(
                 "native:test",
                 "session",
@@ -122,6 +130,10 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         )
         self.assertRegex(
             chatterbox_url,
+            r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.wav$",
+        )
+        self.assertRegex(
+            native_stream_url,
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.wav$",
         )
         self.assertRegex(
@@ -230,6 +242,49 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         response = asyncio.run(voice_routes.native_tts_stream(stream_id))
         self.assertEqual(response.media_type, "audio/mpeg")
         self.assertEqual(bytes(response.body), b"ID3prepared")
+
+    def test_streaming_voice_capability_keeps_finalized_wav_without_transcoding(self) -> None:
+        with (
+            mock.patch.object(vp, "_service_base_url_for_peer", return_value="http://tater"),
+            mock.patch.object(
+                vp,
+                "_pcm_to_wav",
+                return_value=(b"RIFF-finalized-WAVE", {"rate": 16000, "width": 2, "channels": 1}),
+            ),
+            mock.patch.object(
+                vp,
+                "_prepare_native_media_asset_sync",
+                side_effect=AssertionError("streaming-capable playback must skip MP3 transcoding"),
+            ),
+        ):
+            url = vp._store_tts_url(
+                "native:test",
+                "session",
+                b"pcm",
+                {"rate": 16000, "width": 2, "channels": 1},
+                streaming_wav=True,
+            )
+
+        self.assertTrue(url.endswith(".wav"))
+        stream_id = url.rsplit("/", 1)[-1].removesuffix(".wav")
+        response = asyncio.run(voice_routes.native_tts_stream(stream_id))
+        self.assertEqual(response.media_type, "audio/wav")
+        self.assertEqual(bytes(response.body), b"RIFF-finalized-WAVE")
+
+    def test_streaming_voice_support_follows_the_connected_satellite_capability(self) -> None:
+        with mock.patch.object(
+            native_satellite,
+            "client_has_capability",
+            new=mock.AsyncMock(return_value=True),
+        ) as capability:
+            supported = asyncio.run(
+                vp._streaming_voice_playback_supported("native:echo-test")
+            )
+
+        self.assertTrue(supported)
+        capability.assert_awaited_once_with(
+            "native:echo-test", "streaming_voice_playback_version"
+        )
 
     def test_native_media_preparation_converts_wav_to_shared_mp3_asset(self) -> None:
         completed = mock.Mock(returncode=0, stdout=b"ID3prepared", stderr=b"")

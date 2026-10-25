@@ -238,6 +238,7 @@ from speech_settings import (
     save_speech_settings as save_shared_speech_settings,
 )
 from managed_tts import (
+    DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL as MANAGED_DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL as MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL as MANAGED_DEFAULT_QWEN_TTS_MODEL,
     clone_audio_info,
@@ -4287,7 +4288,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             voice_pipeline._load_piper_voice_model(model or voice_pipeline.DEFAULT_PIPER_MODEL)
         elif token == "pocket_tts":
             voice_pipeline._load_pocket_tts_model(model or voice_pipeline.DEFAULT_POCKET_TTS_MODEL)
-        elif token in {"qwen3_tts", "omnivoice"}:
+        elif token in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
             loaded = warm_managed_tts_model(
                 backend=token,
                 model=model,
@@ -11781,18 +11782,19 @@ def _runtime_managed_tts_worker_rows() -> List[Dict[str, Any]]:
     selected_roles: Dict[Tuple[str, str], List[str]] = {}
     for prefix, role in (("", "Direct TTS"), ("announcement_", "Announcement TTS")):
         backend = normalize_managed_tts_backend(settings.get(f"{prefix}tts_backend"))
-        if backend not in {"qwen3_tts", "omnivoice"}:
+        if backend not in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
             continue
-        model = str(settings.get(f"{prefix}tts_model") or "").strip() or (
-            MANAGED_DEFAULT_QWEN_TTS_MODEL
-            if backend == "qwen3_tts"
-            else MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL
-        )
+        model = str(settings.get(f"{prefix}tts_model") or "").strip() or {
+            "qwen3_tts": MANAGED_DEFAULT_QWEN_TTS_MODEL,
+            "omnivoice": MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL,
+            "chatterbox_local": MANAGED_DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+        }[backend]
         selected_roles.setdefault((backend, model), []).append(role)
 
     labels = {
         "qwen3_tts": "Qwen3-TTS",
         "omnivoice": "OmniVoice",
+        "chatterbox_local": "Chatterbox (Built-in)",
     }
     rows: List[Dict[str, Any]] = []
     for worker_row in snapshot.get("models", []):
@@ -21085,6 +21087,12 @@ def get_settings() -> Dict[str, Any]:
     except ValueError:
         omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
     try:
+        chatterbox_local_tts_clone_info = clone_audio_info(
+            "chatterbox_local", speech_settings.get("chatterbox_local_tts_clone_audio")
+        )
+    except ValueError:
+        chatterbox_local_tts_clone_info = {"configured": False, "name": "", "size": 0}
+    try:
         announcement_qwen_tts_clone_info = clone_audio_info(
             "qwen3_tts", speech_settings.get("announcement_qwen_tts_clone_audio")
         )
@@ -21096,6 +21104,12 @@ def get_settings() -> Dict[str, Any]:
         )
     except ValueError:
         announcement_omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
+    try:
+        announcement_chatterbox_local_tts_clone_info = clone_audio_info(
+            "chatterbox_local", speech_settings.get("announcement_chatterbox_local_tts_clone_audio")
+        )
+    except ValueError:
+        announcement_chatterbox_local_tts_clone_info = {"configured": False, "name": "", "size": 0}
     esphome_fields = _esphome_settings_fields()
     esphome_settings_item = esphome_home_module.settings_item_form() if hasattr(esphome_home_module, "settings_item_form") else {}
     esphome_sections = (
@@ -21318,6 +21332,10 @@ def get_settings() -> Dict[str, Any]:
         "speech_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice"
         if omnivoice_tts_clone_info.get("configured")
         else "",
+        "speech_chatterbox_local_tts_clone_audio": chatterbox_local_tts_clone_info,
+        "speech_chatterbox_local_tts_clone_audio_url": "/api/settings/speech/clone-audio/chatterbox_local"
+        if chatterbox_local_tts_clone_info.get("configured")
+        else "",
         "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
         "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
@@ -21370,6 +21388,10 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_omnivoice_tts_clone_audio": announcement_omnivoice_tts_clone_info,
         "speech_announcement_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice?scope=announcement"
         if announcement_omnivoice_tts_clone_info.get("configured")
+        else "",
+        "speech_announcement_chatterbox_local_tts_clone_audio": announcement_chatterbox_local_tts_clone_info,
+        "speech_announcement_chatterbox_local_tts_clone_audio_url": "/api/settings/speech/clone-audio/chatterbox_local?scope=announcement"
+        if announcement_chatterbox_local_tts_clone_info.get("configured")
         else "",
         "speech_satellite_ducking_target_percent": int(
             speech_settings.get("satellite_ducking_target_percent")
@@ -21623,7 +21645,15 @@ def _managed_tts_profile_scope(value: Any) -> str:
 
 
 def _managed_tts_profile_field(backend: str, scope: str, suffix: str) -> str:
-    prefix = "qwen_tts" if backend == "qwen3_tts" else "omnivoice_tts" if backend == "omnivoice" else ""
+    prefix = (
+        "qwen_tts"
+        if backend == "qwen3_tts"
+        else "omnivoice_tts"
+        if backend == "omnivoice"
+        else "chatterbox_local_tts"
+        if backend == "chatterbox_local"
+        else ""
+    )
     if not prefix:
         return ""
     field = f"{prefix}_{suffix}"
@@ -21651,7 +21681,7 @@ def get_speech_clone_audio(backend: str, scope: str = "direct") -> Response:
 async def upload_speech_clone_audio(backend: str, request: Request, scope: str = "direct") -> Dict[str, Any]:
     token = normalize_managed_tts_backend(backend)
     profile_scope = _managed_tts_profile_scope(scope)
-    if token not in {"qwen3_tts", "omnivoice"}:
+    if token not in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
     filename = str(request.headers.get("x-filename") or "reference.wav").strip()
     try:
@@ -21664,7 +21694,8 @@ async def upload_speech_clone_audio(backend: str, request: Request, scope: str =
     try:
         path = store_clone_audio(token, filename=filename, data=payload, profile=profile_scope)
         save_managed_tts_clone_audio_path(token, path, profile=profile_scope)
-        save_managed_tts_clone_text(token, "", profile=profile_scope)
+        if token != "chatterbox_local":
+            save_managed_tts_clone_text(token, "", profile=profile_scope)
         info = clone_audio_info(token, path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -21675,25 +21706,33 @@ async def upload_speech_clone_audio(backend: str, request: Request, scope: str =
         "note": "",
         "error": "",
     }
-    try:
-        audio_bytes, audio_format = await asyncio.to_thread(decode_clone_audio_pcm, token, path)
-        transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
-            audio_bytes,
-            audio_format,
-            selector=f"tts_clone_{profile_scope}_{token}",
-        )
+    if token == "chatterbox_local":
         transcription.update(
             {
-                "status": "ready" if transcript else "unavailable",
-                "backend": stt_backend,
-                "note": backend_note or ("" if transcript else "No speech was detected in the reference audio."),
+                "status": "not_required",
+                "note": "Built-in Chatterbox conditions directly on the reference audio.",
             }
         )
-        if transcript:
-            save_managed_tts_clone_text(token, transcript, profile=profile_scope)
-    except Exception as exc:
-        transcription["error"] = str(exc) or "Automatic transcription was unavailable."
-        logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
+    else:
+        try:
+            audio_bytes, audio_format = await asyncio.to_thread(decode_clone_audio_pcm, token, path)
+            transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
+                audio_bytes,
+                audio_format,
+                selector=f"tts_clone_{profile_scope}_{token}",
+            )
+            transcription.update(
+                {
+                    "status": "ready" if transcript else "unavailable",
+                    "backend": stt_backend,
+                    "note": backend_note or ("" if transcript else "No speech was detected in the reference audio."),
+                }
+            )
+            if transcript:
+                save_managed_tts_clone_text(token, transcript, profile=profile_scope)
+        except Exception as exc:
+            transcription["error"] = str(exc) or "Automatic transcription was unavailable."
+            logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
     clear_managed_tts_workers()
     return {
         "ok": True,
@@ -21716,7 +21755,8 @@ def delete_speech_clone_audio(backend: str, scope: str = "direct") -> Dict[str, 
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
     remove_clone_audio(token, current.get(field), profile=profile_scope)
     save_managed_tts_clone_audio_path(token, "", profile=profile_scope)
-    save_managed_tts_clone_text(token, "", profile=profile_scope)
+    if token != "chatterbox_local":
+        save_managed_tts_clone_text(token, "", profile=profile_scope)
     clear_managed_tts_workers()
     return {
         "ok": True,
@@ -23701,11 +23741,14 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         announcement_managed_audio = {
             "qwen3_tts": current_speech.get("announcement_qwen_tts_clone_audio"),
             "omnivoice": current_speech.get("announcement_omnivoice_tts_clone_audio"),
+            "chatterbox_local": current_speech.get("announcement_chatterbox_local_tts_clone_audio"),
         }
         if selected_announcement_backend in announcement_managed_audio:
-            direct_field = (
-                "qwen_tts_clone_audio" if selected_announcement_backend == "qwen3_tts" else "omnivoice_tts_clone_audio"
-            )
+            direct_field = {
+                "qwen3_tts": "qwen_tts_clone_audio",
+                "omnivoice": "omnivoice_tts_clone_audio",
+                "chatterbox_local": "chatterbox_local_tts_clone_audio",
+            }[selected_announcement_backend]
             direct_path = str(current_speech.get(direct_field) or "").strip()
             announcement_path = str(announcement_managed_audio.get(selected_announcement_backend) or "").strip()
             if direct_path and announcement_path == direct_path:
@@ -23762,6 +23805,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     "speech_omnivoice_tts_instruct", current_speech.get("omnivoice_tts_instruct") or ""
                 )
             ).strip(),
+            chatterbox_local_tts_clone_audio=current_speech.get("chatterbox_local_tts_clone_audio"),
             wyoming_tts_host=str(
                 updates.get("speech_wyoming_tts_host", current_speech.get("wyoming_tts_host") or "")
             ).strip(),
@@ -23866,6 +23910,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     current_speech.get("announcement_omnivoice_tts_instruct") or "",
                 )
             ).strip(),
+            announcement_chatterbox_local_tts_clone_audio=announcement_managed_audio.get("chatterbox_local"),
             satellite_ducking_target_percent=updates.get(
                 "speech_satellite_ducking_target_percent",
                 current_speech.get("satellite_ducking_target_percent"),

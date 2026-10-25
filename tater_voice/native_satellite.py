@@ -5174,6 +5174,12 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
         "tts.finished",
         "audio.overlay.finished",
     }:
+        if not _as_bool(payload.get("ok"), True):
+            logger.warning(
+                "[native-satellite] playback failed selector=%s error=%s",
+                selector,
+                _text(payload.get("error")) or "unknown playback error",
+            )
         bridge = await _voice_bridge(selector)
         if bridge is not None:
             await bridge.announcement_finished()

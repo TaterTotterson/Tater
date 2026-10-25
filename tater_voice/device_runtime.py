@@ -167,10 +167,6 @@ def _is_voice_session(value: Any) -> bool:
     return bool(session_type is not None and isinstance(value, session_type))
 
 
-def _clear_streamed_tts_state(runtime: Dict[str, Any]) -> None:
-    _vp()._clear_streamed_tts_state(runtime)
-
-
 def _cancel_announcement_wait(runtime: Dict[str, Any]) -> None:
     _vp()._cancel_announcement_wait(runtime)
 
@@ -1353,7 +1349,6 @@ async def disconnect_selector(selector: str, *, reason: str) -> None:
         session = runtime.get("session")
         if _is_voice_session(session):
             sid = _text(getattr(session, "session_id", ""))
-        _clear_streamed_tts_state(runtime)
         _cancel_announcement_wait(runtime)
         _cancel_audio_stall_watch(runtime)
         runtime["awaiting_announcement"] = False
