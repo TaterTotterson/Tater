@@ -1343,10 +1343,12 @@ def _load_echo_firmware_manifest(
             continue
         raw_artifacts = raw_device.get("artifacts") if isinstance(raw_device.get("artifacts"), dict) else {}
         artifacts: Dict[str, Dict[str, Any]] = {}
-        for kind in ("factory", "ota", "ota_bridge"):
+        for kind in ("factory", "ota", "ota_bridge", "system"):
             if kind == "ota" and not _as_bool(raw_device.get("ota"), False):
                 continue
             if kind == "ota_bridge" and not _as_bool(raw_device.get("ota"), False):
+                continue
+            if kind == "system" and not _as_bool(raw_device.get("ota"), False):
                 continue
             if kind == "factory" and not _as_bool(raw_device.get("factory_install"), False):
                 continue
@@ -1371,7 +1373,9 @@ def _load_echo_firmware_manifest(
                 "sha256": sha256,
                 "size_bytes": size_bytes,
                 "flash_transport": (
-                    "tater_native_ota"
+                    "tater_native_system_ota"
+                    if kind == "system"
+                    else "tater_native_ota"
                     if kind in {"ota", "ota_bridge"}
                     else "external_factory_installer"
                 ),
@@ -2827,6 +2831,21 @@ def _build_device_context(
     )
     pending_migration = _load_ota_migration(selector_token, template_key)
     ota_migration = _required_ota_migration(prebuilt_firmware, capabilities, pending_migration)
+    system_artifact = (
+        (prebuilt_firmware.get("artifacts") or {}).get("system")
+        if isinstance(prebuilt_firmware.get("artifacts"), dict)
+        else None
+    )
+    system_ota_available = bool(
+        isinstance(system_artifact, dict) and _text(system_artifact.get("path"))
+    )
+    system_ota_supported = _capability_version(capabilities, "system_ota_version") >= 1
+    installed_system_version = _text(capabilities.get("system_version"))
+    system_update_available = bool(
+        system_ota_available
+        and latest_firmware_version
+        and installed_system_version != latest_firmware_version
+    )
     firmware_project = _text(prebuilt_device.get("project")) or "tater.native_satellite"
     matched_template_key = _matched_template_key(selector_token, client_row)
     update_if_missing_installed = bool(
@@ -2843,6 +2862,9 @@ def _build_device_context(
         update_if_missing_installed=update_if_missing_installed,
     )
     if ota_migration:
+        version_snapshot["update_available"] = True
+    app_update_available = bool(version_snapshot.get("update_available"))
+    if system_update_available:
         version_snapshot["update_available"] = True
     if usb_recovery:
         display_name = f"{_text(template_spec.get('label')) or 'Firmware'} Browser USB Recovery"
@@ -2887,9 +2909,19 @@ def _build_device_context(
         "firmware_project": firmware_project,
         "installed_firmware_version": installed_firmware_version,
         "installed_firmware_version_source": _text(version_snapshot.get("source")),
+        "installed_system_version": installed_system_version,
+        "system_ota_available": system_ota_available,
+        "system_ota_supported": system_ota_supported,
+        "system_update_available": system_update_available,
+        "app_update_available": app_update_available,
         "firmware_update_available": bool(version_snapshot.get("update_available")),
         "firmware_update_status": (
-            f"Installed {installed_firmware_version} • latest {latest_firmware_version}"
+            (
+                f"App {installed_firmware_version or 'unknown'} • "
+                f"Tater Linux {installed_system_version or 'unknown'} • latest {latest_firmware_version}"
+            )
+            if system_ota_available
+            else f"Installed {installed_firmware_version} • latest {latest_firmware_version}"
             if installed_firmware_version and latest_firmware_version
             else (
                 f"Latest {latest_firmware_version} • flash once to enable version checks"
@@ -2927,6 +2959,7 @@ def _build_device_context(
     if not ota_supported:
         item["prebuilt_firmware"]["artifacts"].pop("ota", None)
         item["prebuilt_firmware"]["artifacts"].pop("ota_bridge", None)
+        item["prebuilt_firmware"]["artifacts"].pop("system", None)
         item["firmware_update_status"] = "This Echo build needs one USB/recovery update to enable OTA."
 
     return {
@@ -2949,6 +2982,11 @@ def _build_device_context(
         "native_firmware": True,
         "capabilities": copy.deepcopy(capabilities),
         "ota_migration": copy.deepcopy(ota_migration),
+        "installed_system_version": installed_system_version,
+        "system_ota_available": system_ota_available,
+        "system_ota_supported": system_ota_supported,
+        "system_update_available": system_update_available,
+        "app_update_available": app_update_available,
         "display_target": display_target,
         "display_target_label": display_target_label if display_target_label != display_target else "",
         "item": item,
@@ -3259,7 +3297,9 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 "title": _text(item.get("title")) or selector_token,
                 "template_label": _text(item.get("template_label")),
                 "installed": _text(item.get("installed_firmware_version")) or "unknown",
+                "installed_system": _text(item.get("installed_system_version")) or "unknown",
                 "latest": _text(item.get("firmware_version")),
+                "system_update_available": bool(item.get("system_update_available")),
                 "prebuilt_firmware_available": bool(item.get("prebuilt_firmware_available")),
                 "prebuilt_firmware": copy.deepcopy(item.get("prebuilt_firmware") if isinstance(item.get("prebuilt_firmware"), dict) else {}),
             }
@@ -4000,7 +4040,11 @@ def _complete_native_ota_locked(session: Dict[str, Any], actual_version: str) ->
     session["active"] = False
     session["returncode"] = 0
     session["error"] = ""
-    session["message"] = f"Native OTA verified after reboot. The satellite is running {version}."
+    session["message"] = (
+        f"System OTA verified after reboot. The satellite is running Tater Linux {version}."
+        if _lower(session.get("ota_stage")) == "system"
+        else f"Native OTA verified after reboot. The satellite is running {version}."
+    )
     _set_session_progress_locked(session, 100.0)
     _set_session_phase_locked(session, "completed")
     _save_recorded_firmware_version(
@@ -4038,11 +4082,11 @@ def _complete_native_ota_handoff_locked(session: Dict[str, Any]) -> None:
 
 
 def _native_ota_stage_progress(session: Dict[str, Any], progress: float) -> float:
-    if int(session.get("ota_stage_count") or 1) < 2:
+    count = max(1, int(session.get("ota_stage_count") or 1))
+    if count < 2:
         return progress
-    if _lower(session.get("ota_stage")) == "bridge":
-        return progress * 0.49
-    return 50.0 + (progress * 0.49)
+    index = max(1, min(count, int(session.get("ota_stage_index") or 1)))
+    return ((index - 1) * 100.0 + progress) / count
 
 
 def _client_capabilities(client_status: Dict[str, Any]) -> Dict[str, Any]:
@@ -4083,6 +4127,7 @@ def _continue_native_ota_migration_locked(
         {
             "ota_stage": "final",
             "ota_stage_index": 2,
+            "ota_command_type": "ota.url",
             "source_binary": _text(final_artifact.get("source_binary")),
             "ota_url": _text(final_artifact.get("ota_url")),
             "artifact_id": _text(final_artifact.get("artifact_id")),
@@ -4090,7 +4135,10 @@ def _continue_native_ota_migration_locked(
             "binary_name": _text(final_artifact.get("binary_name")),
             "binary_size": int(final_artifact.get("binary_size") or 0),
             "binary_sha256": _text(final_artifact.get("sha256")),
-            "progress_percent": 50.0,
+            "progress_percent": (
+                (max(1, int(session.get("ota_stage_index") or 1)) * 100.0)
+                / max(2, int(session.get("ota_stage_count") or 2))
+            ),
             "progress_bytes": 0,
             "progress_total_bytes": int(final_artifact.get("binary_size") or 0),
             "ota_command_sent": False,
@@ -4116,6 +4164,65 @@ def _continue_native_ota_migration_locked(
             "final",
         )
     worker = threading.Thread(target=_native_tater_ota_session_worker, args=(_text(session.get("id")),), daemon=True)
+    session["worker"] = worker
+    worker.start()
+    return True
+
+
+def _continue_native_system_ota_locked(
+    session: Dict[str, Any], client_status: Dict[str, Any]
+) -> bool:
+    if _lower(session.get("ota_stage")) == "system":
+        return False
+    system_artifact = (
+        session.get("ota_system_artifact")
+        if isinstance(session.get("ota_system_artifact"), dict)
+        else {}
+    )
+    if not system_artifact:
+        return False
+    current = _capability_version(_client_capabilities(client_status), "system_ota_version")
+    if current < 1:
+        _fail_native_ota_locked(
+            session,
+            "The application update restarted without System OTA support; Tater Linux was not changed.",
+        )
+        return True
+    stage_count = max(2, int(session.get("ota_stage_count") or 2))
+    session.update(
+        {
+            "ota_stage": "system",
+            "ota_stage_index": stage_count,
+            "ota_command_type": "ota.system.url",
+            "source_binary": _text(system_artifact.get("source_binary")),
+            "ota_url": _text(system_artifact.get("ota_url")),
+            "artifact_id": _text(system_artifact.get("artifact_id")),
+            "binary_url": _text(system_artifact.get("ota_url")),
+            "binary_name": _text(system_artifact.get("binary_name")),
+            "binary_size": int(system_artifact.get("binary_size") or 0),
+            "binary_sha256": _text(system_artifact.get("sha256")),
+            "progress_percent": ((stage_count - 1) * 100.0) / stage_count,
+            "progress_bytes": 0,
+            "progress_total_bytes": int(system_artifact.get("binary_size") or 0),
+            "ota_command_sent": False,
+            "ota_reboot_requested": False,
+            "ota_disconnect_seen": False,
+            "ota_reconnect_seen": False,
+            "message": "Application update verified. Installing the Tater Linux system now.",
+        }
+    )
+    _set_session_phase_locked(session, "starting")
+    _append_session_entry_locked(
+        session,
+        level="info",
+        message="Application update verified after reboot; continuing with the inactive Linux root slot.",
+        source="session",
+    )
+    worker = threading.Thread(
+        target=_native_tater_ota_session_worker,
+        args=(_text(session.get("id")),),
+        daemon=True,
+    )
     session["worker"] = worker
     worker.start()
     return True
@@ -4162,16 +4269,24 @@ def _apply_native_ota_update_locked(
             if reconnected:
                 session["ota_reconnect_seen"] = True
                 expected_version = _text(session.get("firmware_version"))
-                actual_version = _text(client_status.get("firmware_version"))
+                system_stage = _lower(session.get("ota_stage")) == "system"
+                actual_version = (
+                    _text(_client_capabilities(client_status).get("system_version"))
+                    if system_stage
+                    else _text(client_status.get("firmware_version"))
+                )
                 if expected_version and actual_version == expected_version:
                     if _continue_native_ota_migration_locked(session, client_status):
+                        return
+                    if _continue_native_system_ota_locked(session, client_status):
                         return
                     _complete_native_ota_locked(session, actual_version)
                     return
                 if actual_version:
+                    version_kind = "Tater Linux system" if system_stage else "firmware"
                     _fail_native_ota_locked(
                         session,
-                        f"The satellite reconnected on {actual_version}, but Tater expected {expected_version or 'the new firmware'}. The update may have rolled back or been interrupted.",
+                        f"The satellite reconnected on {version_kind} {actual_version}, but Tater expected {expected_version or 'the new version'}. The update may have rolled back or been interrupted.",
                     )
                     return
 
@@ -4185,7 +4300,11 @@ def _apply_native_ota_update_locked(
         return
 
     if bool(session.get("ota_reboot_requested")) or bool(session.get("ota_disconnect_seen")):
-        session["message"] = "Firmware downloaded. Waiting for the satellite to reconnect on the new version."
+        session["message"] = (
+            "Tater Linux staged. Waiting for the satellite to pass its trial boot."
+            if _lower(session.get("ota_stage")) == "system"
+            else "Firmware downloaded. Waiting for the satellite to reconnect on the new version."
+        )
         _set_session_phase_locked(session, "awaiting_device_logs")
 
 
@@ -4577,6 +4696,7 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         ota_url = _text(session.get("ota_url"))
         ota_sha256 = _text(session.get("binary_sha256"))
         ota_size = _as_int(session.get("binary_size"), 0, minimum=0)
+        ota_command_type = _text(session.get("ota_command_type")) or "ota.url"
         display_name = _text(session.get("display_name")) or selector or "device"
         _set_session_phase_locked(session, "uploading")
         _append_session_entry_locked(
@@ -4624,7 +4744,7 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         result = native_satellite.run_on_runtime_loop(
             native_satellite.send_command(
                 selector,
-                "ota.url",
+                ota_command_type,
                 {"url": ota_url, "sha256": ota_sha256, "size_bytes": ota_size},
             ),
             timeout=5.0,
@@ -4656,7 +4776,11 @@ def _native_tater_ota_session_worker(session_id: str) -> None:
         _append_session_entry_locked(
             session,
             level="info",
-            message="Native OTA command sent. The satellite will download firmware from Tater and report progress.",
+            message=(
+                "System OTA command sent. The satellite will verify and stage the inactive Linux root slot."
+                if ota_command_type == "ota.system.url"
+                else "Native OTA command sent. The satellite will download firmware from Tater and report progress."
+            ),
             source="session",
         )
         session["returncode"] = None
@@ -5620,15 +5744,26 @@ def _start_flash_session(
         )
     ota_migration = context.get("ota_migration") if isinstance(context.get("ota_migration"), dict) else {}
     ota_stage = _lower(ota_migration.get("stage")) if ota_migration else "final"
-    initial_artifact_kind = (
-        _lower(ota_migration.get("bridge_artifact"))
-        if ota_stage == "bridge"
-        else _lower(ota_migration.get("final_artifact")) or "ota"
+    native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
+    system_pending = bool(native_firmware and context.get("system_update_available"))
+    start_with_system = bool(
+        system_pending
+        and context.get("system_ota_supported")
+        and not context.get("app_update_available")
+        and not ota_migration
     )
+    if start_with_system:
+        ota_stage = "system"
+        initial_artifact_kind = "system"
+    else:
+        initial_artifact_kind = (
+            _lower(ota_migration.get("bridge_artifact"))
+            if ota_stage == "bridge"
+            else _lower(ota_migration.get("final_artifact")) or "ota"
+        )
     prebuilt_upload = _prebuilt_artifact_available(context, initial_artifact_kind)
     if not prebuilt_upload:
         raise RuntimeError(f"No prebuilt {initial_artifact_kind} image is available for this firmware target.")
-    native_firmware = bool(context.get("native_firmware")) or bool((context.get("prebuilt_firmware") or {}).get("native") if isinstance(context.get("prebuilt_firmware"), dict) else False)
     if not host and not native_firmware:
         raise RuntimeError("OTA target host is missing.")
     prebuilt_binary = _download_prebuilt_firmware_binary(context, initial_artifact_kind)
@@ -5641,6 +5776,14 @@ def _start_flash_session(
         final_ota_artifact = _create_native_ota_artifact(
             context, Path(final_prebuilt_binary["path"])
         )
+    system_ota_artifact: Dict[str, Any] = {}
+    system_prebuilt_binary: Dict[str, Any] = {}
+    if native_firmware and system_pending and not start_with_system:
+        system_prebuilt_binary = _download_prebuilt_firmware_binary(context, "system")
+        system_ota_artifact = _create_native_ota_artifact(
+            context, Path(system_prebuilt_binary["path"])
+        )
+    ota_command_type = "ota.system.url" if start_with_system else "ota.url"
     command = (
         ["native_tater_ota", selector, _text(ota_artifact.get("ota_url"))]
         if native_firmware
@@ -5670,8 +5813,10 @@ def _start_flash_session(
         "ota_migration": copy.deepcopy(ota_migration),
         "ota_stage": ota_stage,
         "ota_stage_index": 1 if ota_stage == "bridge" else (2 if ota_migration else 1),
-        "ota_stage_count": 2 if ota_migration else 1,
+        "ota_stage_count": (2 if ota_migration else 1) + (1 if system_ota_artifact else 0),
+        "ota_command_type": ota_command_type,
         "ota_final_artifact": final_ota_artifact,
+        "ota_system_artifact": system_ota_artifact,
         "context": context,
         "command": command,
         "source_binary": str(prebuilt_binary.get("path") or ""),
@@ -5742,6 +5887,17 @@ def _start_flash_session(
                     message=(
                         f"Final OTA image {final_cached_text}: "
                         f"{Path(final_prebuilt_binary['path']).name}."
+                    ),
+                    source="session",
+                )
+            if system_prebuilt_binary:
+                system_cached_text = "cached" if bool(system_prebuilt_binary.get("cached")) else "downloaded"
+                _append_session_entry_locked(
+                    session,
+                    level="info",
+                    message=(
+                        f"Linux system image {system_cached_text}: "
+                        f"{Path(system_prebuilt_binary['path']).name}."
                     ),
                     source="session",
                 )

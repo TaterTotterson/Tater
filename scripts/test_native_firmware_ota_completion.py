@@ -357,6 +357,84 @@ class NativeFirmwareOtaCompletionTests(unittest.TestCase):
         self.assertEqual("failed", session["phase"])
         self.assertIn("ota_bundle_components_version", session["error"])
 
+    def test_app_reconnect_continues_with_system_rootfs(self) -> None:
+        session = _session()
+        session.update(
+            {
+                "id": "fw_echo_system",
+                "template_key": "biscuit",
+                "firmware_version": "v2.5.6",
+                "ota_stage": "final",
+                "ota_stage_index": 1,
+                "ota_stage_count": 2,
+                "ota_system_artifact": {
+                    "source_binary": "/tmp/system.tar.gz",
+                    "ota_url": "http://tater.test/system/firmware.bin",
+                    "artifact_id": "system",
+                    "binary_name": "firmware.bin",
+                    "binary_size": 8192,
+                    "sha256": "c" * 64,
+                },
+            }
+        )
+        worker = mock.Mock()
+        with (
+            mock.patch.object(firmware.threading, "Thread", return_value=worker),
+            mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version,
+        ):
+            firmware._apply_native_ota_update_locked(
+                session,
+                [],
+                {
+                    "connected": True,
+                    "connected_ts": 200.0,
+                    "firmware_version": "v2.5.6",
+                    "capabilities": {
+                        "system_ota_version": 1,
+                        "system_version": "v2.4.0",
+                    },
+                },
+            )
+
+        self.assertTrue(session["active"])
+        self.assertEqual("system", session["ota_stage"])
+        self.assertEqual("ota.system.url", session["ota_command_type"])
+        self.assertEqual("http://tater.test/system/firmware.bin", session["ota_url"])
+        self.assertEqual(50.0, session["progress_percent"])
+        worker.start.assert_called_once_with()
+        save_version.assert_not_called()
+
+    def test_system_reconnect_verifies_rootfs_version(self) -> None:
+        session = _session()
+        session.update(
+            {
+                "template_key": "radar",
+                "firmware_version": "v2.5.6",
+                "ota_stage": "system",
+                "ota_stage_index": 2,
+                "ota_stage_count": 2,
+            }
+        )
+        with mock.patch.object(firmware, "_save_recorded_firmware_version") as save_version:
+            firmware._apply_native_ota_update_locked(
+                session,
+                [],
+                {
+                    "connected": True,
+                    "connected_ts": 200.0,
+                    "firmware_version": "v2.5.6",
+                    "capabilities": {
+                        "system_ota_version": 1,
+                        "system_version": "v2.5.6",
+                    },
+                },
+            )
+
+        self.assertFalse(session["active"])
+        self.assertEqual("completed", session["phase"])
+        self.assertIn("Tater Linux v2.5.6", session["message"])
+        save_version.assert_called_once()
+
     def test_old_version_reconnect_reports_rollback_instead_of_hanging(self) -> None:
         session = _session()
 

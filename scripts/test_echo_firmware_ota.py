@@ -40,6 +40,11 @@ def _echo_manifest() -> dict[str, object]:
                         "sha256": "b" * 64,
                         "size": 2048,
                     },
+                    "system": {
+                        "name": "tater-echo-biscuit-v0.4.0-system-ota.tar.gz",
+                        "sha256": "8" * 64,
+                        "size": 16384,
+                    },
                 },
             },
             "checkers": {
@@ -184,6 +189,7 @@ class EchoFirmwareOtaTests(unittest.TestCase):
 
         device = manifest["devices_by_key"]["biscuit"]
         ota = device["artifacts"]["ota"]
+        system = device["artifacts"]["system"]
         factory = device["artifacts"]["factory"]
         self.assertEqual("v0.4.0", device["firmware_version"])
         self.assertEqual("tater_native_ota", ota["flash_transport"])
@@ -194,6 +200,9 @@ class EchoFirmwareOtaTests(unittest.TestCase):
             ota["path"],
         )
         self.assertFalse(factory["browser_flash_supported"])
+        self.assertEqual("tater_native_system_ota", system["flash_transport"])
+        self.assertEqual(16384, system["size_bytes"])
+        self.assertTrue(system["path"].endswith("-system-ota.tar.gz"))
 
     def test_echo_manifest_rejects_unverified_artifact_metadata(self) -> None:
         payload = _echo_manifest()
@@ -324,6 +333,64 @@ class EchoFirmwareOtaTests(unittest.TestCase):
                     session["ota_final_artifact"]["ota_url"],
                 )
                 save_migration.assert_called_once()
+                worker.start.assert_called_once_with()
+            finally:
+                firmware._FIRMWARE_SESSIONS.pop(result["session_id"], None)
+
+    def test_current_app_starts_directly_with_pending_system_ota(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            system_path = root / "system.tar.gz"
+            system_path.write_bytes(b"system")
+            context = {
+                "selector": "native:dot-system-test",
+                "host": "10.4.20.27",
+                "display_base_url": "http://10.4.20.10:8501",
+                "display_name": "Office Dot",
+                "template_key": "biscuit",
+                "template_label": "Echo Dot 2",
+                "firmware_version": "v0.4.0",
+                "native_firmware": True,
+                "ota_supported": True,
+                "app_update_available": False,
+                "system_update_available": True,
+                "system_ota_supported": True,
+                "prebuilt_firmware": {
+                    "native": True,
+                    "artifacts": {
+                        "ota": {"path": "app.tar.gz"},
+                        "system": {"path": "system.tar.gz"},
+                    },
+                },
+            }
+            worker = mock.Mock()
+            with (
+                mock.patch.object(
+                    firmware,
+                    "_download_prebuilt_firmware_binary",
+                    return_value={"path": system_path, "cached": False},
+                ) as download,
+                mock.patch.object(
+                    firmware,
+                    "_create_native_ota_artifact",
+                    return_value={
+                        "artifact_id": "system",
+                        "ota_url": "http://tater.test/system/firmware.bin",
+                        "binary_name": "firmware.bin",
+                        "binary_size": system_path.stat().st_size,
+                        "sha256": "8" * 64,
+                        "source_binary": str(system_path),
+                    },
+                ),
+                mock.patch.object(firmware.threading, "Thread", return_value=worker),
+            ):
+                result = firmware._start_flash_session(context)
+            try:
+                self.assertEqual("system", result["ota_stage"])
+                self.assertEqual(1, result["ota_stage_count"])
+                download.assert_called_once_with(context, "system")
+                session = firmware._FIRMWARE_SESSIONS[result["session_id"]]
+                self.assertEqual("ota.system.url", session["ota_command_type"])
                 worker.start.assert_called_once_with()
             finally:
                 firmware._FIRMWARE_SESSIONS.pop(result["session_id"], None)
