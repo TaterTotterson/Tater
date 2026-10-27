@@ -52,19 +52,19 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["call"]["state"], "active")
         message_types = [call.args[1] for call in sent.await_args_list]
         self.assertEqual(message_types, ["sat_chat.started", "sat_chat.started"])
-        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-low")
-        self.assertEqual(sent.await_args_list[1].args[2]["video_send_profile"], "echo-low")
+        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-balanced")
+        self.assertEqual(sent.await_args_list[1].args[2]["video_send_profile"], "echo-balanced")
         self.assertNotIn("sat_chat.invite", message_types)
         self.assertNotIn("sat_chat.ringing", message_types)
 
-    async def test_athena_uses_echo_low_video_receive_profile(self) -> None:
+    async def test_athena_uses_echo_balanced_video_receive_profile(self) -> None:
         sent = AsyncMock()
         with patch.object(sat_chat, "_native_clients", new=AsyncMock(return_value=self.clients)), patch.object(
             sat_chat, "_send", new=sent
         ), patch.object(sat_chat, "refresh_directories", new=AsyncMock()):
             await sat_chat.start("native:den", "native:office")
 
-        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-low")
+        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-balanced")
 
     async def test_audio_only_satellite_cannot_initiate_or_end(self) -> None:
         with patch.object(sat_chat, "_native_clients", new=AsyncMock(return_value=self.clients)), patch.object(
@@ -201,6 +201,22 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
         with Image.open(io.BytesIO(resized[len(sat_chat.VIDEO_FRAME_PREFIX):])) as image:
             self.assertEqual(image.size, (480, 270))
             self.assertAlmostEqual(image.width / image.height, 16 / 9, places=2)
+
+    async def test_balanced_echo_video_is_capped_at_640_by_360(self) -> None:
+        source = Image.new("RGB", (1280, 720), (120, 80, 40))
+        encoded = io.BytesIO()
+        source.save(encoded, format="JPEG", quality=70)
+        frame = sat_chat.VIDEO_FRAME_PREFIX + encoded.getvalue()
+
+        resized = await asyncio.to_thread(
+            sat_chat._resize_echo_video_frame,
+            frame,
+            max_size=(640, 360),
+            quality=62,
+        )
+
+        with Image.open(io.BytesIO(resized[len(sat_chat.VIDEO_FRAME_PREFIX):])) as image:
+            self.assertEqual(image.size, (640, 360))
 
     async def test_native_end_notifies_connected_little_spud_media(self) -> None:
         event_sender = AsyncMock()

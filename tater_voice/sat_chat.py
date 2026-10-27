@@ -36,10 +36,14 @@ def _truthy(value: Any) -> bool:
 
 def _video_receive_profile(participant: Optional[Dict[str, Any]]) -> str:
     board = _text((participant or {}).get("board")).lower().replace("_", "-")
-    if board in {"checkers", "crown", "athena", "rook"}:
-        # Echo displays favor the low-latency 320x180 stream. Crown presents
-        # video in a smaller 16:9 panel, so the extra 640x360 pixels no longer
-        # justify their decode and draw cost.
+    if board in {"checkers", "crown", "athena"}:
+        # The larger Echo displays use a 640x360 source at 15 FPS. This avoids
+        # enlarging the former 320x180 call frame across an 848-1280px panel
+        # while retaining a conservative cadence for software JPEG decoding.
+        return "echo-balanced"
+    if board == "rook":
+        # Rook's VGA sensor and 352x198 call area get little benefit from the
+        # larger profile, so keep its cheaper direct Bayer path at 20 FPS.
         return "echo-low"
     return ""
 
@@ -362,6 +366,13 @@ async def _video_relay_worker(
 
                 if profile == "echo-low":
                     frame = await asyncio.to_thread(_resize_echo_video_frame, frame)
+                elif profile == "echo-balanced":
+                    frame = await asyncio.to_thread(
+                        _resize_echo_video_frame,
+                        frame,
+                        max_size=(640, 360),
+                        quality=62,
+                    )
                 await native_satellite.send_binary(peer, frame)
                 continue
             async with _lock:
@@ -379,7 +390,12 @@ async def _video_relay_worker(
                 _video_relays.pop(key, None)
 
 
-def _resize_echo_video_frame(frame: bytes) -> bytes:
+def _resize_echo_video_frame(
+    frame: bytes,
+    *,
+    max_size: tuple[int, int] = (480, 270),
+    quality: int = 58,
+) -> bytes:
     if not frame.startswith(VIDEO_FRAME_PREFIX):
         return frame
     try:
@@ -387,12 +403,12 @@ def _resize_echo_video_frame(frame: bytes) -> bytes:
 
         with Image.open(io.BytesIO(frame[len(VIDEO_FRAME_PREFIX):])) as source:
             source.load()
-            if source.width <= 480 and source.height <= 270:
+            if source.width <= max_size[0] and source.height <= max_size[1]:
                 return frame
             image = source.convert("RGB")
-            image.thumbnail((480, 270), Image.Resampling.BILINEAR)
+            image.thumbnail(max_size, Image.Resampling.BILINEAR)
             encoded = io.BytesIO()
-            image.save(encoded, format="JPEG", quality=58, optimize=False)
+            image.save(encoded, format="JPEG", quality=quality, optimize=False)
         return VIDEO_FRAME_PREFIX + encoded.getvalue()
     except Exception:
         # Media routing must remain fail-open: a malformed or unusual JPEG is

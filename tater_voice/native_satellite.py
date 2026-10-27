@@ -490,10 +490,152 @@ def _screen_cameras_supported(payload: Dict[str, Any]) -> bool:
 
 
 CAMERA_FRAME_PREFIX = b"TCAM1"
+MAX_CAMERA_FRAME_BYTES = 4 * 1024 * 1024
 _screen_camera_tasks: Dict[str, asyncio.Task] = {}
+_native_camera_relay_lock = asyncio.Lock()
+_native_camera_relays: Dict[str, Dict[str, Any]] = {}
 
 
-def _screen_camera_payload(*, selected_id: str = "", loading: bool = False, error: str = "") -> Dict[str, Any]:
+def _echo_camera_profile_for_boards(source_board: Any, target_board: Any) -> str:
+    source = _text(source_board).lower().replace("_", "-")
+    target = _text(target_board).lower().replace("_", "-")
+    large_displays = {"checkers", "crown", "athena"}
+    if source in large_displays and target in large_displays:
+        return "echo-balanced"
+    return "echo-low"
+
+
+async def _native_camera_stream_profile(source: str, target: str) -> str:
+    source_token = _canonical_selector(source)
+    target_token = _canonical_selector(target)
+    boards: Dict[str, str] = {}
+    async with _clients_lock:
+        for selector in {source_token, target_token}:
+            row = _clients.get(selector)
+            hello = row.get("hello") if isinstance(row, dict) and isinstance(row.get("hello"), dict) else {}
+            payload = hello.get("payload") if isinstance(hello.get("payload"), dict) else {}
+            boards[selector] = _text(payload.get("board"))
+    return _echo_camera_profile_for_boards(boards.get(source_token), boards.get(target_token))
+
+
+async def _native_camera_relay_worker(source: str, queue: asyncio.Queue) -> None:
+    try:
+        while True:
+            frame = await queue.get()
+            async with _native_camera_relay_lock:
+                relay = _native_camera_relays.get(source)
+                targets = sorted(relay.get("targets") or []) if isinstance(relay, dict) else []
+            if not targets:
+                continue
+            await asyncio.gather(
+                *(send_binary(target, frame) for target in targets),
+                return_exceptions=True,
+            )
+    except asyncio.CancelledError:
+        raise
+
+
+async def _subscribe_native_camera(source: str, target: str) -> asyncio.Event:
+    source_token = _canonical_selector(source)
+    target_token = _canonical_selector(target)
+    if not source_token or not target_token:
+        raise ValueError("Native camera source and display target are required.")
+    profile = await _native_camera_stream_profile(source_token, target_token)
+    async with _native_camera_relay_lock:
+        relay = _native_camera_relays.get(source_token)
+        first = not isinstance(relay, dict)
+        if first:
+            queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+            ended = asyncio.Event()
+            relay = {"queue": queue, "ended": ended, "targets": set()}
+            relay["task"] = asyncio.create_task(_native_camera_relay_worker(source_token, queue))
+            _native_camera_relays[source_token] = relay
+        relay["targets"].add(target_token)
+        if first:
+            try:
+                result = await send_request(
+                    source_token,
+                    "camera.stream.start",
+                    {"profile": profile, "reason": "room_vision"},
+                    timeout_s=4.0,
+                )
+                if not _as_bool(result.get("ok"), False):
+                    raise RuntimeError(_text(result.get("error")) or "Echo camera stream did not start.")
+            except Exception:
+                _native_camera_relays.pop(source_token, None)
+                relay["task"].cancel()
+                raise
+        return relay["ended"]
+
+
+async def _unsubscribe_native_camera(source: str, target: str) -> None:
+    source_token = _canonical_selector(source)
+    target_token = _canonical_selector(target)
+    stop_source = False
+    task: Optional[asyncio.Task] = None
+    async with _native_camera_relay_lock:
+        relay = _native_camera_relays.get(source_token)
+        if not isinstance(relay, dict):
+            return
+        targets = relay.get("targets")
+        if isinstance(targets, set):
+            targets.discard(target_token)
+        if not targets:
+            _native_camera_relays.pop(source_token, None)
+            task = relay.get("task") if isinstance(relay.get("task"), asyncio.Task) else None
+            stop_source = True
+    if task is not None:
+        task.cancel()
+    if stop_source:
+        with contextlib.suppress(Exception):
+            await send_request(source_token, "camera.stream.stop", {}, timeout_s=2.0)
+
+
+async def _queue_native_camera_frame(source: str, frame: bytes) -> None:
+    payload = bytes(frame or b"")
+    if (
+        not payload.startswith(CAMERA_FRAME_PREFIX)
+        or len(payload) <= len(CAMERA_FRAME_PREFIX) + 3
+        or len(payload) - len(CAMERA_FRAME_PREFIX) > MAX_CAMERA_FRAME_BYTES
+        or payload[len(CAMERA_FRAME_PREFIX):len(CAMERA_FRAME_PREFIX) + 2] != b"\xff\xd8"
+    ):
+        return
+    async with _native_camera_relay_lock:
+        relay = _native_camera_relays.get(_canonical_selector(source))
+        queue = relay.get("queue") if isinstance(relay, dict) else None
+        if not isinstance(queue, asyncio.Queue):
+            return
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(payload)
+
+
+async def _native_camera_source_ended(source: str) -> None:
+    source_token = _canonical_selector(source)
+    async with _native_camera_relay_lock:
+        relay = _native_camera_relays.pop(source_token, None)
+    if not isinstance(relay, dict):
+        return
+    ended = relay.get("ended")
+    if isinstance(ended, asyncio.Event):
+        ended.set()
+    task = relay.get("task")
+    if isinstance(task, asyncio.Task):
+        task.cancel()
+
+
+def _screen_camera_payload(
+    *,
+    selected_id: str = "",
+    loading: bool = False,
+    error: str = "",
+    stream_url: str = "",
+    stream_active: bool = False,
+) -> Dict[str, Any]:
     from . import display_cameras
 
     try:
@@ -512,6 +654,8 @@ def _screen_camera_payload(*, selected_id: str = "", loading: bool = False, erro
             "selected_name": _text(selected.get("name")),
             "selected_room": _text(selected.get("room")),
             "selected_talkback": _as_bool(selected.get("talkback"), False),
+            "stream_url": _text(stream_url) if selected else "",
+            "stream_active": bool(stream_active and selected),
             "loading": bool(loading and selected),
             "error": _text(error),
         }
@@ -527,12 +671,53 @@ async def _stop_screen_camera_stream(selector: str) -> None:
             await task
 
 
-async def _run_screen_camera_stream(selector: str, camera_id: str) -> None:
+async def _run_screen_camera_stream(selector: str, camera_id: str, *, prefer_stream: bool = False) -> None:
     from . import display_cameras
 
     token = _canonical_selector(selector)
     failures = 0
+    stream_url = ""
+    native_source = ""
+    native_ended: Optional[asyncio.Event] = None
     try:
+        if prefer_stream:
+            try:
+                opened_url, stream_format, _row = await asyncio.to_thread(display_cameras.open_stream, camera_id)
+                if stream_format == "tater-native-mjpeg":
+                    native_source = opened_url
+                    native_ended = await _subscribe_native_camera(native_source, token)
+                else:
+                    stream_url = opened_url
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _vp().logger.info(
+                    "[native-satellite] live camera stream unavailable selector=%s camera=%s; using snapshots: %s",
+                    token,
+                    camera_id,
+                    exc,
+                )
+        await send_command(
+            token,
+            "display.cameras",
+            await asyncio.to_thread(
+                _screen_camera_payload,
+                selected_id=camera_id,
+                stream_url=stream_url,
+                stream_active=bool(stream_url or native_ended is not None),
+            ),
+        )
+        if native_ended is not None:
+            await native_ended.wait()
+            await send_command(
+                token,
+                "display.cameras",
+                await asyncio.to_thread(
+                    _screen_camera_payload,
+                    selected_id=camera_id,
+                    error="Live camera stream ended; using snapshot fallback.",
+                ),
+            )
         while True:
             started = time.monotonic()
             try:
@@ -559,12 +744,17 @@ async def _run_screen_camera_stream(selector: str, camera_id: str) -> None:
                         _screen_camera_payload,
                         selected_id=camera_id,
                         error=_text(exc) or "Camera frame failed.",
+                        stream_url=stream_url,
+                        stream_active=bool(stream_url),
                     ),
                 )
                 await asyncio.sleep(min(5.0, 0.75 * failures))
                 continue
-            await asyncio.sleep(max(0.05, 0.35 - (time.monotonic() - started)))
+            interval = 1.0 if stream_url else 0.35
+            await asyncio.sleep(max(0.05, interval - (time.monotonic() - started)))
     finally:
+        if native_source:
+            await _unsubscribe_native_camera(native_source, token)
         if _screen_camera_tasks.get(token) is asyncio.current_task():
             _screen_camera_tasks.pop(token, None)
 
@@ -5062,6 +5252,9 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             _notify_state_change("settings", selector)
     if settings_result_changed:
         _notify_state_change("settings_result", selector)
+    if msg_type == "camera.stream.ended":
+        await _native_camera_source_ended(selector)
+        return None
     if msg_type == "ambient.observation.request":
         from . import reachy_ambient
 
@@ -5112,11 +5305,23 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             raise KeyError("Camera is unavailable or no longer configured.")
         await _stop_screen_camera_stream(selector)
         await send_command(selector, "display.cameras", directory)
-        task = asyncio.create_task(_run_screen_camera_stream(selector, camera_id))
+        selected = next(
+            (
+                row
+                for row in list(directory.get("cameras") or [])
+                if _text((row or {}).get("id")) == camera_id
+            ),
+            {},
+        )
+        prefer_stream = _as_bool(selected.get("stream"), False) and await client_has_capability(
+            selector,
+            "screen_camera_stream",
+        )
+        task = asyncio.create_task(_run_screen_camera_stream(selector, camera_id, prefer_stream=prefer_stream))
         _screen_camera_tasks[_canonical_selector(selector)] = task
         return _envelope(
             "display.camera.select.ack",
-            {"ok": True, "camera_id": camera_id},
+            {"ok": True, "camera_id": camera_id, "streaming": prefer_stream},
             message_id=_text(message.get("id")),
         )
     if msg_type == "display.camera.close":
@@ -5464,6 +5669,9 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     client_row["binary_bytes"] = int(client_row.get("binary_bytes") or 0) + len(data)
                     client_row["last_seen_ts"] = _now()
                     client_row["last_message_type"] = "binary"
+                if data.startswith(CAMERA_FRAME_PREFIX):
+                    await _queue_native_camera_frame(selector, data)
+                    continue
                 from . import sat_chat
                 from . import wake_verifier
 
@@ -5500,6 +5708,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
     finally:
         if selector:
             await _stop_screen_camera_stream(selector)
+            await _native_camera_source_ended(selector)
         await _cancel_websocket_tasks(
             wake_verifier_tasks,
             selector=selector,
