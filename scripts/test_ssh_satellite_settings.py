@@ -63,6 +63,7 @@ class SSHSatelliteSettingsTests(unittest.TestCase):
 
         first_by_key = {str(field.get("key") or ""): field for field in first}
         second_by_key = {str(field.get("key") or ""): field for field in second}
+        first_keys = [str(field.get("key") or "") for field in first]
         first_password = str(first_by_key["ssh_password"]["value"])
         second_password = str(second_by_key["ssh_password"]["value"])
         self.assertFalse(first_by_key["ssh_enabled"]["value"])
@@ -70,6 +71,11 @@ class SSHSatelliteSettingsTests(unittest.TestCase):
         self.assertNotEqual(first_password, second_password)
         self.assertTrue(first_by_key["ssh_password"]["copyable"])
         self.assertTrue(first_by_key["ssh_password"]["generatable"])
+        self.assertEqual(
+            first_keys[:4],
+            ["ssh_section", "ssh_enabled", "ssh_login", "ssh_password"],
+        )
+        self.assertNotIn("nww_architecture", first_keys)
 
     def test_password_is_sent_only_when_enabled_and_capable(self) -> None:
         redis = FakeRedis()
@@ -137,6 +143,7 @@ class SSHSatelliteSettingsTests(unittest.TestCase):
             REPO_ROOT / "frontend/src/settings/components/voice/VoiceSatellites.vue"
         ).read_text(encoding="utf-8")
         helpers = (REPO_ROOT / "tater_voice/ui_helpers.py").read_text(encoding="utf-8")
+        bundle = (REPO_ROOT / "tateros_static/ui/tater-ui.js").read_text(encoding="utf-8")
 
         self.assertIn("field.revealable", component)
         self.assertIn("field.copyable", component)
@@ -145,6 +152,7 @@ class SSHSatelliteSettingsTests(unittest.TestCase):
         self.assertIn('field.get("key")) == "ssh_login"', helpers)
         self.assertIn("root@{host}", helpers)
         self.assertIn("Satellite Settings", satellites)
+        self.assertIn("tm-field-input-actions", bundle)
 
 
 if __name__ == "__main__":
