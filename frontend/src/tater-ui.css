@@ -2256,6 +2256,10 @@ body[data-popup-effect="melt"] .tater-popup-leave-active .tater-popup-effect-bur
 .tvoice-settings-sections .tm-field-sections > .tm-form-card > header h3 { color: var(--tv-accent); font-size: .72rem; letter-spacing: .025em; }
 .tvoice-settings-sections .tm-field-sections > .tm-form-card > header p { max-width: 760px; font-size: .61rem; }
 .tvoice-settings-sections .tm-field { padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--tv-border) 82%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--tv-surface) 74%, transparent); }
+.tm-field-input-row { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.tm-field-input-row > input { min-width: 0; flex: 1; }
+.tm-field-input-actions { display: inline-flex; flex: 0 0 auto; gap: 5px; }
+.tm-field-input-actions .tv-button { min-height: 32px; padding: 6px 9px; font-size: .58rem; }
 .tvoice-settings-sections .tm-toggle-field { min-height: 58px; align-items: center; }
 .tvoice-display-photo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .tvoice-display-photo-grid article { position: relative; overflow: hidden; min-height: 104px; border: 1px solid var(--tv-border); border-radius: 11px; background: var(--tv-surface-strong); }

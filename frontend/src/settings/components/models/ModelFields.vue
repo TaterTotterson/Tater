@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, reactive, ref } from "vue";
 import type { JsonRow } from "../../types";
 
 const props = withDefaults(defineProps<{
@@ -16,6 +16,8 @@ const emit = defineEmits<{
 }>();
 
 const rows = computed(() => (Array.isArray(props.sections) ? props.sections : []));
+const revealed = reactive<Record<string, boolean>>({});
+const copiedKey = ref("");
 
 function fields(section: JsonRow): JsonRow[] {
   return Array.isArray(section.fields) ? section.fields : [];
@@ -89,6 +91,35 @@ function visible(field: JsonRow): boolean {
 function readonly(field: JsonRow): boolean {
   const rawType = String(field.type || "").trim().toLowerCase();
   return props.disabled || Boolean(field.disabled || field.read_only || field.readonly || ["table", "readonly", "section", "led_preview", "display_theme_preview"].includes(rawType));
+}
+
+function inputType(field: JsonRow): string {
+  const type = typeOf(field);
+  if (type === "password") return revealed[keyOf(field)] ? "text" : "password";
+  if (["number", "time", "color"].includes(type)) return type;
+  return "text";
+}
+
+async function copyField(field: JsonRow) {
+  const key = keyOf(field);
+  const value = String(valueOf(field) ?? "");
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    copiedKey.value = key;
+    window.setTimeout(() => { if (copiedKey.value === key) copiedKey.value = ""; }, 1600);
+  } catch { /* The value remains selectable when clipboard access is unavailable. */ }
+}
+
+function generateField(field: JsonRow) {
+  if (props.disabled || readonly(field)) return;
+  if (String(field.generator || "") !== "tater_password") return;
+  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  const groups = [0, 4, 8].map((start) => [...bytes.slice(start, start + 4)].map((value) => alphabet[value % alphabet.length]).join(""));
+  emit("change", keyOf(field), `tater-${groups.join("-")}`);
+  revealed[keyOf(field)] = true;
 }
 
 function setValue(field: JsonRow, event: Event) {
@@ -274,17 +305,23 @@ function displayThemeStyle(field: JsonRow): Record<string, string> {
               </template>
             </select>
             <textarea v-else-if="typeOf(field) === 'textarea'" :value="String(valueOf(field) ?? '')" :placeholder="String(field.placeholder || '')" :readonly="readonly(field)" @input="setValue(field, $event)" />
-            <input
-              v-else
-              :type="typeOf(field) === 'number' ? 'number' : typeOf(field) === 'password' ? 'password' : typeOf(field) === 'time' ? 'time' : typeOf(field) === 'color' ? 'color' : 'text'"
-              :value="String(valueOf(field) ?? '')"
-              :placeholder="String(field.placeholder || '')"
-              :min="field.min"
-              :max="field.max"
-              :step="field.step"
-              :readonly="readonly(field)"
-              @input="setValue(field, $event)"
-            />
+            <div v-else class="tm-field-input-row">
+              <input
+                :type="inputType(field)"
+                :value="String(valueOf(field) ?? '')"
+                :placeholder="String(field.placeholder || '')"
+                :min="field.min"
+                :max="field.max"
+                :step="field.step"
+                :readonly="readonly(field)"
+                @input="setValue(field, $event)"
+              />
+              <div v-if="field.copyable || field.revealable || field.generatable" class="tm-field-input-actions">
+                <button v-if="field.revealable" class="tv-button" type="button" :disabled="props.disabled" @click.prevent.stop="revealed[keyOf(field)] = !revealed[keyOf(field)]">{{ revealed[keyOf(field)] ? "Hide" : "Show" }}</button>
+                <button v-if="field.copyable" class="tv-button" type="button" :disabled="!String(valueOf(field) ?? '')" @click.prevent.stop="copyField(field)">{{ copiedKey === keyOf(field) ? "Copied" : "Copy" }}</button>
+                <button v-if="field.generatable" class="tv-button" type="button" :disabled="props.disabled || readonly(field)" @click.prevent.stop="generateField(field)">New</button>
+              </div>
+            </div>
             <small v-if="field.description">{{ field.description }}</small>
           </label>
         </template>

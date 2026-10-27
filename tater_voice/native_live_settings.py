@@ -5,6 +5,8 @@ from datetime import datetime
 import hashlib
 import json
 import math
+import re
+import secrets
 from typing import Any, Dict, List
 from urllib.error import URLError
 from urllib.parse import urljoin
@@ -121,6 +123,7 @@ DEFAULTS: Dict[str, Any] = {
     "led_replying_animation": "audio_glow",
     "led_music_animation": "music_bars",
     "logging_level": "info",
+    "ssh_enabled": False,
 }
 FIRMWARE_SETTING_KEYS = (
     "wake_engine",
@@ -178,6 +181,7 @@ FIRMWARE_SETTING_KEYS = (
     "led_replying_animation",
     "led_music_animation",
     "logging_level",
+    "ssh_enabled",
 )
 
 WAKE_ENGINES = {"off", "button", "micro_wake_word", "server"}
@@ -185,6 +189,8 @@ WAKE_DETECTOR_MODES = {"mww", "oww", "nww", "mww_oww", "mww_nww"}
 WAKE_FAMILIES = {"mww", "echo"}
 WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 LOGGING_LEVELS = {"error", "warning", "info", "debug"}
+SSH_PASSWORD_PATTERN = re.compile(r"^[A-Za-z0-9._@%+=-]{12,64}$")
+SSH_PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 DISPLAY_THEMES = (
     {
         "value": "tater",
@@ -1162,6 +1168,37 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if token in {"0", "false", "no", "off", "disabled"}:
         return False
     return bool(default)
+
+
+def _supports_ssh_management(capabilities: Dict[str, Any] | None = None) -> bool:
+    values = capabilities if isinstance(capabilities, dict) else {}
+    return _as_bool(values.get("ssh_management"), False) and _as_int(
+        values.get("ssh_management_version"),
+        0,
+        minimum=0,
+        maximum=100,
+    ) >= 1
+
+
+def _valid_ssh_password(value: Any) -> bool:
+    return bool(SSH_PASSWORD_PATTERN.fullmatch(_text(value)))
+
+
+def _new_ssh_password() -> str:
+    groups = ["".join(secrets.choice(SSH_PASSWORD_ALPHABET) for _ in range(4)) for _ in range(3)]
+    return "tater-" + "-".join(groups)
+
+
+def _ensure_ssh_password(selector: Any) -> str:
+    token = _selector_token(selector)
+    if not token:
+        return ""
+    current = _text(_raw_settings(token).get("ssh_password"))
+    if _valid_ssh_password(current):
+        return current
+    password = _new_ssh_password()
+    redis_client.hset(settings_hash_key(token), mapping={"ssh_password": password})
+    return password
 
 
 def _as_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
@@ -2185,6 +2222,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "led_replying_animation": _led_animation_value(source.get("led_replying_animation"), "led_replying_animation"),
         "led_music_animation": _led_music_animation_value(source.get("led_music_animation")),
         "logging_level": logging_level,
+        "ssh_enabled": _as_bool(source.get("ssh_enabled"), bool(DEFAULTS["ssh_enabled"])),
     }
 
 
@@ -2397,6 +2435,16 @@ def firmware_settings_snapshot(
                 for setting_key, wire_key in _OUTPUT_CHAIN_WIRE_KEYS.items()
             }
         )
+    if _supports_ssh_management(capabilities):
+        output["ssh_enabled"] = bool(current.get("ssh_enabled"))
+        password = _text(_raw_settings(selector).get("ssh_password"))
+        if output["ssh_enabled"] and _valid_ssh_password(password):
+            output["ssh_password"] = password
+        else:
+            output.pop("ssh_password", None)
+    else:
+        output.pop("ssh_enabled", None)
+        output.pop("ssh_password", None)
     if _board_supports_screen_settings(board) and _supports_screen_power_management(board, capabilities):
         if _board_is_s3_screen(board):
             now = datetime.now().astimezone()
@@ -2547,6 +2595,10 @@ def settings_fields(
     capabilities: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     family = _lower(wake_family)
+    token = _selector_token(selector)
+    ssh_password = ""
+    if token and _supports_ssh_management(capabilities):
+        ssh_password = _ensure_ssh_password(token)
     current = (
         wake_family_settings_snapshot(family)
         if family in WAKE_FAMILIES
@@ -3379,6 +3431,42 @@ def settings_fields(
                 {"value": "debug", "label": "Debug"},
             ],
         },
+        {
+            "key": "ssh_section",
+            "label": "Remote Maintenance",
+            "type": "section",
+            "description": "Turn on an SSH shell for this satellite over its active Wi-Fi or Ethernet connection.",
+        },
+        {
+            "key": "ssh_enabled",
+            "label": "SSH Access",
+            "type": "checkbox",
+            "value": current["ssh_enabled"],
+            "default": DEFAULTS["ssh_enabled"],
+            "description": "Off by default. Turn this on only while you want remote shell access to this satellite.",
+            "full_width": True,
+        },
+        {
+            "key": "ssh_login",
+            "label": "SSH Login",
+            "type": "readonly",
+            "value": "root",
+            "description": "Use this login from Terminal after saving SSH Access.",
+            "show_when": {"source_key": "ssh_enabled", "equals": True},
+            "copyable": True,
+        },
+        {
+            "key": "ssh_password",
+            "label": "SSH Password",
+            "type": "password",
+            "value": ssh_password,
+            "description": "Unique to this satellite. Use Show or Copy, or generate a new readable password before saving.",
+            "show_when": {"source_key": "ssh_enabled", "equals": True},
+            "copyable": True,
+            "revealable": True,
+            "generatable": True,
+            "generator": "tater_password",
+        },
     ]
     if _selector_token(selector):
         fields = [
@@ -3465,6 +3553,12 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
     if not (_selector_token(selector) and _supports_output_chain(capabilities)):
         fields = [field for field in fields if _text(field.get("key")) not in _OUTPUT_CHAIN_FIELD_KEYS]
+    if not (_selector_token(selector) and _supports_ssh_management(capabilities)):
+        fields = [
+            field
+            for field in fields
+            if _text(field.get("key")) not in {"ssh_section", "ssh_enabled", "ssh_login", "ssh_password"}
+        ]
     return fields
 
 
@@ -3794,6 +3888,22 @@ def save_shared_wake_settings(values: Dict[str, Any]) -> Dict[str, Any]:
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:
     token = _selector_token(selector)
     incoming = dict(values or {})
+    ssh_password_changed = False
+    if token and _as_bool(incoming.get("ssh_enabled"), False):
+        password = _text(incoming.get("ssh_password"))
+        if not password:
+            password = _ensure_ssh_password(token)
+            incoming["ssh_password"] = password
+        if not _valid_ssh_password(password):
+            raise ValueError("SSH password must be 12-64 characters using letters, numbers, or ._@%+=-.")
+    elif "ssh_password" in incoming and _text(incoming.get("ssh_password")) and not _valid_ssh_password(incoming.get("ssh_password")):
+        raise ValueError("SSH password must be 12-64 characters using letters, numbers, or ._@%+=-.")
+    if token and _valid_ssh_password(incoming.get("ssh_password")):
+        password = _text(incoming.get("ssh_password"))
+        ssh_password_changed = _text(_raw_settings(token).get("ssh_password")) != password
+        if ssh_password_changed:
+            redis_client.hset(settings_hash_key(token), mapping={"ssh_password": password})
+    incoming.pop("ssh_password", None)
     if token:
         incoming = {
             key: value
@@ -3843,6 +3953,8 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
     current_base = normalize_settings(current_raw, base=board_base)
     normalized = normalize_settings(incoming, base={**current_base, **profile, **oww_profile})
     changed = [key for key, value in normalized.items() if current.get(key) != value]
+    if ssh_password_changed:
+        changed.append("ssh_password")
     persisted = normalized
     if token:
         persisted = {

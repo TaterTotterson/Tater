@@ -759,6 +759,9 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 board=board,
                 capabilities=native_capabilities,
             )
+            for field in native_settings_fields:
+                if esphome_runtime.text(field.get("key")) == "ssh_login":
+                    field["value"] = f"root@{host}" if host else "root@DEVICE_IP"
             volume_field = next(
                 (
                     field
