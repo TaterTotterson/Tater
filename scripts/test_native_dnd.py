@@ -47,12 +47,19 @@ class NativeDNDTests(unittest.TestCase):
         with (
             mock.patch.object(native_live_settings, "settings_snapshot", return_value=current),
             mock.patch.object(native_live_settings, "_global_settings_with_migration", return_value={}),
+            mock.patch.object(native_live_settings, "_ensure_ssh_password", return_value="tater-test-test-test"),
         ):
-            fields = native_live_settings.settings_fields("native:bedroom", board="rook", capabilities={})
+            fields = native_live_settings.settings_fields(
+                "native:bedroom",
+                board="rook",
+                capabilities={"ssh_management": True, "ssh_management_version": 1},
+            )
         rows = {str(field.get("key")): field for field in fields}
+        keys = [str(field.get("key")) for field in fields]
         self.assertIn("dnd_section", rows)
         self.assertIn("dnd_enabled", rows)
         self.assertIn("dnd_schedule_enabled", rows)
+        self.assertEqual(keys.index("dnd_section"), keys.index("ssh_password") + 1)
         self.assertEqual(rows["dnd_start"]["type"], "time")
         self.assertEqual(rows["dnd_end"]["show_when"]["source_key"], "dnd_schedule_enabled")
 
