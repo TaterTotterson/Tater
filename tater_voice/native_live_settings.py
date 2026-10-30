@@ -96,6 +96,10 @@ DEFAULTS: Dict[str, Any] = {
     "continued_chat": True,
     "barge_in_enabled": False,
     "volume_percent": 80,
+    "dnd_enabled": False,
+    "dnd_schedule_enabled": False,
+    "dnd_start": "22:00",
+    "dnd_end": "07:00",
     "eq_bands": [0.0] * 8,
     "eq_loudness": False,
     "bass_guard_enabled": True,
@@ -161,6 +165,10 @@ FIRMWARE_SETTING_KEYS = (
     "continued_chat",
     "barge_in_enabled",
     "volume_percent",
+    "dnd_enabled",
+    "dnd_schedule_enabled",
+    "dnd_start",
+    "dnd_end",
     "audio_output_mode",
     "screen_brightness",
     "screen_auto_brightness_enabled",
@@ -1567,6 +1575,9 @@ _DISPLAY_EDGE_FIELD_KEYS = _DISPLAY_EDGE_SETTING_KEYS
 _AUDIO_OUTPUT_SETTING_KEYS = {"audio_output_mode"}
 _AUDIO_OUTPUT_FIELD_KEYS = _AUDIO_OUTPUT_SETTING_KEYS | {"audio_output_section"}
 
+_DND_SETTING_KEYS = {"dnd_enabled", "dnd_schedule_enabled", "dnd_start", "dnd_end"}
+_DND_FIELD_KEYS = _DND_SETTING_KEYS | {"dnd_section"}
+
 _OUTPUT_CHAIN_SETTING_KEYS = {
     "eq_bands",
     "eq_loudness",
@@ -2137,6 +2148,13 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "continued_chat": _as_bool(source.get("continued_chat"), bool(DEFAULTS["continued_chat"])),
         "barge_in_enabled": _as_bool(source.get("barge_in_enabled"), bool(DEFAULTS["barge_in_enabled"])),
         "volume_percent": _as_int(source.get("volume_percent"), int(DEFAULTS["volume_percent"]), minimum=0, maximum=100),
+        "dnd_enabled": _as_bool(source.get("dnd_enabled"), bool(DEFAULTS["dnd_enabled"])),
+        "dnd_schedule_enabled": _as_bool(
+            source.get("dnd_schedule_enabled"),
+            bool(DEFAULTS["dnd_schedule_enabled"]),
+        ),
+        "dnd_start": _time_value(source.get("dnd_start"), str(DEFAULTS["dnd_start"])),
+        "dnd_end": _time_value(source.get("dnd_end"), str(DEFAULTS["dnd_end"])),
         "eq_bands": _eq_bands_value(source.get("eq_bands")),
         "eq_loudness": _as_bool(source.get("eq_loudness"), bool(DEFAULTS["eq_loudness"])),
         "bass_guard_enabled": _as_bool(
@@ -2253,6 +2271,35 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     return current
 
 
+def dnd_active(
+    selector: Any = "",
+    *,
+    board: Any = "",
+    now: datetime | None = None,
+) -> bool:
+    """Return the effective DND state using the satellite's daily local window."""
+    current = settings_snapshot(selector, board=board)
+    if _as_bool(current.get("dnd_enabled"), False):
+        return True
+    if not _as_bool(current.get("dnd_schedule_enabled"), False):
+        return False
+    start = _time_value(current.get("dnd_start"), "")
+    end = _time_value(current.get("dnd_end"), "")
+    if not start or not end:
+        return False
+    current_time = now or datetime.now()
+    minute = current_time.hour * 60 + current_time.minute
+    start_hour, start_minute = (int(part) for part in start.split(":", 1))
+    end_hour, end_minute = (int(part) for part in end.split(":", 1))
+    start_value = start_hour * 60 + start_minute
+    end_value = end_hour * 60 + end_minute
+    if start_value == end_value:
+        return True
+    if start_value < end_value:
+        return start_value <= minute < end_value
+    return minute >= start_value or minute < end_value
+
+
 def shared_wake_settings_snapshot() -> Dict[str, Any]:
     """Return the one wake profile shared by every satellite family.
 
@@ -2363,6 +2410,8 @@ def firmware_settings_snapshot(
     # Some firmware fields (notably the projected NWW model source) are
     # derived below rather than persisted in the shared settings document.
     output = {key: current[key] for key in FIRMWARE_SETTING_KEYS if key in current}
+    local_offset = datetime.now().astimezone().utcoffset()
+    output["utc_offset_seconds"] = int(local_offset.total_seconds()) if local_offset is not None else 0
     if family == "mww":
         output["wake_mww_enabled"] = True
         output["wake_oww_enabled"] = False
@@ -2685,6 +2734,52 @@ def settings_fields(
             "revealable": True,
             "generatable": True,
             "generator": "tater_password",
+        },
+        {
+            "key": "dnd_section",
+            "label": "Do Not Disturb",
+            "type": "section",
+            "description": (
+                "Silence music, announcements, wake sounds, and other non-critical playback on this satellite. "
+                "Timers and alarms remain audible, and the microphone stays available so you can turn DND off by voice."
+            ),
+        },
+        {
+            "key": "dnd_enabled",
+            "label": "Do Not Disturb Now",
+            "type": "checkbox",
+            "value": current["dnd_enabled"],
+            "default": DEFAULTS["dnd_enabled"],
+            "description": (
+                "Manually keep DND on. Turning this off still leaves an active daily DND window in effect."
+            ),
+            "full_width": True,
+        },
+        {
+            "key": "dnd_schedule_enabled",
+            "label": "Daily DND Schedule",
+            "type": "checkbox",
+            "value": current["dnd_schedule_enabled"],
+            "default": DEFAULTS["dnd_schedule_enabled"],
+            "description": "Automatically turn DND on and off at the same local times each day.",
+            "full_width": True,
+        },
+        {
+            "key": "dnd_start",
+            "label": "Turn On At",
+            "type": "time",
+            "value": current["dnd_start"],
+            "default": DEFAULTS["dnd_start"],
+            "show_when": {"source_key": "dnd_schedule_enabled", "equals": True},
+        },
+        {
+            "key": "dnd_end",
+            "label": "Turn Off At",
+            "type": "time",
+            "value": current["dnd_end"],
+            "default": DEFAULTS["dnd_end"],
+            "show_when": {"source_key": "dnd_schedule_enabled", "equals": True},
+            "description": "Overnight windows are supported. Matching on/off times keep DND scheduled all day.",
         },
         {
             "key": "wake_section",
@@ -3554,6 +3649,8 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
     if not (_selector_token(selector) and _supports_output_chain(capabilities)):
         fields = [field for field in fields if _text(field.get("key")) not in _OUTPUT_CHAIN_FIELD_KEYS]
+    if not _selector_token(selector):
+        fields = [field for field in fields if _text(field.get("key")) not in _DND_FIELD_KEYS]
     if not (_selector_token(selector) and _supports_ssh_management(capabilities)):
         fields = [
             field

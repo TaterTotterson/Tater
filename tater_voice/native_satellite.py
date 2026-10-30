@@ -34,6 +34,7 @@ NATIVE_WEBSOCKET_DISCONNECT_TIMEOUT_S = 1.0
 NATIVE_MEDIA_DISCONNECT_GRACE_S = 6.0
 NATIVE_SCREEN_WEATHER_REFRESH_S = 60.0
 NATIVE_SCREEN_CLIMATE_REFRESH_S = 15.0
+NATIVE_TIMEZONE_REFRESH_S = 15 * 60.0
 _NATIVE_WAKE_PREROLL_BOUNDARY = object()
 
 VOICE_EVENT_STATE = {
@@ -2777,7 +2778,7 @@ async def sendspin_stereo_pair_targets(pair: Dict[str, Any]) -> list[Dict[str, A
 
 async def sendspin_targets_for_selectors(selectors: list[Any]) -> list[Dict[str, Any]]:
     """Expand native destinations into reachable Sendspin player endpoints."""
-    from . import stereo_pairs
+    from . import native_live_settings, stereo_pairs
 
     expanded: list[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -2829,6 +2830,8 @@ async def sendspin_targets_for_selectors(selectors: list[Any]) -> list[Dict[str,
 
     missing: list[str] = []
     disconnected: list[str] = []
+    dnd_blocked: list[str] = []
+    dnd_stereo_pair = False
     targets: list[Dict[str, Any]] = []
     async with _clients_lock:
         for expanded_row in expanded:
@@ -2838,7 +2841,14 @@ async def sendspin_targets_for_selectors(selectors: list[Any]) -> list[Dict[str,
                 disconnected.append(selector)
                 continue
             hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
-            capabilities = _capabilities(_message_payload(hello))
+            hello_payload = _message_payload(hello)
+            capabilities = _capabilities(hello_payload)
+            board = _text(hello_payload.get("board"))
+            if native_live_settings.dnd_active(selector, board=board):
+                dnd_blocked.append(selector)
+                if _text(expanded_row.get("channel")) in {"left", "right"}:
+                    dnd_stereo_pair = True
+                continue
             absent: list[str] = []
             if not bool(capabilities.get("sendspin_player")):
                 absent.append("sendspin_player")
@@ -2873,6 +2883,16 @@ async def sendspin_targets_for_selectors(selectors: list[Any]) -> list[Dict[str,
         raise RuntimeError(
             "Update satellite firmware before using Sendspin playback: "
             + "; ".join(missing)
+        )
+    if dnd_stereo_pair:
+        raise RuntimeError(
+            "Do Not Disturb is active on a stereo-pair member: " + ", ".join(dnd_blocked)
+        )
+    if dnd_blocked and not targets:
+        raise RuntimeError(
+            "Do Not Disturb is active on the selected satellite"
+            + ("s: " if len(dnd_blocked) != 1 else ": ")
+            + ", ".join(dnd_blocked)
         )
     return targets
 
@@ -5415,6 +5435,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
     screen_weather_sender: Optional[asyncio.Task] = None
     screen_climate_sender: Optional[asyncio.Task] = None
     screen_notification_sender: Optional[asyncio.Task] = None
+    timezone_settings_sender: Optional[asyncio.Task] = None
     wake_verifier_tasks: set[asyncio.Task] = set()
     client_row: Optional[Dict[str, Any]] = None
     client_host = getattr(websocket.client, "host", "unknown") if websocket.client is not None else "unknown"
@@ -5521,16 +5542,29 @@ async def handle_websocket(websocket: WebSocket) -> None:
         )
 
         await send_json(_envelope("state", {"state": "idle"}))
-        await send_json(
-            _envelope(
-                "settings",
-                _firmware_settings_payload(
+        initial_firmware_settings = _firmware_settings_payload(
+            selector,
+            board=_text(payload.get("board")),
+            capabilities=_capabilities(payload),
+        )
+        await send_json(_envelope("settings", initial_firmware_settings))
+
+        async def refresh_timezone_settings() -> None:
+            previous_offset = _as_int(initial_firmware_settings.get("utc_offset_seconds"), 0)
+            while True:
+                await asyncio.sleep(NATIVE_TIMEZONE_REFRESH_S)
+                refreshed = _firmware_settings_payload(
                     selector,
                     board=_text(payload.get("board")),
                     capabilities=_capabilities(payload),
-                ),
-            )
-        )
+                )
+                current_offset = _as_int(refreshed.get("utc_offset_seconds"), 0)
+                if current_offset == previous_offset:
+                    continue
+                await send_json(_envelope("settings", refreshed))
+                previous_offset = current_offset
+
+        timezone_settings_sender = asyncio.create_task(refresh_timezone_settings())
 
         from . import sat_chat
 
@@ -5737,6 +5771,12 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 (screen_notification_sender,),
                 selector=selector,
                 label="screen notification sender",
+            )
+        if timezone_settings_sender is not None:
+            await _cancel_websocket_tasks(
+                (timezone_settings_sender,),
+                selector=selector,
+                label="timezone settings sender",
             )
         if selector:
             bridge = None
