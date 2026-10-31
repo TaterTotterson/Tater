@@ -116,6 +116,7 @@ DEFAULTS: Dict[str, Any] = {
     "screen_night_start": "22:00",
     "screen_night_end": "07:00",
     "screen_night_display": "red_clock",
+    "screen_clock_format": "12h",
     "display_theme": "tater",
     "display_wallpaper_interval_minutes": 1440,
     "display_edge_glow": True,
@@ -178,6 +179,7 @@ FIRMWARE_SETTING_KEYS = (
     "screen_night_start",
     "screen_night_end",
     "screen_night_display",
+    "screen_clock_format",
     "display_theme",
     "display_wallpaper_interval_minutes",
     "display_edge_glow",
@@ -1549,6 +1551,7 @@ _SCREEN_SETTING_KEYS = {
     "screen_night_start",
     "screen_night_end",
     "screen_night_display",
+    "screen_clock_format",
 }
 
 _ECHO_SCREEN_DEFAULTS = {
@@ -1560,6 +1563,7 @@ _ECHO_SCREEN_DEFAULTS = {
     "screen_night_start": "22:00",
     "screen_night_end": "07:00",
     "screen_night_display": "red_clock",
+    "screen_clock_format": "12h",
 }
 
 _SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
@@ -1836,11 +1840,27 @@ def _supports_screen_power_management(
     return _as_int(values.get("screen_power_management_version"), 0, minimum=0, maximum=100) >= 1
 
 
+def _supports_screen_clock_format(
+    board: Any = "",
+    capabilities: Dict[str, Any] | None = None,
+) -> bool:
+    if _board_is_s3_screen(board):
+        return False
+    values = capabilities if isinstance(capabilities, dict) else {}
+    return values.get("screen_clock_format") is True
+
+
 def _screen_night_display_value(value: Any) -> str:
     token = _lower(value).replace("-", "_").replace(" ", "_")
     aliases = {"clock": "red_clock", "red": "red_clock", "screen_off": "off"}
     token = aliases.get(token, token)
     return token if token in {"dim", "red_clock", "off"} else str(DEFAULTS["screen_night_display"])
+
+
+def _screen_clock_format_value(value: Any) -> str:
+    token = _lower(value).replace("-", "").replace(" ", "")
+    token = {"12": "12h", "24": "24h"}.get(token, token)
+    return token if token in {"12h", "24h"} else str(DEFAULTS["screen_clock_format"])
 
 
 def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -2228,6 +2248,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
             str(DEFAULTS["screen_night_end"]),
         ),
         "screen_night_display": _screen_night_display_value(source.get("screen_night_display")),
+        "screen_clock_format": _screen_clock_format_value(source.get("screen_clock_format")),
         "display_theme": _display_theme_value(source.get("display_theme")),
         "display_wallpaper_interval_minutes": _display_wallpaper_interval_value(
             source.get("display_wallpaper_interval_minutes")
@@ -2496,6 +2517,8 @@ def firmware_settings_snapshot(
         output.pop("ssh_enabled", None)
         output.pop("ssh_password", None)
     if _board_supports_screen_settings(board) and _supports_screen_power_management(board, capabilities):
+        if not _supports_screen_clock_format(board, capabilities):
+            output.pop("screen_clock_format", None)
         if _board_is_s3_screen(board):
             now = datetime.now().astimezone()
             output["screen_local_time_seconds"] = (now.hour * 60 * 60) + (now.minute * 60) + now.second
@@ -3346,6 +3369,18 @@ def settings_fields(
             "description": "Control this satellite's screen, automatic room-light response, and overnight behavior.",
         },
         {
+            "key": "screen_clock_format",
+            "label": "Clock Format",
+            "type": "select",
+            "value": current["screen_clock_format"],
+            "default": screen_defaults["screen_clock_format"],
+            "options": [
+                {"value": "12h", "label": "12-hour (6:48 PM)"},
+                {"value": "24h", "label": "24-hour (18:48)"},
+            ],
+            "description": "Choose how time appears on this satellite's home and night clocks.",
+        },
+        {
             "key": "screen_brightness",
             "label": "Screen Brightness (%)",
             "type": "number",
@@ -3639,8 +3674,11 @@ def settings_fields(
             "screen_auto_brightness_enabled",
             "screen_auto_brightness_minimum",
             "screen_night_display",
+            "screen_clock_format",
         }
         fields = [field for field in fields if _text(field.get("key")) not in echo_only]
+    elif not _supports_screen_clock_format(board, capabilities):
+        fields = [field for field in fields if _text(field.get("key")) != "screen_clock_format"]
     if not (_selector_token(selector) and _board_supports_display_theme(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_photos(board)):

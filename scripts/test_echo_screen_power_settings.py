@@ -30,7 +30,11 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
 
     @staticmethod
     def _capabilities() -> dict[str, object]:
-        return {"screen": True, "screen_power_management_version": 1}
+        return {
+            "screen": True,
+            "screen_power_management_version": 1,
+            "screen_clock_format": True,
+        }
 
     def test_all_echo_screen_boards_offer_per_satellite_display_and_night_controls(self) -> None:
         expected = {
@@ -43,6 +47,7 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
             "screen_night_end",
             "screen_night_display",
             "screen_night_brightness",
+            "screen_clock_format",
         }
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
             for board in ("checkers", "crown", "athena", "rook"):
@@ -56,6 +61,15 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
                 self.assertEqual(by_key["screen_brightness"]["default"], 35)
                 self.assertEqual(by_key["screen_night_brightness"]["value"], 3)
                 self.assertEqual(by_key["screen_night_brightness"]["default"], 3)
+                self.assertEqual(by_key["screen_clock_format"]["value"], "12h")
+                self.assertEqual(
+                    [str(option["value"]) for option in by_key["screen_clock_format"]["options"]],
+                    ["12h", "24h"],
+                )
+                self.assertLess(
+                    list(by_key).index("screen_clock_format"),
+                    list(by_key).index("screen_brightness"),
+                )
                 self.assertEqual(
                     {str(option["value"]) for option in by_key["screen_night_display"]["options"]},
                     {"dim", "red_clock", "off"},
@@ -80,6 +94,10 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
         self.assertTrue(normalized["screen_auto_brightness_enabled"])
         self.assertEqual(normalized["screen_auto_brightness_minimum"], 50)
         self.assertEqual(normalized["screen_night_display"], "red_clock")
+        self.assertEqual(
+            native_live_settings.normalize_settings({"screen_clock_format": "24"})["screen_clock_format"],
+            "24h",
+        )
 
         fake = self._redis()
         fake.hgetall.side_effect = [
@@ -93,6 +111,7 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
                 "screen_night_end": "06:15",
                 "screen_night_display": "red_clock",
                 "screen_night_brightness": "3",
+                "screen_clock_format": "24h",
             },
         ]
         with mock.patch.object(native_live_settings, "redis_client", fake):
@@ -105,6 +124,19 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
         self.assertTrue(payload["screen_night_mode_enabled"])
         self.assertEqual(payload["screen_night_display"], "red_clock")
         self.assertEqual(payload["screen_night_brightness"], 3)
+        self.assertEqual(payload["screen_clock_format"], "24h")
+
+    def test_clock_format_is_hidden_from_older_screen_firmware_and_s3_boxes(self) -> None:
+        old_echo = {"screen": True, "screen_power_management_version": 1}
+        with mock.patch.object(native_live_settings, "redis_client", self._redis()):
+            echo_fields = native_live_settings.settings_fields(
+                "native:old-athena", board="athena", capabilities=old_echo
+            )
+            s3_fields = native_live_settings.settings_fields(
+                "native:s3", board="s3-box", capabilities={"screen": True}
+            )
+        self.assertNotIn("screen_clock_format", {field.get("key") for field in echo_fields})
+        self.assertNotIn("screen_clock_format", {field.get("key") for field in s3_fields})
 
 
 if __name__ == "__main__":
